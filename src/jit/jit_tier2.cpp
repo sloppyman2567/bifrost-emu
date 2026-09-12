@@ -1685,7 +1685,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
         // W^X bail: the in-code counter writes the code page (a non-W^X RWX
         // buffer), and the compile here would mprotect the page we're
         // currently executing from. Regions only exist in shared-JIT mode.
-        if (wex_enabled_ || !tier2_enabled()) return;
+        if (wex_enabled_ || !tier2_enabled() || mt_active_) return;
         blocks_mutex_.lock();
         auto it = blocks_.find(pc);
         if (it == blocks_.end()) {

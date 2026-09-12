@@ -359,7 +359,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // 8 code bytes (layout-dependent corruption → SIGSEGV). Self-loops are
     // naturally excluded: their loop-back jumps to block_body_start_off_
     // (past the prologue), so only cold entries count (~1).
-    if (tier2_enabled() && !wex_enabled_)
+    if (tier2_enabled() && !wex_enabled_ && !mt_active_)
         emit_u64(0);  // uint32 counter + 4 bytes padding (RIP-relative inc)
     size_t block_start = code_buf_used_;
     // ── Translate ARM64 → IR ─────────────────────────────────────
@@ -835,7 +835,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Regions entered via a chain edge use the region's own chain-skip entry
     // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
     // vreg-slot layouts compatible.
-    if (tier2_enabled() && !wex_enabled_) {
+    if (tier2_enabled() && !wex_enabled_ && !mt_active_) {
         if (!ir_block.insts.empty()) {
             IROp last_op = ir_block.insts.back().op;
             if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||

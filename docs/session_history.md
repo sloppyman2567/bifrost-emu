@@ -4148,3 +4148,37 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   encoding is distinct from LDUR so it was left alone rather than guessed.
 - **Verified:** full suite **228/228**, quick **223/223**.
 
+## Session History (2026-09-12) — MT JIT code-write race: shared-JIT safe mode
+
+- **Root cause:** default shared-JIT maps the code buffer RWX (W^X disabled)
+  and four runtime writers rewrite *published* code while other vCPUs may be
+  executing it: `patch_chain`, `chain_back_references` (flag-materialize
+  jmp-past), `patch_pending_calls`, and `invalidate_range`/`invalidate_all`;
+  tier-2 regions additionally carry an **in-code** hot-head counter that
+  writes the code page on every entry (tier-2 is ON by default). x86 requires
+  the *executing* core to serialize after a code write, so a vCPU can fetch a
+  torn instruction and die at pc=0 (`decode error at pc=0x0 inst=0x00000000`,
+  reproduced in `test_mem_guard`'s concurrent MAP_FIXED section). The earlier
+  reverted operand-only chain-slot attempt failed because it addressed only
+  one writer.
+- **Fix (Option A — MT-safe mode, no stop-the-world):** `FrostJIT::mt_active_`
+  + `enter_multithreaded()`, called from `spawn_thread` (shared-JIT only) and
+  `spawn_sdl_thread` **before** the second host thread starts. First call sets
+  `mt_active_` and `invalidate_all()`s the block cache — purging chain slots
+  AND tier-2 regions (the in-code counters no compile-time gate can remove
+  retroactively). Then `patch_chain`/`chain_back_references`/
+  `patch_pending_calls` return early and tier-2 emission is gated on
+  `!mt_active_`. Sticky for the JIT lifetime. Safe without quiescing: the
+  first spawn happens while the guest is single-threaded, inside a syscall.
+  `patch_pending_calls` was already safe to skip — its `call rel32` initially
+  targets `jit_call_helper` (slow_path), not rel32=0.
+- **Trade-off:** MT guests lose chaining + tier-2 (dispatch overhead back
+  toward the pre-chaining baseline); single-threaded guests unaffected.
+  `BIFROST_NO_SHARED_JIT=1` (per-thread JIT) never activates the gate.
+- **Verified:** quick suite 223/223; `test_mem_guard` ×30 = 0 fail/0 hang
+  (previously ~1/8 abort + possible hang); `test_pthread`/`test_pthread_cond`/
+  `test_atomic_stress`/`test_fork_threads` ×10 each = 0 fail.
+- **Still open:** a perf-preserving fix (data-indirected chain slots → atomic
+  64-bit pointer store) or true stop-the-world (`async_safe_run_on_cpu`) to
+  restore chaining for MT. Option A is the correctness-first ship.
+

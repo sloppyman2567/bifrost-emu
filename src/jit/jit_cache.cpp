@@ -26,6 +26,8 @@
 namespace arm64emu {
 bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
+    // MT-safe mode: never modify live code (see enter_multithreaded()).
+    if (mt_active_.load(std::memory_order_relaxed)) return false;
     if (chain_patch_off + 5 > CODE_BUF_SIZE) return false;
     // Verify the slot still contains the unpatched pattern: `ret` + NOPs
     // (default) or 5 NOPs (chain-skip lease layout). If it's already
@@ -62,6 +64,9 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
 }
 void FrostJIT::patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn) {
     if (!code_buf_ || !target_fn) return;
+    // MT-safe mode: the call slot already dispatches through jit_call_helper
+    // (slow_path), so leaving it unpatched is correct — just slower.
+    if (mt_active_.load(std::memory_order_relaxed)) return;
     auto it = pending_call_sites_.find(target_pc);
     if (it == pending_call_sites_.end() || it->second.empty()) return;
     // W^X: writable for the duration of all slot rewrites.
@@ -112,6 +117,8 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     }
 }
 void FrostJIT::chain_back_references(uint64_t target_pc) {
+    // MT-safe mode: no runtime code writes (see enter_multithreaded()).
+    if (mt_active_.load(std::memory_order_relaxed)) return;
     // Patch any cached block whose chain_target_pc == target_pc.
     //
     // Uses the back_refs_ index for O(k) lookup (k = number of back-
@@ -297,5 +304,23 @@ void FrostJIT::invalidate_all() {
     for (int i = 0; i < INLINE_CACHE_SLOTS; i++) tls_inline_cache_[i] = InlineCacheEntry{};
     std::atomic_thread_fence(std::memory_order_release);
     make_executable();
+}
+void FrostJIT::enter_multithreaded() {
+    // Sticky: only the FIRST transition into multithreaded execution does
+    // the purge. After that every writer checks mt_active_ and bails.
+    bool expected = false;
+    if (!mt_active_.compare_exchange_strong(expected, true)) return;
+    // Purge every compiled block. This drops all chain slots (patch_chain is
+    // disabled from now on, so none are re-created) AND any tier-2 region:
+    // a region carries an in-code hot-head counter that writes the code page
+    // on every entry, which no compile-time gate can disable retroactively.
+    //
+    // Safe without quiescing: the spawning vCPU is the only running one (the
+    // guest was single-threaded until this moment) and it is inside a
+    // syscall, not executing JIT code. Blocks re-translated after this point
+    // emit no chain slots and no tier-2 regions, so the RWX buffer is never
+    // modified while another core executes it — the x86 cross-modifying-code
+    // hazard that produced the pc=0 torn-jump abort.
+    invalidate_all();
 }
 } // namespace arm64emu

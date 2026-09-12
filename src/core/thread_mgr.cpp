@@ -381,6 +381,12 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
             gt->jit->set_direct_window(mem_.direct_window());
         }
     }
+    // Shared-JIT mode safety: before a second vCPU can execute, unpatch all
+    // chain slots and permanently disable runtime code writes, so the RWX
+    // shared code buffer is never modified under a running core (x86 needs
+    // the executing core to serialize after a code write). No-op in
+    // per-thread-JIT mode and after the first spawn.
+    if (gt->jit == nullptr && jit_) jit_->enter_multithreaded();
     alive_threads_.fetch_add(1);
     if (libc_single_threaded_addr_) {
         mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
@@ -834,6 +840,9 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
         st->cpu.tpidr_el0 = tls;
         st->cpu.tpidrro_el0 = tls;
     }
+    // SDL threads run guest code through the shared main JIT — same
+    // MT-safe gate as spawn_thread (no-op after the first spawn).
+    if (jit_) jit_->enter_multithreaded();
     alive_threads_.fetch_add(1);
     if (libc_single_threaded_addr_) {
         mem_.store<uint32_t>(libc_single_threaded_addr_, 0);

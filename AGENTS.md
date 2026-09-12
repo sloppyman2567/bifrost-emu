@@ -802,6 +802,25 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - **Known gap:** `LDAPUR`/`LDAPURB`/`LDAPURH` (ARMv8.4) still decode to
   UNKNOWN→DecodeError. Their encoding differs from `LDUR`; do not guess it —
   confirm against QEMU's a64.decode/ARM ARM before adding.
+- **Shared-JIT multithread safety (`FrostJIT::enter_multithreaded()`,
+  2026-09-12).** The default shared-JIT code buffer is RWX (W^X is
+  force-disabled in `Emulator::enable_jit`) and several paths rewrite
+  *published* code: `patch_chain`, `chain_back_references` (flag-materialize
+  jmp-past), `patch_pending_calls`, `invalidate_range`/`invalidate_all`, and
+  tier-2 regions' **in-code hot-head counter** (tier-2 is ON by default).
+  x86 requires the *executing* core to serialize after a code write, so under
+  threads these are unsafe (torn jump → `decode error at pc=0x0`). On the
+  first thread spawn `enter_multithreaded()` sets `mt_active_` and
+  `invalidate_all()`s the cache — purging every chain slot AND every tier-2
+  region — after which `patch_chain`/`chain_back_references`/
+  `patch_pending_calls` bail, tier-2 emission is gated on `!mt_active_`, and
+  the buffer is never modified under a running core. Sticky for the JIT
+  lifetime. `BIFROST_NO_SHARED_JIT=1` (per-thread JIT) never activates it and
+  keeps chaining. Trade-off: MT guests lose chaining/tier-2; single-thread
+  guests are unaffected. Do NOT re-enable a runtime code write while
+  `mt_active_` is set without a real quiesce/stop-the-world. Regression:
+  `test_mem_guard`'s concurrent section. A perf-preserving alternative
+  (data-indirected chain slots) is still open.
 
 ## Work Guidance
 

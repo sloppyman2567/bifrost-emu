@@ -484,6 +484,15 @@ public:
     static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000000;
     std::atomic<uint64_t> total_blocks_executed_{0};
     std::atomic<bool>     jit_disabled_{false};  // set by global watchdog
+    // Multithread-safe mode: set by enter_multithreaded() before a second
+    // vCPU's host thread starts. When true, NO runtime code-buffer write may
+    // occur (patch_chain / chain_back_references / patch_pending_calls bail,
+    // tier-2 is disabled), so the RWX shared code buffer is never modified
+    // while another core executes it. x86 cross-modifying code requires the
+    // EXECUTING core to serialize after a write; stopping all writes is the
+    // only coordination-free way to guarantee that. Sticky for the JIT's
+    // lifetime (re-enabling would reopen a spawn-vs-patch race).
+    std::atomic<bool>     mt_active_{false};
     // ── Shared-JIT mode (default) ───────────────────────────────────
     // Spawned threads share the main thread's FrostJIT instance, saving
     // 64 MiB of code-cache per thread. blocks_mutex_ protects the block
@@ -516,6 +525,12 @@ public:
     // slot-unpatch/TLS-drop discipline as invalidate_range, applied to
     // every block. Rare — full O(N) scan.
     void invalidate_all();
+    // Multithread-safe mode (see mt_active_): unpatch every chain slot and
+    // permanently disable runtime code-buffer writes. Called from the thread
+    // spawn paths BEFORE the second vCPU's host thread starts. No-op after
+    // the first call (sticky) and in per-thread-JIT mode.
+    void enter_multithreaded();
+    bool mt_active() const { return mt_active_.load(std::memory_order_relaxed); }
     size_t code_buf_used()  const { return code_buf_used_; }
     size_t code_buf_size()  const { return CODE_BUF_SIZE; }
     size_t cache_entries()  const { return blocks_.size(); }
