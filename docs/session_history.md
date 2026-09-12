@@ -3929,37 +3929,30 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - `make clean && make check-all` from scratch: opgen guards green, `test-capi` **54/54**, `test-nb` **61/61**, full suite **221/221**. Session total ~20 fixes, zero regressions.
 
-## Session History (2026-09-11) — neverball heap corruption root-caused: main-thread glibc `struct pthread` not reserved; + guard-page diagnostics
+## Session History (2026-09-11) — glibc `struct pthread` TLS OOB fixed; neverball corruption persists
 
-- **Guest heap corruption root cause (neverball, interp-reproducible after the
-  2026-09-04 batch):** aarch64 glibc 2.42 uses `TLS_DTV_AT_TP=1` with
-  `THREAD_SELF = tpidr - 1` and `TLS_PRE_TCB_SIZE = sizeof(struct pthread)`
-  (~0x720). The emulator laid per-module static TLS immediately below TP
-  (`tp = static_tls_base_ + lib_size`) and never reserved the descriptor, so
-  `__pthread_getspecific` read `specific_1stblock` at `tp - 0x610` — outside
-  the TLS block, into the previous live allocation — and `__pthread_setspecific`
-  would WRITE there, shredding neighbouring malloc metadata intermittently.
-- **Fix:** insert `TLS_PRE_TCB_SIZE` between module TLS and the TCB:
-  `tp = base + lib_size + TLS_PRE_TCB_SIZE`; module `tp_offset` subtracts the
-  new anchor; `struct pthread` now occupies `[tp - TLS_PRE_TCB_SIZE, tp)` and
-  module TLS sits below it. Applied to `allocate_static_tls`,
+- **Real bug found + fixed (affects all glibc-dynamic guests):** aarch64
+  glibc 2.42 uses `TLS_DTV_AT_TP=1` (`THREAD_SELF = tpidr - 1`), so `struct
+  pthread` (`TLS_PRE_TCB_SIZE`, ~0x720) must sit just below TP with per-module
+  static TLS below it. The old layout put module TLS directly below TP, so
+  `__pthread_getspecific` read `specific_1stblock` at `tp-0x610` outside the
+  block and `__pthread_setspecific` wrote into the neighbouring live
+  allocation. Fix: `tp = base + lib_size + TLS_PRE_TCB_SIZE`, module
+  `tp_offset` subtracts the new anchor; applied to `allocate_static_tls`,
   `allocate_thread_tls`, the 0x1001 `_dl_allocate_tls` handler, and the
-  `dl_tls_static_size` patch (de-duplicated — it no longer adds
-  TLS_PRE_TCB_SIZE again). musl variant-II untouched.
-- **Diagnostics built this session (env-gated):**
-  - `BIFROST_WRITE_TRACE=<path>` now logs complete `addr/size/tid/guest-pc/value`
-    records (0x-prefixed) with `BIFROST_WRITE_TRACE_RANGE=lo:hi`; interp sets
-    the pc, and JIT slow stores (`jit_store_mem_slow/_16/stlr/stxr`) stamp it,
-    so `BIFROST_JIT_SLOW_STORES=1` makes the JIT stream complete too.
-  - `BIFROST_WATCH_TRAP=1` traps (SIGILL) on the first write into `BIFROST_WATCH`.
-  - `BIFROST_GUARD_ALLOCS=1`: PROT_NONE guard page after each bump-path window
-    allocation; a `SIGSEGV`/`SIGBUS` reporter maps the host fault to the guest
-    address and dumps the full guest register file (read/write + pc + lr + tp).
-    This is what localized the TLS bug.
-- **Found + parked (separate bug):** under the JIT neverball still dies at
-  `libz.so.1 + 0xa1d8` (inflate) with a discarded-address guest fault
-  (`jit_*_mem_slow` deliver SIGSEGV without `e.addr`/`report_crash`); interp
-  runs clean past 100s.
-- **Verified:** neverball `--no-jit` 100s clean (was ~25–35s to malloc
-  corruption); glibc-dynamic 8-thread `pthread_[gs]etspecific` + `__thread`
-  stress passes JIT + interp; `--quick` **216/216** incl `--dynamic` **15/15**.
+  `dl_tls_static_size` patch (no double-count). musl variant-II untouched.
+  (`b847e0d`)
+- **Diagnostics kept (env-gated, `d1b6edd`):** complete `BIFROST_WRITE_TRACE`
+  (`addr/size/tid/guest-pc/value`, `BIFROST_WRITE_TRACE_RANGE`; interp + JIT
+  slow stores via `BIFROST_JIT_SLOW_STORES=1`), `BIFROST_WATCH_TRAP=1`, and
+  `BIFROST_GUARD_ALLOCS=1` (PROT_NONE guard after each window allocation +
+  SIGSEGV reporter with a full register dump) — the guard localized the TLS
+  bug.
+- **Verified:** glibc-dynamic 8-thread `pthread_[gs]etspecific` + `__thread`
+  stress under JIT and interp; `--quick` **216/216** incl `--dynamic` **15/15**.
+- **NOT fixed — neverball still corrupts in the menu** (`corrupted double-linked
+  list`, SIGABRT) under `--no-jit`; an earlier 100s-clean run was ASLR luck.
+  A second stomp source remains.
+- **Parked:** under the JIT neverball dies at `libz.so.1 + 0xa1d8` (inflate).
+  The `jit_*_mem_slow` handlers drop `e.addr` and skip `report_crash`, so
+  those faults report `fault_addr=0x0`/no module — fix that first, then hunt.
