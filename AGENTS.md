@@ -774,6 +774,34 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   only with `BIFROST_CRASH_DUMP` (also in `debug_flags.h`). The decode
   throw site stays quiet by default so SIGILL-handler guests stay silent;
   fatal run-loop/thread branches log. Do not add per-app crash probes.
+- **PRFM is a NOP; LDAPR is an acquire load (2026-09-12).** Every prefetch
+  form (unsigned-immediate, unscaled `prfum`, register offset) has
+  `size==11 && opc_ls==0b10` in the non-vector load/store groups — the
+  normal `is_load = (opc&2)||(opc&1)` path decoded it as a sign-extending
+  load, and the `prfop` field (bits[4:0]) is NOT a register, so
+  `prfm pstl1keep,[x0,#8]` (Rt=16) clobbered x16 and a far prefetch could
+  fault. All three decoders (`case 0x18/0x1C` unscaled + reg-offset,
+  `case 0x19/0x1D` unsigned imm) classify that shape as `HINT` (NOP in
+  interp AND the IR translator) — QEMU's `target/arm/tcg/a64.decode` also
+  decodes PRFM as NOP. `LDAPR/LDAPRB/LDAPRH` (ARMv8.3 RCpc acquire load)
+  shares the LSE atomic `case 0x18`/bit21=1/mode=00 shape and was executed
+  as `atom_op==0xC` (CAS); the fixed pattern
+  `(inst & 0x3FFFFC00) == 0x38BFC000` is now checked FIRST and mapped to
+  `LDAR` (acquire, `excl_low6=0x3F`, no reservation). LSE atom_op only uses
+  0..8, so 0xC cannot collide. Regression: `ctest/jit_prfm_ldapr.c`.
+- **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
+  Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
+  `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
+  `move_pages`; `ioprio_get/set`; `settimeofday`; `adjtimex`/`clock_adjtime`
+  (clear `struct timex`, TIME_OK); `vhangup`; `swapoff`. Explicit
+  `-ENOSYS`: `quotactl`/`quotactl_fd`/`bpf`/`userfaultfd`/`memfd_secret`/
+  `mount_setattr`/`lookup_dcookie`/`restart_syscall`/mqueue 181-185/AIO
+  0-4; `-EPERM`: modules 104-106. `fanotify_init/mark` are 262/263 (the old
+  300/301 were x86_64 numbers, unreachable on AArch64). Regression:
+  `ctest/test_misc_extended.c`.
+- **Known gap:** `LDAPUR`/`LDAPURB`/`LDAPURH` (ARMv8.4) still decode to
+  UNKNOWN→DecodeError. Their encoding differs from `LDUR`; do not guess it —
+  confirm against QEMU's a64.decode/ARM ARM before adding.
 
 ## Work Guidance
 
@@ -1060,14 +1088,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **213 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **228 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **213 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 208),
+  (interactive + real-world are the standard default) = **228 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 223),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`
@@ -1078,7 +1106,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **208 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **228 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three

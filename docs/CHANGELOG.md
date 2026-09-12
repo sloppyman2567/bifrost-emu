@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased]
+
+### Added
+- **Compatibility syscalls** (`src/syscalls/misc_extended.cpp`): permissive
+  no-ops for NUMA policy (`remap_file_pages`, `mbind`, `set_mempolicy`,
+  `get_mempolicy`, `migrate_pages`, `move_pages`), `ioprio_get/set`,
+  `settimeofday`, `adjtimex`/`clock_adjtime`, `vhangup`, and `swapoff`;
+  explicit `-ENOSYS` for `quotactl`/`quotactl_fd`/`bpf`/`userfaultfd`/
+  `memfd_secret`/`mount_setattr`/`lookup_dcookie`/`restart_syscall`/mqueue
+  (`181-185`)/AIO (`0-4`), and `-EPERM` for modules (`104-106`).
+- Regression tests `ctest/jit_prfm_ldapr.c` and `ctest/test_misc_extended.c`.
+
+### Fixed
+- **Decoder: `PRFM` (prefetch) is now a NOP instead of a load.** All forms
+  (unsigned-immediate, unscaled `prfum`, register offset) were classified as
+  a sign-extending load; the `prfop` field is not a register, so
+  `prfm pstl1keep,[x0,#8]` clobbered `x16` and a far prefetch could fault.
+- **Decoder: `LDAPR`/`LDAPRB`/`LDAPRH` (ARMv8.3 RCpc acquire loads) are
+  acquire loads, not an LSE CAS.** They share the LSE atomic encoding shape
+  and were silently executed as `atom_op==0xC` (compare-and-swap).
+- **`fanotify_init`/`fanotify_mark` corrected to syscalls 262/263** (the old
+  300/301 are x86_64 numbers, unreachable under the AArch64 asm-generic ABI).
+- **Core hardening sweep:** per-CPU signal frames and a Vyukov MPMC host
+  signal ring (fixes a cross-vCPU dangling reference), exclusive-monitor
+  entries removed on thread exit (ASan-confirmed use-after-free during
+  reaping), wrapping `munmap`/`madvise`/`MAP_FIXED_NOREPLACE` and `brk`
+  cap-exceedance rejected, SDL thread shared ownership with a single join,
+  and a cooperative-exit kick so shutdown cannot hang on a vCPU parked in a
+  blocking host syscall.
+
+### Changed
+- Test suite now runs **228 tests** (quick: 223).
+
 ## [1.5.5-alpha] — vk.xml registry-driven Vulkan marshalling, Phase B complete (2026-08-24)
 
 ### Added

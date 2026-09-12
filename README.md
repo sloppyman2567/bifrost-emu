@@ -259,11 +259,11 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (205 tests — interactive + real-world included
+# Run the full test suite (228 tests — interactive + real-world included
 # by default, real-world binaries auto-download when missing)
 make check
 
-# Quick mode (skip the 5 benchmarks — 200 tests)
+# Quick mode (skip the 5 benchmarks — 223 tests)
 make check-quick
 
 # Run under the interpreter (catches JIT drift)
@@ -286,17 +286,18 @@ make verify
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit | 44 | Focused JIT codegen regression tests (`ctest/`) |
-| Integration | 71 | Real-world programs exercising multiple subsystems (`ctest_real/` + `test/`) |
+| Unit | 54 | Focused JIT codegen regression tests (`ctest/`) |
+| Integration | 84 | Real-world programs exercising multiple subsystems (`ctest_real/` + `test/`) |
 | Toybox | 9 | ToyBox subcommands (echo, seq, ls, md5sum, etc.) |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (BusyBox, iperf3, coreutils) |
+| Real-world dynamic (glibc) | 7 | glibc-dynamic subset of the row above (needs rootfs) |
 | Dynamic | 15 | Dynamically-linked binaries (musl + glibc) — need rootfs |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
 | Interactive | 5 | REPL/stdin tests (echo, repl, cat, sh, fgets_test) |
-| **Total** | **205** | |
+| **Total** | **228** | |
 
-`make check` runs all 205 tests; `make check-quick` skips the 5
-benchmarks for a 200-test run.
+`make check` runs all 228 tests; `make check-quick` skips the 5
+benchmarks for a 223-test run.
 
 ## Configuration
 

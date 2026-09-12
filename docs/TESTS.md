@@ -10,16 +10,16 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 205 | 205 | 0 | Full suite incl. interactive (real-world binaries auto-download) |
-| frostJIT (quick `make check-quick`) | 200 | 200 | 0 | Skip the 5 benchmarks (1 skip possible: `sdl_gl_triangle` without DISPLAY) |
-| Interpreter (`./bifrost-emu --no-jit`) | 205 | 205 | 0 | Same conditions as JIT row |
+| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 228 | 228 | 0 | Full suite incl. interactive (real-world binaries auto-download) |
+| frostJIT (quick `make check-quick`) | 223 | 223 | 0 | Skip the 5 benchmarks (1 skip possible: `sdl_gl_triangle` without DISPLAY) |
+| Interpreter (`./bifrost-emu --no-jit`) | 228 | 228 | 0 | Same conditions as JIT row |
 
-**205 test programs** are defined in `scripts/run_tests.sh` across seven
+**228 test programs** are defined in `scripts/run_tests.sh` across eight
 categories (see table below). The default `make check` suite runs **all
-205** of them (interactive + real-world are the standard default) and
-reports **205 pass / 0 fail** in BOTH the frostJIT and `--no-jit`
+228** of them (interactive + real-world are the standard default) and
+reports **228 pass / 0 fail** in BOTH the frostJIT and `--no-jit`
 interpreter modes. With `make check-quick`, benchmarks are skipped and
-the suite reports **200 pass / 0 fail**.
+the suite reports **223 pass / 0 fail**.
 
 > **Interpreter FCVTZU bug FIXED (2026-08-18):** under `--no-jit`,
 > `jit_int_fp_conv` used to fail `fcvtzu_x_d(1e19)` — the scalar
@@ -30,26 +30,27 @@ the suite reports **200 pass / 0 fail**.
 > conversion sites now route through `fp_to_signed_sat()`/
 > `fp_to_unsigned_sat()` (with the subtract-2^63-then-add-back trick for
 > the scalar 64-bit unsigned band, exactly like the JIT), so the
-> interpreter is 205/205, matching frostJIT.
+> interpreter is 228/228, matching frostJIT.
 
 ### Test categories
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit tests | 44 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute, scalar shifts, SIMD misc, SADDW/UMINP, UMOV, shift-by-imm) |
-| Integration tests | 71 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state, pairmin, shift-by-imm, vDSO clock) |
+| Unit tests | 54 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute, scalar shifts, SIMD misc, SADDW/UMINP, UMOV, shift-by-imm, PRFM/LDAPR, compatibility syscalls) |
+| Integration tests | 84 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state, pairmin, shift-by-imm, vDSO clock, SDL thread lifecycle) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
+| Real-world dynamic (glibc) | 7 | glibc-dynamic subset of the row above (needs rootfs) |
 | Dynamic | 15 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
 | Interactive | 5 | `test/` + `ctest_real/` — REPL/stdin tests (echo, repl, cat, sh, fgets) |
-| **Total** | **205** | 205 run by default; 200 with `--quick` |
+| **Total** | **228** | 228 run by default; 223 with `--quick` |
 
 ### Running the tests
 
 ```bash
-make check              # run all 205 tests (JIT default, colorized summary)
-make check-quick        # skip the 5 benchmarks (200 tests)
+make check              # run all 228 tests (JIT default, colorized summary)
+make check-quick        # skip the 5 benchmarks (223 tests)
 make check-nojit        # run under interpreter (--no-jit)
 make check-fwd          # run with BIFROST_ENABLE_FWD=1
 ./scripts/run_tests.sh  # full suite (real-world binaries auto-download when missing)
