@@ -3956,3 +3956,195 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Parked:** under the JIT neverball dies at `libz.so.1 + 0xa1d8` (inflate).
   The `jit_*_mem_slow` handlers drop `e.addr` and skip `report_crash`, so
   those faults report `fault_addr=0x0`/no module — fix that first, then hunt.
+
+## Session History (2026-09-12) — emulator-core review fixes + dedicated regression tests
+
+- **Signal vs syscall:** `Emulator::syscall` now honors `drain_host_signals`'s
+  return value (a delivered handler frame rewrote x0..x2/pc; the pending syscall
+  must NOT run). Also added `drain_pending_signals` at the syscall boundary — a
+  JIT self-loop that calls syscalls chains native SVC without ever returning to
+  the run loop, so a cross-thread tgkill was never observed. This second part is
+  the actual delivery fix; the new `test_signal_semantics` found it.
+- **Signals are per-CPU:** `SignalFrame` moved to `core/cpu.h`; the handler-call
+  stack is `CPU::sig_frames` (was a shared `SignalTable::frames_` vector whose
+  concurrent `emplace_back` dangled the returned reference across vCPUs).
+  `SigAction actions_` is guarded by `SignalTable::mu_`; `lookup()` returns by
+  value. `rt_sigaction` reads new before writing old (aliased swap).
+  `sigsuspend` saves the PRE-suspend mask in the frame via
+  `CPU::sigsuspend_active`/`sigsuspend_saved_mask`.
+- **Host-signal ring** replaced with a Vyukov MPMC queue (per-slot seq): the old
+  fetch_add(tail)-then-write published the index before the slot and let two
+  vCPUs pop the same slot.
+- **Threads:** `join_threads` snapshots under `threads_mu_` then joins OUTSIDE it
+  (join-under-lock deadlocks with `find_cpu_by_tid`/`invalidate_jit_range`);
+  `exit_group` calls `kill_other_threads`; `~Emulator` stops+joins vCPUs and the
+  stats thread; fork child leaks inherited joinable `std::thread` handles (it
+  cannot join/detach them) and resets `alive_threads_`; `clear_child_tid`
+  cleanup can't throw out of `thread_entry`.
+- **Guest-thread lifetime hardened (2026-09-12, later pass):** `threads_` holds
+  `std::shared_ptr<GuestThread>`; `find_cpu_by_tid` returns an aliasing
+  `std::shared_ptr<CPU>`; `invalidate_jit_*` pins the `GuestThread`; and
+  `spawn_thread` installs `host_thread` BEFORE publishing the `GuestThread`
+  (`std::thread`'s ctor starts the thread, so the guest could finish before the
+  handle assignment — a published half-assigned handle is a data race for any
+  joiner).
+- **ROOT CAUSE of the reaping host-heap corruption (found via ASan,
+  2026-09-12):** LDXR registers a raw `CPU*` in
+  `excl_monitor_shards_[].reservations`, and nothing removed it on thread exit.
+  Reaping a finished `GuestThread` left a dangling `CPU*`; the next store to
+  that address dereferenced it — ASan reported `heap-use-after-free` at
+  `interpreter.cpp:1471` (the STXR/STLR "invalidate other CPUs' reservations"
+  loop) inside `reap_finished_threads`. Fix: `Emulator::excl_remove_cpu(CPU*)`
+  removes the CPU from every shard, called from `thread_entry` BEFORE `finished`
+  is set (so the reaper can't free it first). Reaping from both `spawn_thread`
+  and the main run loop is now safe; the earlier "~85% corruption" is gone.
+  NOTE: this was neither the `find_cpu_by_tid` pointer (shared_ptr did not fix
+  it) nor publication order (reorder did not fix it) — ASan was required.
+- **Memory:** `munmap`/`untrack_allocation` reject wrapping ranges; `madvise`
+  iterates existing pages (was an unbounded ~2^52 page walk); sparse
+  `read`/`write` validate and dereference cached PageCache pointers while
+  holding `mu_` (erase takes the unique lock); `MAP_FIXED_NOREPLACE` refuses the
+  stack and wrapping lengths; fixed maps and in-place `mremap` advance
+  `above_window_next_` (bump-overlap corruption).
+- **Leaks:** ifunc/init/guest-call scratch stacks are reusable thread-locals
+  keyed by owner (were leaked per call); `AT_EXECFN` guards empty argv.
+- **Tests added (musl-static):** `ctest/test_signal_semantics.c` (alias +
+  sigsuspend mask restore + cross-thread tgkill), `ctest/test_fork_threads.c`,
+  `ctest/test_mem_guard.c` (wrap munmap, NOREPLACE stack, huge madvise,
+  above-window MAP_FIXED r/w). Wired into `run_tests.sh` UNIT_TESTS.
+- **Verified:** full suite **224/224** ×2; `test_pthread_cond` **150/150** (was
+  ~85% before `excl_remove_cpu`); 140 additional concurrency/new-test runs
+  0 failures; ASan build of `test_pthread_cond` **25/25 clean** (previously
+  tripped `heap-use-after-free` on run 1). Reaping now runs from both
+  `spawn_thread` and the main run loop.
+- **Still open (not regressions):** SDL-thread lifecycle double-join,
+  non-atomic `cpu.sigpending` bit path, dead `atomic_cas_*` accounting, and —
+  the big one — concurrent JIT chain-slot patching (see next entry).
+
+## Session History (2026-09-12) — cooperative exit + memory-range hardening
+
+- **Cooperative (non-hanging) shutdown:** `exit_group`/`kill_other_threads`/
+  `join_threads`/`stop_sdl_threads` used to join every vCPU, so a thread
+  parked in a host syscall (read/nanosleep/poll/wait) never observed
+  `cpu.running=false` and the join — and process exit — hung forever. Fix
+  (QEMU's `qemu_cpu_kick` pattern): an internal host signal `KICK_SIGNAL`
+  (SIGPWR; not in the forwarded set, `SA_RESTART` off) is installed with a
+  no-op handler and `pthread_kill`ed at each blocked vCPU before joining, so
+  the blocking call returns EINTR and the thread exits. New test
+  `ctest/test_exit_blocked.c` (siblings blocked in read + nanosleep, then
+  `_exit`): 0.32s with the kick, hangs (timeout) without it. Wired into
+  `run_tests.sh`.
+- **Memory:** `map_range` now returns `bool`; `brk` refuses (and returns the
+  old break) when materializing the new pages would exceed the page cap
+  instead of reporting success for unmapped memory. `mremap` no longer
+  injects a bogus `allocations_` key for an untracked `old_addr` (shrink is a
+  no-op; grow falls back to a fresh allocation).
+- **Known open (documented, NOT fixed): concurrent JIT chain-slot patching.**
+  `FrostJIT::invalidate_range` unpatches chain bytes (`0xE9` → ret/nop) in the
+  shared code buffer while other vCPUs may be executing that code — x86 does
+  not guarantee atomic instruction fetch across a concurrent byte write, so a
+  vCPU can decode a torn jump and die at pc=0. QEMU avoids this by only
+  patching when all vCPUs are quiescent (`async_safe_run_on_cpu`); doing that
+  here is a stop-the-world redesign we did not attempt. `test_mem_guard`'s
+  above-window MAP_FIXED test is therefore kept single-threaded (concurrent
+  version measured ~80% pass, and it can HANG as well as abort — one run
+  parked at a torn jump). A future fix needs an epoch/stop-the-world gate
+  around ALL runtime code-byte writers, not just chain slots.
+  **Attempted and REVERTED (2026-09-12):** converting the chain slots to a
+  stable `jmp rel32` opcode (emit `E9 00 00 00 00` and patch/patch-clear only
+  the 4-byte operand, incl. taken-path/selfloop/VERIFY) passed the full suite
+  but did NOT improve the MT stress and introduced more timeouts, so it was
+  reverted. Other runtime writers remain: the flag-materialize region
+  (`jit_cache.cpp` `chain_back_references`) still writes a whole `0xE9` +
+  operand over live code, and tier-2 patches jumps at runtime. A piecemeal
+  operand-only fix is insufficient.
+- **Verified:** full suite **225/225** ×2; ASan build clean on 8 runs each of
+  `test_pthread_cond`/`test_exit_blocked`/`test_signal_semantics`/
+  `test_mem_guard`/`test_fork_threads` (40 runs, 0 errors).
+
+## Session History (2026-09-12) — SDL thread lifecycle (shared ownership + single join)
+
+- **Problem:** `sdl_threads_` held `unique_ptr<SdlThread>` and
+  `wait_sdl_thread`/`detach_sdl_thread`/`stop_sdl_threads` each cached a raw
+  `SdlThread*` after releasing `sdl_threads_mu_`. Concurrent
+  `SDL_WaitThread` + shutdown (`stop_sdl_threads`) could double-join the same
+  `std::thread`; `SDL_DetachThread` `release()`d + leaked the record while the
+  thread ran on a guest stack the (concurrent) waiter then freed. `spawn`
+  also published to the map BEFORE installing `host_thread` (the same
+  `std::thread`-ctor race fixed for GuestThread).
+- **Fix (`thread_mgr.cpp`/`emulator.h`):** `sdl_threads_` now holds
+  `std::shared_ptr<SdlThread>`; each path pins the record. One join + guest
+  stack/handle free per record, serialized by a per-record `finish_mu` +
+  `reaped` flag. `SDL_DetachThread` moves the record to `retired_sdl_threads_`;
+  `reap_retired_sdl_threads()` (called from `reap_finished_threads`) joins it
+  once `finished` and frees its resources — replacing the old leak. `spawn`
+  installs `host_thread` before publishing. `stop_sdl_threads` covers live +
+  retired, kicks blocked host syscalls, frees once.
+- **New test:** `ctest_real/test_sdl_thread.c` (thunked `SDL_CreateThread` /
+  `WaitThread` / `DetachThread` via 0x1002/0x1003): status+data round-trip,
+  8 concurrent create/wait pairs, 4 detached threads. Wired into
+  `run_tests.sh` (`sdl_thread`, exit 77 = skip without SDL).
+- **Verified:** full suite **226/226** ×2; `test_sdl_thread` 20/20 (real
+  display) and **6/6 clean under ASan**.
+- **Also learned:** the emulator forwards SIGTERM to the guest, so a hung
+  guest ignores plain `timeout` (SIGTERM) — the harness already uses
+  `timeout -s KILL`. And a full `/tmp` silently made every redirected test
+  output empty (looks like mass failure); keep sanitizer/test captures small.
+
+## Session History (2026-09-12) — sigpending atomicity + atomic_cas accounting
+
+- **`cpu.sigpending` is now `std::atomic<uint64_t>`.** A cross-thread
+  `tgkill`/`tkill`/`kill` queue-overflow fallback sets a pending bit while the
+  target thread is concurrently doing `|=`/`&=`/`!= 0` on the same word — a
+  plain RMW data race. All sites now use `fetch_or`/`fetch_and`/`load`/`store`
+  (`signal.cpp`, `misc_signal.cpp`, `threads.cpp`, `thread_mgr.cpp`).
+- **`Memory::atomic_cas_32/64` accounting.** They are dead today (no callers),
+  but the `pages_` emplace paths bypassed the page cap and never bumped
+  `total_pages_` (the read/write paths check `would_exceed_page_limit` and
+  account). Added the cap check (single-page: fail on OOM; cross-page:
+  pre-count missing pages) and `total_pages_.fetch_add` on every insert, so
+  wiring LSE atomics later can't silently bypass the OOM guard. NOTE: still
+  untested (no callers to exercise it).
+- **Verified:** full suite **226/226** ×2; `test_signal_semantics` 30/30
+  (cross-thread pending path).
+
+## Session History (2026-09-12) — PRFM/LDAPR decode fixes + compatibility syscalls
+
+- **PRFM was decoded as a load (silent register clobber / fault).** Every
+  form (unsigned immediate, unscaled `prfum`, register offset) has
+  `size==11 && opc_ls==0b10` for the non-vector load/store groups, which the
+  old `is_load = (opc&2)||(opc&1)` classified as a sign-extending load. The
+  `prfop` field (bits[4:0]) is NOT a register, so e.g.
+  `prfm pstl1keep, [x0, #8]` (Rt=16) wrote the loaded word into x16, and a
+  far prefetch offset would fault on an address the guest only hinted. All
+  three decoders (`case 0x18/0x1C` unscaled + reg-offset, `case 0x19/0x1D`
+  unsigned imm) now classify `!is_vec && size==3 && opc_ls==2` as `HINT`
+  (NOP in interp AND the IR translator). Baseline ARMv8 — compilers emit
+  this for `__builtin_prefetch`/auto-prefetch, so real binaries hit it.
+- **LDAPR/LDAPRB/LDAPRH (ARMv8.3 RCpc acquire load) were decoded as LSE
+  CAS.** `ldapr xN,[xM]` = `0xf8bfc007`-family shares the `case 0x18`,
+  bit21=1, mode=00 shape with LDADD/etc.; the LSE path read
+  `atom_op=(inst>>12)&0xF == 0xC` and executed a compare-and-swap
+  (corruption, not a load). Fixed pattern `(inst & 0x3FFFFC00) == 0x38BFC000`
+  is now detected first and mapped to `LDAR` (acquire, `excl_low6=0x3F`, no
+  monitor reservation) — RCpc is weaker than LDAR, so the stronger model is
+  safe. Size comes from bits[31:30] so x/w/b/h all work.
+- **`test_lse_inline`/`test_atomic_stress` still pass** (the LSE atom_op
+  space is 0..8, so 0xC never collides).
+- **Compatibility syscalls (`misc_extended.cpp`).** Permissive no-ops:
+  NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/`get_mempolicy` (reports
+  MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/`move_pages`; `ioprio_get`/
+  `set`; `settimeofday`; `adjtimex`/`clock_adjtime` (zero the `struct timex`,
+  return TIME_OK); `vhangup`; `swapoff`. Explicit errors: `quotactl`/
+  `quotactl_fd`/`bpf`/`userfaultfd`/`memfd_secret`/`mount_setattr`/
+  `lookup_dcookie`/`restart_syscall`/mqueue 181-185/AIO 0-4 → `-ENOSYS`;
+  module 104-106 → `-EPERM`. Also **fixed fanotify numbers**: `case
+  300/301` were the x86_64 numbers (unreachable on AArch64); now `262/263`.
+- **New tests:** `ctest/jit_prfm_ldapr.c` (5 checks, JIT + interp) and
+  `ctest/test_misc_extended.c` (19 checks) — both registered in
+  `scripts/run_tests.sh`.
+- **Known gap (not added):** `LDAPUR`/`LDAPURB`/`LDAPURH` (ARMv8.4) still
+  decode to UNKNOWN→DecodeError; rare (needs `+rcpc`/v8.4 build), and the
+  encoding is distinct from LDUR so it was left alone rather than guessed.
+- **Verified:** full suite **228/228**, quick **223/223**.
+
