@@ -25,8 +25,16 @@ std::string map_guest_path(const std::string& guest_path) {
     const char* bifrost_root = getenv("BIFROST_ROOT");
     if (!bifrost_root || !bifrost_root[0]) return guest_path;
     if (guest_path.empty() || guest_path[0] != '/') return guest_path;
-    if (guest_path.substr(0, 5) == "/proc") return guest_path;
-    if (guest_path.substr(0, 4) == "/dev") return guest_path;
+    // Virtual filesystems are not remapped. Match on a path boundary so
+    // "/procedure" and "/device" are NOT mistaken for /proc and /dev
+    // (a substr prefix test used to let those bypass the sandbox).
+    auto is_under = [](const std::string& p, const char* base) {
+        size_t n = std::strlen(base);
+        return p.compare(0, n, base) == 0 &&
+               (p.size() == n || p[n] == '/');
+    };
+    if (is_under(guest_path, "/proc")) return guest_path;
+    if (is_under(guest_path, "/dev")) return guest_path;
     // X11 clients need to read the host X auth cookie. If the guest opens
     // the exact path the host XAUTHORITY points at, pass it through
     // unchanged — it lives in the host session dir (e.g. /run/user/...),
@@ -36,7 +44,29 @@ std::string map_guest_path(const std::string& guest_path) {
     if (xauth && xauth[0] == '/' && guest_path == xauth) return guest_path;
     std::string root(bifrost_root);
     while (root.size() > 1 && root.back() == '/') root.pop_back();
-    return root + guest_path;
+    // Lexically normalize "." and ".." before remapping (chroot-style:
+    // ".." at the root stays at the root). Without this, a guest path of
+    // "/../../etc/passwd" produced "$ROOT/../../etc/passwd" and read a
+    // host file outside the sandbox.
+    std::string norm;
+    size_t i = 0;
+    while (i < guest_path.size()) {
+        size_t j = guest_path.find('/', i);
+        if (j == std::string::npos) j = guest_path.size();
+        std::string comp = guest_path.substr(i, j - i);
+        if (comp.empty() || comp == ".") {
+            // no-op
+        } else if (comp == "..") {
+            size_t slash = norm.rfind('/');
+            if (slash == std::string::npos) norm.clear();
+            else norm.erase(slash);
+        } else {
+            norm += '/';
+            norm += comp;
+        }
+        i = j + 1;
+    }
+    return root + norm;  // norm is empty for "/" (or all-"." paths)
 }
 // Static method exposed via Yggdrasil so syscall handlers don't need to
 // friend host.cpp's free function.
