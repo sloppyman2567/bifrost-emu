@@ -2090,9 +2090,9 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // area, causing the "got = expected/4" TLS corruption pattern
         // with 8+ threads. Now we add sizeof(struct pthread) explicitly.
         constexpr uint64_t TLS_SURPLUS = 16384;
-        constexpr uint64_t STRUCT_PTHREAD_SIZE = 2304;  // glibc AArch64
-        uint64_t tls_static_size = static_tls_size_ + STRUCT_PTHREAD_SIZE +
-                                   2048 + TLS_SURPLUS;
+        // static_tls_size_ now already includes TLS_PRE_TCB_SIZE (the
+        // struct pthread slot below TP), so it is added exactly once.
+        uint64_t tls_static_size = static_tls_size_ + 2048 + TLS_SURPLUS;
         // Round up to alignment (64 bytes).
         tls_static_size = (tls_static_size + 63) & ~63ULL;
         // Store for later use (post-relocation patching of _rtld_global_ro).
@@ -3079,15 +3079,14 @@ void DynamicLinker::allocate_static_tls() {
     constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;  // sizeof(tcbhead_t) = tcb + dtv
     uint64_t tcb_size = (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1);
     // Reserve the dlopen surplus AFTER the block (trailing, not in TP
-    // math): the TP anchor (lib_tls_size_) stays exactly L0 so the guest's
-    // own TCB computation (block + its PT_TLS sum) keeps agreeing with our
-    // offsets. Growing the lib area instead shifted TP against guest
-    // blocks and corrupted the heap in thread tests. Surplus tp offsets
-    // are positive (past main TLS), valid on every thread.
-    lib_tls_size_ = lib_size;
+    // math): the TP anchor (lib_tls_size_) covers only the module TLS plus
+    // the glibc struct-pthread slot below TP, so the guest's own TCB
+    // computation keeps agreeing with our offsets. Surplus tp offsets are
+    // positive (past main TLS), valid on every thread.
+    lib_tls_size_ = lib_size + TLS_PRE_TCB_SIZE;
     tcb_size_ = tcb_size;
-    // Total static TLS block = lib + TCB + main.
-    uint64_t total = lib_size + tcb_size + main_memsz;
+    // Total static TLS block = lib + struct pthread + TCB + main.
+    uint64_t total = lib_size + TLS_PRE_TCB_SIZE + tcb_size + main_memsz;
     // Round up to max alignment (16 minimum).
     uint64_t max_align = 16;
     if (main_align > max_align) max_align = main_align;
@@ -3114,8 +3113,8 @@ void DynamicLinker::allocate_static_tls() {
         obj.tls_mod_id = next_tls_mod_id_++;
         if (obj.is_main) {
             // Main exe TLS: at POSITIVE TP offset = tcb_size.
-            // In the template block, it's at [base + lib_size + tcb_size, ...).
-            obj.tls_block_offset = lib_size + tcb_size;
+            // In the template block it follows lib TLS + struct pthread.
+            obj.tls_block_offset = lib_size + TLS_PRE_TCB_SIZE + tcb_size;
             obj.tls_tp_offset = static_cast<int64_t>(tcb_size);  // positive
         } else {
             // Lib TLS: at NEGATIVE TP offset.
@@ -3129,7 +3128,7 @@ void DynamicLinker::allocate_static_tls() {
             // negative offsets. The tp_offset = lib_cursor - lib_size (negative).
             obj.tls_block_offset = lib_cursor;
             obj.tls_tp_offset = static_cast<int64_t>(lib_cursor) -
-                                static_cast<int64_t>(lib_size);  // negative
+                                static_cast<int64_t>(lib_tls_size_);  // negative
             lib_cursor += obj.tls.memsz;
         }
         // Copy initialized data (.tdata) from obj's PT_TLS filesz.
@@ -3200,7 +3199,7 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
     uint64_t tcb_size = (main_align > 1)
         ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
         : TLS_TCB_SIZE_BASE;
-    uint64_t total_tls_size = lib_size + tcb_size + main_memsz;
+    uint64_t total_tls_size = lib_size + TLS_PRE_TCB_SIZE + tcb_size + main_memsz;
     uint64_t tcb;
     if (total_tls_size == 0) {
         // No TLS — return a minimal zeroed block.
@@ -3219,7 +3218,7 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
     if (block == 0) return 0;
     std::vector<uint8_t> zeros(alloc_size, 0);
     mem.write(block, zeros.data(), alloc_size);
-    tcb = block + lib_size;  // TP points to TCB header start
+    tcb = block + lib_size + TLS_PRE_TCB_SIZE;  // TCB sits above struct pthread
     // ── Copy each module's TLS template to its per-thread slot ──
     for (const auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;

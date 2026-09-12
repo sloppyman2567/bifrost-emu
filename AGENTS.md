@@ -44,6 +44,33 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - glibc `dlopen` hook offset in `_rtld_global_ro` is detected from
   `dlopen` disassembly (368 vs 376 across glibc versions)
 - Static ELFs still get a DynamicLinker so runtime thunk dlopen works
+- **glibc AArch64 static-TLS layout (variant-I):** aarch64 glibc uses
+  `TLS_DTV_AT_TP=1` with `THREAD_SELF = tpidr - 1`, so `struct pthread`
+  (`TLS_PRE_TCB_SIZE = sizeof(struct pthread)`, ~0x720 on 2.42;
+  `DynamicLinker::TLS_PRE_TCB_SIZE`=2304 is a safe upper bound) MUST be
+  reserved immediately below TP, with per-module static TLS BELOW the
+  descriptor. So `tp = static_tls_base_ + lib_size + TLS_PRE_TCB_SIZE`, and
+  module `tls_tp_offset = block_offset - lib_tls_size_`. Putting module TLS
+  directly below TP (the old layout) made `__pthread_getspecific` read
+  `specific_1stblock` at `tp - 0x610` out of bounds and `__pthread_setspecific`
+  WRITE into the neighbouring live allocation → silent, intermittent guest
+  heap corruption (neverball "smallbin/unsorted double linked list corrupted").
+  All layout sites must stay in sync: `allocate_static_tls`,
+  `allocate_thread_tls`, the 0x1001 `_dl_allocate_tls` handler in
+  `src/syscalls/misc.cpp`, and the `dl_tls_static_size` patch in
+  `dynamic_linker.cpp` (which must NOT add `TLS_PRE_TCB_SIZE` again, since
+  `static_tls_size_` already includes it). musl is variant-II (untouched).
+- **Guest store observability:** `BIFROST_WRITE_TRACE=<path>` logs complete
+  `addr/size/tid/guest-pc/value` records (0x-prefixed;
+  `BIFROST_WRITE_TRACE_RANGE=lo:hi` filters). Interp stamps the pc via
+  `note_interp_pc`; JIT slow stores (`jit_store_mem_slow/_16_slow/stlr/stxr`)
+  stamp it too, so `BIFROST_JIT_SLOW_STORES=1` makes the JIT stream complete
+  for a clean-vs-bad differential. `BIFROST_WATCH_TRAP=1` SIGILLs on the first
+  write into `BIFROST_WATCH`. `BIFROST_GUARD_ALLOCS=1` appends a PROT_NONE
+  guard page after each bump-path window allocation and installs a
+  SIGSEGV/SIGBUS reporter (guest address + full register file + pc); this is
+  how the TLS bug above was localized. Guards are opt-in only (they leak the
+  guard page VA for the debug run).
 - Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP

@@ -192,13 +192,16 @@ public:
     // a real implementation that tracks the GOT-slot → symbol mapping.
     // ── TLS ────────────────────────────────────────────────────────
     // Total size of the static TLS block across all loaded objects.
-    // With variant-I layout: total = lib_size + tcb_size + main_memsz.
+    // With variant-I layout: total = lib_size + TLS_PRE_TCB_SIZE + tcb_size
+    // + main_memsz.
     uint64_t static_tls_size() const { return static_tls_size_; }
     uint64_t static_tls_base() const { return static_tls_base_; }
     // The thread pointer (TPIDR_EL0) for the main thread.
-    // Variant-I (glibc): TP = static_tls_base_ + lib_size (points to TCB header).
+    // Variant-I (glibc): TP = static_tls_base_ + lib_size + TLS_PRE_TCB_SIZE.
+    //   struct pthread (TLS_PRE_TCB_SIZE) is just below TP (THREAD_SELF =
+    //   tpidr - 1 on aarch64/Dtv-at-tp), then lib TLS below that.
     //   Main exe TLS is at TP + tcb_size (positive offset).
-    //   Lib TLS is at TP - lib_size (negative offset).
+    //   Lib TLS is at TP - TLS_PRE_TCB_SIZE - lib_size .. TP - TLS_PRE_TCB_SIZE.
     // Variant-II (musl): TP = static_tls_base_ + static_tls_size_ (end of block).
     //   All TLS is at negative TP offsets.
     uint64_t thread_pointer() const {
@@ -209,6 +212,12 @@ public:
     uint64_t lib_tls_size() const { return lib_tls_size_; }
     // Size of the TCB header (tcbhead_t), rounded up to main exe alignment.
     uint64_t tcb_size() const { return tcb_size_; }
+    // glibc AArch64 TLS_PRE_TCB_SIZE = sizeof(struct pthread). With
+    // TLS_DTV_AT_TP (aarch64), THREAD_SELF = tpidr - 1, so the descriptor
+    // sits immediately below TPIDR_EL0 and per-module static TLS sits
+    // below the descriptor. 2304 is an upper bound for glibc 2.4x
+    // (measured ~0x720); over-reserving only adds zeroed padding.
+    static constexpr uint64_t TLS_PRE_TCB_SIZE = 2304;
     // Allocate a fresh per-thread TLS block (variant-I glibc layout) for a
     // new guest thread and return its TCB pointer (== the thread's
     // TPIDR_EL0), or 0 on failure. Mirrors the a0==0 path of the 0x1001

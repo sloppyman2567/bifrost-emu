@@ -1052,7 +1052,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t tcb_size = (main_align > 1)
                 ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
                 : TLS_TCB_SIZE_BASE;
-            uint64_t total_tls_size = lib_size + tcb_size + main_memsz;
+            uint64_t total_tls_size = lib_size + DynamicLinker::TLS_PRE_TCB_SIZE +
+                                      tcb_size + main_memsz;
             uint64_t tcb;
             if (a0 != 0) {
                 // Caller-allocated (normal pthread_create path).
@@ -1082,7 +1083,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (block == 0) { ret_err(ENOMEM); return 0; }
                 std::vector<uint8_t> zeros(alloc_size, 0);
                 mem_.write(block, zeros.data(), alloc_size);
-                tcb = block + lib_size;  // TP points to TCB header start
+                tcb = block + lib_size + DynamicLinker::TLS_PRE_TCB_SIZE;  // TCB above struct pthread
             }
             // ── Copy each module's TLS template to its per-thread slot ──
             // Variant-I layout per-thread (TP = tcb):
