@@ -36,10 +36,12 @@
 // We emit:
 //   - EV_KEY for keyboard + mouse buttons + joystick buttons
 //   - EV_REL for mouse movement (REL_X, REL_Y, REL_WHEEL)
-//   - EV_ABS for joystick axes (ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ,
-//     ABS_HAT0X, ABS_HAT0Y)
+//   - EV_ABS for game controller axes (ABS_X, ABS_Y, ABS_RX, ABS_RY,
+//     ABS_BRAKE, ABS_GAS). Mouse motion is relative only (REL_X/REL_Y),
+//     avoiding collisions with the controller's ABS_X/ABS_Y stick axes.
 //   - EV_SYN after each "batch" of events to delimit frames
-//   - JS_EVENT_BUTTON / JS_EVENT_AXIS for /dev/input/js0
+//   - JS_EVENT_BUTTON / JS_EVENT_AXIS for /dev/input/js0; controller
+//     connection also queues current state using JS_EVENT_INIT.
 //
 // ── Game controller support ─────────────────────────────────
 // SDL2's game controller API provides a higher-level abstraction than the
@@ -75,6 +77,9 @@
 //   - Only one game controller (js0). Multi-controller support is a
 //     future enhancement.
 //   - No multitouch (SDL2 has it; not yet plumbed through).
+//   - Focus loss synthesizes releases for held EV_KEY state because SDL
+//     may not deliver the matching key-up events after focus changes.
+//   - /dev/input/mice ImPS/2 reads are not implemented (read returns ENOSYS).
 //   - Time stamps use CLOCK_MONOTONIC (steady_clock); real Linux uses
 //     CLOCK_MONOTONIC for input events. Previously we used CLOCK_REALTIME
 //     (system_clock), which could jump backwards on NTP adjustment and

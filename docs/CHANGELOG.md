@@ -49,6 +49,11 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   cap-exceedance rejected, SDL thread shared ownership with a single join,
   and a cooperative-exit kick so shutdown cannot hang on a vCPU parked in a
   blocking host syscall.
+- **SDL input state cleanup:** held keys are released on focus loss;
+  mouse motion reports only relative axes so it cannot overwrite the
+  controller's `ABS_X`/`ABS_Y` stick values. `/dev/input/js0` receives
+  `JS_EVENT_INIT` snapshots on controller connection, flipped wheel
+  direction is normalized, and input diagnostic counters are synchronized.
 
 ### Changed
 - Test suite now runs **228 tests** (quick: 223).
