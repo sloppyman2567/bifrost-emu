@@ -10,7 +10,7 @@
 #   - Supports running under interpreter (--no-jit) or FWD (--fwd)
 #
 # Usage:
-#   ./scripts/run_tests.sh              # run everything (default = JIT, full 205-test suite)
+#   ./scripts/run_tests.sh              # run the standard JIT suite
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -19,21 +19,18 @@
 #   ./scripts/run_tests.sh --verbose    # show full output of each test
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --filter 'sig|brk' # filter without downloading fixtures
-#   ./scripts/run_tests.sh --quick      # skip bench + slow tests
+#   ./scripts/run_tests.sh --quick      # skip benchmarks
 #
-# Test count breakdown (205 total standard):
-#   Unit         44  — ctest/*.elf focused JIT regression tests
-#   Integration  71  — ctest_real/*.elf + test/*.elf real programs
+# Fully provisioned suite (229 test runs):
+#   Unit         55  — ctest/*.elf focused regressions
+#   Integration  84  — ctest_real/*.elf + test/*.elf
 #   Toybox        9  — ctest_real/toybox subcommands
-#   Real-world   56  — downloaded static + dynamic glibc binaries
-#                      (49 static busybox/toybox + 7 dynamic glibc)
-#   Benchmarks    5  — performance (included in standard suite)
-#   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
-#   Interactive   5  — visual/stdin REPL tests (included in standard suite)
-#
-# Standard suite = 212 tests. Quick suite = 207 (skip benchmarks).
-# With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
-# Without rootfs, dynamic tests skip automatically.
+#   Real-world   49  — static BusyBox/Toybox commands
+#   Real-world dynamic 7 — glibc binaries; rootfs required
+#   Dynamic      15  — musl/glibc tests; rootfs required
+#   Benchmarks    5  — omitted with --quick
+#   Interactive   5  — stdin-driven tests
+# Without a rootfs: 207 runs (202 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -130,7 +127,7 @@ fi
 # The toybox binary is already committed in the repo (ctest_real/toybox).
 # The default full run (RUN_ALL=1) downloads these when missing and also
 # runs the interactive tests, so a bare `run_tests.sh` exercises every
-# category — the full 205-test suite.
+# available category. Rootfs-dependent categories are enabled when present.
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
@@ -213,7 +210,8 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite = 205 tests across 7 categories.
+# Standard suite includes 55 unit, 84 integration, 9 Toybox, 5 interactive,
+# 49 static real-world, 5 benchmark, and optional rootfs-dependent tests.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(

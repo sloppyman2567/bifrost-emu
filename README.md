@@ -19,7 +19,7 @@ machine without QEMU or a cross-compiler.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.5.5](https://img.shields.io/badge/version-1.5.5-orange.svg)](CHANGELOG.md)
+[![Version: 1.5.5](https://img.shields.io/badge/version-1.5.5-orange.svg)](docs/CHANGELOG.md)
 
 ## What is bifrost-emu?
 
@@ -259,14 +259,14 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (228 tests — interactive + real-world included
-# by default, real-world binaries auto-download when missing)
+# Run the standard suite (benchmarks included; dynamic tests run when a
+# configured rootfs is present; missing real-world fixtures may be fetched)
 make check
 
-# Quick mode (skip the 5 benchmarks — 223 tests)
+# Quick mode (skips benchmarks)
 make check-quick
 
-# Run under the interpreter (catches JIT drift)
+# Run the quick suite under the interpreter
 make check-nojit
 
 # JIT divergence checker (slow, catches codegen bugs)
@@ -282,22 +282,25 @@ make verify
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-### Test Categories
+With all fixtures available, the runner executes 229 test runs: 55 unit,
+84 integration, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
+15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
+a configured rootfs; the real-world dynamic binaries are part of the
+real-world fixture set. `--quick` skips the five benchmarks. Without a
+rootfs, the runner selects 207 runs (202 with `--quick`). Missing guest
+fixtures and unavailable display/SDL support can result in skips. See
+[docs/TESTS.md](docs/TESTS.md) for details.
 
-| Category | Count | Description |
-|----------|-------|-------------|
-| Unit | 54 | Focused JIT codegen regression tests (`ctest/`) |
-| Integration | 84 | Real-world programs exercising multiple subsystems (`ctest_real/` + `test/`) |
-| Toybox | 9 | ToyBox subcommands (echo, seq, ls, md5sum, etc.) |
-| Real-world | 56 | Downloaded static + dynamic glibc binaries (BusyBox, iperf3, coreutils) |
-| Real-world dynamic (glibc) | 7 | glibc-dynamic subset of the row above (needs rootfs) |
-| Dynamic | 15 | Dynamically-linked binaries (musl + glibc) — need rootfs |
-| Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| Interactive | 5 | REPL/stdin tests (echo, repl, cat, sh, fgets_test) |
-| **Total** | **228** | |
+### Host Input
 
-`make check` runs all 228 tests; `make check-quick` skips the 5
-benchmarks for a 223-test run.
+With SDL2 enabled, `FrostInput` translates host keyboard, mouse, and game
+controller events into Linux-style records. `/dev/input/event0` exposes
+`input_event` records; `/dev/input/js0` exposes legacy `js_event` records.
+Mouse movement uses relative axes, while absolute axes are reserved for
+game controller sticks and triggers. Controller connection queues
+`JS_EVENT_INIT` state, and focus loss synthesizes key releases to avoid
+stuck keys. In headless builds input queues remain empty; `/dev/input/mice`
+ImPS/2 reads are currently unsupported.
 
 ## Configuration
 
@@ -483,9 +486,9 @@ The JIT uses:
 
 ## Documentation
 
-- [CHANGELOG.md](CHANGELOG.md) — Release history
-- [TESTS.md](TESTS.md) — Test suite details
-- [ROADMAP.md](ROADMAP.md) — Future plans
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — Release history
+- [docs/TESTS.md](docs/TESTS.md) — Test suite details
+- [docs/ROADMAP.md](docs/ROADMAP.md) — Future plans
 - [bifrost.toml.sample](bifrost.toml.sample) — Config file reference
 - `context.md` (in tarball) — Detailed development history (not in git)
 

@@ -54,9 +54,18 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   controller's `ABS_X`/`ABS_Y` stick values. `/dev/input/js0` receives
   `JS_EVENT_INIT` snapshots on controller connection, flipped wheel
   direction is normalized, and input diagnostic counters are synchronized.
+- **SDL audio callback lifecycle:** callback execution uses a dedicated
+  guest CPU with its own stack and TLS; closing a device from its callback
+  defers destruction to avoid self-deadlock, and forked children discard
+  inherited worker state.
+- **Tier-2 LICM correctness:** architectural `LOAD_REG` reads remain in the
+  loop because codegen can resolve them from dirty cached registers;
+  SIMD `SMOV` is included in Tier-2's direct-write tracking for pinning.
 
 ### Changed
-- Test suite now runs **228 tests** (quick: 223).
+- Test runner defines 229 fully provisioned runs (224 with `--quick`);
+  without a rootfs, 207 are selected (202 with `--quick`). Missing guest
+  fixtures and unavailable host display support may cause skips.
 
 ## [1.5.5-alpha] — vk.xml registry-driven Vulkan marshalling, Phase B complete (2026-08-24)
 
@@ -393,10 +402,11 @@ back-edges.
 
 - **Region DCE, LICM, and cross-block const-prop over the concatenated
   back-edge region IR**, gated by `BIFROST_NO_RDCE` / `BIFROST_NO_LICM`.
-  LICM hoists loop-invariant pure-GPR ops + GPR `LOAD_REG` of never-written
-  non-pinned archs into a preheader emitted once per region entry (the Lback
-  jumps past it). Cross-block const-prop extends the fold-lookahead to an
-  IMM with exactly one consumer anywhere later in the region. Region IR is
+  LICM hoists loop-invariant pure-GPR scratch operations into a preheader
+  emitted once per region entry (the Lback jumps past it). Architectural
+  `LOAD_REG` reads remain in the loop because they may resolve through dirty
+  cached register mappings. Cross-block const-prop extends the fold-lookahead
+  to an IMM with exactly one consumer anywhere later in the region. Region IR is
   optimized with FWD forced on (`optimize_ir(block, force_fwd)`) so real
   invariant chains threaded through a GPR can be hoisted.
 - **BRCOND_FALLTHRU region terms:** a trace whose last block is an
