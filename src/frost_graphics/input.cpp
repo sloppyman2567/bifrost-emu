@@ -358,8 +358,6 @@ static uint8_t sdl_gc_button_to_js(SDL_GameControllerButton btn) {
 struct FrostInputImpl {
     static constexpr size_t EVENT_CAP = 256;
     static constexpr size_t JS_CAP = 256;
-    static constexpr int32_t MOUSE_ABS_RANGE = 32767;  // ABS_X/ABS_Y range
-    static constexpr uint32_t SYN_DROPPED_INTERVAL = 250;  // (unused, kept for compat)
     std::vector<input_event_> event_queue;
     size_t event_head = 0, event_tail = 0;
     std::vector<js_event_> js_queue;
@@ -376,11 +374,6 @@ struct FrostInputImpl {
     int controller_count = 0;  // cached for has_game_controller()
     // Baseline timestamp for js_event.time (milliseconds since startup).
     std::chrono::steady_clock::time_point startup_time;
-    // Mouse absolute position tracking. We accumulate relative motion
-    // to produce ABS_X/ABS_Y events alongside EV_REL. The range is
-    // 0..MOUSE_ABS_RANGE (matching Linux convention for touchscreens).
-    int32_t mouse_abs_x = MOUSE_ABS_RANGE / 2;
-    int32_t mouse_abs_y = MOUSE_ABS_RANGE / 2;
     // Last emitted event for deduplication. Linux only emits events when
     // values change; we match that behavior to avoid spamming the guest
     // with duplicate events.
@@ -434,6 +427,22 @@ struct FrostInputImpl {
 #else
         (void)mods;
 #endif
+    }
+    // Focus changes can prevent host key-up events from reaching us.
+    void release_held_keys() {
+        uint8_t held[KEY_BMP];
+        {
+            std::lock_guard<std::mutex> g(mu);
+            std::memcpy(held, key_bmp, sizeof(held));
+        }
+        bool released = false;
+        for (uint16_t code = 1; code < KEY_BMP * 8u; ++code) {
+            if (held[code / 8u] & static_cast<uint8_t>(1u << (code % 8u))) {
+                push_event(linux_input::EV_KEY, code, 0);
+                released = true;
+            }
+        }
+        if (released) push_event(linux_input::EV_SYN, 0, 0);
     }
     // ── Push an input_event (24 bytes) into the event queue ─────────
     void push_event(uint16_t type, uint16_t code, int32_t value) {
@@ -561,9 +570,12 @@ struct FrostInputImpl {
             if (SDL_IsGameController(i)) {
                 SDL_GameController* gc = SDL_GameControllerOpen(i);
                 if (gc) {
-                    std::lock_guard<std::mutex> g(mu);
-                    controllers.push_back(static_cast<void*>(gc));
-                    controller_count++;
+                    {
+                        std::lock_guard<std::mutex> g(mu);
+                        controllers.push_back(static_cast<void*>(gc));
+                        controller_count++;
+                    }
+                    queue_controller_initial_state(gc);
                     if (getenv("BIFROST_INPUT_TRACE")) {
                         const char* name = SDL_GameControllerNameForIndex(i);
                         fprintf(stderr, "[input] opened game controller %d: %s\n",
@@ -588,6 +600,25 @@ struct FrostInputImpl {
         controller_count = 0;
 #endif
     }
+#if defined(BIFROST_USE_SDL2)
+    void queue_controller_initial_state(SDL_GameController* gc) {
+        for (int i = SDL_CONTROLLER_AXIS_LEFTX;
+             i <= SDL_CONTROLLER_AXIS_TRIGGERRIGHT; ++i) {
+            auto axis = static_cast<SDL_GameControllerAxis>(i);
+            uint8_t number = sdl_gc_axis_to_js(axis);
+            if (number != 0xff)
+                push_js(linux_js::JS_EVENT_AXIS | linux_js::JS_EVENT_INIT,
+                        number, SDL_GameControllerGetAxis(gc, axis));
+        }
+        for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i) {
+            auto button = static_cast<SDL_GameControllerButton>(i);
+            uint8_t number = sdl_gc_button_to_js(button);
+            if (number != 0xff)
+                push_js(linux_js::JS_EVENT_BUTTON | linux_js::JS_EVENT_INIT,
+                        number, SDL_GameControllerGetButton(gc, button) ? 1 : 0);
+        }
+    }
+#endif
 };
 #if defined(BIFROST_USE_SDL2)
 // Result of mapping a character to a Linux keycode.
@@ -759,11 +790,10 @@ bool FrostInput::poll() {
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_CLOSE) {
                     return false;
-                } else if (ev.window.event == SDL_WINDOWEVENT_ENTER) {
-                    // Reset absolute mouse position to center on focus gain.
-                    std::lock_guard<std::mutex> g(impl_->mu);
-                    impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE / 2;
-                    impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE / 2;
+                } else if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                    // The OS may suppress key-up events after focus changes.
+                    impl_->update_modifiers(0);
+                    impl_->release_held_keys();
                 } else if (ev.window.event == SDL_WINDOWEVENT_LEAVE) {
                     // Emit a button release for all mouse buttons when the
                     // cursor leaves the window. This prevents the guest from
@@ -816,33 +846,11 @@ bool FrostInput::poll() {
                 break;
             }
             case SDL_MOUSEMOTION: {
-                // Read/write mouse state under mu, then release before
-                // push_event calls (which acquire mu internally).
-                int mx, my;
-                {
-                    std::lock_guard<std::mutex> g(impl_->mu);
-                    impl_->mouse_abs_x += ev.motion.xrel;
-                    impl_->mouse_abs_y += ev.motion.yrel;
-                    // Clamp to valid range.
-                    if (impl_->mouse_abs_x < 0) impl_->mouse_abs_x = 0;
-                    if (impl_->mouse_abs_x > FrostInputImpl::MOUSE_ABS_RANGE)
-                        impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE;
-                    if (impl_->mouse_abs_y < 0) impl_->mouse_abs_y = 0;
-                    if (impl_->mouse_abs_y > FrostInputImpl::MOUSE_ABS_RANGE)
-                        impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE;
-                    mx = impl_->mouse_abs_x;
-                    my = impl_->mouse_abs_y;
-                }
                 // Emit relative motion (EV_REL) for guests that use it.
                 impl_->push_event(linux_input::EV_REL, linux_input::REL_X,
                                   static_cast<int32_t>(ev.motion.xrel));
                 impl_->push_event(linux_input::EV_REL, linux_input::REL_Y,
                                   static_cast<int32_t>(ev.motion.yrel));
-                // Emit absolute position (EV_ABS) for guests that need it.
-                impl_->push_event(linux_input::EV_ABS, linux_input::ABS_X,
-                                  mx);
-                impl_->push_event(linux_input::EV_ABS, linux_input::ABS_Y,
-                                  my);
                 impl_->push_event(linux_input::EV_SYN, 0, 0);
                 // Warp mouse to window center when it hits the edge. This
                 // prevents the guest cursor from getting stuck at the edge
@@ -870,8 +878,10 @@ bool FrostInput::poll() {
                 break;
             }
             case SDL_MOUSEWHEEL: {
+                const int direction = ev.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+                    ? -1 : 1;
                 impl_->push_event(linux_input::EV_REL, linux_input::REL_WHEEL,
-                                  static_cast<int32_t>(ev.wheel.y));
+                                  static_cast<int32_t>(ev.wheel.y * direction));
                 impl_->push_event(linux_input::EV_SYN, 0, 0);
                 break;
             }
@@ -881,9 +891,12 @@ bool FrostInput::poll() {
                 int idx = ev.cdevice.which;
                 SDL_GameController* gc = SDL_GameControllerOpen(idx);
                 if (gc) {
-                    std::lock_guard<std::mutex> g(impl_->mu);
-                    impl_->controllers.push_back(static_cast<void*>(gc));
-                    impl_->controller_count++;
+                    {
+                        std::lock_guard<std::mutex> g(impl_->mu);
+                        impl_->controllers.push_back(static_cast<void*>(gc));
+                        impl_->controller_count++;
+                    }
+                    impl_->queue_controller_initial_state(gc);
                     if (getenv("BIFROST_INPUT_TRACE")) {
                         const char* name = SDL_GameControllerNameForIndex(idx);
                         fprintf(stderr, "[input] controller added: %s\n",
@@ -1013,6 +1026,7 @@ void FrostInput::drain() {
 // ── Diagnostics ─────────────────────────────────────────────────────────
 uint64_t FrostInput::event_count() const {
     if (!impl_) return 0;
+    std::lock_guard<std::mutex> g(impl_->mu);
     return impl_->event_count;
 }
 size_t FrostInput::queue_size() const {
@@ -1032,10 +1046,12 @@ void FrostInput::key_bitmap(uint8_t* out, size_t n) const {
 }
 bool FrostInput::has_game_controller() const {
     if (!impl_) return false;
+    std::lock_guard<std::mutex> g(impl_->mu);
     return impl_->controller_count > 0;
 }
 int FrostInput::game_controller_count() const {
     if (!impl_) return 0;
+    std::lock_guard<std::mutex> g(impl_->mu);
     return impl_->controller_count;
 }
 } // namespace arm64emu
