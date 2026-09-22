@@ -29,19 +29,19 @@ static void check(const char* name, int ok) {
 
 /* ── EXT: extract bytes from concatenated v1:v0 ── */
 static void test_ext(void) {
-    /* EXT d0, d1, d0, #4 — take bytes [4..11] from d1:d0 */
+    /* EXT extracts from the concatenation Vn || Vm. */
     uint8_t a[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
     uint8_t b[16] = {16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31};
     uint8_t out[16] = {0};
-    /* ext v0.16b, v1.16b, v0.16b, #4: result = bytes [4..19] of b:a */
+    /* ext v0.16b, v1.16b, v0.16b, #4: extract offset 4 from b:a. */
     __asm__ volatile(
         "ext %0.16b, %1.16b, %2.16b, #4"
         : "=w"(*(uint8x16_t*)out)
         : "w"(*(const uint8x16_t*)b), "w"(*(const uint8x16_t*)a)
     );
-    /* Concatenation is [Vm:Vn] = [a:b] = {0..15, 16..31}.
-     * Extracting 16 bytes at offset 4: {4,5,...,15, 16,17,18,19}. */
-    uint8_t e[16] = {4,5,6,7,8,9,10,11,12,13,14,15, 16,17,18,19};
+    /* Vn || Vm = [b:a] = {16..31, 0..15}; offset 4 gives
+     * {20,21,...,31, 0,1,2,3}. */
+    uint8_t e[16] = {20,21,22,23,24,25,26,27,28,29,30,31, 0,1,2,3};
     check("ext_4", memcmp(out, e, 16) == 0);
 }
 

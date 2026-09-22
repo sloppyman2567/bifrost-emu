@@ -207,6 +207,7 @@ UNIT_TESTS=(
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"
     "neon_roundingshift|ctest/jit_neon_roundingshift.elf||5|checks passed"
+    "neon_pngfix|ctest/jit_neon_pngfix.elf||5|checks passed"
     "mvni_softfloat|ctest/jit_mvni_softfloat.elf||5|checks passed"
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"

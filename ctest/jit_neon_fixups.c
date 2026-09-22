@@ -178,8 +178,8 @@ static void test_ext_real(void) {
     uint8_t a[16], b[16], out[16], exp[16];
     for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(0x80 + i); }
     for (int i = 0; i < 16; i++) {
-        // ext v2.16b, v0, v1, #4 = {v1[4..15], v0[0..3]}
-        exp[i] = (i < 12) ? b[i + 4] : a[i - 12];
+        // EXT forms Vn || Vm: {v0[4..15], v1[0..3]}.
+        exp[i] = (i < 12) ? a[i + 4] : b[i - 12];
     }
     __asm__ volatile (
         "ldr q0, [%[a]]\n"
