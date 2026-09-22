@@ -879,6 +879,15 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             // The host pointers the host writes into it are opaque to the
             // game (it only checks the BOOL return).
             const char* nm = entry.name.c_str();
+            if (!strcmp(nm, "SDL_qsort") && dbg().thunk_trace) {
+                // Safe stub: the generic path would hand the AArch64
+                // comparator to host qsort (SIGSEGV on first compare), so
+                // this row is SDL_STUB0 and sorts nothing. No ctest/src
+                // caller depends on it; a borrow-CPU comparator arm would
+                // be disproportionate until a real game needs it.
+                fprintf(stderr, "[thunk] SDL_qsort: no-op, array left "
+                        "unsorted (guest comparator cannot run on host)\n");
+            }
             if (!strcmp(nm, "SDL_GetWindowWMInfo")) {
                 using WmFn = int (*)(void*, void*);
                 auto fn = reinterpret_cast<WmFn>(entry.host_fn);
@@ -1264,6 +1273,31 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // v0..). Host SysV AMD64 expects them in XMM0.. — the C++ cast below
     // places them there automatically.
     if (entry.flags & THUNK_DOUBLE) {
+        // Mixed int + double first: the pure-double arm below would drop
+        // the integer args (e.g. glfwSetCursorPos's window handle).
+        if (entry.flags & THUNK_MIXED_FP) {
+            uint64_t iv = cpu.regs[0];
+            double dv[2] = {0, 0};
+            for (uint8_t i = 0; i < entry.n_float && i < 2; i++) {
+                std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
+            }
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] dispatch: %s (mixed int+double) "
+                        "i0=0x%llx d0=%g d1=%g\n",
+                        entry.name.c_str(),
+                        static_cast<unsigned long long>(iv), dv[0], dv[1]);
+            }
+            if (entry.n_stack == 1 && entry.n_float == 2) {
+                using Fn = void (*)(void*, double, double);
+                reinterpret_cast<Fn>(entry.host_fn)(
+                    reinterpret_cast<void*>(iv), dv[0], dv[1]);
+            } else if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] mixed int+double shape unsupported for %s\n",
+                        entry.name.c_str());
+            }
+            cpu.regs[0] = 0;
+            return 0;
+        }
         double dv[8] = {0};
         for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
             std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
@@ -3297,11 +3331,20 @@ void GraphicThunk::register_known_symbols_() {
         }
         uint8_t n_stack = 0;
         uint8_t flags = 0;
-        if (n_double > 0) {
+        if (n_double > 0 && n_int == 0) {
             // Double-only AAPCS64 ABI: args in d0..d{n-1}. n_float carries
             // the double count; THUNK_DOUBLE tells dispatch to read them as
             // 8-byte doubles (from cpu.v_lo) rather than 4-byte floats.
             flags |= THUNK_DOUBLE;
+            n_float = n_double;
+        } else if (n_double > 0) {
+            // Mixed int + double (glfwSetCursorPos: window in x0, two
+            // doubles in d0/d1). THUNK_DOUBLE marks the FP regs as 8-byte;
+            // THUNK_MIXED_FP routes to the mixed arm with n_stack = int
+            // arity and n_float = double count. The pure-double arm above
+            // must NOT catch this (it would drop the window handle).
+            flags |= THUNK_MIXED_FP | THUNK_DOUBLE;
+            n_stack = n_int;
             n_float = n_double;
         } else if (n_float > 0 && n_int > 0) {
             // Mixed int+float ABI: n_stack holds the integer arity (x0..).

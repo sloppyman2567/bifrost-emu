@@ -121,7 +121,17 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // even though d.shift != 0 — the shift there is a shifted-
                 // register shift, not an extend shift.
                 b = load_arm_reg(block, d.rm);
-                if (d.extend != 0) {
+                // Extended vs shifted form is bit21 of the raw word
+                // (the decoder only records d.extend for the extended
+                // form, and UXTB encodes as extend=0 — the same value as
+                // the "no extend" default for the shifted form). Testing
+                // `d.extend != 0` therefore miscompiled every UXTB form
+                // (e.g. `add x1, x5, w1, uxtb #2` in libjpeg's
+                // jpeg_huff_decode): the mask was skipped and the extend
+                // amount was applied as a shifted-register LSL instead,
+                // computing a wild address for the following LDR.
+                bool extended = (d.raw & 0x00200000u) != 0;
+                if (extended) {
                     // Extended register form — apply extend, then shift.
                     b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
@@ -178,7 +188,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 //   printf("%d", 0). Many other CSEL-after-CMP paths in
                 //   musl were similarly broken.
                 b = load_arm_reg(block, d.rm);
-                if (d.extend != 0) {
+                // Same bit21 extended-form test as ADD_REG/SUB_REG above:
+                // `d.extend != 0` miscompiles UXTB (extend=0, the same as
+                // the shifted-form default), skipping the mask.
+                bool extended = (d.raw & 0x00200000u) != 0;
+                if (extended) {
                     b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
                     b = apply_shift(block, b, d.shift_type, d.shift, d.sf);

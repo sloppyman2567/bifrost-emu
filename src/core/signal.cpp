@@ -34,6 +34,7 @@
 //   signal-pending flag (e.g., toybox sh's `sig_process_pending()`).
 #include "core/signal.h"
 #include "arm64_emu.hpp"
+#include "core/crash_report.h"  // TEMP-NEVERBALL-DEBUG
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -464,6 +465,12 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                         CODENAME, signo,
                         static_cast<unsigned long long>(fault_addr),
                         static_cast<unsigned long long>(cpu.pc));
+                // TEMP-NEVERBALL-DEBUG: guest backtrace at delivery.
+                static const bool bt_ = (getenv("BIFROST_CRASH_BT") != nullptr);
+                if (bt_) {
+                    report_crash(cpu, emu.mem(), "signal-delivery",
+                                 fault_addr, nullptr, nullptr, 0);
+                }
             }
         }
         // Non-terminating defaults (ignore) → just drop the signal.

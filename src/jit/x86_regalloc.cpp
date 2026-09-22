@@ -450,6 +450,27 @@ void FrostJIT::flush_all_vregs() {
         }
     }
 }
+void FrostJIT::flush_all_vregs_keep() {
+    // Same stores as flush_all_vregs, but the cache mappings and dirty
+    // bits are left intact for a LATER epilogue to flush again. Both
+    // branch-exit paths need their own writeback (each executes once),
+    // so the duplicate emission is required, not bloat. Mirrors
+    // evict_vreg's store selection exactly (ARM regs -> cpu.regs[],
+    // scratch vregs -> stack slots).
+    uint16_t m = dirty_host_regs_;
+    while (m) {
+        int r = __builtin_ctz(m);
+        m &= m - 1;  // clear lowest set bit
+        int v = reg_vreg_[r];
+        if (v >= 0 && vreg_dirty_[v]) {
+            if (v <= 31) {
+                emit_store_arm(v, r);
+            } else {
+                emit_store(RBP, vreg_stack_slot(v), r);
+            }
+        }
+    }
+}
 // ── Targeted flush/invalidate (v1.4.0-beta.2) ────────────────────────
 // Walk only the host regs whose bits are set in `mask`, spilling any
 // dirty vreg cached there. This is the heart of the flush-penalty

@@ -1186,6 +1186,16 @@ private:
     // Without this, a dirty vreg cached in `host_reg` is silently lost.
     void clobber_host_reg(int host_reg);
     void flush_all_vregs();
+    // Write back all dirty vregs WITHOUT clearing mappings/dirty state.
+    // For the taken-path epilogue: the fall-through (main) epilogue is
+    // emitted LATER in codegen and must see the same dirty state to emit
+    // its own writeback. A plain flush_all_vregs() here consumes the
+    // codegen-time state (evict clears home/dirty bits), so the
+    // fall-through epilogue finds nothing dirty and silently drops the
+    // stores — stale regs on fall-through exit (zlib inflate's umov-fed
+    // x22/x19 read pre-branch values and died in a null call). Same
+    // hazard class as vec_cache_writeback_all(false) above it.
+    void flush_all_vregs_keep();
     void invalidate_all_vregs();
     // ── Targeted flush/invalidate (v1.4.0-beta.2) ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any

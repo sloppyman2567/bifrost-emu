@@ -421,6 +421,20 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
                             (unsigned long long)++dbg2_count, (unsigned long long)pcbefore,
                             (unsigned long long)cpu->pc, (unsigned long long)fn,
                             (unsigned long long)cpu->sp, (unsigned long long)cpu->regs[30]);
+                    // TEMP-NEVERBALL-DEBUG: regs at loop-block entries.
+                    uint64_t pb = pcbefore, pa = cpu->pc;
+                    if ((pa >= 0x10570000 && pa < 0x10580000) ||
+                        (pb >= 0x10570000 && pb < 0x10580000)) {
+                        fprintf(stderr, "[DBG3-REGS 0x%llx->0x%llx] x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x6=0x%llx x7=0x%llx x15=0x%llx x19=0x%llx x21=0x%llx\n",
+                                (unsigned long long)pb, (unsigned long long)pa,
+                                (unsigned long long)cpu->regs[0], (unsigned long long)cpu->regs[1],
+                                (unsigned long long)cpu->regs[2], (unsigned long long)cpu->regs[3],
+                                (unsigned long long)cpu->regs[4], (unsigned long long)cpu->regs[5],
+                                (unsigned long long)cpu->regs[6], (unsigned long long)cpu->regs[7],
+                                (unsigned long long)cpu->regs[15],
+                                (unsigned long long)cpu->regs[19],
+                                (unsigned long long)cpu->regs[21]);
+                    }
                 }
                 continue;
             }

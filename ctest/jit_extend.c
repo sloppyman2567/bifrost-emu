@@ -110,6 +110,49 @@ int main(void) {
     int32_t *p = (int32_t*)(base + off * 4);
     CHECK(*p == 10, "ldrsw_index");  /* idx_buf[2] + (-2)*4 = idx_buf[0] = 10 */
 
+    /* 15-21. ADD/SUB extended-register form (neverball regression):
+     * `add x0, x1, w2, uxtb #2` must mask w2 to its low byte BEFORE
+     * shifting. The JIT tested `d.extend != 0` to detect the extended
+     * form, but UXTB encodes as extend=0 (same as the shifted-form
+     * default), so the mask was skipped and high bits of Rm leaked
+     * into the result (libjpeg's jpeg_huff_decode computed a wild
+     * table address). Only manifests when Rm has bits above the
+     * extend width set — small immediates silently pass. */
+    {
+        uint64_t b = 0x1000;
+        uint32_t m = 0xDEADBE03u;  /* low byte 0x03, high bits set */
+        uint64_t r15;
+        /* 15. ADD uxtb #2 */
+        __asm__ volatile ("add %0, %1, %w2, uxtb #2" : "=r"(r15) : "r"(b), "r"(m));
+        CHECK(r15 == 0x100Cu, "add_uxtb_sh2");
+        /* 16. ADD uxtb (no shift) — the mask must still apply */
+        __asm__ volatile ("add %0, %1, %w2, uxtb" : "=r"(r15) : "r"(b), "r"(m));
+        CHECK(r15 == 0x1003u, "add_uxtb");
+        /* 17. SUB uxtb #1 */
+        __asm__ volatile ("sub %0, %1, %w2, uxtb #1" : "=r"(r15) : "r"(b), "r"(m));
+        CHECK(r15 == (0x1000u - (0x03u << 1)), "sub_uxtb_sh1");
+        /* 18. ADD uxth #2 */
+        m = 0xDEADBE03u;  /* low half 0xBE03 */
+        __asm__ volatile ("add %0, %1, %w2, uxth #2" : "=r"(r15) : "r"(b), "r"(m));
+        CHECK(r15 == 0x1000u + (0xBE03u << 2), "add_uxth_sh2");
+        /* 19. ADD sxtb #2 (negative byte sign-extends) */
+        m = 0xDEAD0083u;  /* low byte 0x83 = -125 */
+        __asm__ volatile ("add %0, %1, %w2, sxtb #2" : "=r"(r15) : "r"(b), "r"(m));
+        CHECK((int64_t)r15 == (int64_t)0x1000 - 500, "add_sxtb_sh2");
+        /* 20. Plain ADD x (shifted form, no extend) still adds full 64 bits */
+        {
+            uint64_t x2 = 0xDEADBE03u;
+            __asm__ volatile ("add %0, %1, %2" : "=r"(r15) : "r"(b), "r"(x2));
+            CHECK(r15 == 0x1000u + 0xDEADBE03u, "add_x_plain");
+        }
+        /* 21. Shifted-register LSL form unaffected by the extend fix */
+        {
+            uint64_t x2 = 0x100;
+            __asm__ volatile ("add %0, %1, %2, lsl #3" : "=r"(r15) : "r"(b), "r"(x2));
+            CHECK(r15 == 0x1000u + (0x100u << 3), "add_x_lsl3");
+        }
+    }
+
     printf("extend: %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
 }

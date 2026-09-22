@@ -755,13 +755,22 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // and crashes. The host library is only a fallback when no SDL proxy
     // can be initialized (headless host).
     if (entry.flags & THUNK_PROXY) {
-        if (impl_->proxy_) {
-            if (!impl_->proxy_->ready()) {
-                impl_->proxy_->init(640, 480, impl_->mem);
+        // Serialize lazy init under mu: two guest threads racing here both
+        // saw !ready() and double-created the SDL window (leak + torn
+        // window_). ready() is re-checked inside the lock; proxy_dispatch_
+        // below takes the same lock around its own init.
+        bool proxy_ok = false;
+        {
+            std::lock_guard<std::mutex> g(impl_->mu);
+            if (impl_->proxy_) {
+                if (!impl_->proxy_->ready()) {
+                    impl_->proxy_->init(640, 480, impl_->mem);
+                }
+                proxy_ok = impl_->proxy_->ready();
             }
-            if (impl_->proxy_->ready()) {
-                return proxy_dispatch_(cpu, entry.name);
-            }
+        }
+        if (proxy_ok) {
+            return proxy_dispatch_(cpu, entry.name);
         }
         if (!entry.host_fn) {
             // No host function and no proxy — return 0 (NULL).
@@ -3049,10 +3058,20 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         if (sym_name == s) { need_sdl = false; break; }
     }
     if (need_sdl) {
-        if (!impl_->proxy_->ready()) {
-            impl_->proxy_->init(640, 480, impl_->mem);
+        // Same mu-guarded lazy init as dispatch()'s THUNK_PROXY block —
+        // proxy_dispatch_ runs on guest threads too and raced init the
+        // same way.
+        bool proxy_ok = false;
+        {
+            std::lock_guard<std::mutex> g(impl_->mu);
+            if (impl_->proxy_) {
+                if (!impl_->proxy_->ready()) {
+                    impl_->proxy_->init(640, 480, impl_->mem);
+                }
+                proxy_ok = impl_->proxy_->ready();
+            }
         }
-        if (!impl_->proxy_->ready()) {
+        if (!proxy_ok) {
             cpu.regs[0] = 0;
             return 0;
         }

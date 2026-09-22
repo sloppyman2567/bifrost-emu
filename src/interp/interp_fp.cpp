@@ -528,6 +528,76 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 return;
             }
+            // ── Vector FRINTN/A/M/I/Z/X (round to integral) ──
+            // Checked BEFORE the sub_noq switch: FRINTx shares sub_noq
+            // with CMGT/CMGE/CMLE-vs-zero (they differ only in bit16,
+            // which the sub mask drops), so switch cases cannot express
+            // it. Match on fr (keeps U/bit23/bit22/bit16/opc, drops Q
+            // and the register fields) instead. Width from bit22
+            // (0=single .2s/.4s, 1=double .2d). All 12 verified against
+            // the cross assembler, e.g. `frinta v31.2d` = 0x6E618BFF.
+            // libmvec _ZGVnN2v_sin needs FRINTA .2d; without this it
+            // threw DecodeError right after the facge fix.
+            // Half-precision lives in a different slice — untouched.
+            {
+                uint32_t fr = op & 0xBFFFFC00;
+                // 0=N 1=A 2=M 3=X 4=Z 5=I, or -1 when not FRINT.
+                int frmode = -1;
+                bool frdbl = false;
+                switch (fr) {
+                case 0x0E218800: frmode = 0; break;
+                case 0x0E618800: frmode = 0; frdbl = true; break;
+                case 0x2E218800: frmode = 1; break;
+                case 0x2E618800: frmode = 1; frdbl = true; break;
+                case 0x0E219800: frmode = 2; break;
+                case 0x0E619800: frmode = 2; frdbl = true; break;
+                case 0x2E219800: frmode = 3; break;
+                case 0x2E619800: frmode = 3; frdbl = true; break;
+                case 0x0EA19800: frmode = 4; break;
+                case 0x0EE19800: frmode = 4; frdbl = true; break;
+                case 0x2EA19800: frmode = 5; break;
+                case 0x2EE19800: frmode = 5; frdbl = true; break;
+                default: break;
+                }
+                if (frmode >= 0) {
+                    // Q=0+double is scalar space (never SIMD_DP); reject
+                    // like the old fallthrough did.
+                    if (frdbl && !Q) {
+                        dump_decode_error(cpu, mem_, inst);
+                        throw DecodeError(cpu.pc, inst);
+                    }
+                    const int fesz = frdbl ? 8 : 4;
+                    const int felems = (Q ? 16 : 8) / fesz;
+                    uint8_t fbuf[16];
+                    memcpy(fbuf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(fbuf + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < felems; i++) {
+                        if (!frdbl) {
+                            float a;
+                            memcpy(&a, fbuf + i * 4, 4);
+                            float r = (frmode == 0) ? std::rintf(a)
+                                    : (frmode == 1) ? std::roundf(a)
+                                    : (frmode == 2) ? std::floorf(a)
+                                    : (frmode == 4) ? std::truncf(a)
+                                    : std::rintf(a);  // X/I: rint
+                            memcpy(fbuf + i * 4, &r, 4);
+                        } else {
+                            double a;
+                            memcpy(&a, fbuf + i * 8, 8);
+                            double r = (frmode == 0) ? std::rint(a)
+                                     : (frmode == 1) ? std::round(a)
+                                     : (frmode == 2) ? std::floor(a)
+                                     : (frmode == 4) ? std::trunc(a)
+                                     : std::rint(a);  // X/I: rint
+                            memcpy(fbuf + i * 8, &r, 8);
+                        }
+                    }
+                    memcpy(&cpu.v_lo[rd], fbuf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], fbuf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+            }
             switch (sub_noq) {
             // ── DUP (general): sf 0 0 11110 00 0 imm5 0000 0 1 Rn Rd ──
             // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).
@@ -1381,36 +1451,64 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   fcmgt      = 0x6EA0E400 /     = 0x2EA0E400 (U=1, bit23=1)
             //   facge      = 0x6E20EC00 /     = 0x2E20EC00 (bits[11:10]=11)
             //   facgt      = 0x6EA0EC00 /     = 0x2EA0EC00
+            // Double (.2d, type bit22=1, Q=1) forms add 0x40 to the byte-2
+            // nibble; the neverball crash was libmvec _ZGVnN2v_sin doing
+            // `facge v3.2d, v0.2d, v3.2d` (0x6E63EC03), which matched no
+            // case and threw DecodeError ("executing garbage" — it was a
+            // missing op, not corruption).
             // Per-lane all-ones if condition else 0; NaN makes ordered
             // compares false; FA* compare absolute values.
             // vkQuake's renderer does `fcmgt v28.2s, v19.2s, v31.2s`
             // (0x2EBFE67C) in its math code.
             case 0x0E20E400: case 0x2E20E400: case 0x2EA0E400:
-            case 0x2E20EC00: case 0x2EA0EC00: {
-                const int elems = Q ? 4 : 2;
+            case 0x2E20EC00: case 0x2EA0EC00:
+            case 0x0E60E400: case 0x2E60E400: case 0x2EE0E400:
+            case 0x2E60EC00: case 0x2EE0EC00: {
+                const bool is_double = (sub_noq >> 22) & 1;
+                const int esz = is_double ? 8 : 4;
+                const int elems = (Q ? 16 : 8) / esz;
                 uint8_t out[16] = {0};
                 for (int i = 0; i < elems; i++) {
-                    float a, b;
-                    // Lane i: rn lane lives in v_lo/v_hi qword i/2, half i%2
-                    uint64_t lo_a = (i < 2) ? cpu.v_lo[rn] : cpu.v_hi[rn];
-                    uint64_t lo_b = (i < 2) ? cpu.v_lo[rm] : cpu.v_hi[rm];
-                    uint32_t ua = (i & 1) ? (lo_a >> 32) : (uint32_t)lo_a;
-                    uint32_t ub = (i & 1) ? (lo_b >> 32) : (uint32_t)lo_b;
-                    memcpy(&a, &ua, 4);
-                    memcpy(&b, &ub, 4);
                     bool res;
-                    switch (sub_noq) {
-                    case 0x0E20E400: res = a == b; break;              // FCMEQ
-                    case 0x2E20E400: res = a >= b; break;              // FCMGE
-                    case 0x2EA0E400: res = a > b; break;               // FCMGT
-                    default: {                                          // FA*
-                        float fa = std::fabs(a), fb = std::fabs(b);
-                        res = (sub_noq == 0x2E20EC00) ? (fa >= fb)
-                                                      : (fa > fb);
-                        break;
+                    if (!is_double) {
+                        float a, b;
+                        uint64_t lo_a = (i < 2) ? cpu.v_lo[rn] : cpu.v_hi[rn];
+                        uint64_t lo_b = (i < 2) ? cpu.v_lo[rm] : cpu.v_hi[rm];
+                        uint32_t ua = (i & 1) ? (lo_a >> 32) : (uint32_t)lo_a;
+                        uint32_t ub = (i & 1) ? (lo_b >> 32) : (uint32_t)lo_b;
+                        memcpy(&a, &ua, 4);
+                        memcpy(&b, &ub, 4);
+                        switch (sub_noq) {
+                        case 0x0E20E400: res = a == b; break;              // FCMEQ
+                        case 0x2E20E400: res = a >= b; break;              // FCMGE
+                        case 0x2EA0E400: res = a > b; break;               // FCMGT
+                        default: {                                          // FA*
+                            float fa = std::fabs(a), fb = std::fabs(b);
+                            res = (sub_noq == 0x2E20EC00) ? (fa >= fb)
+                                                          : (fa > fb);
+                            break;
+                        }
+                        }
+                        memset(out + i * 4, res ? 0xFF : 0x00, 4);
+                    } else {
+                        double a, b;
+                        uint64_t ua = (i == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
+                        uint64_t ub = (i == 0) ? cpu.v_lo[rm] : cpu.v_hi[rm];
+                        memcpy(&a, &ua, 8);
+                        memcpy(&b, &ub, 8);
+                        switch (sub_noq) {
+                        case 0x0E60E400: res = a == b; break;              // FCMEQ
+                        case 0x2E60E400: res = a >= b; break;              // FCMGE
+                        case 0x2EE0E400: res = a > b; break;               // FCMGT
+                        default: {                                          // FA*
+                            double fa = std::fabs(a), fb = std::fabs(b);
+                            res = (sub_noq == 0x2E60EC00) ? (fa >= fb)
+                                                          : (fa > fb);
+                            break;
+                        }
+                        }
+                        memset(out + i * 8, res ? 0xFF : 0x00, 8);
                     }
-                    }
-                    memset(out + i * 4, res ? 0xFF : 0x00, 4);
                 }
                 memcpy(&cpu.v_lo[rd], out, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
@@ -2533,8 +2631,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // → S src (.s[idx]). Widening ops (SMULL/UMULL/SMLAL/UMLAL/
             // SMLSL/UMLSL) double the lane width; MUL/MLA/MLS keep it.
             // Opcode map (verified against the cross assembler):
-            //   0000 MLA(U=1)  0001 MLS(U=1)  0010 SMLAL/UMLAL
+            //   0000 MLA(U=1)  0100 MLS(U=1)  0010 SMLAL/UMLAL
             //   0110 SMLSL/UMLSL  1000 MUL(U=0)  1010 SMULL/UMULL
+            // (MLS is 0100, not 0001 — opc 0001/U=0 is FMLSL, an FP16 op
+            // that must NOT execute as integer MLS.)
             // libjpeg-turbo's AArch64 IDCT does `smull v18.4s, v7.4h,
             // v6.h[3]` / `smlal …` — without this the interp SIGILL'd
             // during JPEG decode.
@@ -2559,21 +2659,33 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     idx = 0;
                 }
                 if (esize_src &&
-                    (opc == 0x0 || opc == 0x1 || opc == 0x8 ||
+                    (opc == 0x0 || opc == 0x4 || opc == 0x8 ||
                      opc == 0x2 || opc == 0x6 || opc == 0xA ||
                      opc == 0xC || opc == 0xD || opc == 0xE)) {
                     bool widen = (opc == 0x2 || opc == 0x6 || opc == 0xA ||
                                   opc == 0xE);
-                    bool is_sub = (opc == 0x1 || opc == 0x6);
+                    bool is_sub = (opc == 0x4 || opc == 0x6);
                     bool accum = (opc == 0x0 || opc == 0x2 || opc == 0x6);
                     int esize = widen ? esize_src * 2 : esize_src;
-                    int elems = (Q ? 16 : 8) / esize;
+                    // Lane count = source lanes, clamped to the 128-bit
+                    // dest capacity. (Q?16:8)/esize divides by the DEST
+                    // width, which halves the count for widening ops
+                    // (smull Q=0 only ran 2 of 4 lanes, leaving zeros);
+                    // dividing by the source width overshoots only for
+                    // Q=1 widening forms real compilers never emit, so
+                    // clamp instead of overflowing the 16-byte vd buffer.
+                    int elems = (Q ? 16 : 8) / esize_src;
+                    if (elems * esize > 16) elems = 16 / esize;
                     uint64_t mask = esize == 8 ? ~0ULL : ((1ULL << (esize * 8)) - 1);
                     uint8_t buf_n[16], buf_m[16], vd[16];
                     memcpy(buf_n, &cpu.v_lo[rn], 8);
                     memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
-                    memcpy(buf_m, &cpu.v_lo[rm], 8);
-                    memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                    // Indexed-element Rm is bits[19:16] (4 bits); the
+                    // shared 5-bit d.rm includes the M index bit (bit20),
+                    // so `smull v.4s,v.4h,v.h[1]` (M=1) would read v(Rm+16)
+                    // (stale/zero) instead of vRm. rm_reg is the 4-bit form.
+                    memcpy(buf_m, &cpu.v_lo[rm_reg], 8);
+                    memcpy(buf_m + 8, &cpu.v_hi[rm_reg], 8);
                     if (widen && !accum) {
                         memset(vd, 0, sizeof(vd));
                     } else {
@@ -2585,10 +2697,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     int64_t smul_v = static_cast<int64_t>(
                         static_cast<int64_t>(mul_v << (64 - esize_src * 8)) >> (64 - esize_src * 8));
                     for (int i = 0; i < elems; i++) {
+                        // Source lanes are esize_src wide (widening reads
+                        // NARROWER lanes than it writes — using esize here
+                        // fused adjacent lanes into one 32-bit value).
                         uint64_t a = 0;
-                        memcpy(&a, buf_n + i * esize, esize);
+                        memcpy(&a, buf_n + i * esize_src, esize_src);
                         int64_t sa = static_cast<int64_t>(
-                            static_cast<int64_t>(a << (64 - esize * 8)) >> (64 - esize * 8));
+                            static_cast<int64_t>(a << (64 - esize_src * 8)) >> (64 - esize_src * 8));
                         uint64_t acc = 0;
                         memcpy(&acc, vd + i * esize, esize);
                         uint64_t r;

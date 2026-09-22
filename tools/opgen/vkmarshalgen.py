@@ -21,6 +21,7 @@ Layouts come from vkxml.layout_all(), already validated byte-for-byte
 against the vendored vulkan_core.h (see vk_layout validation).
 
 Usage: python3 tools/opgen/vkmarshalgen.py <vk.xml> <out.hpp>
+       python3 tools/opgen/vkmarshalgen.py --check <vk.xml> <out.hpp>
 """
 import sys
 import os
@@ -253,9 +254,11 @@ inline const VkStructDesc* vk_find_struct_by_stype(int32_t stype) {
 
 
 def main():
-    xml_path = sys.argv[1] if len(sys.argv) > 1 else \
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    check = '--check' in sys.argv[1:]
+    xml_path = args[0] if len(args) > 0 else \
         'tools/vulkan-headers/registry/vk.xml'
-    out_path = sys.argv[2] if len(sys.argv) > 2 else \
+    out_path = args[1] if len(args) > 1 else \
         'include/opgen_vkmarshal.hpp'
     reg = parse_registry(xml_path)
     layouts = layout_all(reg)
@@ -639,12 +642,27 @@ def main():
     out = out.replace('{PLAN_TABLES}', '\n\n'.join(plan_tables))
     out = out.replace('{PLAN_ROWS}', '\n'.join(plan_rows))
     out = out.replace('{STYPE_TABLE}', stype_table)
+    if check:
+        try:
+            with open(out_path) as fh:
+                current = fh.read()
+        except (IOError, OSError):
+            current = ""
+        if current != out:
+            print(f'vkmarshalgen: {out_path} is OUT OF DATE — run '
+                  f'`make vkmarshal` (vk.xml changed, generated header '
+                  f'not synced)', file=sys.stderr)
+            return 1
+        print(f'vkmarshalgen: {out_path} is up to date '
+              f'({len(order)} structs, {len(plans)} plans)')
+        return 0
     with open(out_path, 'w') as fh:
         fh.write(out)
     print(f'wrote {out_path}: {len(order)} struct descriptors '
           f'({n_chain_added} chainable), {len(plans)} command plans, '
           f'{len(entries)} sType entries')
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

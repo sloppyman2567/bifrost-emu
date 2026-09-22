@@ -27,6 +27,7 @@
 // approaches the 4095-entry vreg table.
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
+#include "debug_flags.h"
 #include "ir/ir.hpp"
 #include "ir/ir.h"
 #include <algorithm>  // std::find

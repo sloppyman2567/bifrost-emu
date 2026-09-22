@@ -1070,7 +1070,11 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if (size == 0)      idx = (H << 3) | (L << 2) | (M << 1) | ((rm_reg >> 3) & 1);
                 else if (size == 1) idx = (H << 2) | (L << 1) | M;
                 else                idx = (H << 1) | L;
-                emit(block, IROp::SIMD_MUL_ELEM, d.rd, d.rn, d.rm,
+                // Indexed-element Rm is bits[19:16] (4 bits); d.rm is the
+                // 5-bit bits[20:16] field which includes the M index bit,
+                // so any lane with M=1 (e.g. v.h[1]) would read v(Rm+16).
+                // Pass the 4-bit rm_reg as the IR src2.
+                emit(block, IROp::SIMD_MUL_ELEM, d.rd, d.rn, (uint16_t)rm_reg,
                      static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
                      ct.subop | (idx << 8), cur_pc);
                 return true;

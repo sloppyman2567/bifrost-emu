@@ -434,8 +434,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // once, normally. SVC re-executes kernel side effects; calls step the
     // ref INTO the callee while the JIT called-and-continued; unresolved
     // stores escape the snapshot and corrupt live state (the ccmp abort).
+    // BIFROST_VERIFY_UNTRACKED=1 (debug only) also verifies unresolved-
+    // store blocks; their ref re-run can double-apply stores, so only
+    // trust divergences that reproduce and make sense (register splits).
+    static bool verify_untracked_ = (getenv("BIFROST_VERIFY_UNTRACKED") != nullptr);
     if (verify_ && entry.exec_count < verify_every_ &&
-        !entry.has_svc && !entry.has_call && !entry.has_unresolved_store) {
+        !entry.has_svc && !entry.has_call &&
+        (!entry.has_unresolved_store || verify_untracked_)) {
         // Mark this block as verified so subsequent dispatches skip the
         // expensive per-block divergence check. This is essential for
         // self-loop blocks, where verify mode must un-patch the self-loop

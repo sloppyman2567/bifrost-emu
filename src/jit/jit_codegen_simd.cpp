@@ -148,6 +148,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         emit_byte(0xF3); emit_xmm_rex(dst, src); emit_byte(0x0F);
         emit_byte(static_cast<uint8_t>(op)); modrm3(dst, src);
     };
+    // Word shuffles share opcode 0x70 with pshufd but need legacy
+    // prefixes: F2 0F 70 = pshuflw (low 64 bits), F3 0F 70 = pshufhw
+    // (high 64 bits). sse2_op emits 66 0F 70 = pshufd — using it for a
+    // word shuffle silently shuffles DWORDS instead (neverball IDCT
+    // miscompile: every .h MUL_ELEM lane picked the wrong coefficient).
+    auto sse_f2 = [&](int op, int dst, int src) {
+        emit_byte(0xF2); emit_xmm_rex(dst, src); emit_byte(0x0F);
+        emit_byte(static_cast<uint8_t>(op)); modrm3(dst, src);
+    };
     // Imm-shift in the 0F 71/72/73 group: 66 [REX] 0F op /digit ib.
     // kind: SHL=4, SHR=5, SAR=7 (see emit_shift_imm8).
     auto sse2_imm = [&](int op, int dst, int digit, uint8_t cnt) {
@@ -963,6 +972,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             const int sh = 64 - esize * 8;             // 24 / 16 / 32
             emit_shift_imm8(d, 4, static_cast<uint8_t>(sh));  // shl
             emit_shift_imm8(d, 7, static_cast<uint8_t>(sh));  // sar
+            if (inst.flags_op == 0) {
+                // Q=0 (Wd): zero the upper 32 bits (mov r32, r32).
+                if (d >= 8) emit_byte(rex(false, d >= 8, false, d >= 8));
+                emit_byte(0x89); emit_byte(modrm(3, d & 7, d & 7));
+            }
             set_vreg_reg(inst.dest, d);
             return true;
         }
@@ -1864,6 +1878,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     break;
                 }
                 case 2: {  // FCVTZS — truncate; NaN/±inf → 0 (matches interp)
+                    // Finite out-of-range saturates per ARM (matches
+                    // fp_to_signed_sat in interp_fp.cpp): values >= 2^31 →
+                    // INT32_MAX, values < -2^31 → INT32_MIN. cvttps2dq alone
+                    // returns the 0x80000000 indefinite value for ANY
+                    // out-of-range input, so pre-clamp first. The finite
+                    // mask above is computed from the ORIGINAL x (NaN/inf
+                    // must still → 0), hence the save in xmm12.
                     emit_mask(5, 0x7FFFFFFF7FFFFFFFULL);
                     emit_mask(7, 0x7F8000007F800000ULL);
                     movdqa(3, 0);
@@ -1873,11 +1894,28 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     movdqa(6, 4);
                     sse_fp(0xC2, 6, 7); emit_byte(0); // cmpps xmm6, +inf, 0 (|x|==inf)
                     sse_fp(0x55, 6, 3);              // andnps xmm6, xmm3 → finite
-                    sse2_f3(0x5B, 0, 0);             // cvttps2dq xmm0 (indefinite out-of-range)
+                    movdqa(12, 0);                   // save original x (saturation test)
+                    emit_mask(1, 0xCF000000CF000000ULL);  // -2147483648.0f (exact)
+                    sse_fp(0x5F, 0, 1);              // maxps xmm0, lo
+                    emit_mask(1, 0x4EFFFFFF4EFFFFFFULL);  // 2147483520.0f (top float < 2^31)
+                    sse_fp(0x5D, 0, 1);              // minps xmm0, hi
+                    sse2_f3(0x5B, 0, 0);             // cvttps2dq xmm0
+                    // Exact top edge: x == 2^31 clamps to 2147483520 above,
+                    // but interp saturates it to INT32_MAX — OR the mask in.
+                    emit_mask(2, 0x4F0000004F000000ULL);  // 2147483648.0f
+                    sse_fp(0xC2, 12, 2); emit_byte(5); // cmpps xmm12, 2^31, 5 (>=)
+                    sse2_op(0xDB, 12, 5);            // xmm12 &= 0x7FFFFFFF → INT32_MAX/0
+                    sse2_op(0xEB, 0, 12);            // xmm0 |= saturate
                     sse2_op(0xDB, 0, 6);             // xmm0 &= finite
                     break;
                 }
                 default: {  // FCVTZU — truncate; negatives → 0; NaN/±inf → 0
+                    // Finite values >= 2^32 saturate to UINT32_MAX per ARM
+                    // (matches fp_to_unsigned_sat in interp_fp.cpp). The
+                    // sub+OR hi-path alone yields 0x80000000 there (cvtt of
+                    // x-2^31 is indefinite), so OR the saturation mask in.
+                    // The finite mask (from the ORIGINAL x) is applied last,
+                    // so NaN/±inf still → 0.
                     emit_mask(5, 0x7FFFFFFF7FFFFFFFULL);
                     emit_mask(7, 0x7F8000007F800000ULL);
                     emit_mask(8, 0x4F0000004F000000ULL);  // 2^31
@@ -1891,6 +1929,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     sse_fp(0x55, 6, 3);                // finite
                     sse2_op(0xEF, 10, 10);             // pxor xmm10, xmm10 (0.0)
                     sse_fp(0x5F, 0, 10);               // maxps xmm0, 0 (negatives → 0)
+                    movdqa(12, 0);                     // save x>=0 (saturation test)
                     movdqa(11, 0);
                     sse_fp(0xC2, 11, 8); emit_byte(5); // cmpps xmm11, 2^31, 5 (>=)
                     movdqa(1, 0);
@@ -1901,6 +1940,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     sse2_op(0xDB, 1, 11);              // xmm1 = hi & sel
                     sse2_op(0xDF, 11, 0);              // xmm11 = ~sel & lo
                     sse2_op(0xEB, 1, 11);              // xmm1 = (sel&hi)|(~sel&lo)
+                    emit_mask(2, 0x4F8000004F800000ULL);  // 4294967296.0f (2^32)
+                    sse_fp(0xC2, 12, 2); emit_byte(5); // cmpps xmm12, 2^32, 5 (>=)
+                    sse2_op(0xEB, 1, 12);              // saturate: xmm1 |= mask
                     sse2_op(0xDB, 1, 6);               // xmm1 &= finite
                     movdqa(0, 1);
                     break;
@@ -2511,12 +2553,12 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // Broadcast Vm[idx] to all lanes of X1
             if (esize == 2) {
                 if (idx < 4) {
-                    sse2_op(0x70, 1, 1);                // pshuflw
+                    sse_f2(0x70, 1, 1);                   // pshuflw
                     emit_byte(static_cast<uint8_t>(idx * 0x55));
                     sse2_op(0x70, 1, 1);                // pshufd spread
                     emit_byte(0x00);
                 } else {
-                    sse2_op(0x70, 1, 1);                // pshufhw
+                    sse2_f3(0x70, 1, 1);                 // pshufhw
                     emit_byte(static_cast<uint8_t>((idx - 4) * 0x55));
                     sse2_op(0x70, 1, 1);                // pshufd: high→both
                     emit_byte(0xEE);
@@ -2545,14 +2587,21 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 else     sse2_38(0x28, 0, 1);           // pmuldq (signed low 64)
             else
                 sse2_38(0x40, 0, 1);                    // pmulld (.s MUL/MLA/MLS + widened .h)
-            // Accumulate / subtract
+            // Accumulate / subtract. NOTE: subtract forms (MLS/SMLSL/
+            // UMLSL) compute acc - product, so the SUB must run as
+            // X2 = X2 - X0 (acc first), not X0 = X0 - X2.
             if (subop == 1 || subop == 2 || (subop >= 5 && subop <= 8)) {
                 const bool w_sub = (subop == 2 || subop == 7 || subop == 8);
                 const int aw = widen ? esize * 2 : esize;
+                const int sub_add = aw == 2 ? (w_sub ? 0xF9 : 0xFD) :
+                                    aw == 4 ? (w_sub ? 0xFA : 0xFE) : (w_sub ? 0xFB : 0xD4);
                 load_vec(2, static_cast<int>(inst.dest));
-                sse2_op(aw == 2 ? (w_sub ? 0xF9 : 0xFD) :
-                        aw == 4 ? (w_sub ? 0xFA : 0xFE) : (w_sub ? 0xFB : 0xD4),
-                        0, 2);
+                if (w_sub) {
+                    sse2_op(sub_add, 2, 0);
+                    movdqa(0, 2);
+                } else {
+                    sse2_op(sub_add, 0, 2);
+                }
             }
             store_vec(0, static_cast<int>(inst.dest), widen ? true : q);
             return true;

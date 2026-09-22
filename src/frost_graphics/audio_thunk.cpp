@@ -988,11 +988,26 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (it != I.alsa_pcms_.end() && I.engine) {
             uint64_t buf = R(1);
             int64_t frames = (int64_t)R(2);
+            // Negative frame counts would wrap to a gigantic size_t below
+            // (guest bug or garbage reg) and OOM the host on the vector.
+            if (frames < 0) { tr(-EINVAL); return -EINVAL; }
             size_t fsz = fmt_size(it->second.fmt);
             size_t bytes = (size_t)frames * it->second.ch * fsz;
+            // Clamp one write to 64 MiB; the excess stays unwritten and the
+            // short frame count tells the guest to feed the rest (ALSA
+            // permits short writes).
+            constexpr size_t kMaxBytes = 64u << 20;
+            const size_t frame_sz = (size_t)it->second.ch * fsz;
+            if (frame_sz && bytes > kMaxBytes) {
+                frames = (int64_t)(kMaxBytes / frame_sz);
+                bytes = (size_t)frames * frame_sz;
+            }
             if (buf && bytes) {
-                std::vector<uint8_t> tmp(bytes);
-                I.mem->read(buf, tmp.data(), bytes);
+                std::vector<uint8_t> tmp;
+                try {
+                    tmp.resize(bytes);
+                    I.mem->read(buf, tmp.data(), bytes);
+                } catch (...) { tr(-EFAULT); return -EFAULT; }
                 // Lazily create this pcm's engine stream (fmt/rate/ch are
                 // only final once hw_params have been set).
                 if (!it->second.engine_stream)
@@ -1024,27 +1039,41 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "snd_pcm_close") {
-        std::lock_guard<std::recursive_mutex> g(I.mu);
-        auto it = I.alsa_pcms_.find(R(0));
-        if (it != I.alsa_pcms_.end()) {
-            if (it->second.engine_stream && I.engine) {
-                // Drain-on-close: let the already-queued tail play out
-                // before destroying the stream, or the end of the sound
-                // is cut off. Bounded, and bails early if the mixer
-                // isn't draining (e.g. headless — no silent 5 s stall).
-                int estream = it->second.engine_stream;
-                size_t last = SIZE_MAX;
-                int still = 0;
-                for (int i = 0; i < 500; i++) {   // 500 x 10 ms = 5 s max
-                    size_t q = I.engine->stream_queued_frames(estream);
-                    if (q == 0) break;
-                    if (q == last && ++still >= 20) break;
-                    if (q != last) { last = q; still = 0; }
-                    usleep(10000);
-                }
-                I.engine->stream_close(estream);
+        const uint64_t h = R(0);
+        int estream = 0;
+        {
+            // Snapshot the stream under lock, then DRAIN WITHOUT the lock:
+            // the loop sleeps up to 5 s and holding I.mu that long stalls
+            // every other audio dispatch (writei spins on stream_write_wait
+            // needing the same mutex). Re-find under lock before closing —
+            // a concurrent close may have taken the handle meanwhile.
+            std::lock_guard<std::recursive_mutex> g(I.mu);
+            auto it = I.alsa_pcms_.find(h);
+            if (it != I.alsa_pcms_.end()) estream = it->second.engine_stream;
+        }
+        if (estream && I.engine) {
+            // Drain-on-close: let the already-queued tail play out
+            // before destroying the stream, or the end of the sound
+            // is cut off. Bounded, and bails early if the mixer
+            // isn't draining (e.g. headless — no silent 5 s stall).
+            size_t last = SIZE_MAX;
+            int still = 0;
+            for (int i = 0; i < 500; i++) {   // 500 x 10 ms = 5 s max
+                size_t q = I.engine->stream_queued_frames(estream);
+                if (q == 0) break;
+                if (q == last && ++still >= 20) break;
+                if (q != last) { last = q; still = 0; }
+                usleep(10000);
             }
-            I.alsa_pcms_.erase(it);
+        }
+        {
+            std::lock_guard<std::recursive_mutex> g(I.mu);
+            auto it = I.alsa_pcms_.find(h);
+            if (it != I.alsa_pcms_.end()) {
+                if (it->second.engine_stream && I.engine)
+                    I.engine->stream_close(it->second.engine_stream);
+                I.alsa_pcms_.erase(it);
+            }
         }
         tr(0); return 0;
     }
@@ -1096,8 +1125,16 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (it != I.pulse_streams_.end() && I.engine) {
             uint64_t data = R(1);
             size_t bytes = (size_t)R(2);
-            std::vector<uint8_t> tmp(bytes);
-            I.mem->read(data, tmp.data(), bytes);
+            // Unbounded host allocation on a guest-controlled size: clamp
+            // to 64 MiB (matches the snd_pcm_writei cap and the 256 MiB
+            // queue backlog bound in spirit).
+            constexpr size_t kMaxBytes = 64u << 20;
+            if (bytes > kMaxBytes) { tr(-ENOMEM); return -ENOMEM; }
+            std::vector<uint8_t> tmp;
+            try {
+                tmp.resize(bytes);
+                if (bytes) I.mem->read(data, tmp.data(), bytes);
+            } catch (...) { tr(-EFAULT); return -EFAULT; }
             if (!it->second.engine_stream)
                 it->second.engine_stream = I.engine->stream_open(
                     it->second.fmt, it->second.rate, it->second.ch);

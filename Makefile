@@ -96,7 +96,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check vkmarshal vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
 
 all: $(TARGET)
 
@@ -156,6 +156,22 @@ $(WL_OUT): $(WL_XML) $(WL_GEN)
 wlgen-check:
 	python3 tools/opgen/wlgen.py --check $(WL_XML) $(WL_OUT)
 
+# Vulkan deep-marshal descriptor table (same pattern as the SIMD_DP decode
+# tables): tools/vulkan-headers/registry/vk.xml is the source of truth for
+# struct layouts + per-command staging plans consumed by DisplayThunk's
+# VK_CMD_DEEP policy. Generated into include/opgen_vkmarshal.hpp.
+VKMARSHAL_XML := tools/vulkan-headers/registry/vk.xml
+VKMARSHAL_GEN := tools/opgen/vkmarshalgen.py tools/opgen/vkxml.py
+VKMARSHAL_OUT := include/opgen_vkmarshal.hpp
+
+vkmarshal: $(VKMARSHAL_OUT)
+
+$(VKMARSHAL_OUT): $(VKMARSHAL_XML) $(VKMARSHAL_GEN)
+	python3 tools/opgen/vkmarshalgen.py $(VKMARSHAL_XML) $@
+
+vkmarshal-check:
+	python3 tools/opgen/vkmarshalgen.py --check $(VKMARSHAL_XML) $(VKMARSHAL_OUT)
+
 # Audit every VK row in the spec against the vendored Khronos vk.xml:
 # arity + pointer-position agreement (catches shifted-pointer-mask bugs
 # mechanically). Warnings list dynamically-sized params dispatched as
@@ -177,6 +193,17 @@ glcoverage-check:
 # Audit every EGL row against the vendored Khronos egl.xml.
 egl-check:
 	python3 tools/opgen/eglcheck.py $(THUNK_SPECS) tools/gl-registry/egl.xml
+
+# Audit every GLFW/SDL row in the spec against the installed system headers
+# (/usr/include/GLFW/glfw3.h, /usr/include/SDL2/*.h): arity +
+# pointer-position + float agreement. Same bug class as vkxml-check catches
+# for Vulkan (glfwGetVersion/GetWindowSize, SDL_CreateWindowAndRenderer).
+# Informational only (discrepancies are a demand-driven backlog, not drift)
+# — prints the backlog, always exits 0. Opaque host cookies (GLFWwindow*,
+# SDL_Window*, ...) are verbatim 'i' by design; data/OUT pointers must
+# be 'p'/'z'.
+thunk-hdr-check:
+	python3 tools/opgen/thunkhdrcheck.py $(THUNK_SPECS) || true
 
 # FP fixed-point conversion decode table (same pattern as SIMD_DP above):
 # tools/opgen/fp_fixconv.txt is the single source of truth for which
@@ -408,7 +435,7 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check wlgen-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check $(TARGET) test-capi test-nb
+check-all: setup-tests opgen-check opgen-thunk-check wlgen-check vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check $(TARGET) test-capi test-nb
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
 

@@ -846,6 +846,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `include/opgen_thunk.hpp`), then `make opgen-thunk-check` (CI guard —
   fails if the header drifted from the spec). Do NOT hand-edit the
   generated header or re-add ad-hoc REG_* entries in thunk.cpp.
+  `make thunk-hdr-check` (tools/opgen/thunkhdrcheck.py, informational
+  backlog like proxy-check) audits every GLFW/SDL row against the installed
+  system headers (arity + pointer positions + float width); opaque host
+  cookies (GLFWwindow*, SDL_Window/Surface/Texture, ...) stay verbatim
+  `i`, data/OUT pointers must be `p`/`z`. Check it before adding rows —
+  it catches the glfwGetVersion/GetWindowSize class mechanically.
 - GL3.3+/DSA future-game coverage (2026-08): `glBufferStorage` (SIZE
   `arg1`), `glCreateBuffers`, `glTexStorage2D/3D`, `glTexImage3D` (10 args,
   arg9 pixels via `p` = 64 KiB default bounce — a `z` token needs a SIZE
@@ -1036,8 +1042,10 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `_size_callback` update `window.size` + `glViewport` on resize/fullscreen
   (before it was STUB → HUD stayed at the initial size on the user's
   ultrawide).
-- `make check-all` now runs BOTH generation guards (`opgen-check` +
-  `opgen-thunk-check`) before the test suite, so spec drift fails CI.
+- `make check-all` runs ALL generation guards (`opgen-check` +
+  `opgen-thunk-check` + `wlgen-check` + `vkmarshal-check` + `vkxml-check` +
+  `glxml-check` + `glcoverage-check` + `egl-check` + `opgen-fpfixed-check`)
+  before the test suite, so spec drift fails CI.
 - **Vulkan graphics-pipeline stage (2026-08-21)**: seven more deep-marshal
   policies — `VK_CREATE_SHADER_MODULE` (nested pCode, staging vector
   reserved for codeSize BEFORE any pointer is taken — a later resize

@@ -473,7 +473,7 @@ SDL_InitSubSystem         SDL    i             -     -              -
 SDL_QuitSubSystem         SDL    i             -     -              -
 SDL_Quit                  SDL    -             -     -              -
 SDL_CreateWindow          SDL    piiiii         -     -              -   # arg0: title string
-SDL_CreateWindowAndRenderer SDL  iiiii         -     -              -
+SDL_CreateWindowAndRenderer SDL  iiipp         -     -              -   # w,h,flags, out SDL_Window**, out SDL_Renderer**
 SDL_DestroyWindow         SDL    i             -     -              -
 SDL_GL_CreateContext      SDL    i             -     -              -
 SDL_GL_DeleteContext      SDL    i             -     -              -
@@ -488,7 +488,7 @@ SDL_WaitEvent             SDL    p             -     -              -
 SDL_PushEvent             SDL    p             -     -              -
 SDL_GetWindowSurface      SDL    i             -     -              -
 SDL_UpdateWindowSurface   SDL    i             -     -              -
-SDL_UpdateWindowSurfaceRects SDL iii           -     -              -
+SDL_UpdateWindowSurfaceRects SDL ipi           -     -              -
 SDL_SetWindowTitle        SDL    ip            -     -              -   # arg1: title string
 SDL_GetWindowTitle        SDL    i             str   -              -
 SDL_SetWindowSize         SDL    iii           -     -              -
@@ -525,21 +525,21 @@ SDL_CreateTexture         SDL    iiiii         -     TRACK_TEX      -
 SDL_CreateTextureFromSurface SDL ii            -     -              -
 SDL_DestroyTexture        SDL    i             -     UNTRACK_TEX    -
 SDL_UpdateTexture         SDL    ipzi          -     -              PITCH_H # arg1 rect, arg2 pixels, arg3 pitch
-SDL_RenderSetViewport     SDL    ii            -     -              -
+SDL_RenderSetViewport     SDL    ip            -     -              -
 SDL_RenderSetLogicalSize  SDL    iii           -     -              -
 SDL_SetRenderDrawBlendMode SDL   ii            -     -              -
 SDL_SetTextureBlendMode   SDL    ii            -     -              -
 SDL_MapRGB                SDL    iiii          -     -              -
 SDL_MapRGBA               SDL    iiiii         -     -              -
-SDL_GetRGB                SDL    iiiii         -     -              -
-SDL_GetRGBA               SDL    iiiiii        -     -              -
+SDL_GetRGB                SDL    iippp         -     -              -
+SDL_GetRGBA               SDL    iipppp        -     -              -
 SDL_CreateRGBSurface      SDL    iiiiiiii      -     -              -
 SDL_CreateRGBSurfaceWithFormat SDL iiiii       -     -              -
 SDL_FreeSurface           SDL    i             -     -              -
 SDL_SetColorKey           SDL    ii            -     -              -
 SDL_SetSurfaceAlphaMod    SDL    ii            -     -              -
-SDL_LoadBMP_RW            SDL    ip            -     -              -   # arg0: SDL_RWops*
-SDL_SaveBMP_RW            SDL    iip           -     -              -
+SDL_LoadBMP_RW            SDL    ii            -     -              -   # arg0: SDL_RWops*
+SDL_SaveBMP_RW            SDL    iii           -     -              -
 SDL_RWFromFile            SDL    pp            -     -              -   # args0/1: file,mode strings
 SDL_RWFromMem             SDL    pi            -     -              -   # arg0: mem ptr
 SDL_RWclose               SDL    i             -     -              -
@@ -571,7 +571,7 @@ SDL_GetNumVideoDisplays   SDL    -             -     -              -
 SDL_GetDisplayBounds      SDL    ip            -     -              -   # displayIndex, out SDL_Rect*
 SDL_GetCurrentVideoMode   SDL    i             -     -              -
 SDL_GetWindowDisplayIndex SDL    i             -     -              -
-SDL_Vulkan_LoadLibrary    SDL    i             -     -              -
+SDL_Vulkan_LoadLibrary    SDL    p             -     -              -
 SDL_Vulkan_GetVkGetInstanceProcAddr SDL i     -     -              -
 SDL_Vulkan_CreateSurface  SDL    iip           -     -              -   # (window, VkInstance, VkSurfaceKHR* out translated)
 SDL_CreateThread          SDL    ppp           -     THREAD_CREATE   -   # guest fn ptr can't reach host
@@ -585,7 +585,7 @@ SDL_WaitThread            SDL    ip            -     THREAD_WAIT     -   # no-op
 SDL_WasInit                SDL    i             -     -              -
 SDL_GetVersion             SDL    p             -     -              -   # out SDL_version*
 SDL_GetNumDisplayModes     SDL    i             -     -              -
-SDL_GetDesktopDisplayMode  SDL    i             -     -              -   # (int) -> const SDL_DisplayMode* (host ptr; copied by arm)
+SDL_GetDesktopDisplayMode  SDL    ip             -     -              -   # (int) -> const SDL_DisplayMode* (host ptr; copied by arm)
 SDL_GetDisplayMode         SDL    iip           -     -              -   # display, mode, out SDL_DisplayMode*
 SDL_GetRelativeMouseState  SDL    pp            -     -              -   # out int* x, int* y
 SDL_GetScancodeFromKey     SDL    i             -     -              -
@@ -613,7 +613,7 @@ SDL_JoystickNumButtons     SDL    i             -     -              -
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
 glfwInit                  GLFW   -             -     -              -
 glfwTerminate             GLFW   -             -     -              -
-glfwGetVersion            GLFW   i             -     -              -   # out int*; legacy int passthrough
+glfwGetVersion            GLFW   ppp           -     -              -   # out int *major,*minor,*rev
 glfwWindowHint            GLFW   ii            -     -              -
 glfwCreateWindow          GLFW   iipii         -     GLFW_CREATE    -   # arg2: title string
 glfwDestroyWindow         GLFW   i             -     -              -
@@ -629,17 +629,17 @@ glfwGetTime               GLFW   -             -     -              -
 glfwGetKey                GLFW   ii            -     -              -
 glfwGetMouseButton        GLFW   ii            -     -              -
 glfwGetCursorPos          GLFW   ipp           -     -              -   # args1/2: out double *x,*y
-glfwSetCursorPos          GLFW   iii           -     -              -   # 2 doubles; legacy int passthrough
+glfwSetCursorPos          GLFW   idd           -     -              -   # window, double xpos, double ypos (mixed int+double)
 glfwGetFramebufferSize    GLFW   ipp           -     -              -   # args1/2: out int *w,*h
 glfwSetInputMode          GLFW   iii           -     -              -
 glfwGetInputMode          GLFW   ii            -     -              -
-glfwGetWindowSize         GLFW   ii            -     -              -
+glfwGetWindowSize         GLFW   ipp           -     -              -   # window, out int *w,*h
 glfwSetWindowTitle        GLFW   ip            -     -              -   # arg1: title string
 glfwGetWindowTitle        GLFW   i             -     -              -
 glfwFocusWindow           GLFW   i             -     -              -
 glfwGetPrimaryMonitor     GLFW   -             -     -              -
 glfwGetVideoMode          GLFW   i             -     -              -
-glfwGetWindowPos          GLFW   ii            -     -              -
+glfwGetWindowPos          GLFW   ipp           -     -              -   # window, out int *xpos,*ypos
 glfwSetWindowPos          GLFW   iii           -     -              -
 glfwSetErrorCallback      GLFW   i             -     ERROR_CB       -
 glfwSetKeyCallback        GLFW   ii            -     KEY_CB         -
@@ -1148,22 +1148,22 @@ SDL_acosf                  SDL    f             -     -              -
 SDL_atan2f                 SDL    ff            -     -              -
 SDL_ceilf                  SDL    f             -     -              -
 SDL_cosf                   SDL    f             -     -              -
-SDL_fabs                   SDL    f             -     -              -
+SDL_fabs                   SDL    d             -     -              -
 SDL_fabsf                  SDL    f             -     -              -
 SDL_floorf                 SDL    f             -     -              -
 SDL_fmodf                  SDL    ff            -     -              -
-SDL_pow                    SDL    ff            -     -              -
+SDL_pow                    SDL    dd            -     -              -
 SDL_roundf                 SDL    f             -     -              -
 SDL_sinf                   SDL    f             -     -              -
-SDL_sqrt                   SDL    f             -     -              -
+SDL_sqrt                   SDL    d             -     -              -
 SDL_sqrtf                  SDL    f             -     -              -
 SDL_tanf                   SDL    f             -     -              -
 SDL_calloc                 SDL    ii            -     SDL_ALLOC      -   # guest-window allocation
 SDL_malloc                 SDL    i             -     SDL_ALLOC      -
 SDL_realloc                SDL    ip            -     SDL_ALLOC      -
-SDL_memcmp                 SDL    ppp           -     -              -
-SDL_memcpy                 SDL    ppp           -     -              -
-SDL_memset                 SDL    ppi           -     -              -
+SDL_memcmp                 SDL    ppi           -     -              -
+SDL_memcpy                 SDL    ppi           -     -              -
+SDL_memset                 SDL    pii           -     -              -
 SDL_strcmp                 SDL    pp            -     -              -
 SDL_strncmp                SDL    ppi           -     -              -
 SDL_strncasecmp            SDL    ppi           -     -              -
@@ -1172,8 +1172,8 @@ SDL_strrchr                SDL    pi            -     -              -
 SDL_strstr                 SDL    pp            -     -              -
 SDL_strlen                 SDL    p             -     -              -
 SDL_strlcpy                SDL    ppi           -     -              -
-SDL_strtol                 SDL    pip           -     -              -   # (s, endptr, base)
-SDL_strtoll                SDL    pip           -     -              -
+SDL_strtol                 SDL    ppi           -     -              -   # (s, endptr, base)
+SDL_strtoll                SDL    ppi           -     -              -
 SDL_toupper                SDL    i             -     -              -
 SDL_isdigit                SDL    i             -     -              -
 SDL_isspace                SDL    i             -     -              -
@@ -1181,7 +1181,7 @@ SDL_utf8strlen             SDL    p             -     -              -
 SDL_Error                  SDL    -             -     -              -
 SDL_SetError               SDL    p             -     -              -
 SDL_Log                    SDL    p             -     -              -   # stub: varargs fmt must not reach host printf
-SDL_qsort                  SDL    ipip          -     -              -   # stub: guest compar callback
+SDL_qsort                  SDL    piip          -     SDL_STUB0      -   # stub: guest compar callback can never run on host (SIGSEGV); no-op
 SDL_sscanf                 SDL    pp            -     -              -   # stub: varargs
 SDL_GetDisplayName         SDL    i             str   -              -
 SDL_GetKeyFromName         SDL    p             -     -              -
@@ -1189,18 +1189,18 @@ SDL_GetKeyName             SDL    i             str   -              -
 SDL_EventState             SDL    iii           -     -              -
 SDL_JoystickEventState     SDL    i             -     -              -
 SDL_SetWindowGrab          SDL    ii            -     -              -
-SDL_ShowSimpleMessageBox   SDL    ippp          -     -              -   # stub: never blocks
+SDL_ShowSimpleMessageBox   SDL    ippi          -     -              -   # stub: never blocks
 SDL_StartTextInput         SDL    -             -     -              -
 SDL_StopTextInput          SDL    -             -     -              -
 SDL_HasColorKey            SDL    i             -     -              -
 SDL_FillRect               SDL    ipii          -     -              -
-SDL_ConvertSurface         SDL    piip          -     -              -
-SDL_ConvertSurfaceFormat   SDL    pii           -     -              -
-SDL_DuplicateSurface       SDL    p             -     -              -
+SDL_ConvertSurface         SDL    iii           -     -              -
+SDL_ConvertSurfaceFormat   SDL    iii           -     -              -
+SDL_DuplicateSurface       SDL    i             -     -              -
 SDL_CreateRGBSurfaceFrom   SDL    piiiiiii      -     -              -   # pixels,w,h,depth,pitch,masks
 SDL_CreateRGBSurfaceWithFormatFrom SDL piiii    -     -              -
-SDL_SetSurfaceBlendMode    SDL    pii           -     -              -
-SDL_UpperBlit              SDL    ppii          -     -              -
+SDL_SetSurfaceBlendMode    SDL    iii           -     -              -
+SDL_UpperBlit              SDL    ipip          -     -              -
 SDL_LoadFile_RW            SDL    ip            -     -              -   # stub: host-alloc return
 SDL_RWFromConstMem         SDL    pi            -     -              -
 SDL_RWsize                 SDL    i             -     -              -
@@ -1230,7 +1230,7 @@ SDL_GameControllerNameForIndex SDL i             str   -        -
 SDL_JoystickInstanceID      SDL    i             -     -              -
 SDL_GetScancodeName         SDL    i             str   -        -
 SDL_GetPrefPath             SDL    pp            str   -        -
-SDL_GetCurrentDisplayMode   SDL    i             -     -              -
+SDL_GetCurrentDisplayMode   SDL    ip             -     -              -
 SDL_SetWindowDisplayMode    SDL    ip            -     -              -
 SDL_GetWindowPixelFormat    SDL    i             -     -              -
 SDL_GameControllerAddMappingsFromRW SDL ii          -     -              -   # RWops host handle round-trips verbatim
@@ -2009,24 +2009,24 @@ SDL_CalculateGammaRamp     SDL    fp            -     -              -
 SDL_GL_GetSwapInterval     SDL    -             -     -              -
 SDL_GetPixelFormatName     SDL    i             str   -              -
 SDL_HasClipboardText       SDL    -             -     -              -
-SDL_JoystickNumHats        SDL    p             -     -              -
-SDL_LockSurface            SDL    p             -     -              -
-SDL_LowerBlit              SDL    pppp          -     -              -
-SDL_QueryTexture           SDL    ppppp         -     -              -
-SDL_ReadBE32               SDL    p             -     -              -
-SDL_ReadLE16               SDL    p             -     -              -
-SDL_ReadLE32               SDL    p             -     -              -
-SDL_RenderCopyEx           SDL    ppppdpi       -     -              -
-SDL_RenderDrawLine         SDL    piiii         -     -              -
-SDL_RenderFillRect         SDL    pp            -     -              -
-SDL_RenderFillRects        SDL    ppi           -     -              -
-SDL_RenderReadPixels       SDL    ppipi         -     -              -
-SDL_RenderSetClipRect      SDL    pp            -     -              -
-SDL_RenderSetScale         SDL    pff           -     -              -
-SDL_SetSurfaceColorMod     SDL    piii          -     -              -
-SDL_SetTextureAlphaMod     SDL    pi            -     -              -
-SDL_SetTextureColorMod     SDL    piii          -     -              -
-SDL_SetWindowGammaRamp     SDL    pppp          -     -              -
-SDL_SetWindowResizable     SDL    pi            -     -              -
-SDL_UnlockSurface          SDL    p             -     -              -
+SDL_JoystickNumHats        SDL    i             -     -              -
+SDL_LockSurface            SDL    i             -     -              -
+SDL_LowerBlit              SDL    ipip          -     -              -
+SDL_QueryTexture           SDL    ipppp         -     -              -
+SDL_ReadBE32               SDL    i             -     -              -
+SDL_ReadLE16               SDL    i             -     -              -
+SDL_ReadLE32               SDL    i             -     -              -
+SDL_RenderCopyEx           SDL    iippdpi       -     -              -
+SDL_RenderDrawLine         SDL    iiiii         -     -              -
+SDL_RenderFillRect         SDL    ip            -     -              -
+SDL_RenderFillRects        SDL    ipi           -     -              -
+SDL_RenderReadPixels       SDL    ipipi         -     -              -
+SDL_RenderSetClipRect      SDL    ip            -     -              -
+SDL_RenderSetScale         SDL    iff           -     -              -
+SDL_SetSurfaceColorMod     SDL    iiii          -     -              -
+SDL_SetTextureAlphaMod     SDL    ii            -     -              -
+SDL_SetTextureColorMod     SDL    iiii          -     -              -
+SDL_SetWindowGammaRamp     SDL    ippp          -     -              -
+SDL_SetWindowResizable     SDL    ii            -     -              -
+SDL_UnlockSurface          SDL    i             -     -              -
 SDL_iconv_open             SDL    pp            -     -              -

@@ -326,10 +326,27 @@ static void test_fcvtzu(void) {
     CHECK(memcmp(out, exp, 16) == 0, "fcvtzu v.4s (negatives → 0)");
 }
 
+static void test_fcvtzs_oor(void) {
+    // Finite out-of-range saturates per ARM (matches interp
+    // fp_to_signed_sat): >= 2^31 → INT32_MAX, < -2^31 → INT32_MIN.
+    // Expected values are explicit constants: a C (int32_t) cast of an
+    // out-of-range float is UB, so the test must not compute them.
+    float src[4] = {1e20f, -1e20f, 5e9f, -5e9f};
+    int32_t exp[4] = {0x7FFFFFFF, (int32_t)0x80000000,
+                      0x7FFFFFFF, (int32_t)0x80000000};
+    int32_t out[4];
+    __asm__ volatile (
+        "ldr q0, [%[s]]\n"
+        "fcvtzs v1.4s, v0.4s\n"
+        "str q1, [%[o]]\n"
+        :: [s]"r"(src), [o]"r"(out) : "v0","v1","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "fcvtzs v.4s (finite OOR saturates)");
+}
+
 static void test_fcvtzu_hi(void) {
     // Values above 2^31 exercise the hi-path (x - 2^31 + 0x80000000).
-    // All inputs stay below 2^32: for f >= 2^32 the C (uint32_t) cast is
-    // UB (interp gives 0, JIT gives 0x80000000) so we don't test it.
+    // All inputs stay below 2^32 (a C (uint32_t) cast is only valid there).
     float src[4] = {2147483648.0f, 3000000000.0f, 4000000000.0f, 1073741824.0f};
     uint32_t out[4], exp[4];
     for (int i = 0; i < 4; i++) exp[i] = (uint32_t)src[i];
@@ -340,6 +357,54 @@ static void test_fcvtzu_hi(void) {
         :: [s]"r"(src), [o]"r"(out) : "v0","v1","memory"
     );
     CHECK(memcmp(out, exp, 16) == 0, "fcvtzu v.4s (values >= 2^31)");
+}
+
+static void test_fcvtzu_oor(void) {
+    // Finite values >= 2^32 saturate to UINT32_MAX per ARM (matches interp
+    // fp_to_unsigned_sat). Explicit constants: a C (uint32_t) cast of
+    // f >= 2^32 is UB, so the test must not compute them.
+    float src[4] = {5e9f, 1e20f, 4294967296.0f, 3.0f};
+    uint32_t exp[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 3u};
+    uint32_t out[4];
+    __asm__ volatile (
+        "ldr q0, [%[s]]\n"
+        "fcvtzu v1.4s, v0.4s\n"
+        "str q1, [%[o]]\n"
+        :: [s]"r"(src), [o]"r"(out) : "v0","v1","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "fcvtzu v.4s (finite OOR saturates)");
+}
+
+// ── SMOV (Wd zero-extends into Xd) ─────────────────────────────────
+static void test_smov_w_zext(void) {
+    // smov Wd, Vn.Ts[i] sign-extends the element to 32 bits and ZEROES the
+    // upper 32 of Xd (interp truncates the sext to uint32_t). A full
+    // 64-bit sext here would leave 0xFFFFFFFFFFFFFFFF in x0 instead of
+    // 0x00000000FFFFFFFF.
+    uint8_t src[16] = {0};
+    src[0] = 0xFF;  // s8 -1
+    uint64_t out = 0;
+    __asm__ volatile (
+        "ldr q0, [%[s]]\n"
+        "smov w0, v0.b[0]\n"
+        "mov %[o], x0\n"
+        : [o]"=r"(out) : [s]"r"(src) : "v0","x0","memory"
+    );
+    CHECK(out == 0xFFFFFFFFull, "smov w0, v0.b[0] (Wd zero-extends)");
+}
+
+static void test_smov_x_sext(void) {
+    // smov Xd keeps the full 64-bit sign extension.
+    uint8_t src[16] = {0};
+    src[0] = 0xFF;  // s8 -1
+    uint64_t out = 0;
+    __asm__ volatile (
+        "ldr q0, [%[s]]\n"
+        "smov x0, v0.b[0]\n"
+        "mov %[o], x0\n"
+        : [o]"=r"(out) : [s]"r"(src) : "v0","x0","memory"
+    );
+    CHECK(out == 0xFFFFFFFFFFFFFFFFull, "smov x0, v0.b[0] (Xd sign-extends)");
 }
 
 // ── TBL / TBX ────────────────────────────────────────────────────────
@@ -493,8 +558,12 @@ int main(void) {
     test_ucvtf();
     test_fcvtzs();
     test_fcvtzs_special();
+    test_fcvtzs_oor();
     test_fcvtzu();
     test_fcvtzu_hi();
+    test_fcvtzu_oor();
+    test_smov_w_zext();
+    test_smov_x_sext();
     test_tbl_1reg_16b();
     test_tbl_1reg_8b();
     test_tbl_2reg_16b();

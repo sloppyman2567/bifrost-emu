@@ -48,7 +48,10 @@ void FrostJIT::emit_taken_path_epilogue() {
     // CBZ) is silently dropped on the taken path while the fall-through
     // epilogue still writes it — zlib's inflate loop read stale x22/x19
     // and died in a null call. Cold path: loop exits and returns only.
-    flush_all_vregs();
+    // KEEP (not evict): the fall-through (main) epilogue is emitted LATER
+    // and needs the same dirty state for its own writeback — a consuming
+    // flush here would move the stale-reg bug to the fall-through path.
+    flush_all_vregs_keep();
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
     emit_load(RSI, RBP, emu_slot_off()); // rsi = emu
