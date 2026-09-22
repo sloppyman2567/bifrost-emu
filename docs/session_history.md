@@ -4309,3 +4309,24 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   rules.md (personal), plan.md/findings.md/DISPLAY_THUNK.md (historical).
 - Left as-is: working directory name (bifrost-emu-1.5.0-alpha) — renaming
   would break session paths; the VERSION constant is authoritative.
+
+## 74. Commit split: pre-existing WIP vs migration (2026-09-22)
+
+- Sorted the working tree into two commits: `6567151` (pre-existing
+  fixes: UXTB, taken-path KEEP flush, SMOV/CVTF/MUL_ELEM/pshuflw,
+  thunk rows + thunkhdrcheck, signal/thread, interp, dispatch/glue/
+  backend/regalloc, hunting repros) and `52b6137` (typed-IR migration
+  + privatization + 1.5.5 release). Verified each builds + passes the
+  quick suite (223/223) in isolation.
+- Hard lesson: hunk-splitting across lines the migration overwrote
+  SILENTLY DROPPED three of their fixes (MUL_ELEM rm_reg, SMOV
+  Wd-zeroing, CVTF 2^32 clamp) — the diff showed HEAD→mine, hiding
+  their intermediate state. Caught by running the suite on commit 1
+  (simd_misc + arith failed), root-caused via x86 dump diff (+29 bytes
+  of missing clamp code), restored into commit 1, re-verified green.
+  Rule: when migrating others' uncommitted code, failing tests on the
+  base commit are guilty-until-proven-innocent — always verify the
+  split base, never assume it was already green.
+- Leftovers: tools/ir_convert.cpp (bulk helper, untracked — keep or
+  delete?), pre-existing stash (STORE_MEM cross-wire, untouched),
+  media/binaries (untracked junk, untouched).
