@@ -70,7 +70,7 @@ Emulator::~Emulator() {
         stats_reporter_stop_.store(true, std::memory_order_relaxed);
         stats_reporter_thread_.join();
     }
-    // Stop audio callback pump threads BEFORE the memory/CPU teardown.
+    // Stop audio callback workers BEFORE the memory/CPU teardown.
     if (auto* at = graphics_.audio_thunk()) at->shutdown();
 }
 void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
@@ -1722,17 +1722,31 @@ void Emulator::wire_thunk_android_runner_() {
 void Emulator::wire_thunk_audio_runner_() {
     auto* athunk = graphics_.audio_thunk();
     if (!athunk || !athunk->enabled()) return;
-    athunk->wire(&audio_, &main_cpu_,
+    athunk->wire(&audio_,
                  [this](CPU& cpu, uint64_t fn, const int64_t* iargs,
                         size_t n) -> uint64_t {
                      return call_guest_function(cpu, fn, iargs, n,
                                                 nullptr, 0);
+                 },
+                 [this]() -> std::unique_ptr<CPU> {
+                     if (!dyn_linker_) return {};
+                     auto cpu = std::make_unique<CPU>();
+                     cpu->copy_arch_state_from(main_cpu_);
+                     const uint64_t tls = dyn_linker_->allocate_thread_tls(mem_);
+                     if (!tls) return {};
+                     cpu->tpidr_el0 = tls;
+                     cpu->tpidrro_el0 = tls;
+                     cpu->tid = next_tid_.fetch_add(1);
+                     cpu->is_fork_process = false;
+                     if (jit_) jit_->enter_multithreaded();
+                     // This is the emulator's equivalent of creating a
+                     // guest pthread: tell glibc not to use its single-thread
+                     // fast paths. Store exactly the exported char byte.
+                     if (libc_single_threaded_addr_)
+                         mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
+                     return cpu;
                  });
-    // The pump fires guest callbacks on a second vCPU — glibc must take
-    // malloc locks from now on (see AudioThunk::start_pump).
-    athunk->set_libc_single_threaded_addr(libc_single_threaded_addr_);
-    // Dedicated-vCPU audio pump: guest callbacks fire on a hardware-like
-    // clock (AAA Android requirement), not piggybacked on dispatches.
+    // Start after installing the runner and TLS-aware guest CPU factory.
     athunk->start_pump();
 }
 

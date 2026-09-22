@@ -18,6 +18,7 @@
 #   ./scripts/run_tests.sh --chain-skip # run with BIFROST_CHAIN_SKIP=1
 #   ./scripts/run_tests.sh --verbose    # show full output of each test
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
+#   ./scripts/run_tests.sh --filter 'sig|brk' # filter without downloading fixtures
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
 # Test count breakdown (205 total standard):
@@ -37,6 +38,21 @@
 # Exit code: 0 if all tests pass, 1 if any fail.
 
 set -u
+
+TEMP_FILES=()
+TEMP_DIRS=()
+cleanup_temp_files() {
+    local path
+    for path in "${TEMP_FILES[@]}"; do
+        [ -n "$path" ] && rm -f -- "$path"
+    done
+    for path in "${TEMP_DIRS[@]}"; do
+        [ -n "$path" ] && rm -rf -- "$path"
+    done
+}
+trap cleanup_temp_files EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── Config ─────────────────────────────────────────────────────────────
 EMU="./bifrost-emu"
@@ -64,8 +80,8 @@ RUN_ALL=1
 VERBOSE=0
 QUICK=0
 FILTER=""
-EMU_FLAGS=""
-ENV_PREFIX=""
+EMU_FLAGS=()
+RUN_ENV=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -76,12 +92,17 @@ while [ $# -gt 0 ]; do
         --realworld)    RUN_REALWORLD=1; RUN_ALL=0 ;;
         --dynamic)      RUN_DYNAMIC=1; RUN_ALL=0 ;;
         --bench)        RUN_BENCH=1; RUN_ALL=0 ;;
-        --no-jit)       EMU_FLAGS="--no-jit" ;;
-        --fwd)          ENV_PREFIX="BIFROST_ENABLE_FWD=1" ;;
-        --chain-skip)   ENV_PREFIX="BIFROST_CHAIN_SKIP=1" ;;
+        --no-jit)       EMU_FLAGS+=(--no-jit) ;;
+        --fwd)          RUN_ENV+=(BIFROST_ENABLE_FWD=1) ;;
+        --chain-skip)   RUN_ENV+=(BIFROST_CHAIN_SKIP=1) ;;
         --verbose|-v)   VERBOSE=1 ;;
         --quick)        QUICK=1 ;;
-        --filter)       FILTER="$2"; shift ;;
+        --filter)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "error: --filter requires a non-empty regular expression" >&2
+                exit 2
+            fi
+            FILTER="$2"; shift ;;
         --filter=*)     FILTER="${1#--filter=}" ;;
         --help|-h)
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -95,6 +116,15 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+if [ -n "$FILTER" ]; then
+    grep -E -- "$FILTER" </dev/null >/dev/null 2>&1
+    grep_rc=$?
+    if [ "$grep_rc" -eq 2 ]; then
+        echo "error: invalid --filter regular expression: $FILTER" >&2
+        exit 2
+    fi
+fi
+
 # ── Real-world binary download ────────────────────────────────────────
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
@@ -106,7 +136,7 @@ done
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
 # test runner indefinitely.
 DOWNLOAD_TIMEOUT=90
-if [ "$RUN_ALL" = "1" ]; then
+if [ "$RUN_ALL" = "1" ] && [ -z "$FILTER" ]; then
     echo -e "${C_BOLD}Downloading real-world binaries...${C_RST}"
     mkdir -p ctest_real/realworld
 
@@ -715,24 +745,34 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 FAILED_TESTS=()
+FILTER_MATCH_COUNT=0
+
+record_failure() {
+    local name="$1" reason="$2"
+    printf "  ${C_RED}%-8s${C_RST} ${C_DIM}%-40s${C_RST} ${C_RED}%s${C_RST}\n" \
+        "FAIL" "$name" "$reason"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILED_TESTS+=("$name ($reason)")
+}
 
 run_test() {
     local name="$1" file="$2" stdin="$3" tout="$4" pattern="${5:-}"
     local mode="${6:-}"
-    local full="$EMU $EMU_FLAGS $file"
+    local -a test_command=()
     local output rc
 
     # Apply filter (use grep -E so the user can pass alternation like
     # --filter "sig|brk" — basic regex doesn't support |).
-    if [ -n "$FILTER" ] && ! echo "$name" | grep -qiE "$FILTER"; then
+    if [ -n "$FILTER" ] && ! grep -qiE -- "$FILTER" <<< "$name"; then
         return 0
     fi
+    FILTER_MATCH_COUNT=$((FILTER_MATCH_COUNT + 1))
 
     # Mode filter: if the test specifies "JIT" and we're running
     # --no-jit, skip it. This is for tests that exercise code paths
     # the interpreter doesn't handle correctly (e.g., signal frame
     # stack corruption).
-    if [ "$mode" = "JIT" ] && [ "$EMU_FLAGS" = "--no-jit" ]; then
+    if [ "$mode" = "JIT" ] && [[ " ${EMU_FLAGS[*]} " == *" --no-jit "* ]]; then
         SKIP_COUNT=$((SKIP_COUNT + 1))
         if [ "$VERBOSE" = "1" ]; then
             echo -e "  ${C_YLW}SKIP${C_RST}    $name"
@@ -742,9 +782,13 @@ run_test() {
     fi
 
     # NEW (Turn 74): DYN mode = dynamically-linked binary that requires
-    # BIFROST_ROOT to be set. Skip if BIFROST_ROOT is not in ENV_PREFIX
+    # BIFROST_ROOT to be set. Skip if BIFROST_ROOT is not in RUN_ENV
     # (these are tested separately in the "Real-world dynamic" section).
-    if [ "$mode" = "DYN" ] && ! echo "$ENV_PREFIX" | grep -q "BIFROST_ROOT"; then
+    local has_bifrost_root=0 env_entry
+    for env_entry in "${RUN_ENV[@]}"; do
+        [[ "$env_entry" == BIFROST_ROOT=* ]] && has_bifrost_root=1
+    done
+    if [ "$mode" = "DYN" ] && [ "$has_bifrost_root" -eq 0 ]; then
         return 0  # silent skip — will run in the dynamic section
     fi
 
@@ -756,7 +800,8 @@ run_test() {
     # The file field may contain args (e.g. "ctest_real/toybox echo hello"),
     # so we extract just the first whitespace-separated token as the
     # binary path to test for existence.
-    local bin_path="${file%% *}"
+    read -r -a test_command <<< "$file"
+    local bin_path="${test_command[0]}"
     if [ ! -f "$bin_path" ]; then
         SKIP_COUNT=$((SKIP_COUNT + 1))
         if [ "$VERBOSE" = "1" ]; then
@@ -780,16 +825,31 @@ run_test() {
     # Use a temp file to capture output so we can get the real
     # exit code from timeout (PIPESTATUS is lost inside command
     # substitutions which run in subshells).
-    local tmpout
-    tmpout=$(mktemp)
+    local tmpout tmpin=""
+    tmpout=$(mktemp "${TMPDIR:-/tmp}/bifrost-test-out.XXXXXX") || {
+        record_failure "$name" "could not create test output file"
+        return 0
+    }
+    TEMP_FILES+=("$tmpout")
     if [ -n "$stdin" ]; then
-        printf "$stdin" | env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file > "$tmpout" 2>&1
+        tmpin=$(mktemp "${TMPDIR:-/tmp}/bifrost-test-in.XXXXXX") || {
+            record_failure "$name" "could not create test input file"
+            return 0
+        }
+        TEMP_FILES+=("$tmpin")
+        printf '%b' "$stdin" > "$tmpin"
+        env "${RUN_ENV[@]}" timeout -s KILL "$tout" "$EMU" \
+            "${EMU_FLAGS[@]}" "${test_command[@]}" < "$tmpin" > "$tmpout" 2>&1
     else
-        env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file </dev/null > "$tmpout" 2>&1
+        env "${RUN_ENV[@]}" timeout -s KILL "$tout" "$EMU" \
+            "${EMU_FLAGS[@]}" "${test_command[@]}" </dev/null > "$tmpout" 2>&1
     fi
     rc=$?
     output=$(tr -d '\0' < "$tmpout")
-    rm -f "$tmpout"
+    rm -f -- "$tmpout"
+    if [ -n "$tmpin" ]; then
+        rm -f -- "$tmpin"
+    fi
 
     # Determine pass/fail
     local status="PASS"
@@ -865,7 +925,19 @@ run_category() {
     local count=${#tests[@]}
     [ $count -eq 0 ] && return
 
-    echo -e "\n${C_BOLD}${C_BLU}[$title]${C_RST} ($count tests)"
+    if [ -n "$FILTER" ]; then
+        local selected=0 entry test_name
+        for entry in "${tests[@]}"; do
+            IFS='|' read -r test_name _ <<< "$entry"
+            if grep -qiE -- "$FILTER" <<< "$test_name"; then
+                selected=$((selected + 1))
+            fi
+        done
+        [ "$selected" -eq 0 ] && return
+        echo -e "\n${C_BOLD}${C_BLU}[$title]${C_RST} ($selected selected of $count)"
+    else
+        echo -e "\n${C_BOLD}${C_BLU}[$title]${C_RST} ($count tests)"
+    fi
     for t in "${tests[@]}"; do
         IFS='|' read -r name file stdin tout pattern mode <<< "$t"
         run_test "$name" "$file" "$stdin" "$tout" "$pattern" "$mode"
@@ -874,8 +946,11 @@ run_category() {
 
 # ── Run ────────────────────────────────────────────────────────────────
 echo -e "${C_BOLD}bifrost-emu test runner${C_RST}"
-echo -e "${C_DIM}mode: ${ENV_PREFIX:-JIT default} $EMU_FLAGS${C_RST}"
-echo -e "${C_DIM}emulator: $($EMU --version 2>/dev/null || echo "$EMU")${C_RST}"
+mode_label="JIT default"
+[ "${#EMU_FLAGS[@]}" -gt 0 ] && mode_label="${EMU_FLAGS[*]}"
+[ "${#RUN_ENV[@]}" -gt 0 ] && mode_label="$mode_label ${RUN_ENV[*]}"
+echo -e "${C_DIM}mode: $mode_label${C_RST}"
+echo -e "${C_DIM}emulator: $("$EMU" --version 2>/dev/null || echo "$EMU")${C_RST}"
 
 START=$(date +%s)
 
@@ -885,18 +960,24 @@ START=$(date +%s)
 # symlink + outside canary, run with BIFROST_ROOT pointed at it, clean up.
 # The test binary takes no fixture paths (fixed guest-absolute paths).
 if [ "$RUN_INTEGRATION" = "1" ]; then
-    SBX=/tmp/bifrost-sbx-test
-    rm -rf "$SBX" && mkdir -p "$SBX/root/sub" "$SBX/outside" && \
-    printf 'hello\n' > "$SBX/root/sub/real.txt" && \
-    printf 'CANARY-DO-NOT-READ\n' > "$SBX/outside/secret" && \
-    ln -sf "$SBX/outside/secret" "$SBX/root/sub/evil" && \
-    ln -sf "$SBX/outside" "$SBX/root/sub/outlink" && {
-        OLD_ENV_PREFIX="$ENV_PREFIX"
-        ENV_PREFIX="BIFROST_ROOT=$SBX/root ${ENV_PREFIX}"
-        run_category "Sandbox" "test_sandbox|ctest/test_sandbox.elf||10|checks passed"
-        ENV_PREFIX="$OLD_ENV_PREFIX"
-    }
-    rm -rf "$SBX"
+    SBX=$(mktemp -d "${TMPDIR:-/tmp}/bifrost-sbx-test.XXXXXX")
+    if [ -z "$SBX" ]; then
+        record_failure "test_sandbox" "could not create sandbox fixture directory"
+    else
+        TEMP_DIRS+=("$SBX")
+        if mkdir -p "$SBX/root/sub" "$SBX/outside" && \
+                printf 'hello\n' > "$SBX/root/sub/real.txt" && \
+                printf 'CANARY-DO-NOT-READ\n' > "$SBX/outside/secret" && \
+                ln -sf "$SBX/outside/secret" "$SBX/root/sub/evil" && \
+                ln -sf "$SBX/outside" "$SBX/root/sub/outlink"; then
+            OLD_RUN_ENV=("${RUN_ENV[@]}")
+            RUN_ENV=("BIFROST_ROOT=$SBX/root" "${RUN_ENV[@]}")
+            run_category "Sandbox" "test_sandbox|ctest/test_sandbox.elf||10|checks passed"
+            RUN_ENV=("${OLD_RUN_ENV[@]}")
+        else
+            record_failure "test_sandbox" "could not provision sandbox fixtures"
+        fi
+    fi
 fi
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"
 [ "$RUN_TOYBOX" = "1" ]      && run_category "Toybox tests"      "${TOYBOX_TESTS[@]}"
@@ -907,8 +988,8 @@ fi
 # can find their shared libraries. These are SEPARATE from the static
 # real-world tests above (which don't need BIFROST_ROOT).
 if [ "$RUN_REALWORLD" = "1" ] && [ -d "rootfs/lib" ]; then
-    OLD_ENV_PREFIX="$ENV_PREFIX"
-    ENV_PREFIX="BIFROST_ROOT=$PWD/rootfs ${ENV_PREFIX}"
+    OLD_RUN_ENV=("${RUN_ENV[@]}")
+    RUN_ENV=("BIFROST_ROOT=$PWD/rootfs" "${RUN_ENV[@]}")
     DYN_REALWORLD_TESTS=()
     for t in "${REALWORLD_TESTS[@]}"; do
         case "$t" in
@@ -918,7 +999,7 @@ if [ "$RUN_REALWORLD" = "1" ] && [ -d "rootfs/lib" ]; then
     if [ ${#DYN_REALWORLD_TESTS[@]} -gt 0 ]; then
         run_category "Real-world dynamic (glibc)" "${DYN_REALWORLD_TESTS[@]}"
     fi
-    ENV_PREFIX="$OLD_ENV_PREFIX"
+    RUN_ENV=("${OLD_RUN_ENV[@]}")
 fi
 
 [ "$RUN_BENCH" = "1" ]       && run_category "Benchmarks"        "${BENCH_TESTS[@]}"
@@ -927,11 +1008,16 @@ fi
 # These run the same test binary but with BIFROST_ROOT set to the
 # rootfs directory, enabling shared library loading.
 if [ "$RUN_DYNAMIC" = "1" ]; then
-    # Save the original ENV_PREFIX and append BIFROST_ROOT.
-    OLD_ENV_PREFIX="$ENV_PREFIX"
-    ENV_PREFIX="BIFROST_ROOT=$PWD/rootfs ${ENV_PREFIX}"
+    # Save the original environment and append BIFROST_ROOT.
+    OLD_RUN_ENV=("${RUN_ENV[@]}")
+    RUN_ENV=("BIFROST_ROOT=$PWD/rootfs" "${RUN_ENV[@]}")
     run_category "Dynamic linking" "${DYNAMIC_TESTS[@]}"
-    ENV_PREFIX="$OLD_ENV_PREFIX"
+    RUN_ENV=("${OLD_RUN_ENV[@]}")
+fi
+
+if [ -n "$FILTER" ] && [ "$FILTER_MATCH_COUNT" -eq 0 ]; then
+    echo "error: no tests matched --filter: $FILTER" >&2
+    exit 2
 fi
 
 END=$(date +%s)

@@ -2536,26 +2536,23 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
     plays via the same mixer; `write()` returns BYTES accepted.
   - mix_interleaved/ring_queued_bytes/ring_free_bytes/clear_queued are
     GONE — update any out-of-tree caller.
-- **Dedicated-vCPU audio pump (`AudioThunk::start_pump`, default ON,
-  BIFROST_AUDIO_PUMP=0 opts out)**: a host clock thread (2 ms tick)
-  fires guest data callbacks on an EXCLUSIVE cloned vCPU (arch-state
-  copy of main CPU incl. TPIDR_EL0; CPU is non-copyable — copy fields
-  manually) at per-stream period pacing with 500 ms stall resync.
-  Real SMP semantics — mirrors Android's in-process AAudio callback
-  thread; decouples callback cadence from guest API-call frequency (the
-  AAA Android requirement). When active, inline deferral from dispatch
-  arms is DISABLED (single callback mutator). Bounce is snapshotted
-  under `pump_mu` (recursive_mutex) before firing so a callback closing
-  its own device mid-fire can't UAF. SDL/AAudio open/close arms take
-  pump_mu around map mutations.
+- **Callback pump safety**: callbacks run on a separate CPU with TLS from
+  `DynamicLinker::allocate_thread_tls`; a copied `TPIDR_EL0` is never used.
+  `BIFROST_AUDIO_PUMP=0` selects inline dispatch callbacks. The forked child
+  switches to inline delivery because host workers do not survive `fork()`.
+- **SDL audio device IDs**: SDL reserves ID 1 for legacy `SDL_OpenAudio`.
+  `SDL_OpenAudioDevice` IDs start at 2 so legacy pause/close calls cannot
+  alias the first device opened through the device API.
 - **CRITICAL fork contract: host threads don't survive ::fork().** A
   forked child inherits the pump's joinable std::thread OBJECT whose
   real thread lives only in the parent — shutdown's join() futex-waited
   FOREVER, hanging EVERY forked guest at exit (test_pipe rc=137 after
   "CHILD: from parent"; child stuck in futex_wait inside exit_group's
   teardown). Fix: fork_guest's child branch calls
-  `audio_thunk->detach_pump_for_fork_child()` (detach phantom, reset,
-  start_pump() fresh for the child). ANY future emulator-owned host
+  `audio_thunk->detach_pump_for_fork_child()` (detach phantom, reconstruct
+  pump synchronization objects that may have been owned by the vanished
+  worker, clear inherited in-flight callback markers, and switch to inline
+  callback delivery in the child). ANY future emulator-owned host
   thread needs the same treatment in fork_guest.
 - **Guest-side pacing lesson (rudolf-cart shim)**: wall-clock-paced
   fill threads MUST schedule in MICROSECONDS — ms-truncated chunk

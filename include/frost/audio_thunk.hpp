@@ -52,6 +52,7 @@ class Audio;
 // returns x0. Never hand guest function pointers to host libraries.
 using AudioCbRunner = std::function<uint64_t(CPU&, uint64_t fn,
                                              const int64_t* iargs, size_t n)>;
+using AudioCbCpuFactory = std::function<std::unique_ptr<CPU>()>;
 // Forward-declare the pimpl.
 struct AudioThunkImpl;
 class AudioThunk {
@@ -72,32 +73,21 @@ public:
         const std::function<void(const std::string&, uint64_t)>& cb) const;
     // Dispatch a thunk call. Returns 0 on success, -errno on failure.
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
-    // Wire the AudioEngine + borrow-CPU callback runner. Must be called
-    // after init() (Emulator::ensure_thunk_linker_ does this). The engine
-    // pointer is borrowed (owned by Emulator); runner may be null, in
-    // which case guest audio callbacks are dropped.
-    void wire(Audio* engine, CPU* cb_cpu, AudioCbRunner runner);
-    // Guest VA of libc's __libc_single_threaded word. The pump fires
-    // guest callbacks on a second vCPU; glibc must know the process is
-    // multi-threaded or malloc runs LOCK-FREE in both threads and the
-    // heap corrupts (neverball "malloc(): invalid size"). The Emulator
-    // sets this right after wire(); start_pump() clears the word.
-    void set_libc_single_threaded_addr(uint64_t addr);
-    // Start the dedicated-vCPU audio pump (AAA Android path): a host
-    // clock thread fires guest data callbacks on an EXCLUSIVE cloned
-    // vCPU at device-like cadence, decoupled from whatever the guest
-    // main loop is doing. Real SMP semantics — same model as Android's
-    // own AAudio callback thread. When active, inline deferral from
-    // dispatch arms is disabled (single callback mutator). Opt out via
-    // BIFROST_AUDIO_PUMP=0. Safe to call once after wire(); no-op if
-    // already running or no runner was wired.
+    // Wire the AudioEngine + guest callback runner and TLS-aware CPU
+    // factory. Must be called after init(). Both pointers are borrowed
+    // (owned by Emulator); an empty runner/factory leaves callbacks on the
+    // inline fallback path.
+    void wire(Audio* engine, AudioCbRunner runner,
+              AudioCbCpuFactory cpu_factory = {});
+    // Start the callback worker. It runs callbacks on a separate CPU with
+    // its own guest TLS block; inline dispatch callbacks remain the fallback.
     void start_pump();
     // Called in a FORKED CHILD (host ::fork()): the pump host thread
     // does not survive fork(), but the std::thread object does — leaving
-    // it joinable makes shutdown's join() wait forever. Detaches the
-    // phantom thread and restarts a fresh pump for the child.
+    // it joinable makes shutdown's join() wait forever. The child switches
+    // back to inline callback delivery.
     void detach_pump_for_fork_child();
-    // Stop all callback pump threads (called at shutdown before teardown).
+    // Stop callback workers (called before teardown).
     void shutdown();
     // Diagnostics.
     size_t symbol_count() const;

@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <time.h>
 
 static int checks = 0, fails = 0;
 #define CHECK(cond, msg) do { \
@@ -36,14 +38,18 @@ static uint64_t bifrost_dlsym(uint64_t h, const char* sym) {
 #define SYM(h, n) bifrost_dlsym(h, n)
 
 /* guest data callback: fills the bounce with a square wave */
-static uint64_t cb_hits = 0;
+static atomic_uint cb_hits = 0;
+static atomic_uint cb_last_frames = 0;
 static void data_cb(void* stream, void* userdata, void* audioData,
                     int32_t numFrames) {
     (void)stream; (void)userdata;
     int16_t* out = (int16_t*)audioData;
     for (int32_t i = 0; i < numFrames * 2; i++)
-        out[i] = (cb_hits & 1) ? 2000 : -2000;
-    cb_hits++;
+        out[i] = (atomic_load_explicit(&cb_hits, memory_order_relaxed) & 1)
+            ? 2000 : -2000;
+    atomic_store_explicit(&cb_last_frames, (unsigned)numFrames,
+                          memory_order_relaxed);
+    atomic_fetch_add_explicit(&cb_hits, 1, memory_order_release);
 }
 /* OpenSL buffer-queue callback */
 static uint64_t bq_hits = 0;
@@ -61,6 +67,7 @@ int main(void) {
         typedef int (*newb_t)(void**);
         typedef void (*seti_t)(void*, int32_t);
         typedef void (*setcb_t)(void*, void*, void*);
+        typedef void (*setframes_t)(void*, int32_t);
         typedef int (*open_t)(void*, void**);
         typedef int (*req_t)(void*);
         typedef int (*wr_t)(void*, const void*, int32_t, int64_t);
@@ -70,29 +77,46 @@ int main(void) {
         seti_t sf = (seti_t)SYM(ha, "AAudioStreamBuilder_setFormat");
         seti_t sc = (seti_t)SYM(ha, "AAudioStreamBuilder_setChannelCount");
         seti_t sr = (seti_t)SYM(ha, "AAudioStreamBuilder_setSampleRate");
+        setframes_t sframes = (setframes_t)SYM(
+            ha, "AAudioStreamBuilder_setFramesPerDataCallback");
         setcb_t sdcb = (setcb_t)SYM(ha, "AAudioStreamBuilder_setDataCallback");
         open_t op = (open_t)SYM(ha, "AAudioStreamBuilder_openStream");
         req_t st = (req_t)SYM(ha, "AAudioStream_requestStart");
         wr_t wr = (wr_t)SYM(ha, "AAudioStream_write");
         geti_t gst = (geti_t)SYM(ha, "AAudioStream_getState");
         close_t cls = (close_t)SYM(ha, "AAudioStream_close");
-        CHECK(bnew && sf && sc && sr && sdcb && op && st && wr && gst && cls,
+        CHECK(bnew && sf && sc && sr && sframes && sdcb && op && st && wr && gst && cls,
               "AAudio symbols resolve");
-        if (bnew && op && wr) {
+        if (bnew && op && wr && sframes) {
             void* b = NULL;
             CHECK(bnew(&b) == 0 && b != NULL, "builder_new");
             sf(b, 1);       /* I16 */
             sc(b, 2);
             sr(b, 44100);
+            sframes(b, 256);
             sdcb(b, (void*)data_cb, NULL);
             void* stream = NULL;
             CHECK(op(b, &stream) == 0 && stream != NULL, "openStream");
             if (st) (void)st(stream);
             int32_t state = gst ? gst(stream) : -1;
             CHECK(state == 4 /*Started*/, "getState == Started");
+            /* Verify the independent guest-TLS worker invokes callbacks at
+             * the requested frame count, rather than only opening a stream. */
+            for (unsigned i = 0; i < 100 &&
+                    atomic_load_explicit(&cb_hits, memory_order_acquire) == 0;
+                 i++) {
+                const struct timespec delay = { .tv_sec = 0,
+                                                .tv_nsec = 1000000 };
+                nanosleep(&delay, NULL);
+            }
+            CHECK(atomic_load_explicit(&cb_hits, memory_order_acquire) > 0,
+                  "AAudio data callback fired");
+            CHECK(atomic_load_explicit(&cb_last_frames, memory_order_relaxed)
+                      == 256,
+                  "AAudio callback uses configured frame count");
             /* blocking write also works alongside the callback pump */
             CHECK(wr(stream, pcm, 4800, 0) == 4800, "blocking write");
-            if (cls) { (void)st(stream); (void)cls(stream); }
+            if (cls) (void)cls(stream);
         }
     }
 
