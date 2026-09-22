@@ -7,6 +7,7 @@
 //   host   → yggdrasil/host.cpp (path remap + openat passthrough)
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/stdio_node.hpp"
+#include "yggdrasil/host_node.hpp"
 #include "core/memory.h"
 #include <cerrno>
 #include <cstdio>
@@ -39,6 +40,28 @@ std::unique_ptr<Node> Yggdrasil::open(const std::string& guest_path,
     if (node || *err_out != 0) return node;
     // 3. Host passthrough (with BIFROST_ROOT remap)
     return open_host(guest_path, flags, mode, err_out);
+}
+// ── Yggdrasil::open_at: explicit-dirfd open ──────────────────────────
+// Absolute paths ignore dirfd per POSIX (same as open()). Relative paths
+// resolve under host_dirfd, which must be a real host dir fd from
+// resolve_dirfd (AT_FDCWD keeps legacy host-cwd behavior via open()).
+// ProcFS/DevFS only match absolute paths, so relative opens go straight
+// to the confined host helper.
+std::unique_ptr<Node> Yggdrasil::open_at(int host_dirfd,
+                                         const std::string& guest_path,
+                                         int flags, mode_t mode,
+                                         int* err_out) {
+    if (!guest_path.empty() && guest_path[0] == '/')
+        return open(guest_path, flags, mode, err_out);
+    int fd = open_host_at(host_dirfd, guest_path, flags, mode);
+    if (fd < 0 && errno == EINVAL && (flags & O_DIRECT)) {
+        fd = open_host_at(host_dirfd, guest_path, flags & ~O_DIRECT, mode);
+    }
+    if (fd < 0) {
+        *err_out = -errno;
+        return nullptr;
+    }
+    return std::make_unique<HostNode>(fd, flags);
 }
 // ── FdTable ───────────────────────────────────────────────────────────
 FdTable::FdTable() {

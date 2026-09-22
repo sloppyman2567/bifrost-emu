@@ -141,7 +141,26 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             int err = 0;
             // Apply guest umask to the creation mode (kernel behavior).
             mode_t mode = static_cast<mode_t>(a3) & ~emu.guest_umask();
-            auto node = vfs_.open(path, static_cast<int>(a2), mode, &err);
+            std::unique_ptr<yggdrasil::Node> node;
+            if (!path.empty() && path[0] != '/') {
+                // Relative path: honor an explicit dirfd (previously
+                // ignored — the open silently resolved against the HOST
+                // cwd instead of the guest dirfd). AT_FDCWD keeps the
+                // legacy host-cwd behavior; anything else invalid is
+                // EBADF (Linux semantics).
+                int hfd = resolve_dirfd(fds_, a0);
+                if (hfd == -100) {
+                    node = vfs_.open(path, static_cast<int>(a2), mode, &err);
+                } else if (hfd < 0) {
+                    ret_err(EBADF); return 0;
+                } else {
+                    node = vfs_.open_at(hfd, path, static_cast<int>(a2),
+                                        mode, &err);
+                }
+            } else {
+                // Absolute path: dirfd is ignored per POSIX.
+                node = vfs_.open(path, static_cast<int>(a2), mode, &err);
+            }
             if (!node) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(err != 0 ? err : -ENOENT));
                 return 0;
@@ -294,12 +313,18 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously implemented as dup2 (which doesn't exist
             // on AArch64). The real syscall at 33 is mknodat. Forward to
             // host mknodat.
+            // Confined via open_parent: the parent traversal goes through
+            // RESOLVE_IN_ROOT when sandboxed, so a symlink/.. in the path
+            // cannot escape BIFROST_ROOT.
+            std::string guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int hfd = resolve_dirfd(fds_, a0);
-            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+            if (!guest.empty() && guest[0] != '/' && hfd == -1 &&
+                static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
             }
-            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::mknodat(hfd, path.c_str(),
+            auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
+            if (!pd.valid()) { ret_errno(); return 0; }
+            int r = ::mknodat(pd.fd, pd.base.c_str(),
                               static_cast<mode_t>(a2), static_cast<dev_t>(a3));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -370,38 +395,55 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 34: { // mkdirat(dirfd, path, mode)
             // static_cast<int>(a0) which passed the guest fd index
             // directly to the host.
+            // Confined via open_parent (see mknodat above).
+            std::string guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int hfd = resolve_dirfd(fds_, a0);
-            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+            if (!guest.empty() && guest[0] != '/' && hfd == -1 &&
+                static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
             }
-            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
+            auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
+            if (!pd.valid()) { ret_errno(); return 0; }
             mode_t mode = static_cast<mode_t>(a2) & ~emu.guest_umask();
-            int r = ::mkdirat(hfd, path.c_str(), mode);
+            int r = ::mkdirat(pd.fd, pd.base.c_str(), mode);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
         case 35: { // unlinkat(dirfd, path, flags)
+            // Confined via open_parent (see mknodat above).
+            std::string guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int hfd = resolve_dirfd(fds_, a0);
-            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+            if (!guest.empty() && guest[0] != '/' && hfd == -1 &&
+                static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
             }
-            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::unlinkat(hfd, path.c_str(), static_cast<int>(a2));
+            auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
+            if (!pd.valid()) { ret_errno(); return 0; }
+            int r = ::unlinkat(pd.fd, pd.base.c_str(), static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
         case 38: { // renameat(olddirfd, oldpath, newdirfd, newpath)
+            // Both sides confined independently (either side could smuggle
+            // a symlink/.. escape).
+            std::string old_guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            std::string new_guest = yggdrasil::Yggdrasil::read_path(mem_, a3);
             int old_hfd = resolve_dirfd(fds_, a0);
             int new_hfd = resolve_dirfd(fds_, a2);
-            if ((old_hfd == -1 && static_cast<int64_t>(a0) != -100) ||
-                (new_hfd == -1 && static_cast<int64_t>(a2) != -100)) {
+            if ((!old_guest.empty() && old_guest[0] != '/' && old_hfd == -1 &&
+                 static_cast<int64_t>(a0) != -100) ||
+                (!new_guest.empty() && new_guest[0] != '/' && new_hfd == -1 &&
+                 static_cast<int64_t>(a2) != -100)) {
                 ret_err(EBADF); return 0;
             }
-            std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
-            int r = ::renameat(old_hfd, oldp.c_str(), new_hfd, newp.c_str());
+            auto old_pd = yggdrasil::Yggdrasil::open_parent(old_hfd, old_guest);
+            if (!old_pd.valid()) { ret_errno(); return 0; }
+            auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
+            if (!new_pd.valid()) { ret_errno(); return 0; }
+            int r = ::renameat(old_pd.fd, old_pd.base.c_str(),
+                               new_pd.fd, new_pd.base.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
@@ -1142,8 +1184,34 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
             if (hfd < 0) { ret_err(EBADF); return 0; }
+            // Confine like chdir(49): a smuggled outside dirfd (opened via
+            // a legacy AT_FDCWD-relative open while the host cwd was
+            // outside the root) must not move the host cwd out of the
+            // sandbox. Save cwd, verify after, roll back on escape.
+            int saved = -1;
+            bool check = yggdrasil::Yggdrasil::sandbox_inside_root();
+            if (check)
+                saved = ::open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             int r = ::fchdir(hfd);
-            if (r < 0) { ret_errno(); return 0; }
+            if (r < 0) {
+                if (saved >= 0) ::close(saved);
+                ret_errno(); return 0;
+            }
+            if (check) {
+                char cwd[PATH_MAX];
+                bool verified =
+                    ::getcwd(cwd, sizeof(cwd)) &&
+                    yggdrasil::Yggdrasil::path_inside_root(cwd);
+                if (!verified) {
+                    if (saved >= 0) {
+                        ::fchdir(saved);
+                        ::close(saved);
+                    }
+                    ret_err(EACCES);
+                    return 0;
+                }
+                if (saved >= 0) ::close(saved);
+            }
             char buf[PATH_MAX];
             if (::getcwd(buf, sizeof(buf))) {
                 emu.vfs_.apply_chdir(std::string(buf));
@@ -1153,9 +1221,48 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 49: { // chdir(path) — AArch64 49
             std::string guest_path = yggdrasil::Yggdrasil::read_path(mem_, a0);
-            std::string path = yggdrasil::Yggdrasil::remap_path(guest_path);
-            int r = ::chdir(path.c_str());
-            if (r < 0) { ret_errno(); return 0; }
+            // Confine via open+fchdir: a raw chdir() follows symlinks, so
+            // chdir("$ROOT/link-to-/tmp") moved the HOST cwd outside the
+            // sandbox and every later AT_FDCWD-relative open escaped with
+            // it. open_host_dir resolves under RESOLVE_IN_ROOT when a
+            // sandbox is active.
+            int dfd = yggdrasil::Yggdrasil::open_host_dir(guest_path);
+            if (dfd < 0) { ret_errno(); return 0; }
+            // Save the current dir so a failed (escaping) chdir restores
+            // it: POSIX leaves cwd unchanged when chdir fails, and the
+            // pre-existing rollback-to-root broke that (cwd jumped from
+            // /sub to / after a denied chdir).
+            int saved = ::open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            int r = ::fchdir(dfd);
+            int se = errno;
+            ::close(dfd);
+            if (r < 0) {
+                if (saved >= 0) ::close(saved);
+                errno = se; ret_errno(); return 0;
+            }
+            // Relative paths resolve against the host cwd, which may live
+            // outside the sandbox — verify containment afterwards and roll
+            // back when the new cwd escaped. (fchdir(fd) itself is left
+            // alone: chroot-parity for smuggled fds, and host-cwd compat.)
+            if (yggdrasil::Yggdrasil::sandbox_inside_root()) {
+                char cwd[PATH_MAX];
+                // getcwd failure = unverifiable cwd: fail CLOSED (roll
+                // back if possible) rather than accepting blindly. A
+                // failed rollback is best-effort only (nothing left to
+                // restore with); the EACCES still stops the caller from
+                // assuming the chdir landed.
+                bool verified = ::getcwd(cwd, sizeof(cwd)) &&
+                                yggdrasil::Yggdrasil::path_inside_root(cwd);
+                if (!verified) {
+                    if (saved >= 0) {
+                        ::fchdir(saved);
+                        ::close(saved);
+                    }
+                    ret_err(EACCES);
+                    return 0;
+                }
+            }
+            if (saved >= 0) ::close(saved);
             emu.vfs_.apply_chdir(guest_path);
             ret_host(r);
             return 0;
@@ -1240,14 +1347,22 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // returning ENOENT.
             int old_hfd = resolve_dirfd(fds_, a0);
             int new_hfd = resolve_dirfd(fds_, a2);
-            if ((old_hfd == -1 && static_cast<int64_t>(a0) != -100) ||
-                (new_hfd == -1 && static_cast<int64_t>(a2) != -100)) {
+            std::string old_guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            std::string new_guest = yggdrasil::Yggdrasil::read_path(mem_, a3);
+            if ((!old_guest.empty() && old_guest[0] != '/' && old_hfd == -1 &&
+                 static_cast<int64_t>(a0) != -100) ||
+                (!new_guest.empty() && new_guest[0] != '/' && new_hfd == -1 &&
+                 static_cast<int64_t>(a2) != -100)) {
                 ret_err(EBADF); return 0;
             }
-            std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
-            int r = ::linkat(old_hfd, oldp.c_str(),
-                             new_hfd, newp.c_str(),
+            // Both sides confined (see renameat above): the source lookup
+            // and the link creation each resolve their parent confined.
+            auto old_pd = yggdrasil::Yggdrasil::open_parent(old_hfd, old_guest);
+            if (!old_pd.valid()) { ret_errno(); return 0; }
+            auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
+            if (!new_pd.valid()) { ret_errno(); return 0; }
+            int r = ::linkat(old_pd.fd, old_pd.base.c_str(),
+                             new_pd.fd, new_pd.base.c_str(),
                              static_cast<int>(a4));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);

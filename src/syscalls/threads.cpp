@@ -14,7 +14,9 @@
 #include "jit/frostjit.hpp"
 #include "frontend/dynamic_linker.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <cstdio>
 #include <mutex>
 #include <cstring>
 #include <vector>
@@ -51,6 +53,19 @@ namespace clone_flags {
     constexpr uint64_t NEWNET            = 0x40000000;
     constexpr uint64_t IO                = 0x80000000;
 }  // namespace clone_flags
+// Namespace/isolation flags we cannot honor in user-mode emulation.
+// Accepting them silently would give the guest NO isolation while it
+// believes it has some (e.g. container runtimes, sandboxing libs).
+// VFORK/PIDFD keep their existing degraded behavior (documented);
+// only the namespace set fails here. Returns true when flags must be
+// rejected.
+inline bool clone_ns_rejected(uint64_t flags) {
+    constexpr uint64_t kNamespaces =
+        clone_flags::NEWNS | clone_flags::NEWCGROUP | clone_flags::NEWUTS |
+        clone_flags::NEWIPC | clone_flags::NEWUSER | clone_flags::NEWPID |
+        clone_flags::NEWNET;
+    return (flags & kNamespaces) != 0;
+}
 // Resolve a guest address to "name+0x..." using the dynamic linker's loaded
 // objects and their .dynsym. Used by the BIFROST_FUTEX_BT backtrace dump.
 static std::string bt_sym(Emulator& emu, uint64_t addr) {
@@ -162,6 +177,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t ptid_ptr = a2;
             uint64_t tls = a3;       // AArch64: x3 = tls
             uint64_t ctid_ptr = a4;  // AArch64: x4 = ctid
+            if (clone_ns_rejected(flags)) { ret_err(EINVAL); return 0; }
             if (!(flags & clone_flags::VM)) {
                 // ── Fork path (no CLONE_VM) ──
                 // Use host fork() for copy-on-write memory. The child
@@ -248,6 +264,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             (void)pidfd;       // CLONE_PIDFD — not yet supported
             (void)exit_signal; // we always deliver SIGCHLD to parent
+            if (clone_ns_rejected(flags)) { ret_err(EINVAL); return 0; }
             // The child stack top is stack + stack_size (clone3 specifies
             // the stack base and size separately, unlike clone which takes
             // the stack top directly).
@@ -338,8 +355,19 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 new_argv.push_back(arg);
                 argv_ptr += 8;
             }
-            // Read the ELF file.
-            FILE* f = fopen(path.c_str(), "rb");
+            // Read the ELF file through the sandbox-confined open (a raw
+            // fopen() here bypassed BIFROST_ROOT entirely — a guest
+            // symlink inside the root pointing at a host AArch64 binary
+            // would load foreign code as the new program image).
+            FILE* f = nullptr;
+            {
+                int hfd = yggdrasil::Yggdrasil::open_host_fd(
+                    path, O_RDONLY | O_CLOEXEC);
+                if (hfd >= 0) {
+                    f = fdopen(hfd, "rb");
+                    if (!f) ::close(hfd);  // fdopen failure leaves it open
+                }
+            }
             bool is_aarch64 = false;
             bool file_existed = (f != nullptr);
             std::vector<uint8_t> elf_data;

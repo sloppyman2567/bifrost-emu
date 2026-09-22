@@ -817,6 +817,26 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - **Known gap:** `LDAPUR`/`LDAPURB`/`LDAPURH` (ARMv8.4) still decode to
   UNKNOWN→DecodeError. Their encoding differs from `LDUR`; do not guess it —
   confirm against QEMU's a64.decode/ARM ARM before adding.
+- **BIFROST_ROOT sandbox is symlink-confined (2026-09-22).** Lexical `..`
+  normalization alone did not stop symlink escapes (a guest link inside the
+  root pointing at /etc/passwd was followed by host openat). All opens
+  (open/openat/execve) and parent traversals now resolve under a cached
+  root fd via openat2 `RESOLVE_IN_ROOT` (`src/yggdrasil/host.cpp`; cached
+  rootfd leaks on evict so in-flight users never see a recycled fd;
+  unopenable root fails CLOSED with ENOENT; `have_openat2` probes once via
+  `call_once`). Write-capable `*at` (mknodat/mkdirat/unlinkat/renameat/
+  linkat/symlinkat) go through `Yggdrasil::open_parent` (RAII `ParentDir`:
+  confined parent fd + verbatim basename; borrowed rootfd never closed;
+  guest `/` maps to base `"."` on the root). chdir/fchdir verify containment
+  with getcwd afterwards and roll back (unverifiable cwd fails CLOSED).
+  openat honors explicit dirfds (bogus dirfd + relative path = EBADF; absolute
+  paths ignore dirfd per POSIX). `/proc/<numeric-pid>/*` and `/proc/self/mem`
+  are denied (ENOENT) under a root; other `/proc/self/*` keeps host
+  passthrough. clone namespace flags are rejected (EINVAL); read-only
+  `*at` (fstatat/faccessat/readlinkat) are still unconfined (metadata only).
+  No-openat2 kernels fall back to textual confinement (documented
+  degradation). Regression: `ctest/test_sandbox.c` (44 checks, fixtures
+  provisioned by the `Sandbox` section in `scripts/run_tests.sh`).
 - **Shared-JIT multithread safety (`FrostJIT::enter_multithreaded()`,
   2026-09-12).** The default shared-JIT code buffer is RWX (W^X is
   force-disabled in `Emulator::enable_jit`) and several paths rewrite

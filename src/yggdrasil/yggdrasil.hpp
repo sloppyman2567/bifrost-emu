@@ -71,6 +71,53 @@ public:
     // (Defined in yggdrasil/host.cpp — exposed here so syscall handlers
     // can call it for path-based syscalls like unlinkat/renameat/etc.)
     static std::string remap_path(const std::string& guest_path);
+    // Confined raw host open (fd or -1 with errno). Used by open_host
+    // internally and by execve/chdir which need the fd, not a Node.
+    static int open_host_fd(const std::string& guest_path, int flags,
+                            mode_t mode = 0);
+    // Confined open relative to an already-open host dir fd (explicit
+    // guest dirfd). Callers pass only relative paths and real dirfds.
+    static int open_host_at(int host_dirfd, const std::string& relpath,
+                            int flags, mode_t mode = 0);
+    // Confined O_RDONLY|O_DIRECTORY open for chdir preparation.
+    static int open_host_dir(const std::string& guest_path);
+    // Confined parent dir + basename for path syscalls (mkdirat,
+    // unlinkat, renameat, fstatat, ...). The parent traversal — the part
+    // that can walk through symlinks and ".." — is confined with
+    // RESOLVE_IN_ROOT whenever a sandbox (or a confined dirfd) applies;
+    // the basename never contains '/'. Callers use pd.fd/pd.base and do
+    // nothing else: the destructor closes owned fds (leak-proof on all
+    // error paths). Invalid results carry errno (check valid()).
+    struct ParentDir {
+        int fd = -1;
+        bool owned = false;
+        std::string base;
+        ~ParentDir() { if (owned && fd >= 0) ::close(fd); }
+        ParentDir() = default;
+        ParentDir(const ParentDir&) = delete;
+        ParentDir& operator=(const ParentDir&) = delete;
+        ParentDir(ParentDir&& o) noexcept
+            : fd(o.fd), owned(o.owned), base(std::move(o.base)) {
+            o.fd = -1;
+            o.owned = false;
+        }
+        bool valid() const { return fd >= 0 && !base.empty(); }
+    };
+    static ParentDir open_parent(int host_dirfd,
+                                 const std::string& guest_path);
+    // True when a BIFROST_ROOT sandbox is active.
+    static bool sandbox_inside_root();
+    // True when `path` (a canonical getcwd-style path) lies inside the
+    // canonical sandbox root (boundary-aware). False when unresolvable.
+    static bool path_inside_root(const char* path);
+    // Explicit-dirfd open: absolute paths behave exactly like open()
+    // (dirfd ignored per POSIX); relative paths resolve under host_dirfd
+    // (a real host dir fd; AT_FDCWD keeps legacy host-cwd behavior).
+    // ProcFS/DevFS only match absolute paths, so relative opens go
+    // straight to the confined host helper.
+    std::unique_ptr<Node> open_at(int host_dirfd,
+                                  const std::string& guest_path,
+                                  int flags, mode_t mode, int* err_out);
     // Set the ELF path (used by /proc/self/exe). Called once from
     // Emulator::load_elf_file().
     void set_elf_path(const std::string& path) { elf_path_ = path; }

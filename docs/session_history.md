@@ -4330,3 +4330,24 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Leftovers: tools/ir_convert.cpp (bulk helper, untracked — keep or
   delete?), pre-existing stash (STORE_MEM cross-wire, untouched),
   media/binaries (untracked junk, untouched).
+
+## 75. Sandbox hardening: symlink confinement (2026-09-22)
+
+- Closed the BIFROST_ROOT symlink escape: host openat() followed guest
+  symlinks pointing outside the root (read/write/execve). Opens now resolve
+  under a cached root fd via openat2 RESOLVE_IN_ROOT; write-capable *at
+  (mknodat/mkdirat/unlinkat/renameat/linkat/symlinkat) go through
+  Yggdrasil::open_parent (confined parent + verbatim basename).
+- Also: openat honors explicit dirfds (bogus+relative=EBADF, absolute ignores
+  per POSIX), execve/chdir confined, chdir/fchdir verify+rollback (fail
+  closed), /proc/<pid>/* + /proc/self/mem denied, clone namespaces EINVAL.
+  Read-only *at (fstatat/faccessat/readlinkat) deliberately left unconfined.
+- Two review rounds (subagents): round 1 caught the *at/fchdir gaps (fixed);
+  round 2 found 6 minor issues (guest "/" misroute, symlinkat EBADF gating,
+  passthrough exemption parity, rootfd<0 errno, dead fchdir line, vacuous
+  test-12 branch) — all fixed, 43→44 checks.
+- Regression: ctest/test_sandbox.c (44 checks, fixtures in run_tests.sh
+  Sandbox section). Quick suite 224/224 green with hardening in.
+- Rule: the HOST environ (not guest setenv) controls BIFROST_ROOT — musl's
+  environ is separate from the host libc's, so tests take the root from the
+  suite's ENV_PREFIX.

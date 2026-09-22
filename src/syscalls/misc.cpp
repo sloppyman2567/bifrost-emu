@@ -742,9 +742,25 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35).
             // (toybox calls symlinkat() via musl). unlinkat is correctly
             // handled at syscall 35 in fs.cpp.
+            // The target (oldp) is stored verbatim — never resolved now —
+            // so it needs no remap. The link CREATION (newp) is confined
+            // via open_parent; the guest dirfd is resolved through FdTable
+            // (it was previously passed raw to the host).
             std::string oldp = Yggdrasil::read_path(mem_, a0);
-            std::string newp = Yggdrasil::read_path(mem_, a2);
-            int r = ::symlinkat(oldp.c_str(), static_cast<int>(a1), newp.c_str());
+            std::string new_guest = Yggdrasil::read_path(mem_, a2);
+            // Absolute newpath ignores dirfd per POSIX (mirror the fs.cpp
+            // convention: EBADF only for relative + bad dirfd).
+            int hfd = AT_FDCWD;
+            if (!new_guest.empty() && new_guest[0] != '/' &&
+                static_cast<int64_t>(a1) != -100) {
+                auto node = fds_.get(static_cast<int>(a1));
+                if (!node) { ret_err(EBADF); return 0; }
+                hfd = node->host_fd();
+                if (hfd < 0) { ret_err(EBADF); return 0; }
+            }
+            auto pd = yggdrasil::Yggdrasil::open_parent(hfd, new_guest);
+            if (!pd.valid()) { ret_errno(); return 0; }
+            int r = ::symlinkat(oldp.c_str(), pd.fd, pd.base.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }

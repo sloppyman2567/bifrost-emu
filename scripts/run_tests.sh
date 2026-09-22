@@ -880,6 +880,23 @@ START=$(date +%s)
 
 [ "$RUN_UNIT" = "1" ]        && run_category "Unit tests"        "${UNIT_TESTS[@]}"
 [ "$RUN_INTEGRATION" = "1" ] && run_category "Integration tests" "${INTEGRATION_TESTS[@]}"
+# Sandbox confinement tests — provision a scratch root with an escaping
+# symlink + outside canary, run with BIFROST_ROOT pointed at it, clean up.
+# The test binary takes no fixture paths (fixed guest-absolute paths).
+if [ "$RUN_INTEGRATION" = "1" ]; then
+    SBX=/tmp/bifrost-sbx-test
+    rm -rf "$SBX" && mkdir -p "$SBX/root/sub" "$SBX/outside" && \
+    printf 'hello\n' > "$SBX/root/sub/real.txt" && \
+    printf 'CANARY-DO-NOT-READ\n' > "$SBX/outside/secret" && \
+    ln -sf "$SBX/outside/secret" "$SBX/root/sub/evil" && \
+    ln -sf "$SBX/outside" "$SBX/root/sub/outlink" && {
+        OLD_ENV_PREFIX="$ENV_PREFIX"
+        ENV_PREFIX="BIFROST_ROOT=$SBX/root ${ENV_PREFIX}"
+        run_category "Sandbox" "test_sandbox|ctest/test_sandbox.elf||10|checks passed"
+        ENV_PREFIX="$OLD_ENV_PREFIX"
+    }
+    rm -rf "$SBX"
+fi
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"
 [ "$RUN_TOYBOX" = "1" ]      && run_category "Toybox tests"      "${TOYBOX_TESTS[@]}"
 [ "$RUN_REALWORLD" = "1" ]   && run_category "Real-world binaries" "${REALWORLD_TESTS[@]}"
