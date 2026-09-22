@@ -113,15 +113,17 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
             // memory; flags_op = register count (1..4), regs contiguous.
             // cond=1 (broadcast, `stp q0,q0`) keeps src2 constant across all
             // halves — only that one register needs pinning.
-            uint32_t n = inst.flags_op ? inst.flags_op : 1;
+            const St16Params sp = inst.st16_params();
+            uint32_t n = sp.count ? sp.count : 1;
             for (uint32_t i = 0; i < n; i++) {
-                int v = (inst.cond && i) ? (inst.src2 & 31) : ((inst.src2 + i) & 31);
+                int v = (sp.broadcast && i) ? (inst.src2 & 31) : ((inst.src2 + i) & 31);
                 if (!vec_used[v]) { vec_used[v] = true; used_count++; }
             }
         } else if (inst.op == IROp::SIMD_LD16) {
             // Guest 16-byte load: dest is the FIRST vector destination;
             // flags_op = register count (1..4), regs contiguous.
-            uint32_t n = inst.flags_op ? inst.flags_op : 1;
+            const Ld16Params lp = inst.ld16_params();
+            uint32_t n = lp.count ? lp.count : 1;
             for (uint32_t i = 0; i < n; i++) {
                 int v = (inst.dest + i) & 31;
                 if (!vec_used[v]) { vec_used[v] = true; used_count++; }
@@ -227,7 +229,7 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
                 break;
             case IROp::FP_CMP:
                 fp_touch(inst.src1, fp_use);
-                if (!(inst.imm & 1)) fp_touch(inst.src2, fp_use);  // register form only
+                if (!inst.fp_cmp_params().with_zero) fp_touch(inst.src2, fp_use);  // register form only
                 break;
             case IROp::FP_MOVI:
                 fp_touch(inst.dest, fp_use);
@@ -242,14 +244,14 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
                 break;
             case IROp::FP_F2I_FIXED:
                 fp_touch(inst.src1, fp_use);
-                if (inst.imms & 1) {
+                if (inst.fp_f2i_fixed_params().fp_reg) {
                     fp_touch(inst.dest, fp_use);  // fp_dest subop
                     fp_written[inst.dest] = true;
                 }
                 break;
             case IROp::FP_I2F_FIXED:
                 fp_touch(inst.dest, fp_use);
-                if (inst.imms & 1) fp_touch(inst.src1, fp_use);  // fp_src subop
+                if (inst.fp_i2f_fixed_params().fp_reg) fp_touch(inst.src1, fp_use);  // fp_src subop
                 break;
             case IROp::FCVT_S2D:
             case IROp::FCVT_D2S:
@@ -262,7 +264,7 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
             case IROp::FNMADD:
             case IROp::FNMSUB:
                 fp_touch(inst.dest, fp_use); fp_touch(inst.src1, fp_use);
-                fp_touch(inst.src2, fp_use); fp_touch(inst.imm, fp_use);  // Va (acc)
+                fp_touch(inst.src2, fp_use); fp_touch(inst.fp_fused_params().acc, fp_use);  // Va (acc)
                 fp_written[inst.dest] = true;
                 break;
             case IROp::FMOV_G2F:
@@ -273,10 +275,10 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
                 fp_touch(inst.src1, fp_use);
                 break;
             case IROp::LOAD_REG:
-                if (inst.sf) fp_touch(inst.src1, fp_use);  // sf=1: load_fp_reg
+                if (inst.is_fp_load()) fp_touch(inst.src1, fp_use);  // sf=1: load_fp_reg
                 break;
             case IROp::STORE_REG:
-                if (inst.sf) fp_touch(inst.dest, fp_use);  // sf=1: store_fp_reg
+                if (inst.is_fp_store()) fp_touch(inst.dest, fp_use);  // sf=1: store_fp_reg
                 break;
             default:
                 break;  // GPR-only / call — no FP regs

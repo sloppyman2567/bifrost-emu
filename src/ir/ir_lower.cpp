@@ -19,17 +19,17 @@ uint16_t swar_swap(IRBlock& b, uint16_t v, uint64_t mask, int n) {
     uint16_t n_v    = load_imm(b, static_cast<uint64_t>(n));
     // hi = (v & mask) << n
     uint16_t kept   = g_alloc.alloc();
-    emit(b, IROp::AND, kept, v, mask_v);
+    b.insts.push_back(IRInst::make(IROp::AND, kept, v, mask_v));
     uint16_t hi     = g_alloc.alloc();
-    emit(b, IROp::SHL, hi, kept, n_v);
+    b.insts.push_back(IRInst::make(IROp::SHL, hi, kept, n_v));
     // lo = (v >> n) & mask
     uint16_t shr    = g_alloc.alloc();
-    emit(b, IROp::SHR, shr, v, n_v);
+    b.insts.push_back(IRInst::make(IROp::SHR, shr, v, n_v));
     uint16_t lo     = g_alloc.alloc();
-    emit(b, IROp::AND, lo, shr, mask_v);
+    b.insts.push_back(IRInst::make(IROp::AND, lo, shr, mask_v));
     // out = hi | lo
     uint16_t out    = g_alloc.alloc();
-    emit(b, IROp::OR, out, hi, lo);
+    b.insts.push_back(IRInst::make(IROp::OR, out, hi, lo));
     return out;
 }
 // 64-bit bit-reversal via 6 SWAR stages:
@@ -47,9 +47,9 @@ uint16_t rbit64_ir(IRBlock& b, uint16_t v) {
     v = swar_swap(b, v, 0x0000FFFF0000FFFFULL, 16);
     // Final 32-bit swap: out = (v << 32) | (v >> 32). No mask needed.
     uint16_t n32 = load_imm(b, 32);
-    uint16_t hi  = g_alloc.alloc(); emit(b, IROp::SHL, hi, v, n32);
-    uint16_t lo  = g_alloc.alloc(); emit(b, IROp::SHR, lo, v, n32);
-    uint16_t out = g_alloc.alloc(); emit(b, IROp::OR,  out, hi, lo);
+    uint16_t hi  = g_alloc.alloc(); b.insts.push_back(IRInst::make(IROp::SHL, hi, v, n32));
+    uint16_t lo  = g_alloc.alloc(); b.insts.push_back(IRInst::make(IROp::SHR, lo, v, n32));
+    uint16_t out = g_alloc.alloc(); b.insts.push_back(IRInst::make(IROp::OR, out, hi, lo));
     return out;
 }
 // 32-bit bit-reversal: same idea, 5 stages (no final 32-bit swap).

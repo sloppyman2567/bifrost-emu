@@ -46,7 +46,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     if (translate_mem(block, d, cur_pc)) return false;
     switch (d.cls) {
         case InstClass::HINT:
-            emit(block, IROp::NOP);
+            block.insts.push_back(IRInst::make(IROp::NOP));
             return false;
         // ── MOVZ / MOVN / MOVK ───────────────────────────────────────
         case InstClass::MOVZ: {
@@ -70,9 +70,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t mv = load_imm(block, mask);
             uint16_t bits = load_imm(block, static_cast<uint64_t>(d.imm16) << (d.hw * 16));
             uint16_t masked = g_alloc.alloc();
-            emit(block, IROp::AND, masked, cur, mv);
+            block.insts.push_back(IRInst::make(IROp::AND, masked, cur, mv));
             uint16_t result = g_alloc.alloc();
-            emit(block, IROp::OR, result, masked, bits);
+            block.insts.push_back(IRInst::make(IROp::OR, result, masked, bits));
             store_arm_reg(block, d.rd, result);
             return false;
         }
@@ -141,7 +141,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             IROp op = (d.cls == InstClass::ADD_REG || d.cls == InstClass::ADD_IMM)
                       ? IROp::ADD : IROp::SUB;
             uint16_t r = g_alloc.alloc();
-            emit(block, op, r, a, b);
+            block.insts.push_back(IRInst::make(op, r, a, b));
             r = zext_if_32bit(block, r, d.sf);
             // For immediate AND extended-register forms, rd=31 writes SP
             // (when !set_flags). The decoder sets d.writes_sp accordingly.
@@ -200,8 +200,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             bool is_add = (d.cls == InstClass::ADDS_REG || d.cls == InstClass::ADDS_IMM);
             uint16_t r = g_alloc.alloc();
-            emit(block, is_add ? IROp::ADDS : IROp::SUBS, r, a, b,
-                 d.sf ? 64 : 32, 0, is_add ? 0 : 1);  // width = 32 or 64
+            AddSubParams ap;
+            ap.bits = d.sf ? 64 : 32;
+            ap.is_sub = !is_add;
+            emit_addsub(block, is_add ? IROp::ADDS : IROp::SUBS, r, a, b,
+                        ap, cur_pc);  // width = 32 or 64
             // CMP (SUBS XZR, ...) doesn't write Rd.
             if (d.rd != 31) {
                 r = zext_if_32bit(block, r, d.sf);
@@ -223,8 +226,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // dest) off inst.width. Hardcoding 0 made every 32-bit
                 // adcs/sbcs execute as 64-bit — x86 CF came out of bit 63
                 // (never set for W-sized inputs), so ARM C was stuck at 0.
-                emit(block, is_sub ? IROp::SBCS : IROp::ADCS, r, a, b,
-                     d.sf ? 64 : 32, 0, is_sub ? 1 : 0);
+                AddSubParams ap;
+                ap.bits = d.sf ? 64 : 32;
+                ap.is_sub = is_sub;
+                emit_addsub(block, is_sub ? IROp::SBCS : IROp::ADCS, r, a, b,
+                            ap, cur_pc);
             } else {
                 // No-flag ADC/SBC: decompose into CSEL + ADD (+ NOT for SBC).
                 //
@@ -248,22 +254,24 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint16_t zero = load_imm(block, 0);
                 // cond=2 (CS = carry set), flags_op=0
                 uint16_t c_val = g_alloc.alloc();
-                emit(block, IROp::CSEL, c_val, one, zero, 0,
-                     2 /*CS*/, 0, 0, cur_pc);
+                CselParams cp;
+                cp.cond = 2;  // CS
+                cp.rd_slot = 0;
+                emit_csel(block, c_val, one, zero, cp, cur_pc);
                 uint16_t op1;
                 if (is_sub) {
                     // op1 = Rn + ~Rm
                     uint16_t not_b = g_alloc.alloc();
-                    emit(block, IROp::NOT, not_b, b);
+                    block.insts.push_back(IRInst::make(IROp::NOT, not_b, b, 0));
                     op1 = g_alloc.alloc();
-                    emit(block, IROp::ADD, op1, a, not_b);
+                    block.insts.push_back(IRInst::make(IROp::ADD, op1, a, not_b));
                 } else {
                     // op1 = Rn + Rm
                     op1 = g_alloc.alloc();
-                    emit(block, IROp::ADD, op1, a, b);
+                    block.insts.push_back(IRInst::make(IROp::ADD, op1, a, b));
                 }
                 // r = op1 + c_val
-                emit(block, IROp::ADD, r, op1, c_val);
+                block.insts.push_back(IRInst::make(IROp::ADD, r, op1, c_val));
             }
             if (d.rd != 31) {
                 r = zext_if_32bit(block, r, d.sf);
@@ -297,7 +305,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // N=1 inverts the register operand (BIC/ORN/EON/BICS).
                 if (d.N) {
                     uint16_t inverted = g_alloc.alloc();
-                    emit(block, IROp::NOT, inverted, b);
+                    block.insts.push_back(IRInst::make(IROp::NOT, inverted, b, 0));
                     b = inverted;
                 }
             }
@@ -316,11 +324,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // (x86 SF comes from bit 63 of the 64-bit test, so a W-form
                 // ANDS/TST would leave ARM N stuck at 0 and misroute every
                 // b.mi/b.pl/csel-mi consumer).
-                emit(block, IROp::TST, 0, a, b);
-                block.insts.back().sf = d.sf;
+                TstParams tp;
+                tp.sf = d.sf;
+                emit_tst(block, a, b, tp, cur_pc);
             }
             uint16_t r = g_alloc.alloc();
-            emit(block, op, r, a, b);
+            block.insts.push_back(IRInst::make(op, r, a, b));
             if (d.rd != 31) {
                 r = zext_if_32bit(block, r, d.sf);
                 store_arm_reg(block, d.rd, r);
@@ -332,11 +341,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t rn = load_arm_reg(block, (d.rn == 31) ? 32 : d.rn);
             uint16_t rm = load_arm_reg(block, (d.rm == 31) ? 32 : d.rm);
             uint16_t prod = g_alloc.alloc();
-            emit(block, IROp::MUL, prod, rn, rm);
+            block.insts.push_back(IRInst::make(IROp::MUL, prod, rn, rm));
             uint16_t ra = load_arm_reg(block, (d.ra == 31) ? 32 : d.ra);
             uint16_t result = g_alloc.alloc();
-            emit(block, d.cls == InstClass::MADD ? IROp::ADD : IROp::SUB,
-                 result, ra, prod);
+            block.insts.push_back(IRInst::make(
+                d.cls == InstClass::MADD ? IROp::ADD : IROp::SUB,
+                result, ra, prod));
             result = zext_if_32bit(block, result, d.sf);
             store_arm_reg(block, d.rd, result);
             return false;
@@ -359,7 +369,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // 32-bit register read zero-extends). Same fix as apply_shift.
             if (d.cls == InstClass::ASR && !d.sf) {
                 uint16_t sext = g_alloc.alloc();
-                emit(block, IROp::SEXT, sext, a, 0, 32);
+                emit_sext(block, sext, a, 32);
                 a = sext;
             }
             // Any 32-bit variable shift: set width=32 so the JIT uses the
@@ -370,7 +380,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // instead of 0x800 and shredded the guest heap).
             uint8_t width = !d.sf ? 32 : 0;
             uint16_t r = g_alloc.alloc();
-            emit(block, op, r, a, s, width);
+            emit_gpr_shift(block, op, r, a, s, GprShiftParams{width});
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -392,7 +402,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             IROp op = (d.cls == InstClass::SBFM) ? IROp::SBFM
                     : IROp::UBFM;
             uint16_t r = g_alloc.alloc();
-            emit_bf(block, op, r, a, 0, d.immr, d.imms, d.sf ? 1 : 0, cur_pc);
+            BfParams bp;
+            bp.immr = d.immr;
+            bp.imms = d.imms;
+            bp.sf = d.sf;
+            emit_bf_typed(block, op, r, a, bp, cur_pc);
             store_arm_reg(block, d.rd, r, d.writes_sp);
             return false;
         }
@@ -428,14 +442,16 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // Without it a dirty Xm[63:32] shifts down into the result.
                 uint16_t sh_hi = load_imm(block, static_cast<uint64_t>(width - lsb));
                 uint16_t hi = g_alloc.alloc();
-                emit(block, IROp::SHL, hi, rn_v, sh_hi, d.sf ? 64 : 32);
+                emit_gpr_shift(block, IROp::SHL, hi, rn_v, sh_hi,
+                               GprShiftParams{static_cast<uint8_t>(d.sf ? 64 : 32)});
                 // lo_part = Rm >> lsb
                 uint16_t sh_lo = load_imm(block, static_cast<uint64_t>(lsb));
                 uint16_t lo = g_alloc.alloc();
-                emit(block, IROp::SHR, lo, rm_v, sh_lo, d.sf ? 64 : 32);
+                emit_gpr_shift(block, IROp::SHR, lo, rm_v, sh_lo,
+                               GprShiftParams{static_cast<uint8_t>(d.sf ? 64 : 32)});
                 // result = hi | lo
                 result = g_alloc.alloc();
-                emit(block, IROp::OR, result, hi, lo);
+                block.insts.push_back(IRInst::make(IROp::OR, result, hi, lo));
             }
             result = zext_if_32bit(block, result, d.sf);
             store_arm_reg(block, d.rd, result);
@@ -478,23 +494,25 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint16_t sh_hi = load_imm(block, width - immr);
                 uint16_t sh_lo = load_imm(block, immr);
                 rot_hi = g_alloc.alloc();
-                emit(block, IROp::SHL, rot_hi, rn_v, sh_hi, d.sf ? 64 : 32);
+                emit_gpr_shift(block, IROp::SHL, rot_hi, rn_v, sh_hi,
+                               GprShiftParams{static_cast<uint8_t>(d.sf ? 64 : 32)});
                 rot_lo = g_alloc.alloc();
-                emit(block, IROp::SHR, rot_lo, rn_v, sh_lo, d.sf ? 64 : 32);
+                emit_gpr_shift(block, IROp::SHR, rot_lo, rn_v, sh_lo,
+                               GprShiftParams{static_cast<uint8_t>(d.sf ? 64 : 32)});
                 rotated = g_alloc.alloc();
-                emit(block, IROp::OR, rotated, rot_hi, rot_lo);
+                block.insts.push_back(IRInst::make(IROp::OR, rotated, rot_hi, rot_lo));
             }
             // field = rotated & mask
             uint16_t mask_v = load_imm(block, mask);
             uint16_t field = g_alloc.alloc();
-            emit(block, IROp::AND, field, rotated, mask_v);
+            block.insts.push_back(IRInst::make(IROp::AND, field, rotated, mask_v));
             // cleared = Rd & ~mask
             uint16_t notmask_v = load_imm(block, notmask);
             uint16_t cleared = g_alloc.alloc();
-            emit(block, IROp::AND, cleared, rd_v, notmask_v);
+            block.insts.push_back(IRInst::make(IROp::AND, cleared, rd_v, notmask_v));
             // result = cleared | field
             uint16_t result = g_alloc.alloc();
-            emit(block, IROp::OR, result, cleared, field);
+            block.insts.push_back(IRInst::make(IROp::OR, result, cleared, field));
             store_arm_reg(block, d.rd, result);
             return false;
         }
@@ -513,20 +531,23 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             if (d.cls == InstClass::CSINC) {
                 uint16_t one = load_imm(block, 1);
                 uint16_t inc = g_alloc.alloc();
-                emit(block, IROp::ADD, inc, rm_v, one);
+                block.insts.push_back(IRInst::make(IROp::ADD, inc, rm_v, one));
                 sel_src2 = inc;
             } else if (d.cls == InstClass::CSINV) {
                 uint16_t inv = g_alloc.alloc();
-                emit(block, IROp::NOT, inv, rm_v);
+                block.insts.push_back(IRInst::make(IROp::NOT, inv, rm_v, 0));
                 sel_src2 = inv;
             } else if (d.cls == InstClass::CSNEG) {
                 uint16_t neg = g_alloc.alloc();
-                emit(block, IROp::NEG, neg, rm_v);
+                block.insts.push_back(IRInst::make(IROp::NEG, neg, rm_v, 0));
                 sel_src2 = neg;
             }
             // CSEL: dest = cond ? rn : sel_src2
             uint16_t r = g_alloc.alloc();
-            emit(block, IROp::CSEL, r, rn_v, sel_src2, 0, d.cond, 0, d.rd, cur_pc);
+            CselParams cp;
+            cp.cond = d.cond;
+            cp.rd_slot = d.rd;
+            emit_csel(block, r, rn_v, sel_src2, cp, cur_pc);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -542,8 +563,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             bool is_sub = (d.cls == InstClass::CCMP);
             // CCMP: if cond then set flags from rn - rm else set imm nzcv.
-            emit(block, IROp::CCMP, 0, rn_v, rm_v, d.nzcv_field,
-                 d.cond, is_sub ? 1 : 0, 0, cur_pc);
+            CcmpParams cp;
+            cp.nzcv = d.nzcv_field;
+            cp.cond = d.cond;
+            cp.is_sub = is_sub;
+            cp.sf = d.sf;
+            emit_ccmp(block, rn_v, rm_v, cp, cur_pc);
             // so the JIT can emit the correct sub/add width. Without this,
             // the JIT always uses 64-bit sub, which computes the Sign Flag
             // from bit 63 instead of bit 31 for 32-bit CCMP — causing the
@@ -553,7 +578,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // of the curl --version crash: a 32-bit ccmp w3, #2, #0, cs
             // computed wrong N, which caused a downstream conditional
             // branch to take the wrong path, leading to a NULL deref.
-            block.insts.back().sf = d.sf ? 1 : 0;
+            // (sf now rides in CcmpParams — no post-hoc patch.)
             return false;
         }
         // ── 1-source data processing: CLZ/CLS/RBIT/REV* ──────────────
@@ -574,7 +599,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::CLZ: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t r = g_alloc.alloc();
-            emit(block, IROp::CLZ, r, a, 0, d.sf ? 64 : 32, 0, 0, d.rd, cur_pc);
+            ClzParams cp;
+            cp.bits = d.sf ? 64 : 32;
+            cp.rd_slot = d.rd;
+            emit_clz(block, r, a, cp, cur_pc);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -582,7 +610,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::REV: {  // REV (64-bit byte-swap) — native BSWAP
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t r = g_alloc.alloc();
-            emit(block, IROp::REV64, r, a, 0, d.sf ? 64 : 32, 0, 0, d.rd, cur_pc);
+            ClzParams cp;
+            cp.bits = d.sf ? 64 : 32;
+            cp.rd_slot = d.rd;
+            emit_rev64(block, r, a, cp, cur_pc);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -629,19 +660,22 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // sign bit set (e.g., CLS(-1) returned -1 instead of 31).
             if (!d.sf) {
                 uint16_t z = g_alloc.alloc();
-                emit(block, IROp::SEXT, z, v, 0, 32);
+                emit_sext(block, z, v, 32);
                 v = z;
             }
             uint16_t sh = load_imm(block, static_cast<uint64_t>(width - 1));
             uint16_t sign = g_alloc.alloc();
-            emit(block, IROp::SAR, sign, v, sh);
+            block.insts.push_back(IRInst::make(IROp::SAR, sign, v, sh));
             uint16_t xored = g_alloc.alloc();
-            emit(block, IROp::XOR, xored, v, sign);
+            block.insts.push_back(IRInst::make(IROp::XOR, xored, v, sign));
             uint16_t clz = g_alloc.alloc();
-            emit(block, IROp::CLZ, clz, xored, 0, static_cast<uint8_t>(width));
+            ClzParams cp;
+            cp.bits = static_cast<uint8_t>(width);
+            cp.rd_slot = 0;
+            emit_clz(block, clz, xored, cp, 0);
             uint16_t one = load_imm(block, 1);
             uint16_t r = g_alloc.alloc();
-            emit(block, IROp::SUB, r, clz, one);
+            block.insts.push_back(IRInst::make(IROp::SUB, r, clz, one));
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -655,7 +689,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // 32-bit RBIT: ZEXT input to clear high bits, decompose,
                 // ZEXT result.
                 uint16_t z = g_alloc.alloc();
-                emit(block, IROp::ZEXT, z, a, 0, 32);
+                emit_zext(block, z, a, 32);
                 r = rbit32_ir(block, z);
                 r = zext_if_32bit(block, r, /*sf=*/false);
             }
@@ -681,8 +715,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
             uint16_t r = g_alloc.alloc();
-            emit(block, d.cls == InstClass::UDIV ? IROp::UDIV : IROp::SDIV,
-                 r, a, b, d.sf ? 64 : 32, 0, 0, 0, cur_pc);
+            DivParams dp;
+            dp.bits = d.sf ? 64 : 32;
+            emit_div(block, d.cls == InstClass::UDIV ? IROp::UDIV : IROp::SDIV,
+                     r, a, b, dp, cur_pc);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -694,13 +730,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     uint16_t lr = load_imm(block, cur_pc + 4);
                     store_arm_reg(block, 30, lr);
                     uint64_t target = cur_pc + d.imm;
-                    emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
+                    emit_bl_call(block, target, cur_pc);
                     return false;
                 }
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
                 uint64_t target = cur_pc + d.imm;
-                emit(block, IROp::BRCOND_FALLTHRU, 0, 0, 0, 0, 14 /*AL*/, 0, target, cur_pc);
+                emit_brcond_fallthru(block, target, cur_pc);
                 block.ends_with_branch = true;
                 return true;
             }
@@ -708,7 +744,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // B is unconditional — encode as BRCOND with cond=AL (always).
             // Using BRCOND_FALLTHRU signals to the codegen that
             // the branch is unconditional and there's no fall-through.
-            emit(block, IROp::BRCOND_FALLTHRU, 0, 0, 0, 0, 14 /*AL*/, 0, target, cur_pc);
+            emit_brcond_fallthru(block, target, cur_pc);
             block.ends_with_branch = true;
             return true;
         }
@@ -722,26 +758,29 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // pointers): the worldgen noise `.compute` wrappers and
                     // recursion otherwise re-dispatch on every indirect call.
                     uint16_t target = load_arm_reg(block, d.rn);
-                    emit(block, IROp::BLR_CALL, 0, target);
+                    block.insts.push_back(IRInst::make(IROp::BLR_CALL, 0, target, 0));
                     return false;  // does NOT end the block
                 }
             }
             uint16_t target = load_arm_reg(block, d.rn);
-            emit(block, IROp::BR, 0, target);
+            block.insts.push_back(IRInst::make(IROp::BR, 0, target, 0));
             block.ends_with_branch = true;
             return true;
         }
         // ── RET ─────────────────────────────────────────────────────
         case InstClass::RET: {
             uint16_t target = load_arm_reg(block, d.rn);
-            emit(block, IROp::BR, 0, target);
+            block.insts.push_back(IRInst::make(IROp::BR, 0, target, 0));
             block.ends_with_branch = true;
             return true;
         }
         // ── Bcond ───────────────────────────────────────────────────
         case InstClass::Bcond: {
             uint64_t target = cur_pc + d.imm;
-            emit(block, IROp::BRCOND, 0, 0, 0, 0, d.cond, 0, target, cur_pc);
+            BrCondParams bp;
+            bp.cond = d.cond;
+            bp.target = target;
+            emit_brcond(block, bp, cur_pc);
             block.ends_with_branch = true;
             return true;
         }
@@ -755,13 +794,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t val = load_arm_reg(block, d.rt);
             uint64_t target = cur_pc + d.imm;
             uint8_t cond = (d.cls == InstClass::CBZ) ? 0 /*EQ*/ : 1 /*NE*/;
-            emit(block, IROp::BRCOND_ZERO, 0, val, 0, 0, cond, 0, target, cur_pc);
-            // Record sf: W-form CBZ/CBNZ test ONLY the low 32 bits. The
-            // codegen's test is 64-bit, so without masking, dirty bits
-            // [63:32] (routine in hand-written asm like glibc's
-            // __strlen_asimd, which keeps fold state across `cbnz w3`)
-            // flip the branch and corrupt the result.
-            block.insts.back().sf = d.sf;
+            BrCondZeroParams bp;
+            bp.cond = cond;
+            bp.target = target;
+            // W-form tests the low 32 bits only (dirty [63:32], routine
+            // in hand-written asm like glibc's __strlen_asimd, would
+            // otherwise flip the branch).
+            bp.sf = d.sf;
+            emit_brcond_zero(block, val, bp, cur_pc);
             block.ends_with_branch = true;
             return true;
         }
@@ -776,7 +816,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint64_t target = cur_pc + d.imm;
             uint8_t cond = (d.cls == InstClass::TBZ) ? 0 /*EQ*/ : 1 /*NE*/;
             uint8_t bit = static_cast<uint8_t>(d.imm_u & 0x3F);
-            emit(block, IROp::BRCOND_BIT, 0, val, 0, bit, cond, 0, target, cur_pc);
+            BrCondBitParams bp;
+            bp.bit = bit;
+            bp.cond = cond;
+            bp.target = target;
+            emit_brcond_bit(block, val, bp, cur_pc);
             block.ends_with_branch = true;
             return true;
         }
@@ -794,7 +838,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── SVC ─────────────────────────────────────────────────────
         case InstClass::SVC:
         case InstClass::SVC_IMM:
-            emit(block, IROp::SVC, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            block.insts.push_back(IRInst::make(IROp::SVC, 0, 0, 0, 0, cur_pc));
             return true;  // ends block (syscall may modify PC)
         // ── MSR / MRS (system reg access) ───────────────────────────
         case InstClass::MSR: case InstClass::MSR_SYS:
@@ -810,23 +854,23 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             bool is_read = (d.cls == InstClass::MRS || d.cls == InstClass::MRS_SYS);
             if (is_read) {
                 uint16_t r = g_alloc.alloc();
-                emit(block, IROp::MRS, r, 0, 0, 0, 0, 0, sys_idx, cur_pc);
+                emit_mrs(block, r, sys_idx, cur_pc);
                 store_arm_reg(block, d.rt, r);
             } else {
                 uint16_t v = load_arm_reg(block, d.rt);
-                emit(block, IROp::MSR, 0, v, 0, 0, 0, 0, sys_idx, cur_pc);
+                emit_msr(block, v, sys_idx, cur_pc);
             }
             return false;
         }
         // ── BRK / HLT (terminators) ─────────────────────────────────
         case InstClass::BRK: case InstClass::BRK_IMM:
         case InstClass::HLT: case InstClass::HLT_IMM:
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
             return true;
         // ── CLREX / BARRIER ─────────────────────────────────────────
         case InstClass::CLREX: case InstClass::CLREX_INST:
         case InstClass::BARRIER:
-            emit(block, IROp::NOP);
+            block.insts.push_back(IRInst::make(IROp::NOP));
             return false;
         // ── SMADDL / UMADDL (widening multiply-accumulate) ─────────
         case InstClass::SMADDL: case InstClass::UMADDL: {
@@ -861,8 +905,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
             uint16_t r = g_alloc.alloc();
-            emit(block, d.cls == InstClass::SMULH ? IROp::SMULH : IROp::UMULH,
-                 r, a, b, 0, 0, 0, 0, cur_pc);
+            block.insts.push_back(IRInst::make(
+                d.cls == InstClass::SMULH ? IROp::SMULH : IROp::UMULH,
+                r, a, b, 0, cur_pc));
             store_arm_reg(block, d.rd, r);
             return false;
         }
@@ -885,7 +930,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     fprintf(stderr, "\n");
                 }
             }
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
             return false;
         }
     }

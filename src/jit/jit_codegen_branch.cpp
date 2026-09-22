@@ -132,6 +132,7 @@ FrostJIT::FlagMatSkip FrostJIT::flag_mat_decision(uint64_t target_pc) {
 int FrostJIT::compile_ir_branch(const IRInst& inst) {
     switch (inst.op) {
         case IROp::BRCOND_ZERO: {
+            const BrCondZeroParams bp = inst.brcond_zero_params();
             // CBZ/CBNZ: branch on (val == 0) without touching flags.
             // cond=0 (EQ) → branch if val == 0
             // cond=1 (NE) → branch if val != 0
@@ -174,13 +175,13 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // glibc __strlen_asimd keeps fold state across `cbnz w3`),
             // so mask RAX before the 64-bit test — mov eax,eax zeroes
             // bits [63:32].
-            if (!inst.sf) {
+            if (!bp.sf) {
                 emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
             }
             // test rax, rax
             emit_test_reg(RAX, RAX);
             // jcc to taken target
-            uint8_t cc = (inst.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
+            uint8_t cc = (bp.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
@@ -204,13 +205,13 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // re-runs the prologue, whose preloads read STALE cpu.regs[]
             // for the deferred pins (infinite loop).
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (inst.imm == current_start_pc_);
+            bool is_selfloop = (bp.target == current_start_pc_);
             if (is_selfloop && !no_selfloop_) {
                 has_selfloop_slot_ = true;
                 selfloop_patch_off_ = code_buf_used_;
                 emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
             }
-            emit_mov_imm_to_rax(inst.imm);
+            emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             if (!has_selfloop_slot_) {
@@ -218,7 +219,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 // The ret is a chain slot patched to `jmp taken_target` once
                 // the taken target is translated (loop-back edges skip the
                 // dispatcher).
-                taken_chain_target_pc_ = inst.imm;
+                taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
                 // Self-loop: keep the original dead epilogue (store PC,
@@ -234,6 +235,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND_BIT: {
+            const BrCondBitParams bp = inst.brcond_bit_params();
             // TBZ/TBNZ: branch on ((val >> bit) & 1) without touching flags.
             // cond=0 (EQ) → branch if bit == 0 (TBZ)
             // cond=1 (NE) → branch if bit == 1 (TBNZ)
@@ -258,10 +260,10 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_byte(rex(true, false, false, RAX >= 8));
             emit_byte(0x0F); emit_byte(0xBA);
             emit_byte(modrm(3, 5, RAX & 7));
-            emit_byte(inst.width);  // bit number
+            emit_byte(bp.bit);  // bit number
             // jcc: TBZ (cond=0, EQ) → JNC (bit==0, CF=0) → JAE (cc=3)
             //      TBNZ (cond=1, NE) → JC (bit==1, CF=1) → JB (cc=2)
-            uint8_t cc = (inst.cond == 0) ? 3 /*JNC/JAE*/ : 2 /*JC/JB*/;
+            uint8_t cc = (bp.cond == 0) ? 3 /*JNC/JAE*/ : 2 /*JC/JB*/;
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
@@ -279,18 +281,18 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // deferred pins only persist across a back-edge that jumps to the
             // body, not one that re-enters the prologue (stale preloads).
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (inst.imm == current_start_pc_);
+            bool is_selfloop = (bp.target == current_start_pc_);
             if (is_selfloop && !no_selfloop_) {
                 has_selfloop_slot_ = true;
                 selfloop_patch_off_ = code_buf_used_;
                 emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
             }
-            emit_mov_imm_to_rax(inst.imm);
+            emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             if (!has_selfloop_slot_) {
                 // Taken path: store PC, restore regs, ret-with-chain-slot.
-                taken_chain_target_pc_ = inst.imm;
+                taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
                 // Self-loop: keep the original dead epilogue — harmless,
@@ -306,6 +308,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND: {
+            const BrCondParams bp = inst.brcond_params();
             if (!flags_in_host_) {
                 // emit_load_flags_from_pstate clobbers only RAX/RCX/RDX
                 // (the C^from_sub extraction is RDX-only since the R8-scratch
@@ -330,7 +333,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // With flags_from_sub_=true (SUB convention, whether originally
             // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
-            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
+            uint8_t cc = resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
             // to pstate on each path separately (the next block may read pstate).
@@ -380,7 +383,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (inst.imm == current_start_pc_);
+            bool is_selfloop = (bp.target == current_start_pc_);
             // On a self-loop back-edge, skip the pstate materialization
             // entirely when the block never reads loop-carried flags
             // (flags_loop_carried_, precomputed in translate_block): the
@@ -400,7 +403,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             if (is_selfloop) {
                 t_skip = skip_taken_materialize ? FlagMatSkip::Skip : FlagMatSkip::None;
             } else {
-                t_skip = flag_mat_decision(inst.imm);
+                t_skip = flag_mat_decision(bp.target);
                 skip_taken_materialize = (t_skip == FlagMatSkip::Skip);
             }
             // If CMC was emitted, re-invert CF before materializing flags.
@@ -418,7 +421,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 materialize_flags_to_pstate();
                 if (t_skip == FlagMatSkip::SkipAndRecord) {
                     pending_flag_mat_.push_back(
-                        {inst.imm, mat_start, code_buf_used_ - mat_start});
+                        {bp.target, mat_start, code_buf_used_ - mat_start});
                 }
             }
             // ── Self-loop chaining ──
@@ -435,7 +438,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 selfloop_patch_off_ = code_buf_used_;
                 emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
             }
-            emit_mov_imm_to_rax(inst.imm);
+            emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;
             //
@@ -464,7 +467,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // self-loop slot was emitted — that jmp already goes straight
             // to the block body, and the epilogue after it is dead code.
             if (!has_selfloop_slot_) {
-                taken_chain_target_pc_ = inst.imm;
+                taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
                 // Self-loop: keep the original dead epilogue (store PC,
@@ -480,20 +483,22 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND_FALLTHRU: {
+            const BrCondFallthruParams bp = inst.fallthru_params();
             flush_all_vregs();
-            emit_mov_imm_to_rax(inst.imm);
+            emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             // Unconditional branch with statically-known target — record
             // it for block chaining. try_chain_block() will patch the
             // epilogue's chain slot to jmp directly to the target block
             // once it has been translated.
-            chain_target_pc_ = inst.imm;
+            chain_target_pc_ = bp.target;
             return 1;
         }
         case IROp::CALL_INTERP:
             emit_call_interp(inst.arm_pc, false);
             return 0;
         case IROp::BRCOND_SKIP: {
+            const BrCondSkipParams bp = inst.brcond_skip_params();
             // 1.5.4-alpha: mid-block conditional skip (leaf inlining). If
             // cond(imm) holds, jump over the next `imm` IR ops (the skip
             // region). Unlike BRCOND this does NOT end the block and does
@@ -511,7 +516,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 flags_in_host_ = true;
             }
             bool need_cmc_for_hi_ls = false;
-            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
+            uint8_t cc = resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
             // The leaf scan only accepts non-carry conditions (EQ/NE/MI/PL/
             // VS/VC/GE/LT/GT/LE), so the cmc dance never fires here — kept
             // for symmetry with BRCOND and to be safe if that list grows.
@@ -523,7 +528,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // op + 1 + region size). Flags stay in host; the region's own
             // ops clobber them as the guest requires on the not-taken path.
             skip_fixups_.push_back(
-                {jcc_patch, static_cast<int>(cur_op_index_ + 1 + inst.imm)});
+                {jcc_patch, static_cast<int>(cur_op_index_ + 1 + bp.count)});
             return 0;
         }
         case IROp::SVC:

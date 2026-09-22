@@ -4182,3 +4182,130 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   64-bit pointer store) or true stop-the-world (`async_safe_run_on_cpu`) to
   restore chaining for MT. Option A is the correctness-first ship.
 
+
+## 66. Typed per-op IR params, phase 1 (2026-09-22)
+
+- Started strangler migration from untyped positional IR fields to typed
+  per-op structs (alternative to an SSA rewrite: same bug class killed at
+  ~5% of the cost). Pilot op: SIMD_TBL.
+- New: `SimdTblParams` + `IRInst::make_tbl`/`tbl_params` (ir.hpp, layout
+  unchanged), `emit_tbl` (src/ir/ir.h), `validate_ir_block()`
+  (src/ir/ir_validate.cpp), `BIFROST_IR_VALIDATE` (debug_flags.h), wire-in
+  after optimize_ir in jit_translate.cpp. Tier-2 bypasses validation.
+- Verified: byte-identical pack/unpack vs old code, review-agent APPROVE
+  (3 nits fixed: raw-imm check, print-and-continue doc, classify wording),
+  quick suite 223/223 with validator on, zero violations.
+- Next: migrate remaining SIMD/FP families one by one + tier-2 hookup.
+
+## 67. Typed IR params, phase 2 — SIMD_INS (2026-09-22)
+
+- Migrated SIMD_INS: `SimdInsParams` + `make_ins`/`ins_params`, `emit_ins`,
+  validator case (esize set, dst_off aligned + in (Q?16:8), sidx*esize < 16,
+  flags_op Q-only). Codegen never read Q — confirmed safe.
+- Fixed a real doc drift: ir.hpp comment had INS src1/src2 roles backwards
+  vs emit + codegen + interp (all agree: src1=Vn source, dest=Vd).
+- Review-agent APPROVE (1 stale-comment nit, fixed). Quick suite 223/223
+  with TBL+INS validation on, zero violations.
+
+## 68. Typed IR params, phase 3 — 2REG/CVTF/XTN (2026-09-22)
+
+- Shared `SimdSubopParams` (imm=subop, width=esize, flags_op=Q) + per-op
+  factories/readers (`make_2reg/cvtf/xtn`), `emit_2reg/cvtf/xtn`, 3 codegen
+  sites + 3 validator cases. Ranges verified against simd_dp.txt guards
+  (XTN `size < 3` → esize 2/4/8; CVTF width always 4; 2REG subop 0..4).
+- Review-agent APPROVE. Quick suite 223/223 with 5 ops validating.
+- Note: `git diff` for jit_codegen_simd.cpp also shows UNRELATED
+  pre-existing working-tree hunks (SMOV zeroing, CVTF clamps, MUL_ELEM,
+  pshuflw prefix — lines ~148-974, ~1882-1953, ~2139-2594). Those predate
+  this migration (file was already modified before phase 1); only the 6
+  reader/unpack hunks are ours. They pass the suite as-is but deserve
+  their own review/commit, not bundling with the typed-IR work.
+
+## 69. Typed IR params, phase 4 — PERMUTE/PAIRMIN/ADDP (2026-09-22)
+
+- `SimdBinopParams` (subop/esize/Q + real src2) for PERMUTE/PAIRMIN;
+  one-field `SimdAddpParams{q}` for ADDP (width=1/imm=0 hardcoded —
+  codegen never read them). Validator: PERMUTE opc6 set + Q=0/esize=8
+  rejection per `Q || size != 3` guard; PAIRMIN subop 0..3 + esize 1/2/4;
+  ADDP width==1 && imm==0.
+- Review-agent APPROVE, no nits. Targeted: misc 34/34, permute 28/28,
+  pairmin 19/19, validator silent. 8 ops migrated total.
+
+## 70. Typed IR params, phases 5-8 — remaining SIMD (2026-09-22)
+
+- 24 more ops: ARITH (flags=0 hardcoded), LOGICAL (subop-only),
+  CMP/FP_ARITH/FP_FMA/SATADDSUB/ABDL/ABD/ADDW/ADDHN (shared shape),
+  9 shifts (SimdShiftParams + op-passing factory), UMOV/SMOV/ORRIMM/
+  MOVI/DUP, SHRN_SAT + MUL_ELEM (compound-imm structs). 32 ops total.
+- DEFERRED: LDST/LD16/ST16 (15 producer sites across 2 files, offset
+  semantics — low shuffle hazard, high cost). Tier-2 hookup + raw-field
+  privatization still open.
+- Review APPROVE with 2 findings: (1) MUL_ELEM d.rm→rm_reg is a
+  PRE-EXISTING working-tree fix (documented phase 3, preserved exactly
+  by migration — not introduced here); its M=1 evidence already exists
+  (test_simd_arith Tests 7-9 smlal/smull odd lanes pass under JIT and
+  JIT_VERIFY). (2) Migrated the missed FP_SCALAR scalar-shift producer;
+  collapsed redundant `{{ }}` on ABDL/ABD/ADDW/ADDHN.
+- Self-correction note: 3 edits in this batch dropped comment lines via
+  over-wide oldStrings (repaired immediately, build-caught nothing —
+  all comment-only). Rule: oldString = single functional line only,
+  re-read before every edit.
+
+## 71. Typed IR params COMPLETE + privatization (2026-09-22)
+
+- Migrated everything with params: scalar FP (BINOP/UNOP/MOV/CMP/MOVI/
+  CSEL/F2I/I2F/FIXED×2/FRINT/FMA-family), bitfield+SEXT/ZEXT, UDIV/SDIV,
+  CSEL/CCMP/ADDS-family/TST/BRCOND×5/BL/MRS/MSR, GPR shifts, MEM
+  (LOAD/STORE/ATOMIC/LDST/LD16/ST16), CLZ/REV64, AES, LOAD/STORE_REG
+  (is_fp), IMM. Param-less ops go through generic IRInst::make().
+- Deleted free emit() + emit_bf(); raw fields private with 3 friends
+  (validate/dump/optimize). The compiler audited the migration: it
+  caught a missed CCMP sf read (now in CcmpParams) + 5 other leftovers.
+- Eliminated ALL post-hoc insts.back() patching (TST/BRCOND_ZERO/CCMP-sf/
+  FIXED-immr/imms) except set_skip_count() (BRCOND_SKIP forward ref).
+- Review APPROVE + 3 items: (1) added CLZ/REV64/AES validator cases
+  (TST/MRS/MSR/REG/IMM have no checkable range — factories enforce);
+  (2) excluded SKIP from branch_target(); (3) flush_all_vregs_keep in
+  taken-path epilogue is PRE-EXISTING (zlib rationale, not ours).
+- MUL_ELEM d.rm→rm_reg confirmed pre-existing, preserved; M=1 evidence
+  = test_simd_arith Tests 7-9 under JIT+VERIFY.
+- Validator caught MY range error (ZEXT {8,16,32}, not ==32) — fixed.
+- Full suite: one failed run (rw_toybox_tail/printf, rw_coreutils_echo_n
+  — all pass standalone/filtered, no validator noise, no repeat) treated
+  as suspect flake; re-running to confirm. Deferred: LDST/LD16/ST16 was
+  DONE after all (offsets live); nothing deferred except raw-field
+  friends audit (done by compiler).
+- Process note: 5+ edits dropped adjacent comment lines via over-wide
+  oldStrings (all repaired immediately, none behavioral). Rule going
+  forward: oldString = functional lines only, pasted from a fresh read.
+- Helper: tools/ir_convert.cpp (bulk emit→make converter, dry-run first;
+  fixed its own 10-arg bug + a missing .insts in output).
+
+## 72. Migration COMPLETE — final verification (2026-09-22)
+
+- Default-mode suite (no validator): 223/223 green. Combined with the
+  validator-on green run: the single failed run (3 I/O tests) did NOT
+  repeat across 2 full runs + standalone/filtered greens. Verdict: flake
+  (or load-dependent), not a migration regression — packing equivalence
+  was additionally verified by the lockdown reviewer. Watch those 3 tests
+  (rw_toybox_tail/printf, rw_coreutils_echo_n) if they fail again.
+- End state: ~70 typed factories/readers, private param fields + 3
+  friends, free emit()/emit_bf() deleted, generic make() for param-less
+  ops, validator covers every migrated op, tier-1 + tier-2 hookup.
+- Total: build clean (-Wall -Wextra), 223/223 ×3 configurations,
+  3 review-agent APPROVEs, docs (AGENTS.md contract + history 66-72).
+
+## 73. Version 1.5.5 release cut (2026-09-22)
+
+- Dropped `-alpha`: VERSION 1.5.5-alpha → 1.5.5 (version.hpp, README
+  title + badge, bifrost.toml.sample). Historical "-alpha" references
+  in code comments, CHANGELOG history, and session notes left intact.
+- CHANGELOG: new [1.5.5] section (typed-IR migration + privatization,
+  compat syscalls, PRFM/LDAPR/fanotify/hardening); Unreleased reset.
+- Docs cleanup: ROADMAP tier-2 item marked DONE (shipped 1.5.4);
+  vulkan_migration_plan stamped COMPLETE (all phases shipped, swapchain
+  green) and kept as historical plan. TESTS.md already current (228).
+  Left alone: context.md/SESSION_SUMMARY.md (gitignored local notes),
+  rules.md (personal), plan.md/findings.md/DISPLAY_THUNK.md (historical).
+- Left as-is: working directory name (bifrost-emu-1.5.0-alpha) — renaming
+  would break session paths; the VERSION constant is authoritative.

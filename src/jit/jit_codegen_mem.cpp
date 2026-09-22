@@ -49,7 +49,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     int s = vreg_home_[inst.src1];
                     d = alloc_reg_excluding(s, -1);
                     emit_mov_reg(d, s);
-                } else if (inst.sf == 1) {
+                } else if (inst.is_fp_load()) {
                     // FP register: load from cpu.v_lo[src1] (or, when the fp
                     // cache pins src1, the pinned XMM — reg-reg move).
                     d = alloc_reg();
@@ -107,7 +107,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 // and R9/R11 are untouched by the term, so only those are
                 // safe. A register that is another vreg's pin is also unsafe
                 // to steal (it holds that vreg's loop-carried value).
-                if (inst.sf == 0 && inst.dest <= 30 && keep_store_dest_) {
+                if (!inst.is_fp_store() && inst.dest <= 30 && keep_store_dest_) {
                     int pin = arch_pin_[inst.dest];
                     if (pin >= 0) {
                         int s = ensure_vreg(inst.src1);
@@ -160,7 +160,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     return 0;
                 }
                 int s = ensure_vreg(inst.src1);
-                if (inst.sf == 1 && inst.dest <= 30) {
+                if (inst.is_fp_store() && inst.dest <= 30) {
                     // FP register: store to cpu.v_lo[dest] (or, when the fp
                     // cache pins dest, the pinned XMM — reg-reg move + dirty).
                     int xd = vec_xmm(inst.dest);
@@ -180,6 +180,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             }
             return 0;
         case IROp::LOAD_MEM: {
+            const MemParams mp = inst.load_mem_params();
             // Memory access via emit_load_mem. The slow path calls
             // jit_load_mem_slow (clobbers caller-saved regs); the fast
             // path uses RAX/RDX/RCX/R10 internally. Now that
@@ -214,13 +215,13 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 flush_dirty_host_regs(MEM_CLOBBER);
                 flush_scratch_host_regs(MEM_CLOBBER);
                 invalidate_host_regs(MEM_CLOBBER);
-                emit_load_mem(RAX, ahome, static_cast<int32_t>(inst.imm),
-                              inst.width, false);
+                emit_load_mem(RAX, ahome, static_cast<int32_t>(mp.offset),
+                              mp.width, false);
             } else {
                 uint16_t kept = load_vreg_to_reg_fast(RAX, inst.src1,
                                                       inst.dest, MEM_CLOBBER);
-                emit_load_mem(RAX, RAX, static_cast<int32_t>(inst.imm),
-                              inst.width, false);
+                emit_load_mem(RAX, RAX, static_cast<int32_t>(mp.offset),
+                              mp.width, false);
                 if (kept & (1u << RAX)) kill_vreg(inst.src1);
             }
             // Keep dest cached in RAX (set_vreg_reg) instead of storing to
@@ -233,6 +234,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             return 0;
         }
         case IROp::STORE_MEM: {
+            const MemParams mp = inst.store_mem_params();
             // Same as LOAD_MEM: only flush caller-saved dirty vregs.
             clobber_flags();
             constexpr uint16_t MEM_CLOBBER =
@@ -262,8 +264,8 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 flush_dirty_host_regs(MEM_CLOBBER);
                 flush_scratch_host_regs(MEM_CLOBBER);
                 invalidate_host_regs(MEM_CLOBBER);
-                emit_store_mem(ahome, static_cast<int32_t>(inst.imm),
-                               vhome, inst.width);
+                emit_store_mem(ahome, static_cast<int32_t>(mp.offset),
+                               vhome, mp.width);
                 return 0;
             }
             uint16_t kept_mask = 0;
@@ -274,7 +276,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             invalidate_host_regs(MEM_CLOBBER & ~kept_mask);
             if (!keep1) load_vreg_to_reg(RAX, inst.src1);
             if (!keep2) load_vreg_to_reg(RCX, inst.src2);
-            emit_store_mem(RAX, static_cast<int32_t>(inst.imm), RCX, inst.width);
+            emit_store_mem(RAX, static_cast<int32_t>(mp.offset), RCX, mp.width);
             return 0;
         }
         default:

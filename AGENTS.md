@@ -169,7 +169,22 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `imm`=dest-byte-offset, `aux`=src element index, `flags_op`=Q (unused,
   built manually via IRInst because emit() has no aux arg). Do NOT shuffle
   these (the TBL case once read cond/flags_op and silently ran as TBX1 with
-  Q=0 — bytes ≥8 came back 0). FCVTZS/FCVTZU truncation MUST use the F3
+  Q=0 — bytes ≥8 came back 0). Migrated ops use TYPED factories/readers
+  instead of raw fields (`SimdTblParams` + `IRInst::make_tbl`/`tbl_params`
+  in ir.hpp, `emit_tbl` in src/ir/ir.h — pilot 2026-09-22): new/future
+  translators MUST emit via the factory and codegen MUST read via the
+  reader, never raw `flags_op`/`imm`. `BIFROST_IR_VALIDATE=1` (debug_flags.h)
+  runs `validate_ir_block()` after optimize_ir on every block; add a case
+  per migrated op. Since 2026-09-22 the migration is COMPLETE and the raw
+  parameter fields (`width/cond/flags_op/imm/immr/imms/sf`) are PRIVATE:
+  translators MUST use factories (or generic `IRInst::make()` for
+  parameter-less ops), codegen MUST use readers — a raw access is a compile
+  error. Only three friends may touch raw fields: `validate_ir_block`,
+  `dump_ir`, `optimize_ir`. Post-hoc `insts.back().X` patching is banned
+  except `set_skip_count()` (BRCOND_SKIP forward reference). Tier-2 blocks
+  are validated too. Dead ops (BFM/EXTR/LLSC/CSINC/RBIT/REV/CLS) have
+  narrow readers, no factories — promote if a producer is ever added.
+  FCVTZS/FCVTZU truncation MUST use the F3
   prefix: `66 0F 5B` is cvtps2dq (ROUNDS, the 12.75→13 bug); truncation is
   `F3 0F 5B` (cvttps2dq, `sse2_f3` helper). TBL/TBX needs SSSE3 (pshufb:
   dst=TABLE, src=CONTROL; OOR control byte has bit7 → 0); esize-2/4 XTN

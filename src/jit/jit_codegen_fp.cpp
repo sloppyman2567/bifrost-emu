@@ -82,7 +82,8 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             // FRINT only clobbers RAX (zero store to v_hi[dest]).
             clobber_flags();
             flush_invalidate_host_regs(1u << RAX);
-            bool is_double = (inst.width == 64);
+            const FpFrintParams fp = inst.fp_frint_params();
+            bool is_double = (fp.bits == 64);
             // Load FP value into XMM0 (fp_load_operand: reg-reg move when
             // the fp cache pins src1, else memory load).
             fp_load_operand(0, inst.src1, is_double);
@@ -103,7 +104,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             //   6 (FRINTA) → interp: x86 has no ties-away mode,
             //     roundsd MXCSR would give ties-even instead.
             uint8_t x86_mode;
-            switch (inst.imm & 0x7) {
+            switch (fp.mode & 0x7) {
                 case 0: x86_mode = 0; break;  // N → nearest
                 case 1: x86_mode = 2; break;  // P → +inf (ceil)
                 case 2: x86_mode = 1; break;  // M → -inf (floor)
@@ -182,11 +183,12 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             // We use `width == 64` to handle this correctly. Using
             // `width != 0` (as the old code did) treats BOTH 32 and 64 as
             // double — silently breaking all single-precision FMA.
-            bool is_double = (inst.width == 64);
+            const FpFusedParams fp = inst.fp_fused_params();
+            bool is_double = (fp.bits == 64);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;  // Vn
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;  // Vm
-            int32_t off_acc = V_LO_OFF + static_cast<int>(inst.imm) * 8; // Va
+            int32_t off_acc = V_LO_OFF + static_cast<int>(fp.acc) * 8; // Va
             if (has_fma3()) {
                 // ── FMA3 native codegen (fp-cache aware) ──
                 // 231 form: dest = op(Vn*Vm, dest), where dest starts as Va
@@ -203,7 +205,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                     default: return false;  // unreachable
                 }
                 int xd = vec_xmm(inst.dest);
-                int xacc = vec_xmm(inst.imm);
+                int xacc = vec_xmm(fp.acc);
                 int dst_xmm;
                 bool copy_acc;
                 if (xd >= 0) {

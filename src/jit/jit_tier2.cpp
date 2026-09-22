@@ -291,6 +291,10 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                     static_cast<int>(tb.ir.insts.size() - 1);
             }
         }
+        // Same per-op contract check as the tier-1 path (jit_translate):
+        // runs whether or not the optimizer ran, validating what the
+        // region compiler is about to consume.
+        if (dbg().ir_validate) validate_ir_block(tb.ir);
         trace.total_insts += static_cast<uint64_t>(instr_count);
         trace.blocks.push_back(std::move(tb));
         if (trace_ended || trace_ends_after_block) {
@@ -710,7 +714,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         bool arch_written[32] = {false};
         for (const auto& inst : region_ir) {
             if (inst.op == IROp::STORE_REG) {
-                if (inst.sf == 0 && inst.dest <= 30) arch_written[inst.dest] = true;
+                if (!inst.is_fp_store() && inst.dest <= 30) arch_written[inst.dest] = true;
             } else if (inst.dest <= 30 &&
                        (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
                         inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
@@ -736,7 +740,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     // LOAD_REG's src1 is the ARCH REG INDEX (0-30), never a
                     // "no source" marker — x0 = index 0 is a REAL operand. The
                     // s==0 no-source shortcut below must NOT apply here.
-                    if (inst.sf != 0) return false;   // FP read — not invariant
+                    if (!inst.is_fp_load()) return false;   // FP read — not invariant
                     if (s > 30) return false;         // LOAD_REG src1 must be arch
                     // A PINNED arch read is allowed to hoist: the preheader
                     // is emitted AFTER the pin preloads, so the chain resting
@@ -1253,6 +1257,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             bool need_cmc = false;
             switch (inst.op) {
                 case IROp::BRCOND: {
+                    const BrCondParams bp = inst.brcond_params();
                     if (!flags_in_host_) {
                         // FLAGS3 only: the loader clobbers RAX/RCX/RDX
                         // (RDX-only C^from_sub extraction; see x86_backend.cpp).
@@ -1266,12 +1271,13 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                         flags_from_sub_ = true;  // CF is now in SUB convention
                         flags_in_host_ = true;
                     }
-                    uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
+                    uint8_t cc = resolve_arm_cond_with_carry(bp.cond, need_cmc);
                     if (need_cmc) emit_byte(0xF5);  // cmc — invert CF for HI/LS
                     jcc = emit_jcc_rel32_placeholder(cc);
                     break;
                 }
                 case IROp::BRCOND_ZERO: {
+                    const BrCondZeroParams bp = inst.brcond_zero_params();
                     clobber_flags();
                     if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
                     int s1 = ensure_vreg(inst.src1, RAX);
@@ -1279,15 +1285,16 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
                     // W-form tests only the low 32 bits (see the matching
                     // fix in jit_codegen_branch.cpp) — mask dirty uppers.
-                    if (!inst.sf) {
+                    if (!bp.sf) {
                         emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
                     }
                     emit_test_reg(RAX, RAX);
-                    uint8_t cc = (inst.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
+                    uint8_t cc = (bp.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
                     jcc = emit_jcc_rel32_placeholder(cc);
                     break;
                 }
                 case IROp::BRCOND_BIT: {
+                    const BrCondBitParams bp = inst.brcond_bit_params();
                     clobber_flags();
                     if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
                     int s1 = ensure_vreg(inst.src1, RAX);
@@ -1296,8 +1303,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     emit_byte(rex(true, false, false, RAX >= 8));
                     emit_byte(0x0F); emit_byte(0xBA);
                     emit_byte(modrm(3, 5, RAX & 7));
-                    emit_byte(inst.width);  // bit number
-                    uint8_t cc = (inst.cond == 0) ? 3 /*JNC*/ : 2 /*JC*/;
+                    emit_byte(bp.bit);  // bit number
+                    uint8_t cc = (bp.cond == 0) ? 3 /*JNC*/ : 2 /*JC*/;
                     jcc = emit_jcc_rel32_placeholder(cc);
                     break;
                 }

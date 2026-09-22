@@ -460,8 +460,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                         uint64_t bt = lp + static_cast<uint64_t>(ld.imm);
                         size_t skip_idx = leaf_block.insts.size();
                         size_t region_start = skip_idx + 1;
-                        emit(leaf_block, IROp::BRCOND_SKIP, 0, 0, 0, 0,
-                             static_cast<uint8_t>(ld.cond & 0xF), 0, 0, lp);
+                        emit_brcond_skip(leaf_block,
+                                           static_cast<uint8_t>(ld.cond & 0xF),
+                                           lp);
                         has_brcond_skip = true;
                         // Translate the not-taken region [lp+4, bt) inline.
                         uint64_t rp = lp + 4;
@@ -480,7 +481,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                         // Patch the skip's region size (in IR ops) now that
                         // the region has been translated.
                         uint64_t region_ops = leaf_block.insts.size() - region_start;
-                        leaf_block.insts[skip_idx].imm = region_ops;
+                        leaf_block.insts[skip_idx].set_skip_count(region_ops);
                         leaf_count++;  // the branch instruction itself
                         lp = bt;
                         continue;
@@ -704,6 +705,9 @@ if (demote_interp) {
     // already tight native FP/GPR code; skipping the pass costs little.
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
     if (!no_opt_ && !has_brcond_skip) optimize_ir(ir_block);
+    // Per-op IR parameter contract check (only migrated ops; see ir.hpp).
+    // Validates what codegen is about to consume, after the optimizer.
+    if (dbg().ir_validate) validate_ir_block(ir_block);
     static bool dump_ir_ = (getenv("BIFROST_JIT_DUMP") != nullptr);
     // BIFROST_DUMP_PC=0x... restricts the IR dump to a single block pc
     // (useful when BIFROST_JIT_DUMP would flood with thousands of blocks).
@@ -952,7 +956,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         if (!ir_block.insts.empty()) {
             const IRInst& last = ir_block.insts.back();
             is_selfloop = (last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO ||
-                           last.op == IROp::BRCOND_BIT) && last.imm == start_pc;
+                           last.op == IROp::BRCOND_BIT) && last.branch_target() == start_pc;
         }
         if (is_selfloop && !no_selfloop && !getenv("BIFROST_NO_PIN") &&
             !getenv("BIFROST_JIT_VERIFY")) {
@@ -1489,7 +1493,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             } else if (inst.op == IROp::IMM) {
                 if (inst.dest < 4096) {
                     vreg_base[inst.dest] = 0xFE;  // marker: this is an IMM
-                    vreg_off[inst.dest]  = static_cast<int64_t>(inst.imm);
+                    vreg_off[inst.dest]  = static_cast<int64_t>(inst.imm_value());
                 }
             } else if (inst.op == IROp::ADD) {
                 // ADD v, v1, v2 — try to fold if one operand is IMM
@@ -1512,8 +1516,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 if (b <= 31) {
                     BlockEntry::StoreInfo si;
                     si.arm_reg = b;
-                    si.offset  = vreg_off[inst.src1] + static_cast<int64_t>(inst.imm);
-                    si.width   = inst.width;
+                    si.offset  = vreg_off[inst.src1] + static_cast<int64_t>(inst.store_mem_params().offset);
+                    si.width   = inst.store_mem_params().width;
                     si.use_absolute = false;
                     if (!(modified_so_far & (1u << b))) {
                         // Base reg NOT modified — use saved.regs[b] + offset (original path).
@@ -1547,7 +1551,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 // (the inflate copy loop's stp q29,q28 was exactly this).
                 // One StoreInfo per 16-byte chunk (flags_op = nregs).
                 uint8_t b = (inst.src1 < 4096) ? vreg_base[inst.src1] : 0xFF;
-                uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+                const St16Params sp = inst.st16_params();
+                uint32_t nregs = sp.count ? sp.count : 1;
                 bool resolvable = (b <= 31);
                 if (resolvable && (modified_so_far & (1u << b)) &&
                     !arm_reg_known[b]) {
@@ -1557,13 +1562,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     if (!has_call_like) entry.has_unresolved_store = true;
                     static bool trace_simdst16_ = (getenv("BIFROST_TRACE_SIMDST16") != nullptr);
                     if (trace_simdst16_) {
+                        const St16Params sp = inst.st16_params();
                         fprintf(stderr, "[SIMDST16] block @ 0x%llx: UNTRACKED SIMD_ST16 src2=%d flags_op=%u imm=%lld\n",
                                 static_cast<unsigned long long>(start_pc),
-                                inst.src2, inst.flags_op ? inst.flags_op : 1,
-                                static_cast<long long>(inst.imm));
+                                inst.src2, sp.count ? sp.count : 1,
+                                static_cast<long long>(sp.offset));
                     }
                 } else {
-                    int64_t off = vreg_off[inst.src1] + static_cast<int64_t>(inst.imm);
+                    int64_t off = vreg_off[inst.src1] + static_cast<int64_t>(inst.st16_params().offset);
                     for (uint32_t ci = 0; ci < nregs; ci++) {
                         BlockEntry::StoreInfo si;
                         si.arm_reg = b;

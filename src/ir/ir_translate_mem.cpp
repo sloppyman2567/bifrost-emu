@@ -62,7 +62,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint8_t shift_amt = (d.shift & 1) ? d.size : 0;
                 uint16_t ext = apply_extend(block, idx, d.extend, shift_amt);
                 addr = g_alloc.alloc();
-                emit(block, IROp::ADD, addr, base, ext);
+                block.insts.push_back(IRInst::make(IROp::ADD, addr, base, ext));
             } else if (post_index) {
                 // Post-index: load/store from base (no offset).
                 addr = base;
@@ -91,13 +91,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // the canonical vector storage (no stale-pinned-XMM risk).
                 if (is_load) {
                     if (vec_q) {
-                        emit(block, IROp::SIMD_LD16, d.rt, addr, 0, 0, 0, 1,
-                             static_cast<uint64_t>(mem_off), cur_pc);
+                        emit_ld16(block, d.rt, addr, Ld16Params{1, static_cast<uint64_t>(mem_off)}, cur_pc);
                     } else {
                         uint16_t lo = g_alloc.alloc();
-                        emit(block, IROp::LOAD_MEM, lo, addr, 0,
-                             static_cast<uint8_t>(vec_nbytes), 0, 0,
-                             static_cast<uint64_t>(mem_off));
+                        MemParams mp;
+                        mp.width = static_cast<uint8_t>(vec_nbytes);
+                        mp.offset = static_cast<uint64_t>(mem_off);
+                        emit_load_mem(block, lo, addr, mp, cur_pc);
                         // LOAD_MEM zero-extends into the vreg; src2 is a
                         // real zero vreg (load_imm) so v_hi gets 0, matching
                         // the interpreter (v_hi = 0 for nbytes < 16). Passing
@@ -105,12 +105,11 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         // write ITS value into v_hi — and on the store path
                         // it clobbers X0 itself.
                         uint16_t zero = load_imm(block, 0);
-                        emit(block, IROp::SIMD_LDST, d.rt, lo, zero, 1, 0, 0, 0, cur_pc);
+                        emit_ldst(block, d.rt, lo, zero, LdStParams{true}, cur_pc);
                     }
                 } else {
                     if (vec_q) {
-                        emit(block, IROp::SIMD_ST16, 0, addr, d.rt, 0, 0, 1,
-                             static_cast<uint64_t>(mem_off), cur_pc);
+                        emit_st16(block, addr, d.rt, St16Params{1, false, static_cast<uint64_t>(mem_off)}, cur_pc);
                     } else {
                         uint16_t lo = g_alloc.alloc();
                         // Store: read v_lo[d.rt] into the lo vreg. src2 is a
@@ -119,16 +118,19 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         // codegen's set_vreg_reg would clobber X0 with
                         // v_hi[d.rt]'s value.
                         uint16_t hi_scratch = g_alloc.alloc();
-                        emit(block, IROp::SIMD_LDST, d.rt, lo, hi_scratch, 0, 0, 0, 0, cur_pc);
-                        emit(block, IROp::STORE_MEM, 0, addr, lo,
-                             static_cast<uint8_t>(vec_nbytes), 0, 0,
-                             static_cast<uint64_t>(mem_off));
+                        emit_ldst(block, d.rt, lo, hi_scratch, LdStParams{false}, cur_pc);
+                        MemParams mp;
+                        mp.width = static_cast<uint8_t>(vec_nbytes);
+                        mp.offset = static_cast<uint64_t>(mem_off);
+                        emit_store_mem(block, addr, lo, mp, cur_pc);
                     }
                 }
             } else if (is_load) {
                 uint16_t val = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, val, addr, 0, static_cast<uint8_t>(width),
-                     0, 0, static_cast<uint64_t>(mem_off));
+                MemParams mp;
+                mp.width = static_cast<uint8_t>(width);
+                mp.offset = static_cast<uint64_t>(mem_off);
+                emit_load_mem(block, val, addr, mp, cur_pc);
                 // Sign-extend check: for non-vector loads, opc_ls bit 2
                 // (i.e. opc_ls & 2) indicates LDRSW/LDRSB/LDRSH (sign-
                 // extending loads). The decoder does NOT set d.cls to
@@ -139,19 +141,21 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool sign_ext = d.opc_ls & 2;
                 if (sign_ext) {
                     uint16_t ext = g_alloc.alloc();
-                    emit(block, IROp::SEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
+                    emit_sext(block, ext, val, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext);
                 } else if (width < 8) {
                     uint16_t ext = g_alloc.alloc();
-                    emit(block, IROp::ZEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
+                    emit_zext(block, ext, val, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext);
                 } else {
                     store_arm_reg(block, d.rt, val);
                 }
             } else {
                 uint16_t val = load_arm_reg(block, d.rt);
-                emit(block, IROp::STORE_MEM, 0, addr, val, static_cast<uint8_t>(width),
-                     0, 0, static_cast<uint64_t>(mem_off));
+                MemParams mp;
+                mp.width = static_cast<uint8_t>(width);
+                mp.offset = static_cast<uint64_t>(mem_off);
+                emit_store_mem(block, addr, val, mp, cur_pc);
             }
             // Writeback.
             if (d.writeback) {
@@ -161,13 +165,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // rn = base + disp
                     uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                     uint16_t new_base = g_alloc.alloc();
-                    emit(block, IROp::ADD, new_base, base, off);
+                    block.insts.push_back(IRInst::make(IROp::ADD, new_base, base, off));
                     store_arm_reg(block, d.rn, new_base, rn_is_sp);
                 } else {
                     // Pre-index: rn = base + disp.
                     uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                     uint16_t new_base = g_alloc.alloc();
-                    emit(block, IROp::ADD, new_base, base, off);
+                    block.insts.push_back(IRInst::make(IROp::ADD, new_base, base, off));
                     store_arm_reg(block, d.rn, new_base, rn_is_sp);
                 }
             }
@@ -214,18 +218,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // once, not twice. The JIT codegen reads `cond` to keep
                     // src2 constant across both halves instead of src2+i.
                     if (is_load) {
-                        emit(block, IROp::SIMD_LD16, d.rt, base, 0, 0, 0, 1,
-                             static_cast<uint64_t>(mem_off), cur_pc);
-                        emit(block, IROp::SIMD_LD16, d.rt2, base, 0, 0, 0, 1,
-                             static_cast<uint64_t>(mem_off + stride), cur_pc);
+                        emit_ld16(block, d.rt, base, Ld16Params{1, static_cast<uint64_t>(mem_off)}, cur_pc);
+                        emit_ld16(block, d.rt2, base, Ld16Params{1, static_cast<uint64_t>(mem_off + stride)}, cur_pc);
                     } else if (d.rt == d.rt2) {
-                        emit(block, IROp::SIMD_ST16, 0, base, d.rt, 0, 1, 2,
-                             static_cast<uint64_t>(mem_off), cur_pc);
+                        emit_st16(block, base, d.rt, St16Params{2, true, static_cast<uint64_t>(mem_off)}, cur_pc);
                     } else {
-                        emit(block, IROp::SIMD_ST16, 0, base, d.rt, 0, 0, 1,
-                             static_cast<uint64_t>(mem_off), cur_pc);
-                        emit(block, IROp::SIMD_ST16, 0, base, d.rt2, 0, 0, 1,
-                             static_cast<uint64_t>(mem_off + stride), cur_pc);
+                        emit_st16(block, base, d.rt, St16Params{1, false, static_cast<uint64_t>(mem_off)}, cur_pc);
+                        emit_st16(block, base, d.rt2, St16Params{1, false, static_cast<uint64_t>(mem_off + stride)}, cur_pc);
                     }
                 } else if (is_load) {
                     // S/D LDP: load rt (S/D width), zero the upper half.
@@ -233,36 +232,44 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // is guest X0 (vreg 0), and reading it here writes X0's
                     // value into v_hi instead of zeroing it.
                     uint16_t lo1 = g_alloc.alloc();
-                    emit(block, IROp::LOAD_MEM, lo1, base, 0, esize, 0, 0,
-                         static_cast<uint64_t>(mem_off));
+                    MemParams mp;
+                    mp.width = static_cast<uint8_t>(esize);
+                    mp.offset = static_cast<uint64_t>(mem_off);
+                    emit_load_mem(block, lo1, base, mp, cur_pc);
                     uint16_t zero = load_imm(block, 0);
-                    emit(block, IROp::SIMD_LDST, d.rt, lo1, zero, 1, 0, 0, 0, cur_pc);
+                    emit_ldst(block, d.rt, lo1, zero, LdStParams{true}, cur_pc);
                     uint16_t lo2 = g_alloc.alloc();
-                    emit(block, IROp::LOAD_MEM, lo2, base, 0, esize, 0, 0,
-                         static_cast<uint64_t>(mem_off + stride));
+                    MemParams mp2;
+                    mp2.width = static_cast<uint8_t>(esize);
+                    mp2.offset = static_cast<uint64_t>(mem_off + stride);
+                    emit_load_mem(block, lo2, base, mp2, cur_pc);
                     uint16_t zero2 = load_imm(block, 0);
-                    emit(block, IROp::SIMD_LDST, d.rt2, lo2, zero2, 1, 0, 0, 0, cur_pc);
+                    emit_ldst(block, d.rt2, lo2, zero2, LdStParams{true}, cur_pc);
                 } else {
                     // S/D STP: store rt's low bytes to [base+mem_off] and
                     // rt2's to [base+mem_off+stride]. hi_scratch receives
                     // the unused v_hi half (literal 0 = guest X0).
                     uint16_t lo1 = g_alloc.alloc();
                     uint16_t hi1 = g_alloc.alloc();
-                    emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 0, 0, 0, 0, cur_pc);
-                    emit(block, IROp::STORE_MEM, 0, base, lo1, esize, 0, 0,
-                         static_cast<uint64_t>(mem_off));
+                    emit_ldst(block, d.rt, lo1, hi1, LdStParams{false}, cur_pc);
+                    MemParams mp;
+                    mp.width = static_cast<uint8_t>(esize);
+                    mp.offset = static_cast<uint64_t>(mem_off);
+                    emit_store_mem(block, base, lo1, mp, cur_pc);
                     uint16_t lo2 = g_alloc.alloc();
                     uint16_t hi2 = g_alloc.alloc();
-                    emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 0, 0, 0, 0, cur_pc);
-                    emit(block, IROp::STORE_MEM, 0, base, lo2, esize, 0, 0,
-                         static_cast<uint64_t>(mem_off + stride));
+                    emit_ldst(block, d.rt2, lo2, hi2, LdStParams{false}, cur_pc);
+                    MemParams mp2;
+                    mp2.width = static_cast<uint8_t>(esize);
+                    mp2.offset = static_cast<uint64_t>(mem_off + stride);
+                    emit_store_mem(block, base, lo2, mp2, cur_pc);
                 }
                 // Writeback
                 if (d.writeback || post_index || pre_index) {
                     bool rn_is_sp = (d.rn == 31);
                     uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                     uint16_t new_base = g_alloc.alloc();
-                    emit(block, IROp::ADD, new_base, base, off);
+                    block.insts.push_back(IRInst::make(IROp::ADD, new_base, base, off));
                     store_arm_reg(block, d.rn, new_base, rn_is_sp);
                 }
                 return true;
@@ -289,22 +296,26 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             int64_t mem_off = post_index ? 0 : d.disp;
             if (is_load) {
                 uint16_t val1 = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, val1, addr, 0, static_cast<uint8_t>(width),
-                     0, 0, static_cast<uint64_t>(mem_off));
+                MemParams mp;
+                mp.width = static_cast<uint8_t>(width);
+                mp.offset = static_cast<uint64_t>(mem_off);
+                emit_load_mem(block, val1, addr, mp, cur_pc);
                 // Sign-extend or zero-extend if needed (for 32-bit)
                 if (width < 8) {
                     uint16_t ext1 = g_alloc.alloc();
-                    emit(block, IROp::ZEXT, ext1, val1, 0, static_cast<uint8_t>(width * 8));
+                    emit_zext(block, ext1, val1, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext1);
                 } else {
                     store_arm_reg(block, d.rt, val1);
                 }
                 uint16_t val2 = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, val2, addr, 0, static_cast<uint8_t>(width),
-                     0, 0, static_cast<uint64_t>(mem_off + esize));
+                MemParams mp2;
+                mp2.width = static_cast<uint8_t>(width);
+                mp2.offset = static_cast<uint64_t>(mem_off + esize);
+                emit_load_mem(block, val2, addr, mp2, cur_pc);
                 if (width < 8) {
                     uint16_t ext2 = g_alloc.alloc();
-                    emit(block, IROp::ZEXT, ext2, val2, 0, static_cast<uint8_t>(width * 8));
+                    emit_zext(block, ext2, val2, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt2, ext2);
                 } else {
                     store_arm_reg(block, d.rt2, val2);
@@ -313,17 +324,21 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // STP: store rt, rt2
                 uint16_t val1 = load_arm_reg(block, d.rt);
                 uint16_t val2 = load_arm_reg(block, d.rt2);
-                emit(block, IROp::STORE_MEM, 0, addr, val1, static_cast<uint8_t>(width),
-                     0, 0, static_cast<uint64_t>(mem_off));
-                emit(block, IROp::STORE_MEM, 0, addr, val2, static_cast<uint8_t>(width),
-                     0, 0, static_cast<uint64_t>(mem_off + esize));
+                MemParams mp;
+                mp.width = static_cast<uint8_t>(width);
+                mp.offset = static_cast<uint64_t>(mem_off);
+                emit_store_mem(block, addr, val1, mp, cur_pc);
+                MemParams mp2;
+                mp2.width = static_cast<uint8_t>(width);
+                mp2.offset = static_cast<uint64_t>(mem_off + esize);
+                emit_store_mem(block, addr, val2, mp2, cur_pc);
             }
             // Writeback
             if (d.writeback || post_index || pre_index) {
                 bool rn_is_sp = (d.rn == 31);
                 uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                 uint16_t new_base = g_alloc.alloc();
-                emit(block, IROp::ADD, new_base, base, off);
+                block.insts.push_back(IRInst::make(IROp::ADD, new_base, base, off));
                 store_arm_reg(block, d.rn, new_base, rn_is_sp);
             }
             return true;
@@ -335,7 +350,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
             return true;
         case InstClass::LSE_ATOMIC: {
             // LSE atomics: native x86 lock-prefixed instructions.
@@ -357,17 +372,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // cpu.regs[rs] via emit_load_arm(inst.imm).
                 uint16_t desired = load_arm_reg(block, d.rt);
                 uint16_t dest = g_alloc.alloc();
-                IRInst inst{};
-                inst.op = IROp::ATOMIC;
-                inst.dest = dest;
-                inst.src1 = base;
-                inst.src2 = desired;  // desired (rt) → [mem] on match
-                inst.width = static_cast<uint8_t>(width_bytes);
-                inst.cond = d.atom_op;
-                inst.flags_op = 1;  // CAS always returns old
-                inst.imm = d.rs;    // ARM reg: expected (in) + old (out)
-                inst.arm_pc = cur_pc;
-                block.insts.push_back(inst);
+                AtomicParams ap;
+                ap.width = static_cast<uint8_t>(width_bytes);
+                ap.atom_op = d.atom_op;
+                ap.is_load = true;  // CAS always returns old
+                ap.reg_idx = d.rs;  // ARM reg: expected (in) + old (out)
+                // desired (rt) → [mem] on match.
+                emit_atomic(block, dest, base, desired, ap, cur_pc);
                 store_arm_reg(block, d.rs, dest);  // rs = old value
             } else {
                 // Non-CAS LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SWP/MAX/MIN).
@@ -376,9 +387,12 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // use faster codegen for ST* (e.g., STADD → lock add instead
                 // of lock xadd, STSET → lock or instead of CAS-loop).
                 uint16_t dest = g_alloc.alloc();
-                emit(block, IROp::ATOMIC, dest, base, src,
-                     static_cast<uint8_t>(width_bytes),
-                     d.atom_op, (d.rt != 31) ? 1 : 0, d.rt, cur_pc);
+                AtomicParams ap;
+                ap.width = static_cast<uint8_t>(width_bytes);
+                ap.atom_op = d.atom_op;
+                ap.is_load = (d.rt != 31);
+                ap.reg_idx = d.rt;
+                emit_atomic(block, dest, base, src, ap, cur_pc);
                 store_arm_reg(block, d.rt, dest);
             }
             return true;

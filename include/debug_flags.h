@@ -36,6 +36,7 @@ struct DebugFlags {
     bool ld2  = false;  // BIFROST_LD2_DBG  — second-run dynamic-linker
     // ── JIT codegen diagnostics ──────────────────────────────────────
     bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
+    bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
@@ -95,6 +96,7 @@ struct DebugFlags {
         f.exec_trace= all || env("BIFROST_EXEC_TRACE");
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
+        f.ir_validate = all || env("BIFROST_IR_VALIDATE");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         f.crash_dump = all || env("BIFROST_CRASH_DUMP");

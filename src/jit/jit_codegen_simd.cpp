@@ -239,7 +239,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // SIMD_LOGICAL touches no GPRs: the SSE2 XMM half-loop and the
             // VEX vec-cache path both use XMM0-2 only, and the RBX base
             // register is reserved (never holds a cached vreg). No GPR flush.
-            uint8_t opc = static_cast<uint8_t>(inst.imm);
+            uint8_t opc = inst.logical_params().subop;
             // For opc 0-2 we use a single SSE2 op; for 3-5 we emit a
             // 2-3 instruction sequence.
             uint8_t sse_op = 0;
@@ -350,8 +350,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // sizes (1/2/4/8 bytes) and opcodes (add/sub/mul) are native;
         // rare combinations fall back to CALL_INTERP.
         case IROp::SIMD_ARITH: {
-            uint8_t opc = static_cast<uint8_t>(inst.imm);
-            int esize = static_cast<int>(inst.width);
+            const SimdArithParams ap = inst.arith_params();
+            uint8_t opc = ap.subop;
+            int esize = static_cast<int>(ap.esize);
             if (esize != 1 && esize != 2 && esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
@@ -475,9 +476,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // clear sign bit (andps). width = element bytes (4/8); flags_op
         // = Q (1 = process both v_lo and v_hi, 0 = v_lo only).
         case IROp::SIMD_FP_ARITH: {
-            uint8_t opc = static_cast<uint8_t>(inst.imm);
-            int esize = static_cast<int>(inst.width);
-            bool Q = (inst.flags_op != 0);
+            const SimdSubopParams fp = inst.fp_arith_params();
+            uint8_t opc = fp.subop;
+            int esize = static_cast<int>(fp.esize);
+            bool Q = fp.q;
             bool is_double = (esize == 8);
             if (esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
@@ -596,10 +598,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // size (4=float via *ps, 8=double via *pd); flags_op = Q.
         // imm: 0=FMLA (+), 1=FMLS (-).
         case IROp::SIMD_FP_FMA: {
-            int esize = static_cast<int>(inst.width);
-            bool Q = (inst.flags_op != 0);
+            const SimdSubopParams fp = inst.fp_fma_params();
+            int esize = static_cast<int>(fp.esize);
+            bool Q = fp.q;
             bool is_double = (esize == 8);
-            bool is_sub = (static_cast<uint8_t>(inst.imm) == 1);
+            bool is_sub = (fp.subop == 1);
             if (esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
@@ -727,9 +730,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // compare of zeros in the unused lane is discarded by the MOVSD
         // store). Same pattern as the existing CMEQ half-loop.
         case IROp::SIMD_CMP: {
-            uint8_t opc = static_cast<uint8_t>(inst.imm);
-            int esize = static_cast<int>(inst.width);
-            bool Q = (inst.flags_op != 0);
+            const SimdSubopParams cp = inst.cmp_params();
+            uint8_t opc = cp.subop;
+            int esize = static_cast<int>(cp.esize);
+            bool Q = cp.q;
             if (opc > 4 || (esize != 1 && esize != 2 && esize != 4 && esize != 8)) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
@@ -833,8 +837,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // width = esize (1/2/4/8, default 8); flags_op = Q.
             // esize<8: mask the low element then shift-replicate it across
             // the qword in RAX (RCX = scratch); esize==8: full GPR value.
-            const int esize = inst.width ? static_cast<int>(inst.width) : 8;
-            const bool q = inst.flags_op != 0;
+            const SimdDupParams dp = inst.dup_params();
+            const int esize = dp.esize ? static_cast<int>(dp.esize) : 8;
+            const bool q = dp.q;
             auto emit_dup_qword = [&]() {
                 if (esize >= 8) return;
                 clobber_host_reg(RCX);
@@ -931,8 +936,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // interp's zero-extended element read for esize < 8; esize == 8
         // loads the full qword from v_lo or v_hi per the lane index.
         case IROp::SIMD_UMOV: {
-            const int esize = inst.width ? static_cast<int>(inst.width) : 8;
-            const int index = static_cast<int>(inst.imm);
+            const SimdMovParams mp = inst.umov_params();
+            const int esize = mp.esize ? static_cast<int>(mp.esize) : 8;
+            const int index = static_cast<int>(mp.index);
             const int byte_off = index * esize;        // offset into the 16-byte vector
             const int qword = byte_off / 8;            // 0 -> v_lo, 1 -> v_hi
             const int32_t off = (qword == 0 ? V_LO_OFF : V_HI_OFF)
@@ -951,13 +957,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // Identical element addressing to UMOV (width = esize 1/2/4,
         // imm = lane index, flags_op = Q), followed by a left+arithmetic-
         // right shift pair so the sign bit propagates through the 64-bit
-        // register. Q=0 results land in the low 32 bits already correctly
-        // sign-extended (set_vreg_reg stores the full qword; guest W reads
-        // use only the low half). The .D form never reaches here (table
-        // guard keeps it UNKNOWN -> interp -> DecodeError).
+        // register. Q=1 writes Xd (full 64-bit sign extension). Q=0 writes
+        // Wd: the low 32 bits hold the sign-extended element and the upper
+        // 32 of Xd are ZERO (interp_fp.cpp truncates the sext to uint32_t),
+        // so mask off the upper half with mov r32,r32. The .D form never
+        // reaches here (table guard keeps it UNKNOWN -> interp ->
+        // DecodeError).
         case IROp::SIMD_SMOV: {
-            const int esize = inst.width ? static_cast<int>(inst.width) : 4;
-            const int index = static_cast<int>(inst.imm);
+            const SimdMovParams mp = inst.smov_params();
+            const int esize = mp.esize ? static_cast<int>(mp.esize) : 4;
+            const int index = static_cast<int>(mp.index);
             const int byte_off = index * esize;        // offset into the 16-byte vector
             const int qword = byte_off / 8;            // 0 -> v_lo, 1 -> v_hi
             const int32_t off = (qword == 0 ? V_LO_OFF : V_HI_OFF)
@@ -972,7 +981,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             const int sh = 64 - esize * 8;             // 24 / 16 / 32
             emit_shift_imm8(d, 4, static_cast<uint8_t>(sh));  // shl
             emit_shift_imm8(d, 7, static_cast<uint8_t>(sh));  // sar
-            if (inst.flags_op == 0) {
+            if (!mp.q) {
                 // Q=0 (Wd): zero the upper 32 bits (mov r32, r32).
                 if (d >= 8) emit_byte(rex(false, d >= 8, false, d >= 8));
                 emit_byte(0x89); emit_byte(modrm(3, d & 7, d & 7));
@@ -987,9 +996,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // have no compact pre-AVX512 form and stay on the interpreter.
         case IROp::SIMD_SATADDSUB: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int esize = static_cast<int>(inst.width) == 2 ? 2 : 1;
-            const bool q = inst.flags_op != 0;
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.sataddsub_params();
+            const int esize = static_cast<int>(sp.esize) == 2 ? 2 : 1;
+            const bool q = sp.q;
+            const int subop = static_cast<int>(sp.subop);
             // opcode[subop][esize]: PADDSB EC/W ED, PADDUSB DC/W DD,
             // PSUBSB E8/W E9, PSUBUSB D8/W DA
             static const uint8_t kOp[4][2] = {
@@ -1010,13 +1020,14 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // One movabs + one vmovq (vmovq already zeroes the upper half for
         // Q=0); vmovddup broadcasts the pattern to both halves for Q=1.
         case IROp::SIMD_MOVI: {
+            const SimdMoviParams mp = inst.movi_params();
             clobber_host_reg(RAX);
-            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm64(RAX, mp.pattern);
             {
                 int xd = vec_xmm(static_cast<int>(inst.dest));
                 if (xd >= 0) {
                     emit_vex3(1, true, 0, 1, xd, RAX, true, 0x6E);  // vmovq xd, rax
-                    if (inst.flags_op)
+                    if (mp.q)
                         emit_vex3(1, false, 0, 3, xd, xd, true, 0x12);  // vmovddup xd,xd
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
@@ -1025,7 +1036,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             int32_t mofflo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t moffhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, mofflo, RAX);
-            if (inst.flags_op) {
+            if (mp.q) {
                 emit_store(CPU_REG, moffhi, RAX);
             } else {
                 emit_mov_imm32_zext(RAX, 0);
@@ -1038,25 +1049,26 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // flags_op = Q. ORR/BIC (vector, immediate) read Vd as their source,
         // exactly like the interpreter's apply_or_bic_u{32,16}.
         case IROp::SIMD_ORRIMM: {
+            const SimdOrrImmParams op = inst.orrimm_params();
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
             clobber_host_reg(RAX);
-            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm64(RAX, op.pattern);
             {
                 int xd = vec_xmm(static_cast<int>(inst.dest));
                 if (xd >= 0) {
                     // Pattern into scratch XMM0, then VEX logical with xd.
                     emit_vex3(1, true, 0, 1, 0, RAX, true, 0x6E);    // vmovq xmm0, rax
-                    if (inst.flags_op)
+                    if (op.q)
                         emit_vex3(1, false, 0, 3, 0, 0, true, 0x12); // vmovddup xmm0,xmm0
-                    if (inst.cond) {
+                    if (op.invert) {
                         // BIC: xd = xd & ~imm = vpandn xd, xmm0(imm), xd
                         emit_vex3(1, false, 0, 1, xd, xd, true, 0xDF);
                     } else {
                         // ORR: xd = xd | imm
                         emit_vex3(1, false, xd, 1, xd, 0, true, 0xEB);
                     }
-                    if (!inst.flags_op)
+                    if (!op.q)
                         emit_vex3(1, false, 0, 2, xd, xd, true, 0x7E);  // vmovq xd,xd → zero upper (F3)
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
@@ -1066,13 +1078,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             int32_t olo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t ohi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_load(RCX, CPU_REG, olo);
-            if (inst.cond) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
+            if (op.invert) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
             else           { emit_or_reg(RCX, RAX); }
             emit_store(CPU_REG, olo, RCX);
-            if (inst.flags_op) {
-                emit_mov_imm64(RAX, inst.imm);
+            if (op.q) {
+                emit_mov_imm64(RAX, op.pattern);
                 emit_load(RCX, CPU_REG, ohi);
-                if (inst.cond) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
+                if (op.invert) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
                 else           { emit_or_reg(RCX, RAX); }
                 emit_store(CPU_REG, ohi, RCX);
             } else {
@@ -1085,7 +1097,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         case IROp::SIMD_LDST: {
             // width=1 (load): src1=lo vreg, src2=hi vreg → v_lo[dest], v_hi[dest]
             // width=0 (store): v_lo[dest] → src1 vreg, v_hi[dest] → src2 vreg
-            if (inst.width == 1) {
+            if (inst.ldst_is_load()) {
                 // Load: write vregs to v_lo/v_hi
                 // use separate host regs for lo/hi so we
                 // don't clobber src1's cached value when loading src2.
@@ -1126,10 +1138,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
-            uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+            const Ld16Params lp = inst.ld16_params();
+            uint32_t nregs = lp.count ? lp.count : 1;
             // rax = addr + imm
             load_vreg_to_reg(RAX, inst.src1);
-            if (inst.imm != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm));
+            if (lp.offset != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(lp.offset));
             // Limit check: addr + 16*nregs <= DIRECT_WINDOW_SIZE.
             int tmp = (RAX != RDX) ? RDX : RCX;
             emit_mov_imm32_zext(tmp, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - static_cast<uint64_t>(16 * nregs)));
@@ -1150,8 +1163,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (vec_cache_active_) vec_cache_writeback_all(false);
             for (uint32_t i = 0; i < nregs; i++) {
                 load_vreg_to_reg(RAX, inst.src1);
-                if (inst.imm != 0 || i != 0) {
-                    emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm + 16 * i));
+                if (lp.offset != 0 || i != 0) {
+                    emit_add_reg_imm(RAX, static_cast<int32_t>(lp.offset + 16 * i));
                 }
                 emit_push(WIN_REG);
                 emit_load(RDI, RBP, emu_slot_off());
@@ -1217,14 +1230,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
-            uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+            const St16Params sp = inst.st16_params();
+            uint32_t nregs = sp.count ? sp.count : 1;
             // cond=1 → broadcast: every 16-byte half stores the SAME source
             // vector (`stp q0,q0` memset pattern), so src2 stays constant
             // across the loop instead of src2+i.
-            bool broadcast = (inst.cond != 0);
+            bool broadcast = sp.broadcast;
             // rax = addr + imm
             load_vreg_to_reg(RAX, inst.src1);
-            if (inst.imm != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm));
+            if (sp.offset != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(sp.offset));
             // Limit check.
             int tmp = (RAX != RDX) ? RDX : RCX;
             emit_mov_imm32_zext(tmp, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - static_cast<uint64_t>(16 * nregs)));
@@ -1244,8 +1258,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (vec_cache_active_) vec_cache_writeback_all(false);
             for (uint32_t i = 0; i < nregs; i++) {
                 load_vreg_to_reg(RAX, inst.src1);
-                if (inst.imm != 0 || i != 0) {
-                    emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm + 16 * i));
+                if (sp.offset != 0 || i != 0) {
+                    emit_add_reg_imm(RAX, static_cast<int32_t>(sp.offset + 16 * i));
                 }
                 emit_push(WIN_REG);
                 emit_load(RDI, RBP, emu_slot_off());
@@ -1372,9 +1386,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         case IROp::SIMD_SRSRA:
         case IROp::SIMD_SLI:
         case IROp::SIMD_SRI: {
-            int esize = static_cast<int>(inst.width);
-            uint8_t shift = static_cast<uint8_t>(inst.imm);
-            bool q = (inst.flags_op != 0);
+            const SimdShiftParams sp = inst.shift_params();
+            int esize = static_cast<int>(sp.esize);
+            uint8_t shift = sp.shift;
+            bool q = sp.q;
             // Fall back to CALL_INTERP for unsupported element sizes.
             //  - esize=1 (8-bit): no PSLLB/PSRLB/PSRAB in SSE2.
             //  - esize=8 SSHR/SSRA/SRSRA: 64-bit arithmetic shifts need
@@ -1662,7 +1677,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // multiplication is the same on both architectures), so we
         // use PCLMULQDQ natively when available.
         case IROp::AES_CRYPTO: {
-            uint8_t sub_op = static_cast<uint8_t>(inst.imm);
+            uint8_t sub_op = inst.aes_params().subop;
             // PMULL/PMULL2 — use PCLMULQDQ when available.
             if ((sub_op == 4 || sub_op == 5) && has_pclmulqdq()) {
                 clobber_flags();
@@ -1756,8 +1771,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // flags_op = Q. Full 128-bit source; Q=0 zeroes v_hi.
         case IROp::SIMD_2REG: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int esize = static_cast<int>(inst.width);
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.p2reg_params();
+            const int esize = static_cast<int>(sp.esize);
+            const int subop = static_cast<int>(sp.subop);
             if ((subop == 3 || subop == 4) &&
                 esize != 1 && esize != 2 && esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
@@ -1850,7 +1866,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     break;
                 }
             }
-            store_vec(0, static_cast<int>(inst.dest), inst.flags_op != 0);
+            store_vec(0, static_cast<int>(inst.dest), sp.q);
             return true;
         }
         // ── SIMD CVTF (SCVTF/UCVTF/FCVTZS/FCVTZU, 32-bit lanes) ──────
@@ -1858,7 +1874,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // 3=FCVTZU f32→u32). width is always 4. flags_op = Q.
         case IROp::SIMD_CVTF: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.cvtf_params();
+            const int subop = static_cast<int>(sp.subop);
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             switch (subop) {
@@ -1948,7 +1965,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     break;
                 }
             }
-            store_vec(0, static_cast<int>(inst.dest), inst.flags_op != 0);
+            store_vec(0, static_cast<int>(inst.dest), sp.q);
             return true;
         }
         // ── SIMD ADDP (pairwise byte add, 8B/16B) — native SSE2 ──────
@@ -1956,7 +1973,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // Vd[8+i] = Vm[2i] + Vm[2i+1]  (Q=1);  8B form: Vd[4+i] = Vm pairs.
         case IROp::SIMD_ADDP: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const bool q = inst.flags_op != 0;
+            const SimdAddpParams ap = inst.addp_params();
+            const bool q = ap.q;
             clobber_flags();
             emit_mask(2, 0x00FF00FF00FF00FFULL);   // 0x00FF per 16-bit lane
             auto reduce = [&](int x) {
@@ -1995,8 +2013,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // preserving v_lo). Full 128-bit source; 8 result bytes.
         case IROp::SIMD_XTN: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int esize = static_cast<int>(inst.width);
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.xtn_params();
+            const int esize = static_cast<int>(sp.esize);
+            const int subop = static_cast<int>(sp.subop);
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             switch (subop) {
@@ -2060,7 +2079,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     break;
                 }
             }
-            if (inst.flags_op) {
+            if (sp.q) {
                 store_lo(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
             } else {
                 store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
@@ -2074,14 +2093,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // Out-of-range indices → 0 (TBL) / keep dest byte (TBX). Only
         // XMM0-9 used; all helpers are REX-aware. Requires SSSE3 (pshufb).
         case IROp::SIMD_TBL: {
-            if (vec_cache_active_ || !has_ssse3() || inst.imm > 2) {
+            const SimdTblParams tp = inst.tbl_params();
+            if (vec_cache_active_ || !has_ssse3() || tp.nregs > 2) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
             clobber_flags();
-            const bool is_tbx = (inst.flags_op & 2) != 0;
-            const bool q = (inst.flags_op & 1) != 0;
-            const int nregs = static_cast<int>(inst.imm);
+            const bool is_tbx = tp.is_tbx;
+            const bool q = tp.q;
+            const int nregs = static_cast<int>(tp.nregs);
             const int bp = q ? 16 : 8;                 // bytes per table reg
             const int table_len = nregs * bp;
             // ge(T) = (idx >= T) = pcmpgtb(paddb(idx,0x80), (T-129)&0xFF)
@@ -2133,12 +2153,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // cpu.v_lo/v_hi (never vec-cache pinned). flags_op = Q.
         case IROp::SIMD_INS: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int esize = static_cast<int>(inst.width);
-            const int src_byte = static_cast<int>(inst.aux) * esize;
+            const SimdInsParams ip = inst.ins_params();
+            const int esize = static_cast<int>(ip.esize);
+            const int src_byte = static_cast<int>(ip.sidx) * esize;
             const int sq = src_byte / 8;                   // 0 → v_lo, 1 → v_hi
             const int32_t soff = (sq ? V_HI_OFF : V_LO_OFF)
                 + static_cast<int>(inst.src1) * 8 + (src_byte % 8);
-            const int dst_byte = static_cast<int>(inst.imm);
+            const int dst_byte = static_cast<int>(ip.dst_off);
             const int dq = dst_byte / 8;
             const int b_in_q = dst_byte % 8;               // field offset in the qword
             const int32_t doff = (dq ? V_HI_OFF : V_LO_OFF)
@@ -2178,10 +2199,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            const int esize = static_cast<int>(inst.width);
-            const bool q = inst.flags_op != 0;
+            const SimdBinopParams pp = inst.permute_params();
+            const int esize = static_cast<int>(pp.esize);
+            const bool q = pp.q;
             uint8_t maskA[16], maskB[16];
-            build_permute_masks(static_cast<uint8_t>(inst.imm), esize, q,
+            build_permute_masks(static_cast<uint8_t>(pp.subop), esize, q,
                                 maskA, maskB);
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));   // X0 = A
@@ -2210,9 +2232,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            const int esize = static_cast<int>(inst.width);
-            const bool q = inst.flags_op != 0;
-            const int subop = static_cast<int>(inst.imm);
+            const SimdBinopParams pp = inst.pairmin_params();
+            const int esize = static_cast<int>(pp.esize);
+            const bool q = pp.q;
+            const int subop = static_cast<int>(pp.subop);
             if (esize != 1 && esize != 2 && esize != 4) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
@@ -2294,8 +2317,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // abs trick: t = a-b; m = t >>s (bits-1); r = (t ^ m) - m.
         case IROp::SIMD_ABD: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int esize = static_cast<int>(inst.width);
-            const bool q = inst.flags_op != 0;
+            const SimdSubopParams sp = inst.abd_params();
+            const int esize = static_cast<int>(sp.esize);
+            const bool q = sp.q;
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             load_vec(1, static_cast<int>(inst.src2));
@@ -2331,9 +2355,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (vec_cache_active_ || !has_sse41()) {
                 emit_call_interp(inst.arm_pc, false); return true;
             }
-            const int esize = static_cast<int>(inst.width);
-            const bool q = inst.flags_op != 0;
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.abdl_params();
+            const int esize = static_cast<int>(sp.esize);
+            const bool q = sp.q;
+            const int subop = static_cast<int>(sp.subop);
             if (esize != 1 && esize != 2 && esize != 4) {
                 emit_call_interp(inst.arm_pc, false); return true;
             }
@@ -2383,9 +2408,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (vec_cache_active_ || !has_sse41()) {
                 emit_call_interp(inst.arm_pc, false); return true;
             }
-            const int esize = static_cast<int>(inst.width);   // src esize
-            const bool q = inst.flags_op != 0;
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.addw_params();
+            const int esize = static_cast<int>(sp.esize);   // src esize
+            const bool q = sp.q;
+            const int subop = static_cast<int>(sp.subop);
             const bool is_sub = (subop & 2) != 0;
             const bool is_uns = (subop & 1) != 0;
             clobber_flags();
@@ -2409,9 +2435,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // always full 128-bit.
         case IROp::SIMD_ADDHN: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
-            const int esize_in = static_cast<int>(inst.width);
-            const bool q = inst.flags_op != 0;
-            const int subop = static_cast<int>(inst.imm);
+            const SimdSubopParams sp = inst.addhn_params();
+            const int esize_in = static_cast<int>(sp.esize);
+            const bool q = sp.q;
+            const int subop = static_cast<int>(sp.subop);
             const bool is_sub = (subop & 2) != 0;
             const bool round = (subop & 1) != 0;
             if (esize_in < 2 || esize_in > 8) {
@@ -2468,10 +2495,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // (dest-half select). Source always full 128-bit.
         // subop: 0=SQSHRN 1=UQSHRN 2=SQRSHRN 3=URQSHRN 4=SQSHRUN 5=SQRSHRUN
         case IROp::SIMD_SHRN_SAT: {
-            const int esize = static_cast<int>(inst.width);
-            const int subop = static_cast<int>(inst.imm & 0xFF);
-            const int shift = static_cast<int>((inst.imm >> 8) & 0xFF);
-            const bool q = inst.flags_op != 0;
+            const SimdShrnSatParams sp = inst.shrn_sat_params();
+            const int esize = static_cast<int>(sp.esize);
+            const int subop = static_cast<int>(sp.subop);
+            const int shift = static_cast<int>(sp.shift);
+            const bool q = sp.q;
             // 64-bit source needs PSRAQ — does not exist in SSE2/AVX2
             // (VPSRAQ is AVX-512F only). Fall back to the interpreter.
             if (vec_cache_active_ || esize == 8 ||
@@ -2538,10 +2566,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // SQDMULH/SQRDMULH/SQDMULL stay on the interpreter for now
         // (saturating doubling needs a wider sequence).
         case IROp::SIMD_MUL_ELEM: {
-            const int esize = static_cast<int>(inst.width);
-            const int subop = static_cast<int>(inst.imm & 0xFF);
-            const int idx = static_cast<int>((inst.imm >> 8) & 0xFF);
-            const bool q = inst.flags_op != 0;
+            const SimdMulElemParams mp = inst.mul_elem_params();
+            const int esize = static_cast<int>(mp.esize);
+            const int subop = static_cast<int>(mp.subop);
+            const int idx = static_cast<int>(mp.lane);
+            const bool q = mp.q;
             const bool widen = (subop >= 3 && subop <= 8) || subop == 11;
             if (vec_cache_active_ || !has_sse41() || esize == 1 ||
                 esize > 4 || subop >= 9) {

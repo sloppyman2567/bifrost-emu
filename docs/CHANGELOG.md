@@ -6,9 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [Unreleased]
+## [1.5.5] — typed IR parameters + privatization, compat syscalls, decoder fixes (2026-09-22)
 
 ### Added
+- **Typed per-op IR parameters with privatized raw fields.** Every IR op
+  is now constructed through a typed factory (`IRInst::make_*` in
+  `include/ir/ir.hpp`, ~70 factories) and read through typed readers;
+  the raw parameter fields (`width/cond/flags_op/imm/immr/imms/sf`) are
+  private with only three friends (`validate_ir_block`, `dump_ir`,
+  `optimize_ir`) — a pack/unpack mismatch is now a compile error instead
+  of a silent miscompile. Covers all SIMD ops, the scalar FP family,
+  flag-setting ALU, branches, atomics, and memory ops. The old generic
+  `emit()`/`emit_bf()` are deleted; parameter-less ops use generic
+  `IRInst::make()`. All post-hoc `insts.back().X` patching eliminated
+  except `set_skip_count()` (BRCOND_SKIP forward reference).
+- **`BIFROST_IR_VALIDATE=1`**: per-op contract checker
+  (`validate_ir_block()`, wired after `optimize_ir` on tier-1 and tier-2
+  region blocks) that fails loud on packing drift.
 - **Compatibility syscalls** (`src/syscalls/misc_extended.cpp`): permissive
   no-ops for NUMA policy (`remap_file_pages`, `mbind`, `set_mempolicy`,
   `get_mempolicy`, `migrate_pages`, `move_pages`), `ioprio_get/set`,
@@ -86,7 +100,7 @@ DEVICE (string arrays), ALLOCATE_COMMAND_BUFFERS, WaitForFences.
   the device callback) + dedicated-vCPU audio pump.
 - CSEL family native cmovcc lowering + pstate-loader scratch fix.
 
-## [Unreleased] — Working audio path (Linux + Android), audio-thunk dispatch arms (2026-08-22)
+## [Working notes 2026-08-22] — Working audio path (Linux + Android), audio-thunk dispatch arms
 
 ### Added
 - **AudioEngine core** (`src/audio/`): `Audio::write_interleaved(fmt, rate,
@@ -118,7 +132,7 @@ DEVICE (string arrays), ALLOCATE_COMMAND_BUFFERS, WaitForFences.
 - `is_thunk_supported_lib_` gained libaaudio/libOpenSLES so Android guests
   can dlopen them.
 
-## [Unreleased] — CSEL-cmov landing, Vulkan graphics pipelines + vkMapMemory, stats reporter fix (2026-08-21)
+## [Working notes 2026-08-21] — CSEL-cmov landing, Vulkan graphics pipelines + vkMapMemory, stats reporter fix
 
 ### Fixed
 - **CSEL/CCMP/BRCOND_SKIP/ADCS-SBCS flag-loader scratch bug**: 

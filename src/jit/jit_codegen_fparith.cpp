@@ -60,7 +60,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         // The mask build (mov/cmov/vmovq) is RFLAGS-neutral, so the guest
         // flags stay valid in host RFLAGS after this op.
         case IROp::FP_CSEL: {
-            bool is_double = (inst.width == 1);
+            const FpCselParams fp = inst.fp_csel_params();
+            bool is_double = (fp.ftype == 1);
             if (!has_fma3()) {  // VEX-encoded blendv requires AVX (FMA3 implies AVX)
                 emit_call_interp(inst.arm_pc, false);
                 return true;
@@ -87,7 +88,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             // Condition code (SUB convention; HI/LS after ADD/TST need cmc).
             bool need_cmc = false;
-            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
+            uint8_t cc = resolve_arm_cond_with_carry(fp.cond, need_cmc);
             if (need_cmc) emit_byte(0xF5);  // cmc — invert CF for HI/LS
             // Build the mask: mask = (cond) ? sign-bit-set : 0, flags-neutral.
             // mov rax,0; mov rcx, imm; cmovcc rax,rcx; vmovq xmm0,rax.
@@ -98,7 +99,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // Double: bit63. Single: bit31.
             emit_mov_imm64(RCX, is_double ? 0x8000000000000000ULL
                                           : 0x0000000080000000ULL);
-            if (inst.cond == 0xE || inst.cond == 0xF) {
+            if (fp.cond == 0xE || fp.cond == 0xF) {
                 // AL/NV: the interpreter's cond_true() treats both as
                 // always-true (decoder.cpp), so mask = sign-bit-set →
                 // select src1 unconditionally.
@@ -143,7 +144,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         // R12/R13/R15 are preserved.
         case IROp::FP_BINOP: {
             // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest] = 0
-            bool is_double = (inst.width == 1);
+            const FpBinopParams bp = inst.fp_binop_params();
+            bool is_double = (bp.ftype == 1);
             uint8_t ld_prefix = is_double ? 0xF2 : 0xF3;  // MOVSD/MOVSS
             clobber_flags();
             // FP_BINOP only clobbers RAX (zero store to
@@ -158,7 +160,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // Load src2 into XMM1: movsd/movss xmm1, [rbx+off]
             fp_load_operand(1, inst.src2, is_double);
             // Execute SSE2 op
-            uint8_t opc = static_cast<uint8_t>(inst.imm);
+            uint8_t opc = bp.opcode;
             uint8_t sse_op;
             switch (opc) {
                 case 0: sse_op = 0x59; break;  // mul (mulsd)
@@ -217,14 +219,15 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             return true;
         }
         case IROp::FP_UNOP: {
-            bool is_double = (inst.width == 1);
+            const FpUnopParams up = inst.fp_unop_params();
+            bool is_double = (up.ftype == 1);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             clobber_flags();
             // FP_UNOP clobbers only RAX (sign mask for FABS/FNEG; zero store).
             // RCX/RDX are not touched — don't flush them.
             flush_invalidate_host_regs(1u << RAX);
             fp_load_operand(0, inst.src1, is_double);
-            uint8_t opc = static_cast<uint8_t>(inst.imm);
+            uint8_t opc = up.opcode;
             if (opc == 0) {
                 // FMOV — no-op
             } else if (opc == 1) {
@@ -264,7 +267,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // single zeroes v_hi[dest] (ARM: fmov Sd,Sn clears the upper 32
             // bits). Pure XMM0 memory-to-memory move — no arithmetic. Replaces
             // the old 4-op GPR round-trip (2-4 memory accesses per side).
-            bool is_double = (inst.width == 1);
+            const FpMovParams mp = inst.fp_mov_params();
+            bool is_double = (mp.ftype == 1);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             clobber_flags();
             // movsd/movss preserve flags; clobber_flags() is a conservative
@@ -310,15 +314,16 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // 0x5F000000 (float) for width=0. Using the double constant
             // with single-precision ucomiss/subss reads only the low 32
             // bits (0x00000000 = 0.0f), breaking the >= 2^63 detection.
-            bool is_double = (inst.width == 1);
-            bool is_unsigned = (inst.imm != 0);
+            const FpF2IParams fp = inst.fp_f2i_params();
+            bool is_double = (fp.ftype == 1);
+            bool is_unsigned = fp.is_unsigned;
             // ARM FCVT rounding mode, encoded in `cond` (see
             // ir_translate_fp.cpp): bits[1:0] = rmode (0=N nearest-even,
             // 1=P +inf, 2=M -inf, 3=Z toward-zero), bit 2 = A (ties-away).
             // The A variant and unsigned non-Z never reach here — the IR
             // translator routes them to CALL_INTERP — but keep the JIT
             // defensive so a future gate drift can't silently mis-round.
-            uint8_t rmode = inst.cond & 3;
+            uint8_t rmode = fp.rounding & 3;
             if (is_unsigned) {
                 if (rmode != 3) {
                     emit_call_interp(inst.arm_pc, false);
@@ -406,7 +411,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // raw cvtt returns the indefinite 0x8000... sentinel for
                 // any out-of-range input, so post-clamp can't tell +ovf
                 // from -ovf. range-check the rounded value first.
-                bool is_64bit_dest = (inst.flags_op != 0);
+                bool is_64bit_dest = fp.sf;
                 // round N/P/M to an fp integer in xmm1 (explicit roundss/sd
                 // mode so host mxcsr can't leak in); Z converts xmm0 direct.
                 int rsrc = 0;
@@ -493,6 +498,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // "if (src >= 2^63) subtract 2^63, convert signed, add 2^63
             //  to result as double" trick.
             //
+            const FpI2FParams fp = inst.fp_i2f_params();
             // sf (flags_op) selects the source GPR width:
             //   sf=0 → 32-bit GPR (Wn)
             //   sf=1 → 64-bit GPR (Xn)
@@ -511,9 +517,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // 0x5F000000 (float) for width=0. Using the double constant
             // with addss reads only the low 32 bits (0x00000000 = 0.0f),
             // silently losing the 2^63 correction.
-            bool is_double = (inst.width == 1);
-            bool is_unsigned = (inst.imm != 0);
-            bool is_64bit_src = (inst.flags_op != 0);
+            bool is_double = (fp.ftype == 1);
+            bool is_unsigned = fp.is_unsigned;
+            bool is_64bit_src = fp.sf;
             // Validate FP register index (dest is an FP reg index 0-31).
             check_fp_reg_index(inst.dest, "FP_I2F dest");
             // REX.W prefix: 64-bit form when source is 64-bit OR when
@@ -589,11 +595,12 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // fbits range is 1..64. For fbits=64, 2^64 as double overflows
             // to +inf, and `scaled = a * inf` is ±inf or NaN — the saturate
             // path clamps to INT_MAX/UINT_MAX, matching the interpreter.
-            bool is_double = (inst.width == 1);
-            bool is_unsigned = (inst.imm != 0);
-            bool is_64bit_dest = (inst.flags_op != 0);
-            bool fp_dest = (inst.imms & 1) != 0;  // subop 3: int result into an FP reg
-            int fbits = static_cast<int>(inst.immr);  // 0 = plain integer form (no scale)
+            const FpFixedParams fp = inst.fp_f2i_fixed_params();
+            bool is_double = (fp.w == 1);
+            bool is_unsigned = fp.is_unsigned;
+            bool is_64bit_dest = fp.sf;
+            bool fp_dest = fp.fp_reg;  // subop 3: int result into an FP reg
+            int fbits = static_cast<int>(fp.fbits);  // 0 = plain integer form (no scale)
             check_fp_reg_index(inst.src1, "FP_F2I_FIXED src1");
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
@@ -827,11 +834,12 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // the converted double in XMM0, then multiply by 2^-fbits
             // (= divide by 2^fbits). Single-precision dest: promote to
             // double, multiply, then demote back to single.
-            bool is_double = (inst.width == 1);
-            bool is_unsigned = (inst.imm != 0);
-            bool is_64bit_src = (inst.flags_op != 0);
-            bool fp_src = (inst.imms & 1) != 0;  // subop 2: int bits in an FP reg
-            int fbits = static_cast<int>(inst.immr);  // 0 = plain integer form (no scale)
+            const FpFixedParams fp = inst.fp_i2f_fixed_params();
+            bool is_double = (fp.w == 1);
+            bool is_unsigned = fp.is_unsigned;
+            bool is_64bit_src = fp.sf;
+            bool fp_src = fp.fp_reg;  // subop 2: int bits in an FP reg
+            int fbits = static_cast<int>(fp.fbits);  // 0 = plain integer form (no scale)
             check_fp_reg_index(inst.dest, "FP_I2F_FIXED dest");
             uint8_t rex_w = (is_64bit_src || is_unsigned) ? 0x48 : 0x00;
             clobber_flags();
@@ -930,7 +938,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             //
             // We use conditional sets (setcc) to build pstate in RDX,
             // then store to cpu.pstate.
-            bool is_double = (inst.width == 1);
+            const FpCmpParams cp = inst.fp_cmp_params();
+            bool is_double = (cp.ftype == 1);
             clobber_flags();
             // FP_CMP clobbers RAX, RCX, RDX (flag manipulation).
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
@@ -945,7 +954,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             //
             // Register form: src2 = rm (0..30). Load v_lo[src2] into XMM1.
             // Zero form: src2 = 0, imm bit 0 = 1. Use xorps to zero XMM1.
-            bool with_zero = (inst.imm & 1) != 0;
+            bool with_zero = cp.with_zero;
             if (!with_zero) {
                 fp_load_operand(1, inst.src2, is_double);
             } else {
@@ -1046,7 +1055,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
             clobber_host_reg(RAX);
-            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm64(RAX, inst.fp_movi_params().bits);
             int xd = vec_xmm(inst.dest);
             if (xd >= 0) {
                 emit_vmovq_gpr_to_xmm(xd, RAX);

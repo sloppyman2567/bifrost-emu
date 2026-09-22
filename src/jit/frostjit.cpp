@@ -190,11 +190,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             //   SMAX/SMIN/UMAX/UMIN (4-7): CAS-loop with cmp+cmov
             //
             // inst.imm = ARM reg index (rt for non-CAS, rs for CAS) for
-            //   slow-path result reload.
-            // inst.immr = CAS desired vreg index (packed; only for CAS).
-            uint8_t atom_op = inst.cond;
-            bool is_load = (inst.flags_op != 0);
-            int w = inst.width;
+            //   slow-path result reload. (CAS desired value arrives in
+            //   src2, not immr.)
+            const AtomicParams ap = inst.atomic_params();
+            uint8_t atom_op = ap.atom_op;
+            bool is_load = ap.is_load;
+            int w = ap.width;
             bool is_64 = (w == 8);
             bool is_16 = (w == 2);
             // SMAX/SMIN/UMAX/UMIN and 8-bit/16-bit CAS need special handling
@@ -206,7 +207,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (atom_op >= 0xC && w < 4)) {
                 emit_call_interp(inst.arm_pc, false);
                 if (is_load && inst.dest != 0) {
-                    emit_load_arm(RAX, static_cast<int>(inst.imm));
+                    emit_load_arm(RAX, static_cast<int>(ap.reg_idx));
                     store_reg_to_vreg(inst.dest, RAX);
                 }
                 constexpr uint16_t MEM_CLOBBER =
@@ -246,7 +247,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // ARM CAS: old=[Xn]; if old==Ws, [Xn]=Wt; Ws=old.
                 // Map: RAX=Ws(expected from cpu.regs[imm]), [mem]=Wt(RCX=desired).
                 emit_mov_reg(R9, RAX);              // R9 = host addr
-                emit_load_arm(RAX, static_cast<int>(inst.imm));  // RAX = expected
+                emit_load_arm(RAX, static_cast<int>(ap.reg_idx));  // RAX = expected
                 // lock cmpxchg [R9], RCX
                 emit_byte(0xF0);                    // LOCK
                 emit_byte(is_64 ? 0x49 : 0x41);     // REX.WB(64) or REX.B(32) for R9
@@ -374,7 +375,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Reload result: inst.imm = ARM reg index (rt for non-CAS,
             // rs for CAS). The interpreter wrote the old value there.
             if (is_load && inst.dest != 0) {
-                emit_load_arm(RAX, static_cast<int>(inst.imm));
+                emit_load_arm(RAX, static_cast<int>(ap.reg_idx));
                 store_reg_to_vreg(inst.dest, RAX);
             }
             int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
@@ -393,7 +394,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
-            emit_mov_imm32(RCX, inst.width);
+            emit_mov_imm32(RCX, inst.llsc_width());
             emit_call_aligned(&jit_ldxr, 0);
             store_reg_to_vreg(inst.dest, RAX);
             invalidate_host_regs(MEM_CLOBBER);
@@ -411,7 +412,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
-            emit_mov_imm32(R8, inst.width);
+            emit_mov_imm32(R8, inst.llsc_width());
             emit_call_aligned(&jit_stxr, 0);
             store_reg_to_vreg(inst.dest, RAX);
             invalidate_host_regs(MEM_CLOBBER);
@@ -429,7 +430,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
-            emit_mov_imm32(R8, inst.width);
+            emit_mov_imm32(R8, inst.llsc_width());
             emit_call_aligned(&jit_stlr, 0);
             invalidate_host_regs(MEM_CLOBBER);
             return false;
@@ -443,7 +444,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s2 = RCX;
             bool is_sub = (inst.op == IROp::SUBS);
-            bool is_32bit = (inst.width == 32);
+            bool is_32bit = (inst.addsub_params().bits == 32);
             // Always compute in RAX (holds src1) to avoid alloc_reg_for
             // evicting the operands under register pressure.
             int d = RAX;
@@ -501,6 +502,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
         case IROp::TST: {
+            const TstParams tp = inst.tst_params();
             // Force both operands into distinct host regs via force_two_vregs_to.
             // but ensure_vreg ignores the `preferred` hint when the vreg is
             // already cached elsewhere. Under high register pressure, the
@@ -510,7 +512,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // the wrong value.
             clobber_flags();
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-            if (inst.sf == 0) {
+            if (!tp.sf) {
                 // W-form ANDS/TST: the N flag must come from bit 31, so
                 // use a 32-bit TEST (no REX.W). A 64-bit test reads SF
                 // from bit 63, which is always 0 on zero-extended W
@@ -549,7 +551,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             kill_vreg(inst.dest);
             {
                 int d = alloc_reg();
-                int rd = static_cast<int>(inst.imm);
+                int rd = static_cast<int>(inst.csin_rd());
                 emit_load_arm(d, rd);
                 set_vreg_reg(inst.dest, d);
             }
@@ -580,7 +582,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // emit_normalize_cf_to_sub_convention normalizes to SUB convention.
             // For ADCS, we then cmc to get ADD convention.
             bool is_sub = (inst.op == IROp::SBCS);
-            bool is_32bit = (inst.width == 32);
+            bool is_32bit = (inst.addsub_params().bits == 32);
             // Load flags from pstate (we need CF in x86 CF).
             // If flags_in_host_, materialize first (to preserve pstate),
             // then we already have flags in host.
@@ -664,7 +666,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // fixed values matching the interpreter. Unknown registers
             // return 0.
             clobber_flags();  // xor d,d and emit_load don't preserve flags
-            uint64_t sys = inst.imm;
+            uint64_t sys = inst.mrs_idx();
             uint8_t op1 = (sys >> 16) & 0x7;
             uint8_t crn = (sys >> 12) & 0xF;
             uint8_t crm = (sys >> 8) & 0xF;
@@ -751,7 +753,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
         // ── MSR — write system register ──────────────────────────────
         case IROp::MSR: {
-            uint64_t sys = inst.imm;
+            uint64_t sys = inst.msr_idx();
             uint8_t op1 = (sys >> 16) & 0x7;
             uint8_t crn = (sys >> 12) & 0xF;
             uint8_t crm = (sys >> 8) & 0xF;
@@ -853,6 +855,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
         // Call the target block via jit_call_helper, then continue the block.
         case IROp::BL_CALL: {
+            const BlParams bp = inst.bl_params();
             // Flush ALL dirty vregs to cpu.regs[]/stack BEFORE the call.
             flush_all_vregs();
             // Materialize host flags to pstate if valid (callee may read pstate).
@@ -874,12 +877,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // dirty at runtime on the next iteration (see vec_cache_writeback_all_pinned).
             if (vec_cache_active_) vec_cache_writeback_all_pinned();
             // Set cpu.pc = target_pc so the callee's chain/self-loop logic works.
-            emit_mov_imm_to_rax(inst.imm);
+            emit_mov_imm_to_rax(bp.target);
             emit_store(CPU_REG, PC_OFF, RAX);
             // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
             emit_load(RSI, RBP, emu_slot_off());
-            emit_mov_imm64(RDX, inst.imm);  // RDX = target_pc (use imm64 for >4GB)
+            emit_mov_imm64(RDX, bp.target);  // RDX = target_pc (use imm64 for >4GB)
             // Save WIN_REG (R10, caller-saved) before the call.
             // emit_call_abs clobbers RAX (to load the function address),
             // so we can't save RAX across the call. The return value
@@ -926,12 +929,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // when already translated, else record for later patching
                 // (end of the target's translate_block).
                 patch_call_rel32(call_slot, code_buf_ + slow_off);
-                uint64_t (*tfn)(CPU*, Emulator*) = lookup_only(inst.imm);
+                uint64_t (*tfn)(CPU*, Emulator*) = lookup_only(bp.target);
                 if (tfn) {
                     patch_call_rel32(call_slot, reinterpret_cast<const uint8_t*>(tfn));
                 } else {
                     if (pending_call_sites_.size() > 1000000) pending_call_sites_.clear();
-                    pending_call_sites_[inst.imm].push_back(call_slot);
+                    pending_call_sites_[bp.target].push_back(call_slot);
                 }
             } else {
                 // Original path: call jit_call_helper (target not yet

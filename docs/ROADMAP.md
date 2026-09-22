@@ -105,7 +105,9 @@ status, see [TESTS.md](TESTS.md).
     (render onto every swapchain image, not just image 0) and add
     multi-frame fences + semaphore-based acquire/present sync so
     double-buffered engines run at native throughput.
-14. **Tier-2 JIT: region/trace compilation (the performance milestone).**
+14. **[DONE 2026-08-19] Tier-2 JIT: region/trace compilation (the performance milestone).**
+    Shipped in 1.5.4-alpha: region blocks with cross-block register
+    allocation, LICM, loop-carried pins; see docs/CHANGELOG.md.
     Rationale (measured 2026-08-19): SIGPROF on the minecraft game shows
     the `jit` bucket (generated native code) at 56-71% of wall time while
     dispatch/thunks/mmap are <25% combined — the residual emulator cost is

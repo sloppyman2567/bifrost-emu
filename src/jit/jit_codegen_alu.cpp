@@ -34,7 +34,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::IMM:
             if (inst.dest) {
                 if (inst.dest > 32 && inst.dest < 4096)
-                    jit_consts_[inst.dest] = inst.imm;
+                    jit_consts_[inst.dest] = inst.imm_value();
                 // Fold lookahead: when the immediately-following op folds
                 // this constant into an x86 immediate form (dead src2), the
                 // mov we'd emit here is dead code — skip it. The pre-scan
@@ -47,7 +47,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 if (cur_op_index_ < fold_ahead_kind_.size()) {
                     uint8_t fa = fold_ahead_kind_[cur_op_index_];
                     if (fa == 1) {
-                        int64_t c = static_cast<int64_t>(inst.imm);
+                        int64_t c = static_cast<int64_t>(inst.imm_value());
                         if (static_cast<int64_t>(static_cast<int32_t>(c)) == c)
                             return 0;
                     } else if (fa == 2) {
@@ -55,10 +55,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     }
                 }
                 int d = alloc_reg_for(inst.dest, -1);
-                if (inst.imm <= 0xFFFFFFFFULL) {
-                    emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm));
+                if (inst.imm_value() <= 0xFFFFFFFFULL) {
+                    emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm_value()));
                 } else {
-                    emit_mov_imm64(d, inst.imm);
+                    emit_mov_imm64(d, inst.imm_value());
                 }
             }
             return 0;
@@ -195,7 +195,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                         d = alloc_reg_excluding(s1, -1);
                         if (d != s1) emit_mov_reg(d, s1);
                     }
-                    bool is_32bit = (inst.width == 32);
+                    bool is_32bit = (inst.gpr_shift_params().width == 32);
                     int kind = (inst.op == IROp::SHL) ? 4
                              : (inst.op == IROp::SHR) ? 5
                              : (inst.op == IROp::SAR) ? 7 : 1;
@@ -247,7 +247,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // emit_shift: mask CL to 6 bits (x86 shift counts are mod 64)
             // and emit `d = d shift_cl` for the current inst.op.
             auto emit_shift = [&](int d) {
-                bool is_32bit = (inst.width == 32);
+                bool is_32bit = (inst.gpr_shift_params().width == 32);
                 int kind = (inst.op == IROp::SHL) ? 4
                          : (inst.op == IROp::SHR) ? 5
                          : (inst.op == IROp::SAR) ? 7 : 1;
@@ -306,7 +306,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int s = ensure_vreg(inst.src1);
             int d = alloc_reg(s);
             if (d != s) emit_mov_reg(d, s);
-            int bits = inst.width;
+            int bits = inst.sext_bits();
             if (bits < 64) {
                 int sh = 64 - bits;
                 emit_shift_imm8(d, 4, sh);
@@ -316,7 +316,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::ZEXT: {
-            int bits = inst.width;
+            int bits = inst.zext_bits();
             int s = ensure_vreg(inst.src1);
             int d = alloc_reg(s);
             if (d != s) emit_mov_reg(d, s);
@@ -377,7 +377,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // For 32-bit CLZ: x86 LZCNT counts 64-bit leading zeros.
             // ARM 32-bit CLZ should only count the lower 32 bits.
             // Subtract 32 to account for the upper 32 zero bits.
-            if (inst.width == 32) {
+            if (inst.clz_params().bits == 32) {
                 // sub d, 32 (use the right encoding for d >= R8)
                 if (d >= 8) emit_byte(0x49); else emit_byte(0x48);
                 emit_byte(0x83); emit_byte(0xE8 | (d & 7)); emit_byte(0x20);
@@ -409,7 +409,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 emit_mov_reg(d, RAX);
             }
             // bswap d (in-place if d == RAX, or the copy if d != RAX).
-            if (inst.width == 32) {
+            if (inst.rev64_params().bits == 32) {
                 // 32-bit bswap: 0F C8+r (no REX.W). REX.B if d >= 8.
                 if (d >= 8) emit_byte(0x41);
                 emit_byte(0x0F); emit_byte(0xC8 + (d & 7));
@@ -424,6 +424,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::CSEL: {
+            const CselParams cp = inst.csel_params();
             // Native CSEL/CSINC/CSINV/CSNEG via CMOVcc (2026-08-21).
             //
             // Semantics:
@@ -466,7 +467,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // here: materialize the in-host flags, then the normal load
             // path below re-establishes them with SUB convention.
             if (flags_in_host_ && !flags_from_sub_ &&
-                (inst.cond & 0xE) == 0x8) {
+                (cp.cond & 0xE) == 0x8) {
                 materialize_flags_to_pstate();  // sets flags_in_host_ = false
                 loaded_from_pstate = true;      // pstate is now current; the
                                                 // epilogue must NOT re-materialize
@@ -486,7 +487,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // whether originally from SUB or normalized after loading),
             // resolve_arm_cond_with_carry uses the default mapping.
             bool need_cmc = false;
-            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
+            uint8_t cc = resolve_arm_cond_with_carry(cp.cond, need_cmc);
             // Operands in their own registers (XZR = vreg 32 → immediate 0).
             const bool z1 = (inst.src1 == 32);
             const bool z2 = (inst.src2 == 32);
@@ -563,9 +564,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         //   EXTR Rd, Rn, Rm, #imms:
         //     Rd = (Rn:Rm) >> imms
         case IROp::SBFM: case IROp::UBFM: {
-            int width = inst.sf ? 64 : 32;
-            int immr = inst.immr;
-            int imms = inst.imms;
+            const BfParams bp = inst.bf_params();
+            int width = bp.sf ? 64 : 32;
+            int immr = bp.immr;
+            int imms = bp.imms;
             // Load src into RAX.
             // flush+invalidate FIRST so the
             // cache is empty and the subsequent memory access can't
@@ -724,7 +726,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             kill_vreg(inst.dest);
             {
                 int d = alloc_reg();
-                int rd = static_cast<int>(inst.imm);
+                int rd = static_cast<int>(inst.swar_rd());
                 emit_load_arm(d, rd);
                 set_vreg_reg(inst.dest, d);
             }
@@ -734,11 +736,12 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             //            or (rn + rm) [CCMN]; else set flags to imm nzcv.
             // inst.width = nzcv field (4 bits), inst.cond = ARM cond,
             // inst.flags_op = 1 for CCMP (sub), 0 for CCMN (add).
-            bool is_sub = (inst.flags_op == 1);
-            uint8_t nzcv = inst.width & 0xF;
+            const CcmpParams cp = inst.ccmp_params();
+            bool is_sub = cp.is_sub;
+            uint8_t nzcv = cp.nzcv & 0xF;
             // Compute x86 cc (true when ARM cond is TRUE).
             bool need_cmc = false;
-            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
+            uint8_t cc = resolve_arm_cond_with_carry(cp.cond, need_cmc);
             // Ensure flags in host.
             if (!flags_in_host_) {
                 // emit_normalize_cf_to_sub_convention only clobber
@@ -814,7 +817,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // (negative). This caused the ARM N flag to be wrong, leading
             // to incorrect conditional branches and eventually crashes
             // in programs that use 32-bit ccmp (e.g., curl --version).
-            bool is_32bit_ccmp = (inst.sf == 0);
+            bool is_32bit_ccmp = !cp.sf;
             if (is_sub) {
                 if (is_32bit_ccmp) {
                     // 32-bit: sub eax, ecx (no REX.W)
@@ -852,6 +855,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         // ── UDIV / SDIV — native x86 div/idiv ────────────────────────
         case IROp::UDIV:
         case IROp::SDIV: {
+            const uint8_t div_bits = inst.div_bits();
             // ARM64 UDIV/SDIV by zero returns 0 (no exception).
             // x86 div/idiv by zero raises SIGFPE. We emit a test+jz
             // to skip the div and set result=0 when divisor is zero.
@@ -868,7 +872,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // For 32-bit division, zero-extend EAX into RAX (clear upper 32).
             // The dividend must be in EAX; if we loaded a 64-bit value,
             // the upper bits would corrupt the 32-bit div.
-            if (inst.width == 32) {
+            if (div_bits == 32) {
                 // mov eax, eax (zero-extends to RAX on x86-64)
                 emit_byte(0x89); emit_byte(0xC0);
                 // mov ecx, ecx (zero-extends divisor)
@@ -892,7 +896,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             size_t overflow_jmp_patch = 0;
             if (inst.op == IROp::SDIV) {
                 // cmp rcx, -1
-                if (inst.width == 64) {
+                if (div_bits == 64) {
                     emit_byte(0x48); emit_byte(0x83); emit_byte(0xF9); emit_byte(0xFF);
                 } else {
                     emit_byte(0x83);  emit_byte(0xF9); emit_byte(0xFF);
@@ -901,7 +905,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 size_t jne1_patch = emit_jcc_rel32_placeholder(5);  // JNE
                 // Compare dividend to INT_MIN. We use RDX as scratch since
                 // it is already invalidated above and idiv clobbers it anyway.
-                if (inst.width == 64) {
+                if (div_bits == 64) {
                     // mov rdx, 0x8000000000000000 (10 bytes: 48 BA <imm64>)
                     emit_byte(0x48); emit_byte(0xBA);
                     emit_u32(0x00000000); emit_u32(0x80000000);
@@ -914,7 +918,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // jne skip_ovfl
                 size_t jne2_patch = emit_jcc_rel32_placeholder(5);  // JNE
                 // Both checks matched → result = INT_MIN, jump past div.
-                if (inst.width == 64) {
+                if (div_bits == 64) {
                     // mov rax, 0x8000000000000000 (10 bytes)
                     emit_byte(0x48); emit_byte(0xB8);
                     emit_u32(0x00000000); emit_u32(0x80000000);
@@ -931,7 +935,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // mark RDX as invalidated (we used it as scratch)
                 invalidate_host_regs(1u << RDX);
             }
-            if (inst.width == 32) {
+            if (div_bits == 32) {
                 // 32-bit division: use div/idiv on EAX.
                 // xor edx, edx (clear upper for unsigned) or cdq (sign-extend)
                 if (inst.op == IROp::UDIV) {

@@ -1,8 +1,13 @@
 # Vulkan Migration Plan — Generated Marshalling (Phases A → C → B)
 
-Status: **A1 ✅ · A2 ✅ · C1 ✅ partial · C3 ✅ · B batch 1 ✅
-(ShaderModule/PipelineLayout/DescriptorPool/BeginRenderPass/Framebuffer
-migrated; A3 nullify landed as plan role 3)**. Committed.
+> **COMPLETE (2026-08-24):** all phases shipped — graphics-pipeline stage
+> (`vkCreateGraphicsPipelines`/`vkCreateShaderModule`/descriptors),
+> vkMapMemory guest-window bounce, per-image framebuffers, and the
+> `test_vulkan_swapchain.elf` triangle demo (76 checks, JIT + interp).
+> See docs/CHANGELOG.md (1.5.3-alpha … 1.5.5-alpha entries). The rest of
+> this file is the historical working plan.
+>
+> Status at completion: **A1 ✅ · A2 ✅ · C1 ✅ · C3 ✅ · B batch 1 ✅**.
 
 ## Current state (post milestone-2, commit 82f8147)
 

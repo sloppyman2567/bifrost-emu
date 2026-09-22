@@ -32,6 +32,8 @@
 #include <vector>
 #include <utility>
 namespace arm64emu {
+// Forward declaration for IRInst's friend passes (defined below).
+struct IRBlock;
 // IR opcodes. Keep this list tight — every opcode must be handled in
 // frostjit.cpp (codegen).
 enum class IROp : uint8_t {
@@ -253,13 +255,14 @@ enum class IROp : uint8_t {
     //          (1 = TBL1/TBX1, 2 = TBL2/TBX2)
     SIMD_TBL,
     // Native SIMD INS (element, vector -> element, 1.5.4-alpha). Copies one
-    // element of src2 into dest at a byte offset: the interp's
+    // element of src1 into dest at a byte offset: the interp's
     // read-modify-write on v_lo/v_hi. GPR-mediated (NOT vec-cache pinned).
-    //   src1 = destination vreg (read-modify-write), src2 = source vector
+    //   src1 = source vector (Vn), src2 = read-modify-write dest (= dest)
     //   width = element size in bytes (1, 2, 4, 8)
     //   imm   = destination element byte offset (didx * esize)
     //   aux   = source element index (sidx)
     //   flags_op = Q (1=128-bit destination, 0=64-bit)
+    // Typed form: SimdInsParams + make_ins/ins_params (like SIMD_TBL).
     SIMD_INS,
     // Native SIMD permute (ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2, 1.5.4-alpha).
     // Element-wise permute of two source vectors into dest (the interp's
@@ -428,21 +431,1703 @@ static inline const char* cond_name(uint8_t c) {
 }
 // A single IR instruction.
 struct IRInst {
+    // ── Public dataflow fields ────────────────────────────────────
+    // Everyone may read/write these: they carry vreg plumbing, never
+    // per-op parameter contracts.
     IROp    op;
     uint16_t dest;   // destination vreg (0 if no dest)  [was uint8_t]
     uint16_t src1;   // source vreg 1                     [was uint8_t]
     uint16_t src2;   // source vreg 2                     [was uint8_t]
     uint16_t aux;    // auxiliary vreg (SMADDL/SMSUBL accumulator)
-    uint8_t width;   // for LOAD_MEM/STORE_MEM: 1/2/4/8; for SEXT/ZEXT: bits; for BFM/UBFM/SBFM/EXTR: encoded
-    uint8_t cond;    // for CSEL*/CCMP/BRCOND: ARM64 condition code
-    uint8_t flags_op;// for ADDS/SUBS/ADCS/SBCS: 0=add, 1=sub (controls C flag inversion)
-    uint64_t imm;    // immediate value / mem offset / branch target
     uint64_t arm_pc; // PC of the original ARM instruction (for CALL_INTERP, BRCOND, SVC)
+ private:
+    // ── Private parameter fields ──────────────────────────────────
+    // Per-op contracts (see each factory). NOBODY outside this struct
+    // and the three friends below may touch these: translators pack via
+    // factories, codegen unpacks via readers. This is what makes a
+    // pack/unpack mismatch a compile error instead of a miscompile.
+    uint8_t width;   // (see factories — meaning varies per op)
+    uint8_t cond;    // (see factories — meaning varies per op)
+    uint8_t flags_op;// (see factories — meaning varies per op)
+    uint64_t imm;    // (see factories — meaning varies per op)
     // Optional metadata used by the optimizer. Defaults to zero.
     uint8_t immr = 0;   // for BFM/UBFM/SBFM: rotate amount
     uint8_t imms = 0;   // for BFM/UBFM/SBFM: field width selector
     uint8_t sf   = 0;   // 1 if 64-bit, 0 if 32-bit (for masking)
+    // Generic passes with legitimate raw access: the validator (checks
+    // packing), the disassembler (prints raw), the optimizer (folds and
+    // rewrites generically). Everything else goes through factories.
+    friend bool validate_ir_block(const IRBlock& block, FILE* out);
+    friend void dump_ir(const IRBlock& block, FILE* out);
+    friend void optimize_ir(IRBlock& block, bool force_fwd);
+ public:
+
+    // ── Typed per-op factories/readers ──────────────────────────────
+    // The raw parameter fields above carry a different contract per op
+    // (see each IROp comment). Factories pack a typed param struct into
+    // those fields; readers unpack. Both are total functions (no traps)
+    // so codegen can use readers on its hot path; range checking lives
+    // in validate_ir_block(). Ops migrate one by one — unmigrated ops
+    // keep using the raw fields directly.
+    static IRInst make_tbl(uint16_t dest, uint16_t table, uint16_t index,
+                           const struct SimdTblParams& p, uint64_t arm_pc);
+    struct SimdTblParams tbl_params() const;
+    static IRInst make_ins(uint16_t dest, uint16_t src_vec, uint16_t rmw_dest,
+                           const struct SimdInsParams& p, uint64_t arm_pc);
+    struct SimdInsParams ins_params() const;
+    static IRInst make_2reg(uint16_t dest, uint16_t src,
+                            const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams p2reg_params() const;
+    static IRInst make_cvtf(uint16_t dest, uint16_t src,
+                            const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams cvtf_params() const;
+    static IRInst make_xtn(uint16_t dest, uint16_t src,
+                           const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams xtn_params() const;
+    static IRInst make_permute(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const struct SimdBinopParams& p,
+                               uint64_t arm_pc);
+    struct SimdBinopParams permute_params() const;
+    static IRInst make_pairmin(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const struct SimdBinopParams& p,
+                               uint64_t arm_pc);
+    struct SimdBinopParams pairmin_params() const;
+    static IRInst make_addp(uint16_t dest, uint16_t src1, uint16_t src2,
+                            const struct SimdAddpParams& p, uint64_t arm_pc);
+    struct SimdAddpParams addp_params() const;
+    static IRInst make_arith(uint16_t dest, uint16_t src1, uint16_t src2,
+                             const struct SimdArithParams& p, uint64_t arm_pc);
+    struct SimdArithParams arith_params() const;
+    static IRInst make_logical(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const struct SimdLogicParams& p,
+                               uint64_t arm_pc);
+    struct SimdLogicParams logical_params() const;
+    static IRInst make_shift(IROp op, uint16_t dest, uint16_t src,
+                             const struct SimdShiftParams& p,
+                             uint64_t arm_pc);
+    struct SimdShiftParams shift_params() const;
+    static IRInst make_umov(uint16_t dest, uint16_t src_vec,
+                            const struct SimdMovParams& p, uint64_t arm_pc);
+    struct SimdMovParams umov_params() const;
+    static IRInst make_smov(uint16_t dest, uint16_t src_vec,
+                            const struct SimdMovParams& p, uint64_t arm_pc);
+    struct SimdMovParams smov_params() const;
+    static IRInst make_orrimm(uint16_t dest, const struct SimdOrrImmParams& p,
+                              uint64_t arm_pc);
+    struct SimdOrrImmParams orrimm_params() const;
+    static IRInst make_movi(uint16_t dest, const struct SimdMoviParams& p,
+                            uint64_t arm_pc);
+    struct SimdMoviParams movi_params() const;
+    static IRInst make_dup(uint16_t dest, uint16_t src,
+                           const struct SimdDupParams& p, uint64_t arm_pc);
+    struct SimdDupParams dup_params() const;
+    static IRInst make_shrn_sat(uint16_t dest, uint16_t src,
+                                const struct SimdShrnSatParams& p,
+                                uint64_t arm_pc);
+    struct SimdShrnSatParams shrn_sat_params() const;
+    static IRInst make_mul_elem(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const struct SimdMulElemParams& p,
+                                uint64_t arm_pc);
+    struct SimdMulElemParams mul_elem_params() const;
+    static IRInst make_bf(IROp op, uint16_t dest, uint16_t src,
+                          const struct BfParams& p, uint64_t arm_pc);
+    struct BfParams bf_params() const;
+    static IRInst make_sext(uint16_t dest, uint16_t src, uint8_t bits,
+                            uint64_t arm_pc);
+    uint8_t sext_bits() const;
+    static IRInst make_zext(uint16_t dest, uint16_t src, uint8_t bits,
+                            uint64_t arm_pc);
+    uint8_t zext_bits() const;
+    static IRInst make_csel(uint16_t dest, uint16_t src1, uint16_t src2,
+                            const struct CselParams& p, uint64_t arm_pc);
+    struct CselParams csel_params() const;
+    static IRInst make_ccmp(uint16_t src1, uint16_t src2,
+                            const struct CcmpParams& p, uint64_t arm_pc);
+    struct CcmpParams ccmp_params() const;
+    static IRInst make_addsub(IROp op, uint16_t dest, uint16_t src1,
+                              uint16_t src2, const struct AddSubParams& p,
+                              uint64_t arm_pc);
+    struct AddSubParams addsub_params() const;
+    static IRInst make_tst(uint16_t src1, uint16_t src2,
+                           const struct TstParams& p, uint64_t arm_pc);
+    struct TstParams tst_params() const;
+    static IRInst make_gpr_shift(IROp op, uint16_t dest, uint16_t src1,
+                                 uint16_t src2, const struct GprShiftParams& p,
+                                 uint64_t arm_pc);
+    struct GprShiftParams gpr_shift_params() const;
+    static IRInst make_clz(uint16_t dest, uint16_t src,
+                           const struct ClzParams& p, uint64_t arm_pc);
+    struct ClzParams clz_params() const;
+    static IRInst make_rev64(uint16_t dest, uint16_t src,
+                             const struct ClzParams& p, uint64_t arm_pc);
+    struct ClzParams rev64_params() const;
+    static IRInst make_aes(uint16_t dest, uint16_t src1, uint16_t src2,
+                           const struct AesParams& p, uint64_t arm_pc);
+    struct AesParams aes_params() const;
+    static IRInst make_load_mem(uint16_t dest, uint16_t base,
+                                const struct MemParams& p, uint64_t arm_pc);
+    struct MemParams load_mem_params() const;
+    static IRInst make_store_mem(uint16_t base, uint16_t value,
+                                 const struct MemParams& p, uint64_t arm_pc);
+    struct MemParams store_mem_params() const;
+    static IRInst make_atomic(uint16_t dest, uint16_t base, uint16_t operand,
+                              const struct AtomicParams& p, uint64_t arm_pc);
+    struct AtomicParams atomic_params() const;
+    static IRInst make_ldst(uint16_t dest, uint16_t lo, uint16_t hi_or_zero,
+                            const struct LdStParams& p, uint64_t arm_pc);
+    bool ldst_is_load() const;
+    static IRInst make_ld16(uint16_t dest, uint16_t base,
+                            const struct Ld16Params& p, uint64_t arm_pc);
+    struct Ld16Params ld16_params() const;
+    static IRInst make_st16(uint16_t base, uint16_t src,
+                            const struct St16Params& p, uint64_t arm_pc);
+    struct St16Params st16_params() const;
+    static IRInst make_div(IROp op, uint16_t dest, uint16_t src1,
+                           uint16_t src2, const struct DivParams& p,
+                           uint64_t arm_pc);
+    uint8_t div_bits() const;
+    static IRInst make_brcond(const struct BrCondParams& p, uint64_t arm_pc);
+    struct BrCondParams brcond_params() const;
+    static IRInst make_brcond_zero(uint16_t src,
+                                   const struct BrCondZeroParams& p,
+                                   uint64_t arm_pc);
+    struct BrCondZeroParams brcond_zero_params() const;
+    static IRInst make_brcond_bit(uint16_t src,
+                                  const struct BrCondBitParams& p,
+                                  uint64_t arm_pc);
+    struct BrCondBitParams brcond_bit_params() const;
+    static IRInst make_brcond_fallthru(uint64_t target, uint64_t arm_pc);
+    struct BrCondFallthruParams fallthru_params() const;
+    static IRInst make_brcond_skip(uint8_t cond, uint64_t arm_pc);
+    struct BrCondSkipParams brcond_skip_params() const;
+    static IRInst make_bl_call(uint64_t target, uint64_t arm_pc);
+    struct BlParams bl_params() const;
+    static IRInst make_load_reg(uint16_t dest, uint16_t src, bool is_fp,
+                                uint64_t arm_pc = 0);
+    bool is_fp_load() const;
+    static IRInst make_store_reg(uint16_t dest, uint16_t src, bool is_fp,
+                                 uint64_t arm_pc = 0);
+    bool is_fp_store() const;
+    static IRInst make_imm(uint16_t dest, uint64_t value,
+                           uint64_t arm_pc = 0);
+    uint64_t imm_value() const;
+    uint8_t llsc_width() const;
+    uint8_t csin_rd() const;
+    uint8_t swar_rd() const;
+    static IRInst make(IROp op, uint16_t dest = 0, uint16_t src1 = 0,
+                       uint16_t src2 = 0, uint16_t aux = 0,
+                       uint64_t arm_pc = 0);
+    static IRInst make_mrs(uint16_t dest, uint64_t sys_idx, uint64_t arm_pc);
+    uint64_t mrs_idx() const;
+    static IRInst make_msr(uint16_t src, uint64_t sys_idx, uint64_t arm_pc);
+    uint64_t msr_idx() const;
+    uint64_t branch_target() const;
+    void set_skip_count(uint64_t n);
+    static IRInst make_fp_binop(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const struct FpBinopParams& p,
+                                uint64_t arm_pc);
+    struct FpBinopParams fp_binop_params() const;
+    static IRInst make_fp_unop(uint16_t dest, uint16_t src,
+                               const struct FpUnopParams& p, uint64_t arm_pc);
+    struct FpUnopParams fp_unop_params() const;
+    static IRInst make_fp_mov(uint16_t dest, uint16_t src,
+                              const struct FpMovParams& p, uint64_t arm_pc);
+    struct FpMovParams fp_mov_params() const;
+    static IRInst make_fp_cmp(uint16_t dest, uint16_t src1, uint16_t src2,
+                              const struct FpCmpParams& p, uint64_t arm_pc);
+    struct FpCmpParams fp_cmp_params() const;
+    static IRInst make_fp_movi(uint16_t dest, const struct FpMoviParams& p,
+                               uint64_t arm_pc);
+    struct FpMoviParams fp_movi_params() const;
+    static IRInst make_fp_csel(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const struct FpCselParams& p, uint64_t arm_pc);
+    struct FpCselParams fp_csel_params() const;
+    static IRInst make_fp_f2i(uint16_t dest, uint16_t src,
+                              const struct FpF2IParams& p, uint64_t arm_pc);
+    struct FpF2IParams fp_f2i_params() const;
+    static IRInst make_fp_i2f(uint16_t dest, uint16_t src,
+                              const struct FpI2FParams& p, uint64_t arm_pc);
+    struct FpI2FParams fp_i2f_params() const;
+    static IRInst make_fp_f2i_fixed(uint16_t dest, uint16_t src,
+                                    const struct FpFixedParams& p,
+                                    uint64_t arm_pc);
+    struct FpFixedParams fp_f2i_fixed_params() const;
+    static IRInst make_fp_i2f_fixed(uint16_t dest, uint16_t src,
+                                    const struct FpFixedParams& p,
+                                    uint64_t arm_pc);
+    struct FpFixedParams fp_i2f_fixed_params() const;
+    static IRInst make_fp_frint(uint16_t dest, uint16_t src,
+                                const struct FpFrintParams& p,
+                                uint64_t arm_pc);
+    struct FpFrintParams fp_frint_params() const;
+    static IRInst make_fp_fused(IROp op, uint16_t dest, uint16_t src1,
+                              uint16_t src2, const struct FpFusedParams& p,
+                              uint64_t arm_pc);
+    struct FpFusedParams fp_fused_params() const;
+    static IRInst make_cmp(uint16_t dest, uint16_t src1, uint16_t src2,
+                           const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams cmp_params() const;
+    static IRInst make_fp_arith(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const struct SimdSubopParams& p,
+                                uint64_t arm_pc);
+    struct SimdSubopParams fp_arith_params() const;
+    static IRInst make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
+                              const struct SimdSubopParams& p,
+                              uint64_t arm_pc);
+    struct SimdSubopParams fp_fma_params() const;
+    static IRInst make_sataddsub(uint16_t dest, uint16_t src1, uint16_t src2,
+                                 const struct SimdSubopParams& p,
+                                 uint64_t arm_pc);
+    struct SimdSubopParams sataddsub_params() const;
+    static IRInst make_abdl(uint16_t dest, uint16_t src1, uint16_t src2,
+                            const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams abdl_params() const;
+    static IRInst make_abd(uint16_t dest, uint16_t src1, uint16_t src2,
+                           const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams abd_params() const;
+    static IRInst make_addw(uint16_t dest, uint16_t src1, uint16_t src2,
+                            const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams addw_params() const;
+    static IRInst make_addhn(uint16_t dest, uint16_t src1, uint16_t src2,
+                             const struct SimdSubopParams& p,
+                             uint64_t arm_pc);
+    struct SimdSubopParams addhn_params() const;
 };
+// Typed parameter structs, one per migrated op. Field names match the
+// IROp comments so the contract reads the same on both sides.
+struct SimdTblParams {
+    uint8_t nregs = 1;  // 1 = TBL1/TBX1, 2 = TBL2/TBX2 (packed into imm)
+    bool is_tbx = false;// packed into flags_op bit 1
+    bool q = false;     // 0 = 64-bit operand, 1 = 128-bit (flags_op bit 0)
+};
+struct SimdInsParams {
+    uint8_t esize = 1;  // element size in bytes: 1, 2, 4, 8 (width)
+    uint8_t dst_off = 0;// destination element byte offset, didx*esize (imm)
+    uint16_t sidx = 0;  // source element index (aux)
+    bool q = false;     // 0 = 64-bit destination, 1 = 128-bit (flags_op)
+};
+// Shared parameter shape for the unary vector ops SIMD_2REG (CNT/NOT/
+// RBIT/ABS/NEG), SIMD_CVTF (SCVTF/UCVTF/FCVTZS/FCVTZU) and SIMD_XTN
+// (XTN/SQXTUN/SQXTN/UQXTN): imm=subop, width=esize, flags_op=Q.
+// One struct for the shape, one factory+reader per op so the opcode
+// stays pinned at the call site and the validator can range-check
+// per-op subop values.
+struct SimdSubopParams {
+    uint8_t subop = 0;  // operation selector (packed into imm)
+    uint8_t esize = 1;  // element size in bytes (packed into width)
+    bool q = false;     // 0 = 64-bit operand, 1 = 128-bit (flags_op)
+};
+// Same shape but with a real src2 (PERMUTE/PAIRMIN take rn AND rm).
+struct SimdBinopParams {
+    uint8_t subop = 0;  // operation selector (packed into imm)
+    uint8_t esize = 1;  // element size in bytes (packed into width)
+    bool q = false;     // 0 = 64-bit operands, 1 = 128-bit (flags_op)
+};
+// ADDP's only varying parameter is Q (width=1, imm=0 always).
+struct SimdAddpParams {
+    bool q = false;     // 0 = 64-bit operands, 1 = 128-bit (flags_op)
+};
+// Integer SIMD arithmetic: subop + esize only (flags_op is always 0).
+struct SimdArithParams {
+    uint8_t subop = 0;  // 0=add,1=sub,2=mul,3=umin,4=umax,5=smin,6=smax
+    uint8_t esize = 1;  // element size in bytes: 1, 2, 4, 8 (width)
+};
+// Bitwise logical: subop only (imm); width/cond/flags_op are always 0.
+struct SimdLogicParams {
+    uint8_t subop = 0;  // 0=and,1=orr,2=xor,3=bic,4=orn (5=eon, no row yet)
+};
+// Vector shift-by-immediate (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI/URSRA/
+// SRSRA): imm=shift amount, width=esize, flags_op=Q. The opcode itself
+// selects the shift kind, so the factory takes it as a parameter —
+// callers must pass one of the nine SIMD shift ops (the translator's
+// subop switch does).
+struct SimdShiftParams {
+    uint8_t shift = 0;  // shift amount 0..esize*8 (packed into imm)
+    uint8_t esize = 1;  // element size in bytes: 1, 2, 4, 8 (width)
+    bool q = false;     // 0 = 64-bit operand, 1 = 128-bit (flags_op)
+};
+// Vector element -> GPR (UMOV zero-extending, SMOV sign-extending):
+// width=esize, imm=lane index, flags_op=Q (0=Wd, 1=Xd).
+struct SimdMovParams {
+    uint8_t esize = 1;  // element size in bytes: 1, 2, 4, 8 (width)
+    uint8_t index = 0;  // lane index (packed into imm)
+    bool q = false;     // 0 = 32-bit GPR dest, 1 = 64-bit (flags_op)
+};
+// ORR/BIC immediate (read-modify-write dest): 64-bit lane pattern,
+// invert flag (cond), Q.
+struct SimdOrrImmParams {
+    uint64_t pattern = 0;  // replicated lane pattern (packed into imm)
+    bool invert = false;   // 0=ORR, 1=BIC (packed into cond)
+    bool q = false;        // 0 = 64-bit dest, 1 = 128-bit (flags_op)
+};
+// MOVI/MVNI broadcast: 64-bit lane pattern + Q.
+struct SimdMoviParams {
+    uint64_t pattern = 0;  // replicated lane pattern (packed into imm)
+    bool q = false;        // 0 = 64-bit dest, 1 = 128-bit (flags_op)
+};
+// GPR->vector broadcast (DUP): element size + Q (imm is always 0).
+struct SimdDupParams {
+    uint8_t esize = 8;  // element size in bytes: 1, 2, 4, 8 (width)
+    bool q = false;     // 0 = 64-bit dest, 1 = 128-bit (flags_op)
+};
+// Saturating narrowing shift (SQSHRN family): imm=subop | (shift<<8),
+// width=SOURCE esize, flags_op=Q.
+struct SimdShrnSatParams {
+    uint8_t subop = 0;  // 0=SQSHRN,1=UQSHRN,2=SQRSHRN,3=URQSHRN,4=SQSHRUN,
+                        // 5=SQRSHRUN (imm bits 7:0)
+    uint8_t shift = 1;  // 1..esize*8 (imm bits 15:8)
+    uint8_t esize = 2;  // SOURCE element size in bytes (width)
+    bool q = false;     // dest-half select (flags_op)
+};
+// Indexed-element multiply family: imm=subop | (lane<<8), width=SOURCE
+// esize, flags_op=Q. src2 is the 4-bit Rm (not d.rm — see translator).
+struct SimdMulElemParams {
+    uint8_t subop = 0;  // 0=MUL..11=SQDMULL (imm bits 7:0)
+    uint8_t lane = 0;   // indexed-element lane (imm bits 15:8)
+    uint8_t esize = 1;  // SOURCE element size in bytes: 1, 2, 4 (width)
+    bool q = false;     // (flags_op)
+};
+// Bitfield ops (SBFM/UBFM): immr/imms/sf only (width is always 0 —
+// emit_bf never sets it and codegen derives 32/64 from sf). The opcode
+// selects signed vs unsigned, so the factory takes it (like shifts).
+struct BfParams {
+    uint8_t immr = 0;  // rotate amount (immr)
+    uint8_t imms = 0;  // field width selector (imms)
+    bool sf = false;   // 1 = 64-bit, 0 = 32-bit (sf)
+};
+// Integer cond/select/compare/branch/sysreg ops.
+struct CselParams {
+    uint8_t cond = 0;    // ARM condition code (cond)
+    uint8_t rd_slot = 0;  // rd, preserved verbatim (imm; codegen ignores)
+};
+struct CcmpParams {
+    uint8_t nzcv = 0;   // NZCV value for cond-false (packed into WIDTH —
+                        // NOT a byte size!)
+    uint8_t cond = 0;   // ARM condition code (cond)
+    bool is_sub = true;  // 1=CCMP(sub), 0=CCMN(add) (flags_op)
+    bool sf = false;    // 1 = 64-bit compare, 0 = 32-bit (sf)
+};
+struct AddSubParams {
+    uint8_t bits = 64;  // 32 or 64 BITS, not bytes (width)
+    bool is_sub = false;  // 0=add, 1=sub — C inversion (flags_op)
+};
+struct TstParams {
+    bool sf = false;  // 1 = 64-bit TEST, 0 = 32-bit (sf)
+};
+// GPR shifts (SHL/SHR/SAR/ROR): width selects the x86 form — 32 means
+// the 32-bit form, anything else (0 or 64) means 64-bit. Producers use
+// 0 and 64 interchangeably for 64-bit (preserved verbatim; a future
+// cleanup could normalize 64→0 — all readers only test `== 32`).
+struct GprShiftParams {
+    uint8_t width = 0;  // 32 = 32-bit form, else 64-bit (width)
+};
+// Count-leading-zeros / byte-reverse-64: width=32/64 BITS, imm=rd slot
+// (preserved verbatim; codegen ignores it).
+struct ClzParams {
+    uint8_t bits = 64;    // 32 or 64 BITS, not bytes (width)
+    uint8_t rd_slot = 0;  // rd (imm; codegen ignores)
+};
+// Crypto extensions (AESE/AESD/AESMC/AESIMC/PMULL/PMULL2): imm=subop
+// only (0..5); src2 is the key (AES) or second operand (PMULL), 0 for
+// the subop-0 group which derives the variant from the encoding.
+struct AesParams {
+    uint8_t subop = 0;  // 0=AESE-group,1=AESD,2=AESMC,3=AESIMC,4=PMULL,5=PMULL2 (imm)
+};
+// Guest memory access: width=1/2/4/8 bytes, imm=byte offset.
+struct MemParams {
+    uint8_t width = 8;    // access size in bytes: 1, 2, 4, 8 (width)
+    uint64_t offset = 0;  // byte offset added to base (imm)
+};
+// LSE atomics: width=1/2/4/8 bytes, cond=atom op, flags=is_load,
+// imm=ARM reg index (rt, or rs for CAS).
+struct AtomicParams {
+    uint8_t width = 8;    // access size in bytes: 1, 2, 4, 8 (width)
+    uint8_t atom_op = 0;  // 0=LDADD..8=SWP, 0xC-0xF=CAS (cond)
+    bool is_load = true;  // return old value (flags_op)
+    uint8_t reg_idx = 0;  // ARM reg: rt (rs for CAS) (imm)
+};
+// 128-bit vector load/store pair helper (LDST): width=1 load / 0 store.
+struct LdStParams {
+    bool is_load = true;  // 1=load (width=1), 0=store (width=0)
+};
+// 16-byte vector load: flags_op=register count, imm=byte offset
+// (always 0 from current producers; codegen supports nonzero).
+struct Ld16Params {
+    uint8_t count = 1;    // registers 1..4 (flags_op)
+    uint64_t offset = 0;  // byte offset added to base (imm)
+};
+// 16-byte vector store: flags_op=register count, cond=broadcast,
+// imm=byte offset (always 0 from current producers).
+struct St16Params {
+    uint8_t count = 1;    // registers 1..4 (flags_op)
+    bool broadcast = false;  // every half stores src2 (cond)
+    uint64_t offset = 0;  // byte offset added to base (imm)
+};
+// Native division (UDIV/SDIV): width=32/64 BITS only.
+struct DivParams {
+    uint8_t bits = 64;  // 32 or 64 BITS, not bytes (width)
+};
+struct BrCondParams {
+    uint8_t cond = 0;     // ARM condition code (cond)
+    uint64_t target = 0;  // branch target pc (imm)
+};
+struct BrCondZeroParams {
+    uint8_t cond = 0;     // 0=EQ(CBZ), 1=NE(CBNZ) (cond)
+    uint64_t target = 0;  // branch target pc (imm)
+    bool sf = false;      // W-form tests low 32 bits only (sf)
+};
+struct BrCondBitParams {
+    uint8_t bit = 0;      // tested bit number 0..63 (width)
+    uint8_t cond = 0;     // 0=EQ(TBZ), 1=NE(TBNZ) (cond)
+    uint64_t target = 0;  // branch target pc (imm)
+};
+struct BrCondSkipParams {
+    uint8_t cond = 0;     // ARM condition code (cond)
+    uint64_t count = 0;   // region op count (imm; patched post-emit)
+};
+// Scalar FP ops. width here is the ftype flag (0=S single, 1=D double),
+// NOT byte size — kept as `ftype` in every struct below.
+struct FpBinopParams {
+    uint8_t opcode = 0;  // 0=mul,1=div,2=add,3=sub,4=max,5=min,6=nmul (imm)
+    uint8_t ftype = 0;   // 0=S, 1=D (width); flags_op is always 0
+};
+struct FpUnopParams {
+    uint8_t opcode = 0;  // 0=mov,1=abs,2=neg,3=sqrt (imm)
+    uint8_t ftype = 0;   // 0=S, 1=D (width)
+};
+struct FpMovParams {
+    uint8_t ftype = 0;   // 0=S, 1=D (width); the only parameter
+};
+struct FpCmpParams {
+    uint8_t ftype = 0;   // 0=S, 1=D (width)
+    bool with_zero = false;  // 1=FCMP Dn,#0.0 form (imm)
+};
+struct FpMoviParams {
+    uint8_t ftype = 0;   // 0=S, 1=D (width)
+    uint64_t bits = 0;   // decoded FP immediate bits (imm)
+};
+struct FpCselParams {
+    uint8_t ftype = 0;   // 0=S, 1=D (width)
+    uint8_t cond = 0;    // ARM condition code (cond)
+};
+struct FpF2IParams {
+    uint8_t ftype = 0;      // 0=S, 1=D (width)
+    uint8_t rounding = 3;   // (is_away<<2)|rmode (cond)
+    bool sf = false;        // 64-bit dest (flags_op)
+    bool is_unsigned = false;  // (imm)
+};
+struct FpI2FParams {
+    uint8_t ftype = 0;      // 0=S, 1=D (width)
+    bool sf = false;        // 64-bit GPR source (flags_op)
+    bool is_unsigned = false;  // (imm)
+};
+struct FpFixedParams {
+    uint8_t w = 0;          // width as passed by the translator (width)
+    bool is_unsigned = false;  // (imm)
+    bool sf = false;        // (flags_op)
+    uint8_t fbits = 0;      // scale: 0=integer form, else 64-scale (immr)
+    bool fp_reg = false;    // FP-reg source/dest (imms)
+};
+struct FpFrintParams {
+    uint8_t bits = 32;  // 32 or 64 BITS, not bytes (width)
+    uint8_t mode = 0;   // 0=N,1=P,2=M,3=Z,4=I,5=X (imm)
+};
+// Fused multiply-add family (FMADD/FMSUB/FNMADD/FNMSUB): width=32/64
+// BITS, imm=accumulator FP-reg index (Va). The opcode selects the form.
+struct FpFusedParams {
+    uint8_t bits = 32;  // 32 or 64 BITS, not bytes (width)
+    uint8_t acc = 0;    // accumulator FP register index (imm)
+};
+inline IRInst IRInst::make_tbl(uint16_t dest, uint16_t table, uint16_t index,
+                               const SimdTblParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_TBL;
+    inst.dest = dest;
+    inst.src1 = table;
+    inst.src2 = index;
+    inst.flags_op = static_cast<uint8_t>((p.is_tbx ? 2 : 0) | (p.q ? 1 : 0));
+    inst.imm = p.nregs;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdTblParams IRInst::tbl_params() const {
+    SimdTblParams p;
+    p.is_tbx = (flags_op & 2) != 0;
+    p.q = (flags_op & 1) != 0;
+    p.nregs = static_cast<uint8_t>(imm);
+    return p;
+}
+inline IRInst IRInst::make_ins(uint16_t dest, uint16_t src_vec,
+                               uint16_t rmw_dest, const SimdInsParams& p,
+                               uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_INS;
+    inst.dest = dest;
+    inst.src1 = src_vec;
+    inst.src2 = rmw_dest;
+    inst.width = p.esize;
+    inst.imm = p.dst_off;
+    inst.aux = p.sidx;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdInsParams IRInst::ins_params() const {
+    SimdInsParams p;
+    p.esize = width;
+    p.dst_off = static_cast<uint8_t>(imm);
+    p.sidx = aux;
+    p.q = (flags_op & 1) != 0;
+    return p;
+}
+// Shared shape for the unary vector ops (2REG/CVTF/XTN): imm=subop,
+// width=esize, flags_op=Q. One struct, one factory+reader per op so the
+// opcode stays pinned at the call site.
+inline IRInst IRInst::make_2reg(uint16_t dest, uint16_t src,
+                                const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_2REG;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::p2reg_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_cvtf(uint16_t dest, uint16_t src,
+                                const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_CVTF;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::cvtf_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_xtn(uint16_t dest, uint16_t src,
+                               const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_XTN;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::xtn_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+// Binary-vector variant of the subop shape (PERMUTE/PAIRMIN): like
+// SimdSubopParams but with a real src2 (rm) instead of src2=0.
+inline IRInst IRInst::make_permute(uint16_t dest, uint16_t src1,
+                                   uint16_t src2, const SimdBinopParams& p,
+                                   uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_PERMUTE;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdBinopParams IRInst::permute_params() const {
+    return SimdBinopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_pairmin(uint16_t dest, uint16_t src1,
+                                   uint16_t src2, const SimdBinopParams& p,
+                                   uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_PAIRMIN;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdBinopParams IRInst::pairmin_params() const {
+    return SimdBinopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+// ADDP (byte-pair pairwise add) has no subop or esize: width is always 1,
+// imm is always 0, only Q varies. The factory hardcodes the constants so
+// no call site can get them wrong.
+inline IRInst IRInst::make_addp(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const SimdAddpParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ADDP;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = 1;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdAddpParams IRInst::addp_params() const {
+    return SimdAddpParams{(flags_op & 1) != 0};
+}
+// Integer SIMD arithmetic: imm=subop, width=esize, flags_op is ALWAYS 0
+// (the translator passes a literal 0; codegen never reads Q). The factory
+// hardcodes it so no call site can smuggle a stale Q in.
+inline IRInst IRInst::make_arith(uint16_t dest, uint16_t src1, uint16_t src2,
+                                 const SimdArithParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ARITH;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdArithParams IRInst::arith_params() const {
+    return SimdArithParams{static_cast<uint8_t>(imm), width};
+}
+// Bitwise logical: ONLY subop varies (imm); width/cond/flags_op are
+// always 0. The factory hardcodes the constants.
+inline IRInst IRInst::make_logical(uint16_t dest, uint16_t src1,
+                                   uint16_t src2, const SimdLogicParams& p,
+                                   uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_LOGICAL;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = 0;
+    inst.cond = 0;
+    inst.flags_op = 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdLogicParams IRInst::logical_params() const {
+    return SimdLogicParams{static_cast<uint8_t>(imm)};
+}
+inline IRInst IRInst::make_shift(IROp op, uint16_t dest, uint16_t src,
+                                 const SimdShiftParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.shift;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdShiftParams IRInst::shift_params() const {
+    return SimdShiftParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+// Vector element -> GPR (UMOV/SMOV): width=esize, imm=lane index,
+// flags_op=Q. dest is the GPR (rd), src1 the vector (rn).
+inline IRInst IRInst::make_umov(uint16_t dest, uint16_t src_vec,
+                                const SimdMovParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_UMOV;
+    inst.dest = dest;
+    inst.src1 = src_vec;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.index;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdMovParams IRInst::umov_params() const {
+    return SimdMovParams{width, static_cast<uint8_t>(imm),
+                         (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_smov(uint16_t dest, uint16_t src_vec,
+                                const SimdMovParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_SMOV;
+    inst.dest = dest;
+    inst.src1 = src_vec;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.index;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdMovParams IRInst::smov_params() const {
+    return SimdMovParams{width, static_cast<uint8_t>(imm),
+                         (flags_op & 1) != 0};
+}
+// ORR/BIC immediate (read-modify-write dest): imm=64-bit lane pattern,
+// cond=invert (0=ORR,1=BIC), flags_op=Q, width is always 0.
+inline IRInst IRInst::make_orrimm(uint16_t dest, const SimdOrrImmParams& p,
+                                  uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ORRIMM;
+    inst.dest = dest;
+    inst.width = 0;
+    inst.cond = p.invert ? 1 : 0;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.pattern;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdOrrImmParams IRInst::orrimm_params() const {
+    return SimdOrrImmParams{imm, (cond & 1) != 0, (flags_op & 1) != 0};
+}
+// MOVI/MVNI broadcast: imm=64-bit lane pattern, flags_op=Q,
+// width/cond are always 0.
+inline IRInst IRInst::make_movi(uint16_t dest, const SimdMoviParams& p,
+                                uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_MOVI;
+    inst.dest = dest;
+    inst.width = 0;
+    inst.cond = 0;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.pattern;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdMoviParams IRInst::movi_params() const {
+    return SimdMoviParams{imm, (flags_op & 1) != 0};
+}
+// GPR->vector broadcast (DUP): width=esize bytes, flags_op=Q, imm is
+// always 0. Both producers (2d form and general form) fit.
+inline IRInst IRInst::make_dup(uint16_t dest, uint16_t src,
+                               const SimdDupParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_DUP;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdDupParams IRInst::dup_params() const {
+    return SimdDupParams{width, (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_shrn_sat(uint16_t dest, uint16_t src,
+                                    const SimdShrnSatParams& p,
+                                    uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_SHRN_SAT;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = (uint64_t)p.subop | ((uint64_t)p.shift << 8);
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdShrnSatParams IRInst::shrn_sat_params() const {
+    return SimdShrnSatParams{static_cast<uint8_t>(imm & 0xFF),
+                             static_cast<uint8_t>((imm >> 8) & 0xFF),
+                             width, (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_mul_elem(uint16_t dest, uint16_t src1,
+                                    uint16_t src2,
+                                    const SimdMulElemParams& p,
+                                    uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_MUL_ELEM;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = (uint64_t)p.subop | ((uint64_t)p.lane << 8);
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdMulElemParams IRInst::mul_elem_params() const {
+    return SimdMulElemParams{static_cast<uint8_t>(imm & 0xFF),
+                             static_cast<uint8_t>((imm >> 8) & 0xFF),
+                             width, (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_bf(IROp op, uint16_t dest, uint16_t src,
+                              const BfParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.immr = p.immr;
+    inst.imms = p.imms;
+    inst.sf = p.sf ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BfParams IRInst::bf_params() const {
+    return BfParams{immr, imms, sf != 0};
+}
+inline IRInst IRInst::make_sext(uint16_t dest, uint16_t src, uint8_t bits,
+                                uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SEXT;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = bits;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline uint8_t IRInst::sext_bits() const {
+    return width;
+}
+inline IRInst IRInst::make_zext(uint16_t dest, uint16_t src, uint8_t bits,
+                                uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::ZEXT;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = bits;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline uint8_t IRInst::zext_bits() const {
+    return width;
+}
+// Conditional select: cond=ARM condition, imm=rd slot (preserved verbatim;
+// codegen ignores it), width/flags_op are always 0. The translator
+// decomposes CSINC/CSINV/CSNEG into plain CSEL, so only CSEL is emitted.
+inline IRInst IRInst::make_csel(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const CselParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::CSEL;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = 0;
+    inst.cond = p.cond;
+    inst.flags_op = 0;
+    inst.imm = p.rd_slot;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline CselParams IRInst::csel_params() const {
+    return CselParams{cond, static_cast<uint8_t>(imm)};
+}
+// Conditional compare: width=NZCV value (4 bits — NOT a byte size!),
+// cond=ARM condition, flags_op=is_sub (1=CCMP, 0=CCMN), imm always 0.
+inline IRInst IRInst::make_ccmp(uint16_t src1, uint16_t src2,
+                                const CcmpParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::CCMP;
+    inst.dest = 0;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.nzcv;
+    inst.cond = p.cond;
+    inst.flags_op = p.is_sub ? 1 : 0;
+    inst.imm = 0;
+    inst.sf = p.sf ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline CcmpParams IRInst::ccmp_params() const {
+    return CcmpParams{static_cast<uint8_t>(width & 0xF), cond,
+                      (flags_op & 1) != 0, (sf & 1) != 0};
+}
+// Flag-setting ALU (ADDS/SUBS/ADCS/SBCS): width=32/64 BITS (not bytes!),
+// flags_op=is_sub (0=add, 1=sub — controls C inversion). The opcode
+// selects the operation; one factory takes it (like shifts).
+inline IRInst IRInst::make_addsub(IROp op, uint16_t dest, uint16_t src1,
+                                  uint16_t src2, const AddSubParams& p,
+                                  uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.bits;
+    inst.cond = 0;
+    inst.flags_op = p.is_sub ? 1 : 0;
+    inst.imm = 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline AddSubParams IRInst::addsub_params() const {
+    return AddSubParams{width, (flags_op & 1) != 0};
+}
+// TST (ANDS flag-set, no dest): sf only. Set directly by the factory —
+// the old post-hoc `insts.back().sf` patching is gone.
+inline IRInst IRInst::make_tst(uint16_t src1, uint16_t src2,
+                               const TstParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::TST;
+    inst.dest = 0;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.sf = p.sf ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline TstParams IRInst::tst_params() const {
+    return TstParams{(sf & 1) != 0};
+}
+inline IRInst IRInst::make_gpr_shift(IROp op, uint16_t dest, uint16_t src1,
+                                     uint16_t src2, const GprShiftParams& p,
+                                     uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.width;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline GprShiftParams IRInst::gpr_shift_params() const {
+    return GprShiftParams{width};
+}
+inline IRInst IRInst::make_clz(uint16_t dest, uint16_t src,
+                               const ClzParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::CLZ;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.bits;
+    inst.imm = p.rd_slot;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline ClzParams IRInst::clz_params() const {
+    return ClzParams{width, static_cast<uint8_t>(imm)};
+}
+inline IRInst IRInst::make_rev64(uint16_t dest, uint16_t src,
+                                 const ClzParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::REV64;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.bits;
+    inst.imm = p.rd_slot;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline ClzParams IRInst::rev64_params() const {
+    return ClzParams{width, static_cast<uint8_t>(imm)};
+}
+inline IRInst IRInst::make_aes(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const AesParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::AES_CRYPTO;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline AesParams IRInst::aes_params() const {
+    return AesParams{static_cast<uint8_t>(imm)};
+}
+inline IRInst IRInst::make_load_mem(uint16_t dest, uint16_t base,
+                                    const MemParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::LOAD_MEM;
+    inst.dest = dest;
+    inst.src1 = base;
+    inst.src2 = 0;
+    inst.width = p.width;
+    inst.imm = p.offset;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline MemParams IRInst::load_mem_params() const {
+    return MemParams{width, imm};
+}
+inline IRInst IRInst::make_store_mem(uint16_t base, uint16_t value,
+                                     const MemParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::STORE_MEM;
+    inst.dest = 0;
+    inst.src1 = base;
+    inst.src2 = value;
+    inst.width = p.width;
+    inst.imm = p.offset;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline MemParams IRInst::store_mem_params() const {
+    return MemParams{width, imm};
+}
+inline IRInst IRInst::make_atomic(uint16_t dest, uint16_t base,
+                                  uint16_t operand, const AtomicParams& p,
+                                  uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::ATOMIC;
+    inst.dest = dest;
+    inst.src1 = base;
+    inst.src2 = operand;
+    inst.width = p.width;
+    inst.cond = p.atom_op;
+    inst.flags_op = p.is_load ? 1 : 0;
+    inst.imm = p.reg_idx;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline AtomicParams IRInst::atomic_params() const {
+    return AtomicParams{width, cond, (flags_op & 1) != 0,
+                        static_cast<uint8_t>(imm)};
+}
+inline IRInst IRInst::make_ldst(uint16_t dest, uint16_t lo,
+                                uint16_t hi_or_zero, const LdStParams& p,
+                                uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_LDST;
+    inst.dest = dest;
+    inst.src1 = lo;
+    inst.src2 = hi_or_zero;
+    inst.width = p.is_load ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline bool IRInst::ldst_is_load() const {
+    return (width & 1) != 0;
+}
+inline IRInst IRInst::make_ld16(uint16_t dest, uint16_t base,
+                                const Ld16Params& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_LD16;
+    inst.dest = dest;
+    inst.src1 = base;
+    inst.src2 = 0;
+    inst.width = 0;
+    inst.cond = 0;
+    inst.flags_op = p.count;
+    inst.imm = p.offset;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline Ld16Params IRInst::ld16_params() const {
+    return Ld16Params{static_cast<uint8_t>(flags_op), imm};
+}
+inline IRInst IRInst::make_st16(uint16_t base, uint16_t src,
+                                const St16Params& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ST16;
+    inst.dest = 0;
+    inst.src1 = base;
+    inst.src2 = src;
+    inst.width = 0;
+    inst.cond = p.broadcast ? 1 : 0;
+    inst.flags_op = p.count;
+    inst.imm = p.offset;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline St16Params IRInst::st16_params() const {
+    return St16Params{static_cast<uint8_t>(flags_op), (cond & 1) != 0, imm};
+}
+inline IRInst IRInst::make_div(IROp op, uint16_t dest, uint16_t src1,
+                               uint16_t src2, const DivParams& p,
+                               uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.bits;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline uint8_t IRInst::div_bits() const {
+    return width;
+}
+// Conditional branch to target: cond=ARM condition, imm=target pc.
+// dest/src are always 0 (no register operands).
+inline IRInst IRInst::make_brcond(const BrCondParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::BRCOND;
+    inst.dest = 0;
+    inst.src1 = 0;
+    inst.src2 = 0;
+    inst.width = 0;
+    inst.cond = p.cond;
+    inst.flags_op = 0;
+    inst.imm = p.target;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BrCondParams IRInst::brcond_params() const {
+    return BrCondParams{cond, imm};
+}
+// CBZ/CBNZ: cond=EQ/NE, imm=target, sf=W-form flag (was post-hoc patched).
+inline IRInst IRInst::make_brcond_zero(uint16_t src, const BrCondZeroParams& p,
+                                       uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::BRCOND_ZERO;
+    inst.dest = 0;
+    inst.src1 = src;
+    inst.width = 0;
+    inst.cond = p.cond;
+    inst.flags_op = 0;
+    inst.imm = p.target;
+    inst.sf = p.sf ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BrCondZeroParams IRInst::brcond_zero_params() const {
+    return BrCondZeroParams{cond, imm, (sf & 1) != 0};
+}
+// TBZ/TBNZ: width=bit number, cond=EQ/NE, imm=target.
+inline IRInst IRInst::make_brcond_bit(uint16_t src, const BrCondBitParams& p,
+                                      uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::BRCOND_BIT;
+    inst.dest = 0;
+    inst.src1 = src;
+    inst.width = p.bit;
+    inst.cond = p.cond;
+    inst.flags_op = 0;
+    inst.imm = p.target;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BrCondBitParams IRInst::brcond_bit_params() const {
+    return BrCondBitParams{width, cond, imm};
+}
+// Unconditional in-block branch (B/BL fallthrough): cond is always AL,
+// imm=target.
+struct BrCondFallthruParams {
+    uint64_t target = 0;  // branch target pc (imm)
+};
+inline IRInst IRInst::make_brcond_fallthru(uint64_t target, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::BRCOND_FALLTHRU;
+    inst.dest = 0;
+    inst.src1 = 0;
+    inst.src2 = 0;
+    inst.width = 0;
+    inst.cond = 14;  // AL
+    inst.flags_op = 0;
+    inst.imm = target;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BrCondFallthruParams IRInst::fallthru_params() const {
+    return BrCondFallthruParams{imm};
+}
+// Mid-block conditional skip (leaf inlining): cond=ARM condition,
+// imm=region op count (patched after translation via set_skip_count).
+inline IRInst IRInst::make_brcond_skip(uint8_t cond, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::BRCOND_SKIP;
+    inst.dest = 0;
+    inst.src1 = 0;
+    inst.src2 = 0;
+    inst.width = 0;
+    inst.cond = cond;
+    inst.flags_op = 0;
+    inst.imm = 0;  // forward reference — patched by set_skip_count
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BrCondSkipParams IRInst::brcond_skip_params() const {
+    return BrCondSkipParams{cond, imm};
+}
+// BL within block: imm=target pc.
+struct BlParams {
+    uint64_t target = 0;  // call target pc (imm)
+};
+inline IRInst IRInst::make_bl_call(uint64_t target, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::BL_CALL;
+    inst.dest = 0;
+    inst.src1 = 0;
+    inst.src2 = 0;
+    inst.width = 0;
+    inst.cond = 0;
+    inst.flags_op = 0;
+    inst.imm = target;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BlParams IRInst::bl_params() const {
+    return BlParams{imm};
+}
+// GPR/FP register file access (LOAD_REG/STORE_REG): sf selects the file
+// (0=cpu.regs GPR, 1=cpu.v_lo FP). Single-bit param, bool directly.
+inline IRInst IRInst::make_load_reg(uint16_t dest, uint16_t src, bool is_fp,
+                                    uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::LOAD_REG;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.sf = is_fp ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline bool IRInst::is_fp_load() const {
+    return (sf & 1) != 0;
+}
+inline IRInst IRInst::make_store_reg(uint16_t dest, uint16_t src, bool is_fp,
+                                     uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::STORE_REG;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.sf = is_fp ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline bool IRInst::is_fp_store() const {
+    return (sf & 1) != 0;
+}
+// Immediate constant: imm=value (the only payload).
+inline IRInst IRInst::make_imm(uint16_t dest, uint64_t value,
+                               uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::IMM;
+    inst.dest = dest;
+    inst.imm = value;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline uint64_t IRInst::imm_value() const {
+    return imm;
+}
+// Narrow readers for DEFENSIVE-DEAD codegen cases (no producer emits
+// these ops today; the cases exist as fallback). They need typed access
+// for the privatized build; if a producer is ever added, promote the op
+// to a full param struct + factory + validator case.
+inline uint8_t IRInst::llsc_width() const {
+    return width;  // LDXR_FAST/STXR_FAST/STLR_FAST access size
+}
+inline uint8_t IRInst::csin_rd() const {
+    return static_cast<uint8_t>(imm);  // CSINC/CSINV/CSNEG rd slot
+}
+// SWAR-decomposed fallbacks (RBIT/REV16/CLS — never emitted; the
+// translator decomposes them inline): imm=rd slot for the ARM reload.
+inline uint8_t IRInst::swar_rd() const {
+    return static_cast<uint8_t>(imm);
+}
+// Generic constructor for PARAMETER-LESS ops (pure dataflow: ADD/SUB/
+// AND/OR/NOT/MOV/CALL_INTERP/SVC/BR/...). Sets no param fields — any op
+// carrying params MUST use its typed factory above. This is what the
+// old free emit() becomes after privatization.
+inline IRInst IRInst::make(IROp op, uint16_t dest, uint16_t src1,
+                           uint16_t src2, uint16_t aux, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.aux = aux;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+// System register access: imm=sysreg index (up to 21 bits: op1:crn:crm:
+// op2:op0 — NOT a byte; the factory takes the full value).
+inline IRInst IRInst::make_mrs(uint16_t dest, uint64_t sys_idx,
+                               uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::MRS;
+    inst.dest = dest;
+    inst.imm = sys_idx;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline uint64_t IRInst::mrs_idx() const {
+    return imm;
+}
+inline IRInst IRInst::make_msr(uint16_t src, uint64_t sys_idx,
+                               uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::MSR;
+    inst.dest = 0;
+    inst.src1 = src;
+    inst.imm = sys_idx;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline uint64_t IRInst::msr_idx() const {
+    return imm;
+}
+// Block-ending branch target for dispatch logic (self-loop detection).
+// Covers every op that carries a target pc in imm; returns 0 otherwise.
+// NOTE: BRCOND_SKIP is deliberately excluded — its imm is a region op
+// count, not a pc (the sole caller is gated to BRCOND/ZERO/BIT anyway).
+inline uint64_t IRInst::branch_target() const {
+    switch (op) {
+        case IROp::BRCOND:
+        case IROp::BRCOND_ZERO:
+        case IROp::BRCOND_BIT:
+        case IROp::BRCOND_FALLTHRU:
+        case IROp::BL_CALL:
+            return imm;
+        default:
+            return 0;
+    }
+}
+// Forward-reference patch for BRCOND_SKIP's region op count. The ONLY
+// sanctioned post-emit mutation (the count is unknowable at emit time).
+inline void IRInst::set_skip_count(uint64_t n) {
+    imm = n;
+}
+// Scalar FP arithmetic (2-source): imm=opcode, width=ftype (0=S,1=D),
+// flags_op is always 0.
+inline IRInst IRInst::make_fp_binop(uint16_t dest, uint16_t src1,
+                                    uint16_t src2, const FpBinopParams& p,
+                                    uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_BINOP;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.ftype;
+    inst.flags_op = 0;
+    inst.imm = p.opcode;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpBinopParams IRInst::fp_binop_params() const {
+    return FpBinopParams{static_cast<uint8_t>(imm), width};
+}
+// Scalar FP unary: imm=opcode, width=ftype, rest 0.
+inline IRInst IRInst::make_fp_unop(uint16_t dest, uint16_t src,
+                                   const FpUnopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_UNOP;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.ftype;
+    inst.imm = p.opcode;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpUnopParams IRInst::fp_unop_params() const {
+    return FpUnopParams{static_cast<uint8_t>(imm), width};
+}
+// FP register move: width=ftype only.
+inline IRInst IRInst::make_fp_mov(uint16_t dest, uint16_t src,
+                                  const FpMovParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_MOV;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.ftype;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpMovParams IRInst::fp_mov_params() const {
+    return FpMovParams{width};
+}
+// FP compare: width=ftype, imm=with_zero (1=FCMP Dn,#0.0 form).
+inline IRInst IRInst::make_fp_cmp(uint16_t dest, uint16_t src1, uint16_t src2,
+                                  const FpCmpParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_CMP;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.ftype;
+    inst.imm = p.with_zero ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpCmpParams IRInst::fp_cmp_params() const {
+    return FpCmpParams{width, (imm & 1) != 0};
+}
+// FP immediate: width=ftype, imm=decoded bits.
+inline IRInst IRInst::make_fp_movi(uint16_t dest, const FpMoviParams& p,
+                                   uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_MOVI;
+    inst.dest = dest;
+    inst.width = p.ftype;
+    inst.imm = p.bits;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpMoviParams IRInst::fp_movi_params() const {
+    return FpMoviParams{width, imm};
+}
+// FP conditional select: width=ftype, cond=ARM condition.
+inline IRInst IRInst::make_fp_csel(uint16_t dest, uint16_t src1,
+                                   uint16_t src2, const FpCselParams& p,
+                                   uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_CSEL;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.ftype;
+    inst.cond = p.cond;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpCselParams IRInst::fp_csel_params() const {
+    return FpCselParams{width, cond};
+}
+// FP->int (rounding variants): width=ftype, cond=rounding mode
+// ((is_away<<2)|rmode), flags_op=sf, imm=is_unsigned.
+inline IRInst IRInst::make_fp_f2i(uint16_t dest, uint16_t src,
+                                  const FpF2IParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_F2I;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.ftype;
+    inst.cond = p.rounding;
+    inst.flags_op = p.sf ? 1 : 0;
+    inst.imm = p.is_unsigned ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpF2IParams IRInst::fp_f2i_params() const {
+    return FpF2IParams{width, cond, (flags_op & 1) != 0, (imm & 1) != 0};
+}
+// int->FP: width=ftype, flags_op=sf, imm=is_unsigned.
+inline IRInst IRInst::make_fp_i2f(uint16_t dest, uint16_t src,
+                                  const FpI2FParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_I2F;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.ftype;
+    inst.flags_op = p.sf ? 1 : 0;
+    inst.imm = p.is_unsigned ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpI2FParams IRInst::fp_i2f_params() const {
+    return FpI2FParams{width, (flags_op & 1) != 0, (imm & 1) != 0};
+}
+// Fixed-point conversions: width=w, flags_op=sf, imm=is_unsigned,
+// immr=fbits, imms=fp-reg flag. Set DIRECTLY by the factory — the old
+// post-hoc `insts.back().immr/imms` patching is gone.
+inline IRInst IRInst::make_fp_f2i_fixed(uint16_t dest, uint16_t src,
+                                        const FpFixedParams& p,
+                                        uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_F2I_FIXED;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.w;
+    inst.flags_op = p.sf ? 1 : 0;
+    inst.imm = p.is_unsigned ? 1 : 0;
+    inst.immr = p.fbits;
+    inst.imms = p.fp_reg ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpFixedParams IRInst::fp_f2i_fixed_params() const {
+    return FpFixedParams{width, (imm & 1) != 0, (flags_op & 1) != 0,
+                         immr, (imms & 1) != 0};
+}
+inline IRInst IRInst::make_fp_i2f_fixed(uint16_t dest, uint16_t src,
+                                        const FpFixedParams& p,
+                                        uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FP_I2F_FIXED;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.w;
+    inst.flags_op = p.sf ? 1 : 0;
+    inst.imm = p.is_unsigned ? 1 : 0;
+    inst.immr = p.fbits;
+    inst.imms = p.fp_reg ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpFixedParams IRInst::fp_i2f_fixed_params() const {
+    return FpFixedParams{width, (imm & 1) != 0, (flags_op & 1) != 0,
+                         immr, (imms & 1) != 0};
+}
+// FP round-to-integer: width=32/64 BITS (not bytes!), imm=rounding mode.
+inline IRInst IRInst::make_fp_frint(uint16_t dest, uint16_t src,
+                                    const FpFrintParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::FRINT;
+    inst.dest = dest;
+    inst.src1 = src;
+    inst.width = p.bits;
+    inst.imm = p.mode;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpFrintParams IRInst::fp_frint_params() const {
+    return FpFrintParams{width, static_cast<uint8_t>(imm)};
+}
+inline IRInst IRInst::make_fp_fused(IROp op, uint16_t dest, uint16_t src1,
+                                  uint16_t src2, const FpFusedParams& p,
+                                  uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.bits;
+    inst.imm = p.acc;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline FpFusedParams IRInst::fp_fused_params() const {
+    return FpFusedParams{width, static_cast<uint8_t>(imm)};
+}
+// The remaining unary/binary vector ops share the SimdSubopParams shape
+// (imm=subop, width=esize, flags_op=Q): one factory+reader per op so the
+// opcode stays pinned at the call site.
+inline IRInst IRInst::make_cmp(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_CMP;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::cmp_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_fp_arith(uint16_t dest, uint16_t src1,
+                                    uint16_t src2, const SimdSubopParams& p,
+                                    uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_FP_ARITH;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::fp_arith_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
+                                  const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_FP_FMA;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::fp_fma_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_sataddsub(uint16_t dest, uint16_t src1,
+                                     uint16_t src2, const SimdSubopParams& p,
+                                     uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_SATADDSUB;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::sataddsub_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_abdl(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ABDL;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::abdl_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_abd(uint16_t dest, uint16_t src1, uint16_t src2,
+                               const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ABD;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::abd_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_addw(uint16_t dest, uint16_t src1, uint16_t src2,
+                                const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ADDW;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::addw_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
+inline IRInst IRInst::make_addhn(uint16_t dest, uint16_t src1, uint16_t src2,
+                                 const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_ADDHN;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.width = p.esize;
+    inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::addhn_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0};
+}
 // An IR block: a list of IR instructions translated from a basic block
 // of ARM64 code.
 struct IRBlock {
@@ -468,6 +2153,13 @@ void ir_reset_vreg_alloc();
 //   - Peephole (load+op fusion, mask elimination when sf=1)
 //   - Local register caching (LOAD_REG → reuse cached vreg if value is live)
 void optimize_ir(IRBlock& block, bool force_fwd = false);
+// Validate an IR block's per-op parameter contracts (see the typed
+// factories above). Only migrated ops are checked; unmigrated ops are
+// skipped. Violations are reported to `out` (returns false if any found)
+// but compilation continues — print-and-continue, matching the project's
+// other debug diagnostics. Intended for BIFROST_IR_VALIDATE runs, not
+// the hot path.
+bool validate_ir_block(const IRBlock& block, FILE* out = stderr);
 // Dump an IR block to stderr for debugging.
 void dump_ir(const IRBlock& block, FILE* out = stderr);
 } // namespace arm64emu
