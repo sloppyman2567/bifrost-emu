@@ -2320,26 +2320,38 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             const SimdSubopParams sp = inst.abd_params();
             const int esize = static_cast<int>(sp.esize);
             const bool q = sp.q;
+            const bool is_unsigned = sp.subop != 0;
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             load_vec(1, static_cast<int>(inst.src2));
-            movdqa(2, 0);
-            switch (esize) {
-                case 1: sse2_op(0xF8, 2, 1); break;   // psubb
-                case 2: sse2_op(0xF9, 2, 1); break;   // psubw
-                case 4: sse2_op(0xFA, 2, 1); break;   // psubd
-                default: emit_call_interp(inst.arm_pc, false); return true;
-            }
-            movdqa(3, 2);
-            // XMM shift digits: /2=right, /4=arithmetic, /6=left (NOT the
-            // GPR /5,/7 conventions!)
-            sse2_imm(esize == 4 ? 0x72 : 0x71,
-                     3, 4, static_cast<uint8_t>(esize * 8 - 1)); // psra* by bits-1
-            sse2_op(0xEF, 2, 3);                       // pxor t, m
-            switch (esize) {
-                case 1: sse2_op(0xF8, 2, 3); break;   // psubb
-                case 2: sse2_op(0xF9, 2, 3); break;   // psubw
-                case 4: sse2_op(0xFA, 2, 3); break;   // psubd
+            if (esize == 1) {
+                // Byte shifts operate on 16-bit lanes, so the xor/shift
+                // absolute-value idiom leaks across adjacent bytes. Compute
+                // max-min instead, with signed max/min requiring SSE4.1.
+                if (!is_unsigned && !has_sse41()) {
+                    emit_call_interp(inst.arm_pc, false); return true;
+                }
+                movdqa(2, 0);
+                movdqa(3, 0);
+                if (is_unsigned) {
+                    sse2_op(0xDE, 2, 1);             // pmaxub
+                    sse2_op(0xDA, 3, 1);             // pminub
+                } else {
+                    sse2_38(0x3C, 2, 1);             // pmaxsb
+                    sse2_38(0x38, 3, 1);             // pminsb
+                }
+                sse2_op(0xF8, 2, 3);                 // psubb: max-min
+            } else {
+                movdqa(2, 0);
+                if (esize == 2) sse2_op(0xF9, 2, 1);
+                else if (esize == 4) sse2_op(0xFA, 2, 1);
+                else { emit_call_interp(inst.arm_pc, false); return true; }
+                movdqa(3, 2);
+                // XMM shift digits: /4=arithmetic (NOT GPR /5).
+                sse2_imm(esize == 4 ? 0x72 : 0x71,
+                         3, 4, static_cast<uint8_t>(esize * 8 - 1));
+                sse2_op(0xEF, 2, 3);                 // pxor t, m
+                sse2_op(esize == 2 ? 0xF9 : 0xFA, 2, 3);
             }
             movdqa(0, 2);
             store_vec(0, static_cast<int>(inst.dest), q);
@@ -2372,21 +2384,32 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 sse2_imm(0x73, 0, 3, 8);   // psrldq X0, 8
                 sse2_imm(0x73, 1, 3, 8);   // psrldq X1, 8
             }
-            // abs diff at source width (xor-shift trick)
-            movdqa(2, 0);
-            switch (esize) {
-                case 1: sse2_op(0xF8, 2, 1); break;
-                case 2: sse2_op(0xF9, 2, 1); break;
-                case 4: sse2_op(0xFA, 2, 1); break;
-            }
-            movdqa(3, 2);
-            sse2_imm(esize == 4 ? 0x72 : 0x71, 3, 4,
-                     static_cast<uint8_t>(esize * 8 - 1)); // psra* = /4
-            sse2_op(0xEF, 2, 3);
-            switch (esize) {
-                case 1: sse2_op(0xF8, 2, 3); break;
-                case 2: sse2_op(0xF9, 2, 3); break;
-                case 4: sse2_op(0xFA, 2, 3); break;
+            // Absolute difference at source width. SSE has no arithmetic
+            // right shift per byte: the xor/shift abs idiom below would
+            // shift across adjacent byte lanes for esize=1. Use max-min
+            // for byte lanes, preserving signedness; retain the idiom for
+            // 16/32-bit lanes where PSRAW/PSRAD match the lane width.
+            if (esize == 1) {
+                movdqa(2, 0);
+                movdqa(3, 0);
+                if (subop & 1) { // unsigned UABDL/UABAL
+                    sse2_op(0xDE, 2, 1);        // pmaxub
+                    sse2_op(0xDA, 3, 1);        // pminub
+                } else {         // signed SABDL/SABAL
+                    sse2_38(0x3C, 2, 1);         // pmaxsb
+                    sse2_38(0x38, 3, 1);         // pminsb
+                }
+                sse2_op(0xF8, 2, 3);             // psubb: max - min
+            } else {
+                movdqa(2, 0);
+                if (esize == 2) sse2_op(0xF9, 2, 1);
+                else            sse2_op(0xFA, 2, 1);
+                movdqa(3, 2);
+                sse2_imm(esize == 4 ? 0x72 : 0x71, 3, 4,
+                         static_cast<uint8_t>(esize * 8 - 1)); // psra* = /4
+                sse2_op(0xEF, 2, 3);
+                if (esize == 2) sse2_op(0xF9, 2, 3);
+                else            sse2_op(0xFA, 2, 3);
             }
             // Widen low half → full 128 (pmovzx: 20/30/31 bw/wd/dq...
             // pmovzxbw=0x30, pmovzxwd=0x33, pmovzxdq=0x35)

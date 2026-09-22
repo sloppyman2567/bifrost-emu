@@ -226,11 +226,8 @@ struct DecodedInst {
     // these to dispatch correctly — without them, a single-structure LD1
     // {V0.S}[2] would be misdecoded as a 3-register multi-structure LD1,
     // reading/writing 48 bytes instead of 4.
-    bool     is_single_struct = false;  // true for single-structure LD1/ST1
-    bool     is_ld1r = false;           // true for LD1R (single-structure
-    // replicate load, bits[15:14]==0b11). Loads one element and broadcasts it
-    // to every lane of the destination register, instead of addressing a
-    // single lane index like the indexed LD1/ST1 forms.
+    bool     is_single_struct = false;  // true for lane/replicate LD1..LD4
+    bool     is_ld1r = false;           // true for LD1R/LD2R/LD3R/LD4R
     uint8_t  simd_index = 0;            // element index for single-structure
     // LD1/ST1 post-index writeback. bit[23]=1 selects the post-indexed
     // form ([Xn], #imm / [Xn], Xm); bit[23]=0 is plain [Xn] (no writeback).

@@ -353,20 +353,18 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 //   do the final decode (the encoding is complex and varies by
                 //   variant — LD1 vs LD2 vs LD3 vs LD4).
                 d.is_single_struct = true;
-                d.simd_count = 1;
+                // Lane/replicate forms encode 1..4 registers in R:opcode[0].
+                // Losing this count makes ST4 lane stores write only Vt;
+                // libpng uses ST4 to interleave decoded RGBA channels.
+                d.simd_count = static_cast<uint8_t>((((inst >> 13) & 1) << 1) |
+                                                     ((inst >> 21) & 1)) + 1;
                 d.simd_index = ((inst >> 13) & 3);  // raw bits[14:13] as index
                 d.Q = (inst >> 30) & 1;
                 // LD1R {Vt.T}, [Xn]: single-structure REPLICATE load. The
                 // shared decode gives scale = opcode<2:1> = bits[15:14];
-                // scale=='11' selects the replicate family and selem =
-                // UInt(opcode<0>:R)+1 selects the register count. LD1R is
-                // the selem==1 form, uniquely identified by bits[15:14]==11,
-                // bit[13]==0, bit[21]==0 (LD2R sets bit21, LD3R sets bit13,
-                // LD4R sets both). size stays bits[11:10]. It reads ONE
-                // 2^size-byte element from [Xn] and broadcasts it across the
-                // register instead of writing a single lane.
-                d.is_ld1r = (((inst >> 14) & 3) == 3) &&
-                            !((inst >> 13) & 1) && !((inst >> 21) & 1);
+                // scale=='11' selects the replicate family; the same count
+                // field distinguishes LD1R through LD4R.
+                d.is_ld1r = ((inst >> 14) & 3) == 3;
             } else {
                 // Multi-structure LD1/ST1.
                 // Register count comes from the opcode field bits[15:12]

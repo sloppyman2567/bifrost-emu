@@ -264,31 +264,33 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // 1-reg single-structure form), and the index from the
             // remaining bits.
             if (d.is_single_struct) {
-                // LD1R {Vt.T}, [Xn] — single-structure REPLICATE load
+                // LDnR {Vt..Vt+n-1.T}, [Xn] — single-structure REPLICATE load
                 // (bits[15:14]==11). Reads ONE element of 2^size bytes from
                 // [Xn] and broadcasts it to every lane of Vt (Q=1: 16 bytes
-                // across v_lo/v_hi; Q=0: 8 bytes in v_lo). Post-index: Rm==31
-                // → offset=esize, Rm==30 → 0, else Xm. Load-only; there is no
+                // across v_lo/v_hi. Post-index: Rm==31 → offset=nregs*esize,
+                // Rm==30 → 0, else Xm. Load-only; there is no
                 // store-replicate form. Distinguished from the indexed LD1/
                 // ST1 forms below by d.is_ld1r.
                 if (d.is_ld1r) {
                     int esize = 1 << d.size;
                     uint8_t buf[8] = {0};
-                    int r = d.rt;
                     if (d.is_load) {
-                        mem_.read(base, buf, esize, pcache);
-                        for (int off = 0; off < 8; off += esize)
-                            memcpy(reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + off, buf, esize);
-                        if (Q) {
+                        for (int i = 0; i < d.simd_count; i++) {
+                            int r = (d.rt + i) & 31;
+                            mem_.read(base + (uint64_t)i * esize, buf, esize, pcache);
                             for (int off = 0; off < 8; off += esize)
-                                memcpy(reinterpret_cast<uint8_t*>(&cpu.v_hi[r]) + off, buf, esize);
-                        } else {
-                            cpu.v_hi[r] = 0;
+                                memcpy(reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + off, buf, esize);
+                            if (Q) {
+                                for (int off = 0; off < 8; off += esize)
+                                    memcpy(reinterpret_cast<uint8_t*>(&cpu.v_hi[r]) + off, buf, esize);
+                            } else {
+                                cpu.v_hi[r] = 0;
+                            }
                         }
                     }
                     if (d.post_indexed) {
                         uint64_t off = 0;
-                        if (d.rm == 31) off = (uint64_t)esize;
+                        if (d.rm == 31) off = (uint64_t)d.simd_count * esize;
                         else if (d.rm == 30) off = 0;
                         else off = cpu.regs[d.rm];
                         if (d.rn == 31) cpu.sp = base + off;
@@ -318,7 +320,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 int esize = 0;
                 switch (scale) {
                     case 0: // B
-                        idx   = ((int)(Q & 1) << 2) | ((int)Sbit << 1) | (int)(sz >> 1);
+                        idx   = ((int)(Q & 1) << 3) | ((int)Sbit << 2) | (int)sz;
                         esize = 1;
                         break;
                     case 1: // H
@@ -339,11 +341,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         esize = 1;
                         break;
                 }
-                int r = d.rt;
+                for (int i = 0; i < d.simd_count; i++) {
+                int r = (d.rt + i) & 31;
+                uint64_t addr = base + (uint64_t)i * esize;
                 if (d.is_load) {
                     // Load one element from memory into lane `idx`.
                     uint8_t buf[8];
-                    mem_.read(base, buf, esize, pcache);
+                    mem_.read(addr, buf, esize, pcache);
                     if (esize == 1) {
                         // Write into byte `idx` of the V register.
                         uint8_t* vp = (idx < 8)
@@ -386,14 +390,15 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         const uint64_t* vp = (idx == 0) ? &cpu.v_lo[r] : &cpu.v_hi[r];
                         memcpy(buf, vp, 8);
                     }
-                    mem_.write(base, buf, esize, pcache);
+                    mem_.write(addr, buf, esize, pcache);
+                }
                 }
                 // Post-index writeback for the single-structure form:
                 // immediate offset = esize (Rm==0b11111), #0 (Rm==0b11110),
                 // or the value in register Xm.
                 if (d.post_indexed) {
                     uint64_t off = 0;
-                    if (d.rm == 31) off = (uint64_t)esize;
+                    if (d.rm == 31) off = (uint64_t)d.simd_count * esize;
                     else if (d.rm == 30) off = 0;
                     else off = cpu.regs[d.rm];
                     if (d.rn == 31) cpu.sp = base + off;
@@ -1844,12 +1849,17 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             if ((op & 0xBFE00000) == 0x2E000000) {
                 uint8_t imm4 = (op >> 11) & 0xF;
                 uint8_t buf[32];
-                // Per ARM ARM: concat = Vn:Vm where Vm is the low 128 bits
-                // and Vn is the high 128 bits. So buf = [rm:rn].
-                memcpy(buf, &cpu.v_lo[rm], 8);
-                memcpy(buf + 8, &cpu.v_hi[rm], 8);
-                memcpy(buf + 16, &cpu.v_lo[rn], 8);
-                memcpy(buf + 24, &cpu.v_hi[rn], 8);
+                // EXT forms Vn || Vm for both vector lengths. Q=0 uses
+                // only the low 64 bits of each source; Q=1 uses all 128.
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                if (Q) {
+                    memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf + 16, &cpu.v_lo[rm], 8);
+                    memcpy(buf + 24, &cpu.v_hi[rm], 8);
+                } else {
+                    // Do not insert Vn's unused high half between sources.
+                    memcpy(buf + 8, &cpu.v_lo[rm], 8);
+                }
                 uint8_t out[16] = {0};
                 int nbytes = Q ? 16 : 8;
                 memcpy(out, buf + imm4, nbytes);
@@ -3001,11 +3011,14 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         uint64_t a = 0, b = 0;
                         memcpy(&a, buf_n + i * esize, esize);
                         memcpy(&b, buf_m + i * esize, esize);
-                        uint64_t ae = is_u ? a :
-                            (uint64_t)((int64_t)(a << (64 - esize * 8)) >> (64 - esize * 8));
-                        uint64_t be = is_u ? b :
-                            (uint64_t)((int64_t)(b << (64 - esize * 8)) >> (64 - esize * 8));
-                        uint64_t r = (ae >= be) ? ae - be : be - ae;
+                        uint64_t r;
+                        if (is_u) {
+                            r = (a >= b) ? a - b : b - a;
+                        } else {
+                            int64_t ae = (int64_t)(a << (64 - esize * 8)) >> (64 - esize * 8);
+                            int64_t be = (int64_t)(b << (64 - esize * 8)) >> (64 - esize * 8);
+                            r = (ae >= be) ? (uint64_t)(ae - be) : (uint64_t)(be - ae);
+                        }
                         memcpy(out + i * esize, &r, esize);
                     }
                     memcpy(&cpu.v_lo[rd], out, 8);
