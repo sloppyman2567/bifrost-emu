@@ -598,6 +598,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                                 inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
                                 inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
                                 inst.op == IROp::SIMD_UMOV ||
+                                inst.op == IROp::SIMD_SMOV ||
                                 inst.op == IROp::LOAD_MEM || inst.op == IROp::ATOMIC)) {
                         // Direct arch-GPR writers (store_reg_to_vreg /
                         // set_vreg_reg), bypassing STORE_REG — the pin would
@@ -711,21 +712,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // flush+invalidate, so it reloads them from the slots each iteration.
     std::vector<IRInst> preheader;
     if (last_is_backedge && !getenv("BIFROST_NO_LICM")) {
-        bool arch_written[32] = {false};
-        for (const auto& inst : region_ir) {
-            if (inst.op == IROp::STORE_REG) {
-                if (!inst.is_fp_store() && inst.dest <= 30) arch_written[inst.dest] = true;
-            } else if (inst.dest <= 30 &&
-                       (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
-                        inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
-                        inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
-                        inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
-                        inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
-                        inst.op == IROp::SIMD_UMOV ||
-                        inst.op == IROp::LOAD_MEM || inst.op == IROp::ATOMIC)) {
-                arch_written[inst.dest] = true;
-            }
-        }
         std::vector<bool> hoisted_vreg(4096, false);
         std::vector<char> hoisted_op(region_ir.size(), 0);
         for (size_t i = 0; i < region_ir.size(); i++) {
@@ -736,34 +722,20 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                 continue;
             if (inst.op != IROp::LOAD_REG && !is_m2_pure_gpr(inst.op)) continue;
             auto src_invariant = [&](uint16_t s) -> bool {
-                if (inst.op == IROp::LOAD_REG) {
-                    // LOAD_REG's src1 is the ARCH REG INDEX (0-30), never a
-                    // "no source" marker — x0 = index 0 is a REAL operand. The
-                    // s==0 no-source shortcut below must NOT apply here.
-                    if (!inst.is_fp_load()) return false;   // FP read — not invariant
-                    if (s > 30) return false;         // LOAD_REG src1 must be arch
-                    // A PINNED arch read is allowed to hoist: the preheader
-                    // is emitted AFTER the pin preloads, so the chain resting
-                    // on a pinned base reads the pin directly at region entry
-                    // (the arch is never written in the loop, so the entry
-                    // value is invariant). The pre-header chain removes the
-                    // per-iteration recompute — the real LICM win, and the
-                    // common real-world shape (invariant bases are exactly
-                    // what gets pinned). A pinned read with NO hoisted
-                    // consumer is un-hoisted below (refine), so a bare load
-                    // does not regress to a per-iteration slot read.
-                    // Call-aware region: the CALLEE may write this arch
-                    // mid-loop, so a hoisted read would freeze the pre-call
-                    // value — never hoist arch loads when the region calls.
-                    return !arch_written[s] && !has_call;
-                }
                 if (s == 0) return true;  // no source
                 if (s > 32 && s < 4096) return hoisted_vreg[s];
                 return false;  // arch/XZR/SP sources on a pure op — never hoist
             };
-            if (!src_invariant(inst.src1)) continue;
-            if (!src_invariant(inst.src2)) continue;
-            if (!src_invariant(inst.aux)) continue;
+            if (inst.op == IROp::LOAD_REG) {
+                // A register read can reuse a dirty arch-vreg mapping that is
+                // not represented by cpu.regs[] yet. Keep it in the body;
+                // only pure scratch chains are safe to move to the preheader.
+                continue;
+            } else if (!src_invariant(inst.src1) ||
+                       !src_invariant(inst.src2) ||
+                       !src_invariant(inst.aux)) {
+                continue;
+            }
             hoisted_vreg[inst.dest] = true;
             hoisted_op[i] = 1;
         }
