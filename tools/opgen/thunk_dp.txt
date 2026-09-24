@@ -75,12 +75,9 @@
 #                     format, type, pixels — args 3 is yoffset, NOT width)
 #             PITCH_H size = pitch(arg3) * recorded texture height
 #
-# Legacy-fidelity notes: symbols that predate the FP/mixed ABI flags were
-# registered as plain integer passthrough even when the C prototype uses
-# floats (glMultiTexCoord2f, glPolygonOffset, glSampleCoverage). Doubles
-# ('d' ARGS kind) are now supported natively: glOrtho/glClearDepth etc.
-# are real double rows. Float cases below still use 'i' (or 'f' where the
-# ABI was fixed) — verify against the C prototype before editing.
+# AAPCS64 scalar floats travel in v-registers, independently of integer
+# arguments in x-registers. Mixed rows currently support integer arguments
+# before float arguments; special-case any reversed mixed signature.
 
 # ── libGL.so / libGL.so.1 ──────────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
@@ -170,7 +167,7 @@ glNormal3f                GL     fff           -     -              -
 glTexCoord2f              GL     ff            -     -              -
 glActiveTexture          GL     i              -     ELIDE_BIND     -    
 glClientActiveTexture     GL     i             -     -              -
-glMultiTexCoord2f         GL     iii           -     -              -   # target,s,t; legacy int passthrough
+glMultiTexCoord2f         GL     iff           -     -              -   # target,s,t
 glCreateShader            GL     i             -     -              -
 glShaderSource            GL     iipp          -     SHADER_SOURCE  -   # arg2/3: strings/lens
 glCompileShader           GL     i             -     -              -
@@ -244,8 +241,8 @@ glTexParameterf           GL     iif           -     -              -   # mixed:
 glCompressedTexImage2D    GL     iiiiiiiz      -     -              arg6   # arg7: data, size=arg6 imageSize
 glScissor                 GL     iiii          -     -              -
 glClearDepthf             GL     f             -     -              -
-glPolygonOffset          GL     ii            -     -              -   # 2 floats; legacy int passthrough
-glSampleCoverage         GL     ii            -     -              -   # float,bool; legacy int passthrough
+glPolygonOffset          GL     ff            -     -              -   # factor,units
+glSampleCoverage         GL     fi            -     -              -   # value,float then invert,bool
 # ── Future-game coverage (2026-08): DSA / GL3.3+ entry points ──────────
 glBufferStorage          GL     iizi          -     -              arg1 # arg2: const void *data (size=arg1)
 glCreateBuffers          GL     ip            -     -              -   # arg1: GLuint *buffers
@@ -333,7 +330,7 @@ glHint                    GLES   ii            -     -              -
 glFrontFace               GLES   i             -     -              -
 glCullFace                GLES   i             -     -              -
 glLineWidth               GLES   f             -     -              -
-glPolygonOffset           GLES   ii            -     -              -
+glPolygonOffset           GLES   ff            -     -              -
 glPixelStorei             GLES   ii            -     -              -
 glCreateShader            GLES   i             -     -              -
 glShaderSource            GLES   iipp          -     SHADER_SOURCE  -
@@ -435,7 +432,7 @@ glStencilOpSeparate       GLES   iiii          -     -              -
 glStencilMaskSeparate     GLES   ii            -     -              -
 glGetString                GLES   i             str   GET_STRING     -     
 glGetIntegerv             GLES   ip            -     QUERY          -
-glSampleCoverage          GLES   ii            -     -              -
+glSampleCoverage          GLES   fi            -     -              -   # value,float then invert,bool
 
 # ── libEGL.so / libEGL.so.1 ────────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
@@ -1463,7 +1460,7 @@ glMultTransposeMatrixd     GL     p             -     -              -
 glMultTransposeMatrixf     GL     p             -     -              -     
 glMultiDrawArrays          GL     ippi          -     -              -     
 glMultiTexCoord1dv         GL     ip            -     -              -     
-glMultiTexCoord1f          GL     ii            -     -              -     
+glMultiTexCoord1f          GL     if            -     -              -
 glMultiTexCoord1fv         GL     ip            -     -              -     
 glMultiTexCoord1i          GL     ii            -     -              -     
 glMultiTexCoord1iv         GL     ip            -     -              -     
@@ -1476,14 +1473,14 @@ glMultiTexCoord2iv         GL     ip            -     -              -
 glMultiTexCoord2s          GL     iii           -     -              -     
 glMultiTexCoord2sv         GL     ip            -     -              -     
 glMultiTexCoord3dv         GL     ip            -     -              -     
-glMultiTexCoord3f          GL     iiii          -     -              -     
+glMultiTexCoord3f          GL     ifff          -     -              -
 glMultiTexCoord3fv         GL     ip            -     -              -     
 glMultiTexCoord3i          GL     iiii          -     -              -     
 glMultiTexCoord3iv         GL     ip            -     -              -     
 glMultiTexCoord3s          GL     iiii          -     -              -     
 glMultiTexCoord3sv         GL     ip            -     -              -     
 glMultiTexCoord4dv         GL     ip            -     -              -     
-glMultiTexCoord4f          GL     iiiii         -     -              -     
+glMultiTexCoord4f          GL     iffff         -     -              -
 glMultiTexCoord4fv         GL     ip            -     -              -     
 glMultiTexCoord4i          GL     iiiii         -     -              -     
 glMultiTexCoord4iv         GL     ip            -     -              -     
@@ -1572,7 +1569,7 @@ glSecondaryColor3b         GL     iii           -     -              -
 glSecondaryColor3bv        GL     p             -     -              -     
 glSecondaryColor3d         GL     ddd           -     -              -     
 glSecondaryColor3dv        GL     p             -     -              -     
-glSecondaryColor3f         GL     iii           -     -              -     
+glSecondaryColor3f         GL     fff           -     -              -
 glSecondaryColor3fv        GL     p             -     -              -     
 glSecondaryColor3i         GL     iii           -     -              -     
 glSecondaryColor3iv        GL     p             -     -              -     
@@ -1591,7 +1588,7 @@ glSelectBuffer             GL     ip            -     -              -
 glTexBuffer                GL     iii           -     -              -     
 glTexCoord1d               GL     d             -     -              -     
 glTexCoord1dv              GL     p             -     -              -     
-glTexCoord1f               GL     i             -     -              -     
+glTexCoord1f               GL     f             -     -              -
 glTexCoord1fv              GL     p             -     -              -     
 glTexCoord1i               GL     i             -     -              -     
 glTexCoord1iv              GL     p             -     -              -     
@@ -1606,7 +1603,7 @@ glTexCoord2s               GL     ii            -     -              -
 glTexCoord2sv              GL     p             -     -              -     
 glTexCoord3d               GL     ddd           -     -              -     
 glTexCoord3dv              GL     p             -     -              -     
-glTexCoord3f               GL     iii           -     -              -     
+glTexCoord3f               GL     fff           -     -              -
 glTexCoord3fv              GL     p             -     -              -     
 glTexCoord3i               GL     iii           -     -              -     
 glTexCoord3iv              GL     p             -     -              -     
@@ -1614,7 +1611,7 @@ glTexCoord3s               GL     iii           -     -              -
 glTexCoord3sv              GL     p             -     -              -     
 glTexCoord4d               GL     dddd          -     -              -     
 glTexCoord4dv              GL     p             -     -              -     
-glTexCoord4f               GL     iiii          -     -              -     
+glTexCoord4f               GL     ffff          -     -              -
 glTexCoord4fv              GL     p             -     -              -     
 glTexCoord4i               GL     iiii          -     -              -     
 glTexCoord4iv              GL     p             -     -              -     

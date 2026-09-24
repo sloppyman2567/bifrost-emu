@@ -81,6 +81,15 @@ int main(void) {
     int64_t sext = (int8_t)(int64_t)v;  /* sign-extend to 64 bits */
     CHECK((sext << 8) == -0x80LL * 256, "sbfiz_8_8");
 
+    /* SBFIZ must sign-extend the selected 32-bit field before shifting.
+     * Keep the input opaque to the compiler so this exercises the guest
+     * instruction directly (the low 32 bits represent -2147483647). */
+    volatile uint64_t sbfiz_input = 0x80000001ULL;
+    uint64_t sbfiz_result;
+    __asm__ volatile("sbfiz %0, %1, #3, #32"
+                     : "=r"(sbfiz_result) : "r"(sbfiz_input));
+    CHECK(sbfiz_result == 0xFFFFFFFC00000008ULL, "sbfiz_sign_extend_32");
+
     /* Pattern: sign-extend then shift right */
     v = 0x0000000000008000ULL;
     int64_t sx = (int16_t)v;  /* sign-extend 16-bit value */

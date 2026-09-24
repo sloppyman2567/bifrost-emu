@@ -4497,18 +4497,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   FNMADD (o2=1, o1=0): Vd = -Va - Vn*Vm      = -c - a*b
             //   FNMSUB (o2=1, o1=1): Vd = -Va + Vn*Vm      = a*b - c
             //
-            // We model FMA3 fusion semantics by computing the product
-            // and add/sub in a single C++ expression. C++ does NOT
-            // guarantee single-rounding (the compiler may emit
-            // separate mul+add machine instructions), so this matches
-            // the JIT's non-FMA3 decomposed path — both produce
-            // double-rounded results. On hosts with FMA3, the JIT's
-            // FMA3 codegen produces single-rounded results, which
-            // diverges from the interpreter for IEEE 754 edge cases
-            // (e.g. mul=1e308 + acc=1e-300 → exact vs. ∞). This is
-            // a known limitation; the fix requires FMA3 codegen in
-            // the interpreter too (future work — currently we use
-            // the C++ mul+add path).
+            // std::fma performs the product and sum with one final
+            // rounding, as required by the AArch64 fused instructions.
             if ((op & 0xFF000000) == 0x1F000000) {
                 uint8_t ra = (op >> 10) & 0x1F;
                 bool sub = (op >> 15) & 1;   // o1
@@ -4516,22 +4506,20 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 if (ftype) {
                     double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm),
                            c = read_fp_d(cpu, ra);
-                    double prod = a * b;
                     double r;
-                    if      (!neg && !sub) r = prod + c;        // FMADD  = Sa + Sn*Sm
-                    else if (!neg &&  sub) r = c - prod;        // FMSUB  = Sa - Sn*Sm
-                    else if ( neg && !sub) r = -prod - c;       // FNMADD = -Sa - Sn*Sm
-                    else                   r = prod - c;       // FNMSUB = -Sa + Sn*Sm
+                    if      (!neg && !sub) r = std::fma(a, b, c);       // FMADD  = a*b + c
+                    else if (!neg &&  sub) r = std::fma(-a, b, c);      // FMSUB  = c - a*b
+                    else if ( neg && !sub) r = std::fma(-a, b, -c);     // FNMADD = -a*b - c
+                    else                   r = std::fma(a, b, -c);      // FNMSUB = a*b - c
                     write_fp_d(cpu, rd, r);
                 } else {
                     float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm),
                           c = read_fp_s(cpu, ra);
-                    float prod = a * b;
                     float r;
-                    if      (!neg && !sub) r = prod + c;        // FMADD  = Sa + Sn*Sm
-                    else if (!neg &&  sub) r = c - prod;        // FMSUB  = Sa - Sn*Sm
-                    else if ( neg && !sub) r = -prod - c;       // FNMADD = -Sa - Sn*Sm
-                    else                   r = prod - c;       // FNMSUB = -Sa + Sn*Sm
+                    if      (!neg && !sub) r = std::fma(a, b, c);       // FMADD  = a*b + c
+                    else if (!neg &&  sub) r = std::fma(-a, b, c);      // FMSUB  = c - a*b
+                    else if ( neg && !sub) r = std::fma(-a, b, -c);     // FNMADD = -a*b - c
+                    else                   r = std::fma(a, b, -c);      // FNMSUB = a*b - c
                     write_fp_s(cpu, rd, r);
                 }
                 return;

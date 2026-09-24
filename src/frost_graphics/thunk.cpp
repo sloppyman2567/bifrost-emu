@@ -1413,7 +1413,16 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     entry.name.c_str(), ni, entry.n_float,
                     static_cast<long long>(iv[0]), fv[0]);
         }
-        if (ni == 1 && entry.n_float == 1) {
+        // glSampleCoverage(GLfloat value, GLboolean invert) is the one
+        // registered mixed GL setter whose float precedes its integer in
+        // the AArch64 prototype. The generic mixed path handles integer
+        // arguments first, so preserve this function's actual ABI order.
+        if (entry.name == "glSampleCoverage" && ni == 1 &&
+            entry.n_float == 1) {
+            using Fn = void (*)(float, uint8_t);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                fv[0], static_cast<uint8_t>(iv[0]));
+        } else if (ni == 1 && entry.n_float == 1) {
             using Fn = void (*)(int32_t, float);
             reinterpret_cast<Fn>(entry.host_fn)(
                 static_cast<int32_t>(iv[0]), fv[0]);
@@ -1890,11 +1899,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // Default 64 KiB covers modest textures/VBO uploads; the SIZE
         // column of the spec overrides it where the exact size is known.
         size_t kBounce = 65536;
-        // Padded row extent the host driver actually accesses on the
-        // bounce (rows strided to the tracked UNPACK/PACK alignment).
-        // The ALLOCATION must cover it even though the vector's size()
-        // stays at the packed logical size, so the writeback still
-        // copies exactly the guest's logical bytes.
+        // Padded row extent the host driver accesses on pixel-transfer
+        // bounces (rows strided to tracked UNPACK/PACK alignment).
         uint64_t pad_extent = 0;
         auto pixel_extent_ = [&](bool upload, uint64_t h,
                                  uint64_t row_bytes) -> uint64_t {
@@ -1907,23 +1913,39 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t stride = (row_bytes + align - 1) & ~(uint64_t)(align - 1);
             return h ? (h - 1) * stride + row_bytes : 0;
         };
-        // Bytes per pixel for a GL format/type pair (channel count ×
-        // component size). Unknown combos default to 1 byte/pixel.
+        // Bytes per pixel for a GL format/type pair. Packed pixel types
+        // have fixed sizes independent of format component count.
+        // Unknown combos conservatively default to one byte/pixel.
         auto pixel_bps_ = [](uint64_t fmt, uint64_t type) -> uint64_t {
             uint64_t channels = 1;
             switch (fmt) {
                 case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
                 case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
-                case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
+                case 0x190A: case 0x8227: case 0x8228:
+                case 0x822B: case 0x822C: channels = 2; break;  // LA / RG
+                case 0x84F9: channels = 2; break;               // GL_DEPTH_STENCIL
+                case 0x8229: case 0x822A: case 0x8D94:
+                case 0x1903: case 0x1904: case 0x1905:
+                case 0x1906: case 0x1909: case 0x1902:
+                    channels = 1; break;                         // RED / ALPHA / DEPTH
                 default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
             }
-            uint64_t type_sz = 1;
             switch (type) {
-                case 0x1403: case 0x140B: type_sz = 2; break;   // SHORT / HALF_FLOAT
-                case 0x1405: case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // UINT/FLOAT/INT
-                default: break;                                  // UNSIGNED_BYTE etc.
+                case 0x8032: case 0x8362: return 1;              // packed 3-3-2
+                case 0x8363: case 0x8364:                       // packed 5-6-5
+                case 0x8033: case 0x8365:                       // packed 4-4-4-4
+                case 0x8034: case 0x8366: return 2;             // packed 5-5-5-1
+                case 0x8035: case 0x8367:                       // packed 8-8-8-8
+                case 0x8036: case 0x8368:                       // packed 10-10-10-2
+                case 0x8C3B: case 0x8C3E: case 0x84FA: return 4;// packed 32-bit
+                case 0x8DAD: return 8;                          // packed depth/stencil
+                case 0x1400: case 0x1401: return channels;      // BYTE/UBYTE
+                case 0x1402: case 0x1403: case 0x140B:
+                    return channels * 2;                        // SHORT/USHORT/HALF
+                case 0x1404: case 0x1405: case 0x1406: case 0x140C:
+                    return channels * 4;                        // INT/UINT/FLOAT/FIXED
+                default: return channels;
             }
-            return channels * type_sz;
         };
         const thunk::SizeKind sk = entry.spec ? entry.spec->size
                                               : thunk::SizeKind::NONE;
@@ -1958,24 +1980,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (idx == 8) {
                 uint64_t w = args[3], h = args[4];
                 uint64_t fmt = args[6], type = args[7];
-                uint64_t channels = 1;
-                switch (fmt) {
-                    case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
-                    case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
-                    case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
-                    default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
-                }
-                uint64_t type_sz = 1;
-                switch (type) {
-                    case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
-                    case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
-                    default: break;                                  // UNSIGNED_BYTE etc.
-                }
-                uint64_t sz = w * h * channels * type_sz;
+                const uint64_t bps = pixel_bps_(fmt, type);
+                uint64_t sz = w * h * bps;
                 if (sz > 0 && sz < (64ull << 20)) {
                     kBounce = static_cast<size_t>(sz);
                     pad_extent = pixel_extent_(true, h,
-                                               w * channels * type_sz);
+                                               w * bps);
                 }
             }
             break;
@@ -1986,24 +1996,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (idx == 8) {
                 uint64_t w = args[4], h = args[5];
                 uint64_t fmt = args[6], type = args[7];
-                uint64_t channels = 1;
-                switch (fmt) {
-                    case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
-                    case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
-                    case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
-                    default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
-                }
-                uint64_t type_sz = 1;
-                switch (type) {
-                    case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
-                    case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
-                    default: break;                                  // UNSIGNED_BYTE etc.
-                }
-                uint64_t sz = w * h * channels * type_sz;
+                const uint64_t bps = pixel_bps_(fmt, type);
+                uint64_t sz = w * h * bps;
                 if (sz > 0 && sz < (64ull << 20)) {
                     kBounce = static_cast<size_t>(sz);
                     pad_extent = pixel_extent_(true, h,
-                                               w * channels * type_sz);
+                                               w * bps);
                 }
             }
             break;
@@ -2015,24 +2013,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (idx == 9) {
                 uint64_t w = args[3], h = args[4], d = args[5];
                 uint64_t fmt = args[7], type = args[8];
-                uint64_t channels = 1;
-                switch (fmt) {
-                    case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
-                    case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
-                    case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
-                    default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
-                }
-                uint64_t type_sz = 1;
-                switch (type) {
-                    case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
-                    case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
-                    default: break;                                  // UNSIGNED_BYTE etc.
-                }
-                uint64_t sz = w * h * d * channels * type_sz;
+                const uint64_t bps = pixel_bps_(fmt, type);
+                uint64_t sz = w * h * d * bps;
                 if (sz > 0 && sz < (64ull << 20)) {
                     kBounce = static_cast<size_t>(sz);
-                    pad_extent = pixel_extent_(true, h * d,
-                                               w * channels * type_sz);
+                    pad_extent = pixel_extent_(true, h * d, w * bps);
                 }
             }
             break;
@@ -2137,24 +2122,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (idx == 6) {
                 uint64_t w = args[2], h = args[3];
                 uint64_t fmt = args[4], type = args[5];
-                uint64_t channels = 1;
-                switch (fmt) {
-                    case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
-                    case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
-                    case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
-                    default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
-                }
-                uint64_t type_sz = 1;
-                switch (type) {
-                    case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
-                    case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
-                    default: break;                                  // UNSIGNED_BYTE etc.
-                }
-                uint64_t sz = w * h * channels * type_sz;
+                const uint64_t bps = pixel_bps_(fmt, type);
+                uint64_t sz = w * h * bps;
                 if (sz > 0 && sz < (64ull << 20)) {
                     kBounce = static_cast<size_t>(sz);
                     pad_extent = pixel_extent_(false, h,
-                                               w * channels * type_sz);
+                                               w * bps);
                 }
             }
             break;
@@ -2185,18 +2158,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         (unsigned long long)args[7], kBounce);
             }
         }
-        // Reserve capacity for the padded extent BEFORE resize so the
-        // allocation covers every byte the host may stride to, while
-        // size() stays packed for an exact writeback.
+        // Copy the full pixel-store extent. Reserving capacity alone is not
+        // enough: GL reads/writes row padding too, and uploads need those
+        // guest bytes at the offsets the host driver will consume.
         if (pad_extent > static_cast<uint64_t>(kBounce) &&
             pad_extent < (64ull << 20))
-            bounce->reserve(static_cast<size_t>(pad_extent));
+            kBounce = static_cast<size_t>(pad_extent);
         bounce->resize(kBounce);
         try {
             impl_->mem->read(a, bounce->data(), kBounce);
         } catch (...) {
-            // Zero in place — assign() could reallocate and shrink the
-            // reserved padded capacity below the host's access extent.
+            // Keep the full padded extent available to the host driver.
             std::fill(bounce->begin(), bounce->end(), 0);
         }
         *guest_orig = a;
@@ -2223,6 +2195,38 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                        entry.spec->policy == thunk::Policy::EL_PTR ||
                        entry.spec->policy == thunk::Policy::EL_PTR_ARRAY ||
                        entry.spec->policy == thunk::Policy::INDIRECT_PTR);
+    // Pixel pack/unpack buffer arguments are byte offsets, not CPU pointers.
+    // Leave them untouched so host GL can interpret them relative to the
+    // currently bound PBO. This covers the sized paths and other registered
+    // texture transfer calls whose signature still carries a pointer.
+    auto starts_with = [&](const char* prefix) {
+        return entry.name.compare(0, std::strlen(prefix), prefix) == 0;
+    };
+    const bool pixel_unpack_call =
+        starts_with("glTexImage") || starts_with("glTexSubImage") ||
+        starts_with("glCompressedTexImage") ||
+        starts_with("glCompressedTexSubImage") ||
+        starts_with("glTextureSubImage") ||
+        starts_with("glCompressedTextureSubImage") ||
+        entry.name == "glDrawPixels" || entry.name == "glBitmap" ||
+        starts_with("glColorTable");
+    const bool pixel_pack_call =
+        entry.name == "glReadPixels" || starts_with("glGetTexImage") ||
+        starts_with("glGetCompressedTexImage") ||
+        starts_with("glGetnTexImage") || entry.name == "glReadnPixels" ||
+        starts_with("glGetTextureImage") ||
+        starts_with("glGetCompressedTextureImage");
+    bool pixel_data_is_pbo_offset = false;
+    if (impl_->gl_state_tracker_) {
+        constexpr uint32_t pixel_pack_buffer_target = 0x88EB;
+        constexpr uint32_t pixel_unpack_buffer_target = 0x88EC;
+        if (pixel_unpack_call)
+            pixel_data_is_pbo_offset =
+                impl_->gl_state_tracker_->buffer_binding(pixel_unpack_buffer_target) != 0;
+        else if (pixel_pack_call)
+            pixel_data_is_pbo_offset =
+                impl_->gl_state_tracker_->buffer_binding(pixel_pack_buffer_target) != 0;
+    }
     // ── DELETE_TRACK: mirror deletes into the state tracker ──────
     // Deleting a bound object unbinds it; without mirroring, name reuse
     // would observe a stale "already bound" and elide a real bind.
@@ -2306,7 +2310,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
     }
-    if (entry.pointer_args && impl_->mem && !va_ptr_owned) {
+    if (entry.pointer_args && impl_->mem && !va_ptr_owned &&
+        !pixel_data_is_pbo_offset) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (entry.pointer_args & (1u << i)) {
                 translate_ptr(args[i], i, &bounce_bufs[i],

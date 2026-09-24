@@ -606,6 +606,22 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     uint64_t mask = (1ULL << (imms + 1)) - 1;
                     emit_mov_imm64(RDX, mask);
                     emit_and_reg(RAX, RDX);
+                    // SBFM's insert form (SBFIZ) sign-extends the selected
+                    // low field before positioning it. UBFM (UBFIZ/LSL)
+                    // keeps it zero-extended. Without this, negative
+                    // 32-bit indices such as HUF's lowS == -1 become large
+                    // positive offsets instead of addressing the sentinel
+                    // node immediately before the table.
+                    if (inst.op == IROp::SBFM) {
+                        int sign_sh = width - (imms + 1);
+                        if (width == 32) {
+                            emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte(static_cast<uint8_t>(sign_sh));
+                            emit_byte(0xC1); emit_byte(modrm(3, 7, RAX & 7)); emit_byte(static_cast<uint8_t>(sign_sh));
+                        } else {
+                            emit_shift_imm8(RAX, 4, sign_sh);
+                            emit_shift_imm8(RAX, 7, sign_sh);
+                        }
+                    }
                     // THEN shift left by sh.
                     if (width == 32) {
                         emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte(static_cast<uint8_t>(sh));
