@@ -95,7 +95,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             bool rn_is_sp = (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM ||
                              d.cls == InstClass::ADD_REG || d.cls == InstClass::SUB_REG) && d.reads_sp;
             uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
-            uint8_t b;
+            uint16_t b;
             if (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) {
                 // the decoder sets d.imm_u to the raw
                 // 12-bit immediate and d.shift to 0 or 12 (the optional
@@ -164,7 +164,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 rn_is_sp = extended && (d.rn == 31);
             }
             uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
-            uint8_t b;
+            uint16_t b;
             if (d.cls == InstClass::ADDS_IMM || d.cls == InstClass::SUBS_IMM) {
                 // apply d.shift (0 or 12) to d.imm_u,
                 // matching the interpreter. See ADD_IMM/SUB_IMM above
@@ -291,7 +291,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::EOR_REG: case InstClass::EOR_IMM:
         case InstClass::ANDS_REG: case InstClass::ANDS_IMM: {
             uint16_t a = load_arm_reg(block, (d.rn == 31) ? 32 : d.rn);
-            uint8_t b;
+            uint16_t b;
             bool is_imm = (d.cls == InstClass::AND_IMM || d.cls == InstClass::ORR_IMM ||
                            d.cls == InstClass::EOR_IMM || d.cls == InstClass::ANDS_IMM);
             if (is_imm) {
@@ -555,7 +555,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── CCMP / CCMN ──────────────────────────────────────────────
         case InstClass::CCMP: case InstClass::CCMN: {
             uint16_t rn_v = load_arm_reg(block, d.rn);
-            uint8_t rm_v;
+            uint16_t rm_v;
             if (d.is_register) {
                 rm_v = load_arm_reg(block, d.rm);
             } else {

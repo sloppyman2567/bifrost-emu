@@ -363,7 +363,7 @@ inline uint16_t load_arm_reg(IRBlock& b, uint8_t ar, bool is_sp = false) {
 }
 // Write a vreg to an ARM64 reg.
 // `is_sp` controls reg-31 mapping (same as load_arm_reg).
-inline void store_arm_reg(IRBlock& b, uint8_t ar, uint8_t v, bool is_sp = false) {
+inline void store_arm_reg(IRBlock& b, uint8_t ar, uint16_t v, bool is_sp = false) {
     if (ar == 31 && !is_sp) return;  // XZR — discard
     b.insts.push_back(IRInst::make_store_reg(ar, v, false));
 }
@@ -385,7 +385,7 @@ inline uint16_t load_fp_reg(IRBlock& b, uint8_t ar) {
     b.insts.push_back(IRInst::make_load_reg(v, ar, true));
     return v;
 }
-inline void store_fp_reg(IRBlock& b, uint8_t ar, uint8_t v) {
+inline void store_fp_reg(IRBlock& b, uint8_t ar, uint16_t v) {
     if (ar == 31) return;  // XZR — discard
     b.insts.push_back(IRInst::make_store_reg(ar, v, true));
 }

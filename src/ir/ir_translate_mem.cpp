@@ -52,7 +52,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // For post-index (mode=1): load/store from `base`, writeback `base + disp`.
             // For pre-index  (mode=2): load/store from `base + disp`, writeback `base + disp`.
             // For offset     (mode=0): load/store from `base + disp`, no writeback.
-            uint8_t addr;
+            uint16_t addr;
             bool post_index = (d.mode == 1 && d.writeback);
             if (d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_REG) {
                 // Register offset: addr = base + extend_reg(rm, option, S ? size : 0)
