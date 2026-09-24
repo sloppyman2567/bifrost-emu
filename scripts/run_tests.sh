@@ -20,17 +20,21 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --filter 'sig|brk' # filter without downloading fixtures
 #   ./scripts/run_tests.sh --quick      # skip benchmarks
+#   ./scripts/run_tests.sh --strict     # missing selected fixtures are failures
+#   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
+#   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (229 test runs):
-#   Unit         55  — ctest/*.elf focused regressions
+# Fully provisioned suite (232 test runs):
+#   Unit         57  — ctest/*.elf focused regressions
 #   Integration  84  — ctest_real/*.elf + test/*.elf
+#   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   49  — static BusyBox/Toybox commands
 #   Real-world dynamic 7 — glibc binaries; rootfs required
 #   Dynamic      15  — musl/glibc tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 207 runs (202 with --quick); fixtures may be skipped.
+# Without a rootfs: 210 runs (205 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -52,9 +56,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ── Config ─────────────────────────────────────────────────────────────
-EMU="./bifrost-emu"
+EMU="${BIFROST_EMU:-./bifrost-emu}"
 TIMEOUT=15
 TIMEOUT_LONG=60
+STRICT=0
+ALLOW_MISSING=()
 
 # Colors (disabled if not a TTY)
 if [ -t 1 ]; then
@@ -94,6 +100,26 @@ while [ $# -gt 0 ]; do
         --chain-skip)   RUN_ENV+=(BIFROST_CHAIN_SKIP=1) ;;
         --verbose|-v)   VERBOSE=1 ;;
         --quick)        QUICK=1 ;;
+        --strict)       STRICT=1 ;;
+        --allow-missing)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "error: --allow-missing requires a non-empty regular expression" >&2
+                exit 2
+            fi
+            ALLOW_MISSING+=("$2"); shift ;;
+        --allow-missing=*)
+            optional_pattern="${1#--allow-missing=}"
+            if [ -z "$optional_pattern" ]; then
+                echo "error: --allow-missing requires a non-empty regular expression" >&2
+                exit 2
+            fi
+            ALLOW_MISSING+=("$optional_pattern") ;;
+        --emu)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "error: --emu requires an executable path" >&2
+                exit 2
+            fi
+            EMU="$2"; shift ;;
         --filter)
             if [ "$#" -lt 2 ] || [ -z "$2" ]; then
                 echo "error: --filter requires a non-empty regular expression" >&2
@@ -121,6 +147,14 @@ if [ -n "$FILTER" ]; then
         exit 2
     fi
 fi
+for optional_pattern in "${ALLOW_MISSING[@]}"; do
+    grep -E -- "$optional_pattern" </dev/null >/dev/null 2>&1
+    grep_rc=$?
+    if [ "$grep_rc" -eq 2 ]; then
+        echo "error: invalid --allow-missing regular expression: $optional_pattern" >&2
+        exit 2
+    fi
+done
 
 # ── Real-world binary download ────────────────────────────────────────
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
@@ -210,7 +244,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite includes 55 unit, 84 integration, 9 Toybox, 5 interactive,
+# Standard suite includes 57 unit, 84 integration, 1 sandbox, 9 Toybox, 5 interactive,
 # 49 static real-world, 5 benchmark, and optional rootfs-dependent tests.
 
 # Unit tests (ctest/ — focused JIT regression tests)
@@ -248,6 +282,7 @@ UNIT_TESTS=(
     "test_jit_native|ctest/test_jit_native.elf||10|ALL PASS"
     "test_malloc|ctest/test_malloc.elf||5|malloc test done"
     "test_simd_arith|ctest/test_simd_arith.elf||10|ALL PASS"
+    "tier2_smov|ctest/jit_tier2_smov.elf||10|ALL PASS|JIT"
     "test_tls_static|ctest/test_tls_static.elf||10|ALL PASS"
     # Multi-threaded pthread test (default: 4 threads, fib(35)).
     # Exercises clone/clone3 + futex (FUTEX_WAIT/WAKE/REQUEUE) +
@@ -279,6 +314,7 @@ UNIT_TESTS=(
     # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
     # and above-window MAP_FIXED r/w cycles run concurrently.
     "test_mem_guard|ctest/test_mem_guard.elf||20|ALL PASS"
+    "test_syscall_regress|ctest/test_syscall_regress.elf||10|0 checks failed"
     "test_producer_consumer|ctest/test_producer_consumer.elf||10|ALL PASS"
     # High-contention atomic stress test (8 threads). Validates CAS, LL/SC
     # (mutex), and LDADD atomics under game-scale contention.
@@ -801,8 +837,21 @@ run_test() {
     read -r -a test_command <<< "$file"
     local bin_path="${test_command[0]}"
     if [ ! -f "$bin_path" ]; then
-        SKIP_COUNT=$((SKIP_COUNT + 1))
-        if [ "$VERBOSE" = "1" ]; then
+        local optional_fixture=0 optional_pattern
+        for optional_pattern in "${ALLOW_MISSING[@]}"; do
+            if grep -qiE -- "$optional_pattern" <<< "$name"; then
+                optional_fixture=1
+                break
+            fi
+        done
+        if [ "$STRICT" = "1" ] && [ "$optional_fixture" = "0" ]; then
+            record_failure "$name" "required binary $bin_path is missing"
+        else
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+        fi
+        if [ "$optional_fixture" = "1" ]; then
+            echo -e "  ${C_YLW}SKIP${C_RST}    $name (optional fixture $bin_path is missing)"
+        elif [ "$VERBOSE" = "1" ] && [ "$STRICT" != "1" ]; then
             echo -e "  ${C_YLW}SKIP${C_RST}    $name"
             echo -e "         (binary $bin_path not found — build with 'make cross SRC=...')"
         fi

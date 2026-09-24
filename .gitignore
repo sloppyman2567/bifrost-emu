@@ -63,6 +63,7 @@ cmake-build-*/
 # Logs
 *.log
 trace-*.txt
+bench-results/
 
 # Benchmarking / debug artifacts
 bifrost-fb.ppm

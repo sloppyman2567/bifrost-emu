@@ -30,9 +30,14 @@ int main(void) {
 
     // Verify sorted
     for (int i = 1; i < N; i++) {
-        if (arr[i-1] > arr[i]) { printf("sort error at %d\n", i); break; }
+        if (arr[i-1] > arr[i]) {
+            fprintf(stderr, "ERROR: sort order at %d\n", i);
+            free(arr);
+            return 1;
+        }
     }
 
+    puts("VALID: sorted output");
     free(arr);
     return 0;
 }

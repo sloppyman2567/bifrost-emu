@@ -34,7 +34,16 @@ int main(void) {
     double flops = 2.0 * N * N * N;
     printf("matmul: %dx%d in %.3fs = %.1f MFLOPS\n", N, N, secs, flops / secs / 1e6);
 
-    // Prevent optimizer from removing C
+    double expected_last = 0.0;
+    for (int k = 0; k < N; k++)
+        expected_last += (double)(N - 1 + k) * (double)(k * (N - 1));
+    if (C[0][0] != 0.0 || C[N - 1][N - 1] != expected_last) {
+        fprintf(stderr, "ERROR: matrix result %.0f, expected %.0f\n",
+                C[N - 1][N - 1], expected_last);
+        return 1;
+    }
+
     printf("C[0][0]=%.0f C[N-1][N-1]=%.0f\n", C[0][0], C[N-1][N-1]);
+    puts("VALID: matrix result");
     return 0;
 }

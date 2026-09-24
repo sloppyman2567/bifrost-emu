@@ -1391,7 +1391,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.tier2_counter_off = tier2_counter_off_;
     entry.tier2_counter_len = tier2_counter_len_;
     entry.instr_count = instr_count;
-    entry.call_interp_count = call_interp_count;
+    // Runtime hot-interp promotion uses the same post-optimization IR count
+    // as the translate-time interp_only decision. The pre-translation
+    // predictor is intentionally only a block-splitting heuristic and may
+    // overestimate native FP/SIMD instructions.
+    entry.call_interp_count = actual_call_interp;
     entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;
     // SVC presence: the verify-mode interp re-run re-executes the syscall —
     // non-idempotent syscalls (read/poll/...) return different values the

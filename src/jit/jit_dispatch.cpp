@@ -231,8 +231,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // counter, but promoting to interp_only needs exclusive lock).
         // Runtime promotion to interp_only is DISABLED by default: the
         // translator already marks CALL_INTERP-heavy blocks interp_only
-        // (actual_call_interp*2 > instr_count in translate_block; the
-        // call_interp_count heuristic only drives block splitting), and
+        // (based on the post-optimization IR count in translate_block), and
         // mixed blocks (a few fallbacks + several native ops) measure
         // FASTER in JIT — demoting them drags native ops down to
         // interpreter speed (interp is ~2x slower; game steady-state

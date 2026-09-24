@@ -236,6 +236,7 @@ make USE_SDL2=1 USE_THUNK_GL=1
 
 # Debug build with sanitizers
 make debug
+# The sanitizer binary is isolated at build/debug/bifrost-emu-dbg.
 
 # Static library (for embedding bifrost-emu in other projects)
 make lib
@@ -243,13 +244,17 @@ make test-capi  # build + run the host-side C API test (54 checks)
 make test-nb    # build + run the native bridge adapter test (61 checks)
 ```
 
+Each SDL/GL selection gets its own `build/release-sdl*-gl*` directory, and
+the sanitizer build uses `build/debug`. The default release executable is
+also copied to `./bifrost-emu`; `make clean` removes all build profiles.
+
 ### Cross-Compiling Test Binaries
 
 ```bash
 # Fetch the musl cross-toolchain (104 MB)
 ./tools/fetch-musl-toolchain.sh
 
-# Cross-compile all test .c files
+# Cross-compile test C sources and assemble the freestanding test programs
 make setup-tests
 
 # Or compile a single file
@@ -272,6 +277,13 @@ make check-nojit
 # JIT divergence checker (slow, catches codegen bugs)
 make verify
 
+# Local guest-correctness gate (generated files, APIs, JIT/interpreter,
+# sandbox and dynamic glibc regressions)
+make ci
+
+# Full strict suite, including the provisioned dynamic-linker coverage
+make check-all
+
 # Run only specific categories
 ./scripts/run_tests.sh --unit         # JIT regression tests
 ./scripts/run_tests.sh --toybox       # ToyBox integration
@@ -282,13 +294,15 @@ make verify
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner executes 229 test runs: 55 unit,
-84 integration, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
+With all fixtures available, the runner selects 232 test runs: 57 unit,
+84 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
 15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
 a configured rootfs; the real-world dynamic binaries are part of the
 real-world fixture set. `--quick` skips the five benchmarks. Without a
-rootfs, the runner selects 207 runs (202 with `--quick`). Missing guest
-fixtures and unavailable display/SDL support can result in skips. See
+rootfs, the runner selects 210 runs (205 with `--quick`). Missing guest
+fixtures are reported as skips in developer mode; CI uses `--strict` to
+turn missing selected fixtures into failures. Display/driver exit-77 skips
+remain environment-dependent. See
 [docs/TESTS.md](docs/TESTS.md) for details.
 
 ### Host Input
@@ -453,13 +467,19 @@ by the `ctest_real/bench_*.elf` binaries themselves:
 | matrix 256×256 | 15.2 MFLOPS | ~641 MFLOPS | ~42x |
 | MIPS (bench_mips, 800M instr) | ~56 MIPS | ~4,400 MIPS | ~78x |
 
+Repeatable samples with checksums and host/compiler metadata can be captured
+with `scripts/run_benchmarks.py`; see [docs/TESTS.md](docs/TESTS.md).
+
 The tight-ALU self-loop speedup is the top end; mixed real workloads
 (games, worldgen, GL) land in the 10-40x range. Tight loops benefit
 from the dispatch/flag-skip/regalloc work of the 1.5.4-alpha cycle and the vk.xml registry-driven marshalling of 1.5.5-alpha —
 the interpreter is unchanged and runs ~56 MIPS regardless.
-CoreMark (aarch64 guest) runs at ~2,200 iterations/sec plain and
-~2,540 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (~6% of native
-x86_64 speed) with all CRCs validated.
+CoreMark (AArch64 guest) scores ~4,100 iterations/sec on a Ryzen 7
+5800X3D, with all CRCs validated. That is about 9.8% of a published
+41,946 iterations/sec native result for the same CPU
+([CoreMark result](https://zephray.me/coremark/)). The audio callback
+worker starts only when a callback stream opens, so single-threaded guests
+that do not use callback audio retain JIT chaining and tier-2 compilation.
 
 The JIT uses:
 - **AVX-512** (when available) for 512-bit SIMD
@@ -474,7 +494,8 @@ The JIT uses:
 - Run ARM64 Linux apps on x86_64 (CLI tools, scripts, daemons)
 - Test ARM64 builds on x86_64 CI runners
 - Test ARM64 game builds (SDL2, OpenGL ES) during development
-- Analyze ARM64 binaries in a sandboxed environment
+- Run ARM64 binaries with a remapped guest filesystem; see the [security
+  model](docs/SECURITY.md) before using untrusted binaries
 - Run real ARM64 games (SDL2/OpenGL voxel games, teeworlds) on x86_64
   desktops without QEMU
 
@@ -486,6 +507,9 @@ The JIT uses:
 
 ## Documentation
 
+- [docs/JIT.md](docs/JIT.md) — JIT architecture and instruction-change guide
+- [docs/SUPPORT.md](docs/SUPPORT.md) — platform and compatibility support matrix
+- [docs/SECURITY.md](docs/SECURITY.md) — BIFROST_ROOT scope and guest trust model
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — Release history
 - [docs/TESTS.md](docs/TESTS.md) — Test suite details
 - [docs/ROADMAP.md](docs/ROADMAP.md) — Future plans

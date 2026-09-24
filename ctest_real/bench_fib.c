@@ -14,7 +14,13 @@ int main(void) {
     long result = fib(35);
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
+    if (result != 9227465) {
+        fprintf(stderr, "ERROR: fib(35) = %ld, expected 9227465\n", result);
+        return 1;
+    }
+
     double secs = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     printf("fib(35) = %ld in %.3fs\n", result, secs);
+    puts("VALID: fib checksum");
     return 0;
 }

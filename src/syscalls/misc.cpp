@@ -142,13 +142,21 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 26: { // inotify_init1(flags)
             int fd = ::inotify_init1(static_cast<int>(a0));
             if (fd < 0) { ret_errno(); return 0; }
-            ret_host(static_cast<uint64_t>(fd));
+            // Guest descriptors are allocated independently from host fds.
+            // Wrap this fd so later inotify calls resolve the guest number
+            // and close() releases the host descriptor through FdTable.
+            int guest_fd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(
+                fd, O_RDONLY | (static_cast<int>(a0) & O_NONBLOCK)));
+            ret_host(static_cast<uint64_t>(guest_fd));
             return 0;
         }
         // ── inotify_add_watch (syscall 27) ───────────────────────────
         case 27: { // inotify_add_watch(fd, pathname, mask)
+            auto node = fds_.get(static_cast<int>(a0));
+            int host_fd = node ? node->host_fd() : -1;
+            if (host_fd < 0) { ret_err(EBADF); return 0; }
             std::string path = Yggdrasil::read_path(mem_, a1);
-            int wd = ::inotify_add_watch(static_cast<int>(a0), path.c_str(),
+            int wd = ::inotify_add_watch(host_fd, path.c_str(),
                                          static_cast<uint32_t>(a2));
             if (wd < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(wd));
@@ -156,7 +164,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         // ── inotify_rm_watch (syscall 28) ────────────────────────────
         case 28: { // inotify_rm_watch(fd, wd)
-            int r = ::inotify_rm_watch(static_cast<int>(a0), static_cast<int>(a1));
+            auto node = fds_.get(static_cast<int>(a0));
+            int host_fd = node ? node->host_fd() : -1;
+            if (host_fd < 0) { ret_err(EBADF); return 0; }
+            int r = ::inotify_rm_watch(host_fd, static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;

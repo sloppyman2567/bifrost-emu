@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  build-configurations:
+    name: Headless and SDL/GL builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libsdl2-dev libgl-dev libegl-dev
+      - name: Build headless configuration
+        run: make -j2 USE_SDL2=0 USE_THUNK_GL=0
+      - name: Build SDL/GL configuration without replacing headless objects
+        run: |
+          make -j2 USE_SDL2=1 USE_THUNK_GL=1
+          test -x build/release-sdl0-gl0/bifrost-emu
+          test -x build/release-sdl1-gl1/bifrost-emu
+
+  guest-correctness:
+    name: Guest correctness and glibc runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host and AArch64 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libffi-dev gcc-aarch64-linux-gnu
+      - name: Compile guest fixtures
+        run: make setup-tests MUSL_CC=aarch64-linux-gnu-gcc GLIBC_CC=aarch64-linux-gnu-gcc
+      - name: Check generated sources and build emulator
+        run: |
+          make generated-check
+          make -j2 USE_SDL2=0 USE_THUNK_GL=0
+      - name: Run host API checks
+        run: make test-capi test-nb USE_SDL2=0 USE_THUNK_GL=0
+      - name: Run strict JIT and interpreter regressions
+        run: |
+          ./scripts/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --unit --quick --strict
+          ./scripts/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --unit --quick --strict --no-jit
+      - name: Run filesystem sandbox boundary regressions
+        run: ./scripts/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --integration --strict --filter '^test_sandbox$'
+      - name: Run JIT differential verification
+        run: make verify USE_SDL2=0 USE_THUNK_GL=0
+      - name: Run glibc dynamic-link tests
+        run: |
+          AARCH64_SYSROOT=/usr/aarch64-linux-gnu ./scripts/setup-rootfs.sh
+          ./scripts/run_tests.sh \
+            --emu build/release-sdl0-gl0/bifrost-emu \
+            --dynamic --strict \
+            --filter '^(hello_dyn_glibc|test_dyn_(write|hello|malloc|printf|pthread_min|threads|pthread_stress|pthread_8thread)|test_dladdr_glibc)$'
+
+  full-suite:
+    name: Full provisioned suite
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 curl gcc-aarch64-linux-gnu libsdl2-dev libgl-dev libegl-dev libffi-dev
+      - name: Run strict full suite
+        env:
+          AARCH64_SYSROOT: /usr/aarch64-linux-gnu
+          GLIBC_CC: aarch64-linux-gnu-gcc
+        run: make -j2 check-all

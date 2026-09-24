@@ -846,9 +846,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_mov_reg(RDX, RAX);  // RDX = target_pc
             emit_push(WIN_REG);
             emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
-            emit_mov_reg(RCX, RAX);  // RCX = next PC
+            // jit_call_helper leaves cpu.pc at its return PC and returns
+            // that same value. Keep the explicit pre-call PC store above for
+            // accurate guest state during dispatch, but don't copy the
+            // return value back over the field after the helper already set it.
             emit_pop(WIN_REG);
-            emit_store(CPU_REG, PC_OFF, RCX);
             invalidate_all_vregs();
             if (vec_cache_active_) vec_emit_prologue_loads();
             return false;  // does NOT end the block

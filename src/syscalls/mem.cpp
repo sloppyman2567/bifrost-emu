@@ -43,6 +43,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t length = a1;
             uint64_t prot = a2;
             uint64_t flags = a3;
+            constexpr uint64_t BIFROST_MAP_ANONYMOUS = 0x20;
             if (length == 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-22)); return 0; } // EINVAL
             // Sanity-check the length: real Linux rejects absurdly large
             // mmaps based on RLIMIT_AS and available address space. Without
@@ -54,6 +55,27 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             if (length > MAX_MMAP_SANITY) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM));
                 return 0;
+            }
+            // Linux requires file offsets to be page aligned and a valid
+            // descriptor for every non-anonymous mapping. Validate before
+            // reserving guest address space so failures leave no mapping.
+            if ((flags & BIFROST_MAP_ANONYMOUS) == 0) {
+                if ((a5 & Memory::PAGE_MASK) != 0) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                    return 0;
+                }
+                int64_t guest_fd = static_cast<int64_t>(a4);
+                int host_fd = guest_fd >= 0
+                    ? resolve_host_fd(emu, static_cast<int>(guest_fd)) : -1;
+                if (host_fd < 0) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EBADF)));
+                    return 0;
+                }
+                struct stat st;
+                if (::fstat(host_fd, &st) < 0) {
+                    ret_errno();
+                    return 0;
+                }
             }
             constexpr uint64_t BIFROST_MAP_FIXED          = 0x10;
             constexpr uint64_t BIFROST_MAP_FIXED_NOREPLACE = 0x100000;
@@ -265,7 +287,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // standard mechanism for mapping executables and shared
             // libraries) skipped the file-load branch and the guest saw
             // zero pages. Fix: check the correct bit.
-            if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0 /* not MAP_ANONYMOUS */) {
+            if ((a3 & BIFROST_MAP_ANONYMOUS) == 0) {
                 int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
                 if (host_fd >= 0) {
                     struct stat st;

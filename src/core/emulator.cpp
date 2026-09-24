@@ -1746,7 +1746,9 @@ void Emulator::wire_thunk_audio_runner_() {
                          mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
                      return cpu;
                  });
-    // Start after installing the runner and TLS-aware guest CPU factory.
+    // Probe after installing the runner and TLS-aware guest CPU factory.
+    // start_pump() waits until a callback stream is open, so guests that do
+    // not use callback audio keep the single-vCPU JIT path.
     athunk->start_pump();
 }
 

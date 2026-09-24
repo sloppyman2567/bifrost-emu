@@ -25,6 +25,7 @@
 #
 # Usage:
 #   ./scripts/setup-rootfs.sh [rootfs-dir]
+#   AARCH64_SYSROOT=/usr/aarch64-linux-gnu ./scripts/setup-rootfs.sh
 #
 # If no argument is given, defaults to ./rootfs (relative to the
 # project root). The script is idempotent: re-running it refreshes
@@ -39,12 +40,27 @@ cd "$PROJECT_ROOT"
 ROOTFS="${1:-$PROJECT_ROOT/rootfs}"
 TOOLCHAIN_GLIBC="tools/aarch64-linux-gnu-cross"
 TOOLCHAIN_MUSL="tools/aarch64-linux-musl-cross"
+SYSROOT="${AARCH64_SYSROOT:-}"
 
 echo "Setting up rootfs at: $ROOTFS"
 mkdir -p "$ROOTFS"/{lib,lib64,usr/lib,usr/lib64,usr/bin,usr/sbin,etc,bin,sbin,tmp,proc,dev,sys,var/run,var/log,var/tmp,root,home,run,dev/pts,dev/shm}
 
 # ── Copy glibc libraries ──────────────────────────────────────────────
-if [ -d "$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/lib64" ]; then
+# A distro-provided AArch64 sysroot is useful in CI and offline builds.
+# Copy its architecture-specific runtime libraries into the guest rootfs.
+if [ -n "$SYSROOT" ]; then
+	if [ ! -f "$SYSROOT/lib/ld-linux-aarch64.so.1" ]; then
+		echo "Error: AARCH64_SYSROOT has no lib/ld-linux-aarch64.so.1: $SYSROOT" >&2
+		exit 1
+	fi
+	echo "Copying glibc runtime from AARCH64_SYSROOT=$SYSROOT ..."
+	cp -a "$SYSROOT/lib/." "$ROOTFS/lib/"
+	if [ -d "$SYSROOT/usr/lib" ]; then
+		cp -a "$SYSROOT/usr/lib/." "$ROOTFS/usr/lib/"
+	fi
+	mkdir -p "$ROOTFS/lib64"
+	ln -sf ../lib/ld-linux-aarch64.so.1 "$ROOTFS/lib64/ld-linux-aarch64.so.1"
+elif [ -d "$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/lib64" ]; then
     echo "Copying glibc libraries from $TOOLCHAIN_GLIBC ..."
     # Core runtime libs (libc, libm, libdl, libpthread, librt, libresolv,
     # libcrypt, libutil, libBrokenLocale, libanl, libnsl)

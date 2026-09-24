@@ -730,6 +730,25 @@ void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
 
 } // namespace
 
+namespace {
+bool proxy_symbol_needs_sdl(const std::string& sym_name) {
+    static const char* kNoSdlSyms[] = {
+        "wl_display_connect", "wl_display_disconnect", "wl_display_get_fd",
+        "wl_display_flush", "wl_display_dispatch",
+        "wl_display_dispatch_pending", "wl_display_roundtrip",
+        "wl_display_read_events", "wl_display_prepare_read",
+        "wl_display_cancel_read", "wl_proxy_destroy",
+        "wl_display_get_registry", "wl_proxy_get_class",
+        "wl_proxy_marshal", "wl_proxy_marshal_constructor",
+        "wl_proxy_marshal_constructor_versioned", "wl_proxy_add_listener",
+    };
+    for (const char* sym : kNoSdlSyms) {
+        if (sym_name == sym) return false;
+    }
+    return true;
+}
+} // namespace
+
 int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
@@ -754,6 +773,12 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // back through guest memory — marking it as a pointer arg bounces it
     // and crashes. The host library is only a fallback when no SDL proxy
     // can be initialized (headless host).
+    if ((entry.flags & THUNK_PROXY) && !proxy_symbol_needs_sdl(entry.name)) {
+        // Wayland bridge symbols do not need an SDL window. In particular,
+        // don't create an extra SDL window before wl_display_connect; the
+        // proxy forwards these calls to the host compositor directly.
+        return proxy_dispatch_(cpu, entry.name);
+    }
     if (entry.flags & THUNK_PROXY) {
         // Serialize lazy init under mu: two guest threads racing here both
         // saw !ready() and double-created the SDL window (leak + torn
@@ -3043,20 +3068,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
     // the host compositor and must not spawn a phantom SDL window that
     // is never pumped (compositor flags it not-responding, and clicks
     // into the wrong window do nothing).
-    static const char* kNoSdlSyms[] = {
-        "wl_display_connect", "wl_display_disconnect", "wl_display_get_fd",
-        "wl_display_flush", "wl_display_dispatch",
-        "wl_display_dispatch_pending", "wl_display_roundtrip",
-        "wl_display_read_events", "wl_display_prepare_read",
-        "wl_display_cancel_read", "wl_proxy_destroy",
-        "wl_display_get_registry", "wl_proxy_get_class",
-        "wl_proxy_marshal", "wl_proxy_marshal_constructor",
-        "wl_proxy_marshal_constructor_versioned", "wl_proxy_add_listener",
-    };
-    bool need_sdl = true;
-    for (const char* s : kNoSdlSyms) {
-        if (sym_name == s) { need_sdl = false; break; }
-    }
+    const bool need_sdl = proxy_symbol_needs_sdl(sym_name);
     if (need_sdl) {
         // Same mu-guarded lazy init as dispatch()'s THUNK_PROXY block —
         // proxy_dispatch_ runs on guest threads too and raced init the

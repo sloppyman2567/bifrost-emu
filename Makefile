@@ -35,15 +35,23 @@ INCDIR   := include
 CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR) -Isrc -MMD -MP
 LDFLAGS  ?= -pthread
 
-TARGET   := bifrost-emu
-LIB      := libbifrost.a
+BUILD_PROFILE ?= release
+USE_SDL2 ?= 1
+USE_THUNK_GL ?= 1
+BUILD_DIR ?= build/$(BUILD_PROFILE)-sdl$(USE_SDL2)-gl$(USE_THUNK_GL)
+OBJDIR   := $(BUILD_DIR)
+TARGET   ?= $(BUILD_DIR)/bifrost-emu
+LIB      := $(OBJDIR)/libbifrost.a
+CONFIG_STAMP := $(OBJDIR)/.build-config
+MUSL_CC ?= tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
+GLIBC_CC ?= tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc
+CROSS_CC ?= $(MUSL_CC)
 
 # Auto-discover all .cpp under src/, plus main.cpp at the root.
 # api/bifrost_capi.cpp is included in LIB_SOURCES so libbifrost.a exposes
 # the C API (bifrost.h).
 SRC_DIRS := src/core src/yggdrasil src/ir src/jit src/syscalls src/frontend src/frost_graphics src/interp src/audio
 SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
-OBJDIR   := build
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
 DEPS     := $(OBJECTS:.o=.d)   # auto-generated header dependency files
 
@@ -74,10 +82,6 @@ DEPS += $(OBJDIR)/test_capi_host.d $(OBJDIR)/test_nb_host.d
 
 HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
 
-# Default to SDL2/GL for standard builds; override with USE_SDL2=0 / USE_THUNK_GL=0
-USE_SDL2 ?= 1
-USE_THUNK_GL ?= 1
-
 ifeq ($(USE_SDL2),1)
     SDL2_CFLAGS ?= $(shell sdl2-config --cflags 2>/dev/null)
     SDL2_LIBS   ?= $(shell sdl2-config --libs   2>/dev/null)
@@ -96,9 +100,14 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check vkmarshal vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check vkmarshal vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb generated-check ci FORCE
 
 all: $(TARGET)
+ifeq ($(BUILD_PROFILE),release)
+ifeq ($(TARGET),$(BUILD_DIR)/bifrost-emu)
+	cp $(TARGET) bifrost-emu
+endif
+endif
 
 # Regenerate the opcode-decode tables (opgen_simd.hpp) from the specs.
 # Requires python3. The generated headers are committed, so a plain `make`
@@ -226,7 +235,20 @@ opgen-fpfixed-check:
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
 
-# Pattern rule: compile any .cpp under src/ or main.cpp to .o in build/
+# If flags change without changing a source timestamp, rebuild objects.
+FORCE:
+
+$(CONFIG_STAMP): FORCE
+	@mkdir -p $(OBJDIR)
+	@tmp="$@.tmp"; { \
+	  printf '%s\n' 'CXX=$(CXX)' 'CXXFLAGS=$(CXXFLAGS)' 'LDFLAGS=$(LDFLAGS)' \
+	    'USE_SDL2=$(USE_SDL2)' 'USE_THUNK_GL=$(USE_THUNK_GL)' 'BUILD_PROFILE=$(BUILD_PROFILE)'; \
+	} > "$$tmp"; \
+	if ! cmp -s "$$tmp" "$@"; then mv "$$tmp" "$@"; else rm -f "$$tmp"; fi
+
+$(OBJECTS) $(LIB_OBJECTS): $(CONFIG_STAMP)
+
+# Pattern rule: compile any .cpp under src/ or main.cpp to an object under BUILD_DIR.
 # Header dependencies are auto-tracked via -MMD -MP (see DEPS above).
 $(OBJDIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
@@ -235,36 +257,39 @@ $(OBJDIR)/%.o: %.cpp
 # Include auto-generated header dependencies (silently ignore if missing).
 -include $(DEPS)
 
-# Build the static library (libbifrost.a) for API consumers
+# Build a configuration-specific archive and refresh the conventional root
+# copy for existing API consumers.
 lib: $(LIB)
+	cp $(LIB) libbifrost.a
 
 $(LIB): $(LIB_OBJECTS)
 	ar rcs $@ $^
 	@echo "Built $@ (excludes main.cpp; link your own driver)"
 
-# Debug build with sanitizers (no -MMD to keep build/ clean for release)
-debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -I$(INCDIR) -Isrc
-debug: LDFLAGS = -pthread -fsanitize=address,undefined
-debug: $(OBJECTS)
-	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
+# Debug + ASan/UBSan build uses isolated objects and can coexist with release.
+debug:
+	$(MAKE) BUILD_PROFILE=debug BUILD_DIR=build/debug TARGET=build/debug/bifrost-emu-dbg \
+	  USE_SDL2=0 USE_THUNK_GL=0 \
+	  CXXFLAGS='-O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -MMD -MP -I$(INCDIR) -Isrc' \
+	  LDFLAGS='-pthread -fsanitize=address,undefined' all
 
 # ── Test runner ────────────────────────────────────────────────────────
 # `make check` runs the standalone test script (scripts/run_tests.sh),
 # which categorizes tests, colorizes output, and prints a summary table.
 # Supports filters: `make check ARGS="--toybox"` or `make check ARGS="--filter md5"`.
 # See `./scripts/run_tests.sh --help` for all options.
-.PHONY: check check-quick check-nojit check-fwd
+.PHONY: check check-quick check-nojit check-fwd verify
 check: $(TARGET)
-	./scripts/run_tests.sh $(ARGS)
+	./scripts/run_tests.sh --emu $(TARGET) $(ARGS)
 
 check-quick: $(TARGET)
-	./scripts/run_tests.sh --quick
+	./scripts/run_tests.sh --emu $(TARGET) --quick
 
 check-nojit: $(TARGET)
-	./scripts/run_tests.sh --no-jit --quick
+	./scripts/run_tests.sh --emu $(TARGET) --no-jit --quick
 
 check-fwd: $(TARGET)
-	./scripts/run_tests.sh --fwd --quick
+	./scripts/run_tests.sh --emu $(TARGET) --fwd --quick
 
 # Run all test programs.
 #
@@ -295,35 +320,42 @@ test: $(TARGET)
 	done
 	@echo "--- Done. ---"
 
-# Run JIT tests under BIFROST_JIT_VERIFY=1 — catches JIT/interpreter
-# divergences by running each block through both paths and comparing
-# CPU state. Slow (10-50x), but catches codegen bugs that produce
-# wrong results without crashing. Use this after any JIT codegen change.
-#
-# The recipe uses ${PIPESTATUS[0]} (a bash array) to capture the
-# emulator's exit code before the grep pipe consumes it. /bin/sh on
-# Debian is dash, which doesn't support PIPESTATUS, so we force SHELL
-# to /bin/bash for this target (and any other that needs bashisms).
+# Run JIT tests under BIFROST_JIT_VERIFY=1 and fail on missing fixtures,
+# non-zero emulator exit, or a reported divergence. Capture output in a
+# temporary file so filtering cannot mask the emulator's exit status.
 SHELL := /bin/bash
 verify: $(TARGET)
 	@echo "--- JIT verify mode (divergence check) ---"
-	@for f in ctest/jit_*.elf; do \
-	echo "--- $$f (verify) ---"; \
-	BIFROST_JIT_VERIFY=1 timeout 30 ./$(TARGET) $$f </dev/null 2>&1 | \
-	grep -E 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' | head -3; \
-	echo "  (rc=$${PIPESTATUS[0]})"; \
-	done
-	@echo "Done. Any DIVERGENCE lines above indicate JIT codegen bugs."
+	@set -u; failed=0; count=0; \
+	for f in ctest/jit_*.elf; do \
+	  [ -f "$$f" ] || continue; count=$$((count + 1)); \
+	  log=$$(mktemp); \
+	  echo "--- $$f (verify) ---"; \
+	  if BIFROST_JIT_VERIFY=1 timeout 30 "$(TARGET)" "$$f" </dev/null >"$$log" 2>&1; then rc=0; else rc=$$?; fi; \
+	  if grep -Eq 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' "$$log"; then \
+	    grep -E 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' "$$log" | head -3; \
+	    echo "FAIL: divergence in $$f"; failed=1; \
+	  fi; \
+	  if [ $$rc -ne 0 ]; then echo "FAIL: $$f exited with rc=$$rc"; tail -20 "$$log"; failed=1; fi; \
+	  rm -f "$$log"; \
+	done; \
+	if [ $$count -eq 0 ]; then echo "FAIL: no ctest/jit_*.elf fixtures found; run make setup-tests"; exit 1; fi; \
+	if [ $$failed -ne 0 ]; then exit 1; fi; \
+	echo "JIT verify passed for $$count fixtures."
 
 
 # Cross-compile a test program with the bundled musl toolchain.
 # Usage: make cross SRC=ctest_real/hello.c OUT=ctest_real/hello.elf
-CROSS_CC := tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
 cross:
 	@if [ -z "$(SRC)" ] || [ -z "$(OUT)" ]; then \
 	echo "Usage: make cross SRC=<file.c> OUT=<file.elf>"; exit 1; \
 	fi
-	@$(CROSS_CC) -static -O2 $(CROSS_EXTRA) -o $(OUT) $(SRC)
+	@extra="$(CROSS_EXTRA)"; \
+	case "$(SRC)" in \
+		ctest/test_lse_inline.c) extra="$$extra -march=armv8.1-a+lse";; \
+		ctest_real/test_sha256_full.c) extra="$$extra -march=armv8-a+crypto";; \
+	esac; \
+	$(CROSS_CC) -static -O2 $$extra -o $(OUT) $(SRC)
 	@echo "Built $(OUT)"
 
 # Install to /usr/local/bin (override with `make install DESTDIR=/prefix PREFIX=/opt`)
@@ -333,16 +365,16 @@ install: $(TARGET)
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/$(TARGET)
+	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET) $(TARGET)-dbg *.o $(LIB)
+	rm -rf build bifrost-emu bifrost-emu-dbg *.o *.d libbifrost.a
 
 # ── One-click setup ───────────────────────────────────────────────────
 # `make setup` runs the bundled bootstrap script: builds the emulator,
 # fetches the musl toolchain (if missing), cross-compiles every test,
 # sets up the rootfs, and runs the test suite. Idempotent.
-setup: $(TARGET)
+setup: all
 	./scripts/setup.sh
 
 # ── Test toolchains ────────────────────────────────────────────────────
@@ -373,15 +405,17 @@ GLIBC_DYN_PAIRS := ctest_real/hello_dyn_glibc.elf:ctest_real/hello_dyn.c
 # the rootfs. Useful for CI jobs that want to build tests once and run
 # them later. A fresh checkout then yields the complete test set.
 setup-tests:
-	@if [ ! -x tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc ]; then \
+	@if ! command -v "$(MUSL_CC)" >/dev/null 2>&1 && [ ! -x "$(MUSL_CC)" ]; then \
+	  if [ "$(MUSL_CC)" != "tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc" ]; then echo "error: MUSL_CC not found: $(MUSL_CC)" >&2; exit 1; fi; \
 		echo "Fetching musl toolchain ..."; \
 		./tools/fetch-musl-toolchain.sh; \
 	fi
-	@if [ ! -x tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc ]; then \
+	@if ! command -v "$(GLIBC_CC)" >/dev/null 2>&1 && [ ! -x "$(GLIBC_CC)" ]; then \
+	  if [ "$(GLIBC_CC)" != "tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc" ]; then echo "error: GLIBC_CC not found: $(GLIBC_CC)" >&2; exit 1; fi; \
 		echo "Fetching glibc toolchain ..."; \
 		./tools/fetch-glibc-toolchain.sh; \
 	fi
-	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
+	@CC="$(MUSL_CC)"; \
 	count=0; \
 	for src in ctest/*.c ctest_real/*.c; do \
 		[ -f "$$src" ] || continue; \
@@ -390,18 +424,23 @@ setup-tests:
 		elf="$${src%.c}.elf"; \
 		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
 		extra=""; \
-		case "$$src" in ctest_real/test_*vulkan*.c) extra="-Ictest_real/vulkan_headers/include";; esac; \
+		case "$$src" in \
+			ctest/test_lse_inline.c) extra="-march=armv8.1-a+lse";; \
+			ctest_real/test_sha256_full.c) extra="-march=armv8-a+crypto";; \
+			ctest_real/test_*vulkan*.c) extra="-Ictest_real/vulkan_headers/include";; \
+		esac; \
 		if $$CC -static -O2 $$extra -o "$$elf" "$$src" 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \
 	done; \
 	echo "Cross-compiled $$count musl-static test binaries."
-	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
+	@python3 scripts/build_asm_tests.py "$(MUSL_CC)"
+	@CC="$(MUSL_CC)"; \
 	if [ ! -f ctest/nb_testlib.so ] || [ "ctest/nb_testlib.so" -ot "ctest/nb_lib.c" ]; then \
 		$$CC -O2 -shared -fPIC -nostdlib ctest/nb_lib.c -o ctest/nb_testlib.so && \
 		echo "Built ctest/nb_testlib.so (native bridge test lib)."; \
 	fi
-	@CC=tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc; \
+	@CC="$(GLIBC_CC)"; \
 	count=0; \
 	for src in $(GLIBC_DYN_SRCS); do \
 		elf="$${src%.c}.elf"; \
@@ -411,7 +450,7 @@ setup-tests:
 		fi; \
 	done; \
 	echo "Cross-compiled $$count glibc-dynamic test binaries."
-	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
+	@CC="$(MUSL_CC)"; \
 	count=0; \
 	for pair in $(MUSL_DYN_PAIRS); do \
 		elf="$${pair%%:*}"; src="$${pair#*:}"; \
@@ -421,7 +460,7 @@ setup-tests:
 		fi; \
 	done; \
 	echo "Cross-compiled $$count musl-dynamic test binaries."
-	@CC=tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc; \
+	@CC="$(GLIBC_CC)"; \
 	count=0; \
 	for pair in $(GLIBC_DYN_PAIRS); do \
 		elf="$${pair%%:*}"; src="$${pair#*:}"; \
@@ -432,23 +471,43 @@ setup-tests:
 	done; \
 	echo "Cross-compiled $$count glibc-dynamic variant binaries."
 
-# `make check-all` is the "everything" target: build, fetch toolchain,
-# cross-compile tests, set up rootfs, and run the full test suite.
-# This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check wlgen-check vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check $(TARGET) test-capi test-nb
-	@./scripts/setup-rootfs.sh 2>/dev/null || true
-	@./scripts/run_tests.sh
+# Generated source checks share one entry point for CI and local reviews.
+generated-check: opgen-check opgen-thunk-check wlgen-check vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check
+
+# Local guest-correctness gate: generator drift, host APIs, JIT/interpreter
+# regressions, sandbox coverage, and a focused dynamic-glibc run.
+ci: setup-tests generated-check $(TARGET)
+	$(MAKE) test-capi
+	$(MAKE) test-nb
+	$(MAKE) verify
+	./scripts/run_tests.sh --emu $(TARGET) --unit --quick --strict
+	./scripts/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
+	./scripts/run_tests.sh --emu $(TARGET) --integration --strict --filter '^test_sandbox$$'
+	@./scripts/setup-rootfs.sh
+	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
+	./scripts/run_tests.sh --emu $(TARGET) --dynamic --strict --filter '^(hello_dyn_glibc|test_dyn_(write|hello|malloc|printf|pthread_min|threads|pthread_stress|pthread_8thread)|test_dladdr_glibc)$$'
+
+# Full validation provisions the rootfs and requires every selected fixture
+# except the optional external iperf3/coreutils bundle, which is reported as
+# a visible skip when it is not installed. Setup failures are fatal.
+check-all: setup-tests generated-check $(TARGET)
+	$(MAKE) test-capi
+	$(MAKE) test-nb
+	@./scripts/setup-rootfs.sh
+	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
+	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
+	@./scripts/run_tests.sh --emu $(TARGET) --strict --allow-missing '^rw_(iperf3_version|coreutils_)'
 
 # Host-side C API test: test_capi.c links libbifrost.a and runs on the
 # HOST (it cannot be cross-compiled as a guest ELF). Builds and runs it.
 # Note: the guest hello.elf path is relative to the repo root.
 test-capi: lib $(TARGET)
 	@echo "=== Building host C API test ==="
-	@mkdir -p build
-	@$(CXX) -O1 -g -MMD -MP -MF build/test_capi_host.d -Iapi -x c -c ctest/test_capi.c -o build/test_capi_host.o
-	@$(CXX) build/test_capi_host.o libbifrost.a -o build/test_capi_host $(LDFLAGS)
+	@mkdir -p $(OBJDIR)
+	@$(CXX) -O1 -g -MMD -MP -MF $(OBJDIR)/test_capi_host.d -Iapi -x c -c ctest/test_capi.c -o $(OBJDIR)/test_capi_host.o
+	@$(CXX) $(OBJDIR)/test_capi_host.o $(LIB) -o $(OBJDIR)/test_capi_host $(LDFLAGS)
 	@echo "=== Running host C API test ==="
-	@./build/test_capi_host
+	@./$(OBJDIR)/test_capi_host
 
 # Cross-compile the guest AArch64 shared object used by the native bridge
 # host test (a -nostdlib -shared lib with JNI-shaped functions; must be
@@ -465,8 +524,8 @@ $(NB_TESTLIB): ctest/nb_lib.c
 # trampoline through the borrow-CPU path.
 test-nb: lib $(TARGET) $(NB_TESTLIB)
 	@echo "=== Building host native bridge test ==="
-	@mkdir -p build
-	@$(CXX) -O1 -g -MMD -MP -MF build/test_nb_host.d -Iapi -x c -c ctest/test_nb.c -o build/test_nb_host.o
-	@$(CXX) build/test_nb_host.o libbifrost.a -o build/test_nb_host $(LDFLAGS)
+	@mkdir -p $(OBJDIR)
+	@$(CXX) -O1 -g -MMD -MP -MF $(OBJDIR)/test_nb_host.d -Iapi -x c -c ctest/test_nb.c -o $(OBJDIR)/test_nb_host.o
+	@$(CXX) $(OBJDIR)/test_nb_host.o $(LIB) -o $(OBJDIR)/test_nb_host $(LDFLAGS)
 	@echo "=== Running host native bridge test ==="
-	@./build/test_nb_host
+	@./$(OBJDIR)/test_nb_host

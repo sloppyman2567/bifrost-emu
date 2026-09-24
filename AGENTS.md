@@ -1,5 +1,12 @@
 # bifrost-emu
 
+## Required Reading
+
+- **JIT work MUST start by reading [`docs/JIT.md`](docs/JIT.md).** This
+  applies to implementation, debugging, review, and refactoring in `src/jit/`
+  or to JIT-facing decoder and IR changes in `src/frontend/decoder.cpp`,
+  `include/decoder.hpp`, `src/ir/`, or `include/ir/`.
+
 ## Purpose
 
 AArch64 Linux user-mode emulator for x86_64 hosts: JIT + interpreter,

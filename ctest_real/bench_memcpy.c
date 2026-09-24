@@ -24,8 +24,15 @@ int main(void) {
     double mib = (4.0 * BUF_SIZE) / (1024 * 1024);
     printf("memcpy: %.0f MiB in %.3fs = %.0f MiB/s\n", mib, secs, mib / secs);
 
-    // Prevent optimizer from removing the copy
-    if (dst[0] != (char)0xAB) printf("copy error\n");
+    // Validate the complete destination outside the timed interval.
+    for (size_t i = 0; i < BUF_SIZE; i++) {
+        if (dst[i] != src[i]) {
+            fprintf(stderr, "ERROR: memcpy mismatch at byte %zu\n", i);
+            free(src); free(dst);
+            return 1;
+        }
+    }
+    puts("VALID: memcpy contents");
 
     free(src); free(dst);
     return 0;

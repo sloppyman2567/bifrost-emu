@@ -264,6 +264,29 @@ void AudioThunk::start_pump() {
     std::lock_guard<std::mutex> start_lock(impl_->pump_mu);
     if (!impl_->runner || !impl_->cpu_factory || !impl_->engine ||
         impl_->pump_enabled) return;
+    // Do not create a second guest CPU just because the thunk was wired at
+    // process startup. Creating that CPU switches the shared JIT into
+    // multithread-safe mode, which disables runtime block chaining and
+    // tier-2 compilation even for guests that never use audio. Start the
+    // worker only after a callback stream has actually been opened.
+    bool has_callback_stream = false;
+    for (const auto& [handle, stream] : impl_->sdl_devs_) {
+        (void)handle;
+        if (stream.cb_fn && stream.bounce && stream.cb_scheduled) {
+            has_callback_stream = true;
+            break;
+        }
+    }
+    if (!has_callback_stream) {
+        for (const auto& [handle, stream] : impl_->aa_streams_) {
+            (void)handle;
+            if (stream.cb_fn && stream.bounce && stream.cb_scheduled) {
+                has_callback_stream = true;
+                break;
+            }
+        }
+    }
+    if (!has_callback_stream) return;
     const char* mode = getenv("BIFROST_AUDIO_PUMP");
     if (mode && mode[0] == '0') return;  // diagnostic inline fallback
     try {
@@ -833,6 +856,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             wr64(I, obtained + 16, cb_fn);
             wr64(I, obtained + 24, cb_ud);
         }
+        const bool has_callback_stream = slot.cb_fn && slot.bounce &&
+                                         slot.cb_scheduled;
+        pmu.unlock();
+        if (has_callback_stream) start_pump();
         I.wake_pump();
         tr(is_dev ? (int64_t)h : 0);
         return is_dev ? (int64_t)h : 0;   // SDL_OpenAudio returns 0 on success
@@ -1579,6 +1606,9 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         s.engine_stream = I.engine
             ? I.engine->stream_open(s.fmt, s.rate, s.ch) : 0;
         if (s.engine_stream) I.engine->stream_pause(s.engine_stream, true);
+        const bool has_callback = s.cb_fn && s.bounce && s.cb_scheduled;
+        pmu.unlock();
+        if (has_callback) start_pump();
         I.wake_pump();
         tr(0); return 0;   // AAUDIO_OK
     }

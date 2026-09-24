@@ -8,8 +8,8 @@
 #   2. Builds the emulator binary (`make -j$(nproc)`).
 #   3. Optionally fetches the musl aarch64 cross-toolchain (only if the
 #      user wants to rebuild the bundled .elf test programs).
-#   4. Cross-compiles every .c test under ctest/ and ctest_real/ that
-#      ships with the source tree, so `make check` can run them.
+#   4. Cross-compiles C fixtures under ctest/ and ctest_real/, then builds
+#      the freestanding assembly fixtures under test/.
 #   5. Optionally sets up the rootfs for dynamic linking tests.
 #   6. Runs the test suite (`make check`) to confirm everything works.
 #
@@ -142,7 +142,13 @@ if [ "$FETCH_TOOLCHAIN" = "1" ]; then
                 continue
             fi
 
-            if "$CC" -static -O2 -o "$elf" "$src" 2>/dev/null; then
+            extra=()
+            case "$src" in
+                ctest/test_lse_inline.c) extra=(-march=armv8.1-a+lse) ;;
+                ctest_real/test_sha256_full.c) extra=(-march=armv8-a+crypto) ;;
+                ctest_real/test_*vulkan*.c) extra=(-Ictest_real/vulkan_headers/include) ;;
+            esac
+            if "$CC" -static -O2 "${extra[@]}" -o "$elf" "$src" 2>/dev/null; then
                 CROSS_COUNT=$((CROSS_COUNT + 1))
             else
                 # Some test files require special flags (e.g. test_lse_inline.c
@@ -151,6 +157,8 @@ if [ "$FETCH_TOOLCHAIN" = "1" ]; then
                 :
             fi
         done
+
+        python3 scripts/build_asm_tests.py "$CC"
 
         log_ok "Cross-compiled $CROSS_COUNT test binaries ($SKIP_COUNT already up-to-date)"
     fi

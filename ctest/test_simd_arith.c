@@ -1,10 +1,10 @@
-// test_simd_arith.c — Test native SIMD arithmetic (ADD/SUB/MUL).
+// test_simd_arith.c — Test native SIMD arithmetic (ADD/SUB/MUL/ABD/ABDL).
 //
-// Uses NEON intrinsics to generate vector add/sub/mul instructions
-// that the JIT should now compile natively via SIMD_ARITH.
+// Uses NEON intrinsics to exercise native JIT vector arithmetic paths.
 #include <stdio.h>
 #include <arm_neon.h>
 #include <string.h>
+#include <stdint.h>
 
 int main(void) {
     printf("Test 1: 8-bit lane add (8 elements)\n");
@@ -195,6 +195,250 @@ int main(void) {
             return 1;
         }
     }
+    printf("PASS\n");
+
+    /* Test 10: absolute differences whose mathematical result exceeds the
+     * signed source-lane range. The JIT must choose max/min before subtracting;
+     * subtract-then-abs wraps and returns 1 for these endpoint pairs. Inputs
+     * are volatile-loaded so the compiler cannot fold the NEON operations. */
+    printf("Test 10: ABD/ABDL 16/32-bit wraparound endpoints\n");
+    {
+        static volatile int16_t sabd16_a_mem[4] = {-32768, 32767, -100, 100};
+        static volatile int16_t sabd16_b_mem[4] = { 32767,-32768,  100,-100};
+        int16_t sabd16_a[4], sabd16_b[4];
+        for (int i = 0; i < 4; i++) {
+            sabd16_a[i] = sabd16_a_mem[i];
+            sabd16_b[i] = sabd16_b_mem[i];
+        }
+        uint16_t got_sabd16[4];
+        const uint16_t exp_sabd16[4] = {65535, 65535, 200, 200};
+        vst1_u16(got_sabd16, vreinterpret_u16_s16(
+            vabd_s16(vld1_s16(sabd16_a), vld1_s16(sabd16_b))));
+        if (memcmp(got_sabd16, exp_sabd16, sizeof(exp_sabd16)) != 0) {
+            printf("FAIL: SABD.S got %u %u %u %u\n", got_sabd16[0],
+                   got_sabd16[1], got_sabd16[2], got_sabd16[3]);
+            return 1;
+        }
+
+        static volatile uint16_t uabd16_a_mem[4] = {65535, 0, 50000, 100};
+        static volatile uint16_t uabd16_b_mem[4] = {    0,65535,     1, 200};
+        uint16_t uabd16_a[4], uabd16_b[4], got_uabd16[4];
+        for (int i = 0; i < 4; i++) {
+            uabd16_a[i] = uabd16_a_mem[i];
+            uabd16_b[i] = uabd16_b_mem[i];
+        }
+        const uint16_t exp_uabd16[4] = {65535, 65535, 49999, 100};
+        vst1_u16(got_uabd16, vabd_u16(vld1_u16(uabd16_a), vld1_u16(uabd16_b)));
+        if (memcmp(got_uabd16, exp_uabd16, sizeof(exp_uabd16)) != 0) {
+            printf("FAIL: UABD.S got %u %u %u %u\n", got_uabd16[0],
+                   got_uabd16[1], got_uabd16[2], got_uabd16[3]);
+            return 1;
+        }
+
+        static volatile int32_t sabd32_a_mem[2] = {-2147483647 - 1, 2147483647};
+        static volatile int32_t sabd32_b_mem[2] = { 2147483647,-2147483647 - 1};
+        int32_t sabd32_a[2], sabd32_b[2];
+        for (int i = 0; i < 2; i++) {
+            sabd32_a[i] = sabd32_a_mem[i];
+            sabd32_b[i] = sabd32_b_mem[i];
+        }
+        uint32_t got_sabd32[2];
+        const uint32_t exp_sabd32[2] = {UINT32_MAX, UINT32_MAX};
+        vst1_u32(got_sabd32, vreinterpret_u32_s32(
+            vabd_s32(vld1_s32(sabd32_a), vld1_s32(sabd32_b))));
+        if (memcmp(got_sabd32, exp_sabd32, sizeof(exp_sabd32)) != 0) {
+            printf("FAIL: SABD.D got %u %u\n", got_sabd32[0], got_sabd32[1]);
+            return 1;
+        }
+
+        static volatile uint32_t uabd32_a_mem[2] = {UINT32_MAX, 0};
+        static volatile uint32_t uabd32_b_mem[2] = {0, UINT32_MAX};
+        uint32_t uabd32_a[2], uabd32_b[2], got_uabd32[2];
+        for (int i = 0; i < 2; i++) {
+            uabd32_a[i] = uabd32_a_mem[i];
+            uabd32_b[i] = uabd32_b_mem[i];
+        }
+        const uint32_t exp_uabd32[2] = {UINT32_MAX, UINT32_MAX};
+        vst1_u32(got_uabd32, vabd_u32(vld1_u32(uabd32_a), vld1_u32(uabd32_b)));
+        if (memcmp(got_uabd32, exp_uabd32, sizeof(exp_uabd32)) != 0) {
+            printf("FAIL: UABD.D got %u %u\n", got_uabd32[0], got_uabd32[1]);
+            return 1;
+        }
+
+        static volatile int16_t sabdl16_a_mem[4] = {-32768, 32767, -100, 100};
+        static volatile int16_t sabdl16_b_mem[4] = { 32767,-32768,  100,-100};
+        int16_t sabdl16_a[4], sabdl16_b[4];
+        for (int i = 0; i < 4; i++) {
+            sabdl16_a[i] = sabdl16_a_mem[i];
+            sabdl16_b[i] = sabdl16_b_mem[i];
+        }
+        int32_t got_sabdl16[4];
+        const int32_t exp_sabdl16[4] = {65535, 65535, 200, 200};
+        vst1q_s32(got_sabdl16, vabdl_s16(vld1_s16(sabdl16_a), vld1_s16(sabdl16_b)));
+        if (memcmp(got_sabdl16, exp_sabdl16, sizeof(exp_sabdl16)) != 0) {
+            printf("FAIL: SABDL.H got %d %d %d %d\n", got_sabdl16[0],
+                   got_sabdl16[1], got_sabdl16[2], got_sabdl16[3]);
+            return 1;
+        }
+
+        static volatile uint16_t uabdl16_a_mem[4] = {65535, 0, 50000, 100};
+        static volatile uint16_t uabdl16_b_mem[4] = {    0,65535,     1, 200};
+        uint16_t uabdl16_a[4], uabdl16_b[4];
+        for (int i = 0; i < 4; i++) {
+            uabdl16_a[i] = uabdl16_a_mem[i];
+            uabdl16_b[i] = uabdl16_b_mem[i];
+        }
+        uint32_t got_uabdl16[4];
+        const uint32_t exp_uabdl16[4] = {65535, 65535, 49999, 100};
+        vst1q_u32(got_uabdl16, vabdl_u16(vld1_u16(uabdl16_a), vld1_u16(uabdl16_b)));
+        if (memcmp(got_uabdl16, exp_uabdl16, sizeof(exp_uabdl16)) != 0) {
+            printf("FAIL: UABDL.H got %u %u %u %u\n", got_uabdl16[0],
+                   got_uabdl16[1], got_uabdl16[2], got_uabdl16[3]);
+            return 1;
+        }
+
+        static volatile int32_t sabdl32_a_mem[2] = {-2147483647 - 1, 2147483647};
+        static volatile int32_t sabdl32_b_mem[2] = { 2147483647,-2147483647 - 1};
+        int32_t sabdl32_a[2], sabdl32_b[2];
+        for (int i = 0; i < 2; i++) {
+            sabdl32_a[i] = sabdl32_a_mem[i];
+            sabdl32_b[i] = sabdl32_b_mem[i];
+        }
+        int64_t got_sabdl32[2];
+        const int64_t exp_sabdl32[2] = {4294967295LL, 4294967295LL};
+        vst1q_s64(got_sabdl32, vabdl_s32(vld1_s32(sabdl32_a), vld1_s32(sabdl32_b)));
+        if (memcmp(got_sabdl32, exp_sabdl32, sizeof(exp_sabdl32)) != 0) {
+            printf("FAIL: SABDL.S got %lld %lld\n", (long long)got_sabdl32[0],
+                   (long long)got_sabdl32[1]);
+            return 1;
+        }
+
+        static volatile uint32_t uabdl32_a_mem[2] = {UINT32_MAX, 0};
+        static volatile uint32_t uabdl32_b_mem[2] = {0, UINT32_MAX};
+        uint32_t uabdl32_a[2], uabdl32_b[2];
+        for (int i = 0; i < 2; i++) {
+            uabdl32_a[i] = uabdl32_a_mem[i];
+            uabdl32_b[i] = uabdl32_b_mem[i];
+        }
+        uint64_t got_uabdl32[2];
+        const uint64_t exp_uabdl32[2] = {UINT32_MAX, UINT32_MAX};
+        vst1q_u64(got_uabdl32, vabdl_u32(vld1_u32(uabdl32_a), vld1_u32(uabdl32_b)));
+        if (memcmp(got_uabdl32, exp_uabdl32, sizeof(exp_uabdl32)) != 0) {
+            printf("FAIL: UABDL.S got %llu %llu\n",
+                   (unsigned long long)got_uabdl32[0],
+                   (unsigned long long)got_uabdl32[1]);
+            return 1;
+        }
+    }
+    printf("PASS\n");
+
+    /* Test 11: ABDL2 high-half selection and SABAL/UABAL accumulation,
+     * including the combined Q=1 accumulating forms. The low and high source
+     * halves deliberately have different answers so using the wrong half is
+     * visible. */
+    printf("Test 11: ABDL2/ABAL high-half and accumulation\n");
+#define CHECK_ABDL(label, got, expected) do { \
+        if (memcmp((got), (expected), sizeof(expected)) != 0) { \
+            printf("FAIL: %s\n", (label)); \
+            return 1; \
+        } \
+    } while (0)
+    {
+        static volatile int16_t s16a_mem[8] = {
+            -32768, 32767, -100, 100, -30000, 30000, -50, 50};
+        static volatile int16_t s16b_mem[8] = {
+             32767,-32768,  100,-100,  30000,-30000,  50,-50};
+        int16_t s16a[8], s16b[8];
+        for (int i = 0; i < 8; i++) {
+            s16a[i] = s16a_mem[i]; s16b[i] = s16b_mem[i];
+        }
+        int16x8_t vs16a = vld1q_s16(s16a), vs16b = vld1q_s16(s16b);
+        const int32_t exp_sabdl2_16[4] = {60000, 60000, 100, 100};
+        int32_t got_sabdl2_16[4];
+        vst1q_s32(got_sabdl2_16, vabdl_high_s16(vs16a, vs16b));
+        CHECK_ABDL("SABDL2.H", got_sabdl2_16, exp_sabdl2_16);
+        const int32_t exp_sabal_16[4] = {65536, 65537, 203, 204};
+        const int32_t exp_sabal2_16[4] = {60010, 60020, 130, 140};
+        int32_t got_sabal_16[4], got_sabal2_16[4];
+        int32x4_t acc_s16 = {1, 2, 3, 4};
+        vst1q_s32(got_sabal_16,
+                  vabal_s16(acc_s16, vget_low_s16(vs16a), vget_low_s16(vs16b)));
+        CHECK_ABDL("SABAL.H", got_sabal_16, exp_sabal_16);
+        acc_s16 = (int32x4_t){10, 20, 30, 40};
+        vst1q_s32(got_sabal2_16, vabal_high_s16(acc_s16, vs16a, vs16b));
+        CHECK_ABDL("SABAL2.H", got_sabal2_16, exp_sabal2_16);
+
+        static volatile uint16_t u16a_mem[8] = {
+            65535, 0, 50000, 100, 60000, 1, 45000, 600};
+        static volatile uint16_t u16b_mem[8] = {
+                0,65535,     1, 200,     0,60000,  1000, 600};
+        uint16_t u16a[8], u16b[8];
+        for (int i = 0; i < 8; i++) {
+            u16a[i] = u16a_mem[i]; u16b[i] = u16b_mem[i];
+        }
+        uint16x8_t vu16a = vld1q_u16(u16a), vu16b = vld1q_u16(u16b);
+        const uint32_t exp_uabdl2_16[4] = {60000, 59999, 44000, 0};
+        uint32_t got_uabdl2_16[4];
+        vst1q_u32(got_uabdl2_16, vabdl_high_u16(vu16a, vu16b));
+        CHECK_ABDL("UABDL2.H", got_uabdl2_16, exp_uabdl2_16);
+        const uint32_t exp_uabal_16[4] = {65536, 65537, 50002, 104};
+        const uint32_t exp_uabal2_16[4] = {60010, 60019, 44030, 40};
+        uint32_t got_uabal_16[4], got_uabal2_16[4];
+        uint32x4_t acc_u16 = {1, 2, 3, 4};
+        vst1q_u32(got_uabal_16,
+                  vabal_u16(acc_u16, vget_low_u16(vu16a), vget_low_u16(vu16b)));
+        CHECK_ABDL("UABAL.H", got_uabal_16, exp_uabal_16);
+        acc_u16 = (uint32x4_t){10, 20, 30, 40};
+        vst1q_u32(got_uabal2_16, vabal_high_u16(acc_u16, vu16a, vu16b));
+        CHECK_ABDL("UABAL2.H", got_uabal2_16, exp_uabal2_16);
+
+        static volatile int32_t s32a_mem[4] = {
+            -2147483647 - 1, 2147483647, -1, 100};
+        static volatile int32_t s32b_mem[4] = {
+             2147483647,-2147483647 - 1,  1,-200};
+        int32_t s32a[4], s32b[4];
+        for (int i = 0; i < 4; i++) {
+            s32a[i] = s32a_mem[i]; s32b[i] = s32b_mem[i];
+        }
+        int32x4_t vs32a = vld1q_s32(s32a), vs32b = vld1q_s32(s32b);
+        const int64_t exp_sabdl2_32[2] = {2, 300};
+        int64_t got_sabdl2_32[2];
+        vst1q_s64(got_sabdl2_32, vabdl_high_s32(vs32a, vs32b));
+        CHECK_ABDL("SABDL2.S", got_sabdl2_32, exp_sabdl2_32);
+        const int64_t exp_sabal_32[2] = {4294967296LL, 4294967297LL};
+        const int64_t exp_sabal2_32[2] = {12, 320};
+        int64_t got_sabal_32[2], got_sabal2_32[2];
+        int64x2_t acc_s32 = {1, 2};
+        vst1q_s64(got_sabal_32,
+                  vabal_s32(acc_s32, vget_low_s32(vs32a), vget_low_s32(vs32b)));
+        CHECK_ABDL("SABAL.S", got_sabal_32, exp_sabal_32);
+        acc_s32 = (int64x2_t){10, 20};
+        vst1q_s64(got_sabal2_32, vabal_high_s32(acc_s32, vs32a, vs32b));
+        CHECK_ABDL("SABAL2.S", got_sabal2_32, exp_sabal2_32);
+
+        static volatile uint32_t u32a_mem[4] = {UINT32_MAX, 0, 100, UINT32_MAX};
+        static volatile uint32_t u32b_mem[4] = {0, UINT32_MAX, 200, 0};
+        uint32_t u32a[4], u32b[4];
+        for (int i = 0; i < 4; i++) {
+            u32a[i] = u32a_mem[i]; u32b[i] = u32b_mem[i];
+        }
+        uint32x4_t vu32a = vld1q_u32(u32a), vu32b = vld1q_u32(u32b);
+        const uint64_t exp_uabdl2_32[2] = {100, UINT32_MAX};
+        uint64_t got_uabdl2_32[2];
+        vst1q_u64(got_uabdl2_32, vabdl_high_u32(vu32a, vu32b));
+        CHECK_ABDL("UABDL2.S", got_uabdl2_32, exp_uabdl2_32);
+        const uint64_t exp_uabal_32[2] = {4294967296ULL, 4294967297ULL};
+        const uint64_t exp_uabal2_32[2] = {110, 4294967315ULL};
+        uint64_t got_uabal_32[2], got_uabal2_32[2];
+        uint64x2_t acc_u32 = {1, 2};
+        vst1q_u64(got_uabal_32,
+                  vabal_u32(acc_u32, vget_low_u32(vu32a), vget_low_u32(vu32b)));
+        CHECK_ABDL("UABAL.S", got_uabal_32, exp_uabal_32);
+        acc_u32 = (uint64x2_t){10, 20};
+        vst1q_u64(got_uabal2_32, vabal_high_u32(acc_u32, vu32a, vu32b));
+        CHECK_ABDL("UABAL2.S", got_uabal2_32, exp_uabal2_32);
+    }
+#undef CHECK_ABDL
     printf("PASS\n");
 
     printf("\ntest_simd_arith: ALL PASS\n");

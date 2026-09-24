@@ -1437,7 +1437,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             try {
                 mem_.write(a0, cwd.data(), need);
             } catch (...) { ret_err(EFAULT); return 0; }
-            ret_host(static_cast<uint64_t>(cwd.size()));
+            // The Linux getcwd syscall reports the buffer length including
+            // the terminating NUL written above.
+            ret_host(static_cast<uint64_t>(need));
             return 0;
         }
         case 276: { // renameat2(olddirfd, oldpath, newdirfd, newpath, flags)

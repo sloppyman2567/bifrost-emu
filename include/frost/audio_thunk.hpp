@@ -79,8 +79,11 @@ public:
     // inline fallback path.
     void wire(Audio* engine, AudioCbRunner runner,
               AudioCbCpuFactory cpu_factory = {});
-    // Start the callback worker. It runs callbacks on a separate CPU with
-    // its own guest TLS block; inline dispatch callbacks remain the fallback.
+    // Start the callback worker once an SDL/AAudio callback stream exists.
+    // Wiring may call this before any stream is open; that call is a no-op.
+    // The worker uses a separate CPU with its own guest TLS block, while
+    // inline dispatch callbacks remain the fallback when pump mode is off
+    // or worker creation fails.
     void start_pump();
     // Called in a FORKED CHILD (host ::fork()): the pump host thread
     // does not survive fork(), but the std::thread object does — leaving

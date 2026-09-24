@@ -724,7 +724,7 @@ private:
         int     instr_count = 0;      // number of ARM64 instructions in this block
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
-        int     call_interp_count = 0; // number of CALL_INTERP fallbacks in this block
+        int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
         // Tier-2 hot-head detection counter (ROADMAP #14, Phase 1). Counts
         // SLOW-PATH dispatches of this block (incremented under the shared
         // blocks_mutex_ in run_block; the fast paths never touch it). When it

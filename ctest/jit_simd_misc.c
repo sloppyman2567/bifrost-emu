@@ -536,6 +536,40 @@ static void test_ins_d(void) {
     CHECK(memcmp(out, exp, 16) == 0, "ins v0.d[1], v1.d[0]");
 }
 
+// Widening indexed multiplies use Q as the source-half selector. The JIT
+// must read the upper half for the `*2` forms (the JPEG IDCT uses SMULL2).
+static void test_smull2_h(void) {
+    int16_t src[8] = {-30000, 11, -22, 33, 4000, -5000, 6000, -7000};
+    int16_t coeff[8] = {3, -5, 7, -9, 11, -13, 17, -19};
+    int32_t out[4], exp[4];
+    for (int i = 0; i < 4; i++) exp[i] = (int32_t)src[i + 4] * coeff[2];
+    __asm__ volatile (
+        "ldr q0, [%[s]]\n"
+        "ldr q1, [%[c]]\n"
+        "smull2 v2.4s, v0.8h, v1.h[2]\n"
+        "str q2, [%[o]]\n"
+        :: [s]"r"(src), [c]"r"(coeff), [o]"r"(out)
+        : "v0", "v1", "v2", "memory"
+    );
+    CHECK(memcmp(out, exp, sizeof(out)) == 0, "smull2 v.4s, v.8h, v.h[2] uses upper source half");
+}
+
+static void test_smull2_s(void) {
+    int32_t src[4] = {123456, -234567, 345678, -456789};
+    int32_t coeff[4] = {-17, 23, -31, 41};
+    int64_t out[2], exp[2];
+    for (int i = 0; i < 2; i++) exp[i] = (int64_t)src[i + 2] * coeff[1];
+    __asm__ volatile (
+        "ldr q0, [%[s]]\n"
+        "ldr q1, [%[c]]\n"
+        "smull2 v2.2d, v0.4s, v1.s[1]\n"
+        "str q2, [%[o]]\n"
+        :: [s]"r"(src), [c]"r"(coeff), [o]"r"(out)
+        : "v0", "v1", "v2", "memory"
+    );
+    CHECK(memcmp(out, exp, sizeof(out)) == 0, "smull2 v.2d, v.4s, v.s[1] uses upper source half");
+}
+
 int main(void) {
     printf("=== jit_simd_misc ===\n");
     test_cnt_16b();
@@ -572,6 +606,8 @@ int main(void) {
     test_ins_h();
     test_ins_s();
     test_ins_d();
+    test_smull2_h();
+    test_smull2_s();
     printf("=== Results: %d/%d checks passed, %d failures ===\n",
            checks - failures, checks, failures);
     return failures ? 1 : 0;

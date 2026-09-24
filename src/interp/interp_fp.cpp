@@ -2677,15 +2677,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     bool is_sub = (opc == 0x4 || opc == 0x6);
                     bool accum = (opc == 0x0 || opc == 0x2 || opc == 0x6);
                     int esize = widen ? esize_src * 2 : esize_src;
-                    // Lane count = source lanes, clamped to the 128-bit
-                    // dest capacity. (Q?16:8)/esize divides by the DEST
-                    // width, which halves the count for widening ops
-                    // (smull Q=0 only ran 2 of 4 lanes, leaving zeros);
-                    // dividing by the source width overshoots only for
-                    // Q=1 widening forms real compilers never emit, so
-                    // clamp instead of overflowing the 16-byte vd buffer.
-                    int elems = (Q ? 16 : 8) / esize_src;
-                    if (elems * esize > 16) elems = 16 / esize;
+                    // Non-widening Q selects a 64- or 128-bit destination.
+                    // Widening forms always produce 128 bits, while Q
+                    // selects the low or high 64-bit source half (the `2`
+                    // forms such as SMULL2 are common in libjpeg's IDCT).
+                    int elems = widen ? 8 / esize_src : (Q ? 16 : 8) / esize;
+                    int src_base = (widen && Q) ? 8 : 0;
                     uint64_t mask = esize == 8 ? ~0ULL : ((1ULL << (esize * 8)) - 1);
                     uint8_t buf_n[16], buf_m[16], vd[16];
                     memcpy(buf_n, &cpu.v_lo[rn], 8);
@@ -2711,7 +2708,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         // NARROWER lanes than it writes — using esize here
                         // fused adjacent lanes into one 32-bit value).
                         uint64_t a = 0;
-                        memcpy(&a, buf_n + i * esize_src, esize_src);
+                        memcpy(&a, buf_n + src_base + i * esize_src, esize_src);
                         int64_t sa = static_cast<int64_t>(
                             static_cast<int64_t>(a << (64 - esize_src * 8)) >> (64 - esize_src * 8));
                         uint64_t acc = 0;

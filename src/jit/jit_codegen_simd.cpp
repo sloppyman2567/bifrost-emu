@@ -2321,6 +2321,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             const int esize = static_cast<int>(sp.esize);
             const bool q = sp.q;
             const bool is_unsigned = sp.subop != 0;
+            if (((esize == 2 && is_unsigned) || esize == 4) && !has_sse41()) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             load_vec(1, static_cast<int>(inst.src2));
@@ -2343,15 +2346,28 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 sse2_op(0xF8, 2, 3);                 // psubb: max-min
             } else {
                 movdqa(2, 0);
-                if (esize == 2) sse2_op(0xF9, 2, 1);
-                else if (esize == 4) sse2_op(0xFA, 2, 1);
-                else { emit_call_interp(inst.arm_pc, false); return true; }
-                movdqa(3, 2);
-                // XMM shift digits: /4=arithmetic (NOT GPR /5).
-                sse2_imm(esize == 4 ? 0x72 : 0x71,
-                         3, 4, static_cast<uint8_t>(esize * 8 - 1));
-                sse2_op(0xEF, 2, 3);                 // pxor t, m
-                sse2_op(esize == 2 ? 0xF9 : 0xFA, 2, 3);
+                movdqa(3, 0);
+                if (esize == 2) {
+                    if (is_unsigned) {
+                        sse2_38(0x3E, 2, 1);         // pmaxuw
+                        sse2_38(0x3A, 3, 1);         // pminuw
+                    } else {
+                        sse2_op(0xEE, 2, 1);         // pmaxsw
+                        sse2_op(0xEA, 3, 1);         // pminsw
+                    }
+                    sse2_op(0xF9, 2, 3);             // psubw: max-min
+                } else if (esize == 4) {
+                    if (is_unsigned) {
+                        sse2_38(0x3F, 2, 1);         // pmaxud
+                        sse2_38(0x3B, 3, 1);         // pminud
+                    } else {
+                        sse2_38(0x3D, 2, 1);         // pmaxsd
+                        sse2_38(0x39, 3, 1);         // pminsd
+                    }
+                    sse2_op(0xFA, 2, 3);             // psubd: max-min
+                } else {
+                    emit_call_interp(inst.arm_pc, false); return true;
+                }
             }
             movdqa(0, 2);
             store_vec(0, static_cast<int>(inst.dest), q);
@@ -2364,6 +2380,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // to double width (|a|-|b| pattern is extension-safe because the
         // result is non-negative). Accumulate variants add Vd.
         case IROp::SIMD_ABDL: {
+            // 32-bit max/min and unsigned 16-bit max/min below require SSE4.1.
             if (vec_cache_active_ || !has_sse41()) {
                 emit_call_interp(inst.arm_pc, false); return true;
             }
@@ -2384,11 +2401,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 sse2_imm(0x73, 0, 3, 8);   // psrldq X0, 8
                 sse2_imm(0x73, 1, 3, 8);   // psrldq X1, 8
             }
-            // Absolute difference at source width. SSE has no arithmetic
-            // right shift per byte: the xor/shift abs idiom below would
-            // shift across adjacent byte lanes for esize=1. Use max-min
-            // for byte lanes, preserving signedness; retain the idiom for
-            // 16/32-bit lanes where PSRAW/PSRAD match the lane width.
+            // Absolute difference at source width. Use max-min so subtraction
+            // cannot wrap before the absolute value is taken.
             if (esize == 1) {
                 movdqa(2, 0);
                 movdqa(3, 0);
@@ -2402,14 +2416,26 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 sse2_op(0xF8, 2, 3);             // psubb: max - min
             } else {
                 movdqa(2, 0);
-                if (esize == 2) sse2_op(0xF9, 2, 1);
-                else            sse2_op(0xFA, 2, 1);
-                movdqa(3, 2);
-                sse2_imm(esize == 4 ? 0x72 : 0x71, 3, 4,
-                         static_cast<uint8_t>(esize * 8 - 1)); // psra* = /4
-                sse2_op(0xEF, 2, 3);
-                if (esize == 2) sse2_op(0xF9, 2, 3);
-                else            sse2_op(0xFA, 2, 3);
+                movdqa(3, 0);
+                if (esize == 2) {
+                    if (subop & 1) {               // unsigned UABDL/UABAL
+                        sse2_38(0x3E, 2, 1);       // pmaxuw
+                        sse2_38(0x3A, 3, 1);       // pminuw
+                    } else {                       // signed SABDL/SABAL
+                        sse2_op(0xEE, 2, 1);       // pmaxsw
+                        sse2_op(0xEA, 3, 1);       // pminsw
+                    }
+                    sse2_op(0xF9, 2, 3);           // psubw: max-min
+                } else {
+                    if (subop & 1) {               // unsigned UABDL/UABAL
+                        sse2_38(0x3F, 2, 1);       // pmaxud
+                        sse2_38(0x3B, 3, 1);       // pminud
+                    } else {                       // signed SABDL/SABAL
+                        sse2_38(0x3D, 2, 1);       // pmaxsd
+                        sse2_38(0x39, 3, 1);       // pminsd
+                    }
+                    sse2_op(0xFA, 2, 3);           // psubd: max-min
+                }
             }
             // Widen low half → full 128 (pmovzx: 20/30/31 bw/wd/dq...
             // pmovzxbw=0x30, pmovzxwd=0x33, pmovzxdq=0x35)
@@ -2601,6 +2627,12 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));   // Vn
+            // Widening multiply forms use Q to select the source half
+            // (SMULL2/UMLAL2/etc. read Vn[upper lanes]). The widening
+            // unpack below consumes only the low 64 bits, so move the upper
+            // source half down before extending it.
+            if (widen && q)
+                sse2_imm(0x73, 0, 3, 8);                // psrldq xmm0, 8
             load_vec(1, static_cast<int>(inst.src2));   // Vm
             // Broadcast Vm[idx] to all lanes of X1
             if (esize == 2) {

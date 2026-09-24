@@ -15,6 +15,11 @@ int main() {
         acc ^= (acc >> 5);
     }
     sink = acc;
+    if (sink != UINT64_C(0xf800800a2c4ff835)) {
+        fprintf(stderr, "ERROR: accumulator=0x%llx\n", (unsigned long long)sink);
+        return 1;
+    }
     printf("done: acc=0x%llx\n", (unsigned long long)sink);
+    puts("VALID: accumulator checksum");
     return 0;
 }
