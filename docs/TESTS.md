@@ -8,11 +8,11 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Test inventory
 
-The fully provisioned suite contains 232 configured test runs:
+The fully provisioned suite contains 234 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 57 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 59 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 84 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -21,12 +21,30 @@ The fully provisioned suite contains 232 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **232** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **234** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 210 configured runs (205 with `--quick`). These
+tests are not selected, for 212 configured runs (207 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
+
+## Memory and signal regressions
+
+`ctest/test_memory_permissions.c` checks existing read-only protections,
+permissions and unmapped holes inherited across fork, isolation of child
+repairs, syscall `EFAULT`, and brk shrink/regrowth/collision behavior. Fault
+probes check the guest PC and bound retries. Page sizes come from `sysconf`;
+LSE checks run only when advertised by `AT_HWCAP`.
+
+`ctest/test_sigreturn_context.c` checks handler edits to registers, PC, SP,
+NZCV, FP/SIMD state and signal masks, nested alternate stacks, and nine
+malformed signal-frame cases. These exercise the Linux AArch64 ABI; they
+are not a complete Arm architecture conformance suite.
+
+For independent QEMU runs, see the
+[reference signal-mask patch](../tools/qemu-reference/README.md). It fixes
+QEMU's handling of unblockable mask bits while keeping the Linux assertions
+strict.
 
 ## Running tests
 

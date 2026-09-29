@@ -1,0 +1,10 @@
+diff --git a/linux-user/signal.c b/linux-user/signal.c
+index f0a2257..e821e5f 100644
+--- a/linux-user/signal.c
++++ b/linux-user/signal.c
+@@ -252,2 +252,5 @@ void set_sigmask(const sigset_t *set)
+     ts->signal_mask = *set;
++    /* Match Linux set_current_blocked(), including rt_sigreturn masks. */
++    sigdelset(&ts->signal_mask, SIGKILL);
++    sigdelset(&ts->signal_mask, SIGSTOP);
+ }
