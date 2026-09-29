@@ -292,8 +292,8 @@ private:
     Memory* mem_ = nullptr;
     std::vector<HandleEntry> handles_;
     uint64_t next_guest_addr_ = 0;
+    uint64_t handle_page_end_ = 0;
     bool quit_requested_ = false;
-    static constexpr uint64_t HANDLE_BASE = 0x7000000000ULL;
     static constexpr uint64_t HANDLE_STEP = 64;
     static constexpr size_t MAX_HANDLES = 512;
     // Handle type tags.

@@ -863,11 +863,15 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         // enforces pkey restrictions; if we don't use them, the call is
         // equivalent to plain mprotect).
         case 288: { // pkey_mprotect(start, len, prot, pkey)
-            // Forward to mem.cpp's mprotect handler by emulating a call
-            // to syscall_mem with num=226. But we don't have a clean
-            // way to do that here — just call mprotect directly.
-            int r = ::mprotect(reinterpret_cast<void*>(a0), a1, static_cast<int>(a2));
-            if (r < 0) { ret_errno(); return 0; }
+            if ((a0 & Memory::PAGE_MASK) || (a2 & ~uint64_t(7))) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
+            if (!emu.mem().mprotect_guest(a0, a1, static_cast<uint8_t>(a2))) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                return 0;
+            }
+            if (a1) emu.invalidate_jit_range(a0, a1);
             ret_host(0); return 0;
         }
         case 289: { // pkey_alloc(flags, access_rights)

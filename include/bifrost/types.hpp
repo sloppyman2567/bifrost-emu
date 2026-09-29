@@ -54,12 +54,14 @@ struct EmuError : std::runtime_error { using std::runtime_error::runtime_error; 
 struct UnmappedMemory : EmuError {
     uint64_t addr;   // faulting guest virtual address
     bool     write;  // true = write fault, false = read fault
-    UnmappedMemory(uint64_t a, bool w)
+    bool     protection;  // mapped page rejected the requested access
+    int segv_code() const { return protection ? 2 : 1; } // ACCERR / MAPERR
+    UnmappedMemory(uint64_t a, bool w, bool p = false)
         : EmuError(std::string("unmapped ") + (w ? "write" : "read") +
                    " at 0x" + [&]{
                        char b[32]; snprintf(b, sizeof(b), "%lx", a); return std::string(b);
                    }()),
-          addr(a), write(w) {}
+          addr(a), write(w), protection(p) {}
 };
 struct DecodeError : EmuError {
     DecodeError(uint64_t pc, uint32_t inst)

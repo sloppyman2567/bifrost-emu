@@ -304,13 +304,14 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // pc=0x0: __syscall_cancel_arch's `ret` jumped to x30=0
                 // because the BL that set x30 had its store DCE'd.
                 last_store_to.clear();
-            } else if (inst.op == IROp::ATOMIC) {
-                // ATOMIC reads cpu.regs[imm] directly — preserve preceding
-                // STORE_REG to that ARM reg. (GPR only — is_fp=0.)
-                last_store_to.erase(static_cast<uint32_t>(inst.imm) << 1);
-            } else if (inst.op == IROp::LDXR_FAST ||
+            } else if (inst.op == IROp::LOAD_MEM || inst.op == IROp::STORE_MEM ||
+                       inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16 ||
+                       inst.op == IROp::ATOMIC || inst.op == IROp::LDXR_FAST ||
                        inst.op == IROp::STXR_FAST ||
                        inst.op == IROp::STLR_FAST) {
+                // A memory guard may step this instruction or deliver a
+                // signal. Its architectural inputs and interrupted state
+                // must be visible even if a later store overwrites them.
                 last_store_to.clear();
             }
             // FP_I2F/FP_I2F_FIXED read GPRs (src1 = GPR reg index).

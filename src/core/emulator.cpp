@@ -78,6 +78,10 @@ void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
 }
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
+    // IFUNC resolvers can read Linux auxiliary data at low addresses while
+    // the dynamic linker is running. Keep the emulator's zero page mapped
+    // before loading or relocating any guest objects.
+    mem_.map_range(0, Memory::PAGE_SIZE);
     elf_path_ = path;
     // Initialize the guest process name (comm) to the ELF basename.
     // This matches the Linux kernel behavior: the initial comm is the
@@ -1024,6 +1028,20 @@ uint64_t Emulator::load_vdso() {
                        static_cast<size_t>(h.p_filesz));
         } catch (...) { return 0; }
     }
+    for (const auto& h : loads) {
+        if (h.p_memsz == 0) continue;
+        const uint64_t seg_addr = base + h.p_vaddr;
+        const uint64_t seg_end = seg_addr + h.p_memsz;
+        if (seg_end < seg_addr || seg_end > UINT64_MAX - Memory::PAGE_MASK)
+            return 0;
+        const uint64_t page_start = seg_addr & ~Memory::PAGE_MASK;
+        const uint64_t page_end = (seg_end + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+        const uint8_t prot = ((h.p_flags & 4) ? Memory::GUEST_PROT_READ : 0) |
+                             ((h.p_flags & 2) ? Memory::GUEST_PROT_WRITE : 0) |
+                             ((h.p_flags & 1) ? Memory::GUEST_PROT_EXEC : 0);
+        if (!mem_.mprotect_guest(page_start, page_end - page_start, prot))
+            return 0;
+    }
     vdso_base_ = base;
     vdso_size_ = max_vaddr_end;
     if (dbg().dynlink_trace) {
@@ -1293,9 +1311,9 @@ int Emulator::run() {
             }
         } catch (UnmappedMemory& e) {
             // If the guest has installed a SIGSEGV handler, deliver the
-            // signal with the fault address and si_code (MAPERR for read,
-            // ACCERR for write) and continue. Otherwise, stop emulation.
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            // signal with the fault address and si_code (MAPERR for an
+            // unmapped page, ACCERR for permissions) and continue.
+            int si_code = e.segv_code();
             if (deliver_signal(*this, main_cpu_, signals_, BIFROST_SIGSEGV,
                                si_code, e.addr)) {
                 count++;
@@ -2038,6 +2056,7 @@ void Emulator::wire_thunk_sdl_thread_runner_() {
 }
 void Emulator::load_android_activity(const std::string& path,
                                      std::vector<std::string>& argv) {
+    mem_.map_range(0, Memory::PAGE_SIZE);
     ensure_thunk_linker_();
     uint64_t handle = dyn_linker_->load_library(main_cpu_, path);
     if (handle == 0) {

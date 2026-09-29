@@ -100,6 +100,8 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
             info.phdr_addr = h.p_vaddr + info.base_addr;
         }
     }
+    struct SegmentProtection { uint64_t addr, size; uint8_t prot; };
+    std::vector<SegmentProtection> segment_protections;
     for (auto& h : phdrs) {
         if (h.p_type != 1) continue;  // PT_LOAD only
         uint64_t vaddr = h.p_vaddr + info.base_addr;
@@ -120,9 +122,27 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
             std::vector<uint8_t> zeros(bss_size, 0);
             mem.write(bss_start, zeros.data(), bss_size);
         }
+        if (h.p_memsz) {
+            uint64_t end = vaddr + h.p_memsz;
+            if (end < vaddr || end > UINT64_MAX - Memory::PAGE_MASK)
+                throw EmuError("PT_LOAD range overflow");
+            const uint64_t prot = ((h.p_flags & 4) ? Memory::GUEST_PROT_READ : 0) |
+                                  ((h.p_flags & 2) ? Memory::GUEST_PROT_WRITE : 0) |
+                                  ((h.p_flags & 1) ? Memory::GUEST_PROT_EXEC : 0);
+            const uint64_t page_start = vaddr & ~Memory::PAGE_MASK;
+            const uint64_t page_end = (end + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+            segment_protections.push_back({page_start, page_end - page_start,
+                                           static_cast<uint8_t>(prot)});
+        }
         uint64_t end = vaddr + h.p_memsz;
         if (end > info.end_addr) info.end_addr = end;
     }
+    // Apply PT_LOAD permissions only after all file and BSS bytes have been
+    // installed. Adjacent segments can share a page; later headers define
+    // the final protection for that shared page as on Linux.
+    for (const auto& seg : segment_protections)
+        if (!mem.mprotect_guest(seg.addr, seg.size, seg.prot))
+            throw EmuError("unable to set PT_LOAD permissions");
     // If phdr_addr still 0 (no PT_PHDR), try to derive from first PT_LOAD
     if (info.phdr_addr == 0 && !phdrs.empty()) {
         for (auto& h : phdrs) {

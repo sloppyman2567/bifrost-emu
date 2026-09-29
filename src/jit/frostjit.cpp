@@ -152,6 +152,7 @@ thread_local FrostJIT::InlineCacheEntry FrostJIT::tls_inline_cache_[INLINE_CACHE
 // emit_load_mem / emit_store_mem live in x86_backend.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
+    emit_memory_guard(inst);
     // v1.4.5-alpha: FP/SIMD ops are dispatched to
     // compile_ir_inst_fp_() (defined in jit_codegen_fp.cpp) before the
     // integer/memory/branch switch below. The FP handler sets
@@ -759,7 +760,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             uint8_t crm = (sys >> 8) & 0xF;
             uint8_t op2 = (sys >> 4) & 0x7;
             int s = ensure_vreg(inst.src1, RAX);
-            if (s != RAX) emit_mov_reg(RAX, s);
             int32_t off = -1;
             if (crn == 7) {
                 // Cache maintenance (IC IVAU / DC et al): the interp
@@ -780,7 +780,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 off = FPSR_OFF;
             }
             if (off >= 0) {
-                emit_store(CPU_REG, off, RAX);
+                // FPCR/FPSR are 32-bit CPU fields. A 64-bit FPSR store
+                // overwrites the adjacent TPIDR_EL0 and breaks guest TLS.
+                if (off == FPCR_OFF || off == FPSR_OFF)
+                    emit_store32(CPU_REG, off, s);
+                else
+                    emit_store(CPU_REG, off, s);
             } else {
                 // Unknown system register — treat as NOP (discard the
                 // write). Much faster than CALL_INTERP.

@@ -118,28 +118,25 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
-        case 139: { // rt_sigreturn — restore CPU state from signal frame
+        case 139: { // rt_sigreturn — SP points at {siginfo, ucontext}
             SignalFrame frame;
-            if (signals_.pop_frame(cpu, frame)) {
-                memcpy(cpu.regs, frame.regs, sizeof(frame.regs));
-                cpu.regs[31] = 0;
-                cpu.sp     = frame.sp;
-                cpu.pc     = frame.pc;
-                cpu.pstate = frame.pstate;
-                cpu.sigmask = frame.saved_mask;
-                memcpy(cpu.v_lo, frame.v_lo, sizeof(cpu.v_lo));
-                memcpy(cpu.v_hi, frame.v_hi, sizeof(cpu.v_hi));
-                cpu.fpcr = frame.fpcr;
-                cpu.fpsr = frame.fpsr;
-                cpu.tpidr_el0 = frame.tpidr_el0;
-                cpu.tpidrro_el0 = frame.tpidrro_el0;
-                if (frame.on_altstack)
-                    SignalTable::set_altstack_active(cpu, false);
-                if (cpu.sigpending.load() != 0)
-                    deliver_pending_signals(emu, cpu, signals_);
+            if ((cpu.sp & 15) || cpu.sp > UINT64_MAX - 128 ||
+                !restore_ucontext(mem_, cpu, cpu.sp + 128)) {
+                // A bad signal frame raises SIGSEGV, rather than returning
+                // a syscall error or silently using the private snapshot.
+                signals_.pop_frame(cpu, frame);
+                cpu.sigmask &= ~(1ULL << (BIFROST_SIGSEGV - 1));
+                deliver_signal(emu, cpu, signals_, BIFROST_SIGSEGV,
+                               SI_KERNEL_EMU);
                 return 0;
             }
-            ret_host(0);
+            if (signals_.pop_frame(cpu, frame)) {
+                // TLS has no slot in the baseline AArch64 ucontext ABI.
+                cpu.tpidr_el0 = frame.tpidr_el0;
+                cpu.tpidrro_el0 = frame.tpidrro_el0;
+            }
+            if (cpu.sigpending.load() != 0)
+                deliver_pending_signals(emu, cpu, signals_);
             return 0;
         }
         default:

@@ -79,6 +79,13 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             constexpr uint64_t BIFROST_MAP_FIXED          = 0x10;
             constexpr uint64_t BIFROST_MAP_FIXED_NOREPLACE = 0x100000;
+            if (prot & ~uint64_t(7)) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
+            // MAP_NORESERVE and PROT_NONE are virtual reservations. They
+            // still have a mapped VMA and permissions are applied below.
+            const bool virt_reserve = (flags & 0x4000) || prot == 0;
             // Linux requires a page-aligned addr for MAP_FIXED /
             // MAP_FIXED_NOREPLACE (otherwise -EINVAL). Check here so the
             // allocator never sees an unaligned fixed base.
@@ -102,42 +109,21 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // allocation. Game engines and allocators use this flag to
             // reserve address ranges without overwriting mappings.
             if (flags & BIFROST_MAP_FIXED_NOREPLACE) {
-                // Check if [addr, addr+length) overlaps any existing allocation
-                // or the brk heap (brk pages are tracked via map_range, not
-                // the allocation map, so check the brk range explicitly).
-                // NOTE: do NOT use is_mapped() here — it returns true for
-                // any address inside the 4 GiB direct window (the window IS
-                // the storage), which would reject every noreplace mmap.
-                auto allocs = mem_.allocations_snapshot();
-                for (const auto& [base, size] : allocs) {
-                    uint64_t other_end = base + size;
-                    if (addr < other_end && base < addr + length) {
-                        // Overlap → reject without replacing.
-                        ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
-                        return 0;
-                    }
-                }
+                std::lock_guard<std::mutex> brk_lock(brk_mu_);
                 if (addr < brk_ && brk_start_ < addr + length) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
                     return 0;
                 }
-                // The main stack is a VMA too, but it is registered via
-                // map_range (not allocations_), so the snapshot check
-                // above misses it. Refuse to place a NOREPLACE mapping
-                // over the live stack (Linux returns -EEXIST on the stack
-                // VMA); otherwise the guest gets a mapping it writes
-                // through, shredding its own frames.
-                {
-                    uint64_t stack_lo = mem_.stack_top() - Memory::STACK_SIZE;
-                    if (addr < mem_.stack_top() && stack_lo < addr + length) {
-                        ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
-                        return 0;
-                    }
+                // Check and reserve in one Memory lock. The range metadata
+                // includes ELF PT_LOAD, brk, stack, and PROT_NONE mappings.
+                // Start RW so a file-backed mapping can be populated, then
+                // apply its requested permissions before returning.
+                uint64_t mapped = mem_.mmap_fixed_noreplace(addr, length,
+                    virt_reserve, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
+                if (mapped == UINT64_MAX) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
+                    return 0;
                 }
-                // No overlap: place at the exact address (treat like MAP_FIXED
-                // from here on, but with no overwrite of existing pages since
-                // we just verified there are none in range).
-                uint64_t mapped = mem_.mmap_alloc(length, addr);
                 if (mapped == 0) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
@@ -174,6 +160,11 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
                         graphics_.set_guest_fb_addr(addr);
                     }
+                }
+                if (!mem_.mprotect_guest(addr, length, static_cast<uint8_t>(prot))) {
+                    mem_.untrack_allocation(addr, length);
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                    return 0;
                 }
                 ret_host(addr);
                 return 0;
@@ -227,7 +218,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // reservation so later overlap checks see it, but don't zero
             // existing pages (preserves musl's metadata).
             if (prot == 0 && (flags & BIFROST_MAP_FIXED)) { // PROT_NONE + MAP_FIXED
-                if (mem_.mmap_fixed_replace(addr, length, true, false) == 0) {
+                if (mem_.mmap_fixed_replace(addr, length, true, false, 0) == 0) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
@@ -245,15 +236,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // charge against MAX_TOTAL_PAGES at reserve time (per-fault
             // OOM checks still apply). vkQuake's mimalloc reserves
             // GiB-scale arenas this way.
-            bool virt_reserve = (flags & 0x4000) || prot == 0;
             uint64_t mapped;
             if (flags & BIFROST_MAP_FIXED) {
-                // Atomic replace with fresh-zero anonymous semantics
-                // (PROT_NONE already returned above, so prot != 0 here).
-                mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve, prot != 0);
+                // Populate writable first; requested permissions are applied
+                // after file-backed contents have been copied.
+                mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve,
+                    prot != 0, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
                 if (mapped != 0) emu.invalidate_jit_range(addr, length);
             } else {
-                mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve);
+                mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve,
+                    Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
             }
             // BUGFIX: mmap_alloc returns 0 on failure (size cap, invalid
             // range, or OOM page-limit). Returning that 0 to the guest
@@ -319,6 +311,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     graphics_.set_guest_fb_addr(mapped);
                 }
             }
+            if (!mem_.mprotect_guest(mapped, length, static_cast<uint8_t>(prot))) {
+                mem_.untrack_allocation(mapped, length);
+                emu.invalidate_jit_range(mapped, length);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                return 0;
+            }
             ret_host(mapped);
             return 0;
         }
@@ -338,6 +336,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)a0,
                         (unsigned long)a1);
             }
+            // Linux requires a page-aligned base. Do not let the memory
+            // helper round an invalid address down and free its live page.
+            if (a0 & Memory::PAGE_MASK) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
             // Linux rejects a wrapping length with -EINVAL (addr+len
             // overflow). Without this, the page rounding in
             // untrack_allocation could cover the entire address space and
@@ -353,7 +357,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-        case 226: { // mprotect - no-op
+        case 226: { // mprotect
+            if ((a0 & Memory::PAGE_MASK) || (a2 & ~uint64_t(7))) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
+            if (!mem_.mprotect_guest(a0, a1, static_cast<uint8_t>(a2))) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                return 0;
+            }
+            if (a1) emu.invalidate_jit_range(a0, a1);
             ret_host(0);
             return 0;
         }
@@ -438,13 +451,19 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)a0,
                         (unsigned long)a1, (long long)(int64_t)a2);
             }
+            if (a0 & Memory::PAGE_MASK) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
             // MADV_DONTNEED (4): Linux discards the pages — the next
             // access reads zeros. vkQuake's mimalloc decommits freed
             // segments this way and reuses them as initially-zero pages;
             // a no-op here kept stale data and shredded its heap
             // (AllocBlock: full). Other advices stay no-op (pure hints).
-            if ((int64_t)a2 == 4 /* MADV_DONTNEED */)
+            if ((int64_t)a2 == 4 /* MADV_DONTNEED */) {
                 mem_.madvise_dontneed(a0, a1);
+                emu.invalidate_jit_range(a0, a1);
+            }
             ret_host(0);
             return 0;
         }
@@ -486,13 +505,21 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             if (new_brk > brk_) {
-                // Refuse (and report the OLD break) if materializing the
-                // new pages would exceed the page cap — otherwise brk
-                // would report success for memory that was never mapped.
-                if (!mem_.map_range(brk_, new_brk - brk_)) {
+                // A fixed guest mapping may have occupied the future brk
+                // range since the previous break. Linux refuses to grow
+                // across another VMA rather than merging the mappings.
+                // Reserve atomically and reject ANY overlapping page, not
+                // only a completely mapped range. This also serializes brk
+                // growth with concurrent fixed mappings.
+                uint64_t mapped = mem_.mmap_fixed_noreplace(brk_, new_brk - brk_,
+                    false, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
+                if (mapped != brk_) {
                     ret_host(brk_);
                     return 0;
                 }
+            } else if (new_brk < brk_) {
+                mem_.untrack_allocation(new_brk, brk_ - new_brk);
+                emu.invalidate_jit_range(new_brk, brk_ - new_brk);
             }
             brk_ = new_brk;
             ret_host(brk_);

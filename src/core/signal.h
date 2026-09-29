@@ -27,9 +27,8 @@
 //      address) that does:
 //        mov x8, #__NR_rt_sigreturn
 //        svc #0
-//   7. The rt_sigreturn syscall restores the saved CPU state from
-//      our internal stack of signal frames, including the saved signal
-//      mask.
+//   7. The rt_sigreturn syscall restores CPU state and the signal mask
+//      from the guest stack's ucontext, including edits made by the handler.
 //
 // Limitations (clearly documented for the user):
 //   - Signals 1..31 (classic) and 32..64 (real-time) are supported.
@@ -258,6 +257,9 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
 // as the next signal frame's stack pointer if needed).
 uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
                         uint64_t saved_mask, uint64_t fault_addr);
+// Restore a guest ucontext after validating its FP/SIMD context records.
+// Returns false for an unreadable or malformed context, without changing CPU.
+bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr);
 // Deliver a signal to the guest. If a handler is installed, saves
 // the current CPU state, sets up X0=signo / X1=siginfo / X2=ucontext /
 // X30=trampoline / PC=handler, and returns true. If no handler is

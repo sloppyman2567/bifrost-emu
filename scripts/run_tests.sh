@@ -24,8 +24,8 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (232 test runs):
-#   Unit         57  — ctest/*.elf focused regressions
+# Fully provisioned suite (234 test runs):
+#   Unit         59  — ctest/*.elf focused regressions
 #   Integration  84  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
@@ -34,7 +34,7 @@
 #   Dynamic      15  — musl/glibc tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 210 runs (205 with --quick); fixtures may be skipped.
+# Without a rootfs: 212 runs (207 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -307,6 +307,7 @@ UNIT_TESTS=(
     # aliasing, sigsuspend pre-suspend mask restore, and cross-thread
     # delivery through the per-CPU pending queue + per-CPU signal frames.
     "test_signal_semantics|ctest/test_signal_semantics.elf||20|ALL PASS"
+    "test_sigreturn_context|ctest/test_sigreturn_context.elf||20|ALL PASS"
     # fork() with live guest threads: the child must not inherit joinable
     # host std::threads for threads that no longer exist.
     "test_fork_threads|ctest/test_fork_threads.elf||20|ALL PASS"
@@ -314,6 +315,7 @@ UNIT_TESTS=(
     # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
     # and above-window MAP_FIXED r/w cycles run concurrently.
     "test_mem_guard|ctest/test_mem_guard.elf||20|ALL PASS"
+    "test_memory_permissions|ctest/test_memory_permissions.elf||30|ALL PASS"
     "test_syscall_regress|ctest/test_syscall_regress.elf||10|0 checks failed"
     "test_producer_consumer|ctest/test_producer_consumer.elf||10|ALL PASS"
     # High-contention atomic stress test (8 threads). Validates CAS, LL/SC

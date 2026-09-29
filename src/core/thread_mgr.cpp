@@ -378,7 +378,7 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     if (jit_enabled_ && jit_ && no_shared_jit) {
         gt->jit = std::make_unique<FrostJIT>();
         if (gt->jit) {
-            gt->jit->set_direct_window(mem_.direct_window());
+            gt->jit->set_direct_window(mem_.direct_window(), &mem_);
         }
     }
     // Shared-JIT mode safety: before a second vCPU can execute, unpatch all

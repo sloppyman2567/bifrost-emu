@@ -548,7 +548,7 @@ extern "C" {
         try {
             emu->mem().read(addr, &val, width);
         } catch (UnmappedMemory& e) {
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            int si_code = e.segv_code();
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                            si_code, e.addr);
             return 0;  // cpu->running is now false (or handler installed)
@@ -569,7 +569,7 @@ extern "C" {
         try {
             emu->mem().read(addr, buf, 16);
         } catch (UnmappedMemory& e) {
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            int si_code = e.segv_code();
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                            si_code, e.addr);
             return;
@@ -583,7 +583,7 @@ extern "C" {
             Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, buf, 16);
         } catch (UnmappedMemory& e) {
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            int si_code = e.segv_code();
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                            si_code, e.addr);
         }
@@ -598,7 +598,7 @@ extern "C" {
             Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            int si_code = e.segv_code();
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                            si_code, e.addr);
         }
@@ -619,7 +619,7 @@ extern "C" {
         try {
             emu->mem().read(addr, &v, width);
         } catch (UnmappedMemory& e) {
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            int si_code = e.segv_code();
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                            si_code, e.addr);
             return 0;
@@ -646,7 +646,7 @@ extern "C" {
             Memory::note_interp_pc(cpu->pc);
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
-                int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+                int si_code = e.segv_code();
                 deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                                si_code, e.addr);
                 return 1;
@@ -678,7 +678,7 @@ extern "C" {
             Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
-            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            int si_code = e.segv_code();
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
                            si_code, e.addr);
             return;

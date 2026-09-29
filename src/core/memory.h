@@ -55,6 +55,10 @@ public:
     static constexpr size_t MAX_TOTAL_PAGES = 1ULL * 1024 * 1024; // 4 GiB
     static constexpr uint64_t MAX_MMAP_LENGTH = 4ULL * 1024 * 1024 * 1024;
     static constexpr uint64_t NULL_PAGE_LIMIT = PAGE_SIZE;
+    static constexpr uint8_t GUEST_PROT_READ = 1;
+    static constexpr uint8_t GUEST_PROT_WRITE = 2;
+    static constexpr uint8_t GUEST_PROT_EXEC = 4;
+    static constexpr uint8_t GUEST_PAGE_MAPPED = 0x80;
     // Guest heap + stack live INSIDE the 4 GiB direct window so the JIT
     // fast path (direct window memcpy) covers them. The layout formerly
     // put the heap at 0x5000000000 and the stack at 0x8000000000 — both
@@ -115,6 +119,7 @@ public:
     // if it would exceed the page cap (nothing is mapped in that case).
     bool map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
+    bool mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot);
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
     void read(uint64_t addr, void* dst, size_t n, PageCache* pc = nullptr) const;
@@ -134,15 +139,27 @@ public:
     template<typename T> void store(uint64_t addr, T v, PageCache* pc) {
         write(addr, &v, sizeof(T), pc);
     }
-    uint32_t fetch_inst(uint64_t addr) const { return load<uint32_t>(addr); }
-    uint32_t fetch_inst(uint64_t addr, PageCache* pc) const { return load<uint32_t>(addr, pc); }
+    uint32_t fetch_inst(uint64_t addr) const {
+        uint32_t v; read_access(addr, &v, sizeof(v), nullptr, GUEST_PROT_EXEC); return v;
+    }
+    uint32_t fetch_inst(uint64_t addr, PageCache* pc) const {
+        uint32_t v; read_access(addr, &v, sizeof(v), pc, GUEST_PROT_EXEC); return v;
+    }
     // ── Allocators (bump + grow) ──────────────────────────────────────
     // Allocate a chunk of fresh memory; returns starting address.
     // When `hint` is non-zero, the allocation is placed at exactly `hint`
     // (MAP_FIXED semantic). Existing pages at that address are REPLACED
     // with fresh zeroed pages — matches Linux kernel behavior.
     uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0,
-                        bool noreserve = false);
+                        bool noreserve = false,
+                        uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE |
+                                       GUEST_PROT_EXEC);
+    // Atomic MAP_FIXED_NOREPLACE: checks all guest mappings and reserves
+    // the exact range under mu_. Returns UINT64_MAX for overlap, 0 for
+    // allocation/validation failure, or the mapped address on success.
+    uint64_t mmap_fixed_noreplace(uint64_t addr, uint64_t size,
+                                  bool noreserve = false,
+                                  uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE);
     // Atomic MAP_FIXED replace: evict overlapping allocations, restore host
     // prot on reclaimed guard pages, reclaim free ranges, and track the new
     // mapping under one mu_ hold (no untrack/alloc gap for racing mmaps).
@@ -150,7 +167,8 @@ public:
     // brk metadata); true gives fresh-zero anonymous semantics. Returns the
     // address on success, 0 on failure (caller maps to -ENOMEM).
     uint64_t mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve,
-                                bool zero_contents);
+                                bool zero_contents,
+                                uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE);
     // Grow (or shrink) an allocation. When growth would collide with
     // another tracked allocation, a fresh region is allocated and the
     // data is copied (mirrors musl's mremap contract).
@@ -257,6 +275,9 @@ public:
     static constexpr uint64_t DIRECT_WINDOW_SIZE = 4ULL * 1024 * 1024 * 1024;  // 4 GiB
     uint8_t* direct_window_ = nullptr;
     uint8_t* direct_window() const { return direct_window_; }
+    const std::atomic<uint8_t>* direct_page_flags() const {
+        return direct_page_flags_.get();
+    }
     bool in_direct_window(uint64_t addr) const {
         return direct_window_ && addr < DIRECT_WINDOW_SIZE;
     }
@@ -269,13 +290,38 @@ public:
     //
     // For addresses in the direct window, this is a simple pointer
     // arithmetic: host_ptr = direct_window_ + guest_addr.
-    uint8_t* guest_to_host_ptr(uint64_t guest_addr) const {
-        if (in_direct_window(guest_addr)) {
+    uint8_t* guest_to_host_ptr(uint64_t guest_addr,
+                               uint8_t access = GUEST_PROT_READ,
+                               size_t size = 1) const {
+        if (size && in_direct_window(guest_addr) &&
+            size <= DIRECT_WINDOW_SIZE - guest_addr &&
+            range_accessible(guest_addr, size, access)) {
             return direct_window_ + guest_addr;
         }
         return nullptr;
     }
 private:
+    static constexpr uint8_t PAGE_MAPPED = GUEST_PAGE_MAPPED;
+    struct HighMapping {
+        uint64_t end = 0;
+        uint8_t prot = 0;
+    };
+    bool range_mapped_locked(uint64_t lo, uint64_t hi) const;
+    bool range_overlaps_locked(uint64_t lo, uint64_t hi) const;
+    bool mapping_prot_at_locked(uint64_t addr, uint8_t& prot) const;
+    bool range_accessible(uint64_t addr, size_t size, uint8_t access) const;
+    bool high_range_mapped_locked(uint64_t lo, uint64_t hi,
+                                  uint8_t access) const;
+    void split_high_mapping_locked(uint64_t at);
+    void set_high_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
+                                 bool combine);
+    void erase_high_mapping_locked(uint64_t lo, uint64_t hi);
+    void set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
+                            bool combine);
+    bool set_direct_prot(uint64_t lo, uint64_t hi, int prot) const;
+    void check_access(uint64_t addr, size_t size, uint8_t access) const;
+    void read_access(uint64_t addr, void* dst, size_t n, PageCache* pc,
+                     uint8_t access) const;
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;
     mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
@@ -288,6 +334,12 @@ private:
     // malloc/free churn, then mmap starts failing and musl mallocng
     // silently builds its arena at address 0 — BRK #1000 in get_meta).
     std::map<uint64_t, uint64_t> free_ranges_;
+    // Low-window mapping state is an atomic byte per guest page so the
+    // common interpreter path can check permissions without taking mu_.
+    // Bit 7 means mapped (PROT_NONE is still a mapped page); bits 0..2
+    // mirror Linux PROT_READ/WRITE/EXEC. High mappings use coalesced ranges.
+    std::unique_ptr<std::atomic<uint8_t>[]> direct_page_flags_;
+    std::map<uint64_t, HighMapping> high_mappings_;
     // 1.5.4-alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent
     // guest-side info leaks). The base is page-aligned and within the

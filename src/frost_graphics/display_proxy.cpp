@@ -49,6 +49,7 @@ void DisplayProxy::shutdown() {
 #endif
     handles_.clear();
     next_guest_addr_ = 0;
+    handle_page_end_ = 0;
     window_ = renderer_ = texture_ = nullptr;
 }
 bool DisplayProxy::init(uint32_t width, uint32_t height, Memory* mem) {
@@ -261,13 +262,23 @@ void DisplayProxy::x_pump_() {
 }
 uint64_t DisplayProxy::alloc_handle(uint32_t type) {
     if (!mem_ || handles_.size() >= MAX_HANDLES) return 0;
-    uint64_t guest_addr = HANDLE_BASE + next_guest_addr_;
-    next_guest_addr_ += HANDLE_STEP;
+    // Reserve real guest storage instead of writing into a fixed, unmapped
+    // address (which also overlapped the sigreturn trampoline). Pack handles
+    // into pages and keep their addresses distinct after free_handle().
+    if (next_guest_addr_ == handle_page_end_) {
+        uint64_t page = mem_->mmap_alloc(Memory::PAGE_SIZE, 0, false,
+            Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
+        if (!page) return 0;
+        next_guest_addr_ = page;
+        handle_page_end_ = page + Memory::PAGE_SIZE;
+    }
+    uint64_t guest_addr = next_guest_addr_;
     HandleHdr hdr;
     hdr.type = type;
     hdr.index = (uint32_t)handles_.size();
     mem_->write(guest_addr, &hdr, sizeof(hdr));
     handles_.push_back({guest_addr, type});
+    next_guest_addr_ += HANDLE_STEP;
     return guest_addr;
 }
 void DisplayProxy::free_handle(uint64_t guest_addr) {

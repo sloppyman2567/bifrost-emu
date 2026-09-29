@@ -11,6 +11,120 @@
 #include <cstdio>
 #include <cstring>
 namespace arm64emu {
+// Validate native memory accesses before dereferencing the host window.
+// The cold path commits the state BEFORE this instruction, steps the actual
+// guest instruction (including signal delivery), then returns immediately.
+// It never rejoins the block or enters a patched chain with handler state.
+void FrostJIT::emit_memory_guard(const IRInst& inst) {
+    if (!guest_memory_) return;
+    uint16_t address;
+    uint64_t offset = 0;
+    unsigned size;
+    uint8_t access;
+    switch (inst.op) {
+        case IROp::LOAD_MEM:
+        case IROp::STORE_MEM: {
+            auto p = inst.op == IROp::LOAD_MEM ? inst.load_mem_params()
+                                              : inst.store_mem_params();
+            address = inst.src1; offset = p.offset; size = p.width;
+            access = inst.op == IROp::LOAD_MEM ? Memory::GUEST_PROT_READ
+                                              : Memory::GUEST_PROT_WRITE;
+            break;
+        }
+        case IROp::SIMD_LD16: {
+            auto p = inst.ld16_params();
+            address = inst.src1; offset = p.offset;
+            size = 16 * (p.count ? p.count : 1);
+            access = Memory::GUEST_PROT_READ;
+            break;
+        }
+        case IROp::SIMD_ST16: {
+            auto p = inst.st16_params();
+            address = inst.src1; offset = p.offset;
+            size = 16 * (p.count ? p.count : 1);
+            access = Memory::GUEST_PROT_WRITE;
+            break;
+        }
+        case IROp::ATOMIC:
+            address = inst.src1; size = inst.atomic_params().width;
+            access = Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE;
+            break;
+        case IROp::LDXR_FAST: case IROp::STXR_FAST: case IROp::STLR_FAST:
+            address = inst.src1; size = inst.llsc_width();
+            access = inst.op == IROp::LDXR_FAST ? Memory::GUEST_PROT_READ
+                                               : Memory::GUEST_PROT_WRITE;
+            break;
+        default: return;
+    }
+    // Check a pair's entire footprint before its first load/store changes
+    // any architectural register. In particular LDP may alias rt with rn.
+    if (inst.arm_pc) {
+        DecodedInst d;
+        if (decode(d, guest_memory_->fetch_inst(inst.arm_pc)) &&
+            (d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
+            uint64_t first_offset = d.mode == 1 ? 0 : static_cast<uint64_t>(d.disp);
+            if (offset == first_offset) {
+                unsigned opc = (d.raw >> 30) & 3;
+                unsigned element = d.is_vec ? (4u << opc) : (opc == 2 ? 8 : 4);
+                size = 2 * element;
+            }
+        }
+    }
+    clobber_flags();
+    constexpr uint16_t scratch = (1u << RAX) | (1u << RCX) | (1u << RDX);
+    flush_invalidate_host_regs(scratch);
+    load_vreg_to_reg(RAX, address);
+    if (offset) {
+        emit_mov_imm64(RDX, offset);
+        emit_add_reg(RAX, RDX);
+    }
+    std::vector<size_t> cold;
+    emit_mov_imm32_zext(RCX, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - size));
+    emit_cmp_reg(RAX, RCX);
+    cold.push_back(emit_jcc_rel32_placeholder(7)); // JA (also catches wrap/negative addresses)
+    emit_mov_reg(RCX, RAX);
+    if (size > 1) emit_add_reg_imm(RCX, size - 1);
+    emit_shift_imm8(RAX, 5, 12);
+    emit_shift_imm8(RCX, 5, 12);
+    const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
+    const uint8_t required = Memory::GUEST_PAGE_MAPPED | access;
+    emit_mov_imm64(RDX, flags);
+    emit_add_reg(RDX, RAX);
+    emit_load8(RAX, RDX, 0);
+    emit_alu_imm(RAX, 4, required); // AND
+    emit_alu_imm(RAX, 7, required); // CMP
+    cold.push_back(emit_jcc_rel32_placeholder(5)); // JNE
+    emit_mov_imm64(RDX, flags);
+    emit_add_reg(RDX, RCX);
+    emit_load8(RAX, RDX, 0);
+    emit_alu_imm(RAX, 4, required);
+    emit_alu_imm(RAX, 7, required);
+    cold.push_back(emit_jcc_rel32_placeholder(5));
+    size_t hot = emit_jmp_rel32_placeholder();
+    const size_t cold_offset = code_buf_used_;
+    for (size_t p : cold)
+        patch_jcc_rel32(p, static_cast<int32_t>(cold_offset - (p + 6)));
+    flush_all_vregs_keep();
+    // A self-loop/region may carry a dirty architectural pin from a write
+    // later in the previous iteration, even when it is statically clean
+    // at this guard. Commit all mapped architectural registers on this exit.
+    for (int v = 0; v < 32; ++v)
+        if (vreg_home_[v] >= 0) emit_store_arm(v, vreg_home_[v]);
+    // Include loop-carried vector writes, preserving compile-time dirtiness
+    // so the normal epilogue still emits its own writeback.
+    vec_cache_writeback_all_pinned(false);
+    emit_mov_imm64(RAX, inst.arm_pc);
+    emit_store(CPU_REG, PC_OFF, RAX);
+    emit_load(RDI, RBP, emu_slot_off());
+    emit_mov_reg(RSI, CPU_REG);
+    emit_call_aligned(&jit_interp_step, 0);
+    emit_load(RAX, CPU_REG, PC_OFF);
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+    emit_pop(R15); emit_pop(R14); emit_pop(R13);
+    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+    emit_ret();
+    patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
+}
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                                 uint16_t src1, uint16_t dest) {

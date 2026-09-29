@@ -21,8 +21,8 @@
 //   6. The handler runs. When it returns via `ret` (X30), it lands at
 //      the trampoline (mapped at TRAMPOLINE_ADDR), which does
 //      `mov x8, #139; svc #0` to invoke rt_sigreturn.
-//   7. rt_sigreturn (case 139 in misc.cpp) pops the top SignalFrame,
-//      restores all CPU state, and restores the saved sigmask. If
+//   7. rt_sigreturn reads the guest stack's ucontext, honoring handler
+//      edits to registers and the signal mask, and pops SignalFrame metadata. If
 //      SA_RESETHAND was set, the handler has already been cleared in
 //      step 4 (one-shot semantics).
 //
@@ -125,11 +125,11 @@ constexpr uint64_t UNBLOCKABLE_MASK = (1ULL << (BIFROST_SIGKILL - 1)) |
 constexpr uint64_t sig_bit(int signo) { return 1ULL << (signo - 1); }
 // Reserved stack space for siginfo + ucontext + handler frame on the
 // guest stack at signal delivery time. siginfo_t is 128 bytes, ucontext_t
-// (with fpsimd_context) is 976 bytes; the slack covers the handler's own
-// frame and 16-byte alignment.
+// includes the full 4 KiB sigcontext reserved area and its null terminator.
 constexpr size_t SIGINFO_SIZE     = 128;
-constexpr size_t UCONTEXT_SIZE    = 976;
-constexpr size_t FRAME_RESERVE    = 1280;  // siginfo + ucontext + slack
+constexpr size_t CONTEXT_RECORDS  = 464;
+constexpr size_t UCONTEXT_SIZE    = CONTEXT_RECORDS + 4096;
+constexpr size_t FRAME_RESERVE    = SIGINFO_SIZE + UCONTEXT_SIZE + 16;
 // fpsimd_context header (arch/arm64/include/uapi/asm/sigcontext.h).
 constexpr uint32_t FPSIMD_MAGIC = 0x46508001;
 constexpr uint32_t FPSIMD_SIZE  = 528;  // 8 (head) + 8 (fpsr+fpcr) + 512 (vregs)
@@ -318,9 +318,12 @@ uint64_t map_sigreturn_trampoline(Memory& mem) {
     // Idempotent: detect via Memory::is_mapped so a forked child (with
     // its own Memory) correctly re-maps the trampoline.
     if (mem.is_mapped(TRAMPOLINE_ADDR, 8)) return TRAMPOLINE_ADDR;
-    mem.map_range(TRAMPOLINE_ADDR, 4096);
+    if (!mem.map_range(TRAMPOLINE_ADDR, 4096)) return 0;
     static const uint32_t code[2] = { 0xD2801168u, 0xD4000001u };
     mem.write(TRAMPOLINE_ADDR, code, sizeof(code));
+    if (!mem.mprotect_guest(TRAMPOLINE_ADDR, Memory::PAGE_SIZE,
+                            Memory::GUEST_PROT_READ | Memory::GUEST_PROT_EXEC))
+        return 0;
     return TRAMPOLINE_ADDR;
 }
 // ── siginfo_t construction ─────────────────────────────────────────────
@@ -355,20 +358,20 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
     try { mem.write(info_addr, buf, sizeof(buf)); } catch (...) {}
 }
 // ── ucontext_t construction ────────────────────────────────────────────
-// Writes a guest-visible ucontext_t (976 bytes) including the fpsimd_context
-// in the 4 KiB reserved area. Layout (arch/arm64/include/uapi/asm/ucontext.h
+// Writes a guest-visible ucontext_t including the 4 KiB reserved area.
+// Layout (arch/arm64/include/uapi/asm/ucontext.h
 // + sigcontext.h):
 //   +0   uc_flags        (8)
 //   +8   uc_link         (8)  — 0
 //   +16  uc_stack        (24) — ss_sp, ss_flags, ss_size
 //   +40  uc_sigmask      (8)
-//   +48  __unused        (120) — pad to 1024-bit alignment
-//   +168 uc_mcontext.fault_address  (8)
-//   +176 uc_mcontext.regs[31]       (248)
-//   +424 uc_mcontext.sp             (8)
-//   +432 uc_mcontext.pc             (8)
-//   +440 uc_mcontext.pstate         (8)
-//   +448 fpsimd_context             (528)
+//   +48  __unused        (120), then 8 bytes of alignment padding
+//   +176 uc_mcontext.fault_address  (8)
+//   +184 uc_mcontext.regs[31]       (248)
+//   +432 uc_mcontext.sp             (8)
+//   +440 uc_mcontext.pc             (8)
+//   +448 uc_mcontext.pstate         (8), then 8 bytes of alignment padding
+//   +464 fpsimd_context             (528)
 //          +0  head { magic:4, size:4 }
 //          +8  fpsr (4) + fpcr (4)
 //          +16 vregs[32] (512 = 32 × 16)
@@ -376,34 +379,89 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
                         uint64_t saved_mask, uint64_t fault_addr) {
     if (uc_addr == 0) return 0;
     uint8_t buf[UCONTEXT_SIZE] = {0};
+    memcpy(buf + 16, &cpu.altstack.sp, 8);
+    memcpy(buf + 24, &cpu.altstack.flags, 4);
+    memcpy(buf + 32, &cpu.altstack.size, 8);
     memcpy(buf + 40,  &saved_mask, 8);
-    memcpy(buf + 168, &fault_addr, 8);
+    // sigcontext is 16-byte aligned after the 128-byte signal mask.
+    memcpy(buf + 176, &fault_addr, 8);
     // NOT sizeof(cpu.regs) (256 bytes). The AArch64 ucontext_t has
-    // uc_mcontext.regs[31] (X0..X30) at offset 176, followed by sp at
-    // offset 424. The old code wrote 256 bytes starting at offset 176,
-    // which overwrote the sp field at offset 424 with cpu.regs[31]
-    // (which should be 0 but could be stale). Then the explicit
-    // memcpy(buf + 424, &cpu.sp, 8) would overwrite it again — so the
-    // bug was masked as long as cpu.regs[31] was 0. But if cpu.regs[31]
-    // was ever corrupted (e.g., by the rt_sigreturn sizeof bug above),
-    // the ucontext's sp would get the wrong value.
+    // uc_mcontext.regs[31] (X0..X30) at offset 184, followed by sp at
+    // offset 432. Copy only architectural GPRs, never the emulator's
+    // extra regs[31] slot, which would overlap the saved stack pointer.
     constexpr size_t REGS_BYTES = 31 * sizeof(uint64_t);  // 248
-    memcpy(buf + 176, cpu.regs, REGS_BYTES);
-    memcpy(buf + 424, &cpu.sp,     8);
-    memcpy(buf + 432, &cpu.pc,     8);
-    memcpy(buf + 440, &cpu.pstate, 8);
-    // fpsimd_context at offset 448.
-    memcpy(buf + 448 + 0, &FPSIMD_MAGIC, 4);
-    memcpy(buf + 448 + 4, &FPSIMD_SIZE,  4);
-    memcpy(buf + 448 + 8, &cpu.fpsr,     4);
-    memcpy(buf + 448 + 12, &cpu.fpcr,    4);
+    memcpy(buf + 184, cpu.regs, REGS_BYTES);
+    memcpy(buf + 432, &cpu.sp,     8);
+    memcpy(buf + 440, &cpu.pc,     8);
+    // cpu.pstate is only 32 bits and includes a private JIT carry marker.
+    const uint64_t pstate = cpu.pstate & 0xF0000000u;
+    memcpy(buf + 448, &pstate, 8);
+    // The reserved FPSIMD context is also 16-byte aligned.
+    memcpy(buf + 464 + 0, &FPSIMD_MAGIC, 4);
+    memcpy(buf + 464 + 4, &FPSIMD_SIZE,  4);
+    memcpy(buf + 464 + 8, &cpu.fpsr,     4);
+    memcpy(buf + 464 + 12, &cpu.fpcr,    4);
     // Interleave (v_lo, v_hi) into 16-byte vregs[] entries.
     for (int i = 0; i < 32; i++) {
-        memcpy(buf + 448 + 16 + i * 16,     &cpu.v_lo[i], 8);
-        memcpy(buf + 448 + 16 + i * 16 + 8, &cpu.v_hi[i], 8);
+        memcpy(buf + 464 + 16 + i * 16,     &cpu.v_lo[i], 8);
+        memcpy(buf + 464 + 16 + i * 16 + 8, &cpu.v_hi[i], 8);
     }
-    try { mem.write(uc_addr, buf, sizeof(buf)); } catch (...) {}
+    mem.write(uc_addr, buf, sizeof(buf));
     return uc_addr + sizeof(buf);
+}
+// Read and validate everything before changing CPU state. In particular,
+// malformed context records must not leave a partially restored register file.
+bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr) {
+    uint8_t buf[UCONTEXT_SIZE];
+    try { mem.read(uc_addr, buf, sizeof(buf)); }
+    catch (const UnmappedMemory&) { return false; }
+    const auto read64 = [&](size_t off) {
+        uint64_t value; memcpy(&value, buf + off, sizeof(value)); return value;
+    };
+    const auto read32 = [&](size_t off) {
+        uint32_t value; memcpy(&value, buf + off, sizeof(value)); return value;
+    };
+    size_t fpsimd = 0;
+    bool terminated = false;
+    for (size_t off = CONTEXT_RECORDS; off + 8 <= sizeof(buf);) {
+        const uint32_t magic = read32(off), size = read32(off + 4);
+        if (magic == 0 && size == 0) { terminated = true; break; }
+        if (size < 16 || (size & 15) || size > sizeof(buf) - off) return false;
+        if (magic == FPSIMD_MAGIC) {
+            if (fpsimd || size != FPSIMD_SIZE) return false;
+            fpsimd = off;
+        } else if (magic != 0x45535201 || size != 16) { // ESR context
+            return false;
+        }
+        off += size;
+    }
+    if (!terminated || !fpsimd) return false;
+    // Only EL0 AArch64 state is supported; NZCV is the emulated PSTATE.
+    const uint64_t pstate = read64(448);
+    if (pstate & 0x1f) return false;
+    const uint32_t stack_flags = read32(24);
+    if (stack_flags & ~(CPU::AltStack::SS_ONSTACK_EMU |
+                        CPU::AltStack::SS_DISABLE_EMU)) return false;
+    memcpy(cpu.regs, buf + 184, 31 * sizeof(uint64_t));
+    cpu.regs[31] = 0;
+    cpu.sp = read64(432);
+    cpu.pc = read64(440);
+    cpu.pstate = static_cast<uint32_t>(pstate) & 0xF0000000u;
+    cpu.sigmask = read64(40) & ~UNBLOCKABLE_MASK;
+    cpu.fpsr = read32(fpsimd + 8);
+    cpu.fpcr = read32(fpsimd + 12);
+    for (int i = 0; i < 32; ++i) {
+        cpu.v_lo[i] = read64(fpsimd + 16 + i * 16);
+        cpu.v_hi[i] = read64(fpsimd + 24 + i * 16);
+    }
+    cpu.altstack.sp = read64(16);
+    cpu.altstack.size = read64(32);
+    cpu.altstack.flags = stack_flags & ~CPU::AltStack::SS_ONSTACK_EMU;
+    if (!cpu.altstack.disabled() && cpu.sp >= cpu.altstack.sp &&
+        cpu.sp - cpu.altstack.sp < cpu.altstack.size)
+        SignalTable::set_altstack_active(cpu, true);
+    cpu.excl_clear();
+    return true;
 }
 // ── deliver_signal ─────────────────────────────────────────────────────
 // Deliver a signal to the guest. If a real handler is installed, set up
@@ -519,7 +577,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     bool on_altstack = false;
     if ((act_flags & SA_ONSTACK_EMU) &&
         !cpu.altstack.disabled() && !cpu.altstack.active()) {
-        target_sp = (cpu.altstack.top() - FRAME_RESERVE) & ~0xFULL;
+        target_sp = cpu.altstack.top();
         on_altstack = true;
     }
     // Lay out siginfo_t and ucontext_t on the guest stack.
@@ -534,7 +592,13 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                                     : cpu.sigmask;
     // Build the guest-visible siginfo_t and ucontext_t.
     build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr);
-    build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
+    try {
+        build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
+    } catch (const UnmappedMemory&) {
+        cpu.running = false;
+        cpu.exit_code = 128 + BIFROST_SIGSEGV;
+        return false;
+    }
     // Save full CPU state in our internal frame for rt_sigreturn.
     SignalFrame& frame = sigtab.push_frame(cpu, signo);
     // The pending sigsuspend (if any) has now been satisfied: its saved

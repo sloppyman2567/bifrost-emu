@@ -97,7 +97,10 @@ public:
     ~FrostJIT();
     FrostJIT(const FrostJIT&) = delete;
     FrostJIT& operator=(const FrostJIT&) = delete;
-    void set_direct_window(uint8_t* base) { window_base_ = base; }
+    void set_direct_window(uint8_t* base, const Memory* mem = nullptr) {
+        window_base_ = base;
+        guest_memory_ = mem;
+    }
     uint64_t run_block(CPU& cpu, Emulator& emu);
     // Returns the block's fn pointer, translating if needed.
     // If the block is interp_only, returns nullptr (caller falls back to interpreter).
@@ -657,6 +660,7 @@ private:
     size_t   code_buf_used_ = 0;
     bool     code_buf_overflow_ = false;
     uint8_t* window_base_ = nullptr;
+    const Memory* guest_memory_ = nullptr;
     // ── CPU features (FMV) ──────────────────────────────────────────
     // Detected once at construction via CPUID + XGETBV. Cached for the
     // JIT's lifetime. Polled by compile_ir_inst() when emitting code
@@ -1311,6 +1315,7 @@ private:
     // Returns true if the block should end after this op (branch/call),
     // false otherwise.
     bool compile_ir_inst(const IRInst& inst);
+    void emit_memory_guard(const IRInst& inst);
     // FP/SIMD IR-op codegen. Called from compile_ir_inst() for the
     // FP_* and SIMD_* opcodes. Sets fp_handled_ to true if the op was
     // an FP/SIMD op (regardless of whether it ends the block), and

@@ -20,6 +20,7 @@
 //   try_chain_block       — try to chain `entry` to its translated target
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "jit/frostjit.hpp"
+#include "core/memory.h"
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -217,8 +218,14 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
 }
 void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;
-    const uint64_t lo = addr;
-    const uint64_t hi = addr + size;  // wraps only for absurd ranges; callers pass sane values
+    const uint64_t lo = addr & ~Memory::PAGE_MASK;
+    uint64_t end;
+    if (__builtin_add_overflow(addr, size, &end)) { invalidate_all(); return; }
+    uint64_t hi;
+    if (__builtin_add_overflow(end, Memory::PAGE_MASK, &hi))
+        hi = UINT64_MAX & ~Memory::PAGE_MASK;
+    else
+        hi &= ~Memory::PAGE_MASK;
     if (hi <= lo) { invalidate_all(); return; }
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);

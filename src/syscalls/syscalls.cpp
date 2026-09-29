@@ -120,7 +120,7 @@ void dump_syscall_histogram(double dt) {
     }
 }
 // ── Main dispatcher ────────────────────────────────────────────────────
-void Emulator::syscall(CPU& cpu) {
+void Emulator::syscall(CPU& cpu) try {
     uint64_t num = cpu.regs[8];
     note_syscall(num);
     // last-call record for crash reports (cheap: 3 stores, no atomic).
@@ -312,5 +312,9 @@ void Emulator::syscall(CPU& cpu) {
     if (syscall_misc(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
     // Completely unknown syscall — return -ENOSYS.
     cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS));
+} catch (const UnmappedMemory&) {
+    // Bad user pointers are syscall errors, not guest instruction faults.
+    // Catch before returning through generated code (no unwind metadata).
+    cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EFAULT));
 }
 } // namespace arm64emu
