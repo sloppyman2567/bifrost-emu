@@ -8,11 +8,11 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Test inventory
 
-The fully provisioned suite contains 234 configured test runs:
+The fully provisioned suite contains 235 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 59 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 60 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 84 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -21,10 +21,10 @@ The fully provisioned suite contains 234 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **234** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **235** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 212 configured runs (207 with `--quick`). These
+tests are not selected, for 213 configured runs (208 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 
@@ -45,6 +45,13 @@ For independent QEMU runs, see the
 [reference signal-mask patch](../tools/qemu-reference/README.md). It fixes
 QEMU's handling of unblockable mask bits while keeping the Linux assertions
 strict.
+
+`ctest/test_vm_signal_contracts.c` checks fixed `PROT_NONE` mapping contents,
+file-offset preservation with concurrent reads during `mmap`, `mremap` move
+permission and fixed destinations, and alternate-stack changes during a
+handler. Its 47 checks also pass on native Linux. QEMU 11.1.50 disagrees on
+the zero-size `mremap` errno (`ENOMEM` instead of Linux's `EINVAL`); that
+assertion remains strict.
 
 ## Running tests
 

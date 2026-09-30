@@ -272,42 +272,56 @@ int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
 // (24 bytes): ss_sp (8) + ss_flags (4 + 4 pad) + ss_size (8).
 int SignalTable::set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t old_addr) {
     constexpr size_t SS_SIZE = 24;
+    constexpr uint64_t AARCH64_MINSIGSTKSZ = 5120;
+    uint64_t new_sp = 0, new_size = 0;
+    uint32_t new_flags = 0;
+    // Read before writing the old stack: new_addr and old_addr may alias.
+    if (new_addr != 0) {
+        uint8_t buf[SS_SIZE] = {0};
+        try {
+            mem.read(new_addr, buf, SS_SIZE);
+        } catch (...) {
+            return -EFAULT;
+        }
+        memcpy(&new_sp, buf, 8);
+        memcpy(&new_flags, buf + 8, 4);
+        memcpy(&new_size, buf + 16, 8);
+    }
+    // Linux derives SS_ONSTACK from the current SP, rather than trusting
+    // the caller's flags or a cached signal-delivery marker.
+    const bool on_stack = !cpu.altstack.disabled() &&
+        cpu.sp > cpu.altstack.sp &&
+        cpu.sp - cpu.altstack.sp <= cpu.altstack.size;
+    const uint64_t old_sp = cpu.altstack.sp;
+    const uint64_t old_size = cpu.altstack.size;
+    const uint32_t old_flags = cpu.altstack.disabled()
+        ? CPU::AltStack::SS_DISABLE_EMU
+        : (on_stack ? CPU::AltStack::SS_ONSTACK_EMU : 0);
+    if (new_addr != 0) {
+        if (on_stack) return -EPERM;
+        if (new_flags != 0 && new_flags != CPU::AltStack::SS_ONSTACK_EMU &&
+            new_flags != CPU::AltStack::SS_DISABLE_EMU) return -EINVAL;
+        if (new_flags == CPU::AltStack::SS_DISABLE_EMU) {
+            new_sp = 0;
+            new_size = 0;
+        } else if (new_size < AARCH64_MINSIGSTKSZ) {
+            return -ENOMEM;
+        }
+        cpu.altstack.sp = new_sp;
+        cpu.altstack.size = new_size;
+        cpu.altstack.flags = new_flags & CPU::AltStack::SS_DISABLE_EMU;
+    }
     if (old_addr != 0) {
         uint8_t buf[SS_SIZE] = {0};
-        memcpy(buf + 0,  &cpu.altstack.sp,    8);
-        memcpy(buf + 8,  &cpu.altstack.flags, 4);
-        memcpy(buf + 16, &cpu.altstack.size,  8);
+        memcpy(buf, &old_sp, 8);
+        memcpy(buf + 8, &old_flags, 4);
+        memcpy(buf + 16, &old_size, 8);
         try {
             mem.write(old_addr, buf, SS_SIZE);
         } catch (...) {
             return -EFAULT;
         }
     }
-    if (new_addr == 0) {
-        return 0;
-    }
-    uint8_t buf[SS_SIZE] = {0};
-    try {
-        mem.read(new_addr, buf, SS_SIZE);
-    } catch (...) {
-        return -EFAULT;
-    }
-    uint64_t new_sp;     uint32_t new_flags;   uint64_t new_size;
-    memcpy(&new_sp,     buf + 0,  8);
-    memcpy(&new_flags,  buf + 8,  4);
-    memcpy(&new_size,   buf + 16, 8);
-    // User code can only set SS_DISABLE; SS_ONSTACK is kernel-managed.
-    if (new_flags & CPU::AltStack::SS_ONSTACK_EMU) return -EPERM;
-    if (new_flags & ~static_cast<uint32_t>(CPU::AltStack::SS_DISABLE_EMU)) {
-        return -EINVAL;
-    }
-    if (!(new_flags & CPU::AltStack::SS_DISABLE_EMU) &&
-        (new_size < static_cast<uint64_t>(MINSIGSTKSZ) || new_sp == 0)) {
-        return -ENOMEM;
-    }
-    cpu.altstack.sp    = new_sp;
-    cpu.altstack.size  = new_size;
-    cpu.altstack.flags = new_flags;
     return 0;
 }
 // ── Sigreturn trampoline ──────────────────────────────────────────────

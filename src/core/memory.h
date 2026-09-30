@@ -169,10 +169,10 @@ public:
     uint64_t mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve,
                                 bool zero_contents,
                                 uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE);
-    // Grow (or shrink) an allocation. When growth would collide with
-    // another tracked allocation, a fresh region is allocated and the
-    // data is copied (mirrors musl's mremap contract).
-    uint64_t mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size);
+    // Resize an allocation, preserving bytes and per-page permissions.
+    // Relocation requires may_move; fixed_addr requests an exact destination.
+    uint64_t mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size,
+                         bool may_move = true, uint64_t fixed_addr = 0);
     // Remove an allocation from tracking AND reclaim its pages + address
     // range so a future mmap_alloc can reuse it (Linux munmap semantics).
     void untrack_allocation(uint64_t addr, uint64_t size);

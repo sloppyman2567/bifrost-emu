@@ -144,17 +144,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                             // allocate a single huge host bounce (OOM).
                             uint64_t off = 0;
                             std::vector<uint8_t> chunk(64 * 1024);
-                            off_t old = ::lseek(host_fd, 0, SEEK_CUR);
                             while (off < want) {
                                 size_t take = (size_t)std::min<uint64_t>(want - off, chunk.size());
-                                ::lseek(host_fd, (off_t)(a5 + off), SEEK_SET);
-                                ssize_t n = ::read(host_fd, chunk.data(), take);
+                                ssize_t n = ::pread(host_fd, chunk.data(), take,
+                                                    static_cast<off_t>(a5 + off));
+                                if (n < 0 && errno == EINTR) continue;
                                 if (n <= 0) break;
                                 mem_.write(addr + off, chunk.data(), (size_t)n);
                                 off += (uint64_t)n;
                                 if ((size_t)n < take) break;
                             }
-                            ::lseek(host_fd, old, SEEK_SET);
                         }
                     }
                     if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
@@ -214,20 +213,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // brk/map_range memory is intentionally not in allocations_, so
             // the helper preserves the special brk carve-out above while
             // making fixed mappings over normal mmap allocations Linux-like.
-            // PROT_NONE with MAP_FIXED: these are guard pages. Track the
-            // reservation so later overlap checks see it, but don't zero
-            // existing pages (preserves musl's metadata).
-            if (prot == 0 && (flags & BIFROST_MAP_FIXED)) { // PROT_NONE + MAP_FIXED
-                if (mem_.mmap_fixed_replace(addr, length, true, false, 0) == 0) {
-                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
-                    return 0;
-                }
-                // Fixed replace discards old bytes — stale JIT translations
-                // of the replaced range must go (see invalidate_range).
-                emu.invalidate_jit_range(addr, length);
-                ret_host(addr);
-                return 0;
-            }
+            // Protection controls access, not the new mapping's contents.
+            // Anonymous replacements must be zeroed even for PROT_NONE;
+            // file-backed replacements must preload before protection applies.
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
             // MAP_NORESERVE (0x4000 on AArch64 asm-generic — NOT 0x40!)
             // / PROT_NONE mappings are VIRTUAL reservations on real
@@ -241,7 +229,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Populate writable first; requested permissions are applied
                 // after file-backed contents have been copied.
                 mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve,
-                    prot != 0, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
+                    true, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
                 if (mapped != 0) emu.invalidate_jit_range(addr, length);
             } else {
                 mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve,
@@ -268,11 +256,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)a5,
                         (unsigned long long)mapped);
             }
-            // Note: musl's mallocng uses MAP_FIXED with PROT_NONE to carve
-            // pages from the brk region, then calls mprotect to make them
-            // usable. The mmap_alloc above preserves existing pages on
-            // MAP_FIXED (see Memory::mmap_alloc), so musl's metadata
-            // written via the brk extension is not zeroed out.
             // If a file fd is given, read its contents in
             // MAP_ANONYMOUS is 0x20 on Linux AArch64. The old code checked
             // 0x2 (MAP_PRIVATE), so file-backed MAP_PRIVATE mmaps (the
@@ -288,17 +271,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         uint64_t want = std::min<uint64_t>(length, avail);
                         uint64_t off = 0;
                         std::vector<uint8_t> chunk(64 * 1024);
-                        off_t old = ::lseek(host_fd, 0, SEEK_CUR);
                         while (off < want) {
                             size_t take = (size_t)std::min<uint64_t>(want - off, chunk.size());
-                            ::lseek(host_fd, (off_t)(a5 + off), SEEK_SET);
-                            ssize_t n = ::read(host_fd, chunk.data(), take);
+                            ssize_t n = ::pread(host_fd, chunk.data(), take,
+                                                static_cast<off_t>(a5 + off));
+                            if (n < 0 && errno == EINTR) continue;
                             if (n <= 0) break;
                             mem_.write(mapped + off, chunk.data(), (size_t)n);
                             off += (uint64_t)n;
                             if ((size_t)n < take) break;
                         }
-                        ::lseek(host_fd, old, SEEK_SET);
                     }
                 }
                 // If the guest is mmap'ing the graphics framebuffer fd,
@@ -401,27 +383,33 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t old_addr = a0;
             uint64_t old_size = a1;
             uint64_t new_size = a2;
-            // a3 = flags (we honor MREMAP_MAYMOVE implicitly — we may
-            //              return a different address whenever we have to)
-            // a4 = new_addr (only used with MREMAP_FIXED; we don't support that)
-            // musl sometimes calls mremap(0, 0, size, MREMAP_MAYMOVE)
-            // as a "malloc via mremap" idiom (especially in the
-            // meta_area init path). Treat that as a plain mmap.
-            if (old_addr == 0 && old_size == 0) {
-                uint64_t mapped = mem_.mmap_alloc(new_size, 0);
-                if (mapped == 0) {
-                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
-                    return 0;
-                }
-                if (dbg().trace_mmap) {
-                    fprintf(stderr, "[mremap(0,0,%lu) → 0x%llx]\n",
-                            (unsigned long)new_size,
-                            (unsigned long long)mapped);
-                }
-                ret_host(mapped);
+            constexpr uint64_t MAYMOVE = 1;
+            constexpr uint64_t FIXED = 2;
+            const bool fixed = (a3 & FIXED) != 0;
+            if ((a3 & ~(MAYMOVE | FIXED)) || (old_addr & Memory::PAGE_MASK) ||
+                !old_size || !new_size ||
+                old_size > UINT64_MAX - Memory::PAGE_MASK ||
+                new_size > UINT64_MAX - Memory::PAGE_MASK ||
+                (fixed && (!(a3 & MAYMOVE) || (a4 & Memory::PAGE_MASK)))) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
             }
-            uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size);
+            const uint64_t old_len = (old_size + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+            const uint64_t new_len = (new_size + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+            if (old_addr > UINT64_MAX - old_len ||
+                (fixed && (a4 > UINT64_MAX - new_len ||
+                 (old_addr < a4 + new_len && a4 < old_addr + old_len)))) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
+            // Address zero cannot be mapped by Memory; do not confuse it
+            // with the helper's sentinel for an unspecified destination.
+            if (fixed && a4 == 0) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                return 0;
+            }
+            uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size,
+                (a3 & MAYMOVE) != 0, fixed ? a4 : 0);
             if (result == 0) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;

@@ -1117,9 +1117,10 @@ uint64_t Memory::mmap_alloc_callback_stack(uint64_t usable_size) {
                          GUEST_PROT_READ | GUEST_PROT_WRITE);
     return base + P;  // usable base; sp starts at base + P + usable
 }
-uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size) {
-    if (old_addr == 0 || old_size == 0) return 0;
-    if (new_size == 0) new_size = PAGE_SIZE;
+uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size,
+                             bool may_move, uint64_t fixed_addr) {
+    if (old_addr == 0 || old_size == 0 || new_size == 0 ||
+        (old_addr & PAGE_MASK) || (fixed_addr && !may_move)) return 0;
     if (old_size > MAX_MMAP_LENGTH || new_size > MAX_MMAP_LENGTH ||
         old_size > UINT64_MAX - PAGE_MASK ||
         new_size > UINT64_MAX - PAGE_MASK) return 0;
@@ -1129,11 +1130,15 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     uint64_t new_end;
     if (__builtin_add_overflow(old_addr, old_aligned, &old_end) ||
         __builtin_add_overflow(old_addr, new_aligned, &new_end) ||
-        !is_valid_guest_range(old_addr, std::max(old_aligned, new_aligned)))
+        !is_valid_guest_range(old_addr, fixed_addr ? old_aligned :
+                              std::max(old_aligned, new_aligned)))
         return 0;
+    if (fixed_addr && ((fixed_addr & PAGE_MASK) ||
+        !is_valid_guest_range(fixed_addr, new_aligned) ||
+        (old_addr < fixed_addr + new_aligned && fixed_addr < old_end))) return 0;
     // Shrink: keep the same address, reclaim the tail pages + address
     // range so repeated realloc-shrink doesn't march the page cap.
-    if (new_aligned <= old_aligned) {
+    if (!fixed_addr && new_aligned <= old_aligned) {
         std::unique_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(old_addr);
         if (it == allocations_.end() || it->second != old_aligned) return 0;
@@ -1209,7 +1214,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (old_page_prots.size() != old_aligned / PAGE_SIZE) return 0;
     // Any existing VMA, including map_range-only images/guards, blocks an
     // in-place extension. Allocation tracking alone misses those mappings.
-    if (range_overlaps_locked(extra_start, extra_end))
+    if (fixed_addr || range_overlaps_locked(extra_start, extra_end))
         can_grow_in_place = false;
     if (can_grow_in_place) {
         // OOM check first: count above-window pages that would be added.
@@ -1262,11 +1267,14 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     // Collision detected: allocate a fresh region, copy the data, and
     // return the new address. We must release the unique lock here
     // because mmap_alloc/read/write all acquire it themselves.
+    if (!may_move) return 0;  // leave the original mapping untouched
     g.unlock();
-    uint64_t new_addr = mmap_alloc(new_size, 0, false,
-        GUEST_PROT_READ | GUEST_PROT_WRITE);
+    uint64_t new_addr = fixed_addr
+        ? mmap_fixed_replace(fixed_addr, new_size, false, true,
+                             GUEST_PROT_READ | GUEST_PROT_WRITE)
+        : mmap_alloc(new_size, 0, false, GUEST_PROT_READ | GUEST_PROT_WRITE);
     if (new_addr == 0) return 0;  // oom: keep old mapping intact
-    const size_t copy_size = static_cast<size_t>(std::min(old_size, new_size));
+    const size_t copy_size = static_cast<size_t>(std::min(old_aligned, new_aligned));
     if (copy_size > 0) {
         std::vector<uint8_t> buf(copy_size);
         std::unique_lock<std::shared_mutex> copy_lock(mu_);
