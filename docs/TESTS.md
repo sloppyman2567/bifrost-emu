@@ -8,12 +8,12 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Test inventory
 
-The fully provisioned suite contains 240 configured test runs:
+The fully provisioned suite contains 242 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 64 | Focused instruction/JIT regressions in `ctest/` |
-| Integration | 85 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
+| Unit | 65 | Focused instruction/JIT regressions in `ctest/` |
+| Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
 | Real-world static | 49 | BusyBox and Toybox command checks; BusyBox may be fetched by the runner |
@@ -21,10 +21,10 @@ The fully provisioned suite contains 240 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **240** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **242** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 218 configured runs (213 with `--quick`). These
+tests are not selected, for 220 configured runs (215 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 
@@ -85,6 +85,33 @@ also passed JIT verification and memory verification. Applying those settings
 to threaded zstd logged divergences and exceeded its 90-second compression
 timeout, so that diagnostic run remains unresolved. See [zstd.md](zstd.md)
 for the two fixes, fixture scope, and verification limits.
+
+`ctest/jit_memory_guard_address.c` exercises cached constant addresses across
+permission guards, stack saves, pointer loads, and a conditional exit. It
+checks the value after repeated calls, including JIT verification and the
+interpreter.
+
+## SDL fullscreen regression
+
+`ctest_real/test_sdl_fullscreen.c` checks SDL2 desktop/current display-mode
+status returns and caller-owned output structs, invalid display indices,
+three fullscreen/windowed recreation cycles, fullscreen flag transitions,
+restored dimensions, and resize-event payloads. It exercises the sequence used
+by Neverball to save its dimensions. Run it on a desktop, or use SDL's dummy
+video driver for a bounded headless check:
+
+```bash
+make cross SRC=ctest_real/test_sdl_fullscreen.c OUT=ctest_real/test_sdl_fullscreen.elf
+SDL_VIDEODRIVER=dummy ./scripts/run_tests.sh --filter '^sdl_fullscreen$'
+SDL_VIDEODRIVER=dummy ./scripts/run_tests.sh --no-jit --filter '^sdl_fullscreen$'
+```
+
+The regression creates hidden windows so compositor placement rules and an
+interactive game do not interfere with its requested-size assertions.
+It returns exit 77 when SDL video cannot initialize. The pre-fix build fails
+because the mode-query thunk does not fill the guest's dimensions. The repaired
+build passes with the dummy driver and real desktop in both execution modes.
+See [neverball.md](neverball.md) for the root cause and remaining input issues.
 
 ## Running tests
 

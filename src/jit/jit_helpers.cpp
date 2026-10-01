@@ -74,6 +74,10 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     constexpr uint16_t scratch = (1u << RAX) | (1u << RCX) | (1u << RDX);
     flush_invalidate_host_regs(scratch);
     load_vreg_to_reg(RAX, address);
+    // The guard's arithmetic must not leak into the memory emitter. Keep
+    // the entry values on both exits: an address may still be reused by
+    // the emitter, while the guard changes it into a page index below.
+    emit_push(RAX); emit_push(RCX); emit_push(RDX);
     if (offset) {
         emit_mov_imm64(RDX, offset);
         emit_add_reg(RAX, RDX);
@@ -104,6 +108,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     const size_t cold_offset = code_buf_used_;
     for (size_t p : cold)
         patch_jcc_rel32(p, static_cast<int32_t>(cold_offset - (p + 6)));
+    emit_pop(RDX); emit_pop(RCX); emit_pop(RAX);
     flush_all_vregs_keep();
     // A self-loop/region may carry a dirty architectural pin from a write
     // later in the previous iteration, even when it is statically clean
@@ -124,6 +129,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
     emit_ret();
     patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
+    emit_pop(RDX); emit_pop(RCX); emit_pop(RAX);
 }
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,

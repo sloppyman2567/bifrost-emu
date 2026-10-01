@@ -186,16 +186,12 @@ struct GraphicThunkImpl {
     std::mutex mu;
     // Leaf lock for mutable dispatch-time state (string-cache ring,
     // sdl_tex_sizes_, glfw_cbs_ + last-state maps, error slots,
-    // display-mode cache). Rules: never held across the guest
+    // query state). Rules: never held across the guest
     // borrow-CPU runner (re-entrant dispatch), host GL/SDL calls, or
     // Memory::* (own locks) — snapshot under it, act outside, like the
     // sync/UNMAP/wake sites already do. Separate from mu so registry
     // paths never interact with per-call state.
     std::mutex state_mu;
-    // Display-mode guest blocks, one per symbol (replaces the old
-    // function-static cache, which handed one Memory's guest address to
-    // a second emulator instance in-process).
-    std::unordered_map<std::string, uint64_t> display_mode_cache_;
     // 1.5.4-alpha: GL state tracker for consistent query results.
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
     // 1.5.4-alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
@@ -931,55 +927,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
         if (pol == thunk::Policy::NONE && impl_ && impl_->mem) {
-            // SDL2 display-mode getters RETURN a const SDL_DisplayMode*
-            // (host static memory) — no out-param. Copy the 24-byte struct
-            // into a cached guest block so the guest can deref it.
-            // SDL_DisplayMode { Uint32 format; int w, h, refresh_rate;
-            //                   void *driverdata; } = 24 bytes.
+            // SDL2 display-mode queries are int(index, SDL_DisplayMode *out).
+            // The generic pointer path writes the 24-byte LP64 struct into
+            // the caller's buffer and returns the host status unchanged.
+            // Never substitute the SDL3 pointer-returning API here.
             const char* nm = entry.name.c_str();
-            if (strcmp(nm, "SDL_GetCurrentDisplayMode") == 0 ||
-                strcmp(nm, "SDL_GetDesktopDisplayMode") == 0) {
-                // On sdl2-compat hosts the resolved impl may be SDL3-
-                // flavored: bool f(SDL_DisplayID, SDL_DisplayMode* out).
-                // ALWAYS pass an explicit output buffer — a one-arg call
-                // makes it write through whatever sits in RSI (observed:
-                // our own strcmp literal, → SIGSEGV inside libSDL2).
-                // SDL2 ABI returns const SDL_DisplayMode* (never 0/1);
-                // SDL3 ABI returns bool and fills buf.
-                using ModeFn2 = void* (*)(int, void*);
-                auto fn = reinterpret_cast<ModeFn2>(entry.host_fn);
-                if (!fn) { cpu.regs[0] = 0; return 0; }
-                alignas(8) uint8_t buf[32];
-                std::memset(buf, 0, sizeof buf);
-                void* m = fn(static_cast<int>(cpu.regs[0]), buf);
-                const void* src;
-                if (reinterpret_cast<uintptr_t>(m) <= 1) {
-                    // SDL3 flavor: bool result + filled buf.
-                    src = m ? buf : nullptr;
-                } else {
-                    src = m;  // SDL2 flavor: direct pointer
-                }
-                if (!src) { cpu.regs[0] = 0; return 0; }
-                // One reused guest block per symbol (games poll per frame).
-                // Instance field (was function-static: leaked one Memory's
-                // guest address into a second emulator in-process).
-                uint64_t g = 0;
-                {
-                    std::lock_guard<std::mutex> lk(impl_->state_mu);
-                    auto it = impl_->display_mode_cache_.find(nm);
-                    if (it != impl_->display_mode_cache_.end()) {
-                        g = it->second;
-                    } else {
-                        g = impl_->mem->mmap_alloc(32);
-                        if (g) impl_->display_mode_cache_[nm] = g;
-                    }
-                }
-                if (!g) { cpu.regs[0] = 0; return 0; }  // alloc failed
-                try { impl_->mem->write(g, src, 24); }
-                catch (...) { cpu.regs[0] = 0; return 0; }
-                cpu.regs[0] = g;
-                return 0;
-            }
             // SDL_RWFromMem / SDL_RWFromConstMem(mem, size): SDL KEEPS the
             // mem pointer in the RWops and reads it on every later
             // SDL_LoadBMP_RW/etc. A temporary per-call bounce buffer dies
@@ -3229,8 +3181,8 @@ void GraphicThunk::register_known_symbols_() {
     // SDL symbols MUST resolve through the specific library handle:
     // on sdl2-compat hosts libSDL3 is also in the global scope and
     // exports same-named symbols with SDL3 ABI (e.g.
-    // SDL_GetCurrentDisplayMode(displayID, SDL_DisplayMode* out) —
-    // out-param flavor). RTLD_DEFAULT can pick those, and calling them
+    // SDL_GetCurrentDisplayMode returns a pointer in SDL3, whereas SDL2
+    // takes an output buffer). RTLD_DEFAULT can pick those, and calling them
     // with the SDL2 ABI writes through stale registers. A direct handle
     // pins resolution to the real SDL2 ABI library.
     void* sdl_handle = nullptr;

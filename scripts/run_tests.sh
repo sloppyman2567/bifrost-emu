@@ -24,9 +24,9 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (240 test runs):
-#   Unit         64  — ctest/*.elf focused regressions
-#   Integration  85  — ctest_real/*.elf + test/*.elf
+# Fully provisioned suite (242 test runs):
+#   Unit         65  — ctest/*.elf focused regressions
+#   Integration  86  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   49  — static BusyBox/Toybox commands
@@ -34,7 +34,7 @@
 #   Dynamic      15  — musl/glibc tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 213 runs (208 with --quick); fixtures may be skipped.
+# Without a rootfs: 220 runs (215 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -283,6 +283,7 @@ UNIT_TESTS=(
     "test_malloc|ctest/test_malloc.elf||5|malloc test done"
     "test_simd_arith|ctest/test_simd_arith.elf||10|ALL PASS"
     "tier2_smov|ctest/jit_tier2_smov.elf||10|ALL PASS|JIT"
+    "memory_guard_address|ctest/jit_memory_guard_address.elf||15|ALL PASS"
     "bitfield_regalloc|ctest/jit_bitfield_regalloc.elf||10|ALL PASS"
     "ccmp_forward|ctest/jit_ccmp_forward.elf||10|ALL PASS"
     "variable_shift_source|ctest/jit_variable_shift_source.elf||10|ALL PASS"
@@ -370,6 +371,8 @@ UNIT_TESTS=(
 
 # Integration tests (ctest_real/ — real-world test programs)
 INTEGRATION_TESTS=(
+    # SDL2 mode-query ABI, fullscreen recreation, and resize-event delivery.
+    "sdl_fullscreen|ctest_real/test_sdl_fullscreen.elf||30|ALL PASS"
     # Host validator checks guest compression and decompression in both engines.
     "zstd_compression|scripts/run_zstd_regression.sh||120|ZSTD REGRESSION PASSED|HOST_JIT"
     "audio_test|ctest_real/audio_test.elf||10|audio_test: done"
