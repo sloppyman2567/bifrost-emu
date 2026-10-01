@@ -77,3 +77,13 @@ in-block calls, and memory side effects have documented verification limits,
 so pair it with a focused result check when relevant. CoreMark is a useful
 compute workload, but it does not replace application workloads or targeted
 correctness regressions.
+
+## Conditional compares and register forwarding
+
+CCMP and CCMN only define NZCV flags. Their IR `dest=0` is a placeholder,
+not a write to X0. `optimize_ir()` must preserve X0's forwarded value across
+these operations; treating the placeholder as a destination lets a later CSEL
+read stale architectural state when dead-store elimination removes an earlier
+STORE_REG. `ctest/jit_ccmp_forward.c` covers the FreeType rasterizer pattern
+that exposed this as missing glyph pixels in Neverball. See
+[the Neverball validation notes](neverball.md) for the application repro.

@@ -579,7 +579,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 break;
             case IROp::CSEL: case IROp::CSINC:
             case IROp::CSINV: case IROp::CSNEG:
-            case IROp::CCMP:
             case IROp::BFM: case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: {
                 // constant-fold UBFM/SBFM when src1 is
                 // a known constant. These are very common (SXTB/SXTH/SXTW/
@@ -644,7 +643,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                     consts.set(inst.dest, result);
                     block.fold_subst++;
                 }
-                // CSEL/CSINC/CSINV/CSNEG/CCMP are native in the JIT (no
+                // CSEL/CSINC/CSINV/CSNEG are native in the JIT (no
                 // CALL_INTERP), so they only need dest invalidation — this
                 // allows the optimizer to keep caching other registers
                 // across these ops, improving code quality.
@@ -660,6 +659,12 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 last_def[inst.dest] = i;
                 break;
             }
+            case IROp::CCMP:
+                // CCMP/CCMN only write flags. dest=0 is a placeholder,
+                // not a definition of X0: replacing its forwarded value
+                // with v0 makes a later CSEL read stale architectural state
+                // when DSE removes the intervening STORE_REG.
+                break;
             case IROp::CALL_INTERP:
             case IROp::SVC:
             case IROp::BL_CALL:  // callee may modify any reg

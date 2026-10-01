@@ -26,6 +26,7 @@
 # RET     : '-' = plain (void/int, host ret written to x0)
 #           str = host returns const char* -> copy into the guest string cache
 # POLICY  : named dispatch behavior (one switch arm each, no name compares):
+#             SDL_SURFACE    bridge guest surfaces, formats, palettes and pixels
 #             -              default generic path
 #             SHADER_SOURCE  glShaderSource nested string-array marshalling
 #             QUERY          GL state queries intercepted by GLStateTracker
@@ -483,9 +484,9 @@ SDL_GL_SetSwapInterval    SDL    i             -     -              -
 SDL_PollEvent             SDL    p             -     -              -   # arg0: SDL_Event *event
 SDL_WaitEvent             SDL    p             -     -              -
 SDL_PushEvent             SDL    p             -     -              -
-SDL_GetWindowSurface      SDL    i             -     -              -
-SDL_UpdateWindowSurface   SDL    i             -     -              -
-SDL_UpdateWindowSurfaceRects SDL ipi           -     -              -
+SDL_GetWindowSurface               SDL    i             -     SDL_SURFACE        -
+SDL_UpdateWindowSurface            SDL    i             -     SDL_SURFACE        -
+SDL_UpdateWindowSurfaceRects       SDL    ipi           -     SDL_SURFACE        -
 SDL_SetWindowTitle        SDL    ip            -     -              -   # arg1: title string
 SDL_GetWindowTitle        SDL    i             str   -              -
 SDL_SetWindowSize         SDL    iii           -     -              -
@@ -519,24 +520,24 @@ SDL_RenderClear           SDL    i             -     -              -
 SDL_RenderPresent         SDL    i             -     PRESENT        -
 SDL_RenderCopy            SDL    iipp          -     -              -   # args2/3: srcrect,dstrect
 SDL_CreateTexture         SDL    iiiii         -     TRACK_TEX      -
-SDL_CreateTextureFromSurface SDL ii            -     -              -
+SDL_CreateTextureFromSurface       SDL    ii            -     SDL_SURFACE        -
 SDL_DestroyTexture        SDL    i             -     UNTRACK_TEX    -
 SDL_UpdateTexture         SDL    ipzi          -     -              PITCH_H # arg1 rect, arg2 pixels, arg3 pitch
 SDL_RenderSetViewport     SDL    ip            -     -              -
 SDL_RenderSetLogicalSize  SDL    iii           -     -              -
 SDL_SetRenderDrawBlendMode SDL   ii            -     -              -
 SDL_SetTextureBlendMode   SDL    ii            -     -              -
-SDL_MapRGB                SDL    iiii          -     -              -
-SDL_MapRGBA               SDL    iiiii         -     -              -
-SDL_GetRGB                SDL    iippp         -     -              -
-SDL_GetRGBA               SDL    iipppp        -     -              -
-SDL_CreateRGBSurface      SDL    iiiiiiii      -     -              -
-SDL_CreateRGBSurfaceWithFormat SDL iiiii       -     -              -
-SDL_FreeSurface           SDL    i             -     -              -
-SDL_SetColorKey           SDL    ii            -     -              -
-SDL_SetSurfaceAlphaMod    SDL    ii            -     -              -
-SDL_LoadBMP_RW            SDL    ii            -     -              -   # arg0: SDL_RWops*
-SDL_SaveBMP_RW            SDL    iii           -     -              -
+SDL_MapRGB                         SDL    iiii          -     SDL_SURFACE        -
+SDL_MapRGBA                        SDL    iiiii         -     SDL_SURFACE        -
+SDL_GetRGB                         SDL    iippp         -     SDL_SURFACE        -
+SDL_GetRGBA                        SDL    iipppp        -     SDL_SURFACE        -
+SDL_CreateRGBSurface               SDL    iiiiiiii      -     SDL_SURFACE        -
+SDL_CreateRGBSurfaceWithFormat     SDL    iiiii         -     SDL_SURFACE        -
+SDL_FreeSurface                    SDL    i             -     SDL_SURFACE        -
+SDL_SetColorKey                    SDL    iii           -     SDL_SURFACE        -
+SDL_SetSurfaceAlphaMod             SDL    ii            -     SDL_SURFACE        -
+SDL_LoadBMP_RW                     SDL    ii            -     SDL_SURFACE        - # arg0: SDL_RWops*
+SDL_SaveBMP_RW                     SDL    iii           -     SDL_SURFACE        -
 SDL_RWFromFile            SDL    pp            -     -              -   # args0/1: file,mode strings
 SDL_RWFromMem             SDL    pi            -     -              -   # arg0: mem ptr
 SDL_RWclose               SDL    i             -     -              -
@@ -1189,15 +1190,15 @@ SDL_SetWindowGrab          SDL    ii            -     -              -
 SDL_ShowSimpleMessageBox   SDL    ippi          -     -              -   # stub: never blocks
 SDL_StartTextInput         SDL    -             -     -              -
 SDL_StopTextInput          SDL    -             -     -              -
-SDL_HasColorKey            SDL    i             -     -              -
-SDL_FillRect               SDL    ipii          -     -              -
-SDL_ConvertSurface         SDL    iii           -     -              -
-SDL_ConvertSurfaceFormat   SDL    iii           -     -              -
-SDL_DuplicateSurface       SDL    i             -     -              -
-SDL_CreateRGBSurfaceFrom   SDL    piiiiiii      -     -              -   # pixels,w,h,depth,pitch,masks
-SDL_CreateRGBSurfaceWithFormatFrom SDL piiii    -     -              -
-SDL_SetSurfaceBlendMode    SDL    iii           -     -              -
-SDL_UpperBlit              SDL    ipip          -     -              -
+SDL_HasColorKey                    SDL    i             -     SDL_SURFACE        -
+SDL_FillRect                       SDL    ipi           -     SDL_SURFACE        -
+SDL_ConvertSurface                 SDL    iii           -     SDL_SURFACE        -
+SDL_ConvertSurfaceFormat           SDL    iii           -     SDL_SURFACE        -
+SDL_DuplicateSurface               SDL    i             -     SDL_SURFACE        -
+SDL_CreateRGBSurfaceFrom           SDL    piiiiiiii     -     SDL_SURFACE        - # pixels,w,h,depth,pitch,masks
+SDL_CreateRGBSurfaceWithFormatFrom SDL    piiiii        -     SDL_SURFACE        -
+SDL_SetSurfaceBlendMode            SDL    ii            -     SDL_SURFACE        -
+SDL_UpperBlit                      SDL    ipip          -     SDL_SURFACE        -
 SDL_LoadFile_RW            SDL    ip            -     -              -   # stub: host-alloc return
 SDL_RWFromConstMem         SDL    pi            -     -              -
 SDL_RWsize                 SDL    i             -     -              -
@@ -1231,7 +1232,7 @@ SDL_GetCurrentDisplayMode   SDL    ip             -     -              -
 SDL_SetWindowDisplayMode    SDL    ip            -     -              -
 SDL_GetWindowPixelFormat    SDL    i             -     -              -
 SDL_GameControllerAddMappingsFromRW SDL ii          -     -              -   # RWops host handle round-trips verbatim
-SDL_SetWindowIcon           SDL    ip            -     SDL_STUB0      -   # guest SDL_Surface.pixels is a guest ptr
+SDL_SetWindowIcon                  SDL    ii            -     SDL_SURFACE        -
 SDL_GetWindowWMInfo         SDL    ip            -     SDL_STUB0      -   # union embeds raw host pointers
 SDL_SetEventFilter          SDL    pp            -     SDL_EVENT_FILTER -
 SDL_GetEventFilter          SDL    pp            -     SDL_EVENT_FILTER -
@@ -2007,8 +2008,8 @@ SDL_GL_GetSwapInterval     SDL    -             -     -              -
 SDL_GetPixelFormatName     SDL    i             str   -              -
 SDL_HasClipboardText       SDL    -             -     -              -
 SDL_JoystickNumHats        SDL    i             -     -              -
-SDL_LockSurface            SDL    i             -     -              -
-SDL_LowerBlit              SDL    ipip          -     -              -
+SDL_LockSurface                    SDL    i             -     SDL_SURFACE        -
+SDL_LowerBlit                      SDL    ipip          -     SDL_SURFACE        -
 SDL_QueryTexture           SDL    ipppp         -     -              -
 SDL_ReadBE32               SDL    i             -     -              -
 SDL_ReadLE16               SDL    i             -     -              -
@@ -2020,10 +2021,12 @@ SDL_RenderFillRects        SDL    ipi           -     -              -
 SDL_RenderReadPixels       SDL    ipipi         -     -              -
 SDL_RenderSetClipRect      SDL    ip            -     -              -
 SDL_RenderSetScale         SDL    iff           -     -              -
-SDL_SetSurfaceColorMod     SDL    iiii          -     -              -
+SDL_SetSurfaceColorMod             SDL    iiii          -     SDL_SURFACE        -
 SDL_SetTextureAlphaMod     SDL    ii            -     -              -
 SDL_SetTextureColorMod     SDL    iiii          -     -              -
 SDL_SetWindowGammaRamp     SDL    ippp          -     -              -
 SDL_SetWindowResizable     SDL    ii            -     -              -
-SDL_UnlockSurface          SDL    i             -     -              -
+SDL_UnlockSurface                  SDL    i             -     SDL_SURFACE        -
 SDL_iconv_open             SDL    pp            -     -              -
+
+# SDL public-struct surface APIs.

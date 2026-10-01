@@ -283,6 +283,7 @@ UNIT_TESTS=(
     "test_malloc|ctest/test_malloc.elf||5|malloc test done"
     "test_simd_arith|ctest/test_simd_arith.elf||10|ALL PASS"
     "tier2_smov|ctest/jit_tier2_smov.elf||10|ALL PASS|JIT"
+    "ccmp_forward|ctest/jit_ccmp_forward.elf||10|ALL PASS"
     "test_tls_static|ctest/test_tls_static.elf||10|ALL PASS"
     # Multi-threaded pthread test (default: 4 threads, fib(35)).
     # Exercises clone/clone3 + futex (FUTEX_WAIT/WAKE/REQUEUE) +

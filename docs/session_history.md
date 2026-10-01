@@ -2,6 +2,17 @@
 
 moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS.md.
 
+## Session History (2026-10-01) — Neverball font corruption fixed
+
+- Fixed two independent font corruption paths: flags-only CCMP/CCMN incorrectly
+  replaced X0's forwarding entry in the JIT optimizer, and the SDL surface
+  bridge rejected Neverball's stack-copied pixel format before texture upload.
+- Added conditional-compare and copied SDL format/palette regressions. The
+  saved pre-fix binary fails both controls; fixed JIT and interpreter pass.
+- Verified matching SDL_ttf glyph pixels and a readable in-game menu. The user
+  confirmed interactive Neverball works. Full reproduction steps, scope, and
+  validation limits are in [docs/neverball.md](neverball.md).
+
 ## Session History (2026-08-21) — graphics-thunk review pass (bounce padding + depth range)
 
 - **Review of the uncommitted gl_state/thunk/memory.h diff found THREE real

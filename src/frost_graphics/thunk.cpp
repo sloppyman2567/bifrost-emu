@@ -82,6 +82,7 @@
 #include "frost/gl_state.hpp"       // 1.5.4-alpha: GLStateTracker
 #include "frost/android_surface.hpp" // Android NativeActivity surface layer
 #include "opgen_thunk.hpp"          // 1.5.4-alpha: symbol signature table
+#include "sdl_surface_bridge.hpp"
 #include "thunk_common.hpp"         // shared SymbolEntry + trampoline encodings
 #include "debug_flags.h"            // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
@@ -133,6 +134,9 @@ struct GraphicThunkImpl {
     // pointer inside the RWops beyond the dispatch call, so out-of-window
     // sources need a host copy that outlives it. Freed at shutdown.
     std::vector<void*> rw_kept_;
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    SdlSurfaceBridge surface_bridge;
+#endif
     // The trampoline page: a single 64 KiB region of guest memory.
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
@@ -824,6 +828,21 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
+
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    if (entry.spec && entry.spec->policy == thunk::Policy::SDL_SURFACE) {
+        cpu.regs[0] = impl_->surface_bridge.dispatch(*impl_->mem, cpu, entry.name);
+        return 0;
+    }
+    if (entry.name == "SDL_DestroyWindow" || entry.name == "SDL_SetWindowSize")
+        impl_->surface_bridge.forget_window(*impl_->mem, cpu.regs[0]);
+    if (entry.name == "SDL_Quit") impl_->surface_bridge.clear(*impl_->mem);
+#else
+    if (entry.spec && entry.spec->policy == thunk::Policy::SDL_SURFACE) {
+        cpu.regs[0] = 0;
+        return 0;  // no SDL ABI support: never expose a host struct
+    }
+#endif
 
     // ── SDL_mixer policies ────────────────────────────────────────────
     // SDL_mixer is never linked into the emulator, so every Mix_* entry's
