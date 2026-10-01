@@ -87,3 +87,12 @@ read stale architectural state when dead-store elimination removes an earlier
 STORE_REG. `ctest/jit_ccmp_forward.c` covers the FreeType rasterizer pattern
 that exposed this as missing glyph pixels in Neverball. See
 [the Neverball validation notes](neverball.md) for the application repro.
+
+## Shift source preservation and operand width
+
+Variable shifts and rotates must preserve a live count vreg. The x86 CL forms
+mask the effective count in hardware; an explicit AND on the cached RCX value
+destroys source bits that a later IR instruction may read. Keep every W-form
+shift at width 32, including shifted operands produced by `apply_shift()` and
+constant folding. See [zstd regression notes](zstd.md) and the
+`jit_variable_shift_source` / `jit_shifted_operand_width` regressions.

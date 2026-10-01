@@ -315,11 +315,6 @@ void FrostJIT::emit_sub_rsp_imm8(uint8_t n) {
 void FrostJIT::emit_add_rsp_imm8(uint8_t n) {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(n);
 }
-// and cl, imm8 — used to mask shift counts to 0..63 / 0..31.
-// Encoding: REX.W 83 E1 NN.
-void FrostJIT::emit_and_cl_imm8(uint8_t mask) {
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(mask);
-}
 // pushfq / popfq — save/restore x86 RFLAGS.
 // Encoding: 0x9C / 0x9D.
 // Used around C calls to preserve pending flag state, and as part of

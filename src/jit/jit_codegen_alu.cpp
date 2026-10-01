@@ -244,8 +244,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             // Force src2 into RCX (evict current occupant if any).
             force_vreg_to_reg(inst.src2, RCX);
-            // emit_shift: mask CL to 6 bits (x86 shift counts are mod 64)
-            // and emit `d = d shift_cl` for the current inst.op.
+            // x86 shifts/rotates already mask the count to 5/6 bits.
+            // Preserve RCX: it still holds src2's cached, possibly live
+            // value (zstd packs Huffman bits above the count in this value).
             auto emit_shift = [&](int d) {
                 bool is_32bit = (inst.gpr_shift_params().width == 32);
                 int kind = (inst.op == IROp::SHL) ? 4
@@ -259,12 +260,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     // 6 bits silently miscompiles counts >= 32: glibc
                     // _int_malloc's binmap `lsl w8,w2,w8` with bin 107
                     // produced 0 instead of 0x800 → shredded guest heap.)
-                    emit_and_cl_imm8(0x1F);  // mask to 5 bits for 32-bit
                     emit_byte(rex(false, false, false, d >= 8));
                     emit_byte(0xD3);
                     emit_byte(modrm(3, kind, d & 7));
                 } else {
-                    emit_and_cl_imm8(0x3F);
                     emit_shift_cl(d, kind);
                 }
             };

@@ -294,12 +294,12 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects 232 test runs: 57 unit,
-84 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
+With all fixtures available, the runner selects 240 test runs: 64 unit,
+85 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
 15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
 a configured rootfs; the real-world dynamic binaries are part of the
 real-world fixture set. `--quick` skips the five benchmarks. Without a
-rootfs, the runner selects 210 runs (205 with `--quick`). Missing guest
+rootfs, the runner selects 218 runs (213 with `--quick`). Missing guest
 fixtures are reported as skips in developer mode; CI uses `--strict` to
 turn missing selected fixtures into failures. Display/driver exit-77 skips
 remain environment-dependent. See

@@ -24,9 +24,9 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (235 test runs):
-#   Unit         60  — ctest/*.elf focused regressions
-#   Integration  84  — ctest_real/*.elf + test/*.elf
+# Fully provisioned suite (240 test runs):
+#   Unit         64  — ctest/*.elf focused regressions
+#   Integration  85  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   49  — static BusyBox/Toybox commands
@@ -283,7 +283,10 @@ UNIT_TESTS=(
     "test_malloc|ctest/test_malloc.elf||5|malloc test done"
     "test_simd_arith|ctest/test_simd_arith.elf||10|ALL PASS"
     "tier2_smov|ctest/jit_tier2_smov.elf||10|ALL PASS|JIT"
+    "bitfield_regalloc|ctest/jit_bitfield_regalloc.elf||10|ALL PASS"
     "ccmp_forward|ctest/jit_ccmp_forward.elf||10|ALL PASS"
+    "variable_shift_source|ctest/jit_variable_shift_source.elf||10|ALL PASS"
+    "shifted_operand_width|ctest/jit_shifted_operand_width.elf||10|shifted_operand_width: PASS"
     "test_tls_static|ctest/test_tls_static.elf||10|ALL PASS"
     # Multi-threaded pthread test (default: 4 threads, fib(35)).
     # Exercises clone/clone3 + futex (FUTEX_WAIT/WAKE/REQUEUE) +
@@ -367,6 +370,8 @@ UNIT_TESTS=(
 
 # Integration tests (ctest_real/ — real-world test programs)
 INTEGRATION_TESTS=(
+    # Host validator checks guest compression and decompression in both engines.
+    "zstd_compression|scripts/run_zstd_regression.sh||120|ZSTD REGRESSION PASSED|HOST_JIT"
     "audio_test|ctest_real/audio_test.elf||10|audio_test: done"
     "div_loop|ctest_real/div_loop.elf||5"
     "div_loop2|ctest_real/div_loop2.elf||5"
@@ -812,7 +817,7 @@ run_test() {
     # --no-jit, skip it. This is for tests that exercise code paths
     # the interpreter doesn't handle correctly (e.g., signal frame
     # stack corruption).
-    if [ "$mode" = "JIT" ] && [[ " ${EMU_FLAGS[*]} " == *" --no-jit "* ]]; then
+    if { [ "$mode" = "JIT" ] || [ "$mode" = "HOST_JIT" ]; } && [[ " ${EMU_FLAGS[*]} " == *" --no-jit "* ]]; then
         SKIP_COUNT=$((SKIP_COUNT + 1))
         if [ "$VERBOSE" = "1" ]; then
             echo -e "  ${C_YLW}SKIP${C_RST}    $name"
@@ -879,6 +884,14 @@ run_test() {
     # exit code from timeout (PIPESTATUS is lost inside command
     # substitutions which run in subshells).
     local tmpout tmpin=""
+    local -a test_runner=("$EMU" "${EMU_FLAGS[@]}" "${test_command[@]}")
+    local -a test_env=("${RUN_ENV[@]}")
+    if [ "$mode" = "HOST_JIT" ]; then
+        # Host harnesses invoke the requested emulator themselves. This
+        # zstd harness checks both engines, so run it once in the JIT suite.
+        test_runner=(bash "${test_command[@]}")
+        test_env+=("BIFROST_EMU=$EMU")
+    fi
     tmpout=$(mktemp "${TMPDIR:-/tmp}/bifrost-test-out.XXXXXX") || {
         record_failure "$name" "could not create test output file"
         return 0
@@ -891,11 +904,11 @@ run_test() {
         }
         TEMP_FILES+=("$tmpin")
         printf '%b' "$stdin" > "$tmpin"
-        env "${RUN_ENV[@]}" timeout -s KILL "$tout" "$EMU" \
-            "${EMU_FLAGS[@]}" "${test_command[@]}" < "$tmpin" > "$tmpout" 2>&1
+        env "${test_env[@]}" timeout -s KILL "$tout" \
+            "${test_runner[@]}" < "$tmpin" > "$tmpout" 2>&1
     else
-        env "${RUN_ENV[@]}" timeout -s KILL "$tout" "$EMU" \
-            "${EMU_FLAGS[@]}" "${test_command[@]}" </dev/null > "$tmpout" 2>&1
+        env "${test_env[@]}" timeout -s KILL "$tout" \
+            "${test_runner[@]}" </dev/null > "$tmpout" 2>&1
     fi
     rc=$?
     output=$(tr -d '\0' < "$tmpout")

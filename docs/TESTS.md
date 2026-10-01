@@ -8,12 +8,12 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Test inventory
 
-The fully provisioned suite contains 235 configured test runs:
+The fully provisioned suite contains 240 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 60 | Focused instruction/JIT regressions in `ctest/` |
-| Integration | 84 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
+| Unit | 64 | Focused instruction/JIT regressions in `ctest/` |
+| Integration | 85 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
 | Real-world static | 49 | BusyBox and Toybox command checks; BusyBox may be fetched by the runner |
@@ -21,10 +21,10 @@ The fully provisioned suite contains 235 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **235** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **240** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 213 configured runs (208 with `--quick`). These
+tests are not selected, for 218 configured runs (213 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 
@@ -52,6 +52,39 @@ permission and fixed destinations, and alternate-stack changes during a
 handler. Its 47 checks also pass on native Linux. QEMU 11.1.50 disagrees on
 the zero-size `mremap` errno (`ENOMEM` instead of Linux's `EINVAL`); that
 assertion remains strict.
+
+## zstd, shift, and bitfield regressions
+
+`ctest/jit_variable_shift_source.c` checks that all four variable shifts and
+rotates preserve their count source, including packed high bits, at both
+32-bit and 64-bit widths. `ctest/jit_shifted_operand_width.c` checks W-form
+shifted operands with nonzero upper X bits and block-local constant folding.
+Build these sources with `make setup-tests` or `make cross`.
+
+`ctest/jit_bitfield_regalloc.c` checks bitfield results and live source values
+under register pressure, memory stores/reloads, and Tier-2 side exits.
+
+`scripts/run_zstd_regression.sh` uses the bundled static AArch64 zstd fixture
+and requires the host `zstd` CLI. It compresses a deterministic corpus using
+both JIT and interpreter, with default workers and `--single-thread`; host
+zstd validates each archive and restores bytes for comparison. Both guest
+engines also decode a host-generated archive. The main suite runs this host
+harness once through `HOST_JIT`, and skips it under `--no-jit` because the
+harness already exercises both engines.
+
+```bash
+./scripts/run_tests.sh --filter 'variable_shift_source|shifted_operand_width|zstd'
+./scripts/run_tests.sh --no-jit --filter 'variable_shift_source|shifted_operand_width|bitfield_regalloc'
+./scripts/run_zstd_regression.sh
+```
+
+The full working-tree suite passed 240/240 on 2026-10-01 with
+`BIFROST_IR_VALIDATE=1` and `BIFROST_REGALLOC_CHECK=1`; that run included the
+bitfield regression described above. Both focused shift tests
+also passed JIT verification and memory verification. Applying those settings
+to threaded zstd logged divergences and exceeded its 90-second compression
+timeout, so that diagnostic run remains unresolved. See [zstd.md](zstd.md)
+for the two fixes, fixture scope, and verification limits.
 
 ## Running tests
 

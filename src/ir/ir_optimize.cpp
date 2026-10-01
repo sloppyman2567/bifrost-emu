@@ -145,9 +145,17 @@ static bool fold_binop(IROp op, uint64_t a, uint64_t b, uint64_t width, uint64_t
         case IROp::AND: out = a & b; return true;
         case IROp::OR:  out = a | b; return true;
         case IROp::XOR: out = a ^ b; return true;
-        case IROp::SHL: out = a << (b & (width == 32 ? 31 : 63)); return true;
-        case IROp::SHR: out = a >> (b & (width == 32 ? 31 : 63)); return true;
-        case IROp::SAR: out = static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & (width == 32 ? 31 : 63))); return true;
+        case IROp::SHL:
+            out = width == 32 ? static_cast<uint32_t>(a) << (b & 31) : a << (b & 63);
+            return true;
+        case IROp::SHR:
+            out = width == 32 ? static_cast<uint32_t>(a) >> (b & 31) : a >> (b & 63);
+            return true;
+        case IROp::SAR:
+            out = width == 32
+                ? static_cast<uint32_t>(static_cast<int32_t>(a) >> (b & 31))
+                : static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 63));
+            return true;
         case IROp::ROR: {
             // Rotate within the operand width: 32-bit ROR must not spill
             // into the upper 32 bits (which the JIT/interpreter zero).

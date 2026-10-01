@@ -1014,11 +1014,6 @@ private:
     // Stack pointer adjustment (sub/add rsp, imm8).
     void emit_sub_rsp_imm8(uint8_t n);
     void emit_add_rsp_imm8(uint8_t n);
-    // Mask CL register with an 8-bit immediate (`and cl, imm8`).
-    // Used before variable shifts (shl/shr/sar/ror r, cl) to clamp
-    // the shift count to the operand width. Replaces the magic-byte
-    // sequence `emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(n);`.
-    void emit_and_cl_imm8(uint8_t mask);
     // ARM64 reg access.
     void emit_load_arm(int xr, int ar);
     void emit_store_arm(int ar, int xr);

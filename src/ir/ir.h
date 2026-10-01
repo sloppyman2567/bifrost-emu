@@ -476,9 +476,9 @@ inline uint16_t apply_shift(IRBlock& b, uint16_t v, uint8_t shift_type, uint8_t 
               : (shift_type == 1) ? IROp::SHR
               : (shift_type == 2) ? IROp::SAR
               : IROp::ROR;
-    // For 32-bit ROR: set width=32 so the JIT uses a 32-bit rotation
-    // (64-bit ROR on a zero-extended 32-bit value loses wrap bits).
-    uint8_t width = (shift_type == 3 && !sf) ? 32 : 0;
+    // Every W-form shift consumes only the low 32 bits. In particular,
+    // LSR must not shift an X register's upper bits into the W operand.
+    uint8_t width = !sf ? 32 : 0;
     emit_gpr_shift(b, shop, shifted, v, sh, GprShiftParams{width});
     return shifted;
 }
