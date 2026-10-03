@@ -1440,6 +1440,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
+        case 0x100C: { // dlerror: guest string, consumed on first read
+            auto* dl = emu.dyn_linker_.get();
+            ret_host(dl ? dl->get_last_error() : 0);
+            return 0;
+        }
         default:
             return SYSCALL_NOT_HANDLED;
     }

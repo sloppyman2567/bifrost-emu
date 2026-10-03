@@ -2454,6 +2454,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_DSO     = 0;    // _dl_find_dso_for_object
     constexpr uint32_t OFF_TLS     = 8;    // _dl_allocate_tls (16 bytes)
     constexpr uint32_t OFF_TLSINIT = 24;   // _dl_allocate_tls_init (16 bytes)
+    constexpr uint32_t OFF_DLERROR = 288;  // dlerror (syscall-backed)
     constexpr uint32_t OFF_TLSFREE = 272;  // _dl_deallocate_tls (syscall-backed)
     constexpr uint32_t OFF_SIGERR  = 48;   // _dl_signal_error
     constexpr uint32_t OFF_SIGEXC  = 56;   // _dl_signal_exception
@@ -2649,6 +2650,11 @@ bool DynamicLinker::register_ld_linux_shim_() {
         return false;
     }
     emit_stub_syscall(code, 0x100B);
+    if (code.size() != OFF_DLERROR) {
+        error_ = "ld-linux shim dlerror stub layout mismatch";
+        return false;
+    }
+    emit_stub_syscall(code, 0x100C);
     dl_find_object_stub_ = code_base + OFF_DLFO;
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
@@ -2708,11 +2714,10 @@ bool DynamicLinker::register_ld_linux_shim_() {
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 0,  code_base + OFF_DLOPEN);
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 8,  code_base + OFF_DLCLOSE);
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 16, code_base + OFF_DLSYM);
-    // Fill unused dlfcn_hook slots with the return-0 stub to prevent
-    // crashes when glibc calls dladdr/dlerror/dlinfo/dlmopen/dlvsym
-    // through the hook.
+    // Implemented hooks use their syscall-backed stubs; remaining slots
+    // use the return-0 stub to avoid calling a null hook pointer.
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 24, code_base + OFF_DSO); // dlvsym
-    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 32, code_base + OFF_DSO); // dlerror
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 32, code_base + OFF_DLERROR); // dlerror: consume pending loader error
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 40, code_base + OFF_DLADDR); // dladdr (real)
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 48, code_base + OFF_DSO); // dladdr1
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 56, code_base + OFF_DSO); // dlinfo

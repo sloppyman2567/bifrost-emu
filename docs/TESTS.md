@@ -15,11 +15,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 245 configured test runs:
+The fully provisioned suite contains 246 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 68 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 69 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -28,10 +28,10 @@ The fully provisioned suite contains 245 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **245** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **246** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 223 configured runs (218 with `--quick`). These
+tests are not selected, for 224 configured runs (219 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 

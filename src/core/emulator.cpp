@@ -2078,6 +2078,11 @@ void Emulator::wire_thunk_sdl_thread_runner_() {
                 detach_sdl_thread(a0);
                 return 0;
             }
+            if (op == 3) {
+                std::lock_guard<std::mutex> lock(sdl_threads_mu_);
+                auto it = sdl_threads_.find(a0);
+                return it == sdl_threads_.end() ? 0 : it->second->tid;
+            }
             return 0;
         });
 }

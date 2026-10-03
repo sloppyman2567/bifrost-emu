@@ -52,12 +52,13 @@ static uint64_t bifrost_dlsym(uint64_t handle, const char* name) {
 } while (0)
 
 /* ── thread functions ─────────────────────────────────────────────── */
+static unsigned long (*current_thread_id)(void);
 static int worker_sum(void* data) {
     int* out = (int*)data;
     int s = 0;
     for (int i = 0; i < 1000; i++) s += i;   /* 499500 */
     if (out) *out = s;
-    return 7;
+    return current_thread_id ? (int)current_thread_id() : 7;
 }
 static int worker_id(void* data) {
     return (int)(uintptr_t)data;             /* return the data value */
@@ -102,12 +103,18 @@ int main(void) {
         return 77;
     }
 
+    current_thread_id=(void*)(uintptr_t)bifrost_dlsym(hsdl,"SDL_ThreadID");
+    unsigned long (*get_thread_id)(void*)=(void*)(uintptr_t)bifrost_dlsym(hsdl,"SDL_GetThreadID");
+    if(!current_thread_id || !get_thread_id || !current_thread_id() || get_thread_id(NULL)!=current_thread_id()) return 1;
+
     /* ── Test 1: create + wait, status and data round-trip ── */
     int sum = 0, status = -1;
     void* t1 = SDL_CreateThread(worker_sum, "sum", &sum);
     if (!t1) { printf("FAIL: CreateThread returned NULL (%s)\n", SDL_GetError()); SDL_Quit(); return 1; }
+    unsigned long worker_tid=get_thread_id(t1);
+    if(!worker_tid || worker_tid==current_thread_id()) return 1;
     SDL_WaitThread(t1, &status);
-    if (status != 7)   { printf("FAIL: status=%d want 7\n", status); SDL_Quit(); return 1; }
+    if ((unsigned long)status != worker_tid) { printf("FAIL: worker thread id mismatch\n"); SDL_Quit(); return 1; }
     if (sum != 499500) { printf("FAIL: sum=%d want 499500\n", sum); SDL_Quit(); return 1; }
     printf("test 1 (create/wait): ok\n");
 

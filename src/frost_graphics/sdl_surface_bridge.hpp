@@ -33,7 +33,7 @@ private:
     Surface* lookup(uint64_t guest);
     SDL_PixelFormat* format(uint64_t guest);
     void push(Memory& mem, Surface& s);
-    void publish(Memory& mem, Surface& s);
+    void publish(Memory& mem, Surface& s, bool write_pixels);
     uint64_t wrap(Memory& mem, SDL_Surface* host, uint64_t window = 0,
                   uint64_t external_guest = 0, std::vector<uint8_t> external = {});
     void erase(Memory& mem, uint64_t guest, bool free_host);

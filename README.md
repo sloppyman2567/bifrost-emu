@@ -300,12 +300,12 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects 245 test runs: 68 unit,
+With all fixtures available, the runner selects 246 test runs: 69 unit,
 86 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
 15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
 a configured rootfs; the real-world dynamic binaries are part of the
 real-world fixture set. `--quick` skips the five benchmarks. Without a
-rootfs, the runner selects 223 runs (218 with `--quick`). Missing guest
+rootfs, the runner selects 224 runs (219 with `--quick`). Missing guest
 fixtures are reported as skips in developer mode; CI uses `--strict` to
 turn missing selected fixtures into failures. Display/driver exit-77 skips
 remain environment-dependent. See
@@ -517,6 +517,7 @@ Game setup, screenshots, and current compatibility issues:
 
 - [Neverball](docs/neverball.md)
 - [vkQuake](docs/vkquake.md)
+- [Doom 3 / dhewm3](docs/doom3.md)
 
 Build, test, and maintenance references:
 

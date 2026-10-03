@@ -1,4 +1,4 @@
-// Regression for Neverball font surface conversion. No display required.
+// Neverball format conversion and Doom 3 read-only icon pixels. No display required.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,12 +27,47 @@ typedef struct { uint32_t flags; Format *format; int w,h,pitch; void *pixels; vo
     int locked; void *list; int clip[4]; void *map; int refcount; } Surface;
 _Static_assert(sizeof(Surface)==96 && sizeof(Format)==56, "SDL LP64 layout");
 
+static const uint32_t icon_pixels[4] = {0xff112233, 0xff445566, 0xff778899, 0xffaabbcc};
+
 int main(void) {
     uint64_t lib=thunk_dlopen("libSDL2.so"); CHECK(lib);
     Surface *(*create)(uint32_t,int,int,int,uint32_t)=sym(lib,"SDL_CreateRGBSurfaceWithFormat");
     Surface *(*from)(void*,int,int,int,int,uint32_t)=sym(lib,"SDL_CreateRGBSurfaceWithFormatFrom");
     Surface *(*convert)(Surface*,Format*,uint32_t)=sym(lib,"SDL_ConvertSurface");
     void (*free_surface)(Surface*)=sym(lib,"SDL_FreeSurface");
+    Surface *(*from_masks)(void*,int,int,int,int,uint32_t,uint32_t,uint32_t,uint32_t)=sym(lib,"SDL_CreateRGBSurfaceFrom");
+    Surface *(*duplicate)(Surface*)=sym(lib,"SDL_DuplicateSurface");
+    int (*alpha_mod)(Surface*,uint8_t)=sym(lib,"SDL_SetSurfaceAlphaMod");
+    int (*lock)(Surface*)=sym(lib,"SDL_LockSurface");
+    void (*unlock)(Surface*)=sym(lib,"SDL_UnlockSurface");
+    int (*blit)(Surface*,void*,Surface*,void*)=sym(lib,"SDL_UpperBlit");
+    int (*fill)(Surface*,void*,uint32_t)=sym(lib,"SDL_FillRect");
+    /* Creating and reading an external surface must never write .rodata.
+       Exercise both constructors, metadata/lock calls and blit source use. */
+    for (int form=0;form<2;form++) {
+        Surface *icon=form ? from((void*)icon_pixels,2,2,32,8,0x16362004)
+                           : from_masks((void*)icon_pixels,2,2,32,8,0xff0000,0xff00,0xff,0xff000000);
+        CHECK(icon && icon->pixels==(void*)icon_pixels);
+        CHECK(alpha_mod(icon,255)==0);
+        CHECK(lock(icon)==0); unlock(icon);
+        Surface *copy=duplicate(icon); CHECK(copy);
+        CHECK(memcmp(copy->pixels,icon_pixels,sizeof(icon_pixels))==0);
+        Surface *dst=create(0,2,2,32,0x16362004); CHECK(dst);
+        CHECK(blit(icon,NULL,dst,NULL)==0);
+        CHECK(memcmp(dst->pixels,icon_pixels,sizeof(icon_pixels))==0);
+        CHECK(fill(dst,NULL,0xffabcdef)==0);
+        for (int i=0;i<4;i++) CHECK(((uint32_t*)dst->pixels)[i]==0xffabcdef);
+        free_surface(dst); free_surface(copy); free_surface(icon);
+    }
+    /* Writable caller buffers still receive changes made by SDL. */
+    uint32_t writable[4]={0};
+    Surface *external=from(writable,2,2,32,8,0x16362004); CHECK(external);
+    CHECK(fill(external,NULL,0xff123456)==0);
+    for (int i=0;i<4;i++) CHECK(writable[i]==0xff123456);
+    Surface *blit_source=from((void*)icon_pixels,2,2,32,8,0x16362004); CHECK(blit_source);
+    CHECK(blit(blit_source,NULL,external,NULL)==0);
+    CHECK(memcmp(writable,icon_pixels,sizeof(writable))==0);
+    free_surface(blit_source); free_surface(external);
     /* SDL_ttf pads rows; Neverball converts with a stack-local format. */
     uint32_t pixels[24];
     for (int i=0;i<24;i++) pixels[i]=0xff112233;

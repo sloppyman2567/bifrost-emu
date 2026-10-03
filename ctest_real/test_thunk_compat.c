@@ -197,6 +197,14 @@ static int sdl_test(void) {
     int (*update)(void*)=sym(lib,"SDL_UpdateWindowSurface");
     void (*size)(void*,int,int)=sym(lib,"SDL_SetWindowSize");
     void (*destroy)(void*)=sym(lib,"SDL_DestroyWindow");
+    const char *features[]={"SDL_Has3DNow","SDL_HasAltiVec","SDL_HasSSE2","SDL_HasMMX","SDL_HasSSE"};
+    for (unsigned i=0;i<sizeof(features)/sizeof(features[0]);i++) {
+        int (*feature)(void)=sym(lib,features[i]); CHECK(feature && feature()==0);
+    }
+    unsigned long (*thread_id)(void)=sym(lib,"SDL_ThreadID");
+    unsigned long (*get_thread_id)(void*)=sym(lib,"SDL_GetThreadID");
+    CHECK(thread_id() && get_thread_id(NULL)==thread_id());
+    CHECK(get_thread_id((void*)0x1234)==0);
     CHECK(init(0x20)==0);
     void *w=window("surface regression",0,0,16,16,8); CHECK(w);
     Surface *s=window_surface(w); CHECK(s && s->w==16 && s->pixels);
@@ -204,6 +212,18 @@ static int sdl_test(void) {
     CHECK(window_surface(w)==s && ((uint32_t*)s->pixels)[0]==0xff998877);
     CHECK(update(w)==0);
     size(w,24,20); s=window_surface(w); CHECK(s && s->w==24 && s->h==20);
+    // Sparse outputs near a guard: only the ABI object's bytes may change.
+    unsigned char *outputs=mmap((void*)0x6200000000ull,8192,PROT_READ|PROT_WRITE,
+        MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0); CHECK(outputs!=MAP_FAILED);
+    CHECK(mprotect(outputs+4096,4096,PROT_NONE)==0);
+    memset(outputs,0xa5,4096);
+    int *wh=(int*)(outputs+4080);
+    void (*get_size)(void*,int*,int*)=sym(lib,"SDL_GetWindowSize");
+    get_size(w,&wh[0],&wh[1]); CHECK(wh[0]==24 && wh[1]==20);
+    CHECK(outputs[4079]==0xa5 && outputs[4088]==0xa5);
+    void (*get_position)(void*,int*,int*)=sym(lib,"SDL_GetWindowPosition");
+    get_position(w,&wh[0],&wh[1]); CHECK(outputs[4088]==0xa5);
+    CHECK(munmap(outputs,8192)==0);
     CHECK(update(w)==0); CHECK(input_test(lib)==0); destroy(w); quit();
     CHECK(keyboard(NULL)==keys); /* block lifetime survives subsystem restart */
     puts("thunk SDL compatibility passed"); return 0;
@@ -219,6 +239,45 @@ static int gl_test(void) {
     ip(0,4,0x1404,0,values); CHECK(error()==0);
     fp(1,4,0x1404,0,0,values); CHECK(error()==0);
     bind(0x8892,3); ip(0,4,0x1404,0,(void*)16); CHECK(error()==0);
+    void (*map1d)(unsigned,double,double,int,int,const double*)=sym(lib,"glMap1d");
+    void *(*get_proc)(const unsigned char*)=sym(lib,"glXGetProcAddress");
+    void (*resolved_map)(unsigned,double,double,int,int,const double*)=get_proc((const unsigned char*)"glMap1d");
+    CHECK(resolved_map);
+    /* Interleaved integer/double ABI, every target's component count, and
+       padded input extents ending exactly at a protected page boundary. */
+    const unsigned components[9]={4,1,3,1,2,3,4,3,4};
+    double local_points[16];
+    for(int i=0;i<16;i++) local_points[i]=(double)i+0.125;
+    map1d(0xd97,-1.25,2.5,5,3,local_points); CHECK(error()==0);
+    resolved_map(0xd97,-1.25,2.5,5,3,local_points); CHECK(error()==0);
+    unsigned char *map_pages=mmap((void*)0x6300000000ull,8192,PROT_READ|PROT_WRITE,
+                                 MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
+    CHECK(map_pages!=MAP_FAILED && mprotect(map_pages+4096,4096,PROT_NONE)==0);
+    for(unsigned t=0;t<9;t++) {
+        size_t count=2*5+components[t];
+        CHECK(mprotect(map_pages,4096,PROT_READ|PROT_WRITE)==0);
+        double *points=(double*)(map_pages+4096-count*sizeof(double));
+        for(size_t i=0;i<count;i++) points[i]=(double)i+0.125;
+        CHECK(mprotect(map_pages,4096,PROT_READ)==0);
+        map1d(0xd90+t,-1.25,2.5,5,3,points); CHECK(error()==0);
+    }
+    CHECK(munmap(map_pages,8192)==0);
+    /* Input larger than the generic 64 KiB bounce, with stride padding. */
+    size_t count=199*64+4, bytes=count*sizeof(double);
+    size_t mapped=(bytes+4095)&~(size_t)4095;
+    map_pages=mmap((void*)0x6400000000ull,mapped+4096,PROT_READ|PROT_WRITE,
+                   MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0); CHECK(map_pages!=MAP_FAILED);
+    CHECK(mprotect(map_pages+mapped,4096,PROT_NONE)==0);
+    double *points=(double*)(map_pages+mapped-bytes);
+    for(size_t i=0;i<count;i++) points[i]=(double)i+0.125;
+    CHECK(mprotect(map_pages,mapped,PROT_READ)==0);
+    map1d(0xd98,-1.25,2.5,64,200,points); CHECK(error()==0);
+    CHECK(munmap(map_pages,mapped+4096)==0);
+    /* Invalid parameters must reach GL's error path without reading points. */
+    map1d(0,-1.25,2.5,5,3,NULL); CHECK(error()==0x500);
+    map1d(0xd97,-1.25,2.5,0,3,NULL); CHECK(error()==0x501);
+    map1d(0xd97,-1.25,2.5,5,0,NULL); CHECK(error()==0x501);
+    map1d(0xd97,2.5,2.5,5,3,NULL); CHECK(error()==0x501);
     puts("thunk GL compatibility passed"); return 0;
 }
 typedef struct Node {uint32_t type; const void *next; uint32_t count; const uint64_t *devices;} Node;

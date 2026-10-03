@@ -1435,6 +1435,39 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
+            // Ordered vector FP comparisons against zero. Q=0 clears v_hi;
+            // NaNs compare false, and +0/-0 compare equal.
+            case 0x0EA0D800: case 0x2EA0C800: case 0x0EA0C800:
+            case 0x2EA0D800: case 0x0EA0E800:
+            case 0x0EE0D800: case 0x2EE0C800: case 0x0EE0C800:
+            case 0x2EE0D800: case 0x0EE0E800: {
+                const bool is_double = (sub_noq >> 22) & 1;
+                const int esz = is_double ? 8 : 4;
+                const uint32_t kind = sub_noq & ~(1u << 22);
+                uint64_t source[2] = {cpu.v_lo[rn], cpu.v_hi[rn]};
+                uint8_t out[16] = {};
+                for (int i = 0; i < (Q ? 16 : 8) / esz; ++i) {
+                    double value;
+                    if (is_double) memcpy(&value, reinterpret_cast<uint8_t*>(source) + i * 8, 8);
+                    else {
+                        float f;
+                        memcpy(&f, reinterpret_cast<uint8_t*>(source) + i * 4, 4);
+                        value = f;
+                    }
+                    bool result = false;
+                    switch (kind) {
+                        case 0x0EA0D800: result = value == 0.0; break;
+                        case 0x2EA0C800: result = value >= 0.0; break;
+                        case 0x0EA0C800: result = value > 0.0; break;
+                        case 0x2EA0D800: result = value <= 0.0; break;
+                        case 0x0EA0E800: result = value < 0.0; break;
+                    }
+                    memset(out + i * esz, result ? 0xff : 0, esz);
+                }
+                memcpy(&cpu.v_lo[rd], out, 8);
+                memcpy(&cpu.v_hi[rd], out + 8, 8);
+                return;
+            }
             // ── FP compare-register (FCMEQ/FCMGE/FCMGT/FACGE/FACGT) ──
             // SIMD three-same, type=00 (single), verified with the cross
             // assembler:

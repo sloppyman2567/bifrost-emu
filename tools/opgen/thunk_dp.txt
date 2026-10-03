@@ -1451,6 +1451,7 @@ glLoadName                 GL     i             -     -              -
 glLoadTransposeMatrixd     GL     p             -     -              -     
 glLoadTransposeMatrixf     GL     p             -     -              -     
 glLogicOp                  GL     i             -     -              -     
+glMap1d                    GL     iddiip        -     GL_MAP1D       -
 glMap1f                    GL     iiiiip        -     -              -     
 glMap2f                    GL     iiiiiiiiip    -     -              -     
 glMapGrid1f                GL     iii           -     -              -     
@@ -2030,3 +2031,33 @@ SDL_SetWindowGammaRamp     SDL    ippp          -     -              -
 SDL_SetWindowResizable     SDL    ii            -     -              -
 SDL_UnlockSurface                  SDL    i             -     SDL_SURFACE        -
 SDL_iconv_open             SDL    pp            -     -              -
+
+# dhewm3 1.5.5 SDL2 imports. Opaque host handles use i; guest buffers use p.
+SDL_GetKeyboardFocus         SDL -    -   -          -
+SDL_GetMouseFocus            SDL -    -   -          -
+SDL_Has3DNow                 SDL -    -   SDL_STUB0  - # guest is AArch64, not host x86
+SDL_HasAltiVec               SDL -    -   SDL_STUB0  -
+SDL_HasSSE2                  SDL -    -   SDL_STUB0  -
+SDL_HasMMX                   SDL -    -   SDL_STUB0  -
+SDL_HasSSE                   SDL -    -   SDL_STUB0  -
+SDL_ThreadID                 SDL -    -   THREAD_ID  -
+SDL_GetThreadID              SDL i    -   THREAD_ID  -
+SDL_CondSignal               SDL i    -   -          -
+SDL_GetKeyFromScancode       SDL i    -   -          -
+SDL_GetWindowPosition        SDL ipp  -   -          -
+SDL_GameControllerGetProduct SDL i    -   -          -
+SDL_GameControllerGetVendor  SDL i    -   -          -
+SDL_GameControllerGetType    SDL i    -   -          -
+SDL_GameControllerName       SDL i    str -          -
+SDL_GL_GetCurrentWindow      SDL -    -   -          -
+SDL_GetWindowDisplayMode     SDL ip   -   -          -
+SDL_OpenURL                  SDL p    -   -          -
+SDL_GetDisplayDPI            SDL ippp -   -          -
+SDL_CreateSystemCursor       SDL i    -   -          -
+SDL_getenv                   SDL p    str -          -
+SDL_CaptureMouse             SDL i    -   -          -
+SDL_GetWindowGammaRamp       SDL ippp -   -          -
+SDL_GetCurrentVideoDriver    SDL -    str -          -
+SDL_GetRelativeMouseMode     SDL -    -   -          -
+SDL_SetTextInputRect         SDL p    -   -          -
+SDL_RestoreWindow            SDL i    -   -          -

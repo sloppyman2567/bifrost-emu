@@ -176,6 +176,8 @@ public:
     //          blocks until the thread function returns, writes the exit
     //          code to *a1 if non-null, frees the thread's resources,
     //          returns 0.
+    //   op 2 = detach: a0=thread handle.
+    //   op 3 = id: a0=thread handle -> guest thread id, or 0 if unknown.
     using SdlThreadRunner = std::function<uint64_t(
         CPU& cpu, uint32_t op, uint64_t a0, uint64_t a1, uint64_t a2)>;
     void set_sdl_thread_runner(SdlThreadRunner runner);

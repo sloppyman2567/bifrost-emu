@@ -12,6 +12,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 int main(void) {
     int failures = 0;
@@ -86,6 +87,29 @@ int main(void) {
         printf("ceil(3.2) = %f\n", result);
         if (result != 4.0) { fprintf(stderr, "FAIL: ceil(3.2) = %f\n", result); failures++; }
         else printf("PASS: ceil(3.2) = 4.0\n");
+    }
+
+    // OpenAL-style probing uses dlerror(), not just the returned pointer,
+    // to reject unavailable backends. Errors must survive until consumed.
+    dlerror();
+    const char *missing_lib="lib_bifrost_missing_audio_backend.so";
+    void *missing=dlopen(missing_lib,RTLD_NOW);
+    const char *error=dlerror();
+    if(missing || !error || !strstr(error,missing_lib)) {
+        fprintf(stderr,"FAIL: missing dlopen did not report its error\n");
+        failures++;
+    }
+    if(dlerror()!=NULL) {fprintf(stderr,"FAIL: dlopen error not consumed\n");failures++;}
+    const char *missing_sym="bifrost_missing_audio_function";
+    void *address=dlsym(h,missing_sym);
+    error=dlerror();
+    if(address || !error || !strstr(error,missing_sym)) {
+        fprintf(stderr,"FAIL: missing dlsym did not report its error\n");
+        failures++;
+    }
+    if(dlerror()!=NULL) {fprintf(stderr,"FAIL: dlsym error not consumed\n");failures++;}
+    if(!dlsym(h,"sqrt") || dlerror()!=NULL) {
+        fprintf(stderr,"FAIL: successful lookup after error\n");failures++;
     }
 
     // Step 6: dlclose

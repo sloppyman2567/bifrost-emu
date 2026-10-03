@@ -33,7 +33,7 @@ void SdlSurfaceBridge::push(Memory& mem, Surface& s) {
     if (s.pixel_bytes && s.host->pixels && s.pixels)
         mem.read(s.pixels, s.host->pixels, s.pixel_bytes);
 }
-void SdlSurfaceBridge::publish(Memory& mem, Surface& s) {
+void SdlSurfaceBridge::publish(Memory& mem, Surface& s, bool write_pixels) {
     SDL_Surface image = *s.host;
     image.format = reinterpret_cast<SDL_PixelFormat*>(s.meta + kFormatOff);
     image.pixels = reinterpret_cast<void*>(s.pixels);
@@ -53,7 +53,7 @@ void SdlSurfaceBridge::publish(Memory& mem, Surface& s) {
         fmt.palette = reinterpret_cast<SDL_Palette*>(s.meta + kPaletteOff);
     }
     mem.write(s.meta + kFormatOff, &fmt, sizeof(fmt));
-    if (s.pixel_bytes && s.host->pixels && s.pixels)
+    if (write_pixels && s.pixel_bytes && s.host->pixels && s.pixels)
         mem.write(s.pixels, s.host->pixels, s.pixel_bytes);
 }
 uint64_t SdlSurfaceBridge::wrap(Memory& mem, SDL_Surface* host, uint64_t window,
@@ -68,7 +68,7 @@ uint64_t SdlSurfaceBridge::wrap(Memory& mem, SDL_Surface* host, uint64_t window,
             if (old.host == host && old.pixel_bytes ==
                     static_cast<size_t>(host->pitch) * static_cast<size_t>(host->h)) {
                 push(mem, old);
-                publish(mem, old);
+                publish(mem, old, false);
                 return old.meta;
             }
             erase(mem, it->first, false);
@@ -96,7 +96,9 @@ uint64_t SdlSurfaceBridge::wrap(Memory& mem, SDL_Surface* host, uint64_t window,
     }
     uint64_t guest = s->meta;
     surfaces_.emplace(guest, std::move(s));
-    try { publish(mem, *surfaces_.at(guest)); }
+    // External pixels already contain the caller's data, which may be read-only.
+    // Only newly allocated guest pixel buffers need initialization.
+    try { publish(mem, *surfaces_.at(guest), !external_guest); }
     catch (...) { erase(mem, guest, !window); throw; }
     return guest;
 }
@@ -174,7 +176,7 @@ uint64_t SdlSurfaceBridge::dispatch(Memory& mem, CPU& cpu, const std::string& n)
             if (count) mem.read(a(1), rects.data(), rects.size() * sizeof(SDL_Rect));
             rc = SDL_UpdateWindowSurfaceRects(window(), rects.data(), count);
         }
-        if (s) publish(mem, *s);  // includes back-buffer pixel pointer changes
+        if (s) publish(mem, *s, true);  // includes back-buffer pixel pointer changes
         return static_cast<int64_t>(rc);
     }
     if (n == "SDL_MapRGB" || n == "SDL_MapRGBA" || n == "SDL_GetRGB" || n == "SDL_GetRGBA") {
@@ -201,7 +203,7 @@ uint64_t SdlSurfaceBridge::dispatch(Memory& mem, CPU& cpu, const std::string& n)
     if (n == "SDL_FreeSurface") {
         if (s->window) return 0;  // window owns its surface
         if (h->refcount <= 1) erase(mem, s->meta, true);
-        else { SDL_FreeSurface(h); publish(mem, *s); }
+        else { SDL_FreeSurface(h); publish(mem, *s, false); }
         return 0;
     }
     if (n == "SDL_DuplicateSurface") return wrap(mem, SDL_DuplicateSurface(h));
@@ -247,9 +249,11 @@ uint64_t SdlSurfaceBridge::dispatch(Memory& mem, CPU& cpu, const std::string& n)
         rc = n == "SDL_UpperBlit" ? SDL_UpperBlit(h, sr, dst->host, dr) : SDL_LowerBlit(h, sr, dst->host, dr);
         if (sr) mem.write(a(1), sr, sizeof(*sr));
         if (dr) mem.write(a(3), dr, sizeof(*dr));
-        publish(mem, *dst);
+        publish(mem, *dst, true);
     } else return static_cast<uint64_t>(-1);
-    publish(mem, *s);
+    // Blits modify only the destination. Icon, lock and metadata operations
+    // must not overwrite caller-owned source pixels (e.g. a const icon).
+    publish(mem, *s, n == "SDL_FillRect");
     return static_cast<int64_t>(rc);
 }
 } // namespace arm64emu

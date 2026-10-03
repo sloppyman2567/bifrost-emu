@@ -1008,6 +1008,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = 0;
             return 0;
         }
+        if (pol == thunk::Policy::THREAD_ID) {
+            // SDL_Thread handles belong to our guest runner, never host SDL.
+            cpu.regs[0] = (entry.name == "SDL_ThreadID" || cpu.regs[0] == 0)
+                ? static_cast<uint64_t>(cpu.tid)
+                : (impl_->sdl_thread_runner_
+                    ? impl_->sdl_thread_runner_(cpu, 3, cpu.regs[0], 0, 0) : 0);
+            return 0;
+        }
         if (pol == thunk::Policy::SDL_EVENT_FILTER) {
 #if defined(BIFROST_THUNK_HAVE_SDL2)
             if (entry.name == "SDL_SetEventFilter") {
@@ -1349,6 +1357,44 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = 0;
             return 0;
         }
+    }
+
+    // Evaluator control points are input-only; the mixed ABI places domain
+    // doubles in d0/d1 and target/stride/order/points in x0..x3.
+    if (entry.spec && entry.spec->policy == thunk::Policy::GL_MAP1D) {
+        const uint32_t target = static_cast<uint32_t>(cpu.regs[0]);
+        const int32_t stride = static_cast<int32_t>(cpu.regs[1]);
+        const int32_t order = static_cast<int32_t>(cpu.regs[2]);
+        double u1, u2;
+        std::memcpy(&u1, &cpu.v_lo[0], sizeof(u1));
+        std::memcpy(&u2, &cpu.v_lo[1], sizeof(u2));
+        uint32_t components = 0;
+        switch (target) {
+            case 0x0D90: case 0x0D96: case 0x0D98: components = 4; break;
+            case 0x0D92: case 0x0D95: case 0x0D97: components = 3; break;
+            case 0x0D94: components = 2; break;
+            case 0x0D91: case 0x0D93: components = 1; break;
+            default: break;
+        }
+        using Fn = void (*)(uint32_t, double, double, int32_t, int32_t, const double*);
+        auto fn = reinterpret_cast<Fn>(entry.host_fn);
+        // Invalid GL parameters do not consume points. Let the driver set
+        // the GL error rather than reading an unrelated guest buffer.
+        if (!components || stride < static_cast<int32_t>(components) || order <= 0 || u1 == u2) {
+            fn(target, u1, u2, stride, order, nullptr);
+        } else {
+            const uint64_t count = static_cast<uint64_t>(order - 1) * stride + components;
+            constexpr uint64_t kMaxBytes = 16u << 20;
+            if (!cpu.regs[3] || count > kMaxBytes / sizeof(double)) {
+                cpu.regs[0] = 0;
+                return 0;
+            }
+            std::vector<double> points(static_cast<size_t>(count));
+            impl_->mem->read(cpu.regs[3], points.data(), points.size() * sizeof(double));
+            fn(target, u1, u2, stride, order, points.data());
+        }
+        cpu.regs[0] = 0;
+        return 0;
     }
 
     // Return type is independent of argument type: the math APIs return
@@ -2054,6 +2100,19 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if ((entry.name == "SDL_GetMouseState" ||
              entry.name == "SDL_GetRelativeMouseState") && idx < 2)
             kBounce = sizeof(int);
+#endif
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+        if ((entry.name == "SDL_GetWindowPosition" ||
+             entry.name == "SDL_GetWindowSize") && idx >= 1)
+            kBounce = sizeof(int);
+        if (entry.name == "SDL_GetDisplayDPI" && idx >= 1)
+            kBounce = sizeof(float);
+        if (entry.name == "SDL_GetWindowDisplayMode" && idx == 1)
+            kBounce = sizeof(SDL_DisplayMode);
+        if (entry.name == "SDL_SetTextInputRect" && idx == 0)
+            kBounce = sizeof(SDL_Rect);
+        if (entry.name == "SDL_GetWindowGammaRamp" && idx >= 1)
+            kBounce = 256 * sizeof(uint16_t);
 #endif
         // Padded row extent the host driver accesses on pixel-transfer
         // bounces (rows strided to tracked UNPACK/PACK alignment).

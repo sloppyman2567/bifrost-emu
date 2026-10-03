@@ -20,6 +20,18 @@ void glVertexAttribIPointer(unsigned index,int size,unsigned type,int stride,con
 void glVertexAttribPointer(unsigned index,int size,unsigned type,unsigned char normalized,int stride,const void *p) {
     (void)index; (void)size; (void)type; (void)normalized; (void)stride; check_pointer(p);
 }
+void glMap1d(unsigned target,double u1,double u2,int stride,int order,const double *points) {
+    static const unsigned components[9]={4,1,3,1,2,3,4,3,4};
+    if(target<0xd90 || target>0xd98) { last_error=0x500; return; }
+    unsigned n=components[target-0xd90];
+    if(stride<(int)n || order<=0 || u1==u2) { last_error=0x501; return; }
+    if(u1!=-1.25 || u2!=2.5 || (uintptr_t)points<=UINT32_MAX) { last_error=0x502; return; }
+    for(int point=0;point<order;point++)
+        for(unsigned c=0;c<n;c++) {
+            size_t i=(size_t)point*stride+c;
+            if(points[i]!=(double)i+0.125) last_error=0x502;
+        }
+}
 unsigned glGetError(void) { unsigned e=last_error; last_error=0; return e; }
 #endif
 #if defined(THUNK_VK_PROBE)
