@@ -375,7 +375,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             //   paddb/h/w/d/q  = FC/FD/FE/D8
             //   psubb/h/w/d/q  = F8/F9/FA/EB
             //   pmullw (size=2) = D5   (only 16-bit multiply low)
-            //   pmulld (size=4, SSE4.1) = 40 5F (needs 66 0F 38 5F)
+            //   pmulld (size=4, SSE4.1) = 66 0F 38 40
             // min/max (unsigned/signed):
             //   pminub/pmaxub (size=1) = DA/DE
             //   pminsw/pmaxsw (size=2, signed) = EA/EE
@@ -403,10 +403,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 if (esize == 2) {
                     op_byte = 0xD5;        // pmullw (66 0F D5)
                 } else if (esize == 4 && has_sse41()) {
-                    // pmulld (SSE4.1): 66 0F 38 5F. Guarded — SIGILL on
+                    // pmulld (SSE4.1): 66 0F 38 40. Guarded — SIGILL on
                     // pre-Westmere CPUs without the runtime check.
                     needs_38_prefix = true;
-                    op_byte = 0x5F;
+                    op_byte = 0x40;
                 } else {
                     supported = false;  // size=1/8 or no SSE4.1: no native multiply
                 }
@@ -467,7 +467,12 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_arith_half(off1lo, off2lo, offdlo);
-            emit_arith_half(off1hi, off2hi, offdhi);
+            if (ap.q) emit_arith_half(off1hi, off2hi, offdhi);
+            else {
+                // Q=0 always clears v_hi, including when Rd aliases a source.
+                emit_byte(0x48); emit_byte(0xC7);
+                emit_modrm_disp(0, CPU_REG, offdhi); emit_u32(0);
+            }
             return true;
         }
         // ── SIMD FP lane-wise arithmetic (1.5.4-alpha) ─────────────

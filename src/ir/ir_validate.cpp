@@ -265,7 +265,7 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
             }
             case IROp::SIMD_ARITH: {
                 // imm=subop (0..6 from table rows; 7/8 orr_imm have no
-                // rows yet), width=esize, flags_op is always 0.
+                // rows yet), width=esize, flags_op=Q.
                 if (inst.imm > 6) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: SIMD_ARITH "
@@ -291,10 +291,10 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         block.start_pc, i, inst.arm_pc);
                     ok = false;
                 }
-                if (inst.flags_op != 0) {
+                if (inst.flags_op > 1) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: SIMD_ARITH "
-                        "flags_op=0x%x must be 0 (arm_pc=0x%lx)\n",
+                        "flags_op=0x%x must be Q (0/1) (arm_pc=0x%lx)\n",
                         block.start_pc, i, inst.flags_op, inst.arm_pc);
                     ok = false;
                 }

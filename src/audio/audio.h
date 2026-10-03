@@ -32,11 +32,12 @@ enum PcmFormat : uint32_t {
     PCM_FMT_S16 = 2,   // signed 16-bit host-endian
     PCM_FMT_S24 = 3,   // signed 24-bit in 4-byte container (low 3 bytes)
     PCM_FMT_F32 = 4,   // IEEE float32
+    PCM_FMT_S8 = 6,    // signed 8-bit
     PCM_FMT_S32 = 5,   // signed 32-bit host-endian
 };
 inline uint8_t pcm_fmt_size(uint32_t f) {
     switch (f) {
-        case PCM_FMT_U8: return 1;
+        case PCM_FMT_U8: case PCM_FMT_S8: return 1;
         case PCM_FMT_S16: return 2;
         case PCM_FMT_F32: return 4;
         case PCM_FMT_S32: return 4;  // 32-bit container
@@ -60,6 +61,8 @@ public:
     // Frames currently queued-but-unplayed in this stream's ring
     // (GetQueuedAudioSize honest-backlog support).
     size_t stream_queued_frames(int id);
+    // Queue/capacity in the caller's input-frame units, atomically sampled.
+    bool stream_buffer_info(int id, uint32_t input_rate, size_t& queued, size_t& capacity);
     // Format-converting push into the stream's own ring. `data` is
     // interleaved samples in `fmt` at `rate` Hz / `ch` channels. Converts
     // to float at the device rate (linear resample when needed) and

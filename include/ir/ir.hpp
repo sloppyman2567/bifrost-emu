@@ -727,10 +727,11 @@ struct SimdBinopParams {
 struct SimdAddpParams {
     bool q = false;     // 0 = 64-bit operands, 1 = 128-bit (flags_op)
 };
-// Integer SIMD arithmetic: subop + esize only (flags_op is always 0).
+// Integer SIMD arithmetic: subop + esize + Q (flags_op).
 struct SimdArithParams {
     uint8_t subop = 0;  // 0=add,1=sub,2=mul,3=umin,4=umax,5=smin,6=smax
     uint8_t esize = 1;  // element size in bytes: 1, 2, 4, 8 (width)
+    bool q = false;    // Q=0 computes the low half and clears the upper half.
 };
 // Bitwise logical: subop only (imm); width/cond/flags_op are always 0.
 struct SimdLogicParams {
@@ -1088,9 +1089,7 @@ inline IRInst IRInst::make_addp(uint16_t dest, uint16_t src1, uint16_t src2,
 inline SimdAddpParams IRInst::addp_params() const {
     return SimdAddpParams{(flags_op & 1) != 0};
 }
-// Integer SIMD arithmetic: imm=subop, width=esize, flags_op is ALWAYS 0
-// (the translator passes a literal 0; codegen never reads Q). The factory
-// hardcodes it so no call site can smuggle a stale Q in.
+// Integer SIMD arithmetic: imm=subop, width=esize, flags_op=Q.
 inline IRInst IRInst::make_arith(uint16_t dest, uint16_t src1, uint16_t src2,
                                  const SimdArithParams& p, uint64_t arm_pc) {
     IRInst inst{};
@@ -1099,13 +1098,13 @@ inline IRInst IRInst::make_arith(uint16_t dest, uint16_t src1, uint16_t src2,
     inst.src1 = src1;
     inst.src2 = src2;
     inst.width = p.esize;
-    inst.flags_op = 0;
+    inst.flags_op = p.q ? 1 : 0;
     inst.imm = p.subop;
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline SimdArithParams IRInst::arith_params() const {
-    return SimdArithParams{static_cast<uint8_t>(imm), width};
+    return SimdArithParams{static_cast<uint8_t>(imm), width, (flags_op & 1) != 0};
 }
 // Bitwise logical: ONLY subop varies (imm); width/cond/flags_op are
 // always 0. The factory hardcodes the constants.

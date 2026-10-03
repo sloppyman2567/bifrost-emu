@@ -96,3 +96,13 @@ destroys source bits that a later IR instruction may read. Keep every W-form
 shift at width 32, including shifted operands produced by `apply_shift()` and
 constant folding. See [zstd regression notes](zstd.md) and the
 `jit_variable_shift_source` / `jit_shifted_operand_width` regressions.
+
+## Integer vector multiply and Q width
+
+The SSE4.1 lowering of 32-bit vector `MUL` uses `PMULLD`, encoded as
+`66 0F 38 40 /r`. The previous `66 0F 38 5F /r` sequence was invalid and
+crashed Doom 3 during script initialization. `SimdArithParams::q` carries
+the architectural vector width through the factory, translator and codegen:
+Q=0 writes the low 64 bits and clears `v_hi`; Q=1 computes both halves.
+`ctest/jit_simd_mul32.c` covers overflow, source/destination aliasing and both
+widths with fixed expected products, independently checked under QEMU.

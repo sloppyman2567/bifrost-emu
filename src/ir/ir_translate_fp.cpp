@@ -770,6 +770,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 SimdArithParams ap;
                 ap.subop = ct.subop;
                 ap.esize = static_cast<uint8_t>(esize);
+                ap.q = Q;
                 emit_arith(block, d.rd, d.rn, d.rm, ap, cur_pc);
                 return true;
             }

@@ -27,6 +27,9 @@
 #include "debug_flags.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"
+#include "yggdrasil/audio_node.hpp"
+#include <chrono>
+#include <algorithm>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -237,7 +240,12 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             // a millisecond timeout derived from the timespec.
             int nfds = static_cast<int>(a1);
             std::vector<struct pollfd> pfds(nfds);
+            std::vector<std::shared_ptr<yggdrasil::AudioNode>> audio_nodes(nfds);
+            bool virtual_audio = false;
             for (int i = 0; i < nfds; i++) {
+                const int guest_fd = mem_.load<int>(a0 + static_cast<uint64_t>(i) * 8);
+                audio_nodes[i] = std::dynamic_pointer_cast<yggdrasil::AudioNode>(emu.fds().get(guest_fd));
+                virtual_audio |= static_cast<bool>(audio_nodes[i]);
                 pfds[i].fd      = resolve_sock_fd(emu, mem_.load<int>(a0 + static_cast<uint64_t>(i) * 8));
                 pfds[i].events  = mem_.load<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 4);
                 pfds[i].revents = 0;
@@ -270,8 +278,29 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 else { uint64_t ms = (sec > 2000000ULL) ? 2000000000ULL : sec * 1000; ms += nsec / 1000000; timeout_ms = (ms > 2000000000ULL) ? 2000000000 : static_cast<int>(ms); }
             }
             int r;
+            const auto poll_start = std::chrono::steady_clock::now();
             while (true) {
-                r = ::poll(pfds.data(), nfds, timeout_ms);
+                int wait_ms = timeout_ms;
+                if (virtual_audio) {
+                    bool ready = false;
+                    for (int i = 0; i < nfds; ++i)
+                        if (audio_nodes[i] && audio_nodes[i]->poll_events(pfds[i].events)) ready = true;
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - poll_start).count();
+                    wait_ms = ready ? 0 : timeout_ms < 0 ? 5 :
+                              static_cast<int>(std::min<int64_t>(5, std::max<int64_t>(0, timeout_ms - elapsed)));
+                }
+                r = ::poll(pfds.data(), nfds, wait_ms);
+                if (r >= 0 && virtual_audio) {
+                    r = 0;
+                    for (int i = 0; i < nfds; ++i) {
+                        if (audio_nodes[i]) pfds[i].revents |= audio_nodes[i]->poll_events(pfds[i].events);
+                        if (pfds[i].revents) ++r;
+                    }
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - poll_start).count();
+                    if (!r && (timeout_ms < 0 || elapsed < timeout_ms)) continue;
+                }
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run

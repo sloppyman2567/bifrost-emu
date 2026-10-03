@@ -122,6 +122,8 @@ public:
     bool mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot);
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
+    // Validate a whole thunk output range before a host call has side effects.
+    void check_access(uint64_t addr, size_t size, uint8_t access) const;
     void read(uint64_t addr, void* dst, size_t n, PageCache* pc = nullptr) const;
     // BIFROST_WATCH support: interpreter snapshots its pc here so the
     // watch check in write() can attribute host+guest stores.
@@ -319,7 +321,6 @@ private:
     void set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                             bool combine);
     bool set_direct_prot(uint64_t lo, uint64_t hi, int prot) const;
-    void check_access(uint64_t addr, size_t size, uint8_t access) const;
     void read_access(uint64_t addr, void* dst, size_t n, PageCache* pc,
                      uint8_t access) const;
     // Use shared_mutex for reader-writer locking.

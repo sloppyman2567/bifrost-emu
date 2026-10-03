@@ -30,6 +30,7 @@ Audio::~Audio() {
 namespace {
 inline float load_sample(uint32_t fmt, const uint8_t* p) {
     switch (fmt) {
+        case PCM_FMT_S8: return static_cast<int8_t>(p[0]) / 128.0f;
         case PCM_FMT_U8:  return (static_cast<int>(p[0]) - 128) / 128.0f;
         case PCM_FMT_S16: {
             int16_t v;
@@ -195,6 +196,16 @@ size_t Audio::stream_queued_frames(int id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = streams_.find(id);
     return it == streams_.end() ? 0 : (it->second.tail - it->second.head);
+}
+bool Audio::stream_buffer_info(int id, uint32_t rate, size_t& queued, size_t& capacity) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    if (it == streams_.end() || !sample_rate_ || !rate) return false;
+    const auto& s = it->second;
+    // Round queued input frames up, so callers never over-report free space.
+    queued = ((s.tail - s.head) * static_cast<uint64_t>(rate) + sample_rate_ - 1) / sample_rate_;
+    capacity = s.cap_frames * static_cast<uint64_t>(rate) / sample_rate_;
+    return true;
 }
 ssize_t Audio::stream_write(int id, uint32_t fmt, uint32_t rate, uint8_t ch,
                             const uint8_t* data, size_t bytes) {

@@ -145,13 +145,11 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         if (r < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(r, flags);
     }
-    // /dev/snd, /dev/dsp, /dev/audio → audio backend (PCM buffer + WAV dump)
+    // /dev/snd, /dev/dsp, /dev/audio → OSS playback streams.
     if (path == "/dev/snd" || path == "/dev/dsp" || path == "/dev/audio") {
         if (audio_) {
-            // Open the audio backend with default params (44100 Hz, stereo, 16-bit).
-            if (!audio_->ready()) {
-                audio_->open(44100, 2, 2);
-            }
+            // The node negotiates its own format before opening a logical
+            // stream; opening a fixed-rate legacy device here loses OSS setup.
             return std::make_unique<AudioNode>(audio_, flags);
         }
         // No audio backend — fall back to /dev/null so writes succeed.
