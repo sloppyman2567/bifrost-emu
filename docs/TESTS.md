@@ -8,6 +8,19 @@ C or assembly source fails with a rebuild instruction, so ignored local
 fixtures cannot silently test outdated code. Some integration tests also
 require SDL2, a display, or a configured guest rootfs.
 
+## Full validation (2026-10-03)
+
+The full strict suite passes 252/252 in JIT mode with no skips. After fixing
+interpreter decode-cache reuse to match both PC and the fetched instruction
+word, the full interpreter suite passes 249/249 with three JIT-only skips.
+The cross-thread instruction invalidation regression also passes five
+interpreter repeats and QEMU. JIT unit tests pass 75/75 with IR validation.
+
+Both complete runs used desktop/audio access. A restricted sandbox run could
+not initialize display/audio/Vulkan resources and does not replace these
+integration checks. Five stale benchmark fixtures were rebuilt before the
+complete desktop runs.
+
 ## Test inventory
 
 The `fcsel_high_regs` regression has 61 checks for high FCSEL source registers,
@@ -15,11 +28,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 246 configured test runs:
+The fully provisioned suite contains 252 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 69 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 75 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -28,10 +41,10 @@ The fully provisioned suite contains 246 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **246** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **252** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 224 configured runs (219 with `--quick`). These
+tests are not selected, for 230 configured runs (225 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 

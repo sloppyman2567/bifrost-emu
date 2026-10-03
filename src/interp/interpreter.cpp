@@ -83,7 +83,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     // on d.cls. Every instruction handler lives in the switch below.
     {
         // ── Per-vCPU 2-way set-associative decode cache ─────────
-        // Hash PC to a set, check both ways. On hit, skip decode().
+        // Hash PC to a set, check both ways. Reuse a decode only when
+        // both PC and the freshly fetched instruction word match. Other
+        // CPUs can rewrite code, and mappings can reuse the same PC;
+        // checking the word avoids touching another CPU's private cache.
         // This is the hot path — ~100% hit rate for tight loops.
         // Using a const reference avoids copying the 88-byte DecodedInst.
         // The cache lives on `cpu` so each vCPU gets a lock-free cache.
@@ -96,12 +99,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         CPU::CacheEntry& ce0 = cpu.decode_cache[way0];
         CPU::CacheEntry& ce1 = cpu.decode_cache[way1];
         const DecodedInst* dp;
-        if (__builtin_expect(ce0.tag == cpu.pc, 1)) {
+        if (__builtin_expect(ce0.tag == cpu.pc && ce0.d.raw == inst, 1)) {
             dp = &ce0.d;
             cpu.decode_cache_hits++;
             // Update LRU: way 0 is now MRU.
             cpu.decode_cache_lru[set_idx >> 3] &= ~(1u << (set_idx & 7));
-        } else if (__builtin_expect(ce1.tag == cpu.pc, 1)) {
+        } else if (__builtin_expect(ce1.tag == cpu.pc && ce1.d.raw == inst, 1)) {
             dp = &ce1.d;
             cpu.decode_cache_hits++;
             // Update LRU: way 1 is now MRU.

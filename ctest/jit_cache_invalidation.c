@@ -8,6 +8,8 @@ static pthread_mutex_t mu=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv=PTHREAD_COND_INITIALIZER;
 static unsigned request,done;
 static int failed;
+static unsigned first_bad_round;
+static uint64_t first_bad_value;
 static uint32_t *code;
 static void *worker(void *arg) {
  (void)arg;
@@ -16,7 +18,12 @@ static void *worker(void *arg) {
   pthread_mutex_lock(&mu);
   while(request!=round) pthread_cond_wait(&cv,&mu);
   pthread_mutex_unlock(&mu);
-  for(int i=0;i<100;i++) if(fn()!=round) failed=1;
+  for(int i=0;i<100;i++) {
+   uint64_t value=fn();
+   if(value!=round && !failed) {
+    failed=1; first_bad_round=round; first_bad_value=value;
+   }
+  }
   pthread_mutex_lock(&mu);done=round;pthread_cond_signal(&cv);pthread_mutex_unlock(&mu);
  }
  return NULL;
@@ -36,6 +43,10 @@ int main(void) {
   pthread_mutex_unlock(&mu);
  }
  pthread_join(t,NULL);
- if(failed)return 1;
+ if(failed) {
+  printf("FAIL cached instruction: round=%u got=%llu\n",first_bad_round,
+         (unsigned long long)first_bad_value);
+  return 1;
+ }
  puts("jit_cache_invalidation: ALL PASS");return 0;
 }

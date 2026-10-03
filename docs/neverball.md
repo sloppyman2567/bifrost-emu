@@ -12,6 +12,9 @@ the underlying regressions and selected images, rather than every level or a
 long-duration gameplay soak. The user also confirmed mouse control works in
 fullscreen gameplay and after returning to windowed mode on 2026-10-02.
 
+The user reconfirmed working gameplay on 2026-10-03 after relaunching with
+the repaired interpreter decode cache. No new Neverball issue was reported.
+
 ## Running
 
 With the AArch64 game and its dependencies installed in `rootfs`:

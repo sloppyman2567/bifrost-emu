@@ -100,6 +100,7 @@ public:
     static constexpr size_t DECODE_CACHE_SET_MASK = DECODE_CACHE_SETS - 1;
     struct CacheEntry {
         uint64_t    tag = UINT64_MAX;  // PC; UINT64_MAX = empty slot
+        // d.raw is also part of the key: a reused PC may hold new code.
         DecodedInst d;
     };
     std::vector<CacheEntry> decode_cache{DECODE_CACHE_SIZE};

@@ -160,3 +160,17 @@ vector square root explicitly, and preserves Q=0 upper-half clearing. JIT
 uses this corrected reference fallback. `jit_simd_unary_fp` checks S/D widths,
 aliasing, signed zero, FABS/FNEG separation, and all 512 inverse-square-root
 seed calculations used by Doom 3's vectorized math initialization.
+
+## Interpreter decode-cache coherence
+
+The interpreter fetches the current instruction before looking up its
+per-CPU decode cache. A hit requires both the PC and `DecodedInst::raw`
+to match that fetched word. Checking only the PC let another CPU's code
+rewrite leave a stale decoded instruction active after IC maintenance.
+Comparing the word also handles address reuse without modifying another
+CPU's private cache or adding a global cache lock. The synchronized
+`jit_cache_invalidation` regression covers this path in both engines.
+
+After this repair, the complete interpreter suite passes 249/249 (three
+JIT-only skips), and the JIT unit suite passes 75/75 with IR validation.
+The cross-thread regression passes five interpreter repeats and QEMU.

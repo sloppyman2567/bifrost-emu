@@ -8,6 +8,13 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ## Unreleased — game compatibility and TLS follow-up (2026-10-03)
 
+- Interpreter: require both PC and the fetched instruction word for decode-cache
+  hits, preventing stale execution after another thread rewrites code. Improve
+  the cross-thread regression diagnostics; full interpreter suite 249/249
+  (three JIT-only skips), JIT suite 252/252.
+- Gameplay follow-up: Neverball and Minecraft Weekend remain user-confirmed
+  working; Doom 3 works well after the animation math repair. vkQuake still
+  has texture corruption and camera issues. See the game-specific notes.
 - Neverball: user-confirmed stable gameplay, replay, menus, configuration,
   JPEG previews, and fullscreen/windowed mouse control. Corrected SIMD
   narrowing semantics and routed affected JIT instructions through the

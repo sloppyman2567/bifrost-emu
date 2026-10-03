@@ -78,6 +78,11 @@ confirmed that the animation deformation is fixed. This validation covers
 the observed demo sequences, rather than every model or animation.
 The full JIT unit suite passes 75/75 with IR validation enabled.
 
+The user subsequently confirmed that Doom 3 works well in the repaired live
+build. This supports the animation repair and working gameplay; the known
+performance, settings and save-loading limitations below remain separately
+tracked.
+
 ### Remaining issues
 
 - Longer stability runs and loading performance need further validation. The

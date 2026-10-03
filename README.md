@@ -518,6 +518,7 @@ Game setup, screenshots, and current compatibility issues:
 - [Neverball](docs/neverball.md)
 - [vkQuake](docs/vkquake.md)
 - [Doom 3 / dhewm3](docs/doom3.md)
+- [Minecraft Weekend](docs/minecraft-weekend.md)
 
 Build, test, and maintenance references:
 

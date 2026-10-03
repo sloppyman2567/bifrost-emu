@@ -5,6 +5,12 @@ JIT build and supplied four screenshots showing the world, HUD, main menu,
 help, and load menu. This is a Vulkan game bring-up milestone, with remaining
 camera and rendering issues; it is not a claim of complete compatibility.
 
+## Latest gameplay check (2026-10-03)
+
+The user confirmed that vkQuake still runs after the interpreter decode-cache
+repair, but texture corruption and camera issues remain. This is a working
+launch/gameplay checkpoint, not confirmation that those issues are fixed.
+
 ## User screenshot checkpoint
 
 Follow-up on 2026-10-03: the mapped-memory synchronization repair substantially
