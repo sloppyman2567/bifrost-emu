@@ -8,8 +8,14 @@ Demo are installed under `rootfs/dhewm3/`. The demo contains
 `70c2c63ef1190158f1ebd6c255b22d8e`, matching upstream's installation guide.
 The downloaded engine and game module are AArch64 ELFs.
 
-**JIT startup reaches the main menu and renders the game UI.** Full gameplay
-and audible output remain unverified. The initial unresolved SDL imports,
+**JIT startup reaches the main menu and loads the demo Mars City map.**
+The isolated map-load check completes in 64,971 ms and then exits normally
+via the requested `+quit`. The user confirmed audible output in the live
+copy after the map loaded. The user reports roughly 15 minutes of gameplay
+without crashes; the corresponding run ends with normal game shutdown.
+The repaired live game now shows consistent character proportions during
+NPC speech and movement; low frame rate remains unresolved.
+The initial unresolved SDL imports,
 missing curl runtime, vector FP compare-zero support, and OpenAL backend-probing null
 call have been addressed. The null call came from the glibc `dlerror()` hook
 returning zero even after failed library/symbol lookups; OpenAL therefore
@@ -37,18 +43,71 @@ with IR validation and JIT verification. The repaired application displays
 the Doom 3 demo title screen and main menu; this does not establish gameplay
 stability.
 
+The burger-box collision failure was localized with the exact vertex
+normalization instructions from the ARM64 binary. Scalar DUP decoded
+`mov s24, v24.s[1]` as a 64-bit element read because it tested imm5 bit 3
+before bit 2. It copied X into Y, collapsing distinct collision vertices.
+Size now comes from the lowest set bit of imm5, with higher bits selecting
+the lane. A separate vector FMOV immediate bug expanded `0.5` as
+`0x1f000000` instead of `0x3f000000`; its single-precision exponent prefix
+is corrected. Both affected JIT fallback and interpreter execution.
+
+The scalar DUP regression covers all 30 valid lane/width combinations with
+source/destination aliasing; the FMOV regression covers all 768 valid
+immediate/width combinations. Both pass under QEMU, interpreter and JIT.
+The focused five-test SIMD/FP group also passes in both engines. Fixing
+FMOV alone did not clear the collision failure; after the scalar DUP fix,
+the same demo map passes both burger-box models and finishes loading.
+
+### Character animation correctness
+
+A focused reproduction found vector `FSQRT` executing as `FNEG` in both
+engines. The ARM64 `idMath::Init` uses `fsqrt v26.4s,v26.4s` to build its
+inverse-square-root seed table; the bad results propagate into quaternion
+interpolation and can produce non-unit rotations and model scaling.
+Keeping encoding bit 16 and implementing vector square root repairs this
+shared fallback. The exact binary instruction sequences for initialization,
+quaternion interpolation, matrix conversion/composition and vertex skinning
+now match QEMU bit-for-bit on the focused inputs. Animation-frame decoding
+also matches across all 64 component flag combinations.
+
+The permanent `jit_simd_unary_fp` regression checks 530 cases, including all
+512 table seeds, in QEMU, interpreter and JIT. The repaired live game was subsequently verified: NPC heads, shoulders and
+limbs retain consistent proportions during speech and movement, and the user
+confirmed that the animation deformation is fixed. This validation covers
+the observed demo sequences, rather than every model or animation.
+The full JIT unit suite passes 75/75 with IR validation enabled.
+
 ### Remaining issues
 
-- A demo map load fails with `idMoveable 'moveable_burgerboxopen_1': cannot
-  load collision model models/mapobjects/filler/burgerboxopen.lwo`, recorded
-  in the application startup/game log. The cause is not established.
-- The user reports no audible sound and settings options that do not work.
-  OpenAL initialization and the synthetic OSS playback tests succeed, but
-  neither proves audible output or working settings in Doom 3.
+- Longer stability runs and loading performance need further validation. The
+  isolated map-load check took about 65 seconds; user settings can differ.
+- The first live gameplay profile exposed a full 64 MiB JIT code buffer,
+  repeated compilation of cached interpreter-only call targets and uncached
+  overflow failures. The cache now grows in place within a 1 GiB virtual
+  reservation, and fallback decisions are cached. The repaired live copy
+  crosses 64 MiB, grows to 128 MiB and reports zero overflows. Translation
+  sample counts stop increasing in steady execution, but interpreter
+  fallback remains a substantial CPU cost; overall performance is unresolved.
+- The user reports settings options that do not work. Audio was initially
+  inaudible, but the user subsequently confirmed sound in the loaded demo.
+  Settings behavior remains unresolved.
 - The user reports a black strip at the right of the game content and an
   invisible cursor. Viewport sizing and cursor behavior remain unresolved.
+- Loading an existing save reports a script checksum mismatch and explicitly
+  restarts the map with persistent player data. The cause of the mismatch
+  remains unresolved; this does not establish save-file corruption.
 - Gamepad mapping and responsiveness have not been validated. Input tracing
   and verification of mouse/keyboard events should precede gamepad tuning.
+
+The cache regression uses three guest threads with thousands of distinct
+functions and repeated interpreter-only calls. It passes with a forced
+1 MiB budget (one overflow, bounded fallback) and with a growing cache.
+A separate regression passes 100 synchronized cross-thread instruction
+updates with IC maintenance; QEMU independently validates both guests.
+Block-table reads/publication now hold the appropriate lock, negative call
+targets are cached, and TLS entries refresh after invalidation. Live-code
+patching and Tier-2 publication remain disabled in shared multithread mode.
 
 ## GL and OSS compatibility batch
 

@@ -104,156 +104,24 @@ public:
     uint64_t run_block(CPU& cpu, Emulator& emu);
     // Returns the block's fn pointer, translating if needed.
     // If the block is interp_only, returns nullptr (caller falls back to interpreter).
-    uint64_t (*lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
-        blocks_mutex_.lock_shared();
-        auto it = blocks_.find(pc);
-        if (it != blocks_.end() && it->second.fn) {
-            auto fn = it->second.fn;
-            blocks_mutex_.unlock_shared();
-            return fn;
-        }
-        blocks_mutex_.unlock_shared();
-        // Need exclusive lock for translation.
-        blocks_mutex_.lock();
-        auto fn = translate_block(emu, pc);
-        if (!fn) {
-            // Might be interp_only — check again.
-            it = blocks_.find(pc);
-            if (it != blocks_.end()) {
-                fn = it->second.fn;  // nullptr for interp_only
-            }
-        }
-        blocks_mutex_.unlock();
-        return fn;
-    }
-    // Does NOT translate. Returns nullptr if not found or interp_only.
-    // Used by jit_call_helper to avoid corrupting JIT state during execution.
-    // Does NOT lock — called from JIT code which may already hold the lock.
-    // The block cache is a concurrent_hash_map (unordered_map with shared_mutex),
-    // and reads are safe as long as no thread is writing. Since we only read,
-    // and writes (translate_block) happen outside of JIT execution, this is safe.
-    uint64_t (*lookup_only(uint64_t pc))(CPU*, Emulator*) {
-        auto it = blocks_.find(pc);
-        if (it != blocks_.end() && it->second.fn) {
-            return it->second.fn;
-        }
-        return nullptr;
-    }
-    // Used by jit_call_helper when the target isn't translated yet.
-    // Takes the exclusive lock, translates, returns fn (or nullptr for interp_only).
-    uint64_t (*translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
-        blocks_mutex_.lock();
-        auto fn = translate_block(emu, pc);
-        if (!fn) {
-            // Might be interp_only — check again.
-            auto it = blocks_.find(pc);
-            if (it != blocks_.end()) {
-                fn = it->second.fn;  // nullptr for interp_only
-            }
-        }
-        blocks_mutex_.unlock();
-        return fn;
-    }
-    // Fast lookup for jit_call_helper (BL_CALL/BLR_CALL targets). Mirrors
-    // run_block's tiers — last-block cache, inline cache, then the
-    // shared-mutex map — but ALSO populates the caches on the slow path.
-    // jit_call_helper was the only caller that never wrote the caches, so
-    // every helper dispatch fell to the unlocked unordered_map find. The
-    // caches are thread-local and are written exactly like run_block's slow
-    // path (pc+fn+instr_count together), so a later run_block fast-path
-    // match remains valid. NOTE: measured NEUTRAL on the minecraft
-    // worldgen noise (fresh-column heightmap is body-throughput-bound at
-    // ~430 MIPS, not lookup-bound), but it removes a per-call map find from
-    // the hottest call path and is strictly cheaper than the old behavior
-    // for any call-heavy workload (e.g. the mesh BL_CALLs).
+    uint64_t (*lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*);
+    uint64_t (*lookup_only(uint64_t pc))(CPU*, Emulator*);
+    // Code-generation/trace callers already hold blocks_mutex_.
+    uint64_t (*lookup_only_locked(uint64_t pc))(CPU*, Emulator*);
+    uint64_t (*translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emulator*);
+    // Cache hits are thread-local; misses copy metadata under blocks_mutex_.
+    // A null fn is a cached interpreter decision, not a translation miss.
     uint64_t (*lookup_call_target(Emulator& emu, uint64_t pc, int& instr_count))(CPU*, Emulator*) {
+        sync_dispatch_cache();
         if (pc == tls_last_block_.pc) {
             instr_count = tls_last_block_.instr_count;
             return tls_last_block_.fn;
         }
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
-        if (inline_cache_lookup(pc, &fn, instr_count)) {
-            return fn;
-        }
-        fn = lookup_only(pc);
-        if (!fn) {
-            fn = translate_and_lookup(emu, pc);
-            if (!fn) {
-                instr_count = 0;
-                return nullptr;
-            }
-        }
-        int cnt = 0;
-        auto it = blocks_.find(pc);
-        if (it != blocks_.end()) cnt = it->second.instr_count;
-        // ── Tier-2 hot-head detection + region compile (BL/BLR-entered loops) ──
-        // run_block's slow-path counter never fires for real hot loops: they
-        // are entered via BL/BLR from _start/__libc_start_main and run INSIDE
-        // this helper's dispatch loop (or direct `call rel32` chains), so their
-        // blocks stay pinned in the thread-local caches and never reach
-        // run_block's slow path. Mirror the hot-head fire here so tier-2
-        // regions actually trigger on games/benchmarks. No lock is held in
-        // this slow path (lookup_only/translate_and_lookup lock internally),
-        // so increment exec_count under a shared lock and upgrade to exclusive
-        // to compile + register the region (writes blocks_[pc]).
-        if (tier2_enabled() && it != blocks_.end() && !it->second.tier2_hot_logged) {
-            blocks_mutex_.lock_shared();
-            it = blocks_.find(pc);
-            if (it != blocks_.end() && !it->second.tier2_hot_logged) {
-                uint32_t n = ++it->second.exec_count;
-                if (n >= tier2_hits_threshold()) {
-                    it->second.tier2_hot_logged = true;
-                    tier2_counter_disable(it->second.tier2_counter_off,
-                                          it->second.tier2_counter_len);
-                    tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
-                    if (tier2_trace_enabled()) {
-                        fprintf(stderr, "[tier2] hot head (bl) pc=0x%llx exec=%u\n",
-                                static_cast<unsigned long long>(pc),
-                                static_cast<unsigned>(n));
-                    }
-                    Tier2Trace trace = collect_tier2_trace(emu, pc);  // read-only
-                    if (trace.ok) {
-                        blocks_mutex_.unlock_shared();
-                        blocks_mutex_.lock();
-                        auto it2 = blocks_.find(pc);
-                        if (it2 != blocks_.end()) {
-                            uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
-                            uint64_t (*rfn)(CPU*, Emulator*) =
-                                compile_tier2_region(emu, trace, &chain_fn);
-                            if (rfn) {
-                                BlockEntry region_entry;
-                                region_entry.fn = rfn;
-                                // Chain-skip: publish the post-frame-setup
-                                // entry (bare chain jmps must skip the
-                                // region's frame allocation).
-                                if (chain_skip_enabled() && chain_fn)
-                                    region_entry.chain_entry = chain_fn;
-                                region_entry.instr_count = static_cast<int>(trace.total_insts);
-                                region_entry.exec_count = it2->second.exec_count;
-                                region_entry.tier2_hot_logged = it2->second.tier2_hot_logged;
-                                region_entry.ends_with_branch = true;
-                                region_entry.chained = true;        // no chain slot
-                                region_entry.taken_chained = true;
-                                region_entry.interp_only = false;
-                                region_entry.verified_once = true;  // M1: no region verify
-                                it2->second = region_entry;
-                                fn = rfn;
-                                cnt = static_cast<int>(trace.total_insts);
-                            }
-                        }
-                        blocks_mutex_.unlock();
-                        blocks_mutex_.lock_shared();
-                    }
-                }
-            }
-            blocks_mutex_.unlock_shared();
-        }
-        tls_last_block_ = LastBlockCache{pc, fn, cnt};
-        tls_inline_cache_[((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1)] =
-            InlineCacheEntry{pc, fn, cnt};
-        instr_count = cnt;
-        return fn;
+        if (inline_cache_lookup(pc, &fn, instr_count)) return fn;
+        return lookup_call_target_slow(emu, pc, instr_count);
     }
+    uint64_t (*lookup_call_target_slow(Emulator& emu, uint64_t pc, int& instr_count))(CPU*, Emulator*);
     // ── Function Multi-Versioning (FMV) ─────────────────────────────
     // The JIT queries these flags at codegen time to decide which x86
     // instruction sequence to emit for hot operations. For example,
@@ -380,28 +248,31 @@ public:
     // Safety:
     //   - The fn pointer is stable (code_buf_ never moves).
     //   - The instr_count is immutable after translate_block().
-    //   - If the block is later promoted to interp_only (e.g. by the
-    //     hotness tracker), the cached fn is still safe to call — it's
-    //     just suboptimal. The interp_only promotion sets fn=nullptr in
-    //     blocks_[pc], but our cached copy still has the old non-null fn.
-    //     We accept this minor suboptimality for the speed win.
-    //   - If the block is later replaced by a new translation (rare —
-    //     only happens if translate_block is called again for the same
-    //     PC, which the dispatcher avoids by checking blocks_.find()
-    //     first), the cached fn is still correct (same ARM64 code).
-    //   - The cache is invalidated (set to pc=0) whenever the dispatcher
-    //     observes a different PC, so it never serves a wrong-PC hit.
-    //   - Empty entries use the non-canonical sentinel ~0ULL as the PC
-    //     marker (never a real guest PC — guest VAs are 48-bit). pc and
-    //     fn are always written together, so a pc match alone implies a
-    //     valid fn: the fast path does a single load+cmp with no
-    //     redundant fn != nullptr test.
+    // Invalidation generations revoke stale entries on every CPU's next
+    // dispatch. An empty entry has the non-canonical ~0ULL PC sentinel;
+    // a real PC with a null fn is a cached interpreter fallback.
     struct LastBlockCache {
         uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
     };
     static thread_local LastBlockCache tls_last_block_;
+    static thread_local const FrostJIT* tls_cache_owner_;
+    static thread_local uint64_t tls_cache_generation_;
+    static std::atomic<uint64_t> next_cache_generation_;
+    std::atomic<uint64_t> cache_generation_{next_cache_generation_.fetch_add(1, std::memory_order_relaxed)};
+    void invalidate_dispatch_cache() {
+        cache_generation_.store(next_cache_generation_.fetch_add(1, std::memory_order_relaxed),
+                                std::memory_order_release);
+    }
+    void sync_dispatch_cache() {
+        const uint64_t generation = cache_generation_.load(std::memory_order_acquire);
+        if (tls_cache_owner_ == this && tls_cache_generation_ == generation) return;
+        tls_last_block_ = LastBlockCache{};
+        for (auto& entry : tls_inline_cache_) entry = InlineCacheEntry{};
+        tls_cache_owner_ = this;
+        tls_cache_generation_ = generation;
+    }
     // Stats TLS shared by run_block AND jit_call_helper (2026-08-21):
     // hot-path block/instruction counts, batch-flushed into the shared
     // atomics every 64K dispatches so BIFROST_STATS_PERIOD / the exit
@@ -432,8 +303,8 @@ public:
     //
     // Direct-mapped (no replacement policy — the displaced entry is just
     // overwritten). The fn pointer is stable (code_buf_ never moves),
-    // so a stale entry is safe to call — it runs an older (correct)
-    // translation. Entries are populated on the slow path.
+    // and the owner/generation check revokes stale translations before
+    // each dispatch. Entries are populated on the slow path.
     static constexpr int INLINE_CACHE_SLOTS = 256;
     struct InlineCacheEntry {
         uint64_t pc = ~0ULL;
@@ -445,7 +316,7 @@ public:
     // (~5ns) would be most of the lookup's own cost. Entries are always
     // written pc+fn together (slow path), so `e.pc == pc` alone identifies
     // a valid entry (empty = ~0ULL sentinel, never a real guest PC) —
-    // no redundant fn != nullptr test needed.
+    // Null fn entries cache interpreter fallback decisions.
     inline bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
                                     int& instr_count) {
         int slot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1));
@@ -489,9 +360,9 @@ public:
     std::atomic<bool>     jit_disabled_{false};  // set by global watchdog
     // Multithread-safe mode: set by enter_multithreaded() before a second
     // vCPU's host thread starts. When true, NO runtime code-buffer write may
-    // occur (patch_chain / chain_back_references / patch_pending_calls bail,
-    // tier-2 is disabled), so the RWX shared code buffer is never modified
-    // while another core executes it. x86 cross-modifying code requires the
+    // modify published instructions (patch_chain / chain_back_references /
+    // patch_pending_calls bail, tier-2 is disabled). New code is appended to
+    // previously unpublished bytes under the compiler lock. x86 cross-modifying code requires the
     // EXECUTING core to serialize after a write; stopping all writes is the
     // only coordination-free way to guarantee that. Sticky for the JIT's
     // lifetime (re-enabling would reopen a spawn-vs-patch race).
@@ -505,6 +376,10 @@ public:
     // deadlocking. Per-thread state (watchdog, hotness) is thread-local.
     std::shared_mutex blocks_mutex_;  // protects blocks_, back_refs_, code_buf_ writes
     void flush_cache();
+    std::atomic<uint64_t> code_cache_growths{0};
+    std::atomic<uint64_t> code_cache_overflows{0};
+    std::atomic<uint64_t> code_cache_budget_fallbacks{0};
+    void dump_code_cache_stats();
     // ── SMC / mapping invalidation ──────────────────────────────────
     // Erase every cached block whose guest range [pc, pc+instr_count*4)
     // overlaps [addr, addr+size), and unpatch any predecessor chain slot
@@ -514,9 +389,9 @@ public:
     // never a torn one). Code bytes are leaked, never reused, so a stale
     // fn pointer can at worst run old code, never crash on recycled bytes.
     // Also drops matching entries from this thread's last-block/inline
-    // caches (other threads' TLS entries are best-effort: a stale TLS hit
-    // runs the leaked old bytes; guests must synchronize SMC with
-    // IC maintenance + cross-thread barriers, same as real ARM).
+    // caches. A generation change revokes other threads' TLS entries at
+    // their next dispatch; already executing code remains allocated.
+    // Guests must synchronize SMC with IC maintenance and barriers.
     // Takes blocks_mutex_ exclusive. Called for IC cache maintenance
     // (interp MSR_SYS CRn==7), munmap, and MAP_FIXED-replace mmap.
     // Raw guest stores without IC maintenance are NOT hooked (the JIT
@@ -535,7 +410,7 @@ public:
     void enter_multithreaded();
     bool mt_active() const { return mt_active_.load(std::memory_order_relaxed); }
     size_t code_buf_used()  const { return code_buf_used_; }
-    size_t code_buf_size()  const { return CODE_BUF_SIZE; }
+    size_t code_buf_size()  const { return code_buf_limit_; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
     // Resolve sampled host RIPs (from the SIGPROF jit-bucket ring) to guest
@@ -655,10 +530,15 @@ public:
     static_assert(NUM_HOST_REGS <= 16, "dirty_host_regs_ is uint16_t; "
                   "NUM_HOST_REGS must be <= 16");
 private:
-    static constexpr size_t CODE_BUF_SIZE = 64 * 1024 * 1024;
+    // Reserve stable addresses; physical pages are allocated only on writes.
+    static constexpr size_t CODE_BUF_SIZE = 1024ull * 1024 * 1024;
+    size_t code_buf_limit_ = CODE_BUF_SIZE;
+    size_t code_capacity_ = 64 * 1024 * 1024;
+    bool ensure_code_space(size_t bytes);
     uint8_t* code_buf_ = nullptr;
     size_t   code_buf_used_ = 0;
     bool     code_buf_overflow_ = false;
+    bool     code_budget_exhausted_ = false;
     uint8_t* window_base_ = nullptr;
     const Memory* guest_memory_ = nullptr;
     // ── CPU features (FMV) ──────────────────────────────────────────

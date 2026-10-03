@@ -156,7 +156,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
             }
             if (d.cls == InstClass::BL) {
                 if (!no_callregion_ &&
-                    lookup_only(ip + static_cast<uint64_t>(d.imm)) != nullptr) {
+                    lookup_only_locked(ip + static_cast<uint64_t>(d.imm)) != nullptr) {
                     // Call-aware region: a BL is a direct CALL. The callee is
                     // NOT part of the trace — the region's BL_CALL codegen
                     // invokes the (already-translated) standalone callee fn
@@ -1436,7 +1436,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     std::vector<size_t> co_patch_offs;
     auto emit_chainout_exit = [&](uint64_t pc) -> bool {
         if (!exitchain_ok) return false;
-        uint64_t (*tfn)(CPU*, Emulator*) = lookup_only(pc);
+        uint64_t (*tfn)(CPU*, Emulator*) = lookup_only_locked(pc);
         if (!tfn) return false;
         emit_mov_imm_to_rax(pc);              // rax = exit pc
         emit_store(CPU_REG, PC_OFF, RAX);     // cpu.pc = exit pc

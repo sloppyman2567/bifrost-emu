@@ -21,10 +21,91 @@
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "jit/frostjit.hpp"
 #include "core/memory.h"
+#include <cstdio>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
 namespace arm64emu {
+std::atomic<uint64_t> FrostJIT::next_cache_generation_{1};
+thread_local const FrostJIT* FrostJIT::tls_cache_owner_ = nullptr;
+thread_local uint64_t FrostJIT::tls_cache_generation_ = 0;
+uint64_t (*FrostJIT::lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
+    {
+        std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+        auto it = blocks_.find(pc);
+        if (it != blocks_.end()) return it->second.fn;
+    }
+    return translate_and_lookup(emu, pc);
+}
+uint64_t (*FrostJIT::lookup_only(uint64_t pc))(CPU*, Emulator*) {
+    std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+    return lookup_only_locked(pc);
+}
+uint64_t (*FrostJIT::lookup_only_locked(uint64_t pc))(CPU*, Emulator*) {
+    auto it = blocks_.find(pc);
+    return it == blocks_.end() ? nullptr : it->second.fn;
+}
+uint64_t (*FrostJIT::translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    auto it = blocks_.find(pc);
+    if (it != blocks_.end()) return it->second.fn;
+    return translate_block(emu, pc);
+}
+uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
+                                           int& instr_count))(CPU*, Emulator*) {
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    auto it = blocks_.find(pc);
+    if (it == blocks_.end()) {
+        translate_block(emu, pc);
+        it = blocks_.find(pc);
+    }
+    auto fn = it == blocks_.end() ? nullptr : it->second.fn;
+    int cnt = fn ? it->second.instr_count : 1;
+    // Tier-2 metadata writes and publication use the exclusive table lock.
+    if (fn && !mt_active() && tier2_enabled() && !it->second.tier2_hot_logged) {
+        uint32_t n = ++it->second.exec_count;
+        if (n >= tier2_hits_threshold()) {
+            it->second.tier2_hot_logged = true;
+            tier2_counter_disable(it->second.tier2_counter_off,
+                                  it->second.tier2_counter_len);
+            tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
+            Tier2Trace trace = collect_tier2_trace(emu, pc);
+            if (trace.ok) {
+                uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
+                auto rfn = compile_tier2_region(emu, trace, &chain_fn);
+                it = blocks_.find(pc);
+                if (rfn && it != blocks_.end()) {
+                    BlockEntry region;
+                    region.fn = rfn;
+                    if (chain_skip_enabled()) region.chain_entry = chain_fn;
+                    region.instr_count = static_cast<int>(trace.total_insts);
+                    region.exec_count = it->second.exec_count;
+                    region.tier2_hot_logged = true;
+                    region.ends_with_branch = true;
+                    region.chained = region.taken_chained = true;
+                    region.verified_once = true;
+                    it->second = region;
+                    fn = rfn;
+                    cnt = region.instr_count;
+                }
+            }
+        }
+    }
+    tls_last_block_ = LastBlockCache{pc, fn, cnt};
+    tls_inline_cache_[((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1)] =
+        InlineCacheEntry{pc, fn, cnt};
+    instr_count = cnt;
+    return fn;
+}
+void FrostJIT::dump_code_cache_stats() {
+    std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+    fprintf(stderr, "[JIT] code-cache: used=%zu capacity=%zu limit=%zu blocks=%zu growths=%llu overflows=%llu budget_fallbacks=%llu mt=%d\n",
+            code_buf_used_, code_capacity_, code_buf_limit_, blocks_.size(),
+            (unsigned long long)code_cache_growths.load(std::memory_order_relaxed),
+            (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
+            (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
+            mt_active() ? 1 : 0);
+}
 bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
     // MT-safe mode: never modify live code (see enter_multithreaded()).
@@ -229,6 +310,7 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     if (hi <= lo) { invalidate_all(); return; }
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
+    invalidate_dispatch_cache();
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) overlaps [lo, hi).
     std::vector<uint64_t> victims;
     victims.reserve(4);
@@ -288,6 +370,7 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
 void FrostJIT::invalidate_all() {
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
+    invalidate_dispatch_cache();
     if (blocks_.empty()) return;
     make_writable();
     for (auto& kv : blocks_) {

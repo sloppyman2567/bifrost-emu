@@ -201,6 +201,7 @@ void Emulator::print_jit_stats() {
                 static_cast<unsigned long long>(bp.interp_only.load()));
     }
     dump_prof_snapshot();
+    jit_->dump_code_cache_stats();
 }
 // Periodic (or exit-time) SIGPROF bucket snapshot. Shared by print_jit_stats
 // and the BIFROST_STATS_PERIOD reporter so the jit/dispatch/translate/interp
@@ -341,6 +342,7 @@ void Emulator::dump_periodic_stats(double dt) {
     // dump, so the jit/dispatch/translate/interp split was unobservable
     // without a clean exit. Inert unless BIFROST_PROF=1.
     dump_prof_snapshot();
+    jit_->dump_code_cache_stats();
     // Syscall histogram (attributes the SIGPROF "other" bucket). Always
     // counted; printed whenever this periodic reporter runs.
     dump_syscall_histogram(dt);
@@ -444,8 +446,13 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
                     (unsigned long long)cpu->pc, (unsigned long long)cpu->sp,
                     (unsigned long long)cpu->regs[30]);
         }
+        if (jit) {
+            FrostJIT::tls_stat_instr_++;
+            if ((++FrostJIT::tls_stat_exec_ & 0xFFFF) == 0) jit->flush_stat_tls();
+        }
         emu->step(*cpu);
     }
+    if (jit) jit->flush_stat_tls();
     return cpu->pc;
 }
 

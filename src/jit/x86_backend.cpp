@@ -27,20 +27,29 @@
 #include <cstdlib>
 #include <cstring>
 namespace arm64emu {
+bool FrostJIT::ensure_code_space(size_t bytes) {
+    if (bytes > code_buf_limit_ - code_buf_used_) return false;
+    const size_t needed = code_buf_used_ + bytes;
+    if (needed > code_capacity_) {
+        code_capacity_ = std::min(code_buf_limit_, std::max(needed, code_capacity_ * 2));
+        code_cache_growths.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+}
 void FrostJIT::emit_byte(uint8_t b) {
-    if (code_buf_used_ + 1 <= CODE_BUF_SIZE)
+    if (ensure_code_space(1))
         code_buf_[code_buf_used_++] = b;
     else
         code_buf_overflow_ = true;
 }
 void FrostJIT::emit_u32(uint32_t v) {
-    if (code_buf_used_ + 4 <= CODE_BUF_SIZE)
+    if (ensure_code_space(4))
         memcpy(code_buf_ + code_buf_used_, &v, 4), code_buf_used_ += 4;
     else
         code_buf_overflow_ = true;
 }
 void FrostJIT::emit_u64(uint64_t v) {
-    if (code_buf_used_ + 8 <= CODE_BUF_SIZE)
+    if (ensure_code_space(8))
         memcpy(code_buf_ + code_buf_used_, &v, 8), code_buf_used_ += 8;
     else
         code_buf_overflow_ = true;
@@ -285,12 +294,20 @@ size_t FrostJIT::emit_jmp_rel32_placeholder() {
     size_t off = code_buf_used_; emit_byte(0xE9); emit_u32(0); return off;
 }
 void FrostJIT::patch_jmp_rel32(size_t off, int32_t rel) {
+    if (code_buf_overflow_ || off > code_buf_limit_ || 5 > code_buf_limit_ - off) {
+        code_buf_overflow_ = true;
+        return;
+    }
     memcpy(code_buf_+off+1, &rel, 4);
 }
 size_t FrostJIT::emit_call_rel32_placeholder() {
     size_t off = code_buf_used_; emit_byte(0xE8); emit_u32(0); return off;
 }
 void FrostJIT::patch_call_rel32(size_t off, const uint8_t* target) {
+    if (code_buf_overflow_ || off > code_buf_limit_ || 5 > code_buf_limit_ - off) {
+        code_buf_overflow_ = true;
+        return;
+    }
     int64_t rel = target - (code_buf_ + off + 5);
     int32_t rel32 = static_cast<int32_t>(rel);
     memcpy(code_buf_+off+1, &rel32, 4);
@@ -299,6 +316,10 @@ size_t FrostJIT::emit_jcc_rel32_placeholder(uint8_t cc) {
     size_t off = code_buf_used_; emit_byte(0x0F); emit_byte(0x80+cc); emit_u32(0); return off;
 }
 void FrostJIT::patch_jcc_rel32(size_t off, int32_t rel) {
+    if (code_buf_overflow_ || off > code_buf_limit_ || 6 > code_buf_limit_ - off) {
+        code_buf_overflow_ = true;
+        return;
+    }
     memcpy(code_buf_+off+2, &rel, 4);
 }
 // rel8 jumps: jcc rel8 = 0x70+cc <rel8> (2 bytes)
@@ -306,6 +327,10 @@ size_t FrostJIT::emit_jcc_rel8_placeholder(uint8_t cc) {
     size_t off = code_buf_used_; emit_byte(0x70 + cc); emit_byte(0); return off;
 }
 void FrostJIT::patch_jcc_rel8(size_t off, int8_t rel) {
+    if (code_buf_overflow_ || off > code_buf_limit_ || 2 > code_buf_limit_ - off) {
+        code_buf_overflow_ = true;
+        return;
+    }
     code_buf_[off+1] = static_cast<uint8_t>(rel);
 }
 // sub rsp, imm8 / add rsp, imm8 (REX.W 83 EC NN / REX.W 83 C4 NN)

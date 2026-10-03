@@ -289,6 +289,15 @@ static LeafScanResult leaf_scan(Emulator& emu, uint64_t target) {
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
     if (!code_buf_) return nullptr;
+    if (code_budget_exhausted_) {
+        BlockEntry fallback;
+        fallback.interp_only = true;
+        fallback.interp_only_count = fallback.instr_count = 1;
+        fallback.verified_once = true;
+        blocks_[start_pc] = fallback;
+        code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
     // BL_CALL (native call-within-block) does NOT compose with chain-skip:
     // a callee block entered at fn() inside jit_call_helper eventually
     // reaches the chain-skip cold exit (`mov rsp,rbp; pop×6; ret`), which
@@ -884,7 +893,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         emit_call_aligned(reinterpret_cast<void*>(&tier2_fire_stub), 0);
         // Patch the jne to skip the fire path (land right after the call).
         const int8_t rel = static_cast<int8_t>(code_buf_used_ - (jne_off + 2));
-        code_buf_[jne_off + 1] = static_cast<uint8_t>(rel);
+        patch_jcc_rel8(jne_off, rel);
         tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
     }
     // 1.5.4-alpha: load the direct-window base into R10 ONLY if the
@@ -1352,6 +1361,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     if (code_buf_overflow_) {
         code_buf_used_ = block_start;
+        // The budget is fixed for this JIT. Cache the failure so every
+        // subsequent call does not repeat decode/IR/codegen before stepping.
+        BlockEntry fallback;
+        fallback.interp_only = true;
+        fallback.interp_only_count = 1;
+        fallback.instr_count = 1;
+        fallback.verified_once = true;
+        blocks_[start_pc] = fallback;
+        code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
+        code_budget_exhausted_ = true;
         // W^X: make the buffer executable again before returning (we may
         // have written partial code before the overflow was detected).
         make_executable();

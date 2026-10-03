@@ -68,6 +68,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         emu.step(cpu);
         return cpu.pc;
     }
+    sync_dispatch_cache();
     uint64_t pc = cpu.pc;
     // ── 1.5.4-alpha: single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
@@ -102,6 +103,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // implies a valid fn — no redundant fn != nullptr test. The ~0ULL
     // empty sentinel is never a real guest PC (48-bit VAs).
     if (__builtin_expect(pc == tls_last_block_.pc, 1)) {
+        if (!tls_last_block_.fn) {
+            tls_stat_instr_++;
+            if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls();
+            emu.step(cpu);
+            return cpu.pc;
+        }
         tls_stat_instr_ += tls_last_block_.instr_count;
         if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
             return tls_last_block_.fn(&cpu, &emu);
@@ -120,6 +127,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         uint64_t (*cached_fn)(CPU*, Emulator*) = nullptr;
         int cached_count = 0;
         if (inline_cache_lookup(pc, &cached_fn, cached_count)) {
+            if (!cached_fn) {
+                tls_stat_instr_++;
+                if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls();
+                emu.step(cpu);
+                return cpu.pc;
+            }
             tls_stat_instr_ += cached_count;
             if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
                 return cached_fn(&cpu, &emu);
@@ -168,7 +181,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // lock anyway). This is NOT the interp_only demotion machinery
         // (tls_hot_pc_counts_ / HOT_PC_THRESHOLD) and the fast paths
         // (tls_last_block_ / inline cache) stay untouched.
-        if (tier2_enabled() && !entry.tier2_hot_logged) {
+        if (!mt_active() && tier2_enabled() && !entry.tier2_hot_logged) {
             uint32_t n = ++it->second.exec_count;
             if (n >= tier2_hits_threshold()) {
                 it->second.tier2_hot_logged = true;
@@ -307,7 +320,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         cache_misses++;
         blocks_mutex_.unlock_shared();
         blocks_mutex_.lock();
-        auto fn = translate_block(emu, pc);
+        auto existing = blocks_.find(pc);
+        auto fn = existing != blocks_.end() ? existing->second.fn : translate_block(emu, pc);
         if (!fn) {
             auto it2 = blocks_.find(pc);
             if (it2 != blocks_.end() && it2->second.interp_only) {
@@ -348,6 +362,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 wit->second.interp_only = true;
                 wit->second.interp_only_count = wit->second.instr_count;
                 wit->second.fn = nullptr;
+                invalidate_dispatch_cache();
                 wit->second.chained = false;
                 wit->second.taken_chained = false;
             }

@@ -18,6 +18,8 @@ namespace bifrost {
 
 struct DebugFlags {
     // ── X protocol wire / fd-lifecycle traces ─────────────────────────
+    size_t jit_cache_initial_mb = 64; // BIFROST_JIT_CACHE_INITIAL_MB: growth-regression diagnostic
+    size_t jit_cache_mb = 1024; // BIFROST_JIT_CACHE_MB: bounded cache-budget diagnostic (1..1024 MiB)
     bool xtrace   = false;  // BIFROST_XTRACE     — X wire + fd lifecycle
     bool xfull    = false;  // BIFROST_XFULL      — full X request payload dumps
     bool xbt      = false;  // BIFROST_XBT        — X opcode backtraces
@@ -82,6 +84,18 @@ struct DebugFlags {
  private:
     static DebugFlags parse() {
         DebugFlags f;
+        if (const char* budget = std::getenv("BIFROST_JIT_CACHE_MB")) {
+            char* end = nullptr;
+            unsigned long mb = std::strtoul(budget, &end, 10);
+            if (end != budget && *end == '\0' && mb >= 1 && mb <= 1024)
+                f.jit_cache_mb = static_cast<size_t>(mb);
+        }
+        if (const char* initial = std::getenv("BIFROST_JIT_CACHE_INITIAL_MB")) {
+            char* end = nullptr;
+            unsigned long mb = std::strtoul(initial, &end, 10);
+            if (end != initial && *end == '\0' && mb >= 1 && mb <= 1024)
+                f.jit_cache_initial_mb = static_cast<size_t>(mb);
+        }
         const bool all = env("BIFROST_TRACE");
         f.xtrace    = all || env("BIFROST_XTRACE");
         f.xfull     = all || env("BIFROST_XFULL");

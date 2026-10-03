@@ -2078,7 +2078,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     } else {
                         uint32_t val = (static_cast<uint32_t>(imm8 & 0x3F)) << 19;
                         if (imm8 & 0x80) val |= 0x80000000u;             // sign
-                        if (imm8 & 0x40) val |= 0x1F000000u;             // exp
+                        if (imm8 & 0x40) val |= 0x3E000000u;             // exp[7:2] = 0:11111
                         else             val |= 0x40000000u;
                         replicate_u32(val);
                         memcpy(&cpu.v_lo[rd], dst, 8);
@@ -3550,15 +3550,17 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         return;
                     }
                 }
-                // ── FABS / FNEG (FP absolute / negate, vector) ──
+                // ── FABS / FNEG / FSQRT (FP unary, vector) ──
                 // FABS Vd.<T>, Vn.<T>: clear sign bit. FNEG: flip sign bit.
-                // Encoding (3-same, 2-operand, bit22=1 FP): 0 Q 0 1110 1
-                // size 1 0 0000 1111 1 0 Rn Rd. sub3_noq: FABS=0x0E20F800,
-                // FNEG=0x2E20F800. S (size=2) or D (size=3).
+                // Bit 23 is fixed; bit 22 selects S/D. FSQRT sets bit 16,
+                // while FABS/FNEG clear it. Q selects 64/128-bit output.
                 {
-                    uint32_t fs = (op & 0xFF20FC00) & ~(1u << 30);
-                    if (fs == 0x0E20F800 || fs == 0x2E20F800) {
-                        bool is_neg = fs == 0x2E20F800;
+                    // Keep bit16: FSQRT differs from FNEG only by this bit.
+                    // Strip Q and the S/D selector, retaining the fixed size bit.
+                    uint32_t fs = op & 0xBFBFFC00;
+                    if (fs == 0x0EA0F800 || fs == 0x2EA0F800 || fs == 0x2EA1F800) {
+                        bool is_neg = fs == 0x2EA0F800;
+                        bool is_sqrt = fs == 0x2EA1F800;
                         int esize = 1 << size;
                         int lanes = (Q ? 16 : 8) / esize;
                         uint8_t vn[16];
@@ -3567,7 +3569,19 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         for (int i = 0; i < lanes; i++) {
                             uint64_t v = 0;
                             memcpy(&v, vn + i * esize, esize);
-                            if (is_neg) v ^= (1ULL << (esize * 8 - 1));
+                            if (is_sqrt) {
+                                if (esize == 8) {
+                                    double x, r;
+                                    memcpy(&x, &v, 8);
+                                    r = x < 0.0 ? std::numeric_limits<double>::quiet_NaN() : std::sqrt(x);
+                                    memcpy(&v, &r, 8);
+                                } else {
+                                    float x, r;
+                                    memcpy(&x, &v, 4);
+                                    r = x < 0.0f ? std::numeric_limits<float>::quiet_NaN() : std::sqrt(x);
+                                    memcpy(&v, &r, 4);
+                                }
+                            } else if (is_neg) v ^= (1ULL << (esize * 8 - 1));
                             else v &= ~(1ULL << (esize * 8 - 1));
                             if (esize == 8) {
                                 if (i == 0) memcpy(&cpu.v_lo[rd], &v, 8);
@@ -3822,10 +3836,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // instruction was silently NOP'd.
             if ((op & 0xFF20FC00) == 0x5E000400) {
                 uint8_t imm5 = (op >> 16) & 0x1F;
-                int esize, idx;
-                if (imm5 & 0x08)      { esize = 8; idx = imm5 >> 4; }  // D (64-bit)
-                else if (imm5 & 0x04) { esize = 4; idx = imm5 >> 3; }  // S (32-bit)
-                else                  { esize = 4; idx = 0; }
+                // The LOWEST set bit selects the element size; higher
+                // bits encode the lane. For .s[1], imm5=0x0c: bit 3 is
+                // the lane bit, not the size bit for a D element.
+                if (!imm5 || imm5 == 16) throw DecodeError(cpu.pc, op);
+                const int size_log2 = __builtin_ctz(static_cast<unsigned>(imm5));
+                const int esize = 1 << size_log2;
+                const int idx = imm5 >> (size_log2 + 1);
                 uint64_t src_val = 0;
                 int elems_per_qword = 8 / esize;
                 if (idx < elems_per_qword) {
