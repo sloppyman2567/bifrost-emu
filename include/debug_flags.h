@@ -11,6 +11,8 @@
 
 #include <cstdlib>
 #include <string>
+#include <cstdint>
+#include <vector>
 
 namespace bifrost {
 
@@ -39,6 +41,8 @@ struct DebugFlags {
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
+    std::vector<uint64_t> input_watch; // BIFROST_INPUT_WATCH — comma-separated guest u32 addresses
+    bool input_trace = false;  // BIFROST_INPUT_TRACE — bounded SDL mouse/input-mode log
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     // ── crash / decode diagnostics ───────────────────────────────────
     bool crash_dump = false;  // BIFROST_CRASH_DUMP  — detailed crash report
@@ -98,6 +102,16 @@ struct DebugFlags {
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
+        f.input_trace = all || env("BIFROST_INPUT_TRACE");
+        if (const char* p = std::getenv("BIFROST_INPUT_WATCH")) {
+            while (*p && f.input_watch.size() < 32) {
+                char* end = nullptr;
+                uint64_t address = std::strtoull(p, &end, 0);
+                if (end == p || (*end && *end != ',')) break;
+                f.input_watch.push_back(address);
+                p = *end ? end + 1 : end;
+            }
+        }
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         f.crash_dump = all || env("BIFROST_CRASH_DUMP");
         f.dbg_guard  = all || env("BIFROST_DBG_GUARD");

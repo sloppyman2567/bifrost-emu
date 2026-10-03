@@ -1102,7 +1102,8 @@ uint64_t Memory::mmap_alloc_callback_stack(uint64_t usable_size) {
     // Base allocation covers [guard][usable][guard].
     uint64_t base = mmap_alloc(usable + 2 * P);
     if (base == 0) return 0;
-    if (direct_window_) {
+    if (direct_window_ && base < DIRECT_WINDOW_SIZE &&
+        usable + 2 * P <= DIRECT_WINDOW_SIZE - base) {
         // Guards are per-page PROT_NONE holes inside the RW window.
         mprotect(direct_window_ + base, P, PROT_NONE);
         mprotect(direct_window_ + base + P + usable, P, PROT_NONE);
@@ -1112,6 +1113,12 @@ uint64_t Memory::mmap_alloc_callback_stack(uint64_t usable_size) {
         direct_page_flags_[base / P].store(PAGE_MAPPED, std::memory_order_release);
         direct_page_flags_[(base + P + usable) / P].store(PAGE_MAPPED,
                                                           std::memory_order_release);
+    } else {
+        // Sparse/high mappings have no direct-page flag entry. Protect
+        // through the normal guest mapping path instead of indexing past
+        // the window's page table.
+        (void)mprotect_guest(base, P, 0);
+        (void)mprotect_guest(base + P + usable, P, 0);
     }
     (void)mprotect_guest(base + P, usable,
                          GUEST_PROT_READ | GUEST_PROT_WRITE);

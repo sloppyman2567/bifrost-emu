@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## Unreleased — game compatibility and TLS follow-up (2026-10-02)
+## Unreleased — game compatibility and TLS follow-up (2026-10-03)
 
 - Neverball: user-confirmed stable gameplay, replay, menus, configuration,
   JPEG previews, and fullscreen/windowed mouse control. Corrected SIMD
@@ -18,6 +18,16 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   in the user's observed session, with no sudden crashes reported. Camera
   behavior and texture corruption remain unresolved. Added 61 regression
   checks and cropped screenshot evidence in [vkQuake notes](vkquake.md).
+- vkQuake follow-up: preserve pending CPU uploads when merging Vulkan mapped
+  memory readback. Texture colors improved, with remaining artifacts reported.
+  Implement SDL event filters with nested callback scratch stacks and isolated
+  host-thread guest state; correct event/output bounce sizes and above-window
+  callback-stack guards. Add opt-in input diagnostics.
+- SIMD: fix SSHL/USHL signed low-byte register counts and negative USHL right
+  shifts in the shared interpreter fallback; add 182 regression checks. The
+  user still reports excessive vkQuake sensitivity after these repairs.
+- Documentation: remove old planning, audit, and session-history documents;
+  keep current game status and operational references.
 - Dynamic linking: late TLS supports reserved static slots and per-thread
   dynamic DTV allocations, including TLSDESC, template relocation, alignment,
   pthread initialization/reuse, and clean rejection of unsupported

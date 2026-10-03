@@ -7,6 +7,14 @@ camera and rendering issues; it is not a claim of complete compatibility.
 
 ## User screenshot checkpoint
 
+Follow-up on 2026-10-03: the mapped-memory synchronization repair substantially
+improved texture colors in the user's screenshot. The user subsequently
+reported some remaining texture corruption and excessively high sensitivity;
+neither rendering nor camera behavior is considered fully repaired. The
+mapped-memory regression passes in both engines, including preservation of
+pending uploads and GPU readback. Further debugging must preserve the user's
+active gameplay session; diagnostic relaunches previously interrupted play.
+
 - Gameplay and menus work according to the user.
 - In a later checkpoint the user reported no sudden crashes during continued
   play. Session duration was not measured; this is observed interactive
@@ -30,7 +38,8 @@ Saved evidence: [gameplay](images/vkquake-2026-10-02/gameplay.png),
 [main menu](images/vkquake-2026-10-02/menu.png),
 [help](images/vkquake-2026-10-02/help.png), and
 [load menu](images/vkquake-2026-10-02/load.png).
-Later checkpoint: [console with save/load activity](images/vkquake-2026-10-02/console-save-load.png).
+Later checkpoints: [console with save/load activity](images/vkquake-2026-10-02/console-save-load.png)
+and [improved textures with remaining artifacts](images/vkquake-2026-10-03/texture-repair-probe.png).
 
 All saved screenshots are cropped to game content, removing the surrounding
 desktop/video and window title bar. Game pixels are retained without resizing
@@ -46,6 +55,56 @@ BIFROST_ROOT="$(realpath ..)" ../../bifrost-emu ./vkquake -basedir .
 ```
 
 Add `--no-jit` before `./vkquake` to run the interpreter.
+
+## SDL input filter repair (2026-10-03)
+
+The emulator previously ignored `SDL_SetEventFilter` and reported no filter
+from `SDL_GetEventFilter`. Guest filters now run through a host callback
+bridge: their return value controls event rejection, and their callback and
+userdata round-trip through the getter. Callback execution preserves guest
+registers and uses separate scratch stacks/events for nested SDL calls.
+Host event threads receive isolated guest CPU/TLS state.
+
+The regression covers signed mouse deltas, relative output canaries,
+registration/getter/removal, accepted/rejected motion, and nested pushes.
+It also exercises callback stacks above the direct window; those now protect
+sparse guest pages without indexing the direct page table. Small SDL event
+and integer-output bounces use their exact ABI sizes to avoid crossing stack
+guards. `scripts/run_thunk_compat.sh` passes SDL/GL/Vulkan in both engines.
+
+This repairs the confirmed event-filter defect. Subsequent interactive runs
+still showed excessive sensitivity. Horizontal turning was seen in captures,
+but the user could not confidently assess it because of the large camera
+response; the gameplay input issue remains unresolved.
+
+## Remaining sensitivity investigation
+
+A bounded SDL capture (`BIFROST_INPUT_TRACE=1`) showed signed horizontal
+movement arriving in relative mode. `BIFROST_INPUT_WATCH` accepts up to 32
+comma-separated guest addresses and logs changed 32-bit values at SDL polls.
+The live vkQuake capture loaded sensitivity 0.2 and FOV 90; yaw changed by
+small angles. This does not establish that the visible camera is correct.
+
+Exact compiled mouse-motion, camera, angle, rotation, and matrix routines
+passed isolated numerical checks. The glibc-linked probe exposed a separate
+SSHL/USHL bug: both use a signed low-byte shift count, including USHL's
+logical right shift for negative counts. The interpreter previously treated
+USHL as left-only and used whole-lane SSHL counts. JIT fallback shares this
+handler. `ctest/jit_shift_register.c` covers both operations, valid Q forms,
+all lane sizes, destination aliasing, out-of-range counts and ignored upper
+count bits: 182 checks pass under QEMU and both repaired engines. The old
+engines fail USHL by -1. The compiled glibc view probe now also passes with
+its original vectorized call-stub builder.
+
+The user confirmed that sensitivity remains excessive after the shift repair.
+The repair fixes a demonstrated instruction bug, but does not resolve the
+reported camera behavior.
+
+The final gameplay segment of the 2026-10-03 recording shows sharp camera
+swings between floor and ceiling. The greyed-out vkQuake window at the end
+belongs to a separate instance, as clarified by the user; it is not evidence
+that the active gameplay instance hung. The recording does not measure
+physical mouse movement or establish the remaining bug's cause.
 
 ## Pointer corruption fixed
 
@@ -66,6 +125,6 @@ writes. All 61 checks pass under QEMU, JIT, and interpreter. The saved pre-fix
 binary fails the first check and then crashes. The focused FP suite passes
 12/12 in each emulator mode.
 
-This reproduction supersedes the earlier stale-guest-state diagnosis in the
-2026-09-03 session history. Working JIT gameplay does not establish long-run
-stability or resolve the camera and texture issues recorded above.
+This reproduction supersedes the earlier stale-guest-state diagnosis. Working
+JIT gameplay does not establish long-run stability or resolve the camera and
+texture issues recorded above.

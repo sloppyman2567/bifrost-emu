@@ -266,6 +266,7 @@ UNIT_TESTS=(
     "neon|ctest/jit_neon.elf||5|PASS"
     "neon_advanced|ctest/jit_neon_advanced.elf||5|PASS"
     "neon_cmp|ctest/jit_neon_cmp.elf||5|checks passed"
+    "shift_register|ctest/jit_shift_register.elf||5|checks passed"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"
     "neon_roundingshift|ctest/jit_neon_roundingshift.elf||5|checks passed"

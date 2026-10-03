@@ -888,10 +888,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // ── SSHL / USHL (vector, shift left by register) ─────────────
             // Encoding: 0 Q U 01110 size 1 Rm 000100 Rn Rd (sub_noq=0x0E204400
             // for U=0, 0x2E204400 for U=1; size selects 8b/8h/4s/2d lanes).
-            // SSHL shifts each lane of Vn left by the SIGNED value in the
-            // corresponding Vm lane (negative shift → arithmetic right);
-            // USHL uses the UNSIGNED Vm value (left shift only). Shift
-            // amounts >= the lane width produce 0 (LSL) or sign fill (ASR).
+            // Both forms interpret only Vm's low byte as a signed count.
+            // Negative counts shift right: SSHL sign-fills, USHL zero-fills.
+            // Counts outside the lane width produce zero or sign fill.
             // glibc strspn lowers its SWAR "has zero / has non-matching byte"
             // trick to `sshl v0.16b, v0.16b, v2.16b` + `add`; without this
             // the interp SIGILL'd (signal 4) inside strspn during fontconfig
@@ -913,31 +912,19 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     uint64_t vn_lane = 0, vm_lane = 0;
                     memcpy(&vn_lane, buf_n + i * esize, esize);
                     memcpy(&vm_lane, buf_m + i * esize, esize);
+                    int shift = static_cast<int8_t>(static_cast<uint8_t>(vm_lane));
                     uint64_t result;
-                    if (!U) {
-                        // SSHL: signed shift amount; negative → ASR
-                        int64_t s;
-                        if      (esize == 1) s = (int64_t)(int8_t)(uint8_t)vm_lane;
-                        else if (esize == 2) s = (int64_t)(int16_t)(uint16_t)vm_lane;
-                        else if (esize == 4) s = (int64_t)(int32_t)(uint32_t)vm_lane;
-                        else                 s = (int64_t)vm_lane;
-                        if (s >= 0) {
-                            if (s >= bits) result = 0;
-                            else result = (vn_lane << s) & mask;
-                        } else {
-                            int64_t rs = -s;
-                            int64_t sv;
-                            if      (esize == 1) sv = (int64_t)(int8_t)(uint8_t)vn_lane;
-                            else if (esize == 2) sv = (int64_t)(int16_t)(uint16_t)vn_lane;
-                            else if (esize == 4) sv = (int64_t)(int32_t)(uint32_t)vn_lane;
-                            else                 sv = (int64_t)vn_lane;
-                            if (rs >= bits) result = (uint64_t)(sv < 0 ? -1 : 0) & mask;
-                            else result = (uint64_t)(sv >> rs) & mask;
-                        }
+                    if (shift >= 0) {
+                        result = shift >= bits ? 0 : (vn_lane << shift) & mask;
                     } else {
-                        // USHL: unsigned shift amount, left shift only
-                        if (vm_lane >= (uint64_t)bits) result = 0;
-                        else result = (vn_lane << vm_lane) & mask;
+                        int count = -shift; // low-byte range: 1..128, no overflow
+                        bool negative = !U && (vn_lane & (uint64_t{1} << (bits - 1)));
+                        if (count >= bits) {
+                            result = negative ? mask : 0;
+                        } else {
+                            result = vn_lane >> count;
+                            if (negative) result |= mask ^ (mask >> count);
+                        }
                     }
                     memcpy(out + i * esize, &result, esize);
                 }

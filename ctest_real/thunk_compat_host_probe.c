@@ -2,6 +2,7 @@
  * data addresses rather than accidentally dereferencing them on the host. */
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #if defined(THUNK_GL_PROBE)
 static unsigned array_buffer, last_error;
 void glBindBuffer(unsigned target,unsigned buffer) {
@@ -22,6 +23,35 @@ void glVertexAttribPointer(unsigned index,int size,unsigned type,unsigned char n
 unsigned glGetError(void) { unsigned e=last_error; last_error=0; return e; }
 #endif
 #if defined(THUNK_VK_PROBE)
+static unsigned char mapped_memory[8192];
+static uint64_t mapped_offset;
+int vkAllocateMemory(uint64_t device,const void *info,const void *allocator,uint64_t *memory) {
+    (void)device; (void)info; (void)allocator;
+    memset(mapped_memory,0,sizeof(mapped_memory)); *memory=0x55; return 0;
+}
+int vkMapMemory(uint64_t device,uint64_t memory,uint64_t offset,uint64_t size,uint32_t flags,void **data) {
+    (void)device; (void)flags;
+    if(memory!=0x55 || offset>sizeof(mapped_memory) || size>sizeof(mapped_memory)-offset) return -5;
+    mapped_offset=offset; *data=mapped_memory+offset; return 0;
+}
+void vkUnmapMemory(uint64_t device,uint64_t memory) {(void)device;(void)memory;}
+void vkFreeMemory(uint64_t device,uint64_t memory,const void *allocator) {(void)device;(void)memory;(void)allocator;}
+int vkQueueSubmit(uint64_t queue,uint32_t count,const void *submits,uint64_t fence) {
+    (void)queue;(void)count;(void)submits;(void)fence;
+    return mapped_memory[mapped_offset+3]==0x31 && mapped_memory[mapped_offset+7]==0x52 &&
+           mapped_memory[mapped_offset+128]==0xd7 ? 0 : -3;
+}
+int vkWaitForFences(uint64_t device,uint32_t count,const uint64_t *fences,uint32_t all,uint64_t timeout) {
+    (void)device;(void)count;(void)fences;(void)all;(void)timeout;
+    mapped_memory[mapped_offset+128]=0xd7; mapped_memory[mapped_offset+4096]=0xb4; return 0;
+}
+int vkFlushMappedMemoryRanges(uint64_t device,uint32_t count,const void *ranges) {
+    (void)device;(void)count;(void)ranges; return 0;
+}
+int vkInvalidateMappedMemoryRanges(uint64_t device,uint32_t count,const void *ranges) {
+    (void)device;(void)count;(void)ranges;
+    mapped_memory[mapped_offset+256]=0xab; return 0;
+}
 typedef struct Node { uint32_t type; const struct Node *next; uint32_t count; const uint64_t *devices; } Node;
 int vkCreateDevice(uint64_t physical,const void *info,const void *allocator,uint64_t *device) {
     (void)allocator;

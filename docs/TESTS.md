@@ -15,11 +15,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 244 configured test runs:
+The fully provisioned suite contains 245 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 67 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 68 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -28,12 +28,25 @@ The fully provisioned suite contains 244 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **244** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **245** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 222 configured runs (217 with `--quick`). These
+tests are not selected, for 223 configured runs (218 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
+
+## Game compatibility follow-up (2026-10-03)
+
+`ctest/jit_shift_register.c` adds 182 SSHL/USHL checks for signed low-byte
+counts, logical/arithmetic right shifts, lane widths, Q forms, aliasing, and
+out-of-range counts. It passes under QEMU and both emulator engines.
+The six selected shift/permute regressions also pass in both engines.
+
+`scripts/run_thunk_compat.sh` exercises SDL event-filter registration,
+accept/reject returns, nested callbacks, signed mouse deltas, and exact-size
+output bounces, alongside GL ABI and Vulkan mapped-memory upload/readback
+checks. These focused tests do not establish correct interactive vkQuake
+sensitivity; see [vkQuake status](vkquake.md).
 
 ## Memory and signal regressions
 

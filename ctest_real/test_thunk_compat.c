@@ -29,6 +29,75 @@ typedef struct { uint32_t flags; Format *format; int w,h,pitch; void *pixels; vo
     int locked; void *list; int clip[4]; void *map; int refcount; } Surface;
 _Static_assert(sizeof(Surface)==96 && sizeof(Format)==56, "SDL LP64 layout");
 
+typedef union {
+    uint64_t alignment;
+    unsigned char bytes[56];
+    struct { uint32_t type,timestamp,window,which,state; int32_t x,y,xrel,yrel; } motion;
+} InputEvent;
+_Static_assert(sizeof(InputEvent)==56, "SDL2 event LP64 size");
+static int (*input_push)(InputEvent*);
+static int (*input_get_filter)(int(**)(void*,InputEvent*),void**);
+static int input_calls, input_failures;
+static int input_filter(void* userdata, InputEvent* event) {
+    int (*filter)(void*,InputEvent*)=NULL; void* data=NULL;
+    if (!input_get_filter(&filter,&data) || filter!=input_filter || data!=userdata)
+        input_failures++;
+    input_calls++;
+    if (event->motion.type!=0x400) return 1;
+    if (event->motion.xrel==123) {
+        /* Re-enter the bridge: the outer callback's frame/event must survive. */
+        InputEvent nested={0}; nested.motion.type=0x400; nested.motion.xrel=456;
+        if (input_push(&nested)!=0 || event->motion.xrel!=123) input_failures++;
+    }
+    if (event->motion.xrel<0) return 1;
+    return 0;
+}
+static int input_test(uint64_t lib) {
+    input_push=sym(lib,"SDL_PushEvent");
+    input_get_filter=sym(lib,"SDL_GetEventFilter");
+    void (*set_filter)(int(*)(void*,InputEvent*),void*)=sym(lib,"SDL_SetEventFilter");
+    int (*poll)(InputEvent*)=sym(lib,"SDL_PollEvent");
+    uint32_t (*relative)(int*,int*)=sym(lib,"SDL_GetRelativeMouseState");
+    InputEvent event;
+    while(poll(&event)) {}
+    for(int sign=-1;sign<=1;sign+=2) {
+        memset(&event,0,sizeof(event)); event.motion.type=0x400;
+        event.motion.xrel=sign*23; event.motion.yrel=sign*-47;
+        CHECK(input_push(&event)==1);
+        int found=0;
+        for(int tries=0;tries<32;tries++) {
+            if(poll(&event) && event.motion.type==0x400) {found=1;break;}
+        }
+        CHECK(found && event.motion.xrel==sign*23 && event.motion.yrel==sign*-47);
+    }
+    struct { uint32_t before; int x,y; uint32_t after; } xy={0x12345678,999,999,0x87654321};
+    relative(&xy.x,&xy.y);
+    CHECK(xy.before==0x12345678 && xy.after==0x87654321 && xy.x==0 && xy.y==0);
+    int (*filter)(void*,InputEvent*)=NULL;
+    void* userdata=NULL;
+    CHECK(input_get_filter(&filter,&userdata)==0);
+    int cookie=37;
+    set_filter(input_filter,&cookie);
+    CHECK(input_get_filter(&filter,&userdata)==1 && filter==input_filter && userdata==&cookie);
+    CHECK(input_get_filter(NULL,NULL)==1);
+    memset(&event,0,sizeof(event)); event.motion.type=0x400; event.motion.xrel=123;
+    CHECK(input_push(&event)==0 && input_calls==2 && input_failures==0);
+    event.motion.xrel=-123; event.motion.yrel=-456;
+    CHECK(input_push(&event)==1 && input_calls==3 && input_failures==0);
+    int found=0;
+    for(int tries=0;tries<32;tries++) {
+        if(poll(&event) && event.motion.type==0x400) {found=1;break;}
+    }
+    CHECK(found && event.motion.xrel==-123 && event.motion.yrel==-456);
+    set_filter(NULL,NULL);
+    CHECK(input_get_filter(&filter,&userdata)==0 && !filter && !userdata);
+    memset(&event,0,sizeof(event)); event.motion.type=0x400; event.motion.xrel=123;
+    CHECK(input_push(&event)==1 && input_calls==3);
+    while(poll(&event)) {}
+    puts("SDL input/filter regression passed");
+    return 0;
+}
+
 static int sdl_test(void) {
     uint64_t lib=thunk_dlopen("libSDL2.so"); CHECK(lib);
     Surface *(*create)(uint32_t,int,int,int,uint32_t)=sym(lib,"SDL_CreateRGBSurfaceWithFormat");
@@ -135,7 +204,7 @@ static int sdl_test(void) {
     CHECK(window_surface(w)==s && ((uint32_t*)s->pixels)[0]==0xff998877);
     CHECK(update(w)==0);
     size(w,24,20); s=window_surface(w); CHECK(s && s->w==24 && s->h==20);
-    CHECK(update(w)==0); destroy(w); quit();
+    CHECK(update(w)==0); CHECK(input_test(lib)==0); destroy(w); quit();
     CHECK(keyboard(NULL)==keys); /* block lifetime survives subsystem restart */
     puts("thunk SDL compatibility passed"); return 0;
 }
@@ -179,6 +248,37 @@ static int vk_test(void) {
         pi={1000001001,&group,0,NULL,1,&swapchain,&index,NULL};
     CHECK(present(0x1234,&pi)==0);
     group.count=0x40000000; CHECK(present(0x1234,&pi)!=0);
+    int (*allocate)(uint64_t,const void*,const void*,uint64_t*)=sym(lib,"vkAllocateMemory");
+    int (*map)(uint64_t,uint64_t,uint64_t,uint64_t,uint32_t,void**)=sym(lib,"vkMapMemory");
+    void (*unmap)(uint64_t,uint64_t)=sym(lib,"vkUnmapMemory");
+    void (*free_memory)(uint64_t,uint64_t,const void*)=sym(lib,"vkFreeMemory");
+    int (*wait)(uint64_t,uint32_t,const uint64_t*,uint32_t,uint64_t)=sym(lib,"vkWaitForFences");
+    int (*submit)(uint64_t,uint32_t,const void*,uint64_t)=sym(lib,"vkQueueSubmit");
+    int (*flush)(uint64_t,uint32_t,const void*)=sym(lib,"vkFlushMappedMemoryRanges");
+    int (*invalidate)(uint64_t,uint32_t,const void*)=sym(lib,"vkInvalidateMappedMemoryRanges");
+    for(uint64_t offset=0;offset<=64;offset+=64) {
+        struct {uint32_t type; const void *next; uint64_t size; uint32_t memory_type;}
+            ai={5,NULL,8192,0};
+        uint64_t memory=0,fence=1; unsigned char *data=NULL;
+        CHECK(allocate(device,&ai,NULL,&memory)==0 && memory);
+        CHECK(map(device,memory,offset,4160,0,(void**)&data)==0 && data);
+        data[3]=0x31;
+        struct {uint32_t type;const void *next;uint64_t memory,offset,size;}
+            range={6,NULL,memory,offset+3,1};
+        CHECK(flush(device,1,&range)==0);
+        /* Pending CPU upload in the same page as unrelated GPU readback.
+           A blanket pull erases data[7]; disabling pulls loses data[128]. */
+        data[7]=0x52;
+        CHECK(wait(device,1,&fence,1,UINT64_MAX)==0);
+        CHECK(data[3]==0x31 && data[7]==0x52);
+        CHECK(data[128]==0xd7 && data[4096]==0xb4);
+        CHECK(wait(device,1,&fence,1,UINT64_MAX)==0 && data[7]==0x52);
+        CHECK(submit(0x1234,0,NULL,0)==0);
+        range.offset=offset+256; range.size=1;
+        CHECK(invalidate(device,1,&range)==0 && data[256]==0xab);
+        CHECK(submit(0x1234,0,NULL,0)==0);
+        unmap(device,memory); free_memory(device,memory,NULL);
+    }
     puts("thunk Vulkan compatibility passed"); return 0;
 }
 int main(int argc,char **argv) {

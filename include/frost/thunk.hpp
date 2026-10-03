@@ -133,7 +133,8 @@ public:
     // to host GLFW (host code can't invoke guest AArch64 callbacks).
     // After a GLFW_POLL-policy call (glfwPollEvents/glfwWaitEvents),
     // dispatch() reads the host state, detects changes, and invokes the
-    // stored guest callbacks through this runner.
+    // stored guest callbacks through this runner. SDL event filters also
+    // use it and consume its integer return value.
     //
     // The runner borrows the guest CPU (save/restore all state, set
     // x0..=iargs, d0..=fargs, pc=cb, run step() to a sentinel LR), the
@@ -154,6 +155,10 @@ public:
     using VkProcLookup = std::function<uint64_t(const char* sym)>;
     void set_vk_proc_lookup(VkProcLookup lookup);
     void set_glfw_cb_runner(GlfwCbRunner runner);
+    // SDL can invoke event filters on a host event thread. Give that
+    // thread an isolated guest CPU/TLS instead of borrowing live state.
+    using SdlFilterCpuFactory = std::function<std::unique_ptr<CPU>()>;
+    void set_sdl_filter_cpu_factory(SdlFilterCpuFactory factory);
     // ── SDL thread runner (SDL_CreateThread / SDL_WaitThread) ──────────
     // 1.5.4-alpha. The game spawns worker threads (a timer thread, a
     // music/audio thread, an event thread) via SDL_CreateThread and

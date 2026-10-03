@@ -75,6 +75,7 @@
 // See frost/thunk.hpp for the class definition and frost/graphics.hpp
 // for the FrostGraphics::thunk() accessor.
 #include <map>
+#include <atomic>
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
 #include "frost/audio_thunk.hpp"    // 1.5.4-alpha: AudioThunk full def
@@ -275,6 +276,57 @@ struct GraphicThunkImpl {
     // Borrow-CPU runner installed by the Emulator to invoke stored guest
     // GLFW callbacks (see GraphicThunk::GlfwCbRunner).
     GraphicThunk::GlfwCbRunner glfw_cb_runner_;
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    uint64_t sdl_filter_fn_ = 0, sdl_filter_userdata_ = 0;
+    GraphicThunk::SdlFilterCpuFactory sdl_filter_cpu_factory_;
+    // Host SDL may invoke filters outside a guest thunk (e.g. its event
+    // thread). Never borrow another thread's live CPU in that case.
+    inline static thread_local CPU* sdl_dispatch_cpu_ = nullptr;
+    static int sdl_event_filter_(void* userdata, SDL_Event* event) noexcept {
+        auto* self = static_cast<GraphicThunkImpl*>(userdata);
+        uint64_t fn, data;
+        {
+            std::lock_guard<std::mutex> lock(self->state_mu);
+            fn = self->sdl_filter_fn_; data = self->sdl_filter_userdata_;
+        }
+        if (!fn || !self->glfw_cb_runner_ || !self->mem) return 1;
+        try {
+            // Separate event storage at each nesting level, since a guest
+            // filter can push an event and recursively enter this callback.
+            static thread_local Memory* owner = nullptr;
+            static thread_local std::vector<uint64_t> events;
+            static thread_local size_t depth = 0;
+            static thread_local std::unique_ptr<CPU> fallback;
+            if (owner != self->mem) { events.clear(); fallback.reset(); owner = self->mem; }
+            struct Depth {
+                size_t& value;
+                explicit Depth(size_t& v) : value(v) { ++value; }
+                ~Depth() { --value; }
+            };
+            size_t slot = depth;
+            Depth scope(depth);
+            if (events.size() <= slot) events.resize(slot + 1);
+            if (!events[slot]) events[slot] = self->mem->mmap_alloc(sizeof(SDL_Event));
+            uint64_t guest_event = events[slot];
+            if (!guest_event) return 0;
+            self->mem->write(guest_event, event, sizeof(*event));
+            CPU* cpu = sdl_dispatch_cpu_;
+            if (!cpu) {
+                if (!fallback && self->sdl_filter_cpu_factory_)
+                    fallback = self->sdl_filter_cpu_factory_();
+                if (!fallback) return 0;
+                cpu = fallback.get();
+            }
+            int64_t args[] = {static_cast<int64_t>(data), static_cast<int64_t>(guest_event)};
+            uint64_t result = self->glfw_cb_runner_(*cpu, fn, args, 2, nullptr, 0);
+            self->mem->read(guest_event, event, sizeof(*event));
+            return static_cast<int32_t>(result) != 0;
+        } catch (...) {
+            // Never unwind a C++ exception through SDL's C callback ABI.
+            return 0;
+        }
+    }
+#endif
     // Vulkan proc-address lookup wired by the Emulator (resolves a VK
     // symbol name to its guest trampoline via the DisplayThunk registry).
     GraphicThunk::VkProcLookup vk_proc_lookup_;
@@ -695,6 +747,11 @@ GraphicThunk::~GraphicThunk() {
         for (void* p : impl_->rw_kept_) std::free(p);
     }
 #if defined(BIFROST_THUNK_HAVE_SDL2)
+    SDL_EventFilter filter = nullptr;
+    void* userdata = nullptr;
+    if (impl_ && SDL_GetEventFilter(&filter, &userdata) && userdata == impl_.get() &&
+        filter == GraphicThunkImpl::sdl_event_filter_)
+        SDL_SetEventFilter(nullptr, nullptr);
     if (impl_ && impl_->sdl_window) {
         SDL_DestroyWindow(impl_->sdl_window);
     }
@@ -846,6 +903,13 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
+    struct SdlCpuScope {
+        CPU* previous;
+        SdlCpuScope(CPU& current):previous(GraphicThunkImpl::sdl_dispatch_cpu_) {
+            GraphicThunkImpl::sdl_dispatch_cpu_ = &current;
+        }
+        ~SdlCpuScope() { GraphicThunkImpl::sdl_dispatch_cpu_ = previous; }
+    } sdl_cpu_scope(cpu);
     if (entry.spec && entry.spec->policy == thunk::Policy::SDL_SURFACE) {
         cpu.regs[0] = impl_->surface_bridge.dispatch(*impl_->mem, cpu, entry.name);
         return 0;
@@ -945,12 +1009,30 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
         if (pol == thunk::Policy::SDL_EVENT_FILTER) {
-            // in_sdl.c probes/sets the event filter to suppress mouse
-            // motion while unfocused. Never hand the GUEST callback to
-            // host SDL2: Set returns success (filter silently ignored —
-            // events still flow via PollEvent), Get reports "no filter".
-            const char* nm = entry.name.c_str();
-            cpu.regs[0] = strcmp(nm, "SDL_SetEventFilter") == 0 ? 1 : 0;
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+            if (entry.name == "SDL_SetEventFilter") {
+                {
+                    std::lock_guard<std::mutex> lock(impl_->state_mu);
+                    impl_->sdl_filter_fn_ = cpu.regs[0];
+                    impl_->sdl_filter_userdata_ = cpu.regs[1];
+                }
+                // Let SDL apply its queue reset and filter-installation semantics.
+                SDL_SetEventFilter(cpu.regs[0] ? GraphicThunkImpl::sdl_event_filter_ : nullptr,
+                                   cpu.regs[0] ? impl_.get() : nullptr);
+                cpu.regs[0] = 0; // void API
+            } else {
+                uint64_t fn, data;
+                {
+                    std::lock_guard<std::mutex> lock(impl_->state_mu);
+                    fn = impl_->sdl_filter_fn_; data = impl_->sdl_filter_userdata_;
+                }
+                if (cpu.regs[0]) impl_->mem->write(cpu.regs[0], &fn, sizeof(fn));
+                if (cpu.regs[1]) impl_->mem->write(cpu.regs[1], &data, sizeof(data));
+                cpu.regs[0] = fn != 0;
+            }
+#else
+            cpu.regs[0] = 0;
+#endif
             return 0;
         }
         if (pol == thunk::Policy::NONE && impl_ && impl_->mem) {
@@ -1960,6 +2042,19 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // Default 64 KiB covers modest textures/VBO uploads; the SIZE
         // column of the spec overrides it where the exact size is known.
         size_t kBounce = 65536;
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+        // SDL event/out-int buffers are small fixed ABI objects. Reading
+        // a generic 64 KiB bounce across a callback stack's guard page
+        // fails and substitutes zeros, silently losing nested input.
+        if (idx == 0 && (entry.name == "SDL_PushEvent" ||
+                         entry.name == "SDL_PollEvent" ||
+                         entry.name == "SDL_WaitEvent" ||
+                         entry.name == "SDL_WaitEventTimeout"))
+            kBounce = sizeof(SDL_Event);
+        if ((entry.name == "SDL_GetMouseState" ||
+             entry.name == "SDL_GetRelativeMouseState") && idx < 2)
+            kBounce = sizeof(int);
+#endif
         // Padded row extent the host driver accesses on pixel-transfer
         // bounces (rows strided to tracked UNPACK/PACK alignment).
         uint64_t pad_extent = 0;
@@ -3102,24 +3197,56 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
-    if (entry.name == "SDL_PollEvent" && dbg().thunk_trace) {
-        uint32_t ev = 0, evx = 0, evy = 0;
-        if (args[0]) {
-            uint8_t* hp = nullptr;
-            if (bounce_guest[0]) {
-                hp = bounce_bufs[0].data();
-            } else {
-                hp = reinterpret_cast<uint8_t*>(args[0]);
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    if (dbg().input_trace && (entry.name == "SDL_SetRelativeMouseMode" ||
+                             entry.name == "SDL_SetWindowGrab"))
+        fprintf(stderr, "[input] %s arg=%llu result=%d\n", entry.name.c_str(),
+                static_cast<unsigned long long>(args[entry.name == "SDL_SetWindowGrab" ? 1 : 0]),
+                static_cast<int32_t>(ret));
+    if (entry.name == "SDL_PollEvent" && dbg().input_trace && !dbg().input_watch.empty()) {
+        static thread_local std::vector<uint32_t> last;
+        static thread_local unsigned captures = 0;
+        if (captures < 4096) {
+            std::vector<uint32_t> values;
+            bool readable = true;
+            for (uint64_t address : dbg().input_watch) {
+                uint32_t value = 0;
+                try { impl_->mem->read(address, &value, sizeof(value)); }
+                catch (...) { readable = false; break; }
+                values.push_back(value);
             }
-            if (hp) {
-                ev = *reinterpret_cast<uint32_t*>(hp);
-                evx = *reinterpret_cast<uint32_t*>(hp + 16);
-                evy = *reinterpret_cast<uint32_t*>(hp + 20);
+            if (readable && values != last) {
+                fprintf(stderr, "[input] guest-state");
+                for (size_t i = 0; i < values.size(); ++i)
+                    fprintf(stderr, " %llx=%08x", static_cast<unsigned long long>(dbg().input_watch[i]), values[i]);
+                fprintf(stderr, "\n");
+                last = std::move(values);
+                ++captures;
             }
         }
-        fprintf(stderr, "[thunk] SDL_PollEvent -> %llu type=0x%x x=%u y=%u\n",
-                static_cast<unsigned long long>(ret), ev, evx, evy);
     }
+    if (entry.name == "SDL_PollEvent" && (dbg().thunk_trace || dbg().input_trace) &&
+        ret && args[0]) {
+        SDL_Event event;
+        const void* hp = bounce_guest[0] ? bounce_bufs[0].data()
+                                        : reinterpret_cast<void*>(args[0]);
+        std::memcpy(&event, hp, sizeof(event));
+        if (event.type == SDL_MOUSEMOTION) {
+            static std::atomic<unsigned> motion_count{0};
+            // Bound opt-in capture so a long play session cannot grow an
+            // input log without limit. Full thunk tracing remains unlimited.
+            unsigned count = dbg().input_trace ? motion_count.fetch_add(1) : 0;
+            if (dbg().thunk_trace || count < 4096)
+                fprintf(stderr, "[input] motion window=%u device=%u state=%u x=%d y=%d dx=%d dy=%d relative=%d\n",
+                        event.motion.windowID, event.motion.which, event.motion.state,
+                        event.motion.x, event.motion.y, event.motion.xrel, event.motion.yrel,
+                        SDL_GetRelativeMouseMode());
+        } else if (dbg().input_trace && event.type == SDL_WINDOWEVENT) {
+            fprintf(stderr, "[input] window=%u event=%u data=%d,%d\n",
+                    event.window.windowID, event.window.event, event.window.data1, event.window.data2);
+        }
+    }
+#endif
     if (entry.spec && entry.spec->ret == thunk::RetKind::STRING) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
@@ -3159,6 +3286,13 @@ size_t GraphicThunk::symbol_count() const {
 uint64_t GraphicThunk::trampoline_base() const {
     if (!impl_) return 0;
     return impl_->trampoline_base;
+}
+void GraphicThunk::set_sdl_filter_cpu_factory(SdlFilterCpuFactory factory) {
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    if (impl_) impl_->sdl_filter_cpu_factory_ = std::move(factory);
+#else
+    (void)factory;
+#endif
 }
 // ── set_glfw_cb_runner — guest GLFW-callback delivery hook ───────────
 void GraphicThunk::set_glfw_cb_runner(GlfwCbRunner runner) {

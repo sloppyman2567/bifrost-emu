@@ -1202,7 +1202,3 @@ glibc toolchain's libc) and the glibc cross toolchain
 (`tools/fetch-glibc-toolchain.sh`). `setup-tests` fetches both toolchains if
 missing. When touching a dynamic test: rebuild with the correct toolchain,
 not musl-`-static`.
-
-## Session History
-
-moved to docs/session_history.md (all 65 entries) to keep this file lean. add new entries there; keep live contracts above current.

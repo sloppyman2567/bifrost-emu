@@ -1614,6 +1614,20 @@ void Emulator::step(CPU& cpu) {
 void Emulator::wire_thunk_glfw_cb_runner_() {
     auto* thunk = graphics_.thunk();
     if (!thunk || !thunk->enabled()) return;
+    thunk->set_sdl_filter_cpu_factory([this]() -> std::unique_ptr<CPU> {
+        auto cpu = std::make_unique<CPU>();
+        if (dyn_linker_) {
+            uint64_t tls = dyn_linker_->allocate_thread_tls(mem_);
+            if (!tls) return {};
+            cpu->tpidr_el0 = tls;
+            cpu->tpidrro_el0 = tls;
+        }
+        cpu->tid = next_tid_.fetch_add(1);
+        if (jit_) jit_->enter_multithreaded();
+        if (libc_single_threaded_addr_)
+            mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
+        return cpu;
+    });
     thunk->set_glfw_cb_runner(
         [this](CPU& cpu, uint64_t fn, const int64_t* iargs,
                size_t n_iargs, const double* fargs,
@@ -1678,21 +1692,31 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             // a host-side thread, not from any verified guest block.
             // Layout: [PROT_NONE guard][128 KiB usable][guard] — overflow
             // faults loudly instead of trashing live chunks.
-            static thread_local uint64_t scratch_stack = 0;
-            static thread_local uint64_t scratch_top = 0;
+            static thread_local std::vector<uint64_t> scratch_stacks;
+            static thread_local size_t callback_depth = 0;
+            struct CallbackDepth {
+                size_t& depth;
+                explicit CallbackDepth(size_t& d) : depth(d) { ++depth; }
+                ~CallbackDepth() { --depth; }
+            };
+            size_t slot = callback_depth;
+            CallbackDepth depth_scope(callback_depth);
             static thread_local const Emulator* scratch_owner = nullptr;
-            if (scratch_stack == 0 || scratch_owner != this) {
+            if (scratch_owner != this) { scratch_stacks.clear(); scratch_owner = this; }
+            if (scratch_stacks.size() <= slot) scratch_stacks.resize(slot + 1);
+            uint64_t scratch_stack = scratch_stacks[slot];
+            if (scratch_stack == 0) {
                 scratch_stack = mem_.mmap_alloc_callback_stack(128 * 1024);
                 if (scratch_stack == 0) return 0;
                 scratch_owner = this;
-                scratch_top = scratch_stack + 128 * 1024;
+                scratch_stacks[slot] = scratch_stack;
                 if (getenv("BIFROST_SCRATCH_TRACE"))
                     fprintf(stderr, "[scratch] cpu=%p usable=[0x%llx..0x%llx)\n",
                             (void*)&cpu,
                             (unsigned long long)scratch_stack,
-                            (unsigned long long)scratch_top);
+                            (unsigned long long)(scratch_stack + 128 * 1024));
             }
-            uint64_t stack_top = scratch_top;
+            uint64_t stack_top = scratch_stack + 128 * 1024;
             constexpr uint64_t SENTINEL_LR = 0x1000;
             cpu.pc = fn;
             cpu.sp = stack_top;
@@ -1707,18 +1731,20 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             cpu.pstate = 0;
             constexpr uint64_t CALL_LIMIT = 50'000'000;
             uint64_t steps = 0;
+            uint64_t result = 0;
             try {
                 while (cpu.running && cpu.pc != SENTINEL_LR &&
                        steps < CALL_LIMIT) {
                     step(cpu);
                     steps++;
                 }
+                if (cpu.pc == SENTINEL_LR) result = cpu.regs[0];
             } catch (const std::exception&) {
                 // Callback threw (e.g. unhandled SIMD op → DecodeError).
                 // Swallow: restore and let the game continue polling.
             }
             restore();
-            return 0;
+            return result;
         });
 }
 // ── wire_thunk_android_runner_ — Android looper/input + lifecycle ────

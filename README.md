@@ -300,12 +300,12 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects 244 test runs: 67 unit,
+With all fixtures available, the runner selects 245 test runs: 68 unit,
 86 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
 15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
 a configured rootfs; the real-world dynamic binaries are part of the
 real-world fixture set. `--quick` skips the five benchmarks. Without a
-rootfs, the runner selects 222 runs (217 with `--quick`). Missing guest
+rootfs, the runner selects 223 runs (218 with `--quick`). Missing guest
 fixtures are reported as skips in developer mode; CI uses `--strict` to
 turn missing selected fixtures into failures. Display/driver exit-77 skips
 remain environment-dependent. See
@@ -513,14 +513,19 @@ The JIT uses:
 
 ## Documentation
 
+Game setup, screenshots, and current compatibility issues:
+
+- [Neverball](docs/neverball.md)
+- [vkQuake](docs/vkquake.md)
+
+Build, test, and maintenance references:
+
 - [docs/JIT.md](docs/JIT.md) — JIT architecture and instruction-change guide
 - [docs/SUPPORT.md](docs/SUPPORT.md) — platform and compatibility support matrix
 - [docs/SECURITY.md](docs/SECURITY.md) — BIFROST_ROOT scope and guest trust model
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — Release history
 - [docs/TESTS.md](docs/TESTS.md) — Test suite details
-- [docs/ROADMAP.md](docs/ROADMAP.md) — Future plans
 - [bifrost.toml.sample](bifrost.toml.sample) — Config file reference
-- `context.md` (in tarball) — Detailed development history (not in git)
 
 ## License
 

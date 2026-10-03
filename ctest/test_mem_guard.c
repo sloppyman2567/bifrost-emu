@@ -63,7 +63,7 @@ static int test_madvise_huge(void) {
 // 4. Above-window MAP_FIXED r/w cycles. Kept single-threaded: concurrent
 //    MAP_FIXED triggers the JIT's runtime chain-slot patching while other
 //    vCPUs may be executing that code (a known race, NOT fixed here — see
-//    docs/session_history.md). This validates the sparse pages_ path and
+//    docs/TESTS.md). This validates the sparse pages_ path and
 //    the above-window bump cursor a fixed mapping must advance.
 #define NREGIONS 4
 #define ITERS    12

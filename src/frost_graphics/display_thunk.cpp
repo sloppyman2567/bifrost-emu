@@ -8,6 +8,7 @@
 // mixed int+float) and integrates DisplayProxy for X11/Wayland fallback
 // when host libraries are unavailable.
 #include "frost/display_thunk.hpp"
+#include "frost/vulkan_mapped_sync.hpp"
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
 #include "frost/display_proxy.hpp"
 #include "frost/android_surface.hpp"
@@ -71,17 +72,17 @@ struct DisplayThunkImpl {
     // The host mapping address is meaningless in the guest (48-bit host
     // heap, outside the 4 GiB direct window), so vkMapMemory allocates a
     // bounce inside the window and returns ITS guest address; the guest
-    // reads/writes it at full JIT speed. Push (bounce→host) before every
-    // GPU-consuming call (queue submit/present), pull (host→bounce) after
-    // every completion wait — the practical HOST_COHERENT guarantee for
-    // both coherent and non-coherent memory (over-pushing non-coherent
-    // memory is harmless). Explicit flush/invalidate move their ranges.
+    // reads/writes it at full JIT speed. Publish changed guest bytes before
+    // GPU-consuming calls, and merge readback after completion waits without
+    // erasing unsubmitted guest writes. Explicit flush/invalidate refresh
+    // the synchronization baseline for their specified ranges.
     struct VkMapped {
         uint64_t host_ptr;    // host mapping base (a HOST address)
         uint64_t bounce;      // guest address of the window bounce
         uint64_t map_offset;  // offset passed to vkMapMemory
         uint64_t map_size;    // bytes mapped (resolved from VK_WHOLE_SIZE)
         uint64_t alloc_size;  // total VkDeviceMemory allocation size
+        std::vector<uint8_t> baseline; // last synchronized host/guest bytes
     };
     std::unordered_map<uint64_t, VkMapped> vk_maps_;    // memory handle → map
     std::unordered_map<uint64_t, uint64_t> vk_allocs_;  // handle → alloc size
@@ -141,7 +142,7 @@ struct DisplayThunkImpl {
         }
         return 0;
     }
-    // Push all bounces back into the host mappings (before submits/presents).
+    // Publish changed guest bytes to host mappings before submits/presents.
     // No snapshot when nothing is mapped: the map copy + lock is pure
     // overhead at ~10M thunk calls/s and the common case is empty.
     void vk_sync_push_all() {
@@ -149,30 +150,32 @@ struct DisplayThunkImpl {
         if (vk_maps_.empty()) return;
         auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
-            const VkMapped& m = kv.second;
+            VkMapped& m = kv.second;
             if (!m.map_size || !m.host_ptr) continue;
             if (!tracked_room(live, m.bounce, static_cast<size_t>(m.map_size)))
                 continue;  // stale bounce: never push from reused heap
             uint8_t* src = mem->guest_to_host_ptr(m.bounce);
             if (src)
-                std::memcpy(reinterpret_cast<void*>(m.host_ptr), src, m.map_size);
+                vk_mapped::mapped_push(reinterpret_cast<uint8_t*>(m.host_ptr), src,
+                                       m.baseline.data(), m.map_size);
         }
     }
-    // Pull host mappings into the bounces (after completion waits — the
-    // GPU may have written readback data into the host mapping).
+    // Merge host readback after completion waits, preserving guest writes
+    // prepared for later submits (including writes in other allocations).
     // Same empty-map fast path as the push side.
     void vk_sync_pull_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
         if (vk_maps_.empty()) return;
         auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
-            const VkMapped& m = kv.second;
+            VkMapped& m = kv.second;
             if (!m.map_size || !m.host_ptr) continue;
             if (!tracked_room(live, m.bounce, static_cast<size_t>(m.map_size)))
                 continue;  // stale bounce: never pull into reused heap
             uint8_t* dst = mem->guest_to_host_ptr(m.bounce);
             if (dst)
-                std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr), m.map_size);
+                vk_mapped::mapped_pull(reinterpret_cast<const uint8_t*>(m.host_ptr), dst,
+                                       m.baseline.data(), m.map_size);
         }
     }
     uint64_t cache_host_string_(const char* host_str) {
@@ -2520,7 +2523,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             if (it != impl_->vk_maps_.end()) {
                 uint8_t* src = mem->guest_to_host_ptr(it->second.bounce);
                 if (src && it->second.host_ptr && it->second.map_size)
-                    std::memcpy(reinterpret_cast<void*>(it->second.host_ptr), src, it->second.map_size);
+                    vk_mapped::mapped_push(reinterpret_cast<uint8_t*>(it->second.host_ptr), src,
+                                           it->second.baseline.data(), it->second.map_size);
                 mem->untrack_allocation(it->second.bounce,
                                         (it->second.map_size + 0xFFFu) & ~0xFFFull);
                 impl_->vk_maps_.erase(it);
@@ -2579,6 +2583,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         // build a fresh mapping.
         {
             uint64_t s_host = 0, s_bounce = 0, s_size = 0;
+            std::vector<uint8_t> s_baseline;
             bool had_stale = false;
             {
                 std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
@@ -2597,6 +2602,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                     s_host = it->second.host_ptr;
                     s_bounce = it->second.bounce;
                     s_size = it->second.map_size;
+                    s_baseline = std::move(it->second.baseline);
                     impl_->vk_maps_.erase(it);
                     had_stale = true;
                 }
@@ -2604,7 +2610,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             if (had_stale) {
                 uint8_t* src = mem->guest_to_host_ptr(s_bounce);
                 if (src && s_host && s_size)
-                    std::memcpy(reinterpret_cast<void*>(s_host), src, s_size);
+                    vk_mapped::mapped_push(reinterpret_cast<uint8_t*>(s_host), src,
+                                           s_baseline.data(), s_size);
                 mem->untrack_allocation(s_bounce,
                                         (s_size + 0xFFFu) & ~0xFFFull);
                 // Host-unmap via the cached vkUnmapMemory — NEVER the MAP
@@ -2650,10 +2657,19 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             return true;
         }
         std::memcpy(dst, host_ptr, size);  // seed: host → bounce
-        {
+        DisplayThunkImpl::VkMapped mapping{
+            reinterpret_cast<uint64_t>(host_ptr), bounce, offset, size, alloc_size, {}};
+        try {
+            mapping.baseline.assign(dst, dst + size);
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
-            impl_->vk_maps_[mem_handle] = { reinterpret_cast<uint64_t>(host_ptr),
-                                            bounce, offset, size, alloc_size };
+            impl_->vk_maps_.emplace(mem_handle, std::move(mapping));
+        } catch (const std::bad_alloc&) {
+            mem->untrack_allocation(bounce, (size + 0xFFFu) & ~0xFFFull);
+            if (impl_->vk_unmap_host_)
+                reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(
+                    impl_->vk_unmap_host_)(cpu.regs[0], mem_handle);
+            cpu.regs[0] = 0xFFFFFFFFu; // VK_ERROR_OUT_OF_HOST_MEMORY
+            return true;
         }
         if (cpu.regs[5]) {
             try { mem->write(cpu.regs[5], &bounce, sizeof(bounce)); }
@@ -2678,7 +2694,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             if (it != impl_->vk_maps_.end()) {
                 uint8_t* src = mem->guest_to_host_ptr(it->second.bounce);
                 if (src && it->second.host_ptr && it->second.map_size)
-                    std::memcpy(reinterpret_cast<void*>(it->second.host_ptr), src, it->second.map_size);
+                    vk_mapped::mapped_push(reinterpret_cast<uint8_t*>(it->second.host_ptr), src,
+                                           it->second.baseline.data(), it->second.map_size);
                 mem->untrack_allocation(it->second.bounce,
                                         (it->second.map_size + 0xFFFu) & ~0xFFFull);
                 impl_->vk_maps_.erase(it);
@@ -2710,7 +2727,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 rr[i].pNext = nullptr;
                 auto it = impl_->vk_maps_.find(rr[i].memory);
                 if (it == impl_->vk_maps_.end()) continue;
-                const auto& m = it->second;
+                auto& m = it->second;
                 uint64_t off = rr[i].offset;
                 uint64_t sz = rr[i].size;
                 if (sz == ~0ull) sz = m.map_size - (off - m.map_offset);
@@ -2722,7 +2739,10 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 if (!impl_->tracked_room(flive, m.bounce + off, static_cast<size_t>(sz)))
                     continue;  // stale bounce: never push from reused heap
                 uint8_t* src = mem->guest_to_host_ptr(m.bounce + off);
-                if (src) std::memcpy(reinterpret_cast<void*>(m.host_ptr + off), src, sz);
+                if (src) {
+                    std::memcpy(reinterpret_cast<void*>(m.host_ptr + off), src, sz);
+                    std::memcpy(m.baseline.data() + off, src, sz);
+                }
             }
         }
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*)>(entry.host_fn)(
@@ -2755,7 +2775,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             for (uint32_t i = 0; i < count; i++) {
                 auto it = impl_->vk_maps_.find(rr[i].memory);
                 if (it == impl_->vk_maps_.end()) continue;
-                const auto& m = it->second;
+                auto& m = it->second;
                 uint64_t off = rr[i].offset;
                 uint64_t sz = rr[i].size;
                 if (sz == ~0ull) sz = m.map_size - (off - m.map_offset);
@@ -2766,7 +2786,10 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 if (!impl_->tracked_room(ilive, m.bounce + off, static_cast<size_t>(sz)))
                     continue;  // stale bounce: never pull into reused heap
                 uint8_t* dst = mem->guest_to_host_ptr(m.bounce + off);
-                if (dst) std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr + off), sz);
+                if (dst && ret == 0) {
+                    std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr + off), sz);
+                    std::memcpy(m.baseline.data() + off, dst, sz);
+                }
             }
         }
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
