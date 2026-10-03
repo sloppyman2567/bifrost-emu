@@ -567,11 +567,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int width = bp.sf ? 64 : 32;
             int immr = bp.immr;
             int imms = bp.imms;
-            // Load src into RAX.
-            // flush+invalidate FIRST so the
-            // cache is empty and the subsequent memory access can't
-            // interact with stale mappings. We then write the result
-            // directly to the dest vreg's memory home and re-cache it.
+            // Stage src in RAX, preserving live operands before clobbering
+            // its register. Keep the result as a dirty cached dest and
+            // spill only if a later clobber or
+            // block exit needs its memory home, as LOAD_MEM already does.
             //
             // codegen below (shifts, ands, mov_imm64). Use targeted
             // flush+invalidate instead of the full flush_all_vregs+
@@ -631,8 +630,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                         if (RAX >= 8) emit_byte(0x45);
                         emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
                     }
-                    // Write result directly to dest's memory home, then cache.
-                    store_reg_to_vreg(inst.dest, RAX);
+                    // Keep the result dirty; an eager stack store is redundant.
                     set_vreg_reg(inst.dest, RAX);
                     return 0;
                 }
@@ -662,7 +660,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     if (RAX >= 8) emit_byte(0x45);
                     emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
                 }
-                store_reg_to_vreg(inst.dest, RAX);
                 set_vreg_reg(inst.dest, RAX);
                 return 0;
             }
@@ -717,7 +714,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (width == 32) {
                 emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
             }
-            store_reg_to_vreg(inst.dest, RAX);
             set_vreg_reg(inst.dest, RAX);
             return 0;
         }

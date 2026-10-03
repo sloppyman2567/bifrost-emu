@@ -25,9 +25,10 @@
 #           args at SP).
 # RET     : '-' = plain (void/int, host ret written to x0)
 #           str = host returns const char* -> copy into the guest string cache
+#           f/d = binary32/binary64 result returned in guest v0
 # POLICY  : named dispatch behavior (one switch arm each, no name compares):
-#             SDL_SURFACE    bridge guest surfaces, formats, palettes and pixels
 #             -              default generic path
+#             SDL_SURFACE    bridge guest surfaces, formats, palettes and pixels
 #             SHADER_SOURCE  glShaderSource nested string-array marshalling
 #             QUERY          GL state queries intercepted by GLStateTracker
 #             GET_PROC       *GetProcAddress: resolve guest name -> trampoline
@@ -546,6 +547,7 @@ SDL_RWwrite               SDL    ipii          -     -              -   # arg1: 
 SDL_RWseek                SDL    iii           -     -              -
 SDL_RWtell                SDL    i             -     -              -
 SDL_FreeRW                SDL    i             -     -              -
+SDL_PumpEvents            SDL    -             -     -              -
 SDL_GetKeyboardState      SDL    p             -     -              -   # int* numkeys out
 SDL_GetModState           SDL    -             -     -              -
 SDL_SetModState           SDL    i             -     -              -
@@ -1142,20 +1144,20 @@ glLightModelfv             GL     ip            -     -              -   # arg1:
 glLightModeli              GL     ii            -     -              -
 glNormalPointer           GL     iip           -     VA_PTR         -   # arg2: offset (VBO) or ptr
 glTexGeni                  GL     iii           -     -              -
-SDL_acosf                  SDL    f             -     -              -
-SDL_atan2f                 SDL    ff            -     -              -
-SDL_ceilf                  SDL    f             -     -              -
-SDL_cosf                   SDL    f             -     -              -
-SDL_fabs                   SDL    d             -     -              -
-SDL_fabsf                  SDL    f             -     -              -
-SDL_floorf                 SDL    f             -     -              -
-SDL_fmodf                  SDL    ff            -     -              -
-SDL_pow                    SDL    dd            -     -              -
-SDL_roundf                 SDL    f             -     -              -
-SDL_sinf                   SDL    f             -     -              -
-SDL_sqrt                   SDL    d             -     -              -
-SDL_sqrtf                  SDL    f             -     -              -
-SDL_tanf                   SDL    f             -     -              -
+SDL_acosf                          SDL    f             f     -                  -
+SDL_atan2f                         SDL    ff            f     -                  -
+SDL_ceilf                          SDL    f             f     -                  -
+SDL_cosf                           SDL    f             f     -                  -
+SDL_fabs                           SDL    d             d     -                  -
+SDL_fabsf                          SDL    f             f     -                  -
+SDL_floorf                         SDL    f             f     -                  -
+SDL_fmodf                          SDL    ff            f     -                  -
+SDL_pow                            SDL    dd            d     -                  -
+SDL_roundf                         SDL    f             f     -                  -
+SDL_sinf                           SDL    f             f     -                  -
+SDL_sqrt                           SDL    d             d     -                  -
+SDL_sqrtf                          SDL    f             f     -                  -
+SDL_tanf                           SDL    f             f     -                  -
 SDL_calloc                 SDL    ii            -     SDL_ALLOC      -   # guest-window allocation
 SDL_malloc                 SDL    i             -     SDL_ALLOC      -
 SDL_realloc                SDL    ip            -     SDL_ALLOC      -
@@ -2028,5 +2030,3 @@ SDL_SetWindowGammaRamp     SDL    ippp          -     -              -
 SDL_SetWindowResizable     SDL    ii            -     -              -
 SDL_UnlockSurface                  SDL    i             -     SDL_SURFACE        -
 SDL_iconv_open             SDL    pp            -     -              -
-
-# SDL public-struct surface APIs.

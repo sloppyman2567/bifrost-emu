@@ -34,11 +34,13 @@
 //     RELATIVE relocations are applied). See apply_pending_copies_().
 //   - Symbol versioning (.gnu.version / .gnu.version_r) IS parsed and
 //     used for versioned symbol resolution (versioned_symbols_ map).
-//   - dlopen() of a TLS-using library after the static TLS block is
-//     sized is not supported (would require dynamic TLS allocation).
-//   - TLSDESC uses an inline static resolver (desc[0]=0, desc[1]=
-//     TP-offset) — no PLT call to a resolver. This is the "static
-//     TLSDESC" trick valid when the TP-offset is known at load time.
+//   - Late TLS modules use reserved static surplus when their alignment
+//     fits the process layout; otherwise TLSDESC / __tls_get_addr use
+//     per-thread DTV allocations. Initial-exec relocations cannot target
+//     a module without a static slot and make dlopen fail cleanly.
+//   - Static TLSDESC descriptors use a precomputed TP offset; dynamic
+//     descriptors call a shim resolver that allocates/looks up the
+//     calling thread's DTV entry.
 //   - dladdr() is overridden (1.5.4-alpha): the dladdr@GLIBC_2.34 and
 //     dladdr@GLIBC_2.0 symbols are FORCE-overridden to point at our
 //     OFF_DLADDR stub, which calls DynamicLinker::dladdr() via syscall
@@ -62,6 +64,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 namespace arm64emu {
 class Memory;
@@ -141,11 +144,17 @@ struct LoadedObject {
     // were applied to the original .tdata location but NOT the TLS
     // block copy, so the TLS block had pre-relocation (wrong) values.
     uint64_t   tls_block_offset = 0;
+    // Initialized TLS image used for per-thread copies. It can point into
+    // the static template or to a separate template for late modules that
+    // use dynamically allocated per-thread blocks.
+    uint64_t   tls_template_addr = 0;
     // Set for libraries loaded via dlopen AFTER startup: their TLS is
-    // carved from the startup surplus (see below), never from the
-    // startup lib area, so allocate_thread_tls() must exclude them
-    // when recomputing the startup lib_size (TP anchor stays frozen).
+    // never part of the frozen startup lib area, so thread allocation must
+    // exclude them when recomputing the startup lib_size.
     bool       tls_dynamic = false;
+    // Late TLS modules use a TP-relative slot while static surplus remains;
+    // otherwise their DTV entry points to a separately allocated block.
+    bool       tls_static_slot = false;
 };
 class DynamicLinker {
 public:
@@ -167,6 +176,15 @@ public:
     // Look up a symbol by name across all loaded objects. Returns the
     // absolute address, or 0 if not found.
     uint64_t resolve_symbol(const std::string& name) const;
+    // Install a glibc-compatible DTV in the per-thread reserved TLS slot.
+    // Musl uses its own variant-II setup and is left untouched.
+    bool initialize_thread_dtv(Memory& mem, uint64_t tcb);
+    uint64_t resolve_tls_address(Memory& mem, CPU& cpu,
+                                 uint64_t module_id, uint64_t offset);
+    int64_t resolve_tlsdesc_offset(Memory& mem, CPU& cpu,
+                                   uint64_t descriptor_arg);
+    void deallocate_thread_tls(Memory& mem, uint64_t tcb);
+    void register_thread_tls_block(uint64_t tcb);
     // Guest address of libc's __libc_single_threaded BSS word (0 if libc
     // doesn't export it, e.g. musl). link() writes 1 into it so glibc's
     // single-threaded fast paths (e.g. __cxa_guard_acquire, which throws
@@ -223,8 +241,8 @@ public:
     // TPIDR_EL0), or 0 on failure. Mirrors the a0==0 path of the 0x1001
     // _dl_allocate_tls syscall: computes lib_size / main TLS / tcb_size,
     // mmaps a zeroed block ([lib TLS | TCB | main TLS]), copies each
-    // object's TLS template to its per-thread slot, and zeroes the DTV
-    // pointer in the TCB header. Used by SDL_CreateThread thunking to
+    // object's TLS template to its per-thread slot, and initializes a
+    // per-thread DTV in the reserved positive TLS slack. Used by SDL_CreateThread thunking to
     // spawn real guest threads with correct glibc TLS. Takes loader_lock()
     // internally.
     uint64_t allocate_thread_tls(Memory& mem);
@@ -410,6 +428,13 @@ private:
     // track the binding (STB_GLOBAL vs STB_WEAK) so we can implement
     // "first strong wins" instead of "last strong wins" (H6).
     struct SymEntry { uint64_t addr; uint8_t bind; };
+    struct SymbolUndo {
+        bool versioned = false;
+        std::string key;
+        bool had_previous = false;
+        SymEntry previous{};
+        SymEntry installed{};
+    };
     std::unordered_map<std::string, SymEntry> symbols_;
     // "name@version" (e.g. "memcpy@GLIBC_2.17"). When a relocation
     // requests a specific version (via .gnu.version_r), we look up
@@ -443,15 +468,40 @@ private:
     // TLS state.
     uint64_t static_tls_size_ = 0;  // total bytes (aligned)
     uint64_t static_tls_base_ = 0;  // guest VA where the block is mapped
+    uint64_t static_tls_alloc_base_ = 0; // raw mmap address before alignment
+    uint64_t static_tls_alloc_size_ = 0;
     uint64_t lib_tls_size_ = 0;     // lib TLS size (negative TP region)
     uint64_t tcb_size_ = 0;         // TCB header size (tcbhead_t, rounded to align)
+    uint64_t tls_static_alignment_ = 16; // alignment guaranteed for static slots
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
     // Surplus for dlopen'd TLS (variant-I glibc path): reserved inside the
     // template at startup so late libs get real backing on ALL threads.
-    // Carved monotonically; exhaustion falls back to unbacked (old behavior).
+    // Carved monotonically; overflow uses per-thread DTV allocations.
     static constexpr uint64_t TLS_DLOPEN_SURPLUS = 1024;
+    // glibc requires a 32-byte, 32-aligned rseq area in each thread's
+    // positive TLS slack. Keep it separate from the dlopen TLS surplus.
+    static constexpr uint64_t TLS_RSEQ_AREA_SIZE = 32;
+    static constexpr uint64_t TLS_DTV_SURPLUS = 32;
     uint64_t tls_surplus_used_ = 0;
-    uint64_t tls_surplus_base_ = 0;  // template offset where surplus starts (= startup lib_size)
+    uint64_t tls_surplus_base_ = 0;  // template offset after rseq reservation
+    uint64_t rseq_offset_ = 0;       // TP-relative offset to reserved 32-byte area
+    uint64_t dtv_storage_offset_ = 0; // TP-relative offset to dtv[-1]
+    uint64_t dtv_capacity_ = 0;
+    uint64_t tls_generation_ = 1;
+    struct TlsIndex {
+        // module_id == 0 is reserved for undefined-weak TLSDESC entries;
+        // offset then holds the relocation's absolute-address addend.
+        uint64_t module_id = 0;
+        uint64_t offset = 0;
+    };
+    struct TlsAllocation {
+        uint64_t addr = 0;
+        uint64_t size = 0;
+        uint64_t module_id = 0;
+    };
+    std::unordered_map<uint64_t, TlsIndex> tlsdesc_indices_;
+    std::unordered_map<uint64_t, std::vector<TlsAllocation>> tls_thread_allocations_;
+    std::unordered_set<uint64_t> tls_thread_blocks_;
     bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
     uint64_t dlopen_hook_ptr_ = 0;  // dlopen hook struct addr (shim data area)
     uint64_t libc_single_threaded_addr_ = 0;  // guest VA of __libc_single_threaded
@@ -542,10 +592,12 @@ private:
                           uint64_t base, uint64_t& entry);
     // Build the global symbol table from obj's .dynsym. Only exported
     // (SHN_UNDEF == 0, st_shndx != SHN_UNDEF) symbols are added.
-    void index_symbols(CPU& cpu, const LoadedObject& obj);
+    void index_symbols(CPU& cpu, const LoadedObject& obj,
+                       std::vector<SymbolUndo>* undo = nullptr);
     // (.gnu.version, .gnu.version_d, .gnu.version_r) and populate
     // versioned_symbols_ with "name@version" keys.
-    void parse_versions_(CPU& cpu, const LoadedObject& obj);
+    void parse_versions_(CPU& cpu, const LoadedObject& obj,
+                         std::vector<SymbolUndo>* undo = nullptr);
     // Resolve a symbol by name AND version. Looks up versioned_symbols_
     // first (key "name@version"), then falls back to unversioned
     // symbols_. Returns 0 if not found.
@@ -555,6 +607,15 @@ private:
     // object with a PT_TLS segment. Must be called after all libraries
     // are loaded but before relocations are applied.
     void allocate_static_tls();
+    bool ensure_thread_dtv_capacity_(Memory& mem, uint64_t tcb,
+                                     uint64_t required_module_id);
+    bool resolve_tlsdesc_index_(const LoadedObject& obj, uint32_t sym_idx,
+                                int64_t addend, TlsIndex& out);
+    bool install_tlsdesc_(const LoadedObject& obj, uint32_t sym_idx,
+                          int64_t addend, uint64_t target);
+    void track_tls_allocation_(uint64_t tcb, uint64_t addr, uint64_t size,
+                               uint64_t module_id = 0);
+    void release_tls_allocation_(Memory& mem, uint64_t tcb, uint64_t addr);
     // object (libs first, main last). Runs C++ static constructors.
     // Requires init_runner_ to be set; no-ops if not.
     void run_init_arrays_(CPU& cpu);
@@ -589,6 +650,7 @@ private:
     // R_AARCH64_TLSDESC fixup so desc[0] points at a real function
     // the guest can `blr` into.
     uint32_t tlsdesc_resolver_off_ = 0;
+    uint32_t tlsdesc_dynamic_resolver_off_ = 0;
     // Guest address of the _dl_find_object shim stub (calls syscall
     // 0x1008 which fills the glibc 2.42 dl_find_object result struct
     // from host LoadedObject state). Populated by register_ld_linux_shim_()
@@ -606,6 +668,7 @@ private:
     // breaks __libc_early_init (which reads other fields from the
     // real struct at specific offsets).
     uint64_t pending_tls_static_size_ = 0;
+    uint64_t pending_tls_static_align_ = 64;
     // ── Pending R_AARCH64_COPY relocations ───────────────
     // COPY relocations must be deferred until AFTER all other relocations
     // are applied. The COPY reads the original symbol's value (which is
@@ -634,6 +697,7 @@ private:
     // relocations (so _rtld_global_ro is resolved to ld-linux's data)
     // but before __libc_early_init (which reads dl_pagesize).
     void patch_rtld_global_ro_();
+    void patch_rseq_offset_();
     // Funnelled glibc (2.42+): libc's _dl_find_object is a trampoline that
     // jumps through GLRO(dl_find_object) in the REAL _rtld_global_ro
     // (written by ld-linux's _dl_start_final, which the native dynlink

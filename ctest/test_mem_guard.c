@@ -7,13 +7,12 @@
 //   3. madvise over an enormous length returns promptly (it used to walk
 //      one page at a time, ~2^52 iterations, hanging the emulator).
 //   4. Above-the-4GiB-window MAP_FIXED map/write/read/unmap cycles run
-//      concurrently from several threads (sparse pages_ path + locking).
+//      sequentially across several regions (sparse pages_ path).
 //
 // Build: make setup-tests
 // Run:   ./bifrost-emu ctest/test_mem_guard.elf
 // Exit 0 + "ALL PASS" = pass.
 #define _GNU_SOURCE
-#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>

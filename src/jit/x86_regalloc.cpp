@@ -606,7 +606,9 @@ uint16_t FrostJIT::load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
     }
     // Tier 1.5: v is cached in ANOTHER reg that the op will clobber. Copy
     // it to dst first, then flush+invalidate (the flush preserves the value
-    // for later readers via its stack slot), skip the reload. Common case:
+    // for later readers via its stack slot), skip the reload. A dead
+    // scratch instead transfers its mapping to dst and skips that spill.
+    // Common case:
     // ADD/SHL leaves a scratch vreg in RCX, then LOAD_MEM consumes it.
     //
     // CRITICAL: clobber_host_reg(dst) BEFORE the mov. If dst was still
@@ -618,6 +620,19 @@ uint16_t FrostJIT::load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
     if (home >= 0 && home != dst && (clobber_mask & (1u << home))) {
         clobber_host_reg(dst);
         emit_mov_reg(dst, home);
+        if (v > 32 && v < 4096 && v != dest_vreg &&
+            vreg_last_use_this_op(v)) {
+            // Transfer a dead scratch operand to dst before flushing. Its
+            // original register can now be invalidated without a spill,
+            // and dst follows the same consumption contract as the in-dst
+            // fast path above. Live or architectural sources still spill.
+            set_vreg_reg(v, dst);
+            const uint16_t flush_mask = clobber_mask & ~(1u << dst);
+            flush_dirty_host_regs(flush_mask);
+            flush_scratch_host_regs(flush_mask);
+            invalidate_host_regs(flush_mask);
+            return (1u << dst);
+        }
         flush_dirty_host_regs(clobber_mask);
         flush_scratch_host_regs(clobber_mask);
         invalidate_host_regs(clobber_mask);

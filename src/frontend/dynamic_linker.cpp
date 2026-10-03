@@ -27,6 +27,7 @@
 //   - https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst
 //   - Linux kernel: arch/arm64/kernel/module-plts.c, arch/arm64/kernel/module.c
 #include "frontend/dynamic_linker.h"
+#include "core/cpu.h"
 #include "core/memory.h"
 #include "bifrost/types.hpp"
 #include "bifrost/version.hpp"
@@ -187,6 +188,25 @@ bool DynamicLinker::link(CPU& cpu,
     symbols_.clear();
     versioned_symbols_.clear();
     error_.clear();
+    next_tls_mod_id_ = 1;
+    tls_surplus_used_ = 0;
+    static_tls_size_ = 0;
+    static_tls_base_ = 0;
+    static_tls_alloc_base_ = 0;
+    static_tls_alloc_size_ = 0;
+    lib_tls_size_ = 0;
+    tcb_size_ = 0;
+    tls_static_alignment_ = 16;
+    rseq_offset_ = 0;
+    dtv_storage_offset_ = 0;
+    dtv_capacity_ = 0;
+    tls_generation_ = 1;
+    tls_surplus_base_ = 0;
+    pending_tls_static_size_ = 0;
+    pending_tls_static_align_ = 64;
+    tlsdesc_indices_.clear();
+    tls_thread_allocations_.clear();
+    tls_thread_blocks_.clear();
     // Detect musl vs glibc from the interpreter path.
     // musl: /lib/ld-musl-aarch64.so.1
     // glibc: /lib/ld-linux-aarch64.so.1
@@ -560,27 +580,7 @@ bool DynamicLinker::link(CPU& cpu,
                         //   desc[1] = TP-offset
                         // This is the "static TLSDESC" trick used by
                         // musl/glibc when the offset is known at load time.
-                        int64_t tp_off = tlsdesc_tp_offset(obj, sym, A);
-                        // desc[0] = resolver function pointer. The guest
-                        // calls it with x0 = &desc[1]; our stub returns
-                        // the TP-offset stored at [x0+8] (glibc AArch64
-                        // general-dynamic TLS convention). Previously this
-                        // stored 0 (the "static TLSDESC" inline trick),
-                        // which only works with compilers that read desc[1]
-                        // directly — but glibc/Qt codegen does `blr desc[0]`,
-                        // crashing at pc=0x0 on the null resolver.
-                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
-                                            tlsdesc_resolver_off_;
-                        mem_.store<uint64_t>(target, resolver);
-                        // desc[1] = TP-offset
-                        mem_.store<uint64_t>(target + 8,
-                            static_cast<uint64_t>(tp_off));
-                        if (dynlink_trace_enabled()) {
-                            fprintf(stderr, "[dynlink] TLSDESC1 obj=%s @0x%llx resolver=0x%llx tp=%lld shim=0x%llx toff=%u\n",
-                                    obj.name.c_str(), (unsigned long long)target,
-                                    (unsigned long long)resolver, (long long)tp_off,
-                                    (unsigned long long)shim_base_, tlsdesc_resolver_off_);
-                        }
+                        install_tlsdesc_(obj, sym, A, target);
                     } else if (type == R_AARCH64_JUMP_SLOT_) {
                         // Eager binding: resolve now.
                         if (sym == 0) {
@@ -651,17 +651,7 @@ bool DynamicLinker::link(CPU& cpu,
                         // R_AARCH64_TLSDESC relocations at the END of
                         // .rela.plt (DT_JMPREL), not in .rela.dyn. Apply
                         // the same 16-byte descriptor as the RELA loop.
-                        int64_t tp_off = tlsdesc_tp_offset(obj, sym, A);
-                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
-                                            tlsdesc_resolver_off_;
-                        mem_.store<uint64_t>(target, resolver);
-                        mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
-                        if (dynlink_trace_enabled()) {
-                            fprintf(stderr, "[dynlink] TLSDESC-JMP obj=%s @0x%llx resolver=0x%llx tp=%lld shim=0x%llx toff=%u\n",
-                                    obj.name.c_str(), (unsigned long long)target,
-                                    (unsigned long long)resolver, (long long)tp_off,
-                                    (unsigned long long)shim_base_, tlsdesc_resolver_off_);
-                        }
+                        install_tlsdesc_(obj, sym, A, target);
                     }
                     // Other relocation types in DT_JMPREL (rare) fall
                     // through unprocessed — they'd need the same handling
@@ -679,6 +669,10 @@ bool DynamicLinker::link(CPU& cpu,
     // (e.g., libc's stdout variable before RELATIVE sets it to the
     // relocated _IO_2_1_stdout_ address).
     apply_pending_copies_();
+    // ld-linux normally computes this from the final static TLS layout.
+    // Our native linker bypasses that startup code, so publish the offset
+    // for glibc's rseq initialization before libc's startup code runs.
+    patch_rseq_offset_();
     // In glibc 2.34+, the dynamic linker (ld-linux) calls this function
     // during early initialization. It calls __ctype_init() which sets up
     // the thread-local character type tables (ctype_b, ctype_tolower,
@@ -757,6 +751,268 @@ void DynamicLinker::set_libc_single_threaded_() {
         fprintf(stderr, "[dynlink] __libc_single_threaded = 1 @ 0x%llx\n",
                 static_cast<unsigned long long>(libc_single_threaded_addr_));
     }
+}
+// ── patch_rseq_offset_ ────────────────────────────────────────────────
+// glibc's startup code uses TP + __rseq_offset even when rseq registration
+// is disabled; it writes the cpu_id failure marker there. ld-linux normally
+// places this 32-byte area after static TLS. The native linker bypasses that
+// calculation, so publish the matching offset into our reserved TLS slack.
+void DynamicLinker::patch_rseq_offset_() {
+    if (is_musl_ || static_tls_base_ == 0 || rseq_offset_ == 0) return;
+    const uint64_t addr = resolve_symbol("__rseq_offset");
+    if (addr == 0) return;
+    try {
+        mem_.store<uint64_t>(addr, rseq_offset_);
+        if (dynlink_trace_enabled()) {
+            fprintf(stderr, "[dynlink] __rseq_offset = %llu @ 0x%llx\n",
+                    static_cast<unsigned long long>(rseq_offset_),
+                    static_cast<unsigned long long>(addr));
+        }
+    } catch (...) {
+        if (dynlink_trace_enabled()) {
+            fprintf(stderr, "[dynlink] could not patch __rseq_offset @ 0x%llx\n",
+                    static_cast<unsigned long long>(addr));
+        }
+    }
+}
+// ── Per-thread DTV and dynamic TLS ────────────────────────────────────
+void DynamicLinker::track_tls_allocation_(uint64_t tcb, uint64_t addr,
+                                          uint64_t size,
+                                          uint64_t module_id) {
+    if (tcb && addr && size)
+        tls_thread_allocations_[tcb].push_back({addr, size, module_id});
+}
+void DynamicLinker::release_tls_allocation_(Memory& mem, uint64_t tcb,
+                                            uint64_t addr) {
+    auto it = tls_thread_allocations_.find(tcb);
+    if (it == tls_thread_allocations_.end()) return;
+    auto& owned = it->second;
+    for (auto alloc = owned.begin(); alloc != owned.end(); ++alloc) {
+        if (alloc->addr != addr) continue;
+        mem.untrack_allocation(alloc->addr, alloc->size);
+        owned.erase(alloc);
+        break;
+    }
+    if (owned.empty()) tls_thread_allocations_.erase(it);
+}
+bool DynamicLinker::ensure_thread_dtv_capacity_(Memory& mem, uint64_t tcb,
+                                                 uint64_t required_module_id) {
+    if (is_musl_ || tcb == 0 || static_tls_base_ == 0 ||
+        dtv_storage_offset_ == 0 || dtv_capacity_ == 0) return false;
+    constexpr uint64_t DTV_WORDS_PER_ENTRY = 2;
+    constexpr uint64_t DTV_ENTRY_SIZE = sizeof(uint64_t) * DTV_WORDS_PER_ENTRY;
+    uint64_t dtv = 0;
+    try { dtv = mem.load<uint64_t>(tcb); } catch (...) { return false; }
+    if (dtv == 0) {
+        // A newly allocated pthread block has a zeroed TCB. Bootstrap the
+        // DTV in the positive slack reserved by allocate_static_tls().
+        const uint64_t raw = static_cast<uint64_t>(
+            static_cast<int64_t>(tcb) + static_cast<int64_t>(dtv_storage_offset_));
+        const uint64_t bytes = (dtv_capacity_ + 2) * DTV_ENTRY_SIZE;
+        try {
+            std::vector<uint8_t> zeros(static_cast<size_t>(bytes), 0);
+            mem.write(raw, zeros.data(), zeros.size());
+            mem.store<uint64_t>(raw, dtv_capacity_);
+            mem.store<uint64_t>(raw + DTV_ENTRY_SIZE, tls_generation_);
+            dtv = raw + DTV_ENTRY_SIZE;
+            mem.store<uint64_t>(tcb, dtv);
+        } catch (...) {
+            return false;
+        }
+    }
+    if (dtv < DTV_ENTRY_SIZE) return false;
+    uint64_t raw = dtv - DTV_ENTRY_SIZE;
+    uint64_t capacity = 0;
+    try { capacity = mem.load<uint64_t>(raw); } catch (...) { return false; }
+    if (capacity > 65536) return false; // reject a corrupted guest DTV header
+    if (required_module_id <= capacity) return true;
+    if (required_module_id > (UINT64_MAX / DTV_ENTRY_SIZE) - 2) return false;
+    uint64_t new_capacity = std::max<uint64_t>(capacity ? capacity * 2 : 32,
+                                                required_module_id);
+    if (new_capacity > (UINT64_MAX / DTV_ENTRY_SIZE) - 2) return false;
+    const uint64_t new_bytes = (new_capacity + 2) * DTV_ENTRY_SIZE;
+    const uint64_t new_raw = mem.mmap_alloc(new_bytes);
+    if (new_raw == 0) return false;
+    try {
+        std::vector<uint8_t> zeros(static_cast<size_t>(new_bytes), 0);
+        mem.write(new_raw, zeros.data(), zeros.size());
+        const uint64_t old_bytes = (capacity + 2) * DTV_ENTRY_SIZE;
+        std::vector<uint8_t> old(old_bytes);
+        mem.read(raw, old.data(), old.size());
+        mem.write(new_raw, old.data(), old.size());
+        mem.store<uint64_t>(new_raw, new_capacity);
+        mem.store<uint64_t>(new_raw + DTV_ENTRY_SIZE, tls_generation_);
+        mem.store<uint64_t>(tcb, new_raw + DTV_ENTRY_SIZE);
+    } catch (...) {
+        mem.untrack_allocation(new_raw, new_bytes);
+        return false;
+    }
+    track_tls_allocation_(tcb, new_raw, new_bytes);
+    const uint64_t inline_raw = static_cast<uint64_t>(
+        static_cast<int64_t>(tcb) + static_cast<int64_t>(dtv_storage_offset_));
+    if (raw != inline_raw) release_tls_allocation_(mem, tcb, raw);
+    return true;
+}
+bool DynamicLinker::initialize_thread_dtv(Memory& mem, uint64_t tcb) {
+    if (is_musl_) return true;
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
+    if (tcb == 0) return false;
+    if (static_tls_base_ == 0 || dtv_storage_offset_ == 0 ||
+        dtv_capacity_ == 0) return false;
+    uint64_t max_module_id = 0;
+    for (const auto& obj : objects_) {
+        if (obj.tls.present && obj.tls.memsz != 0)
+            max_module_id = std::max(max_module_id, obj.tls_mod_id);
+    }
+    if (!ensure_thread_dtv_capacity_(mem, tcb, max_module_id)) return false;
+    uint64_t dtv = 0;
+    try { dtv = mem.load<uint64_t>(tcb); } catch (...) { return false; }
+    if (dtv < sizeof(uint64_t) * 2) return false;
+    const uint64_t raw = dtv - sizeof(uint64_t) * 2;
+    uint64_t capacity = 0;
+    try { capacity = mem.load<uint64_t>(raw); } catch (...) { return false; }
+    try {
+        mem.store<uint64_t>(raw, capacity);
+        mem.store<uint64_t>(raw + 16, tls_generation_);
+        // INSTALL_DTV(tcb, raw) stores raw + one entry in tcbhead_t.dtv.
+        mem.store<uint64_t>(tcb, dtv);
+        for (const auto& obj : objects_) {
+            if (!obj.tls.present || obj.tls.memsz == 0 ||
+                obj.tls_mod_id == 0 || obj.tls_mod_id > capacity ||
+                (obj.tls_dynamic && !obj.tls_static_slot)) continue;
+            const uint64_t entry = dtv + obj.tls_mod_id * 16;
+            if (mem.load<uint64_t>(entry) == 0) {
+                const uint64_t tls_addr = static_cast<uint64_t>(
+                    static_cast<int64_t>(tcb) + obj.tls_tp_offset);
+                mem.store<uint64_t>(entry, tls_addr);
+                mem.store<uint64_t>(entry + 8, 0);
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+uint64_t DynamicLinker::resolve_tls_address(Memory& mem, CPU& cpu,
+                                             uint64_t module_id,
+                                             uint64_t offset) {
+    std::lock_guard<std::recursive_mutex> lk(loader_lock());
+    if (module_id == 0 || cpu.tpidr_el0 == 0) return 0;
+    LoadedObject* module = nullptr;
+    for (auto& obj : objects_) {
+        if (obj.tls_mod_id == module_id && obj.tls.present && obj.tls.memsz) {
+            module = &obj;
+            break;
+        }
+    }
+    if (!module || offset > module->tls.memsz) return 0;
+    const uint64_t tcb = cpu.tpidr_el0;
+    if (is_musl_) {
+        if (module->tls_dynamic) return 0;
+        return static_cast<uint64_t>(static_cast<int64_t>(tcb) +
+                                     module->tls_tp_offset) + offset;
+    }
+    if (!ensure_thread_dtv_capacity_(mem, tcb, module_id)) return 0;
+    uint64_t dtv = 0;
+    try { dtv = mem.load<uint64_t>(tcb); } catch (...) { return 0; }
+    const uint64_t entry = dtv + module_id * 16;
+    uint64_t tls_addr = 0;
+    try { tls_addr = mem.load<uint64_t>(entry); } catch (...) { return 0; }
+    if (tls_addr == 0) {
+        if (module->tls_dynamic && !module->tls_static_slot) {
+            uint64_t alignment = module->tls.align ? module->tls.align : 1;
+            if ((alignment & (alignment - 1)) != 0) alignment = 1;
+            if (module->tls.memsz > UINT64_MAX - (alignment - 1) ||
+                module->tls.memsz > static_cast<uint64_t>(SIZE_MAX)) return 0;
+            const uint64_t alloc_size = module->tls.memsz + alignment - 1;
+            const uint64_t allocation = mem.mmap_alloc(alloc_size);
+            if (allocation == 0) return 0;
+            if (allocation > UINT64_MAX - (alignment - 1)) {
+                mem.untrack_allocation(allocation, alloc_size);
+                return 0;
+            }
+            tls_addr = (allocation + alignment - 1) & ~(alignment - 1);
+            try {
+                std::vector<uint8_t> zeros(static_cast<size_t>(module->tls.memsz), 0);
+                mem.write(tls_addr, zeros.data(), zeros.size());
+                if (module->tls.filesz > 0) {
+                    if (module->tls.filesz > module->tls.memsz ||
+                        module->tls_template_addr == 0) {
+                        mem.untrack_allocation(allocation, alloc_size);
+                        return 0;
+                    }
+                    std::vector<uint8_t> image(static_cast<size_t>(module->tls.filesz));
+                    mem.read(module->tls_template_addr, image.data(), image.size());
+                    mem.write(tls_addr, image.data(), image.size());
+                }
+                track_tls_allocation_(tcb, allocation, alloc_size,
+                                      module->tls_mod_id);
+            } catch (...) {
+                mem.untrack_allocation(allocation, alloc_size);
+                return 0;
+            }
+        } else {
+            if (module->tls_template_addr == 0) return 0;
+            tls_addr = static_cast<uint64_t>(static_cast<int64_t>(tcb) +
+                                             module->tls_tp_offset);
+            if (!mem.is_mapped(tls_addr, module->tls.memsz)) return 0;
+            try {
+                std::vector<uint8_t> image(static_cast<size_t>(module->tls.memsz));
+                mem.read(module->tls_template_addr, image.data(), image.size());
+                mem.write(tls_addr, image.data(), image.size());
+            } catch (...) {
+                return 0;
+            }
+        }
+        try {
+            mem.store<uint64_t>(entry, tls_addr);
+            mem.store<uint64_t>(entry + 8, 0); // guest must not free emulator mappings
+        } catch (...) {
+            return 0;
+        }
+    }
+    try { mem.store<uint64_t>(dtv, tls_generation_); } catch (...) {}
+    return tls_addr + offset;
+}
+int64_t DynamicLinker::resolve_tlsdesc_offset(Memory& mem, CPU& cpu,
+                                               uint64_t descriptor_arg) {
+    std::lock_guard<std::recursive_mutex> lk(loader_lock());
+    auto it = tlsdesc_indices_.find(descriptor_arg);
+    if (it == tlsdesc_indices_.end()) return 0;
+    // An undefined weak TLSDESC yields the relocation addend as an
+    // absolute address (normally NULL), independently of the calling TP.
+    if (it->second.module_id == 0)
+        return static_cast<int64_t>(it->second.offset - cpu.tpidr_el0);
+    const uint64_t addr = resolve_tls_address(mem, cpu,
+                                              it->second.module_id,
+                                              it->second.offset);
+    if (addr == 0 || cpu.tpidr_el0 == 0) return 0;
+    return static_cast<int64_t>(addr) - static_cast<int64_t>(cpu.tpidr_el0);
+}
+void DynamicLinker::deallocate_thread_tls(Memory& mem, uint64_t tcb) {
+    if (tcb == 0) return;
+    std::lock_guard<std::recursive_mutex> lk(loader_lock());
+    auto it = tls_thread_allocations_.find(tcb);
+    if (it != tls_thread_allocations_.end()) {
+        for (const auto& alloc : it->second)
+            mem.untrack_allocation(alloc.addr, alloc.size);
+        tls_thread_allocations_.erase(it);
+    }
+    // A stack-cached pthread block may be reused after glibc calls this
+    // shim. Clear its DTV pointer so initialize_thread_dtv rebuilds the
+    // inline DTV instead of following an external DTV we just released.
+    if (!is_musl_) {
+        try {
+            if (mem.is_mapped(tcb, sizeof(uint64_t)))
+                mem.store<uint64_t>(tcb, 0);
+        } catch (...) {}
+    }
+    tls_thread_blocks_.erase(tcb);
+}
+void DynamicLinker::register_thread_tls_block(uint64_t tcb) {
+    if (tcb == 0) return;
+    std::lock_guard<std::recursive_mutex> lk(loader_lock());
+    tls_thread_blocks_.insert(tcb);
 }
 // ── set_guest_environ ──────────────────────────────────────────────────
 // Mirror what ld.so's _dl_start_user does on a real boot: set libc's
@@ -1031,7 +1287,8 @@ void DynamicLinker::patch_rtld_global_ro_() {
             }
             uint64_t cur_align = mem_.load<uint64_t>(rtld_ro + align_off);
             if (cur_align == 0) {
-                mem_.store<uint64_t>(rtld_ro + align_off, 64);
+                mem_.store<uint64_t>(rtld_ro + align_off,
+                                     pending_tls_static_align_);
             }
         } else {
             // Fallback: spray all known offset pairs.
@@ -1047,16 +1304,18 @@ void DynamicLinker::patch_rtld_global_ro_() {
                 }
                 uint64_t cur_align = mem_.load<uint64_t>(rtld_ro + ko.align);
                 if (cur_align == 0) {
-                    mem_.store<uint64_t>(rtld_ro + ko.align, 64);
+                    mem_.store<uint64_t>(rtld_ro + ko.align,
+                                         pending_tls_static_align_);
                 }
             }
         }
         if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dynlink] patched _rtld_global_ro @0x%llx: "
                     "dl_pagesize=4096, dl_tls_static_size=%llu, "
-                    "dl_tls_static_align=64 (%s)\n",
+                    "dl_tls_static_align=%llu (%s)\n",
                     static_cast<unsigned long long>(rtld_ro),
                     static_cast<unsigned long long>(pending_tls_static_size_),
+                    static_cast<unsigned long long>(pending_tls_static_align_),
                     detected ? "dynamic detection"
                              : "spray fallback");
         }
@@ -1522,13 +1781,11 @@ void DynamicLinker::apply_pending_copies_() {
 void DynamicLinker::apply_tls_mirror_(const LoadedObject& obj,
                                        uint64_t target, uint64_t value) {
     if (!obj.tls.present || obj.tls.filesz == 0) return;
-    if (static_tls_base_ == 0) return;
+    if (obj.tls_template_addr == 0) return;
     uint64_t tdata_start = obj.base_addr + obj.tls.vaddr;
     uint64_t tdata_end = tdata_start + obj.tls.filesz;
     if (target >= tdata_start && target < tdata_end) {
-        uint64_t tls_dst = static_tls_base_ +
-            obj.tls_block_offset +
-            (target - tdata_start);
+        uint64_t tls_dst = obj.tls_template_addr + (target - tdata_start);
         mem_.store<uint64_t>(tls_dst, value);
     }
 }
@@ -1968,9 +2225,8 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
 //       - _dl_audit_preinit: no-op.
 //       - _dl_rtld_di_serinfo: returns 0.
 //       - _dl_call_fini: no-op.
-//       - __tls_get_addr: returns 0 (static TLS only; this is the
-//         fallback for the rare case where the compiler emits a
-//         __tls_get_addr call for a static-TLS variable).
+//       - __tls_get_addr: resolves a TLS index through the calling
+//         thread's DTV, including modules loaded after startup.
 //       - __tunable_get_val: returns 0 (no tunables).
 //       - __nptl_change_stack_perm: no-op.
 //
@@ -2097,6 +2353,8 @@ bool DynamicLinker::register_ld_linux_shim_() {
         tls_static_size = (tls_static_size + 63) & ~63ULL;
         // Store for later use (post-relocation patching of _rtld_global_ro).
         pending_tls_static_size_ = tls_static_size;
+        pending_tls_static_align_ = std::max<uint64_t>(64,
+                                                        tls_static_alignment_);
     }
     // ── Code page (shim_base_+CODE_PAGE_OFF .. shim_base_+SHIM_SIZE) ─
     // Each stub is 2 instructions (8 bytes), EXCEPT _dl_allocate_tls
@@ -2176,6 +2434,17 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // nop (pad to 16 bytes)
         emit_nop(v);
     };
+    auto emit_stub_syscall = [&](std::vector<uint8_t>& v, uint16_t syscall_id) {
+        const uint32_t movz_x8 = 0xD2800008u |
+                                 (static_cast<uint32_t>(syscall_id) << 5);
+        v.push_back(static_cast<uint8_t>(movz_x8));
+        v.push_back(static_cast<uint8_t>(movz_x8 >> 8));
+        v.push_back(static_cast<uint8_t>(movz_x8 >> 16));
+        v.push_back(static_cast<uint8_t>(movz_x8 >> 24));
+        v.push_back(0x01); v.push_back(0x00); v.push_back(0x00); v.push_back(0xD4); // svc
+        v.push_back(0xC0); v.push_back(0x03); v.push_back(0x5F); v.push_back(0xD6); // ret
+        emit_nop(v);
+    };
     std::vector<uint8_t> code;
     code.reserve(256);
     // Stub layout — _dl_allocate_tls and _dl_allocate_tls_init are 16 bytes;
@@ -2185,7 +2454,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_DSO     = 0;    // _dl_find_dso_for_object
     constexpr uint32_t OFF_TLS     = 8;    // _dl_allocate_tls (16 bytes)
     constexpr uint32_t OFF_TLSINIT = 24;   // _dl_allocate_tls_init (16 bytes)
-    constexpr uint32_t OFF_TLSFREE = 40;   // _dl_deallocate_tls
+    constexpr uint32_t OFF_TLSFREE = 272;  // _dl_deallocate_tls (syscall-backed)
     constexpr uint32_t OFF_SIGERR  = 48;   // _dl_signal_error
     constexpr uint32_t OFF_SIGEXC  = 56;   // _dl_signal_exception
     constexpr uint32_t OFF_CEXC    = 64;   // _dl_catch_exception
@@ -2194,7 +2463,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_PREINIT = 88;   // _dl_audit_preinit
     constexpr uint32_t OFF_SERINFO = 96;   // _dl_rtld_di_serinfo
     constexpr uint32_t OFF_FINI    = 104;  // _dl_call_fini
-    constexpr uint32_t OFF_TLSADDR = 112;  // __tls_get_addr
+    constexpr uint32_t OFF_TLSADDR = 240;  // __tls_get_addr (syscall-backed)
     constexpr uint32_t OFF_TUNABLE = 120;  // __tunable_get_val
     constexpr uint32_t OFF_STACKPERM = 128; // __nptl_change_stack_perm
     constexpr uint32_t OFF_DLOPEN   = 136; // _dl_open (16 bytes — calls syscall 0x1002)
@@ -2205,6 +2474,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // TLSDESC resolver (16 bytes) lives at code.size()==208; OFF_DLFO
     // is placed AFTER it (224) so the two don't collide.
     constexpr uint32_t OFF_DLFO     = 224; // _dl_find_object (16 bytes — calls syscall 0x1008)
+    constexpr uint32_t OFF_TLSDESC_DYNAMIC = 256; // dynamic TLSDESC resolver
     // [0] _dl_find_dso_for_object (returns void*)
     //     Returns 0 (not found). glibc's dladdr and _dl_open use this
     //     to find the containing DSO for a given address. Returning 0
@@ -2241,7 +2511,8 @@ bool DynamicLinker::register_ld_linux_shim_() {
     emit_stub_return0(code);     // offset 88
     // [11] _dl_call_fini (void)
     emit_stub_void(code);        // offset 96
-    // [12] __tls_get_addr (returns void*)
+    // [12] legacy __tls_get_addr slot (the active syscall-backed stub is
+    //      placed after OFF_DLFO to keep every established shim offset stable).
     emit_stub_return0(code);     // offset 104
     // [13] __tunable_get_val (returns int)
     emit_stub_return0(code);     // offset 112
@@ -2360,6 +2631,24 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // nop (pad to 16 bytes)
         emit_nop(code);
     }
+    if (code.size() != OFF_TLSADDR) {
+        error_ = "ld-linux shim TLS stub layout mismatch";
+        return false;
+    }
+    // __tls_get_addr receives struct tls_index* in x0.
+    emit_stub_syscall(code, 0x1009);
+    if (code.size() != OFF_TLSDESC_DYNAMIC) {
+        error_ = "ld-linux shim TLSDESC stub layout mismatch";
+        return false;
+    }
+    // The TLSDESC resolver receives the descriptor address in x0.
+    tlsdesc_dynamic_resolver_off_ = static_cast<uint32_t>(code.size());
+    emit_stub_syscall(code, 0x100A);
+    if (code.size() != OFF_TLSFREE) {
+        error_ = "ld-linux shim TLS deallocator layout mismatch";
+        return false;
+    }
+    emit_stub_syscall(code, 0x100B);
     dl_find_object_stub_ = code_base + OFF_DLFO;
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
@@ -2481,6 +2770,17 @@ bool DynamicLinker::register_ld_linux_shim_() {
     add_func_sym("__tls_get_addr",          OFF_TLSADDR);
     add_func_sym("__tunable_get_val",       OFF_TUNABLE);
     add_func_sym("__nptl_change_stack_perm", OFF_STACKPERM);
+    // TLS lookup must use our DTV because the native linker does not own
+    // glibc's slotinfo list. Route both unversioned and versioned references
+    // through the ABI-compatible syscall stub.
+    symbols_["__tls_get_addr"] =
+        SymEntry{code_base + OFF_TLSADDR, STB_GLOBAL_};
+    for (auto& [key, entry] : versioned_symbols_) {
+        if (key.rfind("__tls_get_addr@", 0) == 0)
+            entry = SymEntry{code_base + OFF_TLSADDR, STB_GLOBAL_};
+    }
+    symbols_["_dl_deallocate_tls"] =
+        SymEntry{code_base + OFF_TLSFREE, STB_GLOBAL_};
     // Override glibc's dl_iterate_phdr with our stub that calls syscall
     // 0x1007. glibc's implementation walks the link_map list, which we
     // don't have. We use FORCE override (not add_func_sym which is
@@ -2945,6 +3245,13 @@ void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
         memcpy(&obj.tls.filesz, p + 32, 8);
         memcpy(&obj.tls.memsz,  p + 40, 8);
         memcpy(&obj.tls.align,  p + 48, 8);
+        if (obj.tls.align == 0) obj.tls.align = 1;
+        // ELF p_align is required to be 0, 1, or a power of two. Treat an
+        // invalid value as byte alignment so malformed images cannot trigger
+        // underflow in the alignment masks used by TLS placement.
+        if ((obj.tls.align & (obj.tls.align - 1)) != 0)
+            obj.tls.align = 1;
+        if (obj.tls.filesz > obj.tls.memsz) return;
         obj.tls.present = true;
         return;
     }
@@ -3014,8 +3321,13 @@ void DynamicLinker::allocate_static_tls() {
     uint64_t lib_size = 0;
     uint64_t main_memsz = 0;
     uint64_t main_align = 1;
+    uint64_t tls_module_count = 0;
+    tls_static_alignment_ = 16;
     for (const auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        ++tls_module_count;
+        if (!is_musl_)
+            tls_static_alignment_ = std::max(tls_static_alignment_, obj.tls.align);
         if (obj.is_main) {
             main_memsz = obj.tls.memsz;
             main_align = obj.tls.align ? obj.tls.align : 16;
@@ -3025,7 +3337,10 @@ void DynamicLinker::allocate_static_tls() {
             lib_size += obj.tls.memsz;
         }
     }
-    if (lib_size == 0 && main_memsz == 0) return;
+    // Keep a minimal variant-I block for glibc even when the executable and
+    // startup DSOs have no PT_TLS. A later dlopen can then use the same TP,
+    // DTV, rseq slot, and static surplus as a process that had startup TLS.
+    if (lib_size == 0 && main_memsz == 0 && is_musl_) return;
     // Round lib_size up to 16 (minimum TLS alignment).
     lib_size = (lib_size + 15) & ~15ULL;
     if (is_musl_) {
@@ -3056,6 +3371,7 @@ void DynamicLinker::allocate_static_tls() {
             if (!obj.tls.present || obj.tls.memsz == 0) continue;
             cursor = (cursor + obj.tls.align - 1) & ~(obj.tls.align - 1);
             obj.tls_block_offset = cursor;
+            obj.tls_template_addr = static_tls_base_ + cursor;
             obj.tls_tp_offset = static_cast<int64_t>(cursor) -
                                 static_cast<int64_t>(total);
             uint64_t src = obj.base_addr + obj.tls.vaddr;
@@ -3078,11 +3394,9 @@ void DynamicLinker::allocate_static_tls() {
     // See the long comment above for the full rationale.
     constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;  // sizeof(tcbhead_t) = tcb + dtv
     uint64_t tcb_size = (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1);
-    // Reserve the dlopen surplus AFTER the block (trailing, not in TP
-    // math): the TP anchor (lib_tls_size_) covers only the module TLS plus
-    // the glibc struct-pthread slot below TP, so the guest's own TCB
-    // computation keeps agreeing with our offsets. Surplus tp offsets are
-    // positive (past main TLS), valid on every thread.
+    // Reserve rseq and DTV storage after the startup TLS data, followed by
+    // the dlopen surplus. All three regions have the same TP-relative
+    // offsets on the main thread and on new pthread stacks.
     lib_tls_size_ = lib_size + TLS_PRE_TCB_SIZE;
     tcb_size_ = tcb_size;
     // Total static TLS block = lib + struct pthread + TCB + main.
@@ -3091,17 +3405,35 @@ void DynamicLinker::allocate_static_tls() {
     uint64_t max_align = 16;
     if (main_align > max_align) max_align = main_align;
     total = (total + max_align - 1) & ~(max_align - 1);
-    // static_tls_size_ covers the surplus too, so GLRO-sized guest thread
-    // blocks (0x1001 caller-alloc path) fit positive-tp dlopen slots;
-    // lib_tls_size_ (the TP anchor) stays frozen at L0. Surplus starts at
-    // template offset `total`.
-    static_tls_size_ = total + TLS_DLOPEN_SURPLUS;
-    tls_surplus_base_ = total;
-    static_tls_base_ = mem_.mmap_alloc(total + TLS_DLOPEN_SURPLUS + 16);  // +16 slack
-    if (static_tls_base_ == 0) {
+    // ld-linux places its rseq area after startup TLS, with at least 32-byte
+    // alignment. Reserve that area in the positive slack before dlopen TLS so
+    // glibc's TP + __rseq_offset writes cannot overlap the DTV or a later TLS
+    // module. mmap_alloc returns a page-aligned base, so aligning this template
+    // offset also aligns the area for the main thread and every allocated TCB.
+    const uint64_t rseq_slot = (total + TLS_RSEQ_AREA_SIZE - 1) &
+                               ~(TLS_RSEQ_AREA_SIZE - 1);
+    rseq_offset_ = rseq_slot - (lib_size + TLS_PRE_TCB_SIZE);
+    dtv_capacity_ = tls_module_count + TLS_DTV_SURPLUS;
+    const uint64_t dtv_slot = (rseq_slot + TLS_RSEQ_AREA_SIZE + 15) & ~15ULL;
+    dtv_storage_offset_ = dtv_slot - (lib_size + TLS_PRE_TCB_SIZE);
+    const uint64_t dtv_bytes = (dtv_capacity_ + 2) * sizeof(uint64_t) * 2;
+    tls_surplus_base_ = (dtv_slot + dtv_bytes + 15) & ~15ULL;
+    // static_tls_size_ covers both reservations, so GLRO-sized guest thread
+    // blocks (0x1001 caller-alloc path) fit positive-tp dlopen slots.
+    static_tls_size_ = tls_surplus_base_ + TLS_DLOPEN_SURPLUS;
+    const uint64_t tls_align_slack = tls_static_alignment_ - 1;
+    if (static_tls_size_ > UINT64_MAX - tls_align_slack) {
+        error_ = "static TLS block size overflow";
+        return;
+    }
+    static_tls_alloc_size_ = static_tls_size_ + tls_align_slack;
+    static_tls_alloc_base_ = mem_.mmap_alloc(static_tls_alloc_size_);
+    if (static_tls_alloc_base_ == 0) {
         error_ = "failed to allocate static TLS block";
         return;
     }
+    static_tls_base_ = (static_tls_alloc_base_ + tls_align_slack) &
+                       ~tls_align_slack;
     // TP = static_tls_base_ + lib_size  (points to the TCB header start).
     // Main exe TLS is at TP + tcb_size (positive offset).
     // Lib TLS is at TP - lib_size (negative offset).
@@ -3115,6 +3447,7 @@ void DynamicLinker::allocate_static_tls() {
             // Main exe TLS: at POSITIVE TP offset = tcb_size.
             // In the template block it follows lib TLS + struct pthread.
             obj.tls_block_offset = lib_size + TLS_PRE_TCB_SIZE + tcb_size;
+            obj.tls_template_addr = static_tls_base_ + obj.tls_block_offset;
             obj.tls_tp_offset = static_cast<int64_t>(tcb_size);  // positive
         } else {
             // Lib TLS: at NEGATIVE TP offset.
@@ -3127,6 +3460,7 @@ void DynamicLinker::allocate_static_tls() {
             // Actually, for simplicity, store libs in load order at increasing
             // negative offsets. The tp_offset = lib_cursor - lib_size (negative).
             obj.tls_block_offset = lib_cursor;
+            obj.tls_template_addr = static_tls_base_ + obj.tls_block_offset;
             obj.tls_tp_offset = static_cast<int64_t>(lib_cursor) -
                                 static_cast<int64_t>(lib_tls_size_);  // negative
             lib_cursor += obj.tls.memsz;
@@ -3144,6 +3478,9 @@ void DynamicLinker::allocate_static_tls() {
             }
         }
         // .bss (memsz - filesz) is already zero from mmap.
+    }
+    if (!initialize_thread_dtv(mem_, thread_pointer())) {
+        error_ = "failed to initialize main-thread DTV";
     }
 }
 // ── TLS accessors ──────────────────────────────────────────────────────
@@ -3212,20 +3549,26 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
         return tcb;
     }
     constexpr uint64_t PTHREAD_SLACK = 8192;
-    uint64_t alloc_size = total_tls_size + PTHREAD_SLACK;
+    const uint64_t tls_extent = std::max(total_tls_size, static_tls_size_);
+    const uint64_t alignment = std::max<uint64_t>(16, tls_static_alignment_);
+    if (tls_extent > UINT64_MAX - PTHREAD_SLACK - (alignment - 1) - 63)
+        return 0;
+    uint64_t alloc_size = tls_extent + PTHREAD_SLACK + alignment - 1;
     alloc_size = (alloc_size + 63) & ~63ULL;
     uint64_t block = mem.mmap_alloc(alloc_size);
     if (block == 0) return 0;
     std::vector<uint8_t> zeros(alloc_size, 0);
     mem.write(block, zeros.data(), alloc_size);
-    tcb = block + lib_size + TLS_PRE_TCB_SIZE;  // TCB sits above struct pthread
+    const uint64_t tls_base = (block + alignment - 1) & ~(alignment - 1);
+    tcb = tls_base + lib_size + TLS_PRE_TCB_SIZE; // TCB above struct pthread
     // ── Copy each module's TLS template to its per-thread slot ──
     for (const auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        if (obj.tls_dynamic && !obj.tls_static_slot) continue;
         int64_t tp_off = obj.tls_tp_offset;
         uint64_t dst = static_cast<uint64_t>(
             static_cast<int64_t>(tcb) + tp_off);
-        uint64_t src = static_tls_base_ + obj.tls_block_offset;
+        uint64_t src = obj.tls_template_addr;
         uint64_t filesz = obj.tls.filesz;
         if (filesz > 0 && filesz <= obj.tls.memsz) {
             try {
@@ -3235,11 +3578,15 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
             } catch (...) {}
         }
     }
-    // ── Zero ONLY the DTV pointer in tcbhead_t (see syscall 0x1001) ──
-    constexpr uint64_t TCB_DTV_OFFSET = 8;  // tcbhead_t.dtv
+    // AArch64 glibc's tcbhead_t is { dtv, private } at TP+0/+8.
     try {
-        mem.store<uint64_t>(tcb + TCB_DTV_OFFSET, 0);
+        mem.store<uint64_t>(tcb + 8, 0);
     } catch (...) {}
+    // SDL-created threads may predate the first late TLS module in a static
+    // executable. Their allocation includes pthread slack, so the first
+    // later TLS lookup can place the DTV after the layout is established.
+    if (static_tls_base_ != 0 && !initialize_thread_dtv(mem, tcb)) return 0;
+    register_thread_tls_block(tcb);
     return tcb;
 }
 // ── resolve_reloc_symbol ───────────────────────────────────────────────
@@ -3345,31 +3692,162 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
 // read 0 → br x0 → crash at pc=0x0.
 int64_t DynamicLinker::tlsdesc_tp_offset(const LoadedObject& obj,
                                          uint32_t sym_idx, int64_t A) {
-    if (sym_idx == 0) {
-        // Local TLS: offset within this module's block is the addend.
-        return obj.tls_tp_offset + A;
+    TlsIndex index{};
+    if (!resolve_tlsdesc_index_(obj, sym_idx, A, index) ||
+        index.offset > static_cast<uint64_t>(INT64_MAX))
+        return 0;
+    for (const auto& candidate : objects_) {
+        if (candidate.tls_mod_id != index.module_id) continue;
+        if (candidate.tls_tp_offset >
+            INT64_MAX - static_cast<int64_t>(index.offset)) return 0;
+        return candidate.tls_tp_offset + static_cast<int64_t>(index.offset);
     }
-    Elf64_Sym s;
+    return 0;
+}
+bool DynamicLinker::resolve_tlsdesc_index_(const LoadedObject& obj,
+                                            uint32_t sym_idx,
+                                            int64_t addend,
+                                            TlsIndex& out) {
+    const LoadedObject* defining = &obj;
+    uint64_t symbol_offset = 0;
+    if (sym_idx != 0) {
+        Elf64_Sym sym{};
+        try {
+            mem_.read(obj.symtab_addr + sym_idx * sizeof(sym), &sym, sizeof(sym));
+        } catch (...) {
+            return false;
+        }
+        if ((sym.st_info & 0x0f) != 6) return false; // STT_TLS
+        const uint8_t bind = sym.st_info >> 4;
+        const uint8_t visibility = sym.st_other & 0x3;
+        if (sym.st_shndx != SHN_UNDEF_ &&
+            (bind == 0 || visibility == 2 || visibility == 3)) {
+            // Local, hidden, and protected TLS definitions bind within the
+            // defining object even when another object exports the same name.
+            symbol_offset = sym.st_value;
+        } else {
+            const uint64_t symbol_addr = resolve_reloc_symbol(obj, sym_idx);
+            if (symbol_addr != 0) {
+                defining = find_object_by_addr(symbol_addr);
+                if (!defining || symbol_addr < defining->base_addr) return false;
+                symbol_offset = symbol_addr - defining->base_addr;
+            } else if (sym.st_shndx != SHN_UNDEF_) {
+                // A defined, preemptible symbol may not have been indexed
+                // (for example, a local static-PIE object); keep its own
+                // definition as the relocation's fallback.
+                symbol_offset = sym.st_value;
+            } else {
+                return false;
+            }
+        }
+    }
+    if (!defining->tls.present || defining->tls.memsz == 0 ||
+        defining->tls_mod_id == 0) return false;
+    uint64_t offset = symbol_offset;
+    if (addend >= 0) {
+        const uint64_t positive = static_cast<uint64_t>(addend);
+        if (positive > UINT64_MAX - offset) return false;
+        offset += positive;
+    } else {
+        const uint64_t magnitude = static_cast<uint64_t>(-(addend + 1)) + 1;
+        if (magnitude > offset) return false;
+        offset -= magnitude;
+    }
+    if (offset > defining->tls.memsz) return false;
+    out.module_id = defining->tls_mod_id;
+    out.offset = offset;
+    return true;
+}
+bool DynamicLinker::install_tlsdesc_(const LoadedObject& obj,
+                                     uint32_t sym_idx,
+                                     int64_t addend,
+                                     uint64_t target) {
+    TlsIndex index{};
+    if (!resolve_tlsdesc_index_(obj, sym_idx, addend, index)) {
+        // A missing weak TLS definition is valid. Use the syscall-backed
+        // resolver because its addend - TP result is thread-dependent.
+        Elf64_Sym symbol{};
+        bool undefined_weak = false;
+        if (sym_idx != 0) {
+            try {
+                mem_.read(obj.symtab_addr + sym_idx * sizeof(symbol),
+                          &symbol, sizeof(symbol));
+                undefined_weak = (symbol.st_info & 0xf) == 6 &&
+                    (symbol.st_info >> 4) == STB_WEAK_ &&
+                    symbol.st_shndx == SHN_UNDEF_ &&
+                    resolve_reloc_symbol(obj, sym_idx) == 0;
+            } catch (...) {}
+        }
+        if (undefined_weak) {
+            try {
+                tlsdesc_indices_[target] = {0, static_cast<uint64_t>(addend)};
+                mem_.store<uint64_t>(target, shim_base_ + SHIM_CODE_PAGE_OFF_ +
+                                            tlsdesc_dynamic_resolver_off_);
+                mem_.store<uint64_t>(target + 8, 0);
+                return true;
+            } catch (...) {
+                tlsdesc_indices_.erase(target);
+            }
+        }
+        set_last_error("could not resolve TLS descriptor in " + obj.name);
+        error_ = "unresolved TLS descriptor in " + obj.name;
+        try {
+            mem_.store<uint64_t>(target, 0);
+            mem_.store<uint64_t>(target + 8, 0);
+        } catch (...) {}
+        return false;
+    }
+    const LoadedObject* defining = nullptr;
+    for (const auto& candidate : objects_) {
+        if (candidate.tls_mod_id == index.module_id) {
+            defining = &candidate;
+            break;
+        }
+    }
+    if (!defining) {
+        set_last_error("TLS descriptor module disappeared in " + obj.name);
+        error_ = "TLS descriptor module missing in " + obj.name;
+        return false;
+    }
+    const bool needs_dynamic_resolver =
+        defining->tls_dynamic && !defining->tls_static_slot;
+    const uint64_t code_base = shim_base_ + SHIM_CODE_PAGE_OFF_;
+    const uint64_t resolver = code_base + (needs_dynamic_resolver
+        ? tlsdesc_dynamic_resolver_off_ : tlsdesc_resolver_off_);
+    uint64_t descriptor_arg = 0;
+    if (needs_dynamic_resolver) {
+        tlsdesc_indices_[target] = index;
+        descriptor_arg = 0; // resolver identifies this descriptor by x0
+    } else {
+        if (index.offset > static_cast<uint64_t>(INT64_MAX) ||
+            defining->tls_tp_offset >
+                INT64_MAX - static_cast<int64_t>(index.offset)) {
+            set_last_error("TLS descriptor offset overflow in " + obj.name);
+            error_ = "TLS descriptor offset overflow in " + obj.name;
+            return false;
+        }
+        const int64_t tp_offset = defining->tls_tp_offset +
+                                  static_cast<int64_t>(index.offset);
+        descriptor_arg = static_cast<uint64_t>(tp_offset);
+        tlsdesc_indices_.erase(target);
+    }
     try {
-        mem_.read(obj.symtab_addr + sym_idx * sizeof(s), &s, sizeof(s));
+        mem_.store<uint64_t>(target, resolver);
+        mem_.store<uint64_t>(target + 8, descriptor_arg);
     } catch (...) {
-        return obj.tls_tp_offset + A;
+        set_last_error("could not write TLS descriptor in " + obj.name);
+        error_ = "could not write TLS descriptor in " + obj.name;
+        return false;
     }
-    std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
-    if (name.empty()) return obj.tls_tp_offset + A;
-    uint64_t sym_addr = resolve_symbol(name);
-    const LoadedObject* def = nullptr;
-    if (sym_addr != 0) {
-        def = find_object_by_addr(sym_addr);
+    if (dynlink_trace_enabled()) {
+        fprintf(stderr, "[dynlink] TLSDESC obj=%s @0x%llx module=%llu offset=0x%llx %s resolver=0x%llx\n",
+                obj.name.c_str(), (unsigned long long)target,
+                (unsigned long long)index.module_id,
+                (unsigned long long)index.offset,
+                needs_dynamic_resolver ? "dynamic" : "static",
+                (unsigned long long)resolver);
     }
-    if (def) {
-        // Defining module: TP offset = its block offset + its st_value.
-        // sym_addr = def->base_addr + def_st_value, so recover it.
-        int64_t def_st_value = static_cast<int64_t>(sym_addr - def->base_addr);
-        return def->tls_tp_offset + def_st_value + A;
-    }
-    // Not resolved: fall back to this module's block + its own st_value.
-    return obj.tls_tp_offset + static_cast<int64_t>(s.st_value) + A;
+    return true;
 }
 // ── parse_versions_ ──────────────────────────────────────
 // Parse the GNU symbol versioning sections and populate
@@ -3395,7 +3873,8 @@ int64_t DynamicLinker::tlsdesc_tp_offset(const LoadedObject& obj,
 // For simplicity, we ONLY parse verdef (exported versions). verneed
 // (needed versions) is consulted at relocation time to look up the
 // correct versioned symbol in dependencies.
-void DynamicLinker::parse_versions_(CPU& cpu, const LoadedObject& obj) {
+void DynamicLinker::parse_versions_(CPU& cpu, const LoadedObject& obj,
+                                    std::vector<SymbolUndo>* undo) {
     if (obj.versym_addr == 0 || obj.verdef_addr == 0) return;
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
     // Build verdef index → version name map.
@@ -3474,10 +3953,17 @@ void DynamicLinker::parse_versions_(CPU& cpu, const LoadedObject& obj) {
         // First-strong-wins (same as index_symbols).
         auto it = versioned_symbols_.find(key);
         if (it == versioned_symbols_.end()) {
-            versioned_symbols_[key] = SymEntry{addr, bind};
+            const SymEntry installed{addr, bind};
+            if (undo)
+                undo->push_back({true, key, false, {}, installed});
+            versioned_symbols_[key] = installed;
         } else {
             if (it->second.bind == STB_WEAK_ && bind == STB_GLOBAL_) {
-                it->second = SymEntry{addr, bind};
+                const SymEntry previous = it->second;
+                const SymEntry installed{addr, bind};
+                if (undo)
+                    undo->push_back({true, key, true, previous, installed});
+                it->second = installed;
             }
         }
     }
@@ -3496,7 +3982,8 @@ uint64_t DynamicLinker::resolve_versioned_symbol(const std::string& name,
     return resolve_symbol(name);
 }
 // ── index_symbols ──────────────────────────────────────────────────────
-void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj) {
+void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj,
+                                  std::vector<SymbolUndo>* undo) {
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
     // available, 8192 cap fallback). Previously hardcoded 8192, dropping
     // symbols past the cap in large libs (Qt, webkit).
@@ -3558,12 +4045,19 @@ void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj) {
         // First-strong-wins symbol resolution (H6).
         auto it = symbols_.find(name);
         if (it == symbols_.end()) {
-            symbols_[name] = SymEntry{addr, bind};
+            const SymEntry installed{addr, bind};
+            if (undo)
+                undo->push_back({false, name, false, {}, installed});
+            symbols_[name] = installed;
         } else {
             // Existing entry. Override only if existing is WEAK and new
             // is STRONG. Never override an existing STRONG.
             if (it->second.bind == STB_WEAK_ && bind == STB_GLOBAL_) {
-                it->second = SymEntry{addr, bind};
+                const SymEntry previous = it->second;
+                const SymEntry installed{addr, bind};
+                if (undo)
+                    undo->push_back({false, name, true, previous, installed});
+                it->second = installed;
             }
             // else: keep existing (first strong wins, or weak kept as-is).
         }
@@ -3775,53 +4269,97 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
     }
     parse_tls(data, obj);
     parse_eh_frame(data, base, obj);
-    // Assign TLS module ID and tp_offset for dlopened libs.
+    // A static executable can dlopen before any native linker setup has
+    // allocated a TLS block. Establish an empty variant-I anchor now so
+    // the first late TLS module gets the same DTV/surplus machinery.
     if (obj.tls.present && obj.tls.memsz > 0) {
+        if (is_musl_) {
+            set_last_error("late TLS allocation is unsupported for musl layout");
+            error_ = "late TLS allocation is unsupported for musl layout";
+            mem_.untrack_allocation(base, max_end);
+            return 0;
+        }
+        if (static_tls_base_ == 0) allocate_static_tls();
+        if (static_tls_base_ == 0) {
+            set_last_error(error_.empty() ? "could not initialize TLS layout" : error_);
+            mem_.untrack_allocation(base, max_end);
+            return 0;
+        }
+        if (cpu.tpidr_el0 == 0) {
+            cpu.tpidr_el0 = thread_pointer();
+            cpu.tpidrro_el0 = cpu.tpidr_el0;
+        }
+        if (cpu.tpidr_el0 != 0)
+            register_thread_tls_block(cpu.tpidr_el0);
+
         obj.tls_mod_id = next_tls_mod_id_++;
-        if (!is_musl_) {
-            // Variant-I (glibc): carve backing from the startup surplus so
-            // the lib gets real storage on ALL threads (main uses the
-            // template directly; new threads copy it). The startup TP
-            // anchor (lib_tls_size_) NEVER grows — tp offsets stay valid
-            // for every thread. Exhaustion falls back to unbacked numbering.
-            uint64_t a = obj.tls.align ? obj.tls.align : 16;
-            uint64_t slot = tls_surplus_base_ +
-                            ((tls_surplus_used_ + a - 1) & ~(a - 1));
-            uint64_t need = (slot - tls_surplus_base_) + obj.tls.memsz;
-            if (static_tls_base_ != 0 && need <= TLS_DLOPEN_SURPLUS) {
-                obj.tls_block_offset = slot;
-                // Template slot sits at TP-space [slot-L', slot-L'+memsz).
-                obj.tls_tp_offset = static_cast<int64_t>(slot) -
-                                    static_cast<int64_t>(lib_tls_size_);
-                obj.tls_dynamic = true;
-                tls_surplus_used_ = need;
-                // Back the slot: zero, then copy .tdata from the lib.
-                uint64_t dst = static_tls_base_ + obj.tls_block_offset;
-                try {
-                    std::vector<uint8_t> z(obj.tls.memsz, 0);
-                    mem_.write(dst, z.data(), z.size());
-                    if (obj.tls.filesz > 0) {
-                        uint64_t src = base + obj.tls.vaddr;
-                        std::vector<uint8_t> t(obj.tls.filesz);
-                        mem_.read(src, t.data(), t.size());
-                        mem_.write(dst, t.data(), t.size());
-                    }
-                } catch (...) {}
+        if (obj.tls_mod_id == 0) {
+            set_last_error("TLS module ID space exhausted");
+            error_ = "TLS module ID space exhausted";
+            mem_.untrack_allocation(base, max_end);
+            return 0;
+        }
+        obj.tls_dynamic = true;
+        uint64_t alignment = obj.tls.align ? obj.tls.align : 1;
+        // The template is aligned, but glibc supplies an aligned TP rather
+        // than our template base for pthreads. Both placements agree only
+        // when the frozen base-to-TP distance preserves this alignment.
+        bool static_slot = alignment <= tls_static_alignment_ &&
+                           lib_tls_size_ % alignment == 0 &&
+                           tls_surplus_base_ <= UINT64_MAX - tls_surplus_used_;
+        uint64_t slot = 0;
+        uint64_t need = UINT64_MAX;
+        if (static_slot) {
+            const uint64_t cursor = tls_surplus_base_ + tls_surplus_used_;
+            if (cursor > UINT64_MAX - (alignment - 1)) {
+                static_slot = false;
             } else {
-                // No surplus left (or no startup template): unbacked numbering
-                // (old behavior) so at least mod IDs stay unique.
-                uint64_t a2 = obj.tls.align ? obj.tls.align : 16;
-                lib_tls_size_ = (lib_tls_size_ + a2 - 1) & ~(a2 - 1);
-                obj.tls_tp_offset = -static_cast<int64_t>(lib_tls_size_ + obj.tls.memsz);
-                lib_tls_size_ += obj.tls.memsz;
-                obj.tls_block_offset = static_tls_size_ - lib_tls_size_;
+                slot = (cursor + alignment - 1) & ~(alignment - 1);
+                if (slot < tls_surplus_base_ ||
+                    obj.tls.memsz > UINT64_MAX - (slot - tls_surplus_base_)) {
+                    static_slot = false;
+                } else {
+                    need = (slot - tls_surplus_base_) + obj.tls.memsz;
+                    static_slot = need <= TLS_DLOPEN_SURPLUS;
+                }
             }
         }
+        if (static_slot) {
+            obj.tls_static_slot = true;
+            obj.tls_block_offset = slot;
+            obj.tls_template_addr = static_tls_base_ + slot;
+            obj.tls_tp_offset = static_cast<int64_t>(slot) -
+                                static_cast<int64_t>(lib_tls_size_);
+            try {
+                std::vector<uint8_t> image(static_cast<size_t>(obj.tls.memsz), 0);
+                if (obj.tls.filesz > 0)
+                    mem_.read(base + obj.tls.vaddr, image.data(),
+                              static_cast<size_t>(obj.tls.filesz));
+                mem_.write(obj.tls_template_addr, image.data(), image.size());
+            } catch (...) {
+                set_last_error("could not initialize static TLS template for " + path);
+                error_ = "could not initialize static TLS template for " + path;
+                mem_.untrack_allocation(base, max_end);
+                return 0;
+            }
+            tls_surplus_used_ = need;
+        } else {
+            // Keep the mapped PT_TLS image as the immutable template. Each
+            // thread receives an aligned, zero-filled copy on first access.
+            obj.tls_static_slot = false;
+            obj.tls_block_offset = 0;
+            obj.tls_tp_offset = 0;
+            obj.tls_template_addr = base + obj.tls.vaddr;
+        }
+        ++tls_generation_;
+        if (tls_generation_ == 0) tls_generation_ = 1;
     }
+    const size_t objects_before_load = objects_.size();
     objects_.push_back(std::move(obj));
     size_t parent_idx = objects_.size() - 1;
-    index_symbols(cpu, objects_[parent_idx]);
-    parse_versions_(cpu, objects_[parent_idx]);
+    std::vector<SymbolUndo> symbol_undo;
+    index_symbols(cpu, objects_[parent_idx], &symbol_undo);
+    parse_versions_(cpu, objects_[parent_idx], &symbol_undo);
     // Load DT_NEEDED dependencies of the dlopen'd library BEFORE applying
     // its relocations. The startup path does this; the dlopen path skipped
     // it, so JUMP_SLOT/GLOB_DAT slots referencing symbols in deps (e.g.
@@ -3859,6 +4397,98 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
     }
     // Apply relocations: RELA, JMPREL, RELR
     auto& nobj = objects_[parent_idx];
+    auto rollback_failed_tls_load = [&]() {
+        const LoadedObject failed = objects_[parent_idx];
+        std::vector<LoadedObject> newly_loaded_dependencies;
+        newly_loaded_dependencies.reserve(objects_.size() - objects_before_load - 1);
+        for (size_t i = objects_before_load; i < objects_.size(); ++i) {
+            if (i != parent_idx) newly_loaded_dependencies.push_back(objects_[i]);
+        }
+
+        // A late TLS allocation may have reached some existing threads before
+        // another thread failed. Remove this module's DTV entries and only its
+        // per-thread allocations; other modules' TLS remains intact.
+        if (failed.tls_mod_id != 0) {
+            for (uint64_t tcb : tls_thread_blocks_) {
+                if (is_musl_) break;
+                try {
+                    const uint64_t dtv = mem_.load<uint64_t>(tcb);
+                    if (dtv < 2 * sizeof(uint64_t) ||
+                        failed.tls_mod_id > (UINT64_MAX - dtv) / 16) continue;
+                    const uint64_t capacity = mem_.load<uint64_t>(dtv - 16);
+                    if (failed.tls_mod_id > capacity) continue;
+                    const uint64_t entry = dtv + failed.tls_mod_id * 16;
+                    const uint64_t tls_addr = mem_.load<uint64_t>(entry);
+                    if (tls_addr != 0 && failed.tls_static_slot &&
+                        failed.tls.memsz != 0 &&
+                        mem_.is_mapped(tls_addr, failed.tls.memsz)) {
+                        std::vector<uint8_t> zeros(
+                            static_cast<size_t>(failed.tls.memsz), 0);
+                        mem_.write(tls_addr, zeros.data(), zeros.size());
+                    }
+                    mem_.store<uint64_t>(entry, 0);
+                    mem_.store<uint64_t>(entry + 8, 0);
+                } catch (...) {}
+
+                auto allocations = tls_thread_allocations_.find(tcb);
+                if (allocations == tls_thread_allocations_.end()) continue;
+                auto& owned = allocations->second;
+                for (auto it = owned.begin(); it != owned.end();) {
+                    if (it->module_id != failed.tls_mod_id) {
+                        ++it;
+                        continue;
+                    }
+                    mem_.untrack_allocation(it->addr, it->size);
+                    it = owned.erase(it);
+                }
+                if (owned.empty()) tls_thread_allocations_.erase(allocations);
+            }
+            if (failed.tls_static_slot && failed.tls_template_addr != 0 &&
+                failed.tls.memsz != 0 &&
+                failed.tls.memsz <= static_cast<uint64_t>(SIZE_MAX)) {
+                try {
+                    std::vector<uint8_t> zeros(
+                        static_cast<size_t>(failed.tls.memsz), 0);
+                    mem_.write(failed.tls_template_addr, zeros.data(), zeros.size());
+                } catch (...) {}
+            }
+        }
+
+        const uint64_t map_end = failed.base_addr <= UINT64_MAX - failed.map_size
+            ? failed.base_addr + failed.map_size : UINT64_MAX;
+        for (auto it = tlsdesc_indices_.begin(); it != tlsdesc_indices_.end();) {
+            if (it->first >= failed.base_addr && it->first < map_end)
+                it = tlsdesc_indices_.erase(it);
+            else
+                ++it;
+        }
+
+        // Undo this object's symbol exports, restoring any weak definition it
+        // replaced. Leave a later dependency's replacement alone.
+        for (auto it = symbol_undo.rbegin(); it != symbol_undo.rend(); ++it) {
+            auto& table = it->versioned ? versioned_symbols_ : symbols_;
+            auto entry = table.find(it->key);
+            if (entry == table.end() ||
+                entry->second.addr != it->installed.addr ||
+                entry->second.bind != it->installed.bind) continue;
+            if (it->had_previous)
+                entry->second = it->previous;
+            else
+                table.erase(entry);
+        }
+
+        objects_.erase(objects_.begin() + static_cast<std::ptrdiff_t>(parent_idx));
+        mem_.untrack_allocation(failed.base_addr, failed.map_size);
+
+        // Dependencies are still mapped and usable. Reindex them after
+        // removing the failed parent's symbols so a strong dependency export
+        // that was previously shadowed by the parent becomes visible.
+        for (const auto& dependency : newly_loaded_dependencies) {
+            index_symbols(cpu, dependency);
+            parse_versions_(cpu, dependency);
+        }
+    };
+    std::string tls_relocation_failure;
     if (nobj.dyn_addr != 0) {
         try {
             uint64_t ra=0,rs=0,ja=0,js=0,rra=0,rrs=0;
@@ -3874,7 +4504,8 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                 else if (dyn.d_tag == DT_RELRSZ_) rrs = dyn.d_val;
             }
             if (ra && rs) {
-                for (uint64_t off = 0; off+24 <= rs; off += 24) {
+                for (uint64_t off = 0; off+24 <= rs &&
+                     tls_relocation_failure.empty(); off += 24) {
                     Elf64_Rela r; mem_.read(ra+off, &r, sizeof(r));
                     uint32_t type = r.r_info & 0xFFFFFFFF;
                     uint32_t sym = r.r_info >> 32;
@@ -3900,61 +4531,66 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                         }
                         if (addr) mem_.store<uint64_t>(target, addr + A);
                     } else if (type == R_AARCH64_TLS_TPREL_) {
-                        // TLS_TPREL: initial-exec access
-                        int64_t tp_off = A;
-                        if (sym != 0) {
-                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
-                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
-                            uint64_t sym_addr = resolve_symbol(name);
-                            int64_t mod_tp_off = nobj.tls_tp_offset;
-                            if (sym_addr != 0) {
-                                const LoadedObject* o = find_object_by_addr(sym_addr);
-                                if (o) mod_tp_off = o->tls_tp_offset;
-                            }
-                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
-                        } else {
-                            tp_off = nobj.tls_tp_offset + A;
+                        TlsIndex index{};
+                        if (!resolve_tlsdesc_index_(nobj, sym, A, index)) {
+                            set_last_error("could not resolve initial-exec TLS in " + path);
+                            error_ = "could not resolve initial-exec TLS in " + path;
+                            tls_relocation_failure = error_;
+                            continue;
                         }
+                        const LoadedObject* defining = nullptr;
+                        for (const auto& candidate : objects_) {
+                            if (candidate.tls_mod_id == index.module_id) {
+                                defining = &candidate;
+                                break;
+                            }
+                        }
+                        if (!defining || (defining->tls_dynamic &&
+                                          !defining->tls_static_slot)) {
+                            set_last_error("late TLS module requires a static TLS slot: " +
+                                           path);
+                            error_ = "late TLS module requires a static TLS slot: " + path;
+                            tls_relocation_failure = error_;
+                            continue;
+                        }
+                        if (index.offset > static_cast<uint64_t>(INT64_MAX) ||
+                            defining->tls_tp_offset >
+                                INT64_MAX - static_cast<int64_t>(index.offset)) {
+                            set_last_error("initial-exec TLS offset overflow in " + path);
+                            error_ = "initial-exec TLS offset overflow in " + path;
+                            tls_relocation_failure = error_;
+                            continue;
+                        }
+                        const int64_t tp_off = defining->tls_tp_offset +
+                                               static_cast<int64_t>(index.offset);
                         mem_.store<uint64_t>(target, static_cast<uint64_t>(tp_off));
                     } else if (type == R_AARCH64_TLS_DTPMOD_) {
-                        // TLS_DTPMOD: module ID
-                        uint64_t mod_id = nobj.tls_mod_id;
-                        if (sym != 0) {
-                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
-                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
-                            uint64_t sym_addr = resolve_symbol(name);
-                            if (sym_addr != 0) {
-                                const LoadedObject* o = find_object_by_addr(sym_addr);
-                                if (o) mod_id = o->tls_mod_id;
-                            }
+                        TlsIndex index{};
+                        if (!resolve_tlsdesc_index_(nobj, sym, 0, index)) {
+                            set_last_error("could not resolve TLS module in " + path);
+                            error_ = "could not resolve TLS module in " + path;
+                            tls_relocation_failure = error_;
+                            continue;
                         }
-                        mem_.store<uint64_t>(target, mod_id + A);
+                        mem_.store<uint64_t>(target, index.module_id + A);
                     } else if (type == R_AARCH64_TLS_DTPREL_) {
-                        // TLS_DTPREL: offset within module
-                        uint64_t tls_off = static_cast<uint64_t>(A);
-                        if (sym != 0) {
-                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
-                            tls_off = s.st_value + A;
+                        TlsIndex index{};
+                        if (!resolve_tlsdesc_index_(nobj, sym, A, index)) {
+                            set_last_error("could not resolve TLS offset in " + path);
+                            error_ = "could not resolve TLS offset in " + path;
+                            tls_relocation_failure = error_;
+                            continue;
                         }
-                        mem_.store<uint64_t>(target, tls_off);
+                        mem_.store<uint64_t>(target, index.offset);
                     } else if (type == R_AARCH64_TLSDESC_) {
-                        // TLSDESC: 16-byte descriptor
-                        int64_t tp_off = tlsdesc_tp_offset(nobj, sym, A);
-                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
-                                            tlsdesc_resolver_off_;
-                        mem_.store<uint64_t>(target, resolver);
-                        mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
-                        if (dynlink_trace_enabled()) {
-                            fprintf(stderr, "[dynlink] TLSDESC2 obj=%s @0x%llx resolver=0x%llx tp=%lld shim=0x%llx toff=%u\n",
-                                    nobj.name.c_str(), (unsigned long long)target,
-                                    (unsigned long long)resolver, (long long)tp_off,
-                                    (unsigned long long)shim_base_, tlsdesc_resolver_off_);
-                        }
+                        if (!install_tlsdesc_(nobj, sym, A, target))
+                            tls_relocation_failure = error_;
                     }
                 }
             }
-            if (ja && js) {
-                for (uint64_t off = 0; off+24 <= js; off += 24) {
+            if (ja && js && tls_relocation_failure.empty()) {
+                for (uint64_t off = 0; off+24 <= js &&
+                     tls_relocation_failure.empty(); off += 24) {
                     Elf64_Rela r; mem_.read(ja+off, &r, sizeof(r));
                     uint32_t type = r.r_info & 0xFFFFFFFF;
                     uint32_t sym = r.r_info >> 32;
@@ -3971,11 +4607,8 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                     } else if (type == R_AARCH64_TLSDESC_) {
                         // Mirror the startup JMPREL path: Qt places TLSDESC
                         // at the end of .rela.plt.
-                        int64_t tp_off = tlsdesc_tp_offset(nobj, sym, A);
-                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
-                                            tlsdesc_resolver_off_;
-                        mem_.store<uint64_t>(target, resolver);
-                        mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
+                        if (!install_tlsdesc_(nobj, sym, A, target))
+                            tls_relocation_failure = error_;
                     } else if (type == R_AARCH64_IRELATIVE_) {
                         // ifunc in PLT
                         uint64_t resolver_addr = nobj.base_addr + A;
@@ -3985,7 +4618,7 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                     }
                 }
             }
-            if (rra && rrs) {
+            if (rra && rrs && tls_relocation_failure.empty()) {
                 // RELR decode: an address entry (bit0=0) seeds the running
                 // reloc vaddr; bitmap entries (bit0=1) cover 63 slots
                 // starting from the seeded address. Each slot reads its
@@ -4019,6 +4652,41 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                 }
             }
         } catch (...) {}
+    }
+    if (!tls_relocation_failure.empty()) {
+        rollback_failed_tls_load();
+        return 0;
+    }
+    if (nobj.tls.present && nobj.tls.memsz > 0 &&
+        nobj.tls_dynamic && nobj.tls_static_slot) {
+        // The late RELA/JMPREL/RELR paths relocate the mapped .tdata image.
+        // Refresh the surplus template before any thread copies it; the
+        // pre-relocation copy may contain stale pointer initializers.
+        try {
+            if (nobj.tls.filesz != 0) {
+                std::vector<uint8_t> image(static_cast<size_t>(nobj.tls.filesz));
+                mem_.read(nobj.base_addr + nobj.tls.vaddr,
+                          image.data(), image.size());
+                mem_.write(nobj.tls_template_addr, image.data(), image.size());
+            }
+        } catch (...) {
+            set_last_error("could not refresh relocated TLS template for " + path);
+            error_ = "could not refresh relocated TLS template for " + path;
+            rollback_failed_tls_load();
+            return 0;
+        }
+        // Materialize it for every thread that already has a TCB so a
+        // constructor or the dlopen caller sees initialized TLS immediately.
+        for (uint64_t tcb : tls_thread_blocks_) {
+            CPU tls_cpu{};
+            tls_cpu.tpidr_el0 = tcb;
+            if (resolve_tls_address(mem_, tls_cpu, nobj.tls_mod_id, 0) == 0) {
+                set_last_error("could not initialize late TLS for " + path);
+                error_ = "could not initialize late TLS for " + path;
+                rollback_failed_tls_load();
+                return 0;
+            }
+        }
     }
     // ── Run DT_INIT and DT_INIT_ARRAY for the dlopen'd library ──
     // glibc's _dl_open calls _dl_init after all relocations are applied,

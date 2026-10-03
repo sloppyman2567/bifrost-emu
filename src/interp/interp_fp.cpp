@@ -233,7 +233,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             cpu.v_hi[d.rd] = cpu.regs[d.rn];
             return;
         case InstClass::FMOV_RVD1:
-            cpu.regs[d.rd] = cpu.v_hi[d.rn];
+            if (d.rd != 31) cpu.regs[d.rd] = cpu.v_hi[d.rn];
             return;
         // ── SIMD load/store multiple structures (LD1/ST1) ─────────
         case InstClass::SIMD_LD1:
@@ -2563,13 +2563,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
                 }
             }
-            // ── Saturating narrowing shift-by-immediate ────────────────
+            // ── Saturating / rounded narrowing shift-by-immediate ───────
             // Encoding: 0 Q U 011111 immh immb opcode Rn Rd (imm space,
             // bits[28:24]=01111). Opcode (bits[15:10]):
-            //   100001 SQSHRUN (U=1)   100011 SQRSHRUN (U=1)
+            //   100001 SQSHRUN (U=1)   100011 SQRSHRUN (U=1) / RSHRN (U=0)
             //   100101 SQSHRN (U=0) / UQSHRN (U=1)
-            //   100111 SQRSHRN (U=0) / URQSHRN (U=1)
-            // Shift right by (esize_src*16 − immh:immb), saturate, and
+            //   100111 SQRSHRN (U=0) / UQRSHRN (U=1)
+            // Shift right by (source_bits − immh:immb), saturate, and
             // narrow to half-width lanes. Q selects the destination half.
             // libjpeg-turbo's IDCT tail does `sqrshrn v1.8b, v1.8h, #2`.
             // MUST be tested before the by-element block below: both live
@@ -2581,47 +2581,41 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     (opc6 == 0x21 || opc6 == 0x23 || opc6 == 0x25 || opc6 == 0x27)) {
                     bool U = (op >> 29) & 1;
                     bool round = (opc6 & 0x2) != 0;
-                    bool unsigned_dst = !(opc6 & 0x4);   // RUN variants
-                    bool unsigned_src = (opc6 & 0x4) && U; // UQSHRN/URQSHRN only
+                    bool saturating = (opc6 & 0x4) || U;
+                    bool unsigned_src = !saturating || ((opc6 & 0x4) && U);
+                    bool unsigned_dst = U;
                     uint32_t immh = (op >> 19) & 0xF;
                     uint32_t immb = (op >> 16) & 7;
-                    int esize_src = (immh >= 8) ? 8 : (immh >= 4) ? 4
-                                  : (immh >= 2) ? 2 : 1;
-                    int bits_src = esize_src * 8;
-                    int shift = bits_src * 2 - (int)((immh << 3) | immb);
-                    int elems = (Q ? 16 : 8) / esize_src;
-                    uint64_t round_c = round ? (1ULL << (shift - 1)) : 0;
+                    // immh describes the NARROW destination lanes. The source
+                    // is always twice that width; Q selects the output half,
+                    // never the number of input lanes.
+                    if (immh == 0 || immh >= 8)
+                        throw DecodeError(cpu.pc, inst);
+                    int dst_esize = immh >= 4 ? 4 : immh >= 2 ? 2 : 1;
+                    int src_esize = dst_esize * 2;
+                    int src_bits = src_esize * 8;
+                    int dst_bits = dst_esize * 8;
+                    int shift = src_bits - (int)((immh << 3) | immb);
                     uint8_t buf_n[16];
                     memcpy(buf_n, &cpu.v_lo[rn], 8);
                     memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
                     uint8_t out[8];
-                    for (int i = 0; i < elems; i++) {
+                    for (int i = 0; i < 8 / dst_esize; i++) {
                         uint64_t a = 0;
-                        memcpy(&a, buf_n + i * esize_src, esize_src);
-                        uint64_t u = a + round_c;   // wraps mod 2^64 (two's complement)
-                        uint64_t wmask = esize_src == 8 ?
-                            ~0ULL : ((1ULL << (esize_src * 8)) - 1);
-                        uint64_t r;
-                        if (unsigned_src) {
-                            // UQSHRN / URQSHRN: logical shift, sat unsigned
-                            uint64_t sh = u >> shift;
-                            r = (sh > wmask) ? wmask : sh;
-                        } else {
-                            // Arithmetic shift right (sign-preserving)
-                            int64_t sh = (int64_t)u >> shift;
-                            if (unsigned_dst) {
-                                // SQSHRUN / SQRSHRUN: negatives clamp to 0
-                                r = (sh < 0) ? 0 :
-                                    ((uint64_t)sh > wmask ? wmask : (uint64_t)sh);
-                            } else {
-                                // SQSHRN / SQRSHRN: sat signed
-                                int64_t lim = (int64_t)1 << (esize_src * 8 - 1);
-                                if (sh > lim - 1) r = (uint64_t)(lim - 1);
-                                else if (sh < -lim) r = (uint64_t)(-lim);
-                                else r = (uint64_t)sh;
-                            }
-                        }
-                        memcpy(out + i * esize_src, &r, esize_src);
+                        memcpy(&a, buf_n + i * src_esize, src_esize);
+                        // Widen before rounding: even UINT64_MAX + round
+                        // must not wrap. Signed inputs need sign extension.
+                        __int128 value = unsigned_src ? (__int128)a :
+                            (__int128)((int64_t)(a << (64 - src_bits)) >> (64 - src_bits));
+                        if (round) value += (__int128)1 << (shift - 1);
+                        value >>= shift;
+                        __int128 lo = unsigned_dst ? 0 : -((__int128)1 << (dst_bits - 1));
+                        __int128 hi = unsigned_dst ? (((__int128)1 << dst_bits) - 1) :
+                            (((__int128)1 << (dst_bits - 1)) - 1);
+                        if (saturating && value < lo) { value = lo; cpu.fpsr |= 1u << 27; }
+                        if (saturating && value > hi) { value = hi; cpu.fpsr |= 1u << 27; }
+                        uint64_t r = (uint64_t)value;
+                        memcpy(out + i * dst_esize, &r, dst_esize);
                     }
                     if (Q) {
                         memcpy(&cpu.v_hi[rd], out, 8);
@@ -2973,11 +2967,17 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             uint64_t an = 0, am = 0;
                             memcpy(&an, vn + (src_off + i) * esize_src, esize_src);
                             memcpy(&am, vm + (src_off + i) * esize_src, esize_src);
-                            uint64_t en = is_u ? an :
-                                (uint64_t)((int64_t)(an << (64 - esize_src * 8)) >> (64 - esize_src * 8));
-                            uint64_t em = is_u ? am :
-                                (uint64_t)((int64_t)(am << (64 - esize_src * 8)) >> (64 - esize_src * 8));
-                            uint64_t r = (en >= em) ? en - em : em - en;
+                            uint64_t r;
+                            if (is_u) {
+                                r = (an >= am) ? an - am : am - an;
+                            } else {
+                                int64_t en = (int64_t)(an << (64 - esize_src * 8)) >> (64 - esize_src * 8);
+                                int64_t em = (int64_t)(am << (64 - esize_src * 8)) >> (64 - esize_src * 8);
+                                // Compare signed lanes before taking the magnitude.
+                                // Source lanes are at most 32 bits, so either
+                                // difference fits in int64_t, including endpoints.
+                                r = (en >= em) ? (uint64_t)(en - em) : (uint64_t)(em - en);
+                            }
                             if (accum) {
                                 uint64_t acc = 0;
                                 memcpy(&acc, vd + i * esize_dst, esize_dst);
@@ -3831,7 +3831,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn]; cpu.v_hi[rd] = 0; }
-                else       { cpu.regs[rd] = cpu.v_lo[rn]; }
+                else if (rd != 31) { cpu.regs[rd] = cpu.v_lo[rn]; }
                 return;
             }
             // FMOV (general ↔ FP, 32-bit)
@@ -3850,7 +3850,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn] & 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
-                else       { cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF; }
+                else if (rd != 31) { cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF; }
                 return;
             }
             // FMOV (scalar, immediate)
@@ -4192,20 +4192,20 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     double r = round_d(a);
                     if (is_unsigned) {
                         uint64_t v = fp_to_unsigned_sat(r, is_64bit);
-                        cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
+                        if (rd != 31) cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                     } else {
                         int64_t v = fp_to_signed_sat(r, is_64bit);
-                        cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
+                        if (rd != 31) cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                     }
                 } else {
                     float a = read_fp_s(cpu, rn);
                     double r = round_s(a);
                     if (is_unsigned) {
                         uint64_t v = fp_to_unsigned_sat(r, is_64bit);
-                        cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
+                        if (rd != 31) cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                     } else {
                         int64_t v = fp_to_signed_sat(r, is_64bit);
-                        cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
+                        if (rd != 31) cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                     }
                 }
                 return;
@@ -4247,24 +4247,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 write_fp_d(cpu, rd, d);
                 return;
             }
-            // FCVTZS/FCVTZU (integer variant)
-            // Mask 0x7F3E0000 with constant 0x1E380000 requires bit 21 = 1
-            // (integer variant). The fixed-point variant (bit 21 = 0) is
-            // handled separately below.
-            if ((op & 0x7F3E0000) == 0x1E380000) {  // FCVTZS/FCVTZU
-                bool is_unsigned = ((op >> 16) & 1);
-                bool is_64bit = sf_val;
-                double a = ftype ? read_fp_d(cpu, rn)
-                                 : static_cast<double>(read_fp_s(cpu, rn));
-                if (is_unsigned) {
-                    uint64_t v = fp_to_unsigned_sat(a, is_64bit);
-                    cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
-                } else {
-                    int64_t v = fp_to_signed_sat(a, is_64bit);
-                    cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
-                }
-                return;
-            }
+            // Integer FCVTZS/FCVTZU are handled by the rounding-mode
+            // conversion family above. A second loose mask here used to
+            // capture FCSEL whenever Rm was S24/S25 or D24/D25, writing
+            // the FP destination number as a GPR (even XZR).
             // ── Fixed-point int↔FP conversions (SCVTF/UCVTF/FCVTZS/FCVTZU #fbits) ──
             // Decoded by the generated table (tools/opgen/fp_fixconv.txt →
             // include/opgen_fpfixed.hpp) so interp, IR translator and JIT
@@ -4294,7 +4280,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             double scaled = std::ldexp(a, fbits);
                             if (is_unsigned) {
                                 uint64_t v = fp_to_unsigned_sat(scaled, is_64bit);
-                                cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
+                                if (rd != 31) cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                             } else {
                                 double hi = is_64bit ? 9223372036854775808.0
                                                      : 2147483648.0;
@@ -4303,7 +4289,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                           : (scaled >= hi) ? (is_64bit ? INT64_MAX : INT32_MAX)
                                           : (scaled < lo)  ? (is_64bit ? INT64_MIN : INT32_MIN)
                                           : static_cast<int64_t>(scaled);
-                                cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v)
+                                if (rd != 31) cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v)
                                                         : static_cast<uint32_t>(static_cast<int32_t>(v));
                             }
                         } else {

@@ -24,8 +24,8 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (242 test runs):
-#   Unit         65  — ctest/*.elf focused regressions
+# Fully provisioned suite (244 test runs):
+#   Unit         67  — ctest/*.elf focused regressions
 #   Integration  86  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
@@ -34,7 +34,7 @@
 #   Dynamic      15  — musl/glibc tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 220 runs (215 with --quick); fixtures may be skipped.
+# Without a rootfs: 222 runs (217 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -274,6 +274,7 @@ UNIT_TESTS=(
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
+    "simd_sat_narrow|ctest/jit_simd_sat_narrow.elf||5|672 checks passed"
     "simd_sat|ctest/test_simd_sat.elf||5|ALL PASS"
     "fp_pw_elem|ctest/jit_fp_pw_elem.elf||5|ALL PASS"
     "loop|ctest/loop.elf||5|Loop value"
@@ -318,7 +319,7 @@ UNIT_TESTS=(
     "test_fork_threads|ctest/test_fork_threads.elf||20|ALL PASS"
     # Memory range-safety (1.5.5-alpha): wrapping munmap rejected,
     # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
-    # and above-window MAP_FIXED r/w cycles run concurrently.
+    # and above-window MAP_FIXED r/w cycles run sequentially.
     "test_mem_guard|ctest/test_mem_guard.elf||20|ALL PASS"
     "test_memory_permissions|ctest/test_memory_permissions.elf||30|ALL PASS"
     # Fixed mapping contents, concurrent fd reads during mmap, mremap
@@ -359,6 +360,7 @@ UNIT_TESTS=(
     # volatile int op between), NaN bitwise selection, +0.0/-0.0 bit-exact,
     # and real C ternaries.
     "jit_fcsel|ctest/jit_fcsel.elf||5|fcsel: PASS"
+    "fcsel_high_regs|ctest/jit_fcsel_high_regs.elf||5|61 checks passed"
     # PRFM (prefetch) must be a NOP (it was decoded as a load and clobbered
     # the prfop field's register number); LDAPR/LDAPRB/LDAPRH (ARMv8.3 RCpc
     # acquire loads) were misdecoded as an LSE CAS.
@@ -870,6 +872,18 @@ run_test() {
             echo -e "         (binary $bin_path not found — build with 'make cross SRC=...')"
         fi
         return 0
+    fi
+
+    # Ignored guest fixtures can outlive source edits. Running an old ELF
+    # tests different code and can resurrect already-replaced regressions.
+    local fixture_source
+    if [[ "$bin_path" == *.elf ]]; then
+        for fixture_source in "${bin_path%.elf}.c" "${bin_path%.elf}.S"; do
+            if [ -f "$fixture_source" ] && [ "$fixture_source" -nt "$bin_path" ]; then
+                record_failure "$name" "stale fixture $bin_path; rebuild with make setup-tests (source: $fixture_source)"
+                return 0
+            fi
+        done
     fi
 
     # Run with timeout. We use `-s KILL` (SIGKILL) instead of the default

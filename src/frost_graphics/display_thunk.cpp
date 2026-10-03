@@ -506,9 +506,16 @@ size_t vk_deep_guest_strlen(Memory* mem, uint64_t g) {
     return n;
 }
 
+size_t vk_deep_size_one(Memory* mem, uint64_t guest,
+                        const thunk::VkStructDesc* d, uint32_t count,
+                        int depth, bool* ok, bool skip_pnext = false);
+void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
+                       const thunk::VkStructDesc* d, uint8_t* out,
+                       int depth, bool skip_pnext = false);
+
 // Dry-size walk of a guest pNext chain (must mirror vk_deep_fill_chain
 // allocation-for-allocation — the two-pass staging contract).
-size_t vk_deep_chain_size(Memory* mem, uint64_t head, bool* ok) {
+size_t vk_deep_chain_size(Memory* mem, uint64_t head, bool* ok, int depth = 0) {
     size_t total = 0;
     int guard = 0;
     while (head && guard++ < kVkDeepMaxPnextNodes) {
@@ -517,19 +524,22 @@ size_t vk_deep_chain_size(Memory* mem, uint64_t head, bool* ok) {
         try { mem->read(head, &s, 4); mem->read(head + 8, &pn, 8); }
         catch (...) { break; }
         const thunk::VkStructDesc* d = thunk::vk_find_struct_by_stype(s);
-        if (!d) { vk_deep_unknown_stype_once(s); break; }
+        if (!d) { vk_deep_unknown_stype_once(s); return total; }
         total = (total + 7u) & ~size_t(7);
-        total += d->size;
-        if (total > kVkDeepMaxBytes) { *ok = false; return 0; }
+        // Marshal the node's arrays/strings/structs too. The chain walk
+        // owns pNext; the element walker must skip that field here.
+        total += vk_deep_size_one(mem, head, d, 1, depth, ok, true);
+        if (!*ok || total > kVkDeepMaxBytes) { *ok = false; return 0; }
         head = pn;
     }
+    if (head) { *ok = false; return 0; }  // cycle / overlong chain
     return total;
 }
 
 // Fill pass: stage every known chain node and relink host-side. *slot
 // receives the HOST head (nullptr when nothing was staged).
 void vk_deep_fill_chain(Memory* mem, VkStage& st, uint64_t head,
-                        void** slot) {
+                        void** slot, int depth = 0) {
     *slot = nullptr;
     void* prev = nullptr;
     int guard = 0;
@@ -541,8 +551,7 @@ void vk_deep_fill_chain(Memory* mem, VkStage& st, uint64_t head,
         const thunk::VkStructDesc* d = thunk::vk_find_struct_by_stype(s);
         if (!d) { vk_deep_unknown_stype_once(s); break; }
         uint8_t* h = reinterpret_cast<uint8_t*>(st.bytes(d->size, 8));
-        try { mem->read(head, h, d->size); }
-        catch (...) { std::memset(h, 0, d->size); }
+        vk_deep_fill_elem(mem, st, head, d, h, depth, true);
         *reinterpret_cast<void**>(h + 8) = nullptr;
         if (prev)
             *reinterpret_cast<void**>(static_cast<uint8_t*>(prev) + 8) = h;
@@ -555,8 +564,9 @@ void vk_deep_fill_chain(Memory* mem, VkStage& st, uint64_t head,
 
 size_t vk_deep_size_one(Memory* mem, uint64_t guest,
                         const thunk::VkStructDesc* d, uint32_t count,
-                        int depth, bool* ok) {
-    if (!ok || depth > 4 || count > kVkDeepMaxElems) { *ok = false; return 0; }
+                        int depth, bool* ok, bool skip_pnext) {
+    if (!ok) return 0;
+    if (depth > 4 || count > kVkDeepMaxElems) { *ok = false; return 0; }
     size_t total = 0;
     for (uint32_t i = 0; i < count; i++) {
         uint64_t g = guest + (uint64_t)i * d->size;
@@ -566,6 +576,7 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
         for (uint16_t fi = 0; fi < d->nfields; fi++) {
             const thunk::VkFieldDesc& f = d->fields[fi];
             if (f.elem & thunk::VKM_PNEXT) {
+                if (skip_pnext) continue;
                 // chain link: account for every known node's staging
                 uint8_t stackbuf2[512];
                 const void* he2 =
@@ -574,7 +585,7 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
                 uint64_t head =
                     reinterpret_cast<uint64_t>(vk_deep_ptr_field(he2, f));
                 total = (total + 7u) & ~size_t(7);
-                total += vk_deep_chain_size(mem, head, ok);
+                total += vk_deep_chain_size(mem, head, ok, depth + 1);
                 if (!*ok) return 0;
                 continue;
             }
@@ -634,6 +645,7 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
             if (!*ok) return 0;
         }
     }
+    if (total > kVkDeepMaxBytes) { *ok = false; return 0; }
     return total;
 }
 
@@ -642,19 +654,20 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
 // re-pointed, then filled recursively.
 void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
                        const thunk::VkStructDesc* d, uint8_t* out,
-                       int depth) {
+                       int depth, bool skip_pnext) {
     try { mem->read(guest, out, d->size); }
     catch (...) { std::memset(out, 0, d->size); return; }
     for (uint16_t fi = 0; fi < d->nfields; fi++) {
         const thunk::VkFieldDesc& f = d->fields[fi];
         if (f.elem & thunk::VKM_PNEXT) {
+            if (skip_pnext) continue;
             // chain link: walk the guest chain via the generated
             // sType→descriptor map (input-only — no node writeback)
             void** slot = reinterpret_cast<void**>(out + f.off);
             vk_deep_fill_chain(mem, st,
                                reinterpret_cast<uint64_t>(
                                    vk_deep_ptr_field(out, f)),
-                               slot);
+                               slot, depth + 1);
             continue;
         }
         if (f.elem & thunk::VKM_STRARR) {
@@ -2389,7 +2402,10 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             bool ok = true;
             chain_need = vk_deep_chain_size(mem,
                 reinterpret_cast<uint64_t>(tmp.pNext), &ok);
-            if (!ok) chain_need = kVkDeepMaxBytes;
+            if (!ok) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(-1));
+                return true;  // never fill a chain that failed the sizing pass
+            }
         }
         st.buf.reserve(std::max<size_t>(chain_need + 4096, 65536));
         VkPresentInfoH* pi = st.alloc<VkPresentInfoH>();

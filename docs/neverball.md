@@ -1,9 +1,16 @@
 # Neverball
 
-Neverball's title and menu text render correctly with fonts enabled after the
-2026-10-01 fixes. The user also confirmed that the game works during interactive
-play. Automated validation below covers font rendering and its underlying
-instruction and SDL ABI regressions; it does not exercise every level.
+As of 2026-10-02, the user reports Neverball 1.6.0 is effectively fully stable
+in interactive play on Bifrost. Gameplay, replay, fonts and menus, configuration
+persistence, and level-preview rendering are working after the font, SDL,
+JIT memory-guard, and JPEG decoding fixes below.
+
+Earlier testing confirmed monitor and resolution selection, ball-model changes,
+and player-name editing. The latest confirmation follows the JPEG repair and
+relaunch. This is a user-reported stability milestone; automated checks cover
+the underlying regressions and selected images, rather than every level or a
+long-duration gameplay soak. The user also confirmed mouse control works in
+fullscreen gameplay and after returning to windowed mode on 2026-10-02.
 
 ## Running
 
@@ -114,11 +121,13 @@ each execution mode.
 The user’s other agent already restored `neverballrc` to 1920×1080. This fix
 preserves that configuration; it does not rewrite previously poisoned files.
 
-Remaining deferred issues:
+Issues recorded at that stage (2026-10-01):
 
-- Mouse input was reported broken in fullscreen. Incorrect dimensions can
-  affect mouse centering, but interactive mouse behavior needs a separate check.
-- Some Help images remain corrupted; affected assets are not yet identified.
+- Mouse input was reported broken in fullscreen. On 2026-10-02 the user
+  explicitly confirmed normal mouse control in fullscreen gameplay and after
+  switching back to windowed mode.
+- Help-image corruption was subsequently traced to JPEG NEON decoding and
+  repaired on 2026-10-02; see the validation below.
 
 User-reported gameplay, replay, monitor/resolution selection, model and player
 name changes, and configuration persistence remain recorded above.
@@ -146,3 +155,53 @@ hidden windows), and `test_mem_guard` failed intermittently. Repeated runs
 also reproduced the latter failure on the saved pre-fix emulator (1/5), so
 that existing high-address memory issue remains separate. Isolated memory
 and signal checks passed, but this is not a clean full-suite result.
+
+## JPEG preview and Help-image corruption fix: 2026-10-02
+
+The hard-set preview (`shot-hard/grid.jpg`) was intact on disk, but guest
+libjpeg's NEON IDCT produced blocky, incorrectly colored pixels. A direct
+`ctest_real/jpegdec_t.elf` decode reproduced this in both execution modes;
+`BIFROST_GUEST_ENV=JSIMD_FORCENONE=1` made both match QEMU.
+
+The interpreter's saturating narrowing shifts treated the narrow destination
+width as the source width, omitted sign extension, and used Q to change the
+input lane count. RSHRN also entered this handler and incorrectly saturated.
+The handler now consumes all 128 source bits, narrows to eight output bytes,
+rounds in a wider temporary, applies the appropriate signed/unsigned clamp,
+and sets sticky FPSR.QC on saturation. RSHRN rounds and truncates without
+saturation. Upper-half forms preserve the destination's lower half.
+
+The native JIT lowering also had incorrect widths, subop decoding, rounding
+and saturation, and did not report QC. These instructions now use the corrected
+interpreter handler; the translator and block-splitting predictor agree on
+that fallback. Restoring native lowering requires equivalent regression
+coverage, including rounding overflow and QC. No performance claim is made.
+
+Validation: `ctest/jit_simd_sat_narrow.c` passes 672 checks under QEMU, JIT
+(with IR validation and register-allocation checks), and interpreter. The
+saved pre-fix interpreter fails 632 of them. The focused SIMD suite passes
+19/19 in each Bifrost mode. Direct JPEG decodes of `shot-hard/grid.jpg`,
+`gui/help1.jpg`, `gui/help2.jpg`, and `shot-easy/slalom.jpg` match QEMU's raw
+RGB output byte-for-byte in both modes. This verifies the decode path;
+it does not constitute interactive coverage of every menu or level.
+
+
+## Stability follow-up: 2026-10-02
+
+After the JPEG repair, `test_mem_guard` passed 100 consecutive runs under JIT
+and 100 under interpreter, with a 20-second timeout per run and no failures.
+This exercises the current single-threaded memory-range/high-address mapping
+regression; it does not validate concurrent MAP_FIXED/JIT invalidation.
+
+The quick suite then passed 238/238 under JIT and 236/236 under interpreter,
+with zero failures. Interpreter mode intentionally skipped `tier2_smov` and
+`zstd_compression` (the latter is a host harness that already checks both
+engines in the JIT run). The initial JIT run rejected four stale fixtures:
+`test_sigreturn_context`, `test_lse_inline`, `sha256_crypto`, and `sha256_full`.
+After rebuilding them, their focused checks and a complete JIT quick rerun
+passed. These results cover the current working tree, including other existing
+changes, rather than the JPEG patch alone.
+
+The user explicitly confirmed normal mouse control during fullscreen gameplay
+and after returning to windowed mode. This closes the earlier fullscreen mouse
+report for the tested local setup; it is interactive user evidence.

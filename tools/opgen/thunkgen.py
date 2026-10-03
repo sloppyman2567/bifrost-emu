@@ -57,7 +57,7 @@ VALID_ARGS = set('ifpzd')
 VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW', 'MIX',
               'VK', 'WL', 'WL_EGL', 'X11', 'X11XCB', 'XCB', 'GBM', 'XEXT',
               'GLX', 'RANDR', 'XKB', 'ANDROID')
-VALID_RET = ('-', 'str')
+VALID_RET = ('-', 'str', 'f', 'd')
 VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'GET_STRING',
                 'DELETE_BUFFERS', 'TRACK_TEX',
                 'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'EL_PTR_ARRAY',
@@ -119,6 +119,8 @@ enum class Policy : uint8_t {
 enum class RetKind : uint8_t {
     PLAIN = 0,
     STRING = 1,
+    FLOAT = 2,
+    DOUBLE = 3,
 };
 
 enum class SizeKind : uint8_t {
@@ -248,7 +250,7 @@ def main():
         return 'Policy::%s' % (policy if policy != '-' else 'NONE')
 
     def rname(ret):
-        return 'RetKind::%s' % ('STRING' if ret == 'str' else 'PLAIN')
+        return 'RetKind::%s' % {'-': 'PLAIN', 'str': 'STRING', 'f': 'FLOAT', 'd': 'DOUBLE'}[ret]
 
     def sname(size):
         if size == '-':

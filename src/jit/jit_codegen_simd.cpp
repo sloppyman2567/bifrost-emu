@@ -2539,75 +2539,12 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             return true;
         }
-        // ── SIMD SHRN_SAT (SQSHRN family — saturating narrowing shift) ─
-        // width = SOURCE esize; imm = subop | (shift << 8); flags_op = Q
-        // (dest-half select). Source always full 128-bit.
-        // subop: 0=SQSHRN 1=UQSHRN 2=SQRSHRN 3=URQSHRN 4=SQSHRUN 5=SQRSHRUN
-        case IROp::SIMD_SHRN_SAT: {
-            const SimdShrnSatParams sp = inst.shrn_sat_params();
-            const int esize = static_cast<int>(sp.esize);
-            const int subop = static_cast<int>(sp.subop);
-            const int shift = static_cast<int>(sp.shift);
-            const bool q = sp.q;
-            // 64-bit source needs PSRAQ — does not exist in SSE2/AVX2
-            // (VPSRAQ is AVX-512F only). Fall back to the interpreter.
-            if (vec_cache_active_ || esize == 8 ||
-                shift < 1 || shift > esize * 8) {
-                emit_call_interp(inst.arm_pc, false); return true;
-            }
-            const bool round = (subop & 2) != 0;
-            const bool unsigned_dst = (subop & 4) != 0;       // RUN variants
-            const bool unsigned_src = (subop & 4) && (subop & 1);
-            clobber_flags();
-            load_vec(0, static_cast<int>(inst.src1));
-            if (round) {
-                uint64_t rc = 1ULL << (shift - 1);
-                emit_mask(1, rc);
-                sse2_op(esize == 1 ? 0xFD : esize == 2 ? 0xFE : 0xD4,
-                        0, 1);                                // padd*
-            }
-            // Shift right (logical /2 for unsigned sources, arithmetic /4
-            // for signed)
-            if (unsigned_src)
-                sse2_imm(esize == 1 ? 0x71 : esize == 2 ? 0x72 : 0x73,
-                         0, 2, static_cast<uint8_t>(shift));  // psrl*
-            else
-                sse2_imm(esize == 1 ? 0x71 : 0x72,
-                         0, 4, static_cast<uint8_t>(shift));  // psraw/psrad
-            // Saturating narrow to half width
-            if (unsigned_dst) {
-                if (esize == 1) {
-                    if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
-                    emit_mask(1, 0x00FF00FF00FF00FFULL);
-                    sse2_38(0x3E, 0, 1);                  // pmaxuw 0xFF
-                    sse2_op(0x67, 0, 0);                  // packuswb
-                } else {
-                    if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
-                    emit_mask(1, 0x0000FFFF0000FFFFULL);
-                    sse2_38(0x3F, 0, 1);                  // pmaxud 0xFFFF
-                    sse2_38(0x2B, 0, 0);                  // packusdw
-                }
-            } else if ((subop & 4)) {
-                // SQSHRUN/SQRSHRUN: signed → unsigned sat; packus clamps
-                // negatives to 0 and positives to max ✓
-                if (esize == 1) sse2_op(0x67, 0, 0);      // packuswb
-                else {
-                    if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
-                    sse2_38(0x2B, 0, 0);                  // packusdw
-                }
-            } else {
-                // SQSHRN/SQRSHRN: signed → signed sat
-                if (esize == 1) sse2_op(0x63, 0, 0);      // packsswb
-                else            sse2_op(0x6B, 0, 0);      // packssdw
-            }
-            if (q) {
-                store_hi(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
-            } else {
-                store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
-                fp_zero_hi(static_cast<int>(inst.dest));
-            }
+        // Saturating narrowing shifts use the reference handler. Native
+        // lowering must widen before rounding, preserve destination halves,
+        // and report saturation through FPSR.QC before it can be reinstated.
+        case IROp::SIMD_SHRN_SAT:
+            emit_call_interp(inst.arm_pc, false);
             return true;
-        }
         // ── SIMD MUL_ELEM (integer vector x indexed element) ──────────
         // width = SOURCE esize; imm = subop | (idx << 8); flags_op = Q.
         // subop: 0=MUL 1=MLA 2=MLS 3=SMULL 4=UMULL 5=SMLAL 6=UMLAL

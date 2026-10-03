@@ -777,9 +777,12 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
                 static_cast<unsigned long long>(fault_pc));
         }
     } catch (const std::exception& e) {
-        fprintf(stderr, "[%s] SDL thread 0x%llx: exception: %s\n",
+        fprintf(stderr, "[%s] SDL thread 0x%llx: exception: %s "
+                "pc=0x%llx sp=0x%llx lr=0x%llx\n",
                 CODENAME, static_cast<unsigned long long>(st->handle_addr),
-                e.what());
+                e.what(), static_cast<unsigned long long>(cpu.pc),
+                static_cast<unsigned long long>(cpu.sp),
+                static_cast<unsigned long long>(cpu.regs[30]));
     }
     // Record the exit code + set the done flag, then futex-wake any
     // SDL_WaitThread waiter on the handle's done word.

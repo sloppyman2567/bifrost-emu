@@ -54,7 +54,8 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             // sub3_noq/fp_key/sm masks mirroring ir_translate_fp.cpp (and
             // silently drifting — AND/ORR/EOR/DUP native paths were missing,
             // forcing those blocks down the interpreter).
-            return simd::classify(d.raw).family == simd::Family::UNKNOWN;
+            const auto family = simd::classify(d.raw).family;
+            return family == simd::Family::UNKNOWN || family == simd::Family::SHRN_SAT;
         }
         case InstClass::FP_SCALAR: {
             uint32_t op = d.raw;

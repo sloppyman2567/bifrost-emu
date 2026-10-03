@@ -137,6 +137,26 @@ struct GraphicThunkImpl {
 #if defined(BIFROST_THUNK_HAVE_SDL2)
     SdlSurfaceBridge surface_bridge;
 #endif
+    std::mutex keyboard_mu;
+    void* keyboard_state_fn = nullptr;
+    uint64_t keyboard_guest = 0;
+    int keyboard_count = 0;
+    // SDL promises a lifetime-stable pointer. Refresh this same guest block
+    // after event pumps, including when the caller caches the first result.
+    uint64_t refresh_keyboard() {
+        std::lock_guard<std::mutex> lock(keyboard_mu);
+        if (!mem || !keyboard_state_fn) return 0;
+        int count = 0;
+        auto fn = reinterpret_cast<const uint8_t* (*)(int*)>(keyboard_state_fn);
+        const uint8_t* keys = fn(&count);
+        constexpr size_t kMaxKeys = 65536;
+        if (!keys || count < 0 || static_cast<size_t>(count) > kMaxKeys) return 0;
+        if (!keyboard_guest) keyboard_guest = mem->mmap_alloc(kMaxKeys);
+        if (!keyboard_guest) return 0;
+        mem->write(keyboard_guest, keys, static_cast<size_t>(count));
+        keyboard_count = count;
+        return keyboard_guest;
+    }
     // The trampoline page: a single 64 KiB region of guest memory.
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
@@ -839,6 +859,15 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;  // no SDL ABI support: never expose a host struct
     }
 #endif
+    if (entry.name == "SDL_GetKeyboardState") {
+        uint64_t out = cpu.regs[0];
+        uint64_t guest = impl_->refresh_keyboard();
+        int count;
+        { std::lock_guard<std::mutex> lock(impl_->keyboard_mu); count = impl_->keyboard_count; }
+        if (out) impl_->mem->write(out, &count, sizeof(count));
+        cpu.regs[0] = guest;
+        return 0;
+    }
 
     // ── SDL_mixer policies ────────────────────────────────────────────
     // SDL_mixer is never linked into the emulator, so every Mix_* entry's
@@ -885,8 +914,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
         if (pol == thunk::Policy::SDL_STUB0) {
-            // vkQuake traps: SDL_SetWindowIcon derefs a guest SDL_Surface
-            // whose `pixels` is a GUEST address (host deref = SIGSEGV).
             // SDL_GetWindowWMInfo is FATAL-failed by vkQuake when it
             // returns false, so it must reach the host: the window handle
             // round-trips verbatim and the SDL_SysWMinfo buffer lives on
@@ -1112,6 +1139,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     entry.name.c_str());
         }
         cpu.regs[0] = 0;
+        if (entry.spec && (entry.spec->ret == thunk::RetKind::FLOAT ||
+                           entry.spec->ret == thunk::RetKind::DOUBLE))
+            cpu.v_lo[0] = cpu.v_hi[0] = 0;
         return 0;
     }
 
@@ -1237,6 +1267,66 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = 0;
             return 0;
         }
+    }
+
+    // Return type is independent of argument type: the math APIs return
+    // in v0, whereas GL setters with the same arguments return void.
+    if (entry.spec && (entry.spec->ret == thunk::RetKind::FLOAT ||
+                       entry.spec->ret == thunk::RetKind::DOUBLE)) {
+        const char* shape = entry.spec->args;
+        uint64_t bits = 0;
+        if (entry.spec->ret == thunk::RetKind::FLOAT) {
+            float a, b, result;
+            std::memcpy(&a, &cpu.v_lo[0], 4);
+            std::memcpy(&b, &cpu.v_lo[1], 4);
+            if (!strcmp(shape, "f")) result = reinterpret_cast<float (*)(float)>(entry.host_fn)(a);
+            else if (!strcmp(shape, "ff")) result = reinterpret_cast<float (*)(float, float)>(entry.host_fn)(a, b);
+            else return -ENOSYS;
+            std::memcpy(&bits, &result, 4);
+        } else {
+            double a, b, result;
+            std::memcpy(&a, &cpu.v_lo[0], 8);
+            std::memcpy(&b, &cpu.v_lo[1], 8);
+            if (!strcmp(shape, "d")) result = reinterpret_cast<double (*)(double)>(entry.host_fn)(a);
+            else if (!strcmp(shape, "dd")) result = reinterpret_cast<double (*)(double, double)>(entry.host_fn)(a, b);
+            else return -ENOSYS;
+            std::memcpy(&bits, &result, 8);
+        }
+        cpu.v_lo[0] = bits;
+        cpu.v_hi[0] = 0;
+        return 0;
+    }
+    // SDL's mixed FP APIs also have pointer-width and return-value contracts
+    // that cannot be represented by the legacy int32/void GL setter casts.
+    if (entry.name == "SDL_CalculateGammaRamp") {
+        float gamma; std::memcpy(&gamma, &cpu.v_lo[0], 4);
+        uint16_t ramp[256];
+        reinterpret_cast<void (*)(float, uint16_t*)>(entry.host_fn)(gamma, ramp);
+        if (cpu.regs[0]) impl_->mem->write(cpu.regs[0], ramp, sizeof(ramp));
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (entry.name == "SDL_RenderSetScale") {
+        float x, y;
+        std::memcpy(&x, &cpu.v_lo[0], 4); std::memcpy(&y, &cpu.v_lo[1], 4);
+        int rc = reinterpret_cast<int (*)(void*, float, float)>(entry.host_fn)(
+            reinterpret_cast<void*>(cpu.regs[0]), x, y);
+        cpu.regs[0] = static_cast<int64_t>(rc);
+        return 0;
+    }
+    if (entry.name == "SDL_RenderCopyEx") {
+        int32_t src[4], dst[4], center[2];
+        if (cpu.regs[2]) impl_->mem->read(cpu.regs[2], src, sizeof(src));
+        if (cpu.regs[3]) impl_->mem->read(cpu.regs[3], dst, sizeof(dst));
+        if (cpu.regs[4]) impl_->mem->read(cpu.regs[4], center, sizeof(center));
+        double angle; std::memcpy(&angle, &cpu.v_lo[0], 8);
+        using Fn = int (*)(void*, void*, const void*, const void*, double, const void*, int);
+        int rc = reinterpret_cast<Fn>(entry.host_fn)(
+            reinterpret_cast<void*>(cpu.regs[0]), reinterpret_cast<void*>(cpu.regs[1]),
+            cpu.regs[2] ? src : nullptr, cpu.regs[3] ? dst : nullptr, angle,
+            cpu.regs[4] ? center : nullptr, static_cast<int>(cpu.regs[5]));
+        cpu.regs[0] = static_cast<int64_t>(rc);
+        return 0;
     }
 
     // ── Double-only AAPCS64 path (glOrtho, glClearDepth, …) ─────────
@@ -2378,6 +2468,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             //   glNormalPointer(type,stride,ptr)             -> arg2
             int pi = 5;
             const char* nm = entry.name.c_str();
+            if (!strcmp(nm, "glVertexAttribIPointer") || !strcmp(nm, "glVertexAttribLPointer"))
+                pi = 4;  // these variants omit the normalized argument
             if (!strcmp(nm, "glVertexPointer") || !strcmp(nm, "glColorPointer"))
                 pi = 3;                               // (size,type,stride,ptr)
             else if (!strcmp(nm, "glTexCoordPointer")) pi = 3;  // (size,type,stride,ptr)
@@ -2943,6 +3035,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         impl_->deliver_glfw_callbacks_(cpu);
     }
 
+    if (entry.name == "SDL_PumpEvents" || entry.name == "SDL_PollEvent" ||
+        entry.name == "SDL_WaitEvent" || entry.name == "SDL_WaitEventTimeout" ||
+        entry.name == "SDL_PeepEvents" || entry.name == "SDL_ResetKeyboard")
+        impl_->refresh_keyboard();
+
     // Track SDL_Texture* dimensions for SDL_UpdateTexture bounce sizing
     // (TRACK_TEX records on create, UNTRACK_TEX drops on destroy).
     if (entry.spec) {
@@ -3192,6 +3289,8 @@ void GraphicThunk::register_known_symbols_() {
         if (!sdl_handle && dbg().thunk_trace)
             fprintf(stderr, "[thunk] sdl: dlopen failed: %s\n", dlerror());
     }
+    impl_->keyboard_state_fn = sdl_handle ? dlsym(sdl_handle, "SDL_GetKeyboardState") : nullptr;
+
     // GLFW callback delivery needs the raw host state-query fns (the
     // GLFW_POLL dispatch path reads them to decide whether guest
     // callbacks should fire). These are resolved once at init.

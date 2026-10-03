@@ -1168,19 +1168,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             case simd::Family::SHRN_SAT: {
-                // SQSHRN family (saturating narrowing shift-by-imm).
-                // width = SOURCE esize; imm = subop | (shift << 8) where
-                // shift = esize_src*16 − (immh:immb), guaranteed 1..esize*8
-                // by the immh!=0 guard (immh:immb ∈ [esize*8, 2*esize*8)).
-                uint32_t immh = (op >> 19) & 0xF;
-                uint32_t immb = (op >> 16) & 7;
-                uint32_t shift = esize * 16 - ((immh << 3) | immb);
-                SimdShrnSatParams sp;
-                sp.subop = ct.subop;
-                sp.shift = static_cast<uint8_t>(shift);
-                sp.esize = static_cast<uint8_t>(esize);
-                sp.q = Q;
-                emit_shrn_sat(block, d.rd, d.rn, sp, cur_pc);
+                // The native lowering is disabled until rounding overflow
+                // and FPSR.QC are implemented correctly.
+                block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
                 return true;
             }
             case simd::Family::MUL_ELEM: {

@@ -707,6 +707,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 uint64_t tp = dyn_linker_->thread_pointer();
                 main_cpu_.tpidr_el0 = tp;
                 main_cpu_.tpidrro_el0 = tp;
+                dyn_linker_->register_thread_tls_block(tp);
                 if (verbose_) {
                     fprintf(stderr, "[%s] native dynlink: static TLS block "
                             "at 0x%llx (size %llu), TP=0x%llx (variant-I)\n",

@@ -2,6 +2,26 @@
 
 moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS.md.
 
+## Session History (2026-10-02) — vkQuake pointer corruption fixed
+
+- Traced the first XZR corruption to `fcsel s31,s25,s24,gt` in an
+  interpreter-rendered SDL worker. An obsolete FP conversion mask treated
+  FCSEL as a conversion and wrote the zero-register slot.
+- Removed that duplicate handler and guarded FP-to-GPR writes to XZR.
+  Added 61 regression checks passing under QEMU, JIT, and interpreter;
+  the focused FP suite passes 12/12 in both emulator modes.
+- User confirmed working default JIT gameplay and menus, then supplied four
+  screenshots. They show texture corruption in JIT too. User reports excessive
+  mouse sensitivity and a camera issue during prerecorded demo playback.
+  Interpreter reaches the demo; clean rendering remains unverified.
+  Evidence and remaining issues are in [vkQuake notes](vkquake.md).
+- This exact reproduction supersedes the 2026-09-03 stale-guest-state diagnosis.
+- Commit preparation: quick suite passed 239/239 JIT and 237/237 interpreter
+  with two expected skips. Late TLS, pthread/edge TLS, and SDL/GL/Vulkan ABI
+  probes passed in both modes; SDL lifecycle soak passed 64 JIT cycles.
+  Saved all five user screenshots cropped to game content and refreshed
+  README, changelog, and test inventory (244 configured runs).
+
 ## Session History (2026-10-01) — Neverball font corruption fixed
 
 - Fixed two independent font corruption paths: flags-only CCMP/CCMN incorrectly
@@ -4359,3 +4379,35 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Rule: the HOST environ (not guest setenv) controls BIFROST_ROOT — musl's
   environ is separate from the host libc's, so tests take the root from the
   suite's ENV_PREFIX.
+
+
+## 76. Neverball stability milestone and JPEG repair (2026-10-02)
+
+- User reports Neverball 1.6.0 is effectively fully stable after the JPEG fix
+  and relaunch. Prior interactive confirmations include gameplay/replay,
+  monitor/resolution selection, ball/player changes, and saved configuration.
+- Fixed interpreter narrowing-shift source widths, signed extension, rounding,
+  saturation, destination-half semantics, and sticky FPSR.QC; RSHRN now rounds
+  without saturation. Removed the incorrect native JIT lowering and aligned
+  translation/block splitting with the corrected interpreter fallback.
+- Regression: 672 checks pass under QEMU and both Bifrost modes; the pre-fix
+  interpreter fails 632. Related SIMD suite: 19/19 in each mode. Four Neverball
+  JPEGs match QEMU pixel-for-pixel, including the hard-set and Help previews.
+- Automated evidence covers focused regressions and image decoding. It does
+  not establish every-level or long-duration soak coverage, nor a separate
+  fullscreen mouse retest at that point. A subsequent user test on the same
+  date confirmed mouse control in fullscreen gameplay and after switching back
+  to windowed mode. See docs/neverball.md for the complete history.
+
+
+## 77. Post-JPEG stability checks (2026-10-02)
+
+- `test_mem_guard`: 100/100 JIT and 100/100 interpreter repetitions pass,
+  with a 20-second timeout per run; current coverage is single-threaded.
+- Quick suite: clean JIT rerun 238/238; interpreter 236/236, two intentional
+  JIT-only skips (`tier2_smov`, dual-engine zstd host harness), zero failures.
+- Rebuilt four stale fixtures detected by the first JIT run: signal-return
+  context, LSE inline, SHA-256 schedule, and SHA-256 full instruction tests.
+  All focused checks passed before the complete JIT rerun.
+- User confirmed mouse control in fullscreen gameplay and after switching
+  back to windowed mode. Updated Neverball and test documentation.

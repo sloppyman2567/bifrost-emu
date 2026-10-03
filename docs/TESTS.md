@@ -3,16 +3,23 @@
 The test runner is [`scripts/run_tests.sh`](../scripts/run_tests.sh). It does
 not build guest fixtures; use `make setup-tests` for the C and assembly
 fixtures, or `make cross SRC=... OUT=...` for one C test. Missing fixtures are
-skipped by default and fail with `--strict`. Some integration tests also
+skipped by default and fail with `--strict`. An ELF older than its matching
+C or assembly source fails with a rebuild instruction, so ignored local
+fixtures cannot silently test outdated code. Some integration tests also
 require SDL2, a display, or a configured guest rootfs.
 
 ## Test inventory
 
-The fully provisioned suite contains 242 configured test runs:
+The `fcsel_high_regs` regression has 61 checks for high FCSEL source registers,
+FP destination 31, single/double precision, aliasing, GPR preservation, and
+discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
+see [the vkQuake reproduction](vkquake.md).
+
+The fully provisioned suite contains 244 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 65 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 67 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -21,14 +28,21 @@ The fully provisioned suite contains 242 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **242** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **244** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 220 configured runs (215 with `--quick`). These
+tests are not selected, for 222 configured runs (217 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 
 ## Memory and signal regressions
+
+`ctest/test_mem_guard.c` checks wrapping `munmap`, stack overlap rejection,
+bounded huge `madvise`, and sequential above-window fixed mapping cycles.
+On 2026-10-02, the failing local ELF still contained the older threaded
+implementation. Rebuilding the current source passed 40/40 runs in each of
+JIT and interpreter mode; this does not establish correctness of that older
+threaded workload.
 
 `ctest/test_memory_permissions.c` checks existing read-only protections,
 permissions and unmapped holes inherited across fork, isolation of child
@@ -111,9 +125,63 @@ interactive game do not interfere with its requested-size assertions.
 It returns exit 77 when SDL video cannot initialize. The pre-fix build fails
 because the mode-query thunk does not fill the guest's dimensions. The repaired
 build passes with the dummy driver and real desktop in both execution modes.
-See [neverball.md](neverball.md) for the root cause and remaining input issues.
+See [neverball.md](neverball.md) for the root cause and current interactive status.
+
+## JPEG SIMD narrowing regression
+
+`ctest/jit_simd_sat_narrow.c` covers the six signed/unsigned saturating narrowing
+shift forms and nonsaturating RSHRN, each at 16→8, 32→16, and 64→32 bits.
+Its 672 checks cover minimum/maximum shift amounts, both destination halves,
+source/destination aliasing, rounding overflow, and sticky FPSR.QC.
+
+```bash
+make cross SRC=ctest/jit_simd_sat_narrow.c OUT=ctest/jit_simd_sat_narrow.elf
+./scripts/run_tests.sh --filter '^simd_sat_narrow$'
+./scripts/run_tests.sh --no-jit --filter '^simd_sat_narrow$'
+qemu-aarch64 ctest/jit_simd_sat_narrow.elf
+```
+
+On 2026-10-02, all 672 checks passed under QEMU, JIT with IR validation and
+register-allocation checks, and interpreter. The saved pre-fix interpreter
+failed 632 checks. The related SIMD suite passed 19/19 in each Bifrost mode.
+Direct libjpeg decodes of four Neverball JPEGs, including the hard-set preview
+and two Help images, matched QEMU's raw RGB output byte-for-byte in both modes.
+The affected JIT narrowing family now uses the corrected interpreter handler.
+See [neverball.md](neverball.md) for the diagnosis and image coverage.
+
+## Stability follow-up: 2026-10-02
+
+The current working-tree quick suite passed 238/238 in JIT mode and 236/236
+in interpreter mode, with two intentional interpreter skips (`tier2_smov`
+and the dual-engine `zstd_compression` host harness). Four stale fixtures were
+rebuilt before the clean full JIT rerun. `test_mem_guard` separately passed
+100 consecutive runs in each mode with no failures; its high-address mapping
+coverage is single-threaded. See [neverball.md](neverball.md) for the associated
+interactive fullscreen mouse confirmation and coverage limits.
+
+Before the compatibility work was committed on the same date, the quick
+suite was rerun with the added FCSEL regression: JIT passed 239/239 and
+interpreter passed 237/237 with the same two expected skips. Standalone late
+TLS and late-TLS pthread/edge scripts passed in both modes; SDL/GL/Vulkan
+thunk compatibility probes passed in both modes, and the default JIT SDL
+lifecycle soak passed 64 cycles. These checks use the current SDL2/GL build.
 
 ## Running tests
+
+Additional standalone regressions build their own fixtures in temporary
+directories and exercise the current emulator (`BIFROST_EMU` can override it):
+
+```sh
+./scripts/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec
+./scripts/test_late_tls_pthread.sh  # existing/new threads, reuse, pointer/alignment/weak cases
+./scripts/run_thunk_compat.sh       # SDL/GL/Vulkan ABI probes in both modes
+./scripts/run_thunk_soak.sh 64      # repeated SDL window/mapping/thread lifecycle
+```
+
+The TLS scripts require the AArch64 glibc compiler; pthread tests also need
+rootfs glibc libraries. Thunk scripts require an SDL2/GL-enabled emulator and
+the musl cross compiler. The SDL soak uses the dummy video driver and does
+not establish long-duration interactive game stability.
 
 ```bash
 make check                 # standard JIT suite

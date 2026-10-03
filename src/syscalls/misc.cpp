@@ -112,6 +112,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             //
             // thread->tid address = TPIDR_EL0 - 0xc8 + 0x28 = TPIDR_EL0 - 0xa0
             // (musl's struct pthread: base = TPIDR_EL0 - 0xc8, tid at +0x28)
+            // Leave the glibc DTV attached here: NPTL may cache this TCB and
+            // reads its DTV before calling _dl_allocate_tls_init on reuse.
+            // That allocator releases emulator-owned dynamic TLS then.
             if (cpu.tpidr_el0 != 0) {
                 uint64_t tid_addr = cpu.tpidr_el0 - 0xa0;
                 try {
@@ -1012,19 +1015,18 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         //   1. Copies lib TLS template to [tcb-lib_size, tcb) (negative TP offsets)
         //   2. ZEROS [tcb, tcb+main_memsz) to clear stale .tbss data
         //      (this is the main exe TLS area at positive TP offsets)
-        //   3. Does NOT copy TCB header fields — glibc's create_thread
-        //      sets tcb/self/dtv/stack_guard/pointer_guard AFTER this
-        //      function returns. The previous version copied a 128-byte
-        //      TCB header from the main thread, which included the DTV
-        //      pointer — when the new thread exited, glibc tried to free
-        //      the main thread's DTV, causing "double free or corruption".
+        //   3. Installs a per-thread DTV in reserved positive TLS slack.
+        //      The native linker bypasses ld-linux's DTV allocator, so the
+        //      syscall shim must provide this pointer before pthread_create
+        //      inspects it. Never copy the main thread's DTV pointer: glibc
+        //      would later mistake it for child-owned state.
         //
         // This is SAFE because _dl_allocate_tls/init run BEFORE
         // create_thread. The sequence in glibc's allocate_stack is:
         //   1. Zero struct pthread (new stacks only)
         //   2. Call _dl_allocate_tls OR _dl_allocate_tls_init ← WE FIRE HERE
         //   3. Set pd->start_routine, pd->arg, etc.
-        //   4. Call create_thread → sets TCB fields, calls clone3
+        //   4. Call create_thread → sets remaining TCB fields, calls clone3
         //
         // For stack-cache reuse (waves 2+), step 1 is skipped. Our zeroing
         // in step 2 replaces it, clearing stale .tbss data. Glibc's
@@ -1118,6 +1120,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.write(block, zeros.data(), alloc_size);
                 tcb = block + lib_size + DynamicLinker::TLS_PRE_TCB_SIZE;  // TCB above struct pthread
             }
+            if (dl && a0 != 0) {
+                // glibc may recycle a cached TLS block. Drop any emulator-
+                // owned dynamic TLS/DTV allocations before resetting it.
+                dl->deallocate_thread_tls(mem_, tcb);
+            }
             // ── Copy each module's TLS template to its per-thread slot ──
             // Variant-I layout per-thread (TP = tcb):
             //   - lib TLS: [tcb - lib_size, tcb)  (negative TP offset)
@@ -1139,60 +1146,45 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (dl && total_tls_size > 0) {
                 for (const auto& obj : dl->objects()) {
                     if (!obj.tls.present || obj.tls.memsz == 0) continue;
+                    if (obj.tls_dynamic && !obj.tls_static_slot) continue;
                     int64_t tp_off = obj.tls_tp_offset;
                     uint64_t dst = static_cast<uint64_t>(
                         static_cast<int64_t>(tcb) + tp_off);
-                    uint64_t src = dl->static_tls_base() + obj.tls_block_offset;
+                    uint64_t src = obj.tls_template_addr;
                     uint64_t filesz = obj.tls.filesz;
-                    if (filesz > 0 && filesz <= obj.tls.memsz) {
-                        try {
+                    try {
+                        std::vector<uint8_t> tls_image(
+                            static_cast<size_t>(obj.tls.memsz), 0);
+                        if (filesz > 0 && filesz <= obj.tls.memsz) {
                             std::vector<uint8_t> tpl(filesz);
                             mem_.read(src, tpl.data(), filesz);
-                            mem_.write(dst, tpl.data(), filesz);
-                        } catch (...) {}
-                    }
-                    // The .bss portion (memsz - filesz) is left as zero
-                    // (mmap gives zero pages). For stack-cache reuse,
-                    // glibc's allocate_stack zeros the whole struct
-                    // pthread area before calling _dl_allocate_tls_init,
-                    // so stale .bss from a previous thread is cleared.
+                            std::copy(tpl.begin(), tpl.end(), tls_image.begin());
+                        }
+                        mem_.write(dst, tls_image.data(), tls_image.size());
+                    } catch (...) {}
+                    // Clear the full TLS block first so stack-cache reuse
+                    // cannot retain stale .tbss from a prior thread.
                 }
             }
-            // ── Zero ONLY the DTV pointer in tcbhead_t ──────────────
-            // The TCB (tcbhead_t) starts at TP. Its layout (glibc 2.36+):
-            //   +0:  tcb (self pointer)
-            //   +8:  dtv pointer
-            //   +16: self pointer
-            //   +24: multiple_threads, gscope_flag
-            //   +32: sysinfo
-            //   +40: stack_guard
-            //   +48: pointer_guard
-            //   ...
-            //
-            // Glibc's create_thread sets tcb, self, stack_guard, and
-            // pointer_guard AFTER _dl_allocate_tls returns. The DTV
-            // pointer is set by _dl_allocate_tls (which we shim). Since
-            // our shim doesn't allocate a real DTV (we use static TLS
-            // only), we MUST zero the DTV pointer so glibc's
-            // __nptl_deallocate_tsd sees dtv==NULL and skips the DTV
-            // free. A non-NULL stale DTV pointer causes "munmap_chunk():
-            // invalid pointer" when glibc tries to free it.
-            //
-            // clobbered glibc's struct pthread fields. This caused hangs
-            // when threads exited (cleanup walked garbage pointers). Now
-            // we zero ONLY the 8-byte DTV pointer at tcb+8.
-            //
-            // For stack-cache reuse (waves 2+), glibc's allocate_stack
-            // zeros the struct pthread area itself before calling
-            // _dl_allocate_tls_init, so stale TCB fields are already
-            // cleared. For new stacks, glibc zeros the whole struct
-            // pthread in allocate_stack. So we only need to ensure the
-            // DTV is NULL (in case glibc's zeroing was incomplete or
-            // the page came from a previous allocation).
-            constexpr uint64_t TCB_DTV_OFFSET = 8;  // tcbhead_t.dtv
+            // AArch64 glibc's tcbhead_t is { dtv, private } at TP+0/+8.
+            // Keep private clear, and install a real DTV in reserved TLS
+            // slack. A null DTV crashes pthread_create's stack-cache path;
+            // pointing it into the TLS block also lets glibc inspect and
+            // clear its entries without freeing the block itself.
+            constexpr uint64_t TCB_PRIVATE_OFFSET = 8;
             try {
-                mem_.store<uint64_t>(tcb + TCB_DTV_OFFSET, 0);
+                mem_.store<uint64_t>(tcb + TCB_PRIVATE_OFFSET, 0);
             } catch (...) {}
+            // A static executable can create threads before its first
+            // TLS-bearing dlopen. In that case no variant-I template/DTV
+            // exists yet; keep the TCB registered and install its DTV when
+            // the first TLS module establishes the layout.
+            if (dl && total_tls_size > 0 && dl->static_tls_base() != 0 &&
+                !dl->initialize_thread_dtv(mem_, tcb)) {
+                ret_err(ENOMEM);
+                return 0;
+            }
+            if (dl && total_tls_size > 0) dl->register_thread_tls_block(tcb);
             if (dbg().dynlink_trace) {
                 fprintf(stderr, "[tls-alloc] TCB @0x%llx (total_tls=%llu, "
                         "lib=%llu, main=%llu, %s)\n",
@@ -1415,6 +1407,36 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(obj->base_addr),
                         static_cast<unsigned long long>(obj->base_addr + obj->map_size));
             }
+            ret_host(0);
+            return 0;
+        }
+        // ── Bifrost-emu TLS resolver syscalls ───────────────────────
+        // AArch64 TLS index layout is { module_id, module_offset }.
+        case 0x1009: { // __tls_get_addr
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0) { ret_host(0); return 0; }
+            uint64_t module_id = 0;
+            uint64_t offset = 0;
+            try {
+                module_id = mem_.load<uint64_t>(a0);
+                offset = mem_.load<uint64_t>(a0 + sizeof(uint64_t));
+            } catch (...) {
+                ret_host(0);
+                return 0;
+            }
+            ret_host(dl->resolve_tls_address(mem_, cpu, module_id, offset));
+            return 0;
+        }
+        case 0x100A: { // dynamic TLSDESC resolver
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0) { ret_host(0); return 0; }
+            ret_host(static_cast<uint64_t>(
+                dl->resolve_tlsdesc_offset(mem_, cpu, a0)));
+            return 0;
+        }
+        case 0x100B: { // _dl_deallocate_tls
+            if (auto* dl = emu.dyn_linker_.get())
+                dl->deallocate_thread_tls(mem_, a0);
             ret_host(0);
             return 0;
         }

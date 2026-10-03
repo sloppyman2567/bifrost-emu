@@ -38,6 +38,12 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
 - Run multi-threaded guest programs (clone + futex + per-thread JIT)
 - Run real games end-to-end (SDL2/OpenGL demos, a Minecraft-like voxel
   game, and teeworlds boot to a stable menu/frame loop under `DISPLAY=:0`)
+- Run Neverball 1.6.0 with user-confirmed stable gameplay, replay, readable
+  menus and fonts, and repaired JPEG previews; see the
+  [Neverball setup and validation notes](docs/neverball.md)
+- Run vkQuake 1.33.1 through the Vulkan thunks with user-confirmed gameplay,
+  menus, and no sudden crashes during the observed session. Texture corruption
+  and buggy camera behavior remain; see [vkQuake status and screenshots](docs/vkquake.md).
 
 **What it is NOT:**
 - Not a full-system emulator (no kernel — use QEMU-system for that)
@@ -294,12 +300,12 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects 242 test runs: 65 unit,
+With all fixtures available, the runner selects 244 test runs: 67 unit,
 86 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
 15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
 a configured rootfs; the real-world dynamic binaries are part of the
 real-world fixture set. `--quick` skips the five benchmarks. Without a
-rootfs, the runner selects 220 runs (215 with `--quick`). Missing guest
+rootfs, the runner selects 222 runs (217 with `--quick`). Missing guest
 fixtures are reported as skips in developer mode; CI uses `--strict` to
 turn missing selected fixtures into failures. Display/driver exit-77 skips
 remain environment-dependent. See

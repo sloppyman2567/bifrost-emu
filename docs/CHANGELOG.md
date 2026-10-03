@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## Unreleased — game compatibility and TLS follow-up (2026-10-02)
+
+- Neverball: user-confirmed stable gameplay, replay, menus, configuration,
+  JPEG previews, and fullscreen/windowed mouse control. Corrected SIMD
+  narrowing semantics and routed affected JIT instructions through the
+  interpreter; 672 focused checks and four JPEG reference decodes verify
+  the repair. See [Neverball notes](neverball.md).
+- vkQuake: removed an interpreter FCSEL/conversion encoding collision that
+  corrupted XZR and Vulkan pointers. Default JIT gameplay and menus work
+  in the user's observed session, with no sudden crashes reported. Camera
+  behavior and texture corruption remain unresolved. Added 61 regression
+  checks and cropped screenshot evidence in [vkQuake notes](vkquake.md).
+- Dynamic linking: late TLS supports reserved static slots and per-thread
+  dynamic DTV allocations, including TLSDESC, template relocation, alignment,
+  pthread initialization/reuse, and clean rejection of unsupported
+  initial-exec placement. Added isolated late-TLS regression scripts.
+- Graphics thunks: correct floating-point SDL math returns, guest keyboard
+  snapshots, SDL_RenderCopyEx argument marshalling, integer/long vertex
+  attribute pointers, and nested Vulkan pNext data staging. Added ABI probes
+  and repeated SDL lifecycle checks.
+- Tests: reject stale guest fixtures instead of silently running outdated
+  binaries; add JPEG narrowing and high-register FCSEL regressions.
+
 ## [1.5.5] — typed IR parameters + privatization, compat syscalls, decoder fixes (2026-09-22)
 
 ### Added
