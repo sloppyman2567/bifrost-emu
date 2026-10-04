@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <setjmp.h>
 
 #define SDL_INIT_VIDEO 0x00000020u
 
@@ -72,6 +73,17 @@ static int worker_detached(void* data) {
         if (out) (*out)++;
     }
     return 99;
+}
+
+__attribute__((noinline)) static void jump_from_nested(jmp_buf env) {
+    longjmp(env, 37);
+}
+__attribute__((noinline)) static int worker_nonlocal(void* data) {
+    jmp_buf env;
+    int value = setjmp(env);
+    if (!value) jump_from_nested(env);
+    *(int*)data = value;
+    return value + 5;
 }
 
 int main(void) {
@@ -151,6 +163,19 @@ int main(void) {
         printf("test 3 (detach): ok\n");
     }
 
+    /* The nonlocal continuation returns to the SDL sentinel while native
+       call helpers still carry their original return PCs. */
+    for (int i = 0; i < 16; ++i) {
+        int value = 0, result = -1;
+        void* t = SDL_CreateThread(worker_nonlocal, "longjmp", &value);
+        if (!t) return 1;
+        SDL_WaitThread(t, &result);
+        if (value != 37 || result != 42) {
+            printf("FAIL: nonlocal value=%d result=%d\n", value, result);
+            return 1;
+        }
+    }
+    printf("test 4 (nested longjmp/native thread return): ok\n");
     SDL_Quit();
     printf("test_sdl_thread: ALL PASS\n");
     return 0;

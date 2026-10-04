@@ -204,8 +204,13 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
             instr_count++;
             tb.ir.count = instr_count;
             for (size_t i = op_start; i < tb.ir.insts.size(); i++) {
-                if (tb.ir.insts[i].op == IROp::CALL_INTERP) {
-                    trace.stop_reason = "call_interp";
+                if (tb.ir.insts[i].op == IROp::CALL_INTERP ||
+                    tb.ir.insts[i].op == IROp::SIMD_NATIVE_STRUCT) {
+                    // Structured memory helpers return a dynamic PC on a
+                    // guest fault and end the Tier-1 block. Regions must
+                    // not continue through their fault/signal boundary.
+                    trace.stop_reason = tb.ir.insts[i].op == IROp::CALL_INTERP
+                        ? "call_interp" : "structured_memory";
                     aborted = true;
                     break;
                 }
@@ -523,7 +528,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         for (const IRInst& inst : region_ir) {
             if (inst.op == IROp::SVC || inst.op == IROp::BR ||
                 inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                inst.op == IROp::CALL_INTERP)
+                inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_EXTRA)
                 return true;
         }
         return false;
@@ -993,6 +998,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         for (const IRInst& inst : region_ir) {
             bool consumer = false;
             switch (inst.op) {
+                case IROp::FP_CMP:
+                    consumer = inst.fp_cmp_params().conditional;
+                    break;
                 case IROp::CSEL: case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG:
                 case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
                 case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:

@@ -5,10 +5,9 @@
 // translate_to_ir() delegates InstClass::FP_SCALAR, FMOV_VD1/RVD1,
 // SIMD_LOGICAL, SIMD_DUP, SIMD_LD1/ST1, and SIMD_DP to translate_fp().
 //
-// All cases handled here are non-terminating (none of them set
-// `block.ends_with_branch` or return true from translate_to_ir), so
-// translate_fp() returns `true` (= "handled") to signal that
-// translate_to_ir() should itself return `false` (= "block continues").
+// translate_fp() returns true when handled. Structured memory helpers
+// terminate their block so a guest fault can return a dynamic signal PC;
+// translate_to_ir() recognizes that operation and ends the block.
 // Returning `false` from translate_fp() means "InstClass not handled
 // here; let the main switch in ir_translate.cpp deal with it".
 //
@@ -17,14 +16,42 @@
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true() (used by executor only)
+#include "jit/native_simd.hpp"
 #include "opgen_simd.hpp" // generated SIMD_DP decode table (tools/opgen)
 #include "opgen_fpfixed.hpp" // generated fixed-point convert table (tools/opgen)
 namespace arm64emu {
 // Returns `true` if `d.cls` was one of the FP/SIMD cases handled here
-// (in which case translate_to_ir() returns `false` — none of the
-// extracted cases terminate a block). Returns `false` to let the caller
+// (structured memory operations also terminate the block). Returns false
+// to let the caller
 // handle the InstClass itself.
 bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
+    if ((d.cls == InstClass::SIMD_DP || d.cls == InstClass::FP_SCALAR) &&
+        classify_native_simd(d.raw) != NativeSimdKind::None) {
+        block.insts.push_back(IRInst::make_native_simd(d.raw, cur_pc));
+        return true;
+    }
+    if ((d.cls==InstClass::SIMD_LD1 || d.cls==InstClass::SIMD_ST1) &&
+        (d.simd_struct >= 2 || d.is_single_struct)) {
+                NativeStructureParams p;
+                p.first=d.rt; p.base=d.rn; p.offset_reg=d.rm;
+                p.count=d.simd_count; p.structure=d.simd_struct;
+                p.q=d.Q; p.load=d.is_load; p.post=d.post_indexed;
+                p.single=d.is_single_struct; p.replicate=d.is_ld1r;
+                p.size=1<<d.size;
+                if(p.single && !p.replicate) {
+                    unsigned scale=(d.raw>>14)&3, s=(d.raw>>12)&1, sz=(d.raw>>10)&3;
+                    if(scale==0) { p.size=1; p.lane=(unsigned(d.Q)<<3)|(s<<2)|sz; }
+                    else if(scale==1) { p.size=2; p.lane=(unsigned(d.Q)<<2)|(s<<1)|(sz>>1); }
+                    else if(scale==2 && !(sz&2)) {
+                        p.size=(sz&1)?8:4; p.lane=(sz&1)?unsigned(d.Q):(unsigned(d.Q)<<1)|s;
+                    } else {
+                        block.insts.push_back(IRInst::make(IROp::CALL_INTERP,0,0,0,0,cur_pc));
+                        return true;
+                    }
+                }
+                block.insts.push_back(IRInst::make_native_structure(p,cur_pc));
+                return true;
+            }
     switch (d.cls) {
         case InstClass::FMOV_VD1: {
             // FMOV Vd.D[1], Rn → v_hi[Vd] = regs[Rn]
@@ -49,6 +76,17 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint8_t rn = (op >> 5) & 0x1F;
             uint8_t rm = (op >> 16) & 0x1F;
             uint8_t opcode = (op >> 12) & 0xF;
+            // Scalar DUP/MOV lane: imm5's lowest set bit encodes element size.
+            if ((op & 0xFF20FC00) == 0x5E000400) {
+                unsigned imm5 = (op >> 16) & 31;
+                if (imm5 && imm5 != 16) {
+                    unsigned shift = __builtin_ctz(imm5);
+                    SimdScalarDupParams p{static_cast<uint8_t>(1u << shift),
+                                         static_cast<uint8_t>(imm5 >> (shift + 1))};
+                    block.insts.push_back(IRInst::make_scalar_dup(rd, rn, p, cur_pc));
+                    return true;
+                }
+            }
             // FMOV (general ↔ FP, 64-bit): may reach here via FP_SCALAR.
             // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
             // Bit[17]=1 additionally excludes FCVTAS (0x9E640020, bit17=0),
@@ -116,6 +154,13 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 FpMovParams mp;
                 mp.ftype = ftype;
                 emit_fp_mov(block, rd, rn, mp, cur_pc);
+                return true;
+            }
+            if ((op & 0xFF200C00) == 0x1E200400 && ftype <= 1) {
+                FpCmpParams cp;
+                cp.ftype = ftype; cp.conditional = true;
+                cp.condition = (op >> 12) & 15; cp.nzcv = op & 15;
+                emit_fp_cmp(block, 0, rn, rm, cp, cur_pc);
                 return true;
             }
             // FCMP/FCMPE — uses shared fp_decode helper.
@@ -242,7 +287,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         case 0x09: frint_mode = 1; break;  // FRINTP (+inf/ceil)
                         case 0x0A: frint_mode = 2; break;  // FRINTM (-inf/floor)
                         case 0x0B: frint_mode = 3; break;  // FRINTZ (truncate)
-                        case 0x0C: frint_mode = 6; break;  // FRINTA (ties-away; jit falls back, no x86 mode)
+                        case 0x0C: frint_mode = 6; break;  // FRINTA (ties-away)
                         case 0x0E: frint_mode = 5; break;  // FRINTX (FPCR+inexact)
                         case 0x0F: frint_mode = 4; break;  // FRINTI (FPCR)
                         default: frint_mode = 0; break;    // 0x0D unused
@@ -293,10 +338,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool is_unsigned = (op >> 16) & 1;
                 uint8_t sf = (op >> 31) & 1;
                 if (ftype <= 1) {
-                    // A (ties-away) and unsigned non-Z rounding aren't
-                    // native in the JIT codegen yet — keep them correct via
-                    // the interpreter rather than mis-rounding.
-                    if (is_away || (is_unsigned && rmode != 3)) {
+                    // Unsigned non-Z rounding remains on the reference path.
+                    if (is_unsigned && (is_away || rmode != 3)) {
                         block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
                         return true;
                     }
@@ -626,6 +669,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             SimdLogicParams lp;
             lp.subop = simd_op;
+            lp.q = (op >> 30) & 1;
             emit_logical(block, d.rd, d.rn, d.rm, lp, cur_pc);
             return true;
         }
@@ -649,10 +693,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // LD2/LD3/LD4 (de-interleaved multi-structure) are not native:
             // the LD16 fast path assumes registers are stored consecutively.
             // Fall back to the interpreter, which de-interleaves element-wise.
-            if (d.simd_struct >= 2 || d.is_single_struct) {
-                block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
-                return true;
-            }
             uint16_t base = load_arm_reg(block, d.rn, true);
             bool is_64bit = (d.Q == 0);
             if (is_64bit) {
@@ -786,11 +826,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             case simd::Family::LOGIC: {
-                // Native only for Q=1 (table enforces the guard). The IR
-                // SIMD_LOGICAL computes both 64-bit halves, so Q=0 (.8b)
-                // stays on the interpreter, which clears v_hi.
+                // Q=0 preserves the computed low half and clears v_hi.
                 SimdLogicParams lp;
                 lp.subop = ct.subop;
+                lp.q = Q;
                 emit_logical(block, d.rd, d.rn, d.rm, lp, cur_pc);
                 return true;
             }
@@ -943,6 +982,18 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return true;
             }
+            case simd::Family::FP_UNARY: {
+                SimdSubopParams p{ct.subop, static_cast<uint8_t>((op & (1u << 22)) ? 8 : 4), Q != 0};
+                block.insts.push_back(IRInst::make_fp_unary(d.rd,d.rn,p,cur_pc));
+                return true;
+            }
+            case simd::Family::FP_INDEXED: {
+                SimdFpArithParams p;
+                p.subop = 2; p.esize = (op & (1u << 22)) ? 8 : 4; p.q = Q;
+                p.lane = p.esize == 4 ? (((op >> 11) & 1) << 1) | ((op >> 21) & 1) : ((op >> 11) & 1);
+                emit_fp_arith(block,d.rd,d.rn,d.rm,p,cur_pc);
+                return true;
+            }
             case simd::Family::FP: {
                 // Vector FP 2-source / FMA. bit22: 0=single, 1=double.
                 bool is_double = (op >> 22) & 1;
@@ -955,7 +1006,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     fp.q = Q;
                     emit_fp_fma(block, d.rd, d.rn, d.rm, fp, cur_pc);
                 } else {
-                    SimdSubopParams fp;
+                    SimdFpArithParams fp;
                     fp.subop = ct.subop;
                     fp.esize = static_cast<uint8_t>(fesize);
                     fp.q = Q;

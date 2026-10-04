@@ -40,7 +40,9 @@ enum class Family : uint8_t {
     MUL_ELEM = 22,
     SMOV = 23,
     SATADDSUB = 24,
-    UNKNOWN = 25,
+    FP_UNARY = 25,
+    FP_INDEXED = 26,
+    UNKNOWN = 27,
 };
 
 struct Op {
@@ -67,11 +69,11 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF20FC00U) == 0x2E208C00U) return Op{Family::INT_CMP, 9, 0, "CMEQ"};
     if ((op & 0xBF20FC00U) == 0x2E203400U) return Op{Family::INT_CMP, 10, 3, "CMHI"};
     if ((op & 0xBF20FC00U) == 0x2E203C00U) return Op{Family::INT_CMP, 11, 4, "CMHS"};
-    if ((op & 0xBFE0FC00U) == 0x0E201C00U && (Q)) return Op{Family::LOGIC, 12, 0, "AND"};
-    if ((op & 0xBFE0FC00U) == 0x0EA01C00U && (Q)) return Op{Family::LOGIC, 13, 1, "ORR"};
-    if ((op & 0xBFE0FC00U) == 0x2E201C00U && (Q)) return Op{Family::LOGIC, 14, 2, "EOR"};
-    if ((op & 0xBFE0FC00U) == 0x0E601C00U && (Q)) return Op{Family::LOGIC, 15, 3, "BIC"};
-    if ((op & 0xBFE0FC00U) == 0x0EE01C00U && (Q)) return Op{Family::LOGIC, 16, 4, "ORN"};
+    if ((op & 0xBFE0FC00U) == 0x0E201C00U) return Op{Family::LOGIC, 12, 0, "AND"};
+    if ((op & 0xBFE0FC00U) == 0x0EA01C00U) return Op{Family::LOGIC, 13, 1, "ORR"};
+    if ((op & 0xBFE0FC00U) == 0x2E201C00U) return Op{Family::LOGIC, 14, 2, "EOR"};
+    if ((op & 0xBFE0FC00U) == 0x0E601C00U) return Op{Family::LOGIC, 15, 3, "BIC"};
+    if ((op & 0xBFE0FC00U) == 0x0EE01C00U) return Op{Family::LOGIC, 16, 4, "ORN"};
     if ((op & 0xBFA0FC00U) == 0x0E20D400U) return Op{Family::FP, 17, 0, "FADD"};
     if ((op & 0xBFA0FC00U) == 0x0EA0D400U) return Op{Family::FP, 18, 1, "FSUB"};
     if ((op & 0xBFA0FC00U) == 0x2E20DC00U) return Op{Family::FP, 19, 2, "FMUL"};
@@ -165,6 +167,10 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF20FC00U) == 0x2E200C00U && (size < 2)) return Op{Family::SATADDSUB, 107, 1, "UQADD"};
     if ((op & 0xBF20FC00U) == 0x0E202C00U && (size < 2)) return Op{Family::SATADDSUB, 108, 2, "SQSUB"};
     if ((op & 0xBF20FC00U) == 0x2E202C00U && (size < 2)) return Op{Family::SATADDSUB, 109, 3, "UQSUB"};
+    if ((op & 0xBFBFFC00U) == 0x0EA0F800U && (Q || size == 2)) return Op{Family::FP_UNARY, 110, 0, "FABS_VEC"};
+    if ((op & 0xBFBFFC00U) == 0x2EA0F800U && (Q || size == 2)) return Op{Family::FP_UNARY, 111, 1, "FNEG_VEC"};
+    if ((op & 0xBFBFFC00U) == 0x2EA1F800U && (Q || size == 2)) return Op{Family::FP_UNARY, 112, 2, "FSQRT_VEC"};
+    if ((op & 0xBF00F400U) == 0x0F009000U && (size >= 2 && (Q || size == 2) && (size == 2 || ((op >> 21) & 1) == 0))) return Op{Family::FP_INDEXED, 113, 2, "FMUL_INDEX"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

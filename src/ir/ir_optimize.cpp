@@ -101,7 +101,7 @@ static bool is_pure(IROp op) {
         case IROp::LOAD_MEM:
         case IROp::STORE_MEM:
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
-        case IROp::CALL_INTERP: case IROp::SVC:
+        case IROp::SIMD_NATIVE_STRUCT: case IROp::SIMD_NATIVE_EXTRA: case IROp::CALL_INTERP: case IROp::SVC:
         case IROp::BL_CALL:  // callee may read/write any ARM reg
         case IROp::BLR_CALL: // callee may read/write any ARM reg
         case IROp::FMOV_G2F: case IROp::FMOV_F2G:
@@ -235,7 +235,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     bool block_has_atomics = false;
     if (fwd_requested) {
         for (const auto& inst : block.insts) {
-            if (inst.op == IROp::ATOMIC ||
+            if (inst.op == IROp::SIMD_NATIVE_STRUCT || inst.op == IROp::SIMD_NATIVE_EXTRA || inst.op == IROp::ATOMIC ||
                 inst.op == IROp::LDXR_FAST ||
                 inst.op == IROp::STXR_FAST ||
                 inst.op == IROp::STLR_FAST) {
@@ -296,7 +296,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // loads don't cross-invalidate each other's stores.
                 uint32_t key = (static_cast<uint32_t>(inst.src1) << 1) | inst.sf;
                 last_store_to.erase(key);
-            } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC ||
+            } else if (inst.op == IROp::SIMD_NATIVE_STRUCT || inst.op == IROp::SIMD_NATIVE_EXTRA || inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC ||
                        inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL) {
                 last_store_to.clear();
             } else if (inst.op == IROp::BR ||
@@ -673,6 +673,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // with v0 makes a later CSEL read stale architectural state
                 // when DSE removes the intervening STORE_REG.
                 break;
+            case IROp::SIMD_NATIVE_STRUCT: case IROp::SIMD_NATIVE_EXTRA:
             case IROp::CALL_INTERP:
             case IROp::SVC:
             case IROp::BL_CALL:  // callee may modify any reg
@@ -932,6 +933,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FP_UNOP: return "FP_UNOP";
                     case IROp::FP_MOV: return "FP_MOV";
                     case IROp::SIMD_LOGICAL: return "SIMD_LOGICAL";
+                    case IROp::SIMD_SCALAR_DUP: return "SIMD_SCALAR_DUP";
                     case IROp::SIMD_DUP: return "SIMD_DUP";
                     case IROp::SIMD_MOVI: return "SIMD_MOVI";
                     case IROp::SIMD_ORRIMM: return "SIMD_ORRIMM";
@@ -989,10 +991,13 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::BLR_CALL: return "BLR_CALL";
                     case IROp::SIMD_UMOV: return "SIMD_UMOV";
                     case IROp::SIMD_SMOV: return "SIMD_SMOV";
+                    case IROp::SIMD_NATIVE_EXTRA: return "SIMD_NATIVE_EXTRA";
+                    case IROp::SIMD_NATIVE_STRUCT: return "SIMD_NATIVE_STRUCT";
                     case IROp::SIMD_SATADDSUB: return "SIMD_SATADDSUB";
                     case IROp::SIMD_LD16: return "SIMD_LD16";
                     case IROp::SIMD_ST16: return "SIMD_ST16";
                     case IROp::SIMD_FP_ARITH: return "SIMD_FP_ARITH";
+                    case IROp::SIMD_FP_UNARY: return "SIMD_FP_UNARY";
                     case IROp::SIMD_FP_FMA: return "SIMD_FP_FMA";
                     case IROp::SIMD_ABDL: return "SIMD_ABDL";
                     case IROp::SIMD_ABD: return "SIMD_ABD";

@@ -5,6 +5,7 @@
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "core/emulator.h"
 #include "debug_flags.h"
+#include "jit/fallback_profile.hpp"
 #include "jit/frostjit.hpp"
 #include "syscalls/syscalls.h"
 #include <csignal>
@@ -208,6 +209,7 @@ void Emulator::print_jit_stats() {
 // split can be observed DURING a run phase (e.g. worldgen) without requiring a
 // clean guest exit. Inert unless BIFROST_PROF=1.
 void Emulator::dump_prof_snapshot() {
+    dump_interpreted_profile();
     if (!prof_enabled.load(std::memory_order_relaxed)) return;
     uint64_t jit = prof_jit.load(std::memory_order_relaxed);
     uint64_t disp = prof_dispatch.load(std::memory_order_relaxed);
@@ -376,7 +378,8 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     thread_local uint64_t tls_call_blocks_ = 0;
     static const bool dbg_call_trace_ = dbg().dbg_guard;
     uint64_t dbg2_count = 0;
-    while (cpu->running && cpu->pc != return_pc) {
+    while (cpu->running && cpu->pc != return_pc &&
+           (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {
         if (__builtin_expect(++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
             if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);
             fprintf(stderr, "[JIT] jit_call_helper watchdog: %llu blocks dispatched by a thread — disabling JIT (likely codegen bug)\n",

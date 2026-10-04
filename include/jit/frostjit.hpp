@@ -834,6 +834,7 @@ private:
     // Records the slot offset in taken_chain_patch_off_ and sets
     // has_taken_chain_slot_. The caller sets taken_chain_target_pc_ first.
     void emit_taken_path_epilogue();
+    void emit_call_stop_guard();
     // pushfq / popfq — save/restore x86 RFLAGS to/from stack.
     // Replaces the magic byte sequences `emit_byte(0x9C)` / `emit_byte(0x9D)`
     // that were scattered across ~20 call sites.
@@ -1197,6 +1198,7 @@ private:
     // returns the "ends_block" bool. If fp_handled_ is false after
     // the call, the caller falls through to the integer switch.
     // Defined in jit_codegen_fp.cpp.
+    void emit_fp_round_away(bool is_double); // XMM0 in/out; scratch XMM1/2, RAX/RCX
     bool compile_ir_inst_fp_(const IRInst& inst);
     bool fp_handled_ = false;  // reset before each compile_ir_inst_fp_ call
     // ── FP-arithmetic / SIMD sub-dispatchers (split out of

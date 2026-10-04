@@ -42,7 +42,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     // file under 1000 lines. Both helpers return `true` if they
     // handled the case (in which case the instruction does not
     // terminate the block — translate_to_ir returns `false`).
-    if (translate_fp(block, d, cur_pc))  return false;
+    if (translate_fp(block, d, cur_pc)) {
+        if (!block.insts.empty() && block.insts.back().op==IROp::SIMD_NATIVE_STRUCT) {
+            block.ends_with_branch=true;
+            return true;
+        }
+        return false;
+    }
     if (translate_mem(block, d, cur_pc)) return false;
     switch (d.cls) {
         case InstClass::HINT:

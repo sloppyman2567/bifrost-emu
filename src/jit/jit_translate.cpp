@@ -16,6 +16,7 @@
 #include "frontend/dynamic_linker.h"
 #include "ir/ir.hpp"
 #include "ir/ir.h"
+#include "jit/native_simd.hpp"
 #include "opgen_simd.hpp"
 #include "opgen_fpfixed.hpp"
 #include <atomic>
@@ -45,6 +46,8 @@ extern thread_local bool blr_call_disabled_;
 // v1.4.5-alpha: moved here from jit_flags.cpp (where it was
 // extracted by accident — it's only used by translate_block).
 static bool instr_will_call_interp(const DecodedInst& d) {
+    if ((d.cls == InstClass::SIMD_DP || d.cls == InstClass::FP_SCALAR) &&
+        classify_native_simd(d.raw) != NativeSimdKind::None) return false;
     switch (d.cls) {
         case InstClass::SIMD_DP: {
             // Native SIMD_DP ops are classified by the generated table
@@ -96,11 +99,17 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             // FP op — splitting FP-heavy blocks every 2 instructions and,
             // via the old interp_only heuristic, demoting tiny FP blocks
             // to the interpreter.)
+            if ((op & 0xFF200C00) == 0x1E200400 && ftype <= 1)
+                return fp_gate >= 0 && !(fp_gate & 0x02);
             // FMOV GPR↔FP (32/64-bit) — ftype-agnostic in the translator.
             if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18)) && (op & (1u << 17)))
                 return fp_gate >= 0 && !(fp_gate & 0x01);
             if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18)) && (op & (1u << 17)))
                 return fp_gate >= 0 && !(fp_gate & 0x01);
+            if ((op & 0xFF20FC00) == 0x5E000400) {
+                unsigned imm5 = (op >> 16) & 31;
+                if (imm5 && imm5 != 16) return fp_gate >= 0 && !(fp_gate & 0x100);
+            }
             if (ftype > 1)
                 return true;  // half-precision → interpreter
             // FMOV FP↔FP (double 0x1E604000 / single 0x1E204000).
@@ -125,24 +134,21 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             if ((op & 0xFF00FC00) == 0x7E00D400)
                 return fp_gate >= 0 && !(fp_gate & 0x04);
             // FP 1-source: FABS/FNEG/FSQRT (1..3) and FRINT* (0x08..0x0F).
-            // FRINTA (0x0C, ir mode 6) has no x86 mode and falls back to
-            // CALL_INTERP — predict interp so the splitter agrees.
+            // FRINTA uses the native truncate/fractional-adjustment sequence.
             if (fp_decode::is_fp_1source(op)) {
                 uint8_t fp1 = fp_decode::fp_1source_opcode(op);
-                if (fp1 == 0x0C) return true;
                 if ((fp1 >= 1 && fp1 <= 3) || (fp1 >= 0x08 && fp1 <= 0x0F))
                     return fp_gate >= 0 && !(fp_gate & 0x08);
             }
             // FCVT{N,P,M,Z,A}{S,U} — FP→int with explicit rounding mode.
             // rmode = bits[20:19] (0=N,1=P,2=M,3=Z); bit[18]=A (ties-away);
             // bit[16]=U. Mirror of ir_translate_fp.cpp's FP_SCALAR block:
-            // A (ties-away) and unsigned non-Z variants still fall back to
-            // CALL_INTERP, so predict interp for those.
+            // Unsigned non-Z variants still fall back to CALL_INTERP.
             if ((op & 0x7F220000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0) {
                 bool away = (op >> 18) & 1;
                 uint8_t rmode = (op >> 19) & 3;
                 bool is_unsigned = (op >> 16) & 1;
-                if (away || (is_unsigned && rmode != 3))
+                if (is_unsigned && (away || rmode != 3))
                     return true;
                 return fp_gate >= 0 && !(fp_gate & 0x10);
             }
@@ -189,7 +195,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
-            return true;
+            return false;
         default:
             break;
     }
@@ -1173,6 +1179,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         for (const IRInst& inst : ir_block.insts) {
             bool consumer = false;
             switch (inst.op) {
+                case IROp::FP_CMP:
+                    consumer = inst.fp_cmp_params().conditional;
+                    break;
                 case IROp::CSEL: case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG:
                 case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
                 case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:

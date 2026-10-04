@@ -13,6 +13,7 @@
 #include "core/crash_report.h"
 #include "decoder.hpp"
 #include "debug_flags.h"
+#include "jit/fallback_profile.hpp"
 #include "frontend/dynamic_linker.h"
 #include <cmath>
 #include <cstdio>
@@ -125,6 +126,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
         }
         const DecodedInst& d = *dp;
+        if (!dbg().fallback_profile.empty())
+            record_interpreted_instruction(cpu.tid, cpu.pc, inst, static_cast<unsigned>(d.cls));
         // ── BIFROST_CLASS_PROF: dynamic per-class instruction histogram ─
         // Run the guest in interpreter mode (BIFROST_NO_JIT=1) with this
         // set to see which instruction classes dominate. Prints every

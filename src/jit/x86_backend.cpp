@@ -633,6 +633,8 @@ extern "C" {
     // Returns (LDXR): the loaded value in RAX.
     // Returns (STXR): 0=success, 1=failure in RAX.
     uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width) {
+        bool exclusive = !(width & 0x100);
+        width &= 0xFF;
         auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
         std::lock_guard<std::mutex> g(shard->mu);
         uint64_t v = 0;
@@ -644,6 +646,7 @@ extern "C" {
                            si_code, e.addr);
             return 0;
         }
+        if (!exclusive) return v;
         cpu->excl_mark(addr, width);
         auto& vec = shard->reservations[addr];
         bool found = false;

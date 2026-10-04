@@ -1,4 +1,5 @@
 #include "legacy_gl.hpp"
+#include "frost/window_stats.hpp"
 // frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha).
 //
 // 1.5.4-alpha: also hosts the FrostGraphics::audio_thunk() and
@@ -912,9 +913,13 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ~SdlCpuScope() { GraphicThunkImpl::sdl_dispatch_cpu_ = previous; }
     } sdl_cpu_scope(cpu);
     if (entry.spec && entry.spec->policy == thunk::Policy::SDL_SURFACE) {
+        uint64_t window = cpu.regs[0];
         cpu.regs[0] = impl_->surface_bridge.dispatch(*impl_->mem, cpu, entry.name);
+        if (cpu.regs[0] == 0 && (entry.name == "SDL_UpdateWindowSurface" || entry.name == "SDL_UpdateWindowSurfaceRects"))
+            window_stats::sdl_present(reinterpret_cast<void*>(window), "SDL surface");
         return 0;
     }
+    if (entry.name == "SDL_DestroyWindow") window_stats::forget(reinterpret_cast<void*>(cpu.regs[0]));
     if (entry.name == "SDL_DestroyWindow" || entry.name == "SDL_SetWindowSize")
         impl_->surface_bridge.forget_window(*impl_->mem, cpu.regs[0]);
     if (entry.name == "SDL_Quit") impl_->surface_bridge.clear(*impl_->mem);
@@ -2552,6 +2557,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             static_cast<int>(args[0]), static_cast<int>(args[1]),
             reinterpret_cast<const char*>(args[2]), args[3], args[4]);
         cpu.regs[0] = win;
+        window_stats::api(entry.name,args,win);
         if (win) {
             float xs = 1.0f, ys = 1.0f;
             using ScaleFn = void (*)(uint64_t, float*, float*);
@@ -3277,6 +3283,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.spec && entry.spec->ret == thunk::RetKind::STRING) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
+    window_stats::api(entry.name,args,ret);
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    if (entry.name == "eglSwapBuffers" && ret)
+        window_stats::sdl_present(impl_->sdl_window,"EGL");
+#endif
     cpu.regs[0] = ret;
     if (impl_->gl_state_tracker_ && entry.tracks_state) {
         impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);

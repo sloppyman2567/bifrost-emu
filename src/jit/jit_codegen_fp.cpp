@@ -29,6 +29,31 @@
 #include <cmath>
 #include <vector>
 namespace arm64emu {
+// Round by truncating first, then adjust only when the fractional magnitude
+// is >= 0.5. Adding 0.5 to the input would mis-round values just below a tie
+// and large already-integral values. Scratch XMM0-2 stay below pinned XMM3-15.
+void FrostJIT::emit_fp_round_away(bool is_double) {
+    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
+    emit_byte(is_double ? 0x0B : 0x0A); emit_byte(0xC8); emit_byte(3); // trunc X1,X0
+    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0); // RAX=original bits
+    emit_byte(is_double ? 0xF2 : 0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1);
+    emit_mov_imm64(RCX, is_double ? 0x7FFFFFFFFFFFFFFFULL : 0x7FFFFFFFULL);
+    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xD1);
+    emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC2); // abs fractional part
+    emit_mov_imm64(RCX, is_double ? 0x3FE0000000000000ULL : 0x3F000000ULL);
+    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xD1);
+    if (is_double) emit_byte(0x66);
+    emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC2);
+    size_t keep = emit_jcc_rel32_placeholder(0x2); // below or unordered (NaN/inf)
+    emit_mov_imm64(RCX, is_double ? 0x8000000000000000ULL : 0x80000000ULL);
+    emit_and_reg(RAX, RCX);
+    emit_mov_imm64(RCX, is_double ? 0x3FF0000000000000ULL : 0x3F800000ULL);
+    emit_or_reg(RAX, RCX); // signed 1.0
+    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0);
+    emit_byte(is_double ? 0xF2 : 0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC8);
+    patch_jcc_rel32(keep, static_cast<int32_t>(code_buf_used_ - (keep + 6)));
+    emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC1); // XMM0=rounded XMM1
+}
 // ── FrostJIT::compile_ir_inst_fp_ ──────────────────────────────────────
 // Handles all FP_* and SIMD_* IR ops. Returns true if the op was
 // handled (caller returns the bool as the "ends_block" flag), false if
@@ -81,7 +106,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             check_fp_reg_index(inst.src1, "FRINT src1");
             // FRINT only clobbers RAX (zero store to v_hi[dest]).
             clobber_flags();
-            flush_invalidate_host_regs(1u << RAX);
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
             const FpFrintParams fp = inst.fp_frint_params();
             bool is_double = (fp.bits == 64);
             // Load FP value into XMM0 (fp_load_operand: reg-reg move when
@@ -101,8 +126,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             //   3 (FRINTZ) → 3 (truncate)
             //   4 (FRINTI) → 4 (MXCSR, default = nearest)
             //   5 (FRINTX) → 4 (uses FPCR rounding mode)
-            //   6 (FRINTA) → interp: x86 has no ties-away mode,
-            //     roundsd MXCSR would give ties-even instead.
+            //   6 (FRINTA) → truncate + fractional tie adjustment.
             uint8_t x86_mode;
             switch (fp.mode & 0x7) {
                 case 0: x86_mode = 0; break;  // N → nearest
@@ -110,7 +134,9 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                 case 2: x86_mode = 1; break;  // M → -inf (floor)
                 case 3: x86_mode = 3; break;  // Z → truncate
                 case 6:
-                    emit_call_interp(inst.arm_pc, false);
+                    emit_fp_round_away(is_double);
+                    fp_store_operand(0, inst.dest, is_double);
+                    fp_zero_hi(inst.dest);
                     return false;
                 default: x86_mode = 4; break; // I/X → current MXCSR
             }

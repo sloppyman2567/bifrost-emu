@@ -738,19 +738,13 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
     uint64_t count = 0;
     int32_t exit_code = 0;
     try {
-        // Run the guest thread function with the interpreter until it RETs
-        // (pc == sentinel LR) or the thread is asked to stop. Per-instruction
-        // stepping (mirroring the GLFW borrow-CPU runner) is REQUIRED here:
-        // the game's setjmp/longjmp exception path re-enters the thread
-        // function's continuation inside a nested jit_call_helper invocation,
-        // whose loop only stops at its own return_pc and knows nothing about
-        // the 0x1000 sentinel — a JIT-dispatched thread fn whose final RET
-        // restores LR=0x1000 then gets dispatched as code (decode error).
-        // With step() the sentinel check applies to every instruction, and
-        // the thread bodies (timer/worker/event) are syscall/thunk-bound so
-        // interpreter speed is fine.
+        // Nested JIT call helpers and post-call exits honor this boundary,
+        // including a setjmp/longjmp continuation that returns to the thread
+        // sentinel instead of the helper's original LR.
+        cpu.jit_stop_pc = SENTINEL_LR;
         while (cpu.running && cpu.pc != SENTINEL_LR) {
-            emu->step(cpu);
+            if (emu->jit_) emu->jit_->run_block(cpu, *emu);
+            else emu->step(cpu);
             count++;
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);

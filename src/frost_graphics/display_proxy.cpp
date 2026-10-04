@@ -1,3 +1,4 @@
+#include "frost/window_stats.hpp"
 // frost_graphics/display_proxy.cpp — DisplayProxy implementation.
 //
 // 1.5.4-alpha: NEW. Owns a single host SDL2 window and translates
@@ -45,7 +46,7 @@ void DisplayProxy::shutdown() {
     SDL_Texture* t = (SDL_Texture*)texture_;
     if (t) SDL_DestroyTexture(t);
     if (r) SDL_DestroyRenderer(r);
-    if (w) SDL_DestroyWindow(w);
+    if (w) { window_stats::forget(w); SDL_DestroyWindow(w); }
 #endif
     handles_.clear();
     next_guest_addr_ = 0;
@@ -83,7 +84,7 @@ bool DisplayProxy::init_sdl2_() {
     }
     if (!renderer_) {
         fprintf(stderr, "[display-proxy] SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow((SDL_Window*)window_); window_ = nullptr;
+        window_stats::forget(window_); SDL_DestroyWindow((SDL_Window*)window_); window_ = nullptr;
         SDL_Quit();
         return false;
     }
@@ -108,6 +109,7 @@ void DisplayProxy::present() {
             SDL_RenderCopy((SDL_Renderer*)renderer_, (SDL_Texture*)texture_, nullptr, nullptr);
         }
         SDL_RenderPresent((SDL_Renderer*)renderer_);
+        window_stats::sdl_present(window_,"Display proxy");
     }
     // Always pump SDL events (even without a window) so the host window
     // never looks frozen and X11 input keeps flowing. x_pump_ owns the

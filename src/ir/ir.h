@@ -311,7 +311,7 @@ inline void emit_cmp(IRBlock& b, uint16_t dest, uint16_t src1,
     b.insts.push_back(IRInst::make_cmp(dest, src1, src2, p, arm_pc));
 }
 inline void emit_fp_arith(IRBlock& b, uint16_t dest, uint16_t src1,
-                          uint16_t src2, SimdSubopParams p, uint64_t arm_pc) {
+                          uint16_t src2, SimdFpArithParams p, uint64_t arm_pc) {
     b.insts.push_back(IRInst::make_fp_arith(dest, src1, src2, p, arm_pc));
 }
 inline void emit_fp_fma(IRBlock& b, uint16_t dest, uint16_t src1,

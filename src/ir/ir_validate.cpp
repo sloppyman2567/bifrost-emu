@@ -11,6 +11,7 @@
 // BIFROST_IR_VALIDATE=1 (see debug_flags.h). Tier-2 region blocks go
 // through the same optimize_ir() but are not validated yet — follow-up.
 #include "ir/ir.hpp"
+#include "jit/native_simd.hpp"
 
 namespace arm64emu {
 
@@ -19,6 +20,22 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
     for (size_t i = 0; i < block.insts.size(); i++) {
         const IRInst& inst = block.insts[i];
         switch (inst.op) {
+            case IROp::SIMD_NATIVE_STRUCT: {
+                auto p=inst.native_structure_params();
+                if ((p.size!=1 && p.size!=2 && p.size!=4 && p.size!=8) ||
+                    p.count<1 || p.count>4 || p.structure<1 || p.structure>4 ||
+                    (p.single && !p.replicate && p.lane*p.size>=16)) {
+                    std::fprintf(out,"[ir-validate] invalid native structure descriptor\n"); ok=false;
+                }
+                break;
+            }
+            case IROp::SIMD_NATIVE_EXTRA:
+                if (classify_native_simd(inst.native_simd_opcode()) == NativeSimdKind::None) {
+                    std::fprintf(out, "[ir-validate] invalid native SIMD encoding\n");
+                    ok = false;
+                }
+                break;
+
             case IROp::SIMD_TBL: {
                 // Check the RAW packed fields (not the reader): the point
                 // is to catch emit/codegen disagreeing about the layout.
@@ -300,6 +317,12 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 }
                 break;
             }
+            case IROp::LDXR_FAST: case IROp::STXR_FAST: case IROp::STLR_FAST:
+                if ((inst.width != 1 && inst.width != 2 && inst.width != 4 && inst.width != 8) || inst.flags_op > 1) {
+                    std::fprintf(out, "[ir-validate] invalid exclusive access width/monitor\n");
+                    ok = false;
+                }
+                break;
             case IROp::SIMD_LOGICAL: {
                 // Only subop varies (imm 0..4 from rows; 5=EON reachable
                 // via the InstClass path); width/cond/flags_op are 0.
@@ -312,10 +335,10 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                     ok = false;
                 }
                 if (inst.width != 0 || inst.cond != 0 ||
-                    inst.flags_op != 0) {
+                    inst.flags_op > 1) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: SIMD_LOGICAL "
-                        "width/cond/flags must be 0 (arm_pc=0x%lx)\n",
+                        "width/cond must be 0; flags must be Q (arm_pc=0x%lx)\n",
                         block.start_pc, i, inst.arm_pc);
                     ok = false;
                 }
@@ -349,9 +372,22 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 }
                 break;
             }
+            case IROp::SIMD_FP_UNARY: {
+                const auto p = inst.fp_unary_params();
+                if (p.subop > 2 || (p.esize != 4 && p.esize != 8) || (!p.q && p.esize == 8) ||
+                    inst.dest >= 32 || inst.src1 >= 32 || (inst.flags_op & ~1u)) {
+                    std::fprintf(out,"[ir-validate] invalid SIMD_FP_UNARY at 0x%lx\n",inst.arm_pc);
+                    ok = false;
+                }
+                break;
+            }
             case IROp::SIMD_FP_ARITH: {
                 // imm=subop (0..7, 0xB FMULX, 0xD FABD), width=4/8,
                 // flags_op=Q.
+                if (inst.aux && (inst.imm != 2 || (inst.width != 4 && inst.width != 8) || inst.aux > 16 / inst.width || (!inst.flags_op && inst.width == 8))) {
+                    std::fprintf(out,"[ir-validate] invalid indexed SIMD_FP_ARITH at 0x%lx\n",inst.arm_pc);
+                    ok = false;
+                }
                 const uint8_t opc = static_cast<uint8_t>(inst.imm);
                 if (opc > 7 && opc != 0xB && opc != 0xD) {
                     std::fprintf(out,
@@ -675,6 +711,15 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 }
                 break;
             }
+            case IROp::SIMD_SCALAR_DUP: {
+                const auto p = inst.scalar_dup_params();
+                if ((p.esize != 1 && p.esize != 2 && p.esize != 4 && p.esize != 8) ||
+                    inst.aux * p.esize >= 16 || inst.dest >= 32 || inst.src1 >= 32) {
+                    std::fprintf(out, "[ir-validate] invalid scalar DUP at 0x%lx\n", inst.arm_pc);
+                    ok = false;
+                }
+                break;
+            }
             case IROp::SIMD_DUP: {
                 // width=esize bytes, flags_op=Q, imm is always 0.
                 if (inst.width != 1 && inst.width != 2 &&
@@ -836,14 +881,14 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 if (inst.width > 1) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_CMP "
-                        "ftype=%u invalid (want 0/1, arm_pc=0x%lx)\n",
+                        "ftype=%u invalid (want flags 0..3 and condition/NZCV 0..15, arm_pc=0x%lx)\n",
                         block.start_pc, i, inst.width, inst.arm_pc);
                     ok = false;
                 }
-                if (inst.imm > 1) {
+                if (inst.imm > 3 || inst.cond > 15 || inst.flags_op > 15) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_CMP "
-                        "imm=%lu invalid (want 0/1, arm_pc=0x%lx)\n",
+                        "imm=%lu invalid (want flags 0..3 and condition/NZCV 0..15, arm_pc=0x%lx)\n",
                         block.start_pc, i, (unsigned long)inst.imm,
                         inst.arm_pc);
                     ok = false;
@@ -881,8 +926,8 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
             }
             case IROp::FP_F2I: {
                 // width=ftype 0/1, cond=rounding ((is_away<<2)|rmode —
-                // is_away is guarded to the interpreter, so native sees
-                // 0..3 only), flags_op=sf, imm=is_unsigned bit.
+                // 0..3 standard rounding or 4 signed ties-away),
+                // flags_op=sf, imm=is_unsigned bit.
                 if (inst.width > 1) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_F2I "
@@ -890,10 +935,10 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         block.start_pc, i, inst.width, inst.arm_pc);
                     ok = false;
                 }
-                if (inst.cond > 3) {
+                if (inst.cond > 4 || (inst.cond == 4 && inst.imm)) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_F2I "
-                        "rounding=%u has ties-away bit (want 0..3, arm_pc=0x%lx)\n",
+                        "rounding=%u invalid (want 0..3 or signed ties-away=4, arm_pc=0x%lx)\n",
                         block.start_pc, i, inst.cond, inst.arm_pc);
                     ok = false;
                 }
@@ -948,7 +993,7 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 break;
             }
             case IROp::FRINT: {
-                // width=32/64 BITS, imm=mode 0..6 (6=FRINTA, jit fallback).
+                // width=32/64 BITS, imm=mode 0..6 (6=FRINTA, ties away).
                 if (inst.width != 32 && inst.width != 64) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FRINT "

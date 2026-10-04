@@ -1,3 +1,4 @@
+#include "frost/window_stats.hpp"
 // graphics.cpp — Graphics backend for bifrost-emu (v1.4.5-alpha).
 //
 // Provides a virtual /dev/fb0 backed by a memfd_create'd file
@@ -105,7 +106,7 @@ FrostGraphics::~FrostGraphics() {
         auto* s = sdl_state(sdl_state_);
         if (s->texture)  SDL_DestroyTexture(s->texture);
         if (s->renderer) SDL_DestroyRenderer(s->renderer);
-        if (s->window)   SDL_DestroyWindow(s->window);
+        if (s->window) { window_stats::forget(s->window); SDL_DestroyWindow(s->window); }
         delete s;
         sdl_state_ = nullptr;
     }
@@ -222,7 +223,7 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
                     SDL_GetError());
             if (s->texture)  SDL_DestroyTexture(s->texture);
             if (s->renderer) SDL_DestroyRenderer(s->renderer);
-            if (s->window)   SDL_DestroyWindow(s->window);
+            if (s->window) { window_stats::forget(s->window); SDL_DestroyWindow(s->window); }
             delete s;
             // Don't set sdl_state_; fall through to headless mode.
         } else {
@@ -231,6 +232,7 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
             SDL_SetRenderDrawColor(s->renderer, 0, 0, 0, 255);
             SDL_RenderClear(s->renderer);
             SDL_RenderPresent(s->renderer);
+            window_stats::sdl_present(s->window,"Framebuffer");
         }
     }
 #endif
@@ -385,6 +387,7 @@ void FrostGraphics::refresh() {
             SDL_RenderClear(s->renderer);
             SDL_RenderCopy(s->renderer, s->texture, nullptr, nullptr);
             SDL_RenderPresent(s->renderer);
+            window_stats::sdl_present(s->window,"Framebuffer");
         }
         poll_events();
         return;

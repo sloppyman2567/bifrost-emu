@@ -109,8 +109,8 @@ widths with fixed expected products, independently checked under QEMU.
 
 ## Shared SIMD fallback semantics
 
-Vector FMOV immediates and scalar DUP element reads currently use the
-interpreter fallback in JIT mode, so reference bugs affect both engines and
+Vector FMOV immediates use the interpreter fallback in JIT mode. Scalar
+DUP element reads now use native `SIMD_SCALAR_DUP`; their reference bugs affected both engines and
 can escape JIT-versus-interpreter verification. Two Doom 3 collision-code
 probes exposed this: `.2s #0.5` expanded with a wrong exponent, and
 `mov s24, v24.s[1]` selected the low lane as a 64-bit element. FMOV's
@@ -156,8 +156,8 @@ AdvSIMD vector `FSQRT` (`0x2EA1F800`, excluding Q and the S/D bit) differs
 from `FNEG` (`0x2EA0F800`) at bit 16. The interpreter's old
 `0xFF20FC00` mask discarded that bit and executed square roots as negations.
 The unary handler now retains bit 16 and the fixed encoding bits, handles
-vector square root explicitly, and preserves Q=0 upper-half clearing. JIT
-uses this corrected reference fallback. `jit_simd_unary_fp` checks S/D widths,
+vector square root explicitly, and preserves Q=0 upper-half clearing. The JIT
+now emits native packed FABS/FNEG/FSQRT through `SIMD_FP_UNARY`. `jit_simd_unary_fp` checks S/D widths,
 aliasing, signed zero, FABS/FNEG separation, and all 512 inverse-square-root
 seed calculations used by Doom 3's vectorized math initialization.
 
@@ -174,3 +174,67 @@ CPU's private cache or adding a global cache lock. The synchronized
 After this repair, the complete interpreter suite passes 249/249 (three
 JIT-only skips), and the JIT unit suite passes 75/75 with IR validation.
 The cross-thread regression passes five interpreter repeats and QEMU.
+
+## Indexed vector floating-point multiply
+
+Vector FMUL by a scalar lane is native for 2S, 4S and 2D. The generated
+classifier retains the five-bit Rm field, rejects reserved 1D encodings, and
+distinguishes single-precision L/H lane bits from the double-precision H bit.
+`SimdFpArithParams::lane` is -1 for a vector operand and otherwise selects
+the scalar lane. Both sources are loaded before destination writes, including
+high-half scalar lanes when the destination aliases Rm. Q=0 clears v_hi.
+These indexed and unary operations use the memory path and disable vector
+pinning for their blocks, keeping CPU vector storage current.
+
+`jit_simd_fp_indexed` covers all scalar lanes, high Rm registers, source and
+destination aliasing, and Q=0 clearing against fixed expected results.
+
+## Ties-away rounding and scalar lane copies
+
+FRINTA and signed FCVTAS now use native SSE4.1 code. The shared helper
+truncates the input, compares the absolute fractional part with 0.5 and
+adjusts by signed 1.0 when necessary. It does not add 0.5 to the original
+input: that mis-rounds adjacent values and large already-integral inputs.
+Signed zero, infinities and NaN payloads retain the rounded result. FCVTAS
+then uses the existing NaN-to-zero and signed saturation checks. Unsigned
+non-truncating conversions retain their interpreter fallback. The helper
+uses XMM0-2 and flushed RAX/RCX, preserving pinned XMM3-15. The splitter,
+translator and IR validator agree on the newly native operations.
+
+`SIMD_SCALAR_DUP` has typed element-size/lane parameters. It loads the
+selected bytes before writing the destination, zero-extends into v_lo and
+clears v_hi, including when source and destination alias. Its memory path
+disables register pinning for the block.
+
+`jit_round_away` checks 6,984 fixed-oracle cases, including adjacent ties,
+large integers, saturation, signed zero, NaNs, infinities and cache-block
+boundaries. `jit_scalar_dup` now checks all 30 valid lanes with and without
+source/destination aliasing (60 checks). Both pass QEMU and JIT verification.
+
+## Native helper and SDL thread boundaries
+
+Complex SIMD helpers in `native_simd.cpp` specialize a single operation at
+translation time; they must not decode or step the interpreter at runtime.
+They are typed, validated IR operations and optimizer barriers. Flush GPR
+state before helpers that read `cpu.regs`, disable incompatible pinning, and
+preserve `WIN_REG` across every SysV call: it is caller-saved R10, so an
+otherwise correct C++ helper can corrupt all later direct-window accesses.
+Tier-2 treats SIMD helpers as calls for GPR pinning and LICM purposes.
+
+`SIMD_NATIVE_STRUCT` terminates Tier-1 execution with the helper's dynamic
+next PC, so a memory fault returns to the guest signal handler rather than
+continuing through a static fall-through edge. Do not chain or fuse this
+boundary into Tier-2 regions. Validate the full footprint before changing
+vector registers or the post-index base, and snapshot aliased sources.
+
+SDL thread callbacks set `CPU::jit_stop_pc` to their return sentinel. Nested
+`jit_call_helper` dispatch must stop there, and generated call continuations
+must unwind without reloading or writing stale cached caller state. Keep
+this host boundary out of architectural CPU copies and retain the interpreter
+runner for `--no-jit`. `test_sdl_thread` includes nonlocal return coverage.
+
+Build the SDL/GL configuration, then run `bash scripts/test_native_doom_gaps.sh`
+for every retained Doom capture gap (625 encodings, 20,000 randomized cases).
+`ctest/jit_doom_gap.elf` contains fixed QEMU-checked oracle cases and is also
+registered in `scripts/run_tests.sh`. A zero explicit IR fallback count alone
+is insufficient: check actual generated execution and host capability gates.

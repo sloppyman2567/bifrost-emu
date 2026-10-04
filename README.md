@@ -77,6 +77,12 @@ export BIFROST_ROOT=$PWD/rootfs
 ./bifrost-emu --no-jit ctest_real/fib.elf
 ```
 
+Graphical programs log their first successful frame presentation to stderr.
+Use `--no-render-log` to suppress that message. `--window-stats` (also
+`--window_stats`) adds Bifrost's version and presentation FPS to the game title.
+Independent title, separate-window and overlay switches are described in
+[window stats](docs/window-stats.md).
+
 ## Running ARM64 Applications
 
 ### Static Binaries
@@ -163,9 +169,10 @@ The rootfs also has `/system/lib64` → `/lib64`, `/vendor/lib64` → `/lib64`
 so Android-style DT_NEEDED entries resolve automatically, and build.prop
 advertises arm64-v8a ABI, SDK 29, ro.kernel.qemu=1.
 
-For full Android app support (APK loading, Dalvik/ART), use a dedicated
-Android emulator (or libbifrost's native-bridge adapter). bifrost-emu
-targets NativeActivity-style Linux ARM64 binaries.
+Integrated APK loading, Bionic compatibility and ART execution are planned
+for v2.0; see the [roadmap](roadmap.md). The current standalone Android path
+supports NativeActivity-style native binaries. The native-bridge adapter
+below is a separate integration interface, not a complete Android runtime.
 
 ## Architecture
 
@@ -521,6 +528,8 @@ Game setup, screenshots, and current compatibility issues:
 - [Minecraft Weekend](docs/minecraft-weekend.md)
 
 Build, test, and maintenance references:
+
+- [v2.0 roadmap](roadmap.md) — Android games, runtime integration, performance and input
 
 - [docs/JIT.md](docs/JIT.md) — JIT architecture and instruction-change guide
 - [docs/SUPPORT.md](docs/SUPPORT.md) — platform and compatibility support matrix

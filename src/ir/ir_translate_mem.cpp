@@ -344,14 +344,29 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return true;
         }
         // ── Atomics (LDXR/STXR/LDAR/STLR/LSE_ATOMIC) ───────────────
-        // LDXR/STXR/STLR use CALL_INTERP for now — the fast C helper path
-        // (jit_ldxr/jit_stxr/jit_stlr) is defined but needs more testing
-        // before enabling in a stable release. LSE atomics get native JIT.
+        // Native helper paths share the interpreter's exclusive monitor;
+        // acquire/release ordering is stronger than required via shard locks.
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
-        case InstClass::LDAR: case InstClass::STLR:
-            block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
+        case InstClass::LDAR: case InstClass::STLR: {
+            uint16_t address = load_arm_reg(block, d.rn, true);
+            bool exclusive = !d.acquire || d.excl_low6 != 0x3F;
+            uint8_t bytes = 1 << d.size;
+            if (d.is_load) {
+                uint16_t value = g_alloc.alloc();
+                block.insts.push_back(IRInst::make_llsc(IROp::LDXR_FAST,
+                    value, address, 0, bytes, exclusive, cur_pc));
+                store_arm_reg(block, d.rt, value);
+            } else {
+                uint16_t value = load_arm_reg(block, d.rt);
+                uint16_t status = g_alloc.alloc();
+                block.insts.push_back(IRInst::make_llsc(
+                    exclusive ? IROp::STXR_FAST : IROp::STLR_FAST,
+                    status, address, value, bytes, exclusive, cur_pc));
+                if (exclusive) store_arm_reg(block, d.rs, status);
+            }
             return true;
+        }
         case InstClass::LSE_ATOMIC: {
             // LSE atomics: native x86 lock-prefixed instructions.
             // Fields:

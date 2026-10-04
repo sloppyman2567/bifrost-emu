@@ -33,12 +33,11 @@
 //   -V, --version   show version and exit
 //   -h, --help      show this help
 //
-// By default bifrost-emu is silent: only the emulated program's
-// stdout/stderr appears. No stats, no exit codes, no noise — just the
-// output.
+// Graphical programs log their first presentation by default.
 #include "bifrost/emulator.hpp"
 #include "bifrost/config.hpp"
 #include "decoder.hpp"
+#include "frost/window_stats.hpp"
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -71,6 +70,10 @@ static void print_banner() {
         "    -q, --quiet        suppress BRK warnings (even with -d)\n"
         "    --fb-dump PATH     dump /dev/fb0 to PATH on exit (PPM)\n"
         "    --audio-dump PATH  dump /dev/dsp to PATH on exit (WAV)\n"
+        "    --window-stats    enable game-title presentation stats (alias --window_stats)\n"
+        "    --[no-]window-stats-title|window|overlay  independent stats displays\n"
+        "    --no-window-stats disable all stats displays\n"
+        "    --no-render-log  disable the default first-presentation log\n"
         "    --raw-tty          force raw TTY mode (per-char input, no echo)\n"
         "    --no-jit           use interpreter only (JIT is on by default)\n"
         "    --jit              enable frostJIT (default; for compatibility)\n"
@@ -83,7 +86,7 @@ static void print_banner() {
         "    -h, --help         show this message\n"
         "\n"
         "  Runs static AArch64 Linux ELF binaries on x86_64.\n"
-        "  Default mode is silent — only program output is shown.\n"
+        "  Graphical programs log their first frame; --no-render-log disables this.\n"
         "\n",
         VERSION);
 }
@@ -165,6 +168,8 @@ static std::string host_path_for(const std::string& guest_path,
 }
 // ── Main ─────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
+        return arm64emu::window_stats::ui_main(std::atoi(argv[2]));
     bool debug   = false;
     bool verbose = false;
     bool quiet   = false;
@@ -212,6 +217,21 @@ int main(int argc, char** argv) {
         if (a == "-d" || a == "--debug")    { debug   = true;  arg_i++; continue; }
         if (a == "-v" || a == "--verbose")  { verbose = true;  arg_i++; continue; }
         if (a == "-q" || a == "--quiet")    { quiet   = true;  arg_i++; continue; }
+        if (a == "--window-stats" || a == "--window_stats") { setenv("BIFROST_WINDOW_STATS", "1", 1); arg_i++; continue; }
+        if (a == "--no-window-stats") {
+            for (auto key : {"BIFROST_WINDOW_STATS", "BIFROST_WINDOW_STATS_TITLE", "BIFROST_WINDOW_STATS_WINDOW", "BIFROST_WINDOW_STATS_OVERLAY"}) setenv(key,"0",1);
+            arg_i++; continue;
+        }
+        bool stats_option = false;
+        for (auto mode : {"title", "window", "overlay"}) {
+            std::string flag = std::string("--window-stats-") + mode;
+            std::string key = std::string("BIFROST_WINDOW_STATS_") + (std::string(mode)=="title" ? "TITLE" : std::string(mode)=="window" ? "WINDOW" : "OVERLAY");
+            if (a == flag || a == "--no-" + flag.substr(2)) {
+                setenv(key.c_str(),a == flag ? "1" : "0",1); stats_option = true;
+            }
+        }
+        if (stats_option) { arg_i++; continue; }
+        if (a == "--no-render-log" || a == "--render-log") { setenv("BIFROST_RENDER_LOG",a == "--render-log" ? "1" : "0",1); arg_i++; continue; }
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }

@@ -493,6 +493,30 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint32_t sub = op & 0xFFE0FC00;  // bits[31:24] + bits[20:10]
             // Strip Q from sub for matching purposes
             uint32_t sub_noq = sub & ~(1u << 30);
+            // FCVTL widens two floats from the selected half to doubles.
+            // Keep bit16 to avoid the integer two-register-misc handlers.
+            if ((op & 0xBFFFFC00) == 0x0E617800) {
+                uint64_t source = Q ? cpu.v_hi[rn] : cpu.v_lo[rn];
+                float values[2]; memcpy(values, &source, 8);
+                double a = static_cast<double>(values[0]);
+                double b = static_cast<double>(values[1]);
+                memcpy(&cpu.v_lo[rd], &a, 8); memcpy(&cpu.v_hi[rd], &b, 8);
+                return;
+            }
+            // SHLL widens unsigned lanes and shifts by their original width.
+            // Its bit16 distinguishes it from saturating accumulate-add.
+            if ((op & 0xBF3FFC00) == 0x2E213800 && size < 3) {
+                unsigned esize = 1u << size;
+                uint64_t source = Q ? cpu.v_hi[rn] : cpu.v_lo[rn];
+                uint8_t result[16]{};
+                for (unsigned i=0; i<8/esize; ++i) {
+                    uint64_t value=0;
+                    memcpy(&value, reinterpret_cast<const uint8_t*>(&source)+i*esize, esize);
+                    value <<= esize*8; memcpy(result+i*esize*2, &value, esize*2);
+                }
+                memcpy(&cpu.v_lo[rd], result, 8); memcpy(&cpu.v_hi[rd], result+8, 8);
+                return;
+            }
             // ── FP narrowing convert (FCVTN / FCVTXN, d -> s) ────────
             // NOTE: these CANNOT go through the sub_noq switch — their
             // opcode uses bits[20:16] (=00001), which the 0xFFE0FC00
@@ -1812,7 +1836,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             default: break;
             }
-            // UADDLV — unique mask shape.
+            // ADDV: horizontal sum truncates to the source lane width.
             if ((op & 0xBF3FFC00) == 0x0E31B800) {
                 int esize = 1 << size;
                 int elems = (Q ? 16 : 8) / esize;
@@ -1825,7 +1849,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     memcpy(&v, buf + i * esize, esize);
                     sum += v;
                 }
-                cpu.v_lo[rd] = sum;
+                cpu.v_lo[rd] = sum & ((1ULL << (esize*8))-1);
                 cpu.v_hi[rd] = 0;
                 return;
             }
@@ -3516,7 +3540,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                 if (opc == 9 || opc == 13) {
                                     r = a * sc;                 // FMUL / FMULX
                                 } else {
-                                    r = d + (opc == 1 ? a * sc : -(a * sc));  // FMLA / FMLS
+                                    r = std::fma(opc == 1 ? a : -a, sc, d); // fused FMLA / FMLS
                                 }
                                 if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
                                 else memcpy(&cpu.v_hi[rd], &r, 8);
@@ -3537,7 +3561,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                 if (opc == 9 || opc == 13) {
                                     r = a * sc;                 // FMUL / FMULX
                                 } else {
-                                    r = d + (opc == 1 ? a * sc : -(a * sc));  // FMLA / FMLS
+                                    r = std::fma(opc == 1 ? a : -a, sc, d); // fused FMLA / FMLS
                                 }
                                 uint32_t rb;
                                 memcpy(&rb, &r, 4);

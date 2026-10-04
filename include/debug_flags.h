@@ -45,6 +45,10 @@ struct DebugFlags {
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     std::vector<uint64_t> input_watch; // BIFROST_INPUT_WATCH — comma-separated guest u32 addresses
     bool input_trace = false;  // BIFROST_INPUT_TRACE — bounded SDL mouse/input-mode log
+    bool window_stats_title = false;
+    bool window_stats_window = false;
+    bool window_stats_overlay = false;
+    bool render_log = true;
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     // ── crash / decode diagnostics ───────────────────────────────────
     bool crash_dump = false;  // BIFROST_CRASH_DUMP  — detailed crash report
@@ -65,6 +69,7 @@ struct DebugFlags {
     std::string watch;  // BIFROST_WATCH — addr[:size] hex; log every
                         // Memory::write overlapping it with the current
                         // interp pc (heap wild-write hunt; --no-jit).
+    std::string fallback_profile; // BIFROST_FALLBACK_PROFILE=path: complete per-thread inventory
     std::string write_trace;  // BIFROST_WRITE_TRACE=path — complete guest
                               // store log (addr/size/tid/guest pc/value)
     std::string write_trace_range;  // BIFROST_WRITE_TRACE_RANGE=lo:hi hex
@@ -96,6 +101,7 @@ struct DebugFlags {
             if (end != initial && *end == '\0' && mb >= 1 && mb <= 1024)
                 f.jit_cache_initial_mb = static_cast<size_t>(mb);
         }
+        if (const char* path = std::getenv("BIFROST_FALLBACK_PROFILE")) f.fallback_profile = path;
         const bool all = env("BIFROST_TRACE");
         f.xtrace    = all || env("BIFROST_XTRACE");
         f.xfull     = all || env("BIFROST_XFULL");
@@ -126,6 +132,14 @@ struct DebugFlags {
                 p = *end ? end + 1 : end;
             }
         }
+        auto toggle = [](const char* key, bool fallback) {
+            const char* v = std::getenv(key);
+            return v ? std::string(v) != "0" && std::string(v) != "false" : fallback;
+        };
+        f.window_stats_title = toggle("BIFROST_WINDOW_STATS_TITLE", toggle("BIFROST_WINDOW_STATS", false));
+        f.window_stats_window = toggle("BIFROST_WINDOW_STATS_WINDOW", false);
+        f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", false);
+        f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         f.crash_dump = all || env("BIFROST_CRASH_DUMP");
         f.dbg_guard  = all || env("BIFROST_DBG_GUARD");

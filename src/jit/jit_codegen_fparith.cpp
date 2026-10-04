@@ -320,10 +320,10 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // ARM FCVT rounding mode, encoded in `cond` (see
             // ir_translate_fp.cpp): bits[1:0] = rmode (0=N nearest-even,
             // 1=P +inf, 2=M -inf, 3=Z toward-zero), bit 2 = A (ties-away).
-            // The A variant and unsigned non-Z never reach here — the IR
-            // translator routes them to CALL_INTERP — but keep the JIT
-            // defensive so a future gate drift can't silently mis-round.
+            // Signed ties-away uses the shared fractional adjustment helper;
+            // unsigned non-Z modes retain their interpreter fallback.
             uint8_t rmode = fp.rounding & 3;
+            const bool is_away = (fp.rounding & 4) != 0;
             if (is_unsigned) {
                 if (rmode != 3) {
                     emit_call_interp(inst.arm_pc, false);
@@ -415,7 +415,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // round N/P/M to an fp integer in xmm1 (explicit roundss/sd
                 // mode so host mxcsr can't leak in); Z converts xmm0 direct.
                 int rsrc = 0;
-                if (rmode == 0) {
+                if (is_away) {
+                    emit_fp_round_away(is_double);
+                } else if (rmode == 0) {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
                     emit_byte(is_double ? 0x0B : 0x0A);
                     emit_byte(0xC8); emit_byte(0);  // round nearest-even xmm1,xmm0
@@ -943,6 +945,26 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             clobber_flags();
             // FP_CMP clobbers RAX, RCX, RDX (flag manipulation).
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            size_t compare_branch = 0, skip_compare = 0;
+            if (cp.conditional) {
+                emit_load_flags_from_pstate();
+                emit_normalize_cf_to_sub_convention();
+                flags_from_sub_ = true;
+                bool need_cmc = false;
+                uint8_t cc = resolve_arm_cond_with_carry(cp.condition, need_cmc);
+                if (need_cmc) emit_byte(0xF5);
+                if (cp.condition < 14) {
+                    compare_branch = emit_jcc_rel32_placeholder(cc);
+                    emit_load32(RCX, CPU_REG, PSTATE_OFF);
+                    emit_byte(0x81); emit_byte(0xE1); emit_u32(0x07FFFFFF);
+                    emit_mov_imm32_zext(RDX, uint32_t(cp.nzcv) << 28);
+                    emit_or_reg(RDX, RCX);
+                    emit_store32(CPU_REG, PSTATE_OFF, RDX);
+                    skip_compare = emit_jmp_rel32_placeholder();
+                    patch_jcc_rel32(compare_branch,
+                        static_cast<int32_t>(code_buf_used_ - (compare_branch + 6)));
+                }
+            }
             // Load src1 into XMM0 (fp_load_operand: reg-reg when pinned).
             fp_load_operand(0, inst.src1, is_double);
             // Load src2 into XMM1 (or zero for FCMP #0.0).
@@ -1043,6 +1065,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(0x81); emit_byte(0xE1); emit_u32(0x07FFFFFF);  // and ecx, 0x07FFFFFF (clear from_sub + NZCV)
             emit_byte(0x48); emit_byte(0x09); emit_byte(0xCA);  // or rdx, rcx
             emit_store32(CPU_REG, PSTATE_OFF, RDX);
+            if (skip_compare) patch_jmp_rel32(skip_compare,
+                static_cast<int32_t>(code_buf_used_ - (skip_compare + 5)));
             flags_in_host_ = false;
             // Defensive: clear from_sub so a future flag-setter that forgets
             // to set flags_from_sub_ doesn't read a stale value.

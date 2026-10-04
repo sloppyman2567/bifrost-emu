@@ -81,6 +81,7 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     bool  vec_used[32] = {};
     int   used_count = 0;
     for (const IRInst& inst : block.insts) {
+        if (inst.op == IROp::SIMD_FP_ARITH && inst.fp_arith_params().lane >= 0) return false;
         if (!vec_cache_compatible_op(inst.op)) return false;
         if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
             inst.op == IROp::SIMD_LOGICAL) {

@@ -19,10 +19,25 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
+#include "jit/native_structure.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
 namespace arm64emu {
+// Called after a native callee, with all caller state already flushed and
+// mappings invalidated. Do not write cached vectors back here: the callee's
+// CPU state is authoritative. This exit is never a patchable chain slot.
+void FrostJIT::emit_call_stop_guard() {
+    emit_load(RAX, CPU_REG, PC_OFF);
+    emit_load(RCX, CPU_REG, offsetof(CPU, jit_stop_pc));
+    emit_cmp_reg(RAX, RCX);
+    size_t resume = emit_jcc_rel32_placeholder(0x5);
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp,rbp
+    emit_pop(R15); emit_pop(R14); emit_pop(R13);
+    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+    emit_ret();
+    patch_jcc_rel32(resume, static_cast<int32_t>(code_buf_used_ - (resume + 6)));
+}
 // ── FrostJIT::emit_taken_path_epilogue ─────────────────────────────────
 // Emits the conditional-branch TAKEN-path tail. RAX must hold the taken
 // next-PC. Writes back dirty cached vectors, stores the PC, sets RDI/RSI
@@ -118,7 +133,10 @@ void FrostJIT::emit_taken_path_epilogue() {
 // Called under blocks_mutex_ (all translate_block callers hold it), so
 // the blocks_ read is safe.
 FrostJIT::FlagMatSkip FrostJIT::flag_mat_decision(uint64_t target_pc) {
-    if (getenv("BIFROST_NO_FLAGSKIP")) return FlagMatSkip::None;
+    // Verification compares architectural flags at every block boundary.
+    // Dead stores are valid during execution, but obscure that comparison.
+    if (getenv("BIFROST_NO_FLAGSKIP") || getenv("BIFROST_JIT_VERIFY"))
+        return FlagMatSkip::None;
     if (target_pc == 0) return FlagMatSkip::None;
     auto it = blocks_.find(target_pc);
     if (it == blocks_.end()) return FlagMatSkip::SkipAndRecord;
@@ -530,6 +548,18 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             skip_fixups_.push_back(
                 {jcc_patch, static_cast<int>(cur_op_index_ + 1 + bp.count)});
             return 0;
+        }
+        case IROp::SIMD_NATIVE_STRUCT: {
+            clobber_flags(); flush_all_vregs();
+            emit_mov_imm64(RAX, inst.arm_pc); emit_store(CPU_REG, PC_OFF, RAX);
+            emit_load(RDI, RBP, emu_slot_off()); emit_mov_reg(RSI, CPU_REG);
+            emit_mov_imm64(RDX, inst.native_structure_params().pack());
+            emit_push(WIN_REG);
+            emit_call_aligned(&native_structure, 1);
+            emit_pop(WIN_REG);
+            invalidate_all_vregs();
+            rax_holds_next_pc_=true; unchainable_end_=true;
+            return 1;
         }
         case IROp::SVC:
             // Native syscall dispatch. vDSO clock stubs keep their fast

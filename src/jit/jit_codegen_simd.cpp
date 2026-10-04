@@ -26,6 +26,7 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
+#include "jit/native_simd.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -221,6 +222,24 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         sse2_op(0x6C, xmm, 5);  // punpcklqdq xmm, xmm5
     };
     switch (inst.op) {
+        case IROp::SIMD_NATIVE_EXTRA: {
+            const uint32_t opcode = inst.native_simd_opcode();
+            auto fn = native_simd_helper(classify_native_simd(opcode));
+            if (!fn) { emit_call_interp(inst.arm_pc, false); return true; }
+            clobber_flags();
+            // These helpers use the CPU vector file. Blocks containing this
+            // IR op are never cache-pinned; flush GPRs for INS-general inputs.
+            flush_all_vregs();
+            emit_mov_reg(RDI, CPU_REG);
+            emit_mov_imm32_zext(RSI, opcode);
+            emit_push(WIN_REG);
+            emit_call_aligned(fn, 1);
+            emit_pop(WIN_REG);
+            invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX)|
+                                 (1u<<R8)|(1u<<R9)|(1u<<R11));
+            return true;
+        }
+
         // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native SSE2 ────
         case IROp::SIMD_LOGICAL: {
             // v_lo[dest],v_hi[dest] = src1 OP src2
@@ -239,7 +258,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // SIMD_LOGICAL touches no GPRs: the SSE2 XMM half-loop and the
             // VEX vec-cache path both use XMM0-2 only, and the RBX base
             // register is reserved (never holds a cached vreg). No GPR flush.
-            uint8_t opc = inst.logical_params().subop;
+            const auto logic = inst.logical_params();
+            uint8_t opc = logic.subop;
             // For opc 0-2 we use a single SSE2 op; for 3-5 we emit a
             // 2-3 instruction sequence.
             uint8_t sse_op = 0;
@@ -281,6 +301,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                         emit_vex3(1, false, xs1, 1, xd, xs2, true, 0xEF);  // vpxor xd,xs1,xs2
                         emit_vex3(1, false, 0, 1, 0, 0, true, 0x76);       // vpcmpeqd xmm0,xmm0
                         emit_vex3(1, false, xd, 1, xd, 0, true, 0xEF);     // vpxor xd,xd,xmm0 → ~
+                    }
+                    if (!logic.q) {
+                        // SSE2 byte shifts preserve low 64 bits, clear high.
+                        for (uint8_t group : {uint8_t(7), uint8_t(3)}) {
+                            emit_byte(0x66);
+                            if (xd >= 8) emit_byte(0x41);
+                            emit_byte(0x0F); emit_byte(0x73);
+                            emit_byte(0xC0 | (group << 3) | (xd & 7)); emit_byte(8);
+                        }
                     }
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
@@ -342,7 +371,12 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_logical_half(off1lo, off2lo, offdlo);
-            emit_logical_half(off1hi, off2hi, offdhi);
+            if (logic.q) emit_logical_half(off1hi, off2hi, offdhi);
+            else {
+                emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC0);
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offdhi);
+            }
             return true;
         }
         // ── SIMD ARITH (integer lane-wise add/sub/mul/min/max) ───────
@@ -480,14 +514,91 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // 0F prefix) or addpd/... (double, 66 0F prefix). FABD = sub then
         // clear sign bit (andps). width = element bytes (4/8); flags_op
         // = Q (1 = process both v_lo and v_hi, 0 = v_lo only).
+        case IROp::SIMD_SCALAR_DUP: {
+            const auto p = inst.scalar_dup_params();
+            flush_invalidate_host_regs(1u << RAX);
+            int byte = p.lane * p.esize;
+            int off = (byte < 8 ? V_LO_OFF : V_HI_OFF) + inst.src1 * 8 + byte % 8;
+            switch (p.esize) {
+                case 1: emit_load8(RAX, CPU_REG, off); break;
+                case 2: emit_load16(RAX, CPU_REG, off); break;
+                case 4: emit_load32(RAX, CPU_REG, off); break;
+                default: emit_load(RAX, CPU_REG, off); break;
+            }
+            emit_store(CPU_REG, V_LO_OFF + inst.dest * 8, RAX);
+            emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, V_HI_OFF + inst.dest * 8, RAX);
+            return true;
+        }
+        case IROp::SIMD_FP_UNARY: {
+            const SimdSubopParams p = inst.fp_unary_params();
+            clobber_flags();
+            flush_invalidate_host_regs(1u << RAX);
+            // This op is intentionally not cache-pinned. Load both halves
+            // before writing either, preserving same-register aliasing.
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+            emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.src1*8);
+            if (p.q) {
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(1,CPU_REG,V_HI_OFF + inst.src1*8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC1);
+            }
+            if (p.subop == 2) {
+                if (p.esize == 8) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0x51); emit_byte(0xC0); // sqrtps/pd
+            } else {
+                uint64_t mask = p.esize == 8 ? 0x8000000000000000ULL : 0x8000000080000000ULL;
+                if (p.subop == 0) mask = ~mask;
+                emit_mov_imm64(RAX,mask);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC9);
+                emit_byte(0x0F); emit_byte(p.subop == 0 ? 0x54 : 0x57); emit_byte(0xC1);
+            }
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+            emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.dest*8);
+            if (p.q) {
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73); emit_byte(0xD8); emit_byte(8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                emit_modrm_disp(0,CPU_REG,V_HI_OFF + inst.dest*8);
+            } else {
+                emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,V_HI_OFF + inst.dest*8,RAX);
+            }
+            return true;
+        }
         case IROp::SIMD_FP_ARITH: {
-            const SimdSubopParams fp = inst.fp_arith_params();
+            const SimdFpArithParams fp = inst.fp_arith_params();
             uint8_t opc = fp.subop;
             int esize = static_cast<int>(fp.esize);
             bool Q = fp.q;
             bool is_double = (esize == 8);
             if (esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            if (fp.lane >= 0) {
+                clobber_flags(); flush_invalidate_host_regs(1u << RAX);
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.src1*8);
+                if (Q) {
+                    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                    emit_modrm_disp(1,CPU_REG,V_HI_OFF + inst.src1*8);
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC1);
+                }
+                int offset = fp.lane * esize;
+                int base = offset < 8 ? V_LO_OFF : V_HI_OFF;
+                emit_byte(is_double ? 0xF2 : 0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1,CPU_REG,base + inst.src2*8 + offset%8);
+                if (is_double) { emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC9); }
+                else { emit_byte(0x66); emit_byte(0x0F); emit_byte(0x70); emit_byte(0xC9); emit_byte(0); }
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1); // mulps/pd
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.dest*8);
+                if (Q) {
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73); emit_byte(0xD8); emit_byte(8);
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                    emit_modrm_disp(0,CPU_REG,V_HI_OFF + inst.dest*8);
+                } else { emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,V_HI_OFF + inst.dest*8,RAX); }
                 return true;
             }
             // Map opcode to SSE op byte.

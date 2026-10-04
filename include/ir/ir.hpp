@@ -25,6 +25,7 @@
 // typically emits 1-3 x86 instructions, and the optimizer removes
 // redundant loads/stores between consecutive ARM64 instructions.
 #pragma once
+#include "jit/native_structure.hpp"
 #include "decoder.hpp"
 #include <cstdint>
 #include <cstddef>
@@ -130,6 +131,9 @@ enum class IROp : uint8_t {
     // Native SIMD/NEON ops (operate on v_lo/v_hi directly via SSE2/AVX)
     SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
                    // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
+    SIMD_NATIVE_STRUCT, // structured vector memory helper, terminates block
+    SIMD_NATIVE_EXTRA, // dedicated compiled SIMD helper (no interpreter dispatch)
+    SIMD_SCALAR_DUP, // SimdScalarDupParams: copy one lane, clear remaining bits
     SIMD_DUP,      // v_lo[dest] = v_hi[dest] = src1 (broadcast 64-bit)
     SIMD_UMOV,     // regs[dest] = element[imm] of vector src1 (v_lo/v_hi)
                    // width = element size in bytes (1, 2, 4, 8);
@@ -208,6 +212,7 @@ enum class IROp : uint8_t {
     //   width = element size in bytes (4=float, 8=double)
     //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
     SIMD_FP_ARITH,
+    SIMD_FP_UNARY, // packed FABS/FNEG/FSQRT; SimdSubopParams
     // Native SIMD FP fused 3-source (FMLA/FMLS, 1.5.4-alpha). Accumulates
     // into dest: dest = dest ± src1*src2 per lane. Same shape as
     // SIMD_FP_ARITH but reads the OLD dest as the accumulator.
@@ -498,6 +503,10 @@ struct IRInst {
     static IRInst make_arith(uint16_t dest, uint16_t src1, uint16_t src2,
                              const struct SimdArithParams& p, uint64_t arm_pc);
     struct SimdArithParams arith_params() const;
+    static IRInst make_native_structure(const NativeStructureParams&, uint64_t arm_pc);
+    NativeStructureParams native_structure_params() const { return NativeStructureParams::unpack(imm); }
+    static IRInst make_native_simd(uint32_t opcode, uint64_t arm_pc);
+    uint32_t native_simd_opcode() const { return static_cast<uint32_t>(imm); }
     static IRInst make_logical(uint16_t dest, uint16_t src1, uint16_t src2,
                                const struct SimdLogicParams& p,
                                uint64_t arm_pc);
@@ -518,6 +527,9 @@ struct IRInst {
     static IRInst make_movi(uint16_t dest, const struct SimdMoviParams& p,
                             uint64_t arm_pc);
     struct SimdMoviParams movi_params() const;
+    static IRInst make_scalar_dup(uint16_t dest, uint16_t src,
+                                  const struct SimdScalarDupParams& p, uint64_t arm_pc);
+    struct SimdScalarDupParams scalar_dup_params() const;
     static IRInst make_dup(uint16_t dest, uint16_t src,
                            const struct SimdDupParams& p, uint64_t arm_pc);
     struct SimdDupParams dup_params() const;
@@ -611,6 +623,10 @@ struct IRInst {
     static IRInst make_imm(uint16_t dest, uint64_t value,
                            uint64_t arm_pc = 0);
     uint64_t imm_value() const;
+    static IRInst make_llsc(IROp op, uint16_t dest, uint16_t address,
+                            uint16_t value, uint8_t width, bool exclusive,
+                            uint64_t arm_pc);
+    bool llsc_exclusive() const { return flags_op != 0; }
     uint8_t llsc_width() const;
     uint8_t csin_rd() const;
     uint8_t swar_rd() const;
@@ -668,9 +684,12 @@ struct IRInst {
                            const struct SimdSubopParams& p, uint64_t arm_pc);
     struct SimdSubopParams cmp_params() const;
     static IRInst make_fp_arith(uint16_t dest, uint16_t src1, uint16_t src2,
-                                const struct SimdSubopParams& p,
+                                const struct SimdFpArithParams& p,
                                 uint64_t arm_pc);
-    struct SimdSubopParams fp_arith_params() const;
+    struct SimdFpArithParams fp_arith_params() const;
+    static IRInst make_fp_unary(uint16_t dest, uint16_t src1,
+                                const struct SimdSubopParams& p, uint64_t arm_pc);
+    struct SimdSubopParams fp_unary_params() const;
     static IRInst make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
                               const struct SimdSubopParams& p,
                               uint64_t arm_pc);
@@ -700,6 +719,10 @@ struct SimdTblParams {
     bool is_tbx = false;// packed into flags_op bit 1
     bool q = false;     // 0 = 64-bit operand, 1 = 128-bit (flags_op bit 0)
 };
+struct SimdScalarDupParams {
+    uint8_t esize = 1;
+    uint8_t lane = 0;
+};
 struct SimdInsParams {
     uint8_t esize = 1;  // element size in bytes: 1, 2, 4, 8 (width)
     uint8_t dst_off = 0;// destination element byte offset, didx*esize (imm)
@@ -716,6 +739,12 @@ struct SimdSubopParams {
     uint8_t subop = 0;  // operation selector (packed into imm)
     uint8_t esize = 1;  // element size in bytes (packed into width)
     bool q = false;     // 0 = 64-bit operand, 1 = 128-bit (flags_op)
+};
+struct SimdFpArithParams {
+    uint8_t subop = 0;
+    uint8_t esize = 4;
+    bool q = false;
+    int8_t lane = -1; // -1: vector source; otherwise broadcast indexed src2
 };
 // Same shape but with a real src2 (PERMUTE/PAIRMIN take rn AND rm).
 struct SimdBinopParams {
@@ -735,7 +764,8 @@ struct SimdArithParams {
 };
 // Bitwise logical: subop only (imm); width/cond/flags_op are always 0.
 struct SimdLogicParams {
-    uint8_t subop = 0;  // 0=and,1=orr,2=xor,3=bic,4=orn (5=eon, no row yet)
+    uint8_t subop = 0;  // 0=and,1=orr,2=xor,3=bic,4=orn,5=eon
+    bool q = true;
 };
 // Vector shift-by-immediate (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI/URSRA/
 // SRSRA): imm=shift amount, width=esize, flags_op=Q. The opcode itself
@@ -902,6 +932,9 @@ struct FpMovParams {
 struct FpCmpParams {
     uint8_t ftype = 0;   // 0=S, 1=D (width)
     bool with_zero = false;  // 1=FCMP Dn,#0.0 form (imm)
+    bool conditional = false;
+    uint8_t condition = 0;
+    uint8_t nzcv = 0;
 };
 struct FpMoviParams {
     uint8_t ftype = 0;   // 0=S, 1=D (width)
@@ -1108,6 +1141,13 @@ inline SimdArithParams IRInst::arith_params() const {
 }
 // Bitwise logical: ONLY subop varies (imm); width/cond/flags_op are
 // always 0. The factory hardcodes the constants.
+inline IRInst IRInst::make_native_structure(const NativeStructureParams& p, uint64_t arm_pc) {
+    IRInst i{}; i.op = IROp::SIMD_NATIVE_STRUCT; i.imm = p.pack(); i.arm_pc = arm_pc; return i;
+}
+inline IRInst IRInst::make_native_simd(uint32_t opcode, uint64_t arm_pc) {
+    IRInst i{}; i.op = IROp::SIMD_NATIVE_EXTRA; i.imm = opcode;
+    i.arm_pc = arm_pc; return i;
+}
 inline IRInst IRInst::make_logical(uint16_t dest, uint16_t src1,
                                    uint16_t src2, const SimdLogicParams& p,
                                    uint64_t arm_pc) {
@@ -1118,13 +1158,13 @@ inline IRInst IRInst::make_logical(uint16_t dest, uint16_t src1,
     inst.src2 = src2;
     inst.width = 0;
     inst.cond = 0;
-    inst.flags_op = 0;
+    inst.flags_op = p.q;
     inst.imm = p.subop;
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline SimdLogicParams IRInst::logical_params() const {
-    return SimdLogicParams{static_cast<uint8_t>(imm)};
+    return SimdLogicParams{static_cast<uint8_t>(imm), flags_op != 0};
 }
 inline IRInst IRInst::make_shift(IROp op, uint16_t dest, uint16_t src,
                                  const SimdShiftParams& p, uint64_t arm_pc) {
@@ -1210,8 +1250,16 @@ inline IRInst IRInst::make_movi(uint16_t dest, const SimdMoviParams& p,
 inline SimdMoviParams IRInst::movi_params() const {
     return SimdMoviParams{imm, (flags_op & 1) != 0};
 }
-// GPR->vector broadcast (DUP): width=esize bytes, flags_op=Q, imm is
-// always 0. Both producers (2d form and general form) fit.
+// Scalar lane copy: width=element bytes, aux=source lane.
+inline IRInst IRInst::make_scalar_dup(uint16_t dest, uint16_t src,
+                                     const SimdScalarDupParams& p, uint64_t arm_pc) {
+    IRInst i{}; i.op = IROp::SIMD_SCALAR_DUP; i.dest = dest; i.src1 = src;
+    i.width = p.esize; i.aux = p.lane; i.arm_pc = arm_pc; return i;
+}
+inline SimdScalarDupParams IRInst::scalar_dup_params() const {
+    return SimdScalarDupParams{width, static_cast<uint8_t>(aux)};
+}
+// GPR->vector broadcast: width=esize, flags_op=Q.
 inline IRInst IRInst::make_dup(uint16_t dest, uint16_t src,
                                const SimdDupParams& p, uint64_t arm_pc) {
     IRInst inst{};
@@ -1711,6 +1759,13 @@ inline uint64_t IRInst::imm_value() const {
 // these ops today; the cases exist as fallback). They need typed access
 // for the privatized build; if a producer is ever added, promote the op
 // to a full param struct + factory + validator case.
+inline IRInst IRInst::make_llsc(IROp op, uint16_t dest, uint16_t address,
+                                 uint16_t value, uint8_t bytes, bool exclusive,
+                                 uint64_t arm_pc) {
+    IRInst i{}; i.op = op; i.dest = dest; i.src1 = address; i.src2 = value;
+    i.width = bytes; i.flags_op = exclusive; i.arm_pc = arm_pc;
+    return i;
+}
 inline uint8_t IRInst::llsc_width() const {
     return width;  // LDXR_FAST/STXR_FAST/STLR_FAST access size
 }
@@ -1842,12 +1897,14 @@ inline IRInst IRInst::make_fp_cmp(uint16_t dest, uint16_t src1, uint16_t src2,
     inst.src1 = src1;
     inst.src2 = src2;
     inst.width = p.ftype;
-    inst.imm = p.with_zero ? 1 : 0;
+    inst.imm = (p.with_zero ? 1 : 0) | (p.conditional ? 2 : 0);
+    inst.cond = p.condition;
+    inst.flags_op = p.nzcv;
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline FpCmpParams IRInst::fp_cmp_params() const {
-    return FpCmpParams{width, (imm & 1) != 0};
+    return FpCmpParams{width, (imm & 1) != 0, (imm & 2) != 0, cond, flags_op};
 }
 // FP immediate: width=ftype, imm=decoded bits.
 inline IRInst IRInst::make_fp_movi(uint16_t dest, const FpMoviParams& p,
@@ -2007,7 +2064,7 @@ inline SimdSubopParams IRInst::cmp_params() const {
                            (flags_op & 1) != 0};
 }
 inline IRInst IRInst::make_fp_arith(uint16_t dest, uint16_t src1,
-                                    uint16_t src2, const SimdSubopParams& p,
+                                    uint16_t src2, const SimdFpArithParams& p,
                                     uint64_t arm_pc) {
     IRInst inst{};
     inst.op = IROp::SIMD_FP_ARITH;
@@ -2017,12 +2074,25 @@ inline IRInst IRInst::make_fp_arith(uint16_t dest, uint16_t src1,
     inst.width = p.esize;
     inst.flags_op = p.q ? 1 : 0;
     inst.imm = p.subop;
+    inst.aux = static_cast<uint64_t>(p.lane + 1);
     inst.arm_pc = arm_pc;
     return inst;
 }
-inline SimdSubopParams IRInst::fp_arith_params() const {
-    return SimdSubopParams{static_cast<uint8_t>(imm), width,
-                           (flags_op & 1) != 0};
+inline SimdFpArithParams IRInst::fp_arith_params() const {
+    return SimdFpArithParams{static_cast<uint8_t>(imm), width,
+                           (flags_op & 1) != 0, aux ? static_cast<int8_t>(aux - 1) : int8_t(-1)};
+}
+inline IRInst IRInst::make_fp_unary(uint16_t dest, uint16_t src1,
+                                    const SimdSubopParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::SIMD_FP_UNARY;
+    inst.dest = dest; inst.src1 = src1;
+    inst.width = p.esize; inst.flags_op = p.q ? 1 : 0;
+    inst.imm = p.subop; inst.arm_pc = arm_pc;
+    return inst;
+}
+inline SimdSubopParams IRInst::fp_unary_params() const {
+    return SimdSubopParams{static_cast<uint8_t>(imm), width, (flags_op & 1) != 0};
 }
 inline IRInst IRInst::make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
                                   const SimdSubopParams& p, uint64_t arm_pc) {

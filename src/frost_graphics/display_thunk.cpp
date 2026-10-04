@@ -1,3 +1,4 @@
+#include "frost/window_stats.hpp"
 // frost_graphics/display_thunk.cpp — DisplayThunk implementation (1.5.4-alpha).
 //
 // See include/frost/display_thunk.hpp for the design overview. This file
@@ -2210,6 +2211,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    window_stats::api(entry.name,args,ret);
     cpu.regs[0] = ret;
     return 0;
 }
@@ -2476,6 +2478,13 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 try { mem->write(results_guest, results_host, have); }
                 catch (...) { /* out pointer unmapped — results lost */ }
             }
+        }
+        if (dbg().frame_trace)
+            fprintf(stderr,"[window-stats] present ret=%d count=%u chain=%llx\n",static_cast<int32_t>(ret),pi->swapchainCount,pi->pSwapchains ? (unsigned long long)static_cast<const uint64_t*>(pi->pSwapchains)[0] : 0);
+        if ((static_cast<int32_t>(ret) == 0 || static_cast<int32_t>(ret) == 1000001003) && pi->pSwapchains) {
+            for (uint32_t i = 0; i < pi->swapchainCount; ++i)
+                if (!results_host || results_host[i] == 0 || results_host[i] == 1000001003)
+                    window_stats::vk_present(static_cast<const uint64_t*>(pi->pSwapchains)[i]);
         }
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) {

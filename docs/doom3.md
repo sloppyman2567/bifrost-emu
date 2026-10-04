@@ -83,17 +83,141 @@ build. This supports the animation repair and working gameplay; the known
 performance, settings and save-loading limitations below remain separately
 tracked.
 
+### Profile-guided math optimization
+
+Starting-map gameplay samples, excluding menu idle, put about 37% of sampled
+CPU time in the interpreter and 39% in the broad dispatch bucket. Translation
+was effectively idle once the scene was warm. Instruction tracing identified
+indexed vector FMUL and vector FNEG in the math workload. Vector indexed
+FMUL (2S/4S/2D) and unary FABS/FNEG/FSQRT now have native JIT paths.
+
+The `ctest/bench_doom_vector_fp.c` five-million-iteration multiply/negate
+probe, using exact finite inputs,
+took 1.15–1.34 seconds with the previous binary and 0.069–0.071 seconds with
+the new build, returning identical results. This is an instruction-level
+measurement, not a whole-game FPS gain. The indexed regression passes all
+28 lane/alias/upper-clearing checks in QEMU, interpreter and JIT; the existing
+unary regression passes all 530 checks. The JIT unit suite passes 76/76,
+and the complete suite passes 253/253 with desktop and audio access.
+Sustained 5 FPS at 3440×1440, including the underground slowdown reported
+after roughly 14 minutes, remains unverified. Save loading remains unresolved.
+
+The next fallback batch adds native FRINTA, signed FCVTAS and scalar lane
+copies. The heavily observed rounding pair was located inside guest libm's
+`expf`; OpenAL and Doom also contain frequent scalar lane extraction. Native
+rounding preserves ties-away, adjacent values, signed zero, NaNs and signed
+saturation; lane extraction clears unused bits and handles aliases.
+
+`ctest/bench_doom_round_lane.c` runs two million iterations per phase. Across
+three runs, the previous binary took 107–108 ms for the rounding pair and
+161–164 ms for three lane copies; the new binary took about 10.2 ms and
+3.24–3.30 ms respectively (roughly 10.6× and 49.6× throughput gains). All
+outputs match. These are instruction probes, not gameplay FPS measurements.
+The rounding regression passes 6,984 checks and scalar lane extraction passes
+60 checks in QEMU, interpreter and verified JIT. The complete JIT suite
+passes 254/254 with IR validation and desktop/audio access. Its whole-game
+benefit still needs a matched-scene comparison.
+
+### Complete interpreted-instruction inventory
+
+`BIFROST_FALLBACK_PROFILE=/tmp/doom-interpreted.tsv` records every observed
+interpreted PC/opcode per guest and host thread, without the old top-12 cutoff.
+`BIFROST_STATS_PERIOD=5` requests periodic snapshots; normal exit also writes
+a final snapshot. Counts are cumulative, and this opt-in diagnostic adds
+overhead. Compare successive snapshots to isolate gameplay from initialization.
+It includes deliberately interpreted callbacks and thread bodies, rather than
+only unsupported JIT instructions. Do not use its FPS as a benchmark or
+instruction frequency as CPU-time attribution.
+
+The completed starting-map capture observed 24,989 distinct encodings across
+six guest threads. Before this repair, the real IR translator classified 625
+encodings as explicit `CALL_INTERP`, spanning 54 assembly mnemonics. All 625
+captured encodings now translate without explicit IR fallback and pass actual
+JIT execution checks. This covers that capture, not every possible map or all
+AArch64 instructions.
+
+Q=0 vector logical operations and `FCCMP/FCCMPE` use inline x86 code.
+Exclusive/acquire-release loads and stores use the existing native monitor
+helpers. Complex SIMD operations (selection, lane broadcasts/insertion,
+narrowing/widening, comparisons, shifts, conversions, reductions, indexed fused
+FMLA and vector immediates) use specialized compiled native helpers selected
+at translation time. These helpers do not invoke the decoder or interpreter.
+Structured vector loads/stores use a native memory helper with alias-safe
+snapshots, complete access checking, post-index writeback and signal-PC exit.
+They remain Tier-1 boundaries; Tier-2 does not fuse through that fault boundary.
+
+SDL-created guest threads now use the JIT when enabled, retaining interpreter
+execution under `--no-jit`. A per-CPU return sentinel stops nested JIT call
+helpers and unwinds generated callers before stale cached state can overwrite
+a nonlocal return. The SDL regression covers create/wait, eight concurrent
+workers, detach and 16 nested `setjmp`/`longjmp` returns. The previously
+interpreted `Sys_SleepUntilPrecise()` worker can now execute supported
+instructions with JIT. Its previous instruction counts were not CPU-time
+measurements or evidence of missing opcode support.
+
+`bash scripts/test_native_doom_gaps.sh` executes all captured encodings with
+32 randomized states each: 20,000 checks, zero register/memory mismatches,
+and zero explicit IR fallbacks. `ctest/jit_doom_gap.c` adds 2,054 fixed-oracle
+checks, including every conditional compare condition and NZCV input for
+single/double less/equal/greater/NaN cases. It passes QEMU, interpreter and
+verified JIT. Independent QEMU checks also exposed reference-interpreter
+errors in FCVTL, SHLL, ADDV result width and fused indexed FMLA; these are
+corrected. Verification now retains cross-block flag stores whose elimination
+is valid for execution but caused stale boundary-NZCV comparisons.
+
+The final full suite passes 255/255 under JIT and 252/252 under interpreter
+with three JIT-only skips. SDL thread lifecycle checks pass separately in both
+engines. Subsequent live gameplay provides the longer validation below;
+instruction probes and suite results alone do not establish a sustained FPS.
+
+`tools/inspect_interpreted_ops.cpp` classifies hex words with the actual decoder
+and translator. `TRANSLATED` only excludes explicit IR fallback; code generation
+can still fall back for host capability or operand conditions.
+`bash scripts/test_fallback_profile.sh` verifies complete concurrent snapshots
+and retention after worker exit (192 entries, 192,000 exact counts).
+
+### Extended gameplay and remaining performance work
+
+After the native-gap and SDL-thread repairs, the user completed a roughly
+27-minute recorded session without a reported crash, progressing through
+Mars City and underground combat. Timestamped frame sampling across the
+recording corroborates exploration, dialogue, combat and return to menus.
+The user reports gameplay never dropped below about 3 FPS and cutscenes
+sustained about 60 FPS. Inspected title samples show 60 FPS in the arrival
+sequence and 4.7 FPS in a later combat scene. These are presentation-counter
+readings and user observations, not a continuous frame-time benchmark or
+proof of a universal minimum FPS.
+
+A fresh 34-second live sampling interval recorded no interpreter samples,
+about 59% native JIT and 41% in the broad dispatch bucket, with translation
+below 0.1%. The sampler initializes JIT-buffer bounds on one thread and
+captures only that initial capacity: worker JIT execution and code beyond
+the original buffer can be misclassified as dispatch. Fix per-thread bounds
+and growth tracking before treating that bucket as dispatcher-only CPU cost.
+
+The user reports that a stationary scene gets faster after warming up and
+that revisiting a scene still stutters. Recompilation is a hypothesis, not
+an established cause. Measure translation deltas, cache hits/misses,
+invalidation reasons, shader creation, asset I/O and per-frame timing during
+cold entry, warm idle and repeat visits. Check that cached code is reused
+before choosing eviction, persistence or prewarming changes. The v2.0
+[roadmap](../roadmap.md) targets more consistent Doom 3 performance, including
+60+ FPS in selected representative scenes where the host permits it.
+
 ### Remaining issues
 
-- Longer stability runs and loading performance need further validation. The
-  isolated map-load check took about 65 seconds; user settings can differ.
+- The recorded session supports approximately 27 minutes of crash-free use,
+  not stability across all maps or unlimited runtime. Loading and long-term
+  frame pacing need further validation; the earlier isolated map-load check
+  took about 65 seconds and user settings can differ.
 - The first live gameplay profile exposed a full 64 MiB JIT code buffer,
   repeated compilation of cached interpreter-only call targets and uncached
   overflow failures. The cache now grows in place within a 1 GiB virtual
   reservation, and fallback decisions are cached. The repaired live copy
   crosses 64 MiB, grows to 128 MiB and reports zero overflows. Translation
-  sample counts stop increasing in steady execution, but interpreter
-  fallback remains a substantial CPU cost; overall performance is unresolved.
+  sample counts stop increasing in steady execution. SDL workers now run
+  with JIT, and a subsequent live interval recorded no interpreter samples.
+  Overall frame pacing and correctly attributed dispatch costs remain open.
 - The user reports settings options that do not work. Audio was initially
   inaudible, but the user subsequently confirmed sound in the loaded demo.
   Settings behavior remains unresolved.
@@ -101,7 +225,8 @@ tracked.
   invisible cursor. Viewport sizing and cursor behavior remain unresolved.
 - Loading an existing save reports a script checksum mismatch and explicitly
   restarts the map with persistent player data. The cause of the mismatch
-  remains unresolved; this does not establish save-file corruption.
+  remains unresolved; this does not establish save-file corruption. The latest
+  user report still indicates save loading is not working correctly.
 - Gamepad mapping and responsiveness have not been validated. Input tracing
   and verification of mouse/keyboard events should precede gamepad tuning.
 

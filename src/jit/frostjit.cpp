@@ -392,11 +392,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
+            emit_mov_imm64(RAX, inst.arm_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
             emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
-            emit_mov_imm32(RCX, inst.llsc_width());
-            emit_call_aligned(&jit_ldxr, 0);
+            emit_mov_imm32(RCX, inst.llsc_width() | (inst.llsc_exclusive() ? 0 : 0x100));
+            emit_push(WIN_REG);
+            emit_call_aligned(&jit_ldxr, 1);
+            emit_pop(WIN_REG);
             store_reg_to_vreg(inst.dest, RAX);
             invalidate_host_regs(MEM_CLOBBER);
             return false;
@@ -409,12 +413,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
+            emit_mov_imm64(RAX, inst.arm_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
             emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
             emit_mov_imm32(R8, inst.llsc_width());
-            emit_call_aligned(&jit_stxr, 0);
+            emit_push(WIN_REG);
+            emit_call_aligned(&jit_stxr, 1);
+            emit_pop(WIN_REG);
             store_reg_to_vreg(inst.dest, RAX);
             invalidate_host_regs(MEM_CLOBBER);
             return false;
@@ -427,12 +435,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
+            emit_mov_imm64(RAX, inst.arm_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
             emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
             emit_mov_imm32(R8, inst.llsc_width());
-            emit_call_aligned(&jit_stlr, 0);
+            emit_push(WIN_REG);
+            emit_call_aligned(&jit_stlr, 1);
+            emit_pop(WIN_REG);
             invalidate_host_regs(MEM_CLOBBER);
             return false;
         }
@@ -857,6 +869,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // return value back over the field after the helper already set it.
             emit_pop(WIN_REG);
             invalidate_all_vregs();
+            emit_call_stop_guard();
             if (vec_cache_active_) vec_emit_prologue_loads();
             return false;  // does NOT end the block
         }
@@ -957,6 +970,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // Invalidate ALL cache mappings after the call.
                 // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
                 invalidate_all_vregs();
+                emit_call_stop_guard();
                 if (vec_cache_active_) vec_emit_prologue_loads();
                 return false;  // does NOT end the block
             }

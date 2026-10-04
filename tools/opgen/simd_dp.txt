@@ -8,7 +8,7 @@
 # Family -> IRSUB meaning:
 #   INT_ARITH = SIMD_ARITH op (0..6 = ADD/SUB/MUL/UMIN/UMAX/SMIN/SMAX)
 #   INT_CMP   = SIMD_CMP op   (0 = CMEQ, 1 = CMGT, 2 = CMGE, 3 = CMHI, 4 = CMHS)
-#   LOGIC     = SIMD_LOGICAL op (0..4 = AND/ORR/EOR/BIC/ORN); native Q=1
+#   LOGIC     = SIMD_LOGICAL op (0..4 = AND/ORR/EOR/BIC/ORN); native Q=0/1
 #   FP        = SIMD_FP op (0..7 FADD..FMINNM, 0xB FMULX, 0xD FABD,
 #                            0xE FMLA, 0xF FMLS)
 #   SHIFT     = shift kind (0..6 = SHL/USHR/SSHR/USRA/SSRA/SLI/SRI)
@@ -37,12 +37,12 @@ CMEQ    0xBF20FC00   0x2E208C00   INT_CMP     0   -
 CMHI    0xBF20FC00   0x2E203400   INT_CMP     3   -
 CMHS    0xBF20FC00   0x2E203C00   INT_CMP     4   -
 
-# ── Bitwise logical 3-register (native Q=1) ──────────────────────────────
-AND     0xBFE0FC00   0x0E201C00   LOGIC     0   Q
-ORR     0xBFE0FC00   0x0EA01C00   LOGIC     1   Q
-EOR     0xBFE0FC00   0x2E201C00   LOGIC     2   Q
-BIC     0xBFE0FC00   0x0E601C00   LOGIC     3   Q
-ORN     0xBFE0FC00   0x0EE01C00   LOGIC     4   Q
+# ── Bitwise logical 3-register (native Q=0/1) ──────────────────────────────
+AND     0xBFE0FC00   0x0E201C00   LOGIC     0   -
+ORR     0xBFE0FC00   0x0EA01C00   LOGIC     1   -
+EOR     0xBFE0FC00   0x2E201C00   LOGIC     2   -
+BIC     0xBFE0FC00   0x0E601C00   LOGIC     3   -
+ORN     0xBFE0FC00   0x0EE01C00   LOGIC     4   -
 
 # ── Vector FP 2-source / FMA (mask FFFE..FC & ~Q30 & ~bit22) ─────────────
 FADD    0xBFA0FC00   0x0E20D400   FP        0     -
@@ -271,3 +271,9 @@ SQADD   0xBF20FC00   0x0E200C00   SATADDSUB  0   size < 2
 UQADD   0xBF20FC00   0x2E200C00   SATADDSUB  1   size < 2
 SQSUB   0xBF20FC00   0x0E202C00   SATADDSUB  2   size < 2
 UQSUB   0xBF20FC00   0x2E202C00   SATADDSUB  3   size < 2
+
+# Packed floating-point unary and indexed multiply. D vector forms require Q=1.
+FABS_VEC    0xBFBFFC00 0x0EA0F800 FP_UNARY   0   Q || size == 2
+FNEG_VEC    0xBFBFFC00 0x2EA0F800 FP_UNARY   1   Q || size == 2
+FSQRT_VEC   0xBFBFFC00 0x2EA1F800 FP_UNARY   2   Q || size == 2
+FMUL_INDEX  0xBF00F400 0x0F009000 FP_INDEXED 2   size >= 2 && (Q || size == 2) && (size == 2 || ((op >> 21) & 1) == 0)
