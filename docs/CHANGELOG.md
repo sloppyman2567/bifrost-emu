@@ -12,6 +12,13 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Toolchain download availability repair
+
+- Use checksum-pinned Bootlin musl GCC in CI, with matching compiler/runtime
+  paths and SDK relocation. Keep musl.cc as the default local source with a
+  Bootlin fallback; preserve existing installed toolchains.
+- Report actual download exit codes and test checksum/failure handling.
+
 ### CI guest-libc and proc-executable repair
 
 - Return absolute guest `/proc/self/exe` paths, preserving the sandbox

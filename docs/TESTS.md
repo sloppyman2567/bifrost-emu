@@ -41,6 +41,23 @@ out-of-bounds count-table indices. Its input now uses halfwords and checks the
 complete table against an expected histogram; QEMU, interpreter and JIT with
 register/memory verification agree on hash `0x0d693c2a`.
 
+### Toolchain bootstrap availability (2026-10-04)
+
+The musl.cc download endpoint timed out from GitHub runners. CI now selects
+Bootlin's checksum-pinned `aarch64--musl--stable-2024.05-1` SDK (GCC 13.3,
+musl 1.2.5), published in its [official toolchain list](https://toolchains.bootlin.com/releases_aarch64.html).
+The default local fetch retains musl.cc and falls back to the same pinned SDK;
+existing installations are preserved. Compatibility aliases keep compiler and
+runtime lookup paths intact, and Bootlin's relocation script runs at install.
+Download failures report the actual status, and a bad checksum fails before
+installation. `scripts/test_musl_fetch.py` checks failure propagation,
+checksum rejection, temporary-file cleanup and existing-install preservation
+without network access. The actual published archive was downloaded, verified,
+installed in a temporary directory and used to rebuild fixtures in an isolated
+checkout. Those fresh fixtures pass 80 JIT units, 78 interpreter units, 56
+differential fixtures plus four threaded oracles, 57 C API checks and 61
+native-bridge checks; the installed developer toolchain was not replaced.
+
 ### CI guest-libc and proc-executable follow-up (2026-10-04)
 
 The build portability repair passed both GitHub build configurations. The next

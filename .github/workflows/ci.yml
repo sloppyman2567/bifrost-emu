@@ -39,6 +39,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential python3 curl libffi-dev gcc-aarch64-linux-gnu
+      - name: Provision checksum-pinned musl toolchain
+        run: |
+          python3 scripts/test_musl_fetch.py
+          bash tools/fetch-musl-toolchain.sh --bootlin
       - name: Compile guest fixtures
         run: make setup-tests GLIBC_CC=aarch64-linux-gnu-gcc
       - name: Check generated sources and build emulator
@@ -81,6 +85,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential python3 curl gcc-aarch64-linux-gnu libsdl2-dev libgl-dev libegl-dev libffi-dev
+      - name: Provision checksum-pinned musl toolchain
+        run: |
+          python3 scripts/test_musl_fetch.py
+          bash tools/fetch-musl-toolchain.sh --bootlin
       - name: Run strict full suite
         env:
           AARCH64_SYSROOT: /usr/aarch64-linux-gnu

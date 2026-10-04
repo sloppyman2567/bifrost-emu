@@ -1,72 +1,57 @@
 #!/bin/bash
-# fetch-musl-toolchain.sh — download the prebuilt musl aarch64 cross-toolchain.
-#
-# We don't bundle the 104 MB tarball in the repo (it bloats git history
-# and release tarballs). Instead, this script downloads it on demand from
-# musl.cc and extracts it under tools/.
-#
-# The download is bounded by a hard 90-second total timeout (--max-time for
-# curl, --timeout for wget). Without a cap, a stalled mirror or a flaky
-# network can hang the bootstrap indefinitely — particularly painful in CI
-# where the job would just run until the runner's wall-clock limit. 90 s is
-# generous for a 104 MB tarball on a 1.5 MB/s link, while still being short
-# enough to fail fast so the caller can retry or surface the error.
-#
-# Usage:
-#   ./tools/fetch-musl-toolchain.sh
-#
-# Then cross-compile with:
-#   tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc -static -O2 -o foo.elf foo.c
+# Fetch AArch64 musl GCC. Existing toolchains are preserved. CI selects the
+# pinned Bootlin source; musl.cc remains the default with Bootlin fallback.
 set -euo pipefail
 cd "$(dirname "$0")"
-
-URL="https://musl.cc/aarch64-linux-musl-cross.tgz"
-TARBALL="aarch64-linux-musl-cross.tgz"
-DIR="aarch64-linux-musl-cross"
-
-# Hard total timeout (seconds) for the download phase. Covers connect +
-# transfer + any retries the tool decides to do internally. Bump this only
-# if you are intentionally fetching over a very slow link.
-DOWNLOAD_TIMEOUT=90
-
-if [ -x "$DIR/bin/aarch64-linux-musl-gcc" ]; then
-    echo "musl toolchain already present at tools/$DIR/"
-    exit 0
+source=${1:-musl.cc}
+if [[ "$source" != musl.cc && "$source" != --bootlin ]]; then
+    echo 'Usage: fetch-musl-toolchain.sh [--bootlin]' >&2; exit 2
 fi
-
-echo "Downloading $URL (timeout: ${DOWNLOAD_TIMEOUT}s) ..."
-if command -v curl >/dev/null 2>&1; then
-    # --max-time caps the WHOLE transfer (connect + body) at 90 s.
-    # --connect-timeout 15 fails fast if the server is unreachable, so we
-    # don't burn the full 90 s on a dead host. --retry 1 allows a single
-    # retry on a transient curl error (e.g. a TCP reset) without spiraling
-    # into a long retry storm.
-    if ! curl -fL --connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 1 \
-            -o "$TARBALL" "$URL"; then
-        echo "Error: download failed (curl exit $?). Check connectivity or" >&2
-        echo "       retry manually with: curl -fL -o $TARBALL $URL" >&2
-        [ -f "$TARBALL" ] && rm -f "$TARBALL"
-        exit 1
+install_dir=aarch64-linux-musl-cross
+if [[ -x "$install_dir/bin/aarch64-linux-musl-gcc" ]]; then
+    echo "musl toolchain already present at tools/$install_dir/"; exit 0
+fi
+if [[ -e "$install_dir" ]]; then
+    echo "Error: incomplete $install_dir exists; move it aside before retrying." >&2; exit 1
+fi
+stage=$(mktemp -d .musl-fetch.XXXXXX)
+trap 'rm -rf -- "$stage"' EXIT
+download() {
+    local url=$1 output=$2 rc
+    echo "Downloading $url ..."
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fL --connect-timeout 15 --max-time 180 --retry 1 -o "$output" "$url"; then return 0; else rc=$?; fi
+        echo "Error: curl download failed (exit $rc): $url" >&2
+    elif command -v wget >/dev/null 2>&1; then
+        if timeout -k 5 180 wget --timeout=15 --tries=2 -O "$output" "$url"; then return 0; else rc=$?; fi
+        echo "Error: wget download failed (exit $rc): $url" >&2
+    else
+        echo 'Error: need curl or wget to download.' >&2; return 1
     fi
-elif command -v wget >/dev/null 2>&1; then
-    # wget --timeout sets connect+read+write timeouts all at once; combined
-    # with --tries=1 we get the same "fail fast, don't hang" behavior as
-    # the curl branch. wget has no single "total transfer time" cap, but
-    # the per-operation timeout bounds the worst-case stall to 90 s.
-    if ! wget --timeout="$DOWNLOAD_TIMEOUT" --tries=1 -O "$TARBALL" "$URL"; then
-        echo "Error: download failed (wget exit $?). Check connectivity or" >&2
-        echo "       retry manually with: wget -O $TARBALL $URL" >&2
-        [ -f "$TARBALL" ] && rm -f "$TARBALL"
-        exit 1
-    fi
+    return "$rc"
+}
+if [[ "$source" == musl.cc ]] && download https://musl.cc/aarch64-linux-musl-cross.tgz "$stage/toolchain.tgz"; then
+    tar -xzf "$stage/toolchain.tgz" -C "$stage"
 else
-    echo "Error: need curl or wget to download." >&2
-    exit 1
+    echo 'Using checksum-pinned Bootlin musl toolchain.'
+    name=aarch64--musl--stable-2024.05-1
+    checksum=f847da1195325525f3f07eef045ef40c6b48464a37e0f7fea77360dfe0bc1aa1
+    download "https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/$name.tar.xz" "$stage/toolchain.tar.xz"
+    printf '%s  %s\n' "$checksum" "$stage/toolchain.tar.xz" | sha256sum -c -
+    tar -xf "$stage/toolchain.tar.xz" -C "$stage"
+    mv "$stage/$name" "$stage/$install_dir"
+    # Preserve the established compiler and runtime lookup paths. Bootlin's
+    # real compiler keeps its original target tuple and relative SDK layout.
+    for tool in "$stage/$install_dir"/bin/aarch64-buildroot-linux-musl-*; do
+        suffix=${tool##*/aarch64-buildroot-linux-musl-}
+        ln -s "${tool##*/}" "$stage/$install_dir/bin/aarch64-linux-musl-$suffix"
+    done
+    ln -s aarch64-buildroot-linux-musl/sysroot "$stage/$install_dir/aarch64-linux-musl"
 fi
-
-echo "Extracting..."
-tar -xzf "$TARBALL"
-rm "$TARBALL"
-
-echo "Done. Toolchain at tools/$DIR/bin/aarch64-linux-musl-gcc"
-"$DIR/bin/aarch64-linux-musl-gcc" --version | head -1
+[[ -x "$stage/$install_dir/bin/aarch64-linux-musl-gcc" ]] || { echo 'Error: archive has no expected compiler' >&2; exit 1; }
+mv "$stage/$install_dir" "$install_dir"
+if [[ -f "$install_dir/relocate-sdk.sh" ]]; then
+    bash "$install_dir/relocate-sdk.sh"
+fi
+"$install_dir/bin/aarch64-linux-musl-gcc" --version | head -1
+echo "Done. Toolchain at tools/$install_dir/bin/aarch64-linux-musl-gcc"
