@@ -12,6 +12,14 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### glibc 2.39 dynamic-loader hook repair
+
+- Detect the dlfcn hook through the relocated `_rtld_global_ro` GOT pointer,
+  supporting glibc 2.39's +672 layout and existing +368/+376 layouts.
+- Fix the null native-loader call exposed by the CI `dladdr` regression;
+  validate ten dynamic-link tests with glibc 2.39 and 2.42 in both engines.
+- Run the selected dynamic-link CI tests in interpreter mode as well as JIT.
+
 ### Toolchain download availability repair
 
 - Use checksum-pinned Bootlin musl GCC in CI, with matching compiler/runtime

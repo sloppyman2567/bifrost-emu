@@ -73,6 +73,10 @@ jobs:
             --emu build/release-sdl0-gl0/bifrost-emu \
             --dynamic --strict \
             --filter '^(hello_dyn_glibc|test_dyn_(write|hello|malloc|printf|pthread_min|threads|pthread_stress|pthread_8thread)|test_dladdr_glibc)$'
+          ./scripts/run_tests.sh \
+            --emu build/release-sdl0-gl0/bifrost-emu \
+            --dynamic --strict --no-jit \
+            --filter '^(hello_dyn_glibc|test_dyn_(write|hello|malloc|printf|pthread_min|threads|pthread_stress|pthread_8thread)|test_dladdr_glibc)$'
 
   full-suite:
     name: Full provisioned suite

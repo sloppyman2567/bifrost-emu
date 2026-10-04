@@ -41,6 +41,20 @@ out-of-bounds count-table indices. Its input now uses halfwords and checks the
 complete table against an expected histogram; QEMU, interpreter and JIT with
 register/memory verification agree on hash `0x0d693c2a`.
 
+### glibc 2.39 loader-hook regression (2026-10-04)
+
+The first provisioned Ubuntu CI run passed the build, API, unit and verification
+checks, but `test_dladdr_glibc` aborted with an unmapped read at zero. An
+isolated Bootlin glibc 2.39 runtime reproduced the failure in both engines:
+`dlopen` read `_rtld_global_ro`'s hook at +672, outside the detector's previous
++352..400 window, and entered the uninitialized native-loader path.
+
+The detector now follows the relocated ADRP/GOT load and requires the actual
+`_rtld_global_ro` address before selecting the hook field. All ten selected
+dynamic-link tests pass in both engines against glibc 2.39 and 2.42, including
+`dladdr` and the eight-thread test. Headless and SDL/GL builds pass. CI now runs
+these ten dynamic-link tests in interpreter mode as well as JIT mode.
+
 ### Toolchain bootstrap availability (2026-10-04)
 
 The musl.cc download endpoint timed out from GitHub runners. CI now selects

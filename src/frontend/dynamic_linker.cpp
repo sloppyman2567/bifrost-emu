@@ -1092,44 +1092,50 @@ bool DynamicLinker::detect_dlopen_hook_offset_(uint32_t& out_hook_off) {
     } catch (...) {
         return false;
     }
-    // Same ADRP+LDR chain used by detect_tls_field_offsets_: once a
-    // register holds &_rtld_global_ro, the next LDR from that base with
-    // an offset in the known hook window is the dlfcn_hook pointer.
-    uint32_t rtld_ro_reg = 0xFFFFFFFF;
-    bool rtld_ro_reg_valid = false;
+    // Follow the relocated GOT load, rather than assuming one ABI offset.
+    // AArch64 glibc 2.39 uses +672; other builds use +368 or +376.
+    // Only accept a field load whose base is the actual _rtld_global_ro
+    // address, so an unrelated ADRP/LDR pair cannot select a wrong field.
+    const uint64_t rtld_ro = resolve_symbol("_rtld_global_ro");
+    if (rtld_ro == 0) return false;
+    uint64_t values[32] = {};
+    bool known[32] = {};
     for (size_t i = 0; i + 4 <= sizeof(code); i += 4) {
         uint32_t insn;
         memcpy(&insn, code + i, 4);
+        const uint32_t rt = insn & 0x1F;
         if ((insn & 0x9F000000) == 0x90000000) {
-            rtld_ro_reg = insn & 0x1F;
-            rtld_ro_reg_valid = false;
+            uint64_t imm = ((insn >> 5) & 0x7FFFFu) << 2;
+            imm |= (insn >> 29) & 3u;
+            const int64_t signed_imm = (imm & (1u << 20))
+                ? static_cast<int64_t>(imm) - (1ll << 21)
+                : static_cast<int64_t>(imm);
+            values[rt] = ((fn + i) & ~uint64_t{4095}) + signed_imm * 4096;
+            known[rt] = rt != 31;
             continue;
         }
-        if ((insn & 0xFFC00000) == 0xF9400000) {
-            uint32_t rn = (insn >> 5) & 0x1F;
-            uint32_t rt = insn & 0x1F;
-            uint32_t imm12 = (insn >> 10) & 0xFFF;
-            uint32_t off = imm12 * 8;  // 64-bit LDR
-            // Hook field first: glibc often reuses the same register
-            // (ldr x4, [x4, #376]), which looks like the ADRP+LDR GOT
-            // chain — so check the hook window whenever the base is
-            // already known to hold &_rtld_global_ro.
-            if (rtld_ro_reg_valid && rn == rtld_ro_reg &&
-                off >= 0x160 && off <= 0x190) {
-                out_hook_off = off;
-                if (dynlink_trace_enabled()) {
-                    fprintf(stderr, "[dynlink] detected dlopen hook offset "
-                            "+0x%x via %s @0x%llx+%zu\n",
-                            off, fn_name,
-                            static_cast<unsigned long long>(fn), i);
-                }
-                return true;
+        if ((insn & 0xFFC00000) != 0xF9400000) continue;
+        const uint32_t rn = (insn >> 5) & 0x1F;
+        const uint32_t off = ((insn >> 10) & 0xFFF) * 8;
+        if (known[rn] && values[rn] == rtld_ro &&
+            off >= 0x100 && off <= 0x400) {
+            out_hook_off = off;
+            if (dynlink_trace_enabled()) {
+                fprintf(stderr, "[dynlink] detected dlopen hook offset "
+                        "+0x%x via %s @0x%llx+%zu\n",
+                        off, fn_name,
+                        static_cast<unsigned long long>(fn), i);
             }
-            if (rtld_ro_reg != 0xFFFFFFFF && rn == rtld_ro_reg && rt == rn) {
-                rtld_ro_reg = rt;
-                rtld_ro_reg_valid = true;
-                continue;
-            }
+            return true;
+        }
+        const bool base_known = known[rn];
+        const uint64_t address = values[rn] + off;
+        known[rt] = false;
+        if (base_known && rt != 31) {
+            try {
+                values[rt] = mem_.load<uint64_t>(address);
+                known[rt] = true;
+            } catch (...) { /* Not a readable GOT entry. */ }
         }
     }
     return false;
@@ -1329,8 +1335,8 @@ void DynamicLinker::patch_rtld_global_ro_() {
     //   ldr xN, [rtld_global_ro, #hook_off]  → hook struct*
     //   ldr xM, [xN] / [xN, #72]             → _dl_open
     // The hook field offset moved across glibc versions:
-    //   glibc ≤2.40: +368 (0x170)
-    //   glibc 2.43+:  +376 (0x178)
+    //   glibc 2.39 (Bootlin/Ubuntu): +672 (0x2a0)
+    //   some Arm GNU builds: +368 (0x170) or +376 (0x178)
     // Hardcoding 368 made dlopen fall into the no-hook path on 2.43,
     // which calls the real ld-linux _dl_open and ends at pc=0.
     if (dlopen_hook_ptr_ != 0) {
