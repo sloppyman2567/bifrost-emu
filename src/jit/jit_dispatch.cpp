@@ -25,16 +25,13 @@ extern thread_local bool prof_in_interp;
 void bifrost_prof_init(FrostJIT* jit);
 bool bifrost_prof_active();
 struct ProfRunGuard {
-    bool saved_;
-    ProfRunGuard() : saved_(bifrost_prof_active()) { if (saved_) prof_in_run_block = true; }
-    ~ProfRunGuard() { if (saved_) prof_in_run_block = false; }
+    bool active_, saved_;
+    ProfRunGuard() : active_(bifrost_prof_active()), saved_(prof_in_run_block) {
+        if (active_) prof_in_run_block = true;
+    }
+    ~ProfRunGuard() { if (active_) prof_in_run_block = saved_; }
 };
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
-    static bool prof_inited = false;
-    if (!prof_inited) {
-        bifrost_prof_init(this);
-        prof_inited = true;
-    }
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
     // every slow-path cache hit was a full environ scan per dispatch.
@@ -74,9 +71,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // Tight loops dispatch the same PC thousands of times in a row.
     // Bypass the shared_mutex + unordered_map lookup entirely when the
     // PC matches the cached one. The cached fn pointer is stable across
-    // translate_block() calls (code_buf_ never moves), so a stale cache
-    // entry is safe to call — worst case it runs an older (still-correct)
-    // translation.
+    // translate_block() calls (code_buf_ never moves), and stale cache
+    // entries are revoked by the owner/generation check above whenever
+    // code or mappings are invalidated.
     //
     // 1.5.4-alpha: trimmed to the bare minimum. The per-PC watchdog is
     // gone from the fast path (the thread-local global watchdog above
@@ -103,6 +100,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // implies a valid fn — no redundant fn != nullptr test. The ~0ULL
     // empty sentinel is never a real guest PC (48-bit VAs).
     if (__builtin_expect(pc == tls_last_block_.pc, 1)) {
+        note_last_cache_hit();
         if (!tls_last_block_.fn) {
             tls_stat_instr_++;
             if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls();
@@ -119,9 +117,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // 1.5.4-alpha: inline cache for block-to-block transitions.
     // Catches the common case of sequential block-to-block transitions
     // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the
-    // shared_mutex. Direct-mapped by a PC hash that mixes high and low
-    // bits; grown to 256 slots (1.5.4-alpha) so a game's hot working
-    // set stays resident instead of thrashing to the slow path. The
+    // shared_mutex. Indexed by a PC hash that mixes high and low
+    // bits; two-way sets retain conflicting hot targets. The
     // lookup is inlined — a separate call would be most of its cost.
     {
         uint64_t (*cached_fn)(CPU*, Emulator*) = nullptr;
@@ -167,6 +164,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // Use a SHARED lock for block lookup (concurrent reads OK). Release
     // before execution — entry is a local copy, no lock needed to run it.
     blocks_mutex_.lock_shared();
+    note_table_lookup();
     auto it = blocks_.find(pc);
     BlockEntry entry;
     if (it != blocks_.end()) {
@@ -385,10 +383,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_last_block_.fn = entry.fn;
         tls_last_block_.instr_count = entry.instr_count;
         // Also populate the inline cache for block-to-block transitions.
-        int slot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1));
-        tls_inline_cache_[slot].pc = pc;
-        tls_inline_cache_[slot].fn = entry.fn;
-        tls_inline_cache_[slot].instr_count = entry.instr_count;
+        inline_cache_insert(pc, entry.fn, entry.instr_count);
     }
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);

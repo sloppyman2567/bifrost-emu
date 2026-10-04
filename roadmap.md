@@ -1,7 +1,8 @@
 # bifrost-emu v2.0 roadmap
 
-Status: planned. Updated October 4, 2026. These are development targets,
-not implemented features, compatibility guarantees or a release date.
+Status: in progress. Updated October 4, 2026. Except for checkpoints explicitly
+marked implemented below, these are development targets, not compatibility
+guarantees or a release date.
 
 v2.0 aims to run selected ARM64 Android games through an integrated Android
 runtime, improve sustained Linux game performance, and make input reliable
@@ -103,6 +104,21 @@ Publish host, settings, scene and measurement duration with each result.
 
 ## JIT and graphics caching
 
+Implemented first checkpoint (October 4): a larger two-way per-thread
+translation lookup cache, shared-lock multithreaded call-target hits,
+optional dispatch-cache telemetry, and retention of dispatch entries during
+data-only mapping changes. Worker CPU profiling now registers each thread's
+code-buffer range and covers logical cache growth. See [JIT contracts](docs/JIT.md)
+and [validation](docs/TESTS.md). This checkpoint does not implement persistent
+translations, shader caching or multithreaded Tier-2/chaining.
+
+Implemented helper checkpoint: batch nested-call statistics at outer returns
+and remove redundant BL/BLR host-flag saves and BL return-PC writes. The
+short-call benchmark improves 1.93×; this is not a Doom FPS guarantee. Guest
+NZCV, stack alignment, vector publication and callback stop guards retain
+correctness coverage.
+
+
 - Instrument per-thread cache hits/misses, compile time, retranslation,
   invalidation reasons, code bytes, growth, eviction and fallback decisions.
 - Confirm revisited unchanged code reuses its translation. Distinguish JIT
@@ -121,8 +137,9 @@ Use cold/warm A/B measurements to verify that cache changes reduce stutters.
 
 ## Input and game compatibility
 
-- Fix vkQuake's remaining camera/sensitivity and texture issues, and
-  preserve Neverball and Minecraft Weekend compatibility.
+- Resolve vkQuake's remaining texture issues and verify the user-reported
+  mouse fix; its causal link to the Doom fixes is not established. Preserve
+  Neverball and Minecraft Weekend compatibility.
 - Verify relative mouse deltas, horizontal/vertical axes, pointer capture,
   sensitivity, focus transitions and fullscreen/windowed changes.
 - Add reliable gamepad discovery, hotplug, mappings, dead zones, triggers,

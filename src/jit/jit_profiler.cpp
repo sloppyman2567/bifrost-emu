@@ -31,6 +31,7 @@
 namespace arm64emu {
 // ── Construction ────────────────────────────────────────────────────────
 FrostJIT::FrostJIT() {
+    dispatch_stats_enabled_ = dbg().jit_dispatch_stats;
     code_buf_limit_ = dbg().jit_cache_mb * 1024 * 1024;
     code_capacity_ = std::min<size_t>(dbg().jit_cache_initial_mb * 1024 * 1024, code_buf_limit_);
     // W^X (Write XOR Execute) protection: allocate the code buffer as

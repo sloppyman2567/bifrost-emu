@@ -148,7 +148,8 @@ thread_local std::unordered_map<uint64_t, uint32_t> FrostJIT::tls_hot_pc_counts_
 thread_local FrostJIT::LastBlockCache FrostJIT::tls_last_block_;
 thread_local uint64_t FrostJIT::tls_stat_exec_ = 0;
 thread_local uint64_t FrostJIT::tls_stat_instr_ = 0;
-thread_local FrostJIT::InlineCacheEntry FrostJIT::tls_inline_cache_[INLINE_CACHE_SLOTS];
+thread_local FrostJIT::InlineCacheSet FrostJIT::tls_inline_cache_[INLINE_CACHE_SETS];
+thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in x86_backend.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
@@ -862,7 +863,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_load(RSI, RBP, emu_slot_off());
             emit_mov_reg(RDX, RAX);  // RDX = target_pc
             emit_push(WIN_REG);
-            emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
+            // Guest NZCV is in cpu.pstate; the callee owns its result.
+            // No pending host flags survive this architectural call.
+            emit_call_aligned(&jit_call_helper, /*num_pushed=*/1, /*preserve_flags=*/false);
             // jit_call_helper leaves cpu.pc at its return PC and returns
             // that same value. Keep the explicit pre-call PC store above for
             // accurate guest state during dispatch, but don't copy the
@@ -960,13 +963,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // Original path: call jit_call_helper (target not yet
                 // translated or BIFROST_NO_DIRECT_CALL=1 bisection gate).
                 emit_push(WIN_REG);
-                emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
-                // RAX = return value (next PC). Save it to RCX before popping WIN_REG.
-                // RCX is caller-saved and was already invalidated by the call.
-                emit_mov_reg(RCX, RAX);  // RCX = next PC
+                // Guest NZCV is in cpu.pstate; the callee owns its result.
+                // No pending host flags survive this architectural call.
+                emit_call_aligned(&jit_call_helper, /*num_pushed=*/1, /*preserve_flags=*/false);
+                // The helper already leaves cpu.pc at its return/stop PC.
+                // Match BLR_CALL: preserve RAX and avoid copying that PC again.
                 emit_pop(WIN_REG);
-                // Store next PC to cpu.pc.
-                emit_store(CPU_REG, PC_OFF, RCX);
                 // Invalidate ALL cache mappings after the call.
                 // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
                 invalidate_all_vregs();

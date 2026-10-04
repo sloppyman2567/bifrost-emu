@@ -10,10 +10,10 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
-The final strict suite passes **255/255 in JIT mode** with no skips and
-**252/252 in interpreter mode**, with three JIT-only skips. Both runs used
+The final strict suite passes **257/257 in JIT mode** with no skips and
+**254/254 in interpreter mode**, with three JIT-only skips. Both runs used
 `BIFROST_IR_VALIDATE=1` and desktop/audio access. The JIT inventory now contains
-78 unit tests. These counts supersede the earlier 252/249 full-suite results.
+80 unit tests. These counts supersede the earlier 256/253 full-suite results.
 
 The retained Doom gap harness passes 20,000 randomized generated-code checks
 for 625 captured encodings, with zero mismatches and zero explicit IR
@@ -26,6 +26,38 @@ Restricted sandbox runs that cannot initialize desktop/audio/Vulkan resources
 do not replace these integration checks. Rebuild stale guest fixtures before
 interpreting failures as emulator regressions.
 
+### Fresh-fixture corrections (2026-10-04)
+
+Rebuilding the freestanding assembly fixtures exposed invalid memory-permission
+assumptions in `count`, `fib_basic` and `repl`: writable buffers had been placed
+in a read/execute text segment. They now reside in `.data`; the REPL buffer
+also matches its 63-character capacity, and count prints the documented 1–5.
+All three pass in QEMU and both emulator engines. The builder publishes from
+a temporary directory beside the fixtures, avoiding cross-filesystem rename
+failures when `/tmp` is on another mount.
+
+The extra histogram fixture used halfword loads from a byte array, producing
+out-of-bounds count-table indices. Its input now uses halfwords and checks the
+complete table against an expected histogram; QEMU, interpreter and JIT with
+register/memory verification agree on hash `0x0d693c2a`.
+
+The additional `make verify` sweep is not clean: the multithreaded
+`jit_cache_invalidation` and `jit_cache_pressure` fixtures report differential
+divergences, and cache pressure hits the verifier's 30-second timeout. Both
+fixtures pass ordinary JIT and interpreter execution. Shared-memory replay
+interference is a possible cause, but these verifier failures remain unresolved;
+the full-suite pass counts above do not imply a clean differential sweep.
+
+The host C API probe likewise assumed an executable guest stack. It now loads
+`ctest/capi_testlib.so` for integer, FP and syscall call probes, preserving the
+non-executable-stack contract. `make test-capi` passes 55/55 checks;
+`make test-nb` passes 61/61. These host API tests are separate from the main
+257-run guest inventory.
+
+Android surface, activity/looper and audio integration probes pass in both
+engines. This verifies those existing native Android contracts, not integrated
+APK launch, a complete Android framework, or ART runtime execution.
+
 ## Test inventory
 
 The `fcsel_high_regs` regression has 61 checks for high FCSEL source registers,
@@ -33,11 +65,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 255 configured test runs:
+The fully provisioned suite contains 257 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 78 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 80 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -46,17 +78,46 @@ The fully provisioned suite contains 255 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **255** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **257** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 233 configured runs (228 with `--quick`). These
+tests are not selected, for 235 configured runs (230 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
+
+## Dispatch cache and profiling regression (2026-10-04)
+
+`jit_dispatch_cache` is registered in the main suite. It checks exact results
+for indirect calls across three guest threads, code replacement after workers
+join, and data-only mmap/munmap churn. QEMU and both engines agree. The bounded
+cache-pressure script also passes at 1 MiB and 64 MiB, including cached
+fallback decisions and logical growth. SDL thread lifecycle/nonlocal-return
+checks pass in both engines.
+
+`bash scripts/test_jit_profiler.sh` passes the independent host regression for
+per-thread/JIT-owner sampler registration and the full reserved growth range.
+It uses deterministic range checks rather than statistical sample thresholds
+and is not another guest-inventory entry. Optional dispatch statistics expose
+both cache ways and table lookups; see [JIT.md](JIT.md).
+
+### Guest-call helpers
+
+`jit_call_helpers` checks nested arithmetic calls and callee-written NZCV
+across three threads; QEMU, JIT and interpreter agree. A single-thread
+helper-forced run (`1000 single`, `BIFROST_NO_DIRECT_CALL=1`) passes register
+and memory verification with no divergence reports. Concurrent verification
+reports library replay divergences also reproduced by the baseline, so it is
+not claimed as a clean differential run.
+
+After the final duplicate-PC-store removal, the complete JIT unit inventory
+passes 80/80 and SDL callback/nonlocal returns pass again. The full suites
+above passed immediately before that last narrowing; the retained native Doom
+harness passes 20,000 checks with no mismatches on the final build.
 
 ## Doom JIT, SDL threads and diagnostics
 
 The following focused tests accompany the native instruction and SDL worker
-changes. Standalone host/SDL probes are not additional entries in the 255-run
+changes. Standalone host/SDL probes are not additional entries in the 257-run
 inventory unless explicitly registered in `run_tests.sh`.
 
 - `ctest/jit_simd_fp_indexed.c`: 28 indexed FMUL lane, aliasing and upper-half

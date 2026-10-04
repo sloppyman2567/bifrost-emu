@@ -18,6 +18,10 @@ passing a focused test is not a claim of complete Linux ABI compatibility.
 
 ## Android scope and v2.0 plans
 
+Android surface, activity/looper and audio regression probes were freshly
+checked in both JIT and interpreter modes on October 4, 2026. The host native
+bridge API probe also passes 61/61; it does not run an actual ART instance.
+
 The current standalone Android path targets native NativeActivity binaries;
 it does not provide integrated APK/ART execution. The existing native-bridge
 interface is an integration API, not a complete Android framework or runtime.

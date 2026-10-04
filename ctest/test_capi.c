@@ -8,6 +8,7 @@
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <dlfcn.h>
 
 static int checks = 0, failures = 0;
 #define CHECK(cond, msg) do { \
@@ -15,14 +16,6 @@ static int checks = 0, failures = 0;
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
     else { printf("OK:   %s\n", msg); } \
 } while(0)
-
-// AArch64 machine-code stubs written into guest memory via bifrost_write_mem.
-//   stub_add:  add x0, x0, x1;  ret
-//   stub_fadd: fadd d0, d0, d1; ret
-static const uint32_t stub_add[] = {0x8b010000, 0xd65f03c0};
-static const uint32_t stub_fadd[] = {0x1e612800, 0xd65f03c0};
-// getpid: mov x8, #172; svc #0; ret
-static const uint32_t stub_getpid[] = {0xd2801588, 0xd4000001, 0xd65f03c0};
 
 static void* svc_hook_ud = NULL;
 static uint64_t svc_hook_calls = 0;
@@ -161,28 +154,29 @@ int main(int argc, const char* argv[]) {
     CHECK(bifrost_lookup_symbol(NULL, "foo") == 0, "lookup_symbol(NULL emu) -> 0");
 
     // ── bifrost_call (guest function invocation) ─────────────────────────
-    // Find a writable guest address inside the stack (sp - 4096). Write the
-    // two stubs there and invoke them via the borrow-CPU path.
-    uint64_t stub_addr = sp - 4096;
-    CHECK(bifrost_write_mem(emu, stub_addr, stub_add, sizeof(stub_add)) == 0,
-          "write_mem(add stub)");
-    CHECK(bifrost_write_mem(emu, stub_addr + 8, stub_fadd, sizeof(stub_fadd)) == 0,
-          "write_mem(fadd stub)");
-    CHECK(bifrost_write_mem(emu, stub_addr + 16, stub_getpid, sizeof(stub_getpid)) == 0,
-          "write_mem(getpid stub)");
+    // Stack pages are deliberately non-executable. Load actual ELF code
+    // instead of weakening memory protections to run synthetic stack stubs.
+    uint64_t call_lib = bifrost_dlopen(emu, "ctest/capi_testlib.so", RTLD_NOW);
+    CHECK(call_lib != 0, "load executable guest call probes");
+    uint64_t add_fn = bifrost_dlsym(emu, call_lib, "capi_add");
+    uint64_t fadd_fn = bifrost_dlsym(emu, call_lib, "capi_fadd");
+    uint64_t getpid_fn = bifrost_dlsym(emu, call_lib, "capi_getpid");
+    CHECK(add_fn != 0, "resolve capi_add");
+    CHECK(fadd_fn != 0, "resolve capi_fadd");
+    CHECK(getpid_fn != 0, "resolve capi_getpid");
 
     // Integer call: add x0,x0,x1 with args {7, 35} -> 42
     int64_t iargs[2] = {7, 35};
-    uint64_t res = bifrost_call(emu, stub_addr, iargs, 2, NULL, 0);
+    uint64_t res = bifrost_call(emu, add_fn, iargs, 2, NULL, 0);
     CHECK(res == 42, "bifrost_call(add, {7,35}) == 42");
 
     // FP call: fadd d0,d0,d1 with {1.5, 2.25} -> 3.75
     double fargs[2] = {1.5, 2.25};
-    double fres = bifrost_call_f(emu, stub_addr + 8, NULL, 0, fargs, 2);
+    double fres = bifrost_call_f(emu, fadd_fn, NULL, 0, fargs, 2);
     CHECK(fres == 3.75, "bifrost_call_f(fadd, {1.5,2.25}) == 3.75");
 
     // syscall stub: getpid() through the emulator (no hook yet)
-    res = bifrost_call(emu, stub_addr + 16, NULL, 0, NULL, 0);
+    res = bifrost_call(emu, getpid_fn, NULL, 0, NULL, 0);
     CHECK(res > 0, "bifrost_call(getpid) returns a positive pid");
 
     // ── SVC hook ─────────────────────────────────────────────────────────
@@ -192,7 +186,7 @@ int main(int argc, const char* argv[]) {
     // Intercept getpid(172): the emulator must call our hook, which returns
     // 0xCAFEBABE without dispatching to the guest syscall layer.
     svc_hook_intercept = 1;
-    res = bifrost_call(emu, stub_addr + 16, NULL, 0, NULL, 0);
+    res = bifrost_call(emu, getpid_fn, NULL, 0, NULL, 0);
     CHECK(res == 0xCAFEBABE, "svc hook intercepts getpid -> 0xCAFEBABE");
     CHECK(svc_hook_calls >= 1, "svc hook was called");
     CHECK(svc_hook_last_num == 172, "svc hook saw syscall 172");
@@ -200,12 +194,12 @@ int main(int argc, const char* argv[]) {
     // Let the emulator handle a syscall normally (write syscall via interp).
     svc_hook_intercept = 0;
     uint64_t calls_before = svc_hook_calls;
-    res = bifrost_call(emu, stub_addr + 16, NULL, 0, NULL, 0);
+    res = bifrost_call(emu, getpid_fn, NULL, 0, NULL, 0);
     CHECK(res > 0, "svc hook passthrough still returns a pid");
     CHECK(svc_hook_calls == calls_before + 1, "svc hook observed passthrough syscall");
     // Clear the hook.
     bifrost_set_svc_hook(emu, NULL, NULL);
-    res = bifrost_call(emu, stub_addr + 16, NULL, 0, NULL, 0);
+    res = bifrost_call(emu, getpid_fn, NULL, 0, NULL, 0);
     CHECK(res > 0, "cleared svc hook -> emulator handles getpid");
 
     // ── Guest function call state restoration ────────────────────────────

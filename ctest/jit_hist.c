@@ -8,14 +8,18 @@
 #include <string.h>
 
 static uint16_t cnt[288];
-static uint8_t lens[1024];
+static uint16_t lens[1024];
 
 int main(void) {
-    for (int i = 0; i < 1024; i++) lens[i] = (uint8_t)((i * 37 + 11) % 19);
+    uint16_t expected[288] = {0};
+    for (int i = 0; i < 1024; i++) {
+        lens[i] = (uint16_t)((i * 37 + 11) % 19);
+        expected[lens[i]]++;
+    }
     memset(cnt, 0, sizeof(cnt));
     uint16_t *c = cnt;
-    uint8_t *p = lens;
-    uint8_t *end = lens + 1024;
+    uint16_t *p = lens;
+    uint16_t *end = lens + 1024;
     // Force the exact shape: post-index ldrh, lsl, indexed strh.
     __asm__ volatile (
         "0: ldrh w1, [%1], #2\n"
@@ -29,5 +33,9 @@ int main(void) {
     uint32_t h = 0;
     for (int i = 0; i < 288; i++) { printf("%u%c", cnt[i], i == 287 ? '\n' : ' '); h = h * 31 + cnt[i]; }
     printf("hash=0x%08x\n", h);
+    if (memcmp(cnt, expected, sizeof(cnt)) != 0) {
+        fprintf(stderr, "histogram mismatch\n");
+        return 1;
+    }
     return 0;
 }

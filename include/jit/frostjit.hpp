@@ -91,6 +91,7 @@ extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, i
 // prologue can take its address at codegen time; forwards to
 // emu->jit()->tier2_fire_region(). Implemented in src/jit/jit_tier2.cpp.
 void tier2_fire_stub(Emulator* emu, uint64_t pc);
+void bifrost_prof_init(class FrostJIT* jit);
 class FrostJIT {
 public:
     FrostJIT();
@@ -114,6 +115,7 @@ public:
     uint64_t (*lookup_call_target(Emulator& emu, uint64_t pc, int& instr_count))(CPU*, Emulator*) {
         sync_dispatch_cache();
         if (pc == tls_last_block_.pc) {
+            note_last_cache_hit();
             instr_count = tls_last_block_.instr_count;
             return tls_last_block_.fn;
         }
@@ -235,7 +237,7 @@ public:
     // tuple — the minimum needed to call the block. The fn pointer is
     // stable across translate_block() calls (it points into code_buf_,
     // which is allocated once and never resized), so a stale cache entry
-    // is safe to call — it just runs an older (still-correct) translation.
+    // is revoked before reuse when its owner's invalidation generation changes.
     //
     // The fast path skips:
     //   1. shared_mutex::lock_shared()  (~25ns on Linux)
@@ -268,10 +270,13 @@ public:
     void sync_dispatch_cache() {
         const uint64_t generation = cache_generation_.load(std::memory_order_acquire);
         if (tls_cache_owner_ == this && tls_cache_generation_ == generation) return;
+        // Never attribute another JIT owner's pending diagnostic counts here.
+        if (tls_cache_owner_ != this) tls_dispatch_stats_ = DispatchStats{};
         tls_last_block_ = LastBlockCache{};
-        for (auto& entry : tls_inline_cache_) entry = InlineCacheEntry{};
+        for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
         tls_cache_owner_ = this;
         tls_cache_generation_ = generation;
+        bifrost_prof_init(this);
     }
     // Stats TLS shared by run_block AND jit_call_helper (2026-08-21):
     // hot-path block/instruction counts, batch-flushed into the shared
@@ -286,6 +291,15 @@ public:
             tls_stat_exec_ = 0;
             tls_stat_instr_ = 0;
         }
+        if (dispatch_stats_enabled_ && (tls_dispatch_stats_.last | tls_dispatch_stats_.way0 |
+            tls_dispatch_stats_.way1 | tls_dispatch_stats_.table | tls_dispatch_stats_.evictions)) {
+            dispatch_last_hits_.fetch_add(tls_dispatch_stats_.last, std::memory_order_relaxed);
+            dispatch_way0_hits_.fetch_add(tls_dispatch_stats_.way0, std::memory_order_relaxed);
+            dispatch_way1_hits_.fetch_add(tls_dispatch_stats_.way1, std::memory_order_relaxed);
+            dispatch_table_lookups_.fetch_add(tls_dispatch_stats_.table, std::memory_order_relaxed);
+            dispatch_evictions_.fetch_add(tls_dispatch_stats_.evictions, std::memory_order_relaxed);
+            tls_dispatch_stats_ = DispatchStats{};
+        }
     }
     // 1.5.4-alpha: Per-thread inline cache for block transitions.
     // This is the FEX-Emu pattern: cache the last N (PC→fn) mappings so
@@ -293,25 +307,56 @@ public:
     // and computed gotos don't pay the shared_mutex + unordered_map cost
     // on every dispatch.
     //
-    // 1.5.4-alpha: grew from 16 → 256 slots and made the lookup inline
-    // in run_block. With a 16-slot direct-mapped cache, a game with a
-    // hot working set of dozens of blocks thrashed constantly: ~3.2M
-    // dispatches/sec fell through to the shared_mutex + unordered_map
-    // slow path (~80-150ns each), which dominated the dispatch bucket
-    // even though it was only ~17% of dispatches. 256 slots + a hash
-    // that mixes high and low PC bits keeps the whole working set cached.
-    //
-    // Direct-mapped (no replacement policy — the displaced entry is just
-    // overwritten). The fn pointer is stable (code_buf_ never moves),
-    // and the owner/generation check revokes stale translations before
-    // each dispatch. Entries are populated on the slow path.
-    static constexpr int INLINE_CACHE_SLOTS = 256;
+    // 1024 two-way sets replace the former 256 direct-mapped slots.
+    // Aligned functions and library offsets can hash to the same set;
+    // retain both hot targets instead of paying the shared table lock on
+    // every alternating call. Way 0 is MRU. Metadata stays thread-local,
+    // and owner/generation checks revoke both ways before dispatch.
+    static constexpr int INLINE_CACHE_SETS = 1024;
     struct InlineCacheEntry {
         uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
     };
-    static thread_local InlineCacheEntry tls_inline_cache_[INLINE_CACHE_SLOTS];
+    struct InlineCacheSet {
+        InlineCacheEntry ways[2];
+    };
+    static thread_local InlineCacheSet tls_inline_cache_[INLINE_CACHE_SETS];
+    struct DispatchStats {
+        uint64_t last = 0, way0 = 0, way1 = 0, table = 0, evictions = 0;
+    };
+    static thread_local DispatchStats tls_dispatch_stats_;
+    bool dispatch_stats_enabled_ = false;
+    std::atomic<uint64_t> dispatch_last_hits_{0}, dispatch_way0_hits_{0}, dispatch_way1_hits_{0};
+    std::atomic<uint64_t> dispatch_table_lookups_{0}, dispatch_evictions_{0};
+    static size_t inline_cache_set(uint64_t pc) {
+        return ((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SETS - 1);
+    }
+    void note_last_cache_hit() {
+        if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.last;
+    }
+    void note_table_lookup() {
+        if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.table;
+    }
+    void inline_cache_insert(uint64_t pc, uint64_t (*fn)(CPU*, Emulator*), int count) {
+        auto& set = tls_inline_cache_[inline_cache_set(pc)];
+        if (set.ways[0].pc != pc) {
+            if (__builtin_expect(dispatch_stats_enabled_, 0) &&
+                set.ways[1].pc != ~0ULL && set.ways[1].pc != pc)
+                ++tls_dispatch_stats_.evictions;
+            set.ways[1] = set.ways[0];
+        }
+        set.ways[0] = InlineCacheEntry{pc, fn, count};
+    }
+    void inline_cache_erase(uint64_t pc) {
+        auto& set = tls_inline_cache_[inline_cache_set(pc)];
+        if (set.ways[0].pc == pc) {
+            set.ways[0] = set.ways[1];
+            set.ways[1] = InlineCacheEntry{};
+        } else if (set.ways[1].pc == pc) {
+            set.ways[1] = InlineCacheEntry{};
+        }
+    }
     // Inlined into run_block's hot path — a separate out-of-line call
     // (~5ns) would be most of the lookup's own cost. Entries are always
     // written pc+fn together (slow path), so `e.pc == pc` alone identifies
@@ -319,11 +364,18 @@ public:
     // Null fn entries cache interpreter fallback decisions.
     inline bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
                                     int& instr_count) {
-        int slot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1));
-        const InlineCacheEntry& e = tls_inline_cache_[slot];
-        if (e.pc == pc) {
-            *fn = e.fn;
-            instr_count = e.instr_count;
+        auto& set = tls_inline_cache_[inline_cache_set(pc)];
+        if (set.ways[0].pc == pc) {
+            if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.way0;
+            *fn = set.ways[0].fn;
+            instr_count = set.ways[0].instr_count;
+            return true;
+        }
+        if (set.ways[1].pc == pc) {
+            if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.way1;
+            std::swap(set.ways[0], set.ways[1]); // retain the most recently used target
+            *fn = set.ways[0].fn;
+            instr_count = set.ways[0].instr_count;
             return true;
         }
         return false;
@@ -872,11 +924,13 @@ private:
     //
     // The caller owns the push/pop of saved regs; the helper owns the
     // alignment fixup + flag save + the call itself.
-    void emit_call_aligned(void* target, int num_pushed);
+    // preserve_flags=false is only for callers with NZCV already published
+    // to CPU state and no live host condition flags. Alignment still holds.
+    void emit_call_aligned(void* target, int num_pushed, bool preserve_flags = true);
     // Function-pointer overload — see emit_call_abs template above.
     template <typename R, typename... Args>
-    void emit_call_aligned(R (*fn)(Args...), int num_pushed) {
-        emit_call_aligned(reinterpret_cast<void*>(fn), num_pushed);
+    void emit_call_aligned(R (*fn)(Args...), int num_pushed, bool preserve_flags = true) {
+        emit_call_aligned(reinterpret_cast<void*>(fn), num_pushed, preserve_flags);
     }
     size_t emit_jmp_rel32_placeholder();
     void patch_jmp_rel32(size_t off, int32_t rel);

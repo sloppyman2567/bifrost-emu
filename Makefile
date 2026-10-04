@@ -501,7 +501,12 @@ check-all: setup-tests generated-check $(TARGET)
 # Host-side C API test: test_capi.c links libbifrost.a and runs on the
 # HOST (it cannot be cross-compiled as a guest ELF). Builds and runs it.
 # Note: the guest hello.elf path is relative to the repo root.
-test-capi: lib $(TARGET)
+CAPI_TESTLIB := ctest/capi_testlib.so
+$(CAPI_TESTLIB): ctest/capi_call_lib.c
+	@$(CROSS_CC) -O2 -shared -fPIC -nostdlib $< -o $@
+	@echo "Built $@"
+
+test-capi: lib $(TARGET) $(CAPI_TESTLIB)
 	@echo "=== Building host C API test ==="
 	@mkdir -p $(OBJDIR)
 	@$(CXX) -O1 -g -MMD -MP -MF $(OBJDIR)/test_capi_host.d -Iapi -x c -c ctest/test_capi.c -o $(OBJDIR)/test_capi_host.o

@@ -355,7 +355,16 @@ void FrostJIT::emit_popfq()  { emit_byte(0x9D); }
 // RSP%16==0 we need (8 * (num_pushed + 1)) % 16 == 0, i.e.
 // num_pushed must be EVEN. If num_pushed is ODD, we emit `sub rsp, 8`
 // first (effectively adding 1 more "push"), making the total even.
-void FrostJIT::emit_call_aligned(void* target, int num_pushed) {
+void FrostJIT::emit_call_aligned(void* target, int num_pushed, bool preserve_flags) {
+    if (!preserve_flags) {
+        // NZCV must already be materialized and flags_in_host_ invalidated.
+        // With no PUSHFQ, an odd caller push count is already ABI-aligned.
+        const bool pad = (num_pushed & 1) == 0;
+        if (pad) emit_sub_rsp_imm8(8);
+        emit_call_abs(target);
+        if (pad) emit_add_rsp_imm8(8);
+        return;
+    }
     bool need_align = (num_pushed & 1) != 0;  // ODD → misaligned
     if (need_align) emit_sub_rsp_imm8(8);
     emit_pushfq();

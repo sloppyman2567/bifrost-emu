@@ -53,6 +53,20 @@ uint64_t (*FrostJIT::translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emu
 }
 uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
                                            int& instr_count))(CPU*, Emulator*) {
+    note_table_lookup();
+    // MT mode cannot promote or patch an existing block. A read-only hit
+    // needs only a shared lock; compilation still rechecks exclusively.
+    if (mt_active()) {
+        std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+        const auto it = blocks_.find(pc);
+        if (it != blocks_.end()) {
+            auto fn = it->second.fn;
+            instr_count = fn ? it->second.instr_count : 1;
+            tls_last_block_ = LastBlockCache{pc, fn, instr_count};
+            inline_cache_insert(pc, fn, instr_count);
+            return fn;
+        }
+    }
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     auto it = blocks_.find(pc);
     if (it == blocks_.end()) {
@@ -92,12 +106,12 @@ uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
         }
     }
     tls_last_block_ = LastBlockCache{pc, fn, cnt};
-    tls_inline_cache_[((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1)] =
-        InlineCacheEntry{pc, fn, cnt};
+    inline_cache_insert(pc, fn, cnt);
     instr_count = cnt;
     return fn;
 }
 void FrostJIT::dump_code_cache_stats() {
+    flush_stat_tls();
     std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
     fprintf(stderr, "[JIT] code-cache: used=%zu capacity=%zu limit=%zu blocks=%zu growths=%llu overflows=%llu budget_fallbacks=%llu mt=%d\n",
             code_buf_used_, code_capacity_, code_buf_limit_, blocks_.size(),
@@ -105,6 +119,15 @@ void FrostJIT::dump_code_cache_stats() {
             (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
             mt_active() ? 1 : 0);
+    if (dispatch_stats_enabled_) {
+        fprintf(stderr, "[JIT] dispatch-cache: last=%llu way0=%llu way1=%llu table=%llu evictions=%llu sets=%d ways=2\n",
+                (unsigned long long)dispatch_last_hits_.load(std::memory_order_relaxed),
+                (unsigned long long)dispatch_way0_hits_.load(std::memory_order_relaxed),
+                (unsigned long long)dispatch_way1_hits_.load(std::memory_order_relaxed),
+                (unsigned long long)dispatch_table_lookups_.load(std::memory_order_relaxed),
+                (unsigned long long)dispatch_evictions_.load(std::memory_order_relaxed),
+                INLINE_CACHE_SETS);
+    }
 }
 bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
@@ -310,7 +333,6 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     if (hi <= lo) { invalidate_all(); return; }
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
-    invalidate_dispatch_cache();
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) overlaps [lo, hi).
     std::vector<uint64_t> victims;
     victims.reserve(4);
@@ -329,6 +351,9 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         }
     }
     if (victims.empty()) return;
+    // Mapping churn in data-only pages cannot change a cached translation.
+    // Revoke all CPUs' dispatch entries only when compiled code is affected.
+    invalidate_dispatch_cache();
     auto unpatch_slot = [&](size_t off) {
         if (off + 5 > CODE_BUF_SIZE) return;
         if (code_buf_[off] != 0xE9) return;  // not patched — leave alone
@@ -361,8 +386,7 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         blocks_.erase(vpc);
         // 4. Drop this thread's fast-path entries for the victim.
         if (tls_last_block_.pc == vpc) tls_last_block_ = LastBlockCache{};
-        int slot = static_cast<int>(((vpc >> 2) ^ (vpc >> 17)) & (INLINE_CACHE_SLOTS - 1));
-        if (tls_inline_cache_[slot].pc == vpc) tls_inline_cache_[slot] = InlineCacheEntry{};
+        inline_cache_erase(vpc);
     }
     std::atomic_thread_fence(std::memory_order_release);
     make_executable();
@@ -391,7 +415,7 @@ void FrostJIT::invalidate_all() {
     back_refs_.clear();
     // Keep pending_call_sites_ (see invalidate_range rationale).
     tls_last_block_ = LastBlockCache{};
-    for (int i = 0; i < INLINE_CACHE_SLOTS; i++) tls_inline_cache_[i] = InlineCacheEntry{};
+    for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
     std::atomic_thread_fence(std::memory_order_release);
     make_executable();
 }

@@ -30,9 +30,11 @@ namespace arm64emu {
 extern thread_local bool prof_in_translate;
 bool bifrost_prof_active();
 struct ProfTranslateGuard {
-    bool saved_;
-    ProfTranslateGuard() : saved_(bifrost_prof_active()) { if (saved_) prof_in_translate = true; }
-    ~ProfTranslateGuard() { if (saved_) prof_in_translate = false; }
+    bool active_, saved_;
+    ProfTranslateGuard() : active_(bifrost_prof_active()), saved_(prof_in_translate) {
+        if (active_) prof_in_translate = true;
+    }
+    ~ProfTranslateGuard() { if (active_) prof_in_translate = saved_; }
 };
 // (end block) instead of BL_CALL (call within block).
 extern thread_local bool bl_call_disabled_;

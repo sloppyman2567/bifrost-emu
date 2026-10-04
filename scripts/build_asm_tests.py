@@ -41,7 +41,9 @@ def main() -> int:
         return 1
 
     built = 0
-    with tempfile.TemporaryDirectory(prefix="bifrost-asm-tests-") as temp_name:
+    # os.replace must stay on the destination filesystem. /tmp may be a
+    # separate mount, so build beside the fixtures for atomic publication.
+    with tempfile.TemporaryDirectory(prefix=".bifrost-asm-tests-", dir=ROOT / "test") as temp_name:
         temp_dir = Path(temp_name)
         for source in fixtures:
             output = source.with_suffix(".elf")

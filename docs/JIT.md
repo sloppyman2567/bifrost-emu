@@ -238,3 +238,64 @@ for every retained Doom capture gap (625 encodings, 20,000 randomized cases).
 `ctest/jit_doom_gap.elf` contains fixed QEMU-checked oracle cases and is also
 registered in `scripts/run_tests.sh`. A zero explicit IR fallback count alone
 is insufficient: check actual generated execution and host capability gates.
+
+## Dispatch cache and worker profiling (2026-10-04)
+
+The thread-local dispatch cache uses 1,024 two-way sets (2,048 entries,
+48 KiB of metadata per host thread), replacing 256 direct-mapped entries.
+Way 0 is most recently used; second-way hits move their target to the front.
+Both native functions and null interpreter-fallback decisions are cached.
+Owner/invalidation-generation checks revoke both ways before reuse. Tier-2
+promotion and explicit invalidation use the same insertion/erasure helpers.
+
+In shared multithread mode, existing call targets can be read under the
+shared block-table lock. Compilation still rechecks under the exclusive lock.
+This does not enable multithreaded chaining, promotion or code reclamation.
+Range invalidation advances the dispatch generation only when a cached block
+or an inlined guest-code range overlaps; data-only mapping changes retain
+valid dispatch entries. Code bytes remain unrecycled during execution.
+
+`BIFROST_JIT_DISPATCH_STATS=1` enables optional per-thread hit/eviction counters.
+With `--verbose`, the code-cache summary includes `last`, `way0`, `way1`,
+`table`, `evictions`, set count and associativity. Counters are batch-flushed
+instead of atomically updated on every hit; worker snapshots can omit pending
+counts. Owner changes discard pending diagnostic counts rather than assigning
+them to another JIT. Counting is disabled by default.
+
+`BIFROST_PROF=1` registers the stable reserved code-buffer range independently
+on each host thread and JIT owner. Process signal/timer installation happens
+once, and nested dispatch/translation guards restore their previous state.
+The registered range covers later logical cache growth. The dispatch bucket
+still includes native helpers called inside dispatch, and the sampled-PC
+histogram remains local to the thread that reports it; this is not complete
+helper/contention attribution.
+
+`ctest/jit_dispatch_cache.c` checks indirect calls on three guest threads,
+synchronized executable-code replacement and data mmap/munmap churn against
+an arithmetic oracle. `bash scripts/test_jit_profiler.sh` deterministically
+checks the sampler's actual range predicate for multiple host threads and
+JIT owners, including addresses beyond the initial logical cache capacity.
+
+## Guest-call helper overhead (2026-10-04)
+
+Nested `jit_call_helper` returns no longer flush shared atomic counters on
+every tiny call. A per-thread nesting guard publishes the remaining tail
+when the outermost helper exits; long-running callees retain the existing
+64K-block batch flush. The guard restores nesting on C++ exception unwind.
+SDL callback/guest nonlocal-return checks retain their sentinel handling.
+
+BL/BLR helper wrappers materialize guest NZCV before the call, invalidate
+host flag tracking, and treat the callee's CPU state as authoritative. They
+now use `emit_call_aligned(..., preserve_flags=false)`, avoiding redundant
+PUSHFQ/POPFQ and their stack padding. Other native helpers retain flag
+preservation by default. Call alignment, WIN_REG preservation, vector
+writeback/reload and stop guards are unchanged. The ordinary BL helper path
+also omits the duplicate copy of the helper's returned PC into CPU state,
+matching the existing BLR path.
+
+`jit_call_helpers` checks nested arithmetic and callee-written Z/C flags
+across three guest threads. Optional `1000 single` arguments allow a clean
+register/memory verification run with `BIFROST_NO_DIRECT_CALL=1` so the helper
+wrapper is exercised even in a single-threaded process. The multithreaded
+verification run produces the same library replay warnings as the unchanged
+baseline; ordinary engines and QEMU agree on the fixture's results.

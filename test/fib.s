@@ -71,6 +71,7 @@ print_digits:
     mov  x8, #93
     svc  #0
 
+.data
 newline:
     .byte 10
 buf:

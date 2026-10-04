@@ -86,6 +86,7 @@ exit_repl:
     mov  x8, #93
     svc  #0
 
+.data
 prompt:
     .ascii "> "
 charbuf:
@@ -95,11 +96,4 @@ gotstr:
 newline:
     .byte 10
 linebuf:
-    .byte 0
-    .byte 0
-    .byte 0
-    .byte 0
-    .byte 0
-    .byte 0
-    .byte 0
-    .byte 0
+    .zero 64

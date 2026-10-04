@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <mutex>
 #include <sys/time.h>
 #include <ucontext.h>
 namespace arm64emu {
@@ -52,14 +53,24 @@ thread_local uint32_t tls_prof_rip_head = 0;
 namespace {
 struct ProfGuard {
     bool* f_;
-    explicit ProfGuard(bool* f) : f_(f) { if (prof_enabled.load(std::memory_order_relaxed)) *f_ = true; }
-    ~ProfGuard() { if (prof_enabled.load(std::memory_order_relaxed)) *f_ = false; }
+    bool active_, saved_;
+    explicit ProfGuard(bool* f) : f_(f), active_(prof_enabled.load(std::memory_order_relaxed)), saved_(*f) {
+        if (active_) *f_ = true;
+    }
+    ~ProfGuard() { if (active_) *f_ = saved_; }
 };
+}
+// Internal diagnostic query, also used by the deterministic thread-registration
+// regression. It reads exactly the range used by the signal sampler.
+bool bifrost_prof_contains_ip(uint64_t rip) {
+    return tls_prof_codebuf && rip >= reinterpret_cast<uint64_t>(tls_prof_codebuf) &&
+        rip - reinterpret_cast<uint64_t>(tls_prof_codebuf) < tls_prof_codebuf_size;
+}
+namespace {
 static void prof_signal_handler(int, siginfo_t*, void* ctx) {
     auto* uc = static_cast<ucontext_t*>(ctx);
     uint64_t rip = static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]);
-    if (tls_prof_codebuf && rip >= reinterpret_cast<uint64_t>(tls_prof_codebuf) &&
-        rip < reinterpret_cast<uint64_t>(tls_prof_codebuf) + tls_prof_codebuf_size) {
+    if (bifrost_prof_contains_ip(rip)) {
         prof_jit.fetch_add(1, std::memory_order_relaxed);
         tls_prof_rips[tls_prof_rip_head & (PROF_RIP_MAX - 1)] = rip;
         tls_prof_rip_head++;
@@ -73,15 +84,13 @@ static void prof_signal_handler(int, siginfo_t*, void* ctx) {
         prof_other.fetch_add(1, std::memory_order_relaxed);
     }
 }
-static void prof_install(FrostJIT* jit) {
-    if (prof_enabled.exchange(true)) return;
-    tls_prof_codebuf = jit->code_buf();
-    tls_prof_codebuf_size = jit->code_buf_size();
+static void prof_install() {
     struct sigaction sa = {};
     sa.sa_sigaction = prof_signal_handler;
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGPROF, &sa, nullptr);
+    prof_enabled.store(true, std::memory_order_release);
     struct itimerval it = {};
     it.it_interval.tv_usec = 10000;  // 100 Hz
     it.it_value.tv_usec = 10000;
@@ -92,10 +101,13 @@ static void prof_install(FrostJIT* jit) {
 // forwarding handlers are installed) so our SIGPROF handler isn't
 // overwritten by install_host_signal_handlers.
 void bifrost_prof_init(FrostJIT* jit) {
-    static bool inited = false;
-    if (inited || !getenv("BIFROST_PROF")) return;
-    inited = true;
-    prof_install(jit);
+    if (!dbg().cpu_profile) return;
+    // Registration is per host thread/JIT owner, even though the process
+    // timer is installed once. The reserved range remains stable on growth.
+    tls_prof_codebuf = jit->code_buf();
+    tls_prof_codebuf_size = jit->code_buf_size();
+    static std::once_flag installed;
+    std::call_once(installed, prof_install);
 }
 bool bifrost_prof_active() {
     return prof_enabled.load(std::memory_order_relaxed);
@@ -377,6 +389,17 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     // watchdog this is a pure codegen-bug safety valve.
     thread_local uint64_t tls_call_blocks_ = 0;
     static const bool dbg_call_trace_ = dbg().dbg_guard;
+    // Keep nested tiny calls from turning batched counters into contended
+    // per-call atomic writes. The outermost return still publishes tails,
+    // including callback/nonlocal-return exits; regular loops flush at 64K.
+    static thread_local unsigned call_depth = 0;
+    struct CallStatsGuard {
+        FrostJIT* jit;
+        unsigned& depth;
+        CallStatsGuard(FrostJIT* j, unsigned& d) : jit(j), depth(d) { ++depth; }
+        ~CallStatsGuard() { if (--depth == 0 && jit) jit->flush_stat_tls(); }
+    } stats_guard(jit, call_depth);
+    static const bool verify_mode_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
     uint64_t dbg2_count = 0;
     while (cpu->running && cpu->pc != return_pc &&
            (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {
@@ -394,7 +417,6 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             // (the inflate copy loop) was invisible to BIFROST_JIT_VERIFY
             // (MFTRACE never fired; the block is entered via `bl`, not the
             // dispatcher). Under verify this is slower but catches the bug.
-            static const bool verify_mode_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
             if (verify_mode_) {
                 cpu->pc = jit->run_block(*cpu, *emu);
                 continue;
@@ -455,7 +477,6 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
         }
         emu->step(*cpu);
     }
-    if (jit) jit->flush_stat_tls();
     return cpu->pc;
 }
 

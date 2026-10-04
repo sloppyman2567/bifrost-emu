@@ -276,6 +276,8 @@ UNIT_TESTS=(
     "doom_gap|ctest/jit_doom_gap.elf||10|doom_gap: ALL PASS"
     "jit_cache|scripts/test_jit_cache.sh||65|jit_cache: ALL PASS|HOST_JIT"
     "jit_cache_invalidation|ctest/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
+    "jit_dispatch_cache|ctest/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
+    "jit_call_helpers|ctest/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
     "shift_register|ctest/jit_shift_register.elf||5|checks passed"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"

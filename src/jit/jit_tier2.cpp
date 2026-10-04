@@ -1733,11 +1733,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
             // touching the TLS is safe; the next dispatch falls to the slow
             // path and finds blocks_[pc] = the region.
             if (tls_last_block_.pc == pc) tls_last_block_.pc = ~0ULL;
-            const int islot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) &
-                                               (INLINE_CACHE_SLOTS - 1));
-            if (tls_inline_cache_[islot].pc == pc) {
-                tls_inline_cache_[islot].pc = ~0ULL;
-            }
+            inline_cache_erase(pc);
 
             // ── Re-patch the loop back-edge into the region ──────────
             // Every trace block whose side exit targets the head is a

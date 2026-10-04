@@ -25,13 +25,14 @@ loop:
 
     ; if counter <= 5, loop
     cmp  x19, #6
-    b.le loop
+    b.lt loop
 
     ; exit(0)
     mov  x0, #0
     mov  x8, #93
     svc  #0
 
+.data
 buf:
     .byte 0
     .byte 0

@@ -223,10 +223,20 @@ before choosing eviction, persistence or prewarming changes. The v2.0
   Settings behavior remains unresolved.
 - The user reports a black strip at the right of the game content and an
   invisible cursor. Viewport sizing and cursor behavior remain unresolved.
-- Loading an existing save reports a script checksum mismatch and explicitly
-  restarts the map with persistent player data. The cause of the mismatch
-  remains unresolved; this does not establish save-file corruption. The latest
-  user report still indicates save loading is not working correctly.
+- Save compatibility is now checked per file (October 4). The older `tuff.save`
+  contains script checksum `b11b4be0`, while current compilation produces
+  `b7c8e788`; Doom explicitly rejects that mismatch and restarts the map with
+  persistent player data. Both newer underground autosaves contain `b7c8e788`.
+  A copied `AutoSave__game_demo_mc_underground.save` restores completely with
+  the untouched installed game module, without the map-restart fallback.
+  A fresh `checksum_roundtrip` save then reloads successfully, preserving view
+  position `(223.75, 593.44, -18.5)` and heading `211.1` degrees exactly.
+  Current interpreter and JIT compilation produce byte-identical 67,783-
+  statement checksum inputs; native MD4, QEMU and both emulator engines agree
+  on their checksum. Earlier emulation producing incompatible script state or
+  a wrong checksum is a plausible explanation for the old save, but the exact
+  historical change has not been isolated. Do not bypass the checksum guard
+  or claim that every older save is recoverable.
 - Gamepad mapping and responsiveness have not been validated. Input tracing
   and verification of mouse/keyboard events should precede gamepad tuning.
 
@@ -375,3 +385,60 @@ Batch validation logs: `/tmp/doom3-batch-tests2.log`,
 The initial batch startup trace is `/tmp/doom3-batch-fixed.log`; its core
 dump identified the invalid multiply opcode. The multiply repair startup
 trace is `/tmp/doom3-batch-jit-fixed.log`.
+
+## Dispatch-cache performance checkpoint (2026-10-04)
+
+The JIT now retains 2,048 per-thread targets in two-way sets, uses shared-lock
+hits for existing multithreaded call targets, and avoids revoking dispatch
+entries for data-only mapping changes. Worker profiler registration also
+covers all participating host threads and the reserved cache-growth range.
+See [JIT.md](JIT.md) for contracts and remaining attribution limitations.
+
+On an AMD Ryzen 7 5800X3D host (8 cores/16 threads), a targeted
+conflicting-address indirect-call workload completed with identical
+results and measured a 2.32× speedup (three alternating baseline/new runs;
+median 1.321 s versus 0.570 s). This is a dispatch microbenchmark, not a Doom 3
+FPS result. The workload uses `ctest/jit_dispatch_cache.elf 500000`,
+three guest threads and 12 million indirect calls. A matched underground
+autosave load plus 120-frame smoke run at
+3440×1440 (windowed, swap interval 0, diagnostic audio disabled) took 81.5 s
+before and 80.8 s after; both ended at the same reported
+position and heading. That single comparison does not establish a meaningful
+in-game improvement, sustained 5 FPS, or 60 FPS gameplay. The Doom smoke timing predates the final
+data-only invalidation refinement; the indirect-call measurements use the
+final build and include the fixture's data mapping churn. Further
+matched gameplay/frame-time profiling is required for those performance goals.
+
+## Helper-call optimization checkpoint (2026-10-04)
+
+Nested guest calls now batch their shared statistics instead of flushing
+atomics on every return. BL/BLR helper wrappers omit redundant host flag
+preservation after publishing guest NZCV, and BL avoids a duplicate return-PC
+write. Callback stop guards and register/vector publication remain intact.
+
+On the Ryzen 7 5800X3D, three alternating baseline/optimized trials of
+`jit_call_helpers.elf 2000000` measured median 1.246 s versus 0.645 s
+(**1.93× faster**) with identical results. The three-thread workload makes
+42 million nested calls; it isolates short-call overhead and is not a
+Doom FPS measurement. The optimized build was subsequently launched with the
+latest underground autosave, audio, title statistics and CPU profiling at
+3440×1440, without a runtime limit. See [JIT.md](JIT.md) and
+[TESTS.md](TESTS.md) for contracts, oracle checks and verifier limitations.
+
+### Gameplay profile after helper optimization
+
+A 30-second interval near the end of the optimized run retained 5,095 CPU
+samples: translated code 3,468 (68.07%), dispatch/native helpers 1,054
+(20.69%), translation 3 (0.06%), interpreter 0 and other host work 570
+(11.19%). Dispatch/helper share was 24.5% in the earlier 67.64-second
+NPC capture. The scenes and durations differ, so this reduction is encouraging
+but does not establish a controlled gameplay speedup or an FPS multiplier.
+These are process CPU samples, including workers, rather than main-thread
+frame-time attribution. The dispatch bucket includes native helper work.
+
+The last cache report contained 67,318 blocks and 80,465,832 emitted bytes,
+with a 128 MiB logical capacity, one growth and zero overflows or budget
+fallbacks. The run reached normal game/audio/graphics shutdown and the process
+exited normally. Terminal logging recorded rendering startup and CPU reports,
+but no FPS history, so sustained FPS cannot be reconstructed from this log.
+The local diagnostic log is `/tmp/doom3-helper-play-20261004.log`.
