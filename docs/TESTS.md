@@ -41,6 +41,24 @@ out-of-bounds count-table indices. Its input now uses halfwords and checks the
 complete table against an expected histogram; QEMU, interpreter and JIT with
 register/memory verification agree on hash `0x0d693c2a`.
 
+### CI guest-libc and proc-executable follow-up (2026-10-04)
+
+The build portability repair passed both GitHub build configurations. The next
+CI failure was glibc-static startup in the host C API probe: a relative loader
+argument became a relative `/proc/self/exe` target, violating Linux semantics
+and glibc's `_dl_get_origin` assertion. The target is now absolute, with the
+sandbox host prefix removed for in-root executables; argv and AT_EXECFN retain
+the original invocation. Synthetic readlink now truncates without adding NUL
+and rejects zero-sized buffers with EINVAL.
+
+The glibc-static hello repro fails before the repair and passes afterward in
+both engines. Host C API checks now include the proc readlink regression and
+pass **57/57**; native bridge checks pass **61/61**. The sandbox fixture checks
+absolute proc targets, truncation and raw-syscall zero-size errors in both
+engines. CI provisions the actual musl compiler for musl-labelled fixtures
+instead of substituting glibc, and separately runs glibc-static startup plus
+its existing glibc dynamic-link checks.
+
 ### Fresh-runner build portability (2026-10-04)
 
 The first pushed CI run failed before tests: the display proxy unconditionally

@@ -12,6 +12,13 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### CI guest-libc and proc-executable repair
+
+- Return absolute guest `/proc/self/exe` paths, preserving the sandbox
+  namespace and original argv/AT_EXECFN; correct readlink truncation, NUL and
+  zero-buffer semantics. Add API/sandbox checks and a glibc-static CI repro.
+- Provision musl for musl fixtures while retaining explicit glibc checks.
+
 ### Fresh-runner CI build repair
 
 - Feature-gate the display proxy's SDL include and remove the build-time

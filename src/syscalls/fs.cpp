@@ -963,17 +963,12 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 std::string path_str(reinterpret_cast<const char*>(path_bytes.data()),
                                      path_bytes.size());
                 if (is_proc_exe_path(path_str)) {
-                    if (a3 > 0 && elf_path_.size() < a3) {
-                        try {
-                            mem_.write(a2, elf_path_.data(), elf_path_.size() + 1);
-                        } catch (...) {
-                            ret_err(EFAULT);
-                            return 0;
-                        }
-                        ret_host(elf_path_.size());
-                        return 0;
-                    }
-                    ret_err(ENOSYS);
+                    if (a3 == 0) { ret_err(EINVAL); return 0; }
+                    // readlink truncates to bufsiz and never appends a NUL.
+                    const size_t count = std::min<size_t>(a3, elf_path_.size());
+                    try { mem_.write(a2, elf_path_.data(), count); }
+                    catch (...) { ret_err(EFAULT); return 0; }
+                    ret_host(count);
                     return 0;
                 }
                 // Call host readlinkat for real filesystem paths.

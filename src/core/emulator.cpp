@@ -208,6 +208,25 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     const std::string host_elf_path = yggdrasil::Yggdrasil::remap_path(path);
     FILE* f = fopen(host_elf_path.c_str(), "rb");
     if (!f) throw EmuError("cannot open " + host_elf_path + ": " + strerror(errno));
+    // Linux /proc/self/exe is absolute even when argv[0] is relative.
+    // Keep argv/AT_EXECFN unchanged, and strip the sandbox's host prefix.
+    if (char* resolved = ::realpath(host_elf_path.c_str(), nullptr)) {
+        elf_path_ = resolved;
+        free(resolved);
+        const std::string mapped_root = yggdrasil::Yggdrasil::remap_path("/");
+        if (mapped_root != "/") {
+            if (char* root = ::realpath(mapped_root.c_str(), nullptr)) {
+                const std::string prefix = std::string(root) == "/" ? "/" : std::string(root) + "/";
+                if (elf_path_.compare(0, prefix.size(), prefix) == 0)
+                    elf_path_ = elf_path_.substr(prefix.size() - 1);
+                else
+                    elf_path_ = path.front() == '/' ? path : "/" + path;
+                free(root);
+            }
+        }
+        vfs_.set_elf_path(elf_path_);
+    }
+
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);

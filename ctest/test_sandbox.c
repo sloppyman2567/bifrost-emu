@@ -122,6 +122,15 @@ int main(void) {
         CHECK(f < 0, "/proc/1/maps denied under root");
         CHECK(e == ENOENT, "/proc denial is ENOENT");
         if (f >= 0) close(f);
+        char exe[4096];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe));
+        CHECK(n > 0 && exe[0] == '/', "proc exe path is absolute inside root");
+        char clipped[2] = {'?', '?'};
+        CHECK(readlink("/proc/self/exe", clipped, 1) == 1 &&
+              clipped[0] == '/' && clipped[1] == '?', "proc readlink truncates without NUL");
+        errno = 0;
+        CHECK(syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe", clipped, 0) == -1 && errno == EINVAL,
+              "proc readlink zero size returns EINVAL");
         // ... while /proc/self/* keeps working.
         f = open("/proc/self/cmdline", O_RDONLY);
         CHECK(f >= 0, "/proc/self/cmdline still works");

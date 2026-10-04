@@ -38,15 +38,20 @@ jobs:
       - name: Install host and AArch64 build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3 libffi-dev gcc-aarch64-linux-gnu
+          sudo apt-get install -y build-essential python3 curl libffi-dev gcc-aarch64-linux-gnu
       - name: Compile guest fixtures
-        run: make setup-tests MUSL_CC=aarch64-linux-gnu-gcc GLIBC_CC=aarch64-linux-gnu-gcc
+        run: make setup-tests GLIBC_CC=aarch64-linux-gnu-gcc
       - name: Check generated sources and build emulator
         run: |
           make generated-check
           make -j2 USE_SDL2=0 USE_THUNK_GL=0
       - name: Run host API checks
-        run: make test-capi test-nb USE_SDL2=0 USE_THUNK_GL=0 MUSL_CC=aarch64-linux-gnu-gcc GLIBC_CC=aarch64-linux-gnu-gcc
+        run: make test-capi test-nb USE_SDL2=0 USE_THUNK_GL=0 GLIBC_CC=aarch64-linux-gnu-gcc
+      - name: Run glibc static startup regression
+        run: |
+          aarch64-linux-gnu-gcc -static -O2 ctest/hello.c -o build/hello-glibc-static.elf
+          build/release-sdl0-gl0/bifrost-emu build/hello-glibc-static.elf
+          build/release-sdl0-gl0/bifrost-emu --no-jit build/hello-glibc-static.elf
       - name: Run strict JIT and interpreter regressions
         run: |
           ./scripts/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --unit --quick --strict

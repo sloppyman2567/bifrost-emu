@@ -164,6 +164,10 @@ int main(int argc, const char* argv[]) {
     CHECK(add_fn != 0, "resolve capi_add");
     CHECK(fadd_fn != 0, "resolve capi_fadd");
     CHECK(getpid_fn != 0, "resolve capi_getpid");
+    uint64_t proc_fn = bifrost_dlsym(emu, call_lib, "capi_proc_exe");
+    CHECK(proc_fn != 0, "resolve capi_proc_exe");
+    CHECK(bifrost_call(emu, proc_fn, NULL, 0, NULL, 0) == 1,
+          "proc exe is absolute; readlink truncates without NUL");
 
     // Integer call: add x0,x0,x1 with args {7, 35} -> 42
     int64_t iargs[2] = {7, 35};
