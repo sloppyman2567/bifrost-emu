@@ -278,6 +278,7 @@ UNIT_TESTS=(
     "jit_cache_invalidation|ctest/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
     "jit_dispatch_cache|ctest/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
     "jit_call_helpers|ctest/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
+    "jit_mt_tier2|ctest/jit_mt_tier2.elf||30|jit_mt_tier2: ALL PASS"
     "shift_register|ctest/jit_shift_register.elf||5|checks passed"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"
@@ -916,6 +917,8 @@ run_test() {
     local tmpout tmpin=""
     local -a test_runner=("$EMU" "${EMU_FLAGS[@]}" "${test_command[@]}")
     local -a test_env=("${RUN_ENV[@]}")
+    # This fixture specifically checks region codegen, which is opt-in.
+    [[ "$name" == tier2_smov ]] && test_env+=(BIFROST_TIER2=1)
     if [ "$mode" = "HOST_JIT" ]; then
         # Host harnesses invoke the requested emulator themselves. This
         # zstd harness checks both engines, so run it once in the JIT suite.

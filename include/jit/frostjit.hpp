@@ -90,7 +90,7 @@ extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, i
 // per-block hot-head counter, BIFROST_TIER2=1). A plain free function so the
 // prologue can take its address at codegen time; forwards to
 // emu->jit()->tier2_fire_region(). Implemented in src/jit/jit_tier2.cpp.
-void tier2_fire_stub(Emulator* emu, uint64_t pc);
+void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site);
 void bifrost_prof_init(class FrostJIT* jit);
 class FrostJIT {
 public:
@@ -413,12 +413,35 @@ public:
     // Multithread-safe mode: set by enter_multithreaded() before a second
     // vCPU's host thread starts. When true, NO runtime code-buffer write may
     // modify published instructions (patch_chain / chain_back_references /
-    // patch_pending_calls bail, tier-2 is disabled). New code is appended to
-    // previously unpublished bytes under the compiler lock. x86 cross-modifying code requires the
-    // EXECUTING core to serialize after a write; stopping all writes is the
-    // only coordination-free way to guarantee that. Sticky for the JIT's
+    // patch_pending_calls bail). MT chaining and promotion use atomic data
+    // cells; only single-thread mode retains legacy instruction patches.
+    // New code is appended under the compiler lock. Published instructions
+    // remain immutable without cross-core serialization. Sticky for the JIT's
     // lifetime (re-enabling would reopen a spawn-vs-patch race).
     std::atomic<bool>     mt_active_{false};
+    // Stable data cells: generated MT instructions never change after publication.
+    struct MtEdge {
+        std::atomic<uint64_t> target{0};
+        uint64_t source_pc = 0, target_pc = 0;
+        bool live = true; // compiler lock only
+        bool cold_entry = false;
+    };
+    struct MtHotCounter {
+        std::atomic<uint32_t> enabled{1}, hits{0};
+    };
+    static_assert(std::atomic<uint64_t>::is_always_lock_free);
+    static_assert(std::atomic<uint32_t>::is_always_lock_free);
+    static_assert(offsetof(MtHotCounter, hits) == 4);
+    std::vector<std::unique_ptr<MtEdge>> mt_edges_;
+    std::unordered_map<uint64_t, std::vector<MtEdge*>> mt_edge_refs_, mt_source_refs_;
+    std::unordered_map<size_t, MtEdge*> mt_edge_slots_;
+    std::vector<std::unique_ptr<MtHotCounter>> mt_hot_counters_;
+    std::unordered_map<size_t, MtHotCounter*> mt_counter_sites_;
+    std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
+    size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false);
+    void refresh_mt_edges(uint64_t target_pc);
+    void retire_mt_source(uint64_t source_pc);
+
     // ── Shared-JIT mode (default) ───────────────────────────────────
     // Spawned threads share the main thread's FrostJIT instance, saving
     // 64 MiB of code-cache per thread. blocks_mutex_ protects the block
@@ -436,9 +459,8 @@ public:
     // Erase every cached block whose guest range [pc, pc+instr_count*4)
     // overlaps [addr, addr+size), and unpatch any predecessor chain slot
     // (fall-through or taken) that targeted an erased block back to its
-    // unpatched ret/NOP pattern (single-byte opcode store — atomic, so a
-    // concurrent executor observes either the old jmp or a clean slot,
-    // never a torn one). Code bytes are leaked, never reused, so a stale
+    // unpatched ret/NOP pattern in ST mode, or atomically clear MT edge
+    // targets. Code bytes and edge data are retained, never reused, so a stale
     // fn pointer can at worst run old code, never crash on recycled bytes.
     // Also drops matching entries from this thread's last-block/inline
     // caches. A generation change revokes other threads' TLS entries at
@@ -455,8 +477,8 @@ public:
     // slot-unpatch/TLS-drop discipline as invalidate_range, applied to
     // every block. Rare — full O(N) scan.
     void invalidate_all();
-    // Multithread-safe mode (see mt_active_): unpatch every chain slot and
-    // permanently disable runtime code-buffer writes. Called from the thread
+    // Multithread-safe transition (see mt_active_): retire legacy slots and
+    // permanently disable rewrites of published instructions. Called from the thread
     // spawn paths BEFORE the second vCPU's host thread starts. No-op after
     // the first call (sticky) and in per-thread-JIT mode.
     void enter_multithreaded();
@@ -563,14 +585,14 @@ public:
     // code page, which only exists in non-W^X shared-JIT mode), and takes the
     // exclusive lock only around the map mutations. Implemented in
     // src/jit/jit_tier2.cpp.
-    void tier2_fire_region(Emulator& emu, uint64_t pc);
+    void tier2_fire_region(Emulator& emu, uint64_t pc, size_t site = 0);
     // Neutralize a block's tier-2 in-code counter after it fires: overwrites
     // the prologue `inc dword[rip]` (6 bytes) with `jmp rel32` past the whole
     // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
     // when no counter was emitted (off==0). Writes the code page directly —
     // callers hold the exclusive blocks_mutex_ (and tier-2 only runs in
     // non-W^X mode, so the buffer is RWX). Implemented in src/jit/jit_tier2.cpp.
-    void tier2_counter_disable(size_t counter_off, size_t counter_len);
+    void tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition = false);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,

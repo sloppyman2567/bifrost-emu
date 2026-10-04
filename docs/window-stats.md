@@ -1,7 +1,9 @@
 # Graphics window stats
 
-`--window-stats` (alias `--window_stats`) enables statistics in the game window
-**title**. The emulator name and version come from `bifrost/version.hpp`.
+Statistics appear in the game window **title** by default.
+`--window-stats` (alias `--window_stats`) explicitly enables title statistics.
+The separate stats window and overlay remain opt-in. The emulator name and
+version come from `bifrost/version.hpp`.
 The display includes the presentation backend, FPS, logical window dimensions
 and total presented frames. The original game title is retained.
 
@@ -65,5 +67,5 @@ EMU=build/release-sdl1-gl1/bifrost-emu ./scripts/test_window_stats.sh
 ```
 
 The regression checks the presentation clock, default first-frame logging,
-opt-in titles, title renaming, idle detection, recreation and explicit disable
+default titles, title renaming, idle detection, recreation and explicit disable
 switches. Optional UI placement and click-through require a real X11 desktop.

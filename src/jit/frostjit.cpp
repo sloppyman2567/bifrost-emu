@@ -30,6 +30,7 @@
 //   - jit_glue.cpp          — Emulator↔FrostJIT glue
 //   - cpu_features.cpp      — host CPU feature detection
 #include "jit/frostjit.hpp"
+#include "debug_flags.h"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
 #include "bifrost/version.hpp"  // CODENAME
@@ -69,23 +70,11 @@ bool FrostJIT::direct_call_enabled() {
     static const bool on = (getenv("BIFROST_NO_DIRECT_CALL") == nullptr);
     return on;
 }
-// ── Tier-2 env gates (BIFROST_TIER2, default ON since 2026-08-21) ──────
-// Tier-2 is the region/loop-fusion JIT (ROADMAP #14): in-code hot-head
-// counters fire on hot loop heads, collect_tier2_trace walks a trace,
-// and compile_tier2_region compiles natural loops with one whole-region
-// regalloc + LICM preheader (+ DCE, const-prop fold-ahead). Only
-// BACK-EDGE regions compile by default (loops-only, measured +3.5% on
-// CoreMark; BIFROST_T2_LINEAR=1 restores all-region). Hot blocks stop
-// paying the counter tax after firing (tier2_counter_disable), which is
-// what makes the always-on default viable — do NOT ship a default that
-// leaves large numbers of eligible blocks un-neutralized.
-// Opt OUT with BIFROST_TIER2=0 (bisection / debugging).
+// Tier-1 JIT is the default. Tier-2 region promotion remains experimental:
+// opt in with BIFROST_TIER2=1; BIFROST_TIER2=0 explicitly keeps it off.
+// Chaining is independent of this gate, including in multithreaded mode.
 bool FrostJIT::tier2_enabled() {
-    static const bool on = [] {
-        const char* s = getenv("BIFROST_TIER2");
-        return !s || s[0] != '0';
-    }();
-    return on;
+    return dbg().tier2;
 }
 uint32_t FrostJIT::tier2_hits_threshold() {
     static const uint32_t hits = [] {
@@ -911,7 +900,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // so we can't save RAX across the call. The return value
             // (next PC) will be in RAX after the call — we must NOT
             // overwrite it with a pop.
-            if (direct_call_enabled()) {
+            if (direct_call_enabled() && !mt_active()) {
                 // ── Direct BL call ─────────────────────────────────
                 // Emit a patchable `call rel32` slot instead of routing
                 // through jit_call_helper → lookup_call_target. Once the

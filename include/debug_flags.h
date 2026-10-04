@@ -40,13 +40,15 @@ struct DebugFlags {
     bool ld2  = false;  // BIFROST_LD2_DBG  — second-run dynamic-linker
     // ── JIT codegen diagnostics ──────────────────────────────────────
     bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
+    bool tier2 = false; // BIFROST_TIER2=1 — opt in to experimental region promotion
+    bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
     bool jit_verify = false;  // BIFROST_JIT_VERIFY: presence enables differential replay
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     std::vector<uint64_t> input_watch; // BIFROST_INPUT_WATCH — comma-separated guest u32 addresses
     bool input_trace = false;  // BIFROST_INPUT_TRACE — bounded SDL mouse/input-mode log
-    bool window_stats_title = false;
+    bool window_stats_title = true;
     bool window_stats_window = false;
     bool window_stats_overlay = false;
     bool render_log = true;
@@ -124,6 +126,7 @@ struct DebugFlags {
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
+        f.no_chain = env("BIFROST_NO_CHAIN");
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.input_trace = all || env("BIFROST_INPUT_TRACE");
@@ -140,7 +143,8 @@ struct DebugFlags {
             const char* v = std::getenv(key);
             return v ? std::string(v) != "0" && std::string(v) != "false" : fallback;
         };
-        f.window_stats_title = toggle("BIFROST_WINDOW_STATS_TITLE", toggle("BIFROST_WINDOW_STATS", false));
+        f.tier2 = toggle("BIFROST_TIER2", false);
+        f.window_stats_title = toggle("BIFROST_WINDOW_STATS_TITLE", toggle("BIFROST_WINDOW_STATS", true));
         f.window_stats_window = toggle("BIFROST_WINDOW_STATS_WINDOW", false);
         f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", false);
         f.render_log = toggle("BIFROST_RENDER_LOG", true);

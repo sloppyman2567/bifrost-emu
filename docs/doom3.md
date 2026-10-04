@@ -2,6 +2,12 @@
 
 ## Current status (2026-10-04)
 
+Use the default tier-1 JIT with MT chaining. Tier-2 is now opt-in via
+`BIFROST_TIER2=1` after a reported gameplay slowdown with MT region promotion.
+The live comparison logs showed higher reported throughput with tier-2 off,
+but were not a matched-scene FPS benchmark. A renderer fault in a recent
+new-game session remains unresolved; this default change is not a crash fix.
+
 Default-JIT gameplay, character animation and audio work in the observed demo
 sessions, including the user's approximately 27-minute crash-free recording.
 New underground saves and a fresh save/load round trip restore successfully;
@@ -17,8 +23,8 @@ attribution or a controlled before/after FPS comparison. See the
 [latest profile](#gameplay-profile-after-helper-optimization).
 
 Current full-suite counts and their final-build coverage limits are in
-[TESTS.md](TESTS.md): 257/257 JIT, 254/254 interpreter with three JIT-only skips,
-then 80/80 JIT unit checks and focused follow-ups after the last helper cleanup.
+[TESTS.md](TESTS.md): 258/258 JIT and 255/255 interpreter with three JIT-only
+skips, plus 81/81 JIT units, 79/79 interpreter units and the MT publication gates.
 Older counts and timings below describe intermediate checkpoints.
 
 ## Bring-up and correctness history (2026-10-03)

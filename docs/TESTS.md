@@ -10,10 +10,19 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
-The final strict suite passes **257/257 in JIT mode** with no skips and
-**254/254 in interpreter mode**, with three JIT-only skips. Both runs used
-`BIFROST_IR_VALIDATE=1` and desktop/audio access. The JIT inventory now contains
-80 unit tests. These counts supersede the earlier 256/253 full-suite results.
+The latest strict suite passes **258/258 in JIT mode** with no skips (121 s)
+and **255/255 in interpreter mode**, with three JIT-only skips (155 s).
+These runs cover the tier-1 default, MT publication changes and default window
+titles. The focused unit suites pass 81/81 JIT and 79/79 interpreter. These
+counts supersede the earlier 257/254 full-suite results.
+
+All 17 additional verification groups pass: generated files, header independence,
+toolchain fetching, verification-gate tests, C API/native bridge, differential
+verification, MT mode controls, immutable MT publication, code cache, CPU and
+fallback profiling, Doom native/compatibility probes, SDL formats, TLS and
+threaded TLS, and window statistics. Differential verification covers 56
+fixtures and five threaded oracle workloads. Tier-2-specific checks explicitly
+enable promotion even though normal execution now defaults to tier 1.
 
 The retained Doom gap harness passes 20,000 randomized generated-code checks
 for 625 captured encodings, with zero mismatches and zero explicit IR
@@ -40,6 +49,34 @@ The extra histogram fixture used halfword loads from a byte array, producing
 out-of-bounds count-table indices. Its input now uses halfwords and checks the
 complete table against an expected histogram; QEMU, interpreter and JIT with
 register/memory verification agree on hash `0x0d693c2a`.
+
+### MT Tier-2 and chaining validation (2026-10-04)
+
+After the MT publication change, the strict unit suites pass **81/81 JIT**
+and **79/79 interpreter** (two intentional interpreter skips). The gate passes
+**56 differential fixtures and five threaded oracle workloads**. The new
+eight-thread region/invalidation oracle also passes under QEMU and interpreter.
+Publication diagnostics prove MT edges and regions are enabled; opt-outs and
+chain-skip configurations retain the arithmetic oracle. Twenty repeated runs
+with `BIFROST_TIER2_HITS=1` pass. Code-cache pressure/growth checks pass at 1
+and 64 MiB, and SDL callback/nonlocal-return tests pass in both engines with
+the dummy video driver. Headless and SDL/GL builds pass. The host publication
+test confirms immutable published bytes through promotion, range/full
+invalidation and retranslation, plus bounded chain execution.
+
+Tier-2 promotion is now opt-in (`BIFROST_TIER2=1`); the MT gate tests both
+the default tier-1 path and explicit tier-2 promotion. The publication and
+SMOV regressions explicitly enable tier-2 so their coverage is retained.
+
+Run the dedicated publication gate after building fresh fixtures:
+
+```sh
+BIFROST_EMU=build/release-sdl0-gl0/bifrost-emu bash scripts/test_jit_mt.sh
+bash scripts/test_jit_mt_publication.sh
+```
+
+This is synthetic correctness and concurrency coverage, not a gameplay frame
+rate measurement or complete code-reclamation implementation.
 
 ### glibc 2.39 loader-hook regression (2026-10-04)
 
@@ -235,7 +272,7 @@ inventory unless explicitly registered in `run_tests.sh`.
 - `scripts/test_fallback_profile.sh`: exact concurrent snapshot retention
   after worker exit, with 192 complete entries and 192,000 counts.
 - `scripts/test_window_stats.sh`: presentation clock, default rendering log,
-  title/idle FPS and enable/disable controls. UI placement, compositor stacking
+  default title/idle FPS and enable/disable controls. UI placement, compositor stacking
   and overlay capture require separate desktop checks; see
   [window-stats limits](window-stats.md).
 

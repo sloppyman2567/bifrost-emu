@@ -142,9 +142,9 @@ reads and publication hold `blocks_mutex_`, with a separate locked lookup for
 compiler callers that already own it. TLS caches track their JIT owner and
 a globally unique invalidation generation, including negative entries.
 Mapping invalidation and the transition to multithreaded execution invalidate
-TLS entries across CPUs at their next dispatch. Multithreaded mode continues
-to disable live-code patching and Tier-2 publication; it does not recycle
-code while another CPU can execute it.
+TLS entries across CPUs at their next dispatch. Multithreaded mode disables
+rewrites of published instructions; its chaining and Tier-2 publication use
+atomic data cells. Code is not recycled while another CPU can execute it.
 
 `BIFROST_STATS_PERIOD` reports cache usage, capacity, budget, growth and
 overflow counts. The cached diagnostic settings `BIFROST_JIT_CACHE_MB`
@@ -255,7 +255,8 @@ promotion and explicit invalidation use the same insertion/erasure helpers.
 
 In shared multithread mode, existing call targets can be read under the
 shared block-table lock. Compilation still rechecks under the exclusive lock.
-This does not enable multithreaded chaining, promotion or code reclamation.
+That checkpoint preceded the MT publication implementation below. Code
+reclamation remains deferred.
 Range invalidation advances the dispatch generation only when a cached block
 or an inlined guest-code range overlaps; data-only mapping changes retain
 valid dispatch entries. Code bytes remain unrecycled during execution.
@@ -304,3 +305,55 @@ register/memory verification run with `BIFROST_NO_DIRECT_CALL=1` so the helper
 wrapper is exercised even in a single-threaded process. The gate runs that mode for differential checks and separately runs the
 original three-thread workload against its arithmetic/NZCV oracle. Concurrent
 replay is suspended rather than restoring shared memory underneath workers.
+
+## Multithreaded Tier-2 and chaining (2026-10-04)
+
+Tier-1 and block chaining are the default. Tier-2 promotion is experimental
+and disabled by default in both single-threaded and MT execution. Opt in with
+`BIFROST_TIER2=1`; `BIFROST_TIER2=0` explicitly disables it. The current MT
+whole-iteration regions can regress application performance. Runtime loop
+hotness and profitability gating remain future work.
+
+Before the second guest CPU starts, the JIT retires legacy single-thread
+instruction patches and purges the table. New MT blocks use immutable
+load/test/jump instructions and naturally aligned, lock-free atomic target
+cells. Release publication changes a cell, not an instruction displacement;
+x86-64 loads provide acquire ordering. Fall-through, taken and region-exit
+edges share the mechanism. Direct BL targets retain helper dispatch in MT
+mode so invalidation cannot leave an embedded stale callee address.
+
+Eligible MT heads count entries using an atomic XADD in separate writable
+metadata. Exactly one entry reaches the promotion threshold; disabling the
+counter updates an atomic flag instead of patching its prologue. The fire
+notification includes the original code site, so a retired block cannot
+promote a replacement translation. Collection, compilation and publication
+hold the exclusive compiler lock with RAII release on failure.
+
+MT regions fuse complete loop iterations. Their back-edges enter through
+revocable data cells and rerun the region prologue; loop-carried pinning and
+LICM across these iteration boundaries remain disabled. This differs from
+the single-thread region's internal loop: it gives concurrent invalidation a
+boundary without patching or reclaiming live code. A per-CPU 256-edge budget
+returns chained execution to dispatch, and callback stop sentinels also end
+chains. Both ordinary and chain-skip frame layouts are covered.
+
+Publication advances every CPU's dispatch generation and redirects incoming
+cells to the new head. Region metadata retains all constituent guest ranges,
+including non-head pages. Invalidation clears incoming cells, permanently
+retires outgoing cells and disables old hot counters. Executable code and its
+metadata remain allocated for the JIT lifetime; reclamation, persistent
+translations and unsynchronized guest code writes remain outside this change.
+A pointer already acquired by another CPU may finish its current iteration;
+guests must still synchronize code changes and instruction-cache maintenance.
+
+`ctest/jit_mt_tier2.c` checks eight concurrent CPUs against a closed-form
+arithmetic oracle, invalidates unchanged live code, rewrites only a region's
+non-head page between synchronized runs, replaces that page with MAP_FIXED,
+and churns data mappings. `scripts/test_jit_mt.sh` additionally requires MT
+edge/region publication, verifies both opt-outs and checks chain-skip mode.
+`scripts/test_jit_mt_publication.sh` snapshots published MT code bytes before
+eight host CPUs trigger promotion, then checks that promotion, range/full
+invalidation and retranslation preserve the snapshot. It also checks the
+execution lease. The verification gate runs the guest concurrency fixture as an independent oracle,
+not shared-memory differential replay. These checks do not establish a Doom 3
+FPS improvement; measure representative gameplay separately.

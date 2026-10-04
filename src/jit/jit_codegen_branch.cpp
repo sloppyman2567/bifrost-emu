@@ -93,7 +93,8 @@ void FrostJIT::emit_taken_path_epilogue() {
     if (chain_skip_enabled()) {
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
-        emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 5 × 0x90
+        if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_);
+        else { emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop(); }
         // Cold exit (only reached when the slot above is unpatched).
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
@@ -112,6 +113,7 @@ void FrostJIT::emit_taken_path_epilogue() {
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
+        if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_);
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }
@@ -135,6 +137,7 @@ void FrostJIT::emit_taken_path_epilogue() {
 FrostJIT::FlagMatSkip FrostJIT::flag_mat_decision(uint64_t target_pc) {
     // Verification compares architectural flags at every block boundary.
     // Dead stores are valid during execution, but obscure that comparison.
+    if (mt_active()) return FlagMatSkip::None;
     if (getenv("BIFROST_NO_FLAGSKIP") || getenv("BIFROST_JIT_VERIFY"))
         return FlagMatSkip::None;
     if (target_pc == 0) return FlagMatSkip::None;
@@ -223,7 +226,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // re-runs the prologue, whose preloads read STALE cpu.regs[]
             // for the deferred pins (infinite loop).
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (bp.target == current_start_pc_);
+            bool is_selfloop = (bp.target == current_start_pc_) && !mt_active();
             if (is_selfloop && !no_selfloop_) {
                 has_selfloop_slot_ = true;
                 selfloop_patch_off_ = code_buf_used_;
@@ -299,7 +302,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // deferred pins only persist across a back-edge that jumps to the
             // body, not one that re-enters the prologue (stale preloads).
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (bp.target == current_start_pc_);
+            bool is_selfloop = (bp.target == current_start_pc_) && !mt_active();
             if (is_selfloop && !no_selfloop_) {
                 has_selfloop_slot_ = true;
                 selfloop_patch_off_ = code_buf_used_;
@@ -401,7 +404,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (bp.target == current_start_pc_);
+            bool is_selfloop = (bp.target == current_start_pc_) && !mt_active();
             // On a self-loop back-edge, skip the pstate materialization
             // entirely when the block never reads loop-carried flags
             // (flags_loop_carried_, precomputed in translate_block): the

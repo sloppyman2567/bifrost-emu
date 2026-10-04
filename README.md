@@ -95,9 +95,14 @@ export BIFROST_ROOT=$PWD/rootfs
 ./bifrost-emu --no-jit ctest_real/fib.elf
 ```
 
+The tier-1 JIT and block chaining are enabled by default. Experimental
+tier-2 region promotion is opt-in with `BIFROST_TIER2=1`; leave it unset or
+set `BIFROST_TIER2=0` for tier-1 execution.
+
 Graphical programs log their first successful frame presentation to stderr.
-Use `--no-render-log` to suppress that message. `--window-stats` (also
-`--window_stats`) adds Bifrost's version and presentation FPS to the game title.
+Use `--no-render-log` to suppress that message. Bifrost's version and
+presentation FPS appear in the game title by default. Use `--no-window-stats`
+to disable stats, or `--window-stats` (also `--window_stats`) to enable the title.
 Independent title, separate-window and overlay switches are described in
 [window stats](docs/window-stats.md).
 

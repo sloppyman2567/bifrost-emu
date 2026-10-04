@@ -21,6 +21,7 @@
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "jit/frostjit.hpp"
 #include "core/memory.h"
+#include "core/cpu.h"
 #include "debug_flags.h"
 #include <cstdio>
 #include <atomic>
@@ -55,8 +56,8 @@ uint64_t (*FrostJIT::translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emu
 uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
                                            int& instr_count))(CPU*, Emulator*) {
     note_table_lookup();
-    // MT mode cannot promote or patch an existing block. A read-only hit
-    // needs only a shared lock; compilation still rechecks exclusively.
+    // MT promotion is driven by atomic entry counters. Read-only table hits
+    // need only a shared lock; compilation still rechecks exclusively.
     if (mt_active()) {
         std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
         const auto it = blocks_.find(pc);
@@ -120,6 +121,8 @@ void FrostJIT::dump_code_cache_stats() {
             (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
             mt_active() ? 1 : 0);
+    fprintf(stderr, "[JIT] MT publication: edges=%llu regions=%llu\n",
+        (unsigned long long)mt_edges_published_.load(), (unsigned long long)mt_regions_published_.load());
     if (dispatch_stats_enabled_) {
         fprintf(stderr, "[JIT] dispatch-cache: last=%llu way0=%llu way1=%llu table=%llu evictions=%llu sets=%d ways=2\n",
                 (unsigned long long)dispatch_last_hits_.load(std::memory_order_relaxed),
@@ -130,10 +133,72 @@ void FrostJIT::dump_code_cache_stats() {
                 INLINE_CACHE_SETS);
     }
 }
+// Emit an immutable load/test/jump edge. The dispatcher supplies a bounded
+// lease; expiry or a host callback sentinel returns through the cold tail.
+size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
+    const size_t off = code_buf_used_;
+    if (!target_pc || dbg().no_chain) return off;
+    auto cell = std::make_unique<MtEdge>();
+    cell->source_pc = current_start_pc_;
+    cell->cold_entry = cold_entry;
+    cell->target_pc = target_pc;
+    MtEdge* edge = cell.get();
+    mt_edges_.push_back(std::move(cell));
+    mt_edge_refs_[target_pc].push_back(edge);
+    mt_source_refs_[current_start_pc_].push_back(edge);
+    mt_edge_slots_[off] = edge;
+    // cmp rax,[rdi+jit_stop_pc]; je cold exit
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);
+    emit_u32(offsetof(CPU, jit_stop_pc));
+    size_t stop = emit_jcc_rel32_placeholder(0x4);
+    // sub dword [rdi+jit_chain_budget],1; jbe cold exit (also handles zero).
+    emit_byte(0x83); emit_byte(0xAF);
+    emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+    size_t budget = emit_jcc_rel32_placeholder(0x6);
+    emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&edge->target));
+    emit_load(R11, R11, 0);
+    emit_byte(0x4D); emit_byte(0x85); emit_byte(0xDB); // test r11,r11
+    size_t empty = emit_jcc_rel32_placeholder(0x4);
+    emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3); // jmp r11
+    for (size_t p : {stop, budget, empty})
+        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    return off;
+}
+void FrostJIT::refresh_mt_edges(uint64_t pc) {
+    auto refs = mt_edge_refs_.find(pc);
+    if (refs == mt_edge_refs_.end()) return;
+    auto block = blocks_.find(pc);
+    uint64_t fn = 0;
+    if (block != blocks_.end() && block->second.fn && !block->second.interp_only)
+        fn = reinterpret_cast<uint64_t>(chain_skip_enabled() && block->second.chain_entry
+            ? block->second.chain_entry : block->second.fn);
+    for (MtEdge* edge : refs->second) {
+        if (!edge->live) continue;
+        uint64_t target = edge->cold_entry && block != blocks_.end()
+            ? reinterpret_cast<uint64_t>(block->second.fn) : fn;
+        if (edge->target.exchange(target, std::memory_order_release) != target && target)
+            mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+void FrostJIT::retire_mt_source(uint64_t pc) {
+    auto refs = mt_source_refs_.find(pc);
+    if (refs == mt_source_refs_.end()) return;
+    for (MtEdge* edge : refs->second) {
+        edge->live = false;
+        edge->target.store(0, std::memory_order_release);
+    }
+    mt_source_refs_.erase(refs);
+}
 bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
-    // MT-safe mode: never modify live code (see enter_multithreaded()).
-    if (mt_active_.load(std::memory_order_relaxed)) return false;
+    // MT publication updates only the data cell, never live instructions.
+    if (mt_active()) {
+        auto slot = mt_edge_slots_.find(chain_patch_off);
+        if (slot == mt_edge_slots_.end() || !slot->second->live) return false;
+        slot->second->target.store(reinterpret_cast<uint64_t>(target_fn), std::memory_order_release);
+        mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     if (chain_patch_off + 5 > CODE_BUF_SIZE) return false;
     // Verify the slot still contains the unpatched pattern: `ret` + NOPs
     // (default) or 5 NOPs (chain-skip lease layout). If it's already
@@ -223,8 +288,8 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     }
 }
 void FrostJIT::chain_back_references(uint64_t target_pc) {
-    // MT-safe mode: no runtime code writes (see enter_multithreaded()).
-    if (mt_active_.load(std::memory_order_relaxed)) return;
+    if (mt_active()) { refresh_mt_edges(target_pc); return; }
+    // Legacy instruction-patching path below is single-thread only.
     // Patch any cached block whose chain_target_pc == target_pc.
     //
     // Uses the back_refs_ index for O(k) lookup (k = number of back-
@@ -356,12 +421,25 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     // Revoke all CPUs' dispatch entries only when compiled code is affected.
     invalidate_dispatch_cache();
     auto unpatch_slot = [&](size_t off) {
+        if (mt_active()) {
+            auto slot = mt_edge_slots_.find(off);
+            if (slot != mt_edge_slots_.end()) slot->second->target.store(0, std::memory_order_release);
+            return;
+        }
         if (off + 5 > CODE_BUF_SIZE) return;
         if (code_buf_[off] != 0xE9) return;  // not patched — leave alone
         code_buf_[off] = unpatched;  // single-byte atomic store
     };
-    make_writable();
+    if (!mt_active()) make_writable();
     for (uint64_t vpc : victims) {
+        if (mt_active()) {
+            retire_mt_source(vpc);
+            auto refs = mt_edge_refs_.find(vpc);
+            if (refs != mt_edge_refs_.end())
+                for (MtEdge* edge : refs->second) edge->target.store(0, std::memory_order_release);
+            auto victim = blocks_.find(vpc);
+            if (victim != blocks_.end()) tier2_counter_disable(victim->second.tier2_counter_off, victim->second.tier2_counter_len);
+        }
         // 2. Unpatch predecessors chained to this victim.
         auto bref = back_refs_.find(vpc);
         if (bref != back_refs_.end()) {
@@ -390,13 +468,24 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         inline_cache_erase(vpc);
     }
     std::atomic_thread_fence(std::memory_order_release);
-    make_executable();
+    if (!mt_active()) make_executable();
 }
 void FrostJIT::invalidate_all() {
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
     if (blocks_.empty()) return;
+    if (mt_active()) {
+        for (auto& edge : mt_edges_) {
+            edge->live = false;
+            edge->target.store(0, std::memory_order_release);
+        }
+        for (auto& counter : mt_hot_counters_) counter->enabled.store(0, std::memory_order_release);
+        blocks_.clear(); back_refs_.clear();
+        tls_last_block_ = LastBlockCache{};
+        for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
+        return;
+    }
     make_writable();
     for (auto& kv : blocks_) {
         BlockEntry& e = kv.second;
@@ -427,17 +516,20 @@ void FrostJIT::enter_multithreaded() {
     if (!mt_active_.compare_exchange_strong(expected, true)) return;
     if (dbg().jit_verify)
         fprintf(stderr, "[VERIFY] suspended: concurrent guest execution requires oracle tests; shared-memory replay is unsafe\n");
-    // Purge every compiled block. This drops all chain slots (patch_chain is
-    // disabled from now on, so none are re-created) AND any tier-2 region:
-    // a region carries an in-code hot-head counter that writes the code page
-    // on every entry, which no compile-time gate can disable retroactively.
-    //
-    // Safe without quiescing: the spawning vCPU is the only running one (the
-    // guest was single-threaded until this moment) and it is inside a
-    // syscall, not executing JIT code. Blocks re-translated after this point
-    // emit no chain slots and no tier-2 regions, so the RWX buffer is never
-    // modified while another core executes it — the x86 cross-modifying-code
-    // hazard that produced the pc=0 torn-jump abort.
-    invalidate_all();
+    // No second vCPU exists yet. Retire legacy ST instruction patches once,
+    // including frames retained by a guest call that created the thread.
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    make_writable();
+    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
+    for (auto& kv : blocks_) {
+        auto& entry = kv.second;
+        for (size_t off : {entry.chain_patch_off, entry.taken_chain_patch_off})
+            if (off && off + 5 <= CODE_BUF_SIZE && code_buf_[off] == 0xE9)
+                code_buf_[off] = unpatched;
+        tier2_counter_disable(entry.tier2_counter_off, entry.tier2_counter_len, true);
+    }
+    make_executable();
+    invalidate_dispatch_cache();
+    blocks_.clear(); back_refs_.clear();
 }
 } // namespace arm64emu

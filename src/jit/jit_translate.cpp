@@ -363,7 +363,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
     dirty_host_regs_ = 0;  // reset dirty-bitmask
-    // Tier-2 in-code hot-head counter (default ON; BIFROST_TIER2=0 opts out):
+    // Tier-2 in-code hot-head counter (opt-in; BIFROST_TIER2=1 enables):
     // 8 bytes of counter state immediately BEFORE the fn entry (unreachable
     // data — the fn starts at block_start below, so the entry point stays the
     // prologue). The prologue emits the RIP-relative increment against this
@@ -832,7 +832,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // skips its own prologue still reads that slot. Disabled mode leaves
     // chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
-    // ── Tier-2 in-code hot-head counter (default ON; BIFROST_TIER2=0 opts out) ──
+    // ── Tier-2 in-code hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
     // Emitted here (after chain_entry_off_, before the R10 window load and
     // vec prologue loads) so BOTH cold entries (falling through the prologue)
     // and chain-skip entries (jumping to chain_entry_off_) hit it — every
@@ -857,7 +857,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Regions entered via a chain edge use the region's own chain-skip entry
     // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
     // vreg-slot layouts compatible.
-    if (tier2_enabled() && !wex_enabled_ && !mt_active_) {
+    if (tier2_enabled() && !wex_enabled_) {
         if (!ir_block.insts.empty()) {
             IROp last_op = ir_block.insts.back().op;
             if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||
@@ -875,18 +875,39 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     if (tier2_head_eligible) {
+        size_t mt_counter_disabled_patch = 0;
         tier2_counter_off_ = code_buf_used_;
-        const size_t data_off = block_start - 8;
-        const uint32_t threshold = tier2_hits_threshold();
-        // inc dword [rip+disp]         (FF 05 disp32)
-        size_t inc_off = code_buf_used_;
-        emit_byte(0xFF); emit_byte(0x05);
-        emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (inc_off + 6))));
-        // cmp dword [rip+disp], imm32  (81 3D disp32 imm32)
-        size_t cmp_off = code_buf_used_;
-        emit_byte(0x81); emit_byte(0x3D);
-        emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (cmp_off + 10))));
-        emit_u32(threshold);
+        if (mt_active()) {
+            auto counter = std::make_unique<MtHotCounter>();
+            MtHotCounter* state = counter.get();
+            mt_hot_counters_.push_back(std::move(counter));
+            mt_counter_sites_[tier2_counter_off_] = state;
+            emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(state));
+            // cmp dword [rax],0; je past counter/fire (patched below)
+            emit_byte(0x83); emit_byte(0x38); emit_byte(0);
+            size_t disabled = emit_jcc_rel32_placeholder(0x4);
+            emit_mov_imm64(RCX, 1);
+            // lock xadd dword [rax+4],ecx: each entry obtains a unique hit.
+            emit_byte(0xF0); emit_byte(0x0F); emit_byte(0xC1);
+            emit_byte(0x48); emit_byte(4);
+            emit_byte(0x81); emit_byte(0xF9);
+            emit_u32(std::max(uint32_t{1}, tier2_hits_threshold()) - 1);
+            // The disabled branch lands at the same skip as the JNE below.
+            // Keep the disabled-counter fixup local to this prologue.
+            mt_counter_disabled_patch = disabled;
+        } else {
+            const size_t data_off = block_start - 8;
+            const uint32_t threshold = tier2_hits_threshold();
+            // inc dword [rip+disp]         (FF 05 disp32)
+            size_t inc_off = code_buf_used_;
+            emit_byte(0xFF); emit_byte(0x05);
+            emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (inc_off + 6))));
+            // cmp dword [rip+disp], imm32  (81 3D disp32 imm32)
+            size_t cmp_off = code_buf_used_;
+            emit_byte(0x81); emit_byte(0x3D);
+            emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (cmp_off + 10))));
+            emit_u32(threshold);
+        }
         // jne short skip                (75 rel8 — patched after the call)
         size_t jne_off = code_buf_used_;
         emit_byte(0x75); emit_byte(0x00);
@@ -898,10 +919,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // point; pushfq makes it 16-aligned for the `call`).
         emit_load(RDI, RBP, emu_slot_off());
         emit_mov_imm64(RSI, start_pc);
+        emit_mov_imm64(RDX, tier2_counter_off_);
         emit_call_aligned(reinterpret_cast<void*>(&tier2_fire_stub), 0);
         // Patch the jne to skip the fire path (land right after the call).
         const int8_t rel = static_cast<int8_t>(code_buf_used_ - (jne_off + 2));
         patch_jcc_rel8(jne_off, rel);
+        if (mt_counter_disabled_patch)
+            patch_jcc_rel32(mt_counter_disabled_patch, static_cast<int32_t>(code_buf_used_ - (mt_counter_disabled_patch + 6)));
         tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
     }
     // 1.5.4-alpha: load the direct-window base into R10 ONLY if the
@@ -969,7 +993,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
         pinned_host_regs_ = 0;
         keep_store_dest_ = false;
-        bool no_selfloop = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+        bool no_selfloop = mt_active() || (getenv("BIFROST_NO_SELFLOOP") != nullptr);
         bool is_selfloop = false;
         if (!ir_block.insts.empty()) {
             const IRInst& last = ir_block.insts.back();
@@ -1336,7 +1360,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // for the successor's prologue-agnostic body (it reads cpu/emu
         // from RDI/RSI at chain_entry just like fn does).
         chain_patch_off = code_buf_used_;
-        emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 5 × 0x90
+        if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
+        else { emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop(); }
         // Cold exit (only reached when the slot above is unpatched).
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
@@ -1354,6 +1379,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // all 5 bytes with `jmp rel32` → target block's entry, skipping the
         // dispatcher entirely for straight-line / unconditional-branch code.
         chain_patch_off = code_buf_used_;
+        if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }
@@ -1673,7 +1699,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.
     // BIFROST_NO_CHAIN disables chaining for debugging.
-    static bool no_chain_ = (getenv("BIFROST_NO_CHAIN") != nullptr);
+    const bool no_chain_ = dbg().no_chain;
     if (!no_chain_) {
         try_chain_block(start_pc, blocks_[start_pc]);
         chain_back_references(start_pc);

@@ -110,7 +110,14 @@ optional dispatch-cache telemetry, and retention of dispatch entries during
 data-only mapping changes. Worker CPU profiling now registers each thread's
 code-buffer range and covers logical cache growth. See [JIT contracts](docs/JIT.md)
 and [validation](docs/TESTS.md). This checkpoint does not implement persistent
-translations, shader caching or multithreaded Tier-2/chaining.
+translations or shader caching.
+
+Implemented MT publication checkpoint: atomic target cells enable chaining
+and Tier-2 promotion without rewriting published instructions. MT regions fuse
+loop iterations and use revocable back-edges with bounded dispatch leases.
+Concurrent invalidation and both frame layouts have independent oracle checks.
+Code and metadata remain unrecycled; quiescent reclamation and loop-carried
+MT region optimization remain future work. Gameplay FPS gains need measurement.
 
 Implemented helper checkpoint: batch nested-call statistics at outer returns
 and remove redundant BL/BLR host-flag saves and BL return-PC writes. The

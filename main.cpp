@@ -70,7 +70,7 @@ static void print_banner() {
         "    -q, --quiet        suppress BRK warnings (even with -d)\n"
         "    --fb-dump PATH     dump /dev/fb0 to PATH on exit (PPM)\n"
         "    --audio-dump PATH  dump /dev/dsp to PATH on exit (WAV)\n"
-        "    --window-stats    enable game-title presentation stats (alias --window_stats)\n"
+        "    --window-stats    enable game-title presentation stats (default; alias --window_stats)\n"
         "    --[no-]window-stats-title|window|overlay  independent stats displays\n"
         "    --no-window-stats disable all stats displays\n"
         "    --no-render-log  disable the default first-presentation log\n"

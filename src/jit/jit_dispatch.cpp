@@ -33,6 +33,7 @@ struct ProfRunGuard {
     ~ProfRunGuard() { if (active_) prof_in_run_block = saved_; }
 };
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
+    cpu.jit_chain_budget = 256;
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
     // every slow-path cache hit was a full environ scan per dispatch.
@@ -149,8 +150,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // would wake A.
     //
     // Block execution is safe without the lock because:
-    //   - The code buffer is PROT_READ|PROT_EXEC (never mutated at runtime
-    //     except via patch_chain, which takes its own W^X toggle).
+    //   - Published MT instructions are immutable; data-cell targets change
+    //     atomically. The shared buffer appends new code without W^X toggles.
     //   - `entry` is a local copy — other threads mutating blocks_[pc]
     //     don't affect our copy.
     //   - x86 JIT code is reentrant — multiple threads can execute the
@@ -171,7 +172,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-        // ── Tier-2 hot-head detection (default ON; BIFROST_TIER2=0 opts out) ──
+        // ── Tier-2 hot-head detection (opt-in; BIFROST_TIER2=1 enables) ──
         // Count SLOW-PATH dispatches per block (BlockEntry::exec_count) and
         // flag the block once it crosses tier2_hits_threshold() — the tier-2
         // trace/region "hot head" feed (ROADMAP #14, Phase 1; a later task

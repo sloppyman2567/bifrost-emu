@@ -18,13 +18,16 @@ run_probe() {
     rg -q 'window_stats: ALL PASS' "$log"
 }
 # Override inherited diagnostics so each invocation checks a distinct mode.
-export BIFROST_WINDOW_STATS=0 BIFROST_WINDOW_STATS_TITLE=0
+unset BIFROST_WINDOW_STATS BIFROST_WINDOW_STATS_TITLE
 export BIFROST_WINDOW_STATS_WINDOW=0 BIFROST_WINDOW_STATS_OVERLAY=0 BIFROST_RENDER_LOG=1
-run_probe "$TASK_TMP/default.log" ctest_real/test_window_stats.elf
+run_probe "$TASK_TMP/default.log" ctest_real/test_window_stats.elf title
 [[ $(rg -c '^\[render\]' "$TASK_TMP/default.log") == 2 ]]
-unset BIFROST_WINDOW_STATS_TITLE
+export BIFROST_WINDOW_STATS=0
+run_probe "$TASK_TMP/env-disabled.log" ctest_real/test_window_stats.elf
 run_probe "$TASK_TMP/title.log" --window_stats ctest_real/test_window_stats.elf title
 rg -q 'idle 0.0 FPS' "$TASK_TMP/title.log"
 run_probe "$TASK_TMP/disabled.log" --window-stats --no-window-stats-title --no-render-log ctest_real/test_window_stats.elf
 if rg -q '^\[render\]' "$TASK_TMP/disabled.log"; then cat "$TASK_TMP/disabled.log"; exit 1; fi
+unset BIFROST_WINDOW_STATS BIFROST_WINDOW_STATS_TITLE
+run_probe "$TASK_TMP/all-disabled.log" --no-window-stats ctest_real/test_window_stats.elf
 printf 'window_stats regression: ALL PASS\n'

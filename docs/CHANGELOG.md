@@ -12,6 +12,32 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Validation of the current checkpoint
+
+- Strict guest suite: 258/258 JIT; 255/255 interpreter with three JIT-only skips.
+- Focused units: 81/81 JIT and 79/79 interpreter; differential gate: 56
+  fixtures and five threaded oracles. All 17 additional verification groups pass.
+- Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
+  reported renderer fault remain unresolved. No controlled FPS claim is made.
+
+### Window statistics defaults
+
+- Show emulator version and presentation stats in game titles by default;
+  retain title/all-stats disable switches and opt-in overlay/separate window.
+
+### Multithreaded Tier-2 and chaining
+
+- Default to tier-1 JIT with chaining; make tier-2 promotion experimental and
+  opt-in via `BIFROST_TIER2=1`, retaining explicit promotion coverage in tests.
+
+- Publish fall-through, taken and region-exit edges through atomic data cells;
+  keep published MT instructions immutable and retain helper-based BL calls.
+- Enable atomic hot-head promotion and whole-iteration MT regions, with
+  bounded chains, cross-CPU cache revocation and constituent-range invalidation.
+- Retain code/metadata until JIT destruction; reclamation remains deferred.
+- Add eight-thread arithmetic/SMC/MAP_FIXED oracles and CI publication checks;
+  preserve single-thread differential verification separately.
+
 ### glibc 2.39 dynamic-loader hook repair
 
 - Detect the dlfcn hook through the relocated `_rtld_global_ro` GOT pointer,

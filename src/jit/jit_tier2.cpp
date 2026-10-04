@@ -463,6 +463,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // behavior for bisection.
     static const bool t2_linear_ = (getenv("BIFROST_T2_LINEAR") != nullptr);
     if (!last_is_backedge && !t2_linear_) return nullptr;
+    // MT regions fuse a whole loop iteration, then use a revocable edge
+    // into the head. This bounds execution and avoids retaining registers
+    // or LICM values across an invalidation/scheduling boundary.
+    if (mt_active()) last_is_backedge = false;
 
     // ── Vreg remap + IR concatenation ────────────────────────────────
     // Each block's IR used its own scratch numbering (starts at 33, the
@@ -1443,6 +1447,18 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         !no_exitchain_ && (getenv("BIFROST_JIT_VERIFY") == nullptr);
     std::vector<size_t> co_patch_offs;
     auto emit_chainout_exit = [&](uint64_t pc) -> bool {
+        if (mt_active()) {
+            emit_mov_imm_to_rax(pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
+            emit_mov_reg(RDI, CPU_REG);
+            emit_load(RSI, RBP, emu_slot_off());
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+            emit_pop(R15); emit_pop(R14); emit_pop(R13);
+            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+            if (exitchain_ok) emit_mt_chain_slot(pc, true);
+            emit_ret();
+            return true;
+        }
         if (!exitchain_ok) return false;
         uint64_t (*tfn)(CPU*, Emulator*) = lookup_only_locked(pc);
         if (!tfn) return false;
@@ -1639,25 +1655,23 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
 // block. This compiles the head's trace as a region and force-patches the
 // loop's back-edge taken-chain slot so the NEXT iteration jumps into the
 // region instead of the old per-block functions.
-void tier2_fire_stub(Emulator* emu, uint64_t pc) {
+void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site) {
     if (!emu) return;
     FrostJIT* jit = emu->jit();
     if (!jit) return;
-    jit->tier2_fire_region(*emu, pc);
+    jit->tier2_fire_region(*emu, pc, site);
 }
 
-void FrostJIT::tier2_counter_disable(size_t counter_off, size_t counter_len) {
+void FrostJIT::tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition) {
     if (!counter_off || counter_len < 6) return;
-    // Overwrite the leading `inc dword[rip+disp]` (6 bytes) with
-    // `jmp rel32` over the whole counter+fire sequence. The block keeps
-    // paying a single taken branch (~1-2 cycles) instead of the
-    // inc+cmp+jne+fire fetch on every entry. Callers hold the exclusive
-    // lock; tier-2 only runs in non-W^X mode (RWX buffer), so the write is
-    // safe while other threads execute the block (a torn byte would only
-    // land in the skipped region — the jmp is written atomically-ish as the
-    // first byte + rel; x86 fetch of a torn JMP could theoretically see a
-    // stale displacement, but the OLD bytes at the target of that jmp are
-    // the dead counter sequence, and this runs once per block).
+    auto mt = mt_counter_sites_.find(counter_off);
+    if (mt != mt_counter_sites_.end()) {
+        mt->second->enabled.store(0, std::memory_order_release);
+        return;
+    }
+    if (mt_active() && !legacy_transition) return;
+    // Only the single running vCPU may replace this legacy instruction
+    // sequence. The MT transition disables it before a worker is launched.
     size_t off = counter_off;
     if (off + 6 > CODE_BUF_SIZE) return;
     const int32_t rel = static_cast<int32_t>(static_cast<int64_t>(counter_len) - 5);
@@ -1666,23 +1680,22 @@ void FrostJIT::tier2_counter_disable(size_t counter_off, size_t counter_len) {
     std::atomic_thread_fence(std::memory_order_release);
 }
 
-void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
+void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
     // Runs from INSIDE a generated block (prologue fire path). Never let an
     // exception cross the JIT frame boundary (std::terminate).
     try {
         // W^X bail: the in-code counter writes the code page (a non-W^X RWX
         // buffer), and the compile here would mprotect the page we're
         // currently executing from. Regions only exist in shared-JIT mode.
-        if (wex_enabled_ || !tier2_enabled() || mt_active_) return;
-        blocks_mutex_.lock();
+        if (wex_enabled_ || !tier2_enabled()) return;
+        std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
         auto it = blocks_.find(pc);
         if (it == blocks_.end()) {
-            blocks_mutex_.unlock();
             return;
         }
+        if (site && it->second.tier2_counter_off != site) return; // retired notification
         BlockEntry old_entry = it->second;
         if (old_entry.tier2_hot_logged) {
-            blocks_mutex_.unlock();
             return;
         }
         // Mark hot-logged BEFORE attempting collection/compilation: the same
@@ -1693,6 +1706,8 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
                               it->second.tier2_counter_len);
         tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
 
+        const size_t old_edge_count = mt_edges_.size();
+        const auto old_source_edges = mt_source_refs_[pc];
         Tier2Trace trace = collect_tier2_trace(emu, pc);  // read-only, we hold the lock
         uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
         uint64_t (*rfn)(CPU*, Emulator*) =
@@ -1719,7 +1734,22 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
             region_entry.taken_chained = true;
             region_entry.interp_only = false;
             region_entry.verified_once = true;  // M1: no region verify
+            for (const auto& block : trace.blocks)
+                region_entry.inlined_ranges_.push_back({block.pc, block.ir.count});
             it->second = region_entry;
+            if (mt_active()) {
+                for (MtEdge* edge : old_source_edges) {
+                    edge->live = false;
+                    edge->target.store(0, std::memory_order_release);
+                }
+                mt_regions_published_.fetch_add(1, std::memory_order_relaxed);
+                invalidate_dispatch_cache(); // revoke every CPU's cached head
+                refresh_mt_edges(pc);
+                for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)
+                    refresh_mt_edges(mt_edges_[k]->target_pc);
+                return; // no instruction rewrites in MT mode
+            }
+
 
             // ── Cache invalidation for the head ────────────────────────
             // This fire ran INSIDE the old head fn (its in-code prologue
@@ -1857,10 +1887,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
                 }
             }
         }
-        blocks_mutex_.unlock();
     } catch (...) {
         // Never let a collect/compile/registration failure escape a JIT frame.
-        if (blocks_mutex_.try_lock()) blocks_mutex_.unlock();
+        // The RAII compiler lock is released on every failure.
     }
 }
 

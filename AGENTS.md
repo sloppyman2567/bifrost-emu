@@ -845,24 +845,29 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   degradation). Regression: `ctest/test_sandbox.c` (44 checks, fixtures
   provisioned by the `Sandbox` section in `scripts/run_tests.sh`).
 - **Shared-JIT multithread safety (`FrostJIT::enter_multithreaded()`,
-  2026-09-12).** The default shared-JIT code buffer is RWX (W^X is
-  force-disabled in `Emulator::enable_jit`) and several paths rewrite
-  *published* code: `patch_chain`, `chain_back_references` (flag-materialize
-  jmp-past), `patch_pending_calls`, `invalidate_range`/`invalidate_all`, and
-  tier-2 regions' **in-code hot-head counter** (tier-2 is ON by default).
-  x86 requires the *executing* core to serialize after a code write, so under
-  threads these are unsafe (torn jump → `decode error at pc=0x0`). On the
-  first thread spawn `enter_multithreaded()` sets `mt_active_` and
-  `invalidate_all()`s the cache — purging every chain slot AND every tier-2
-  region — after which `patch_chain`/`chain_back_references`/
-  `patch_pending_calls` bail, tier-2 emission is gated on `!mt_active_`, and
-  the buffer is never modified under a running core. Sticky for the JIT
-  lifetime. `BIFROST_NO_SHARED_JIT=1` (per-thread JIT) never activates it and
-  keeps chaining. Trade-off: MT guests lose chaining/tier-2; single-thread
-  guests are unaffected. Do NOT re-enable a runtime code write while
-  `mt_active_` is set without a real quiesce/stop-the-world. Regression:
-  `test_mem_guard`'s concurrent section. A perf-preserving alternative
-  (data-indirected chain slots) is still open.
+  updated 2026-10-04).** Shared code remains RWX so new code can be appended
+  while other CPUs execute, but published MT instructions are immutable.
+  Before the second CPU starts, retire the legacy ST chain/counter patches
+  and purge the block table. That transition is the only MT-flagged path
+  allowed to retire legacy instruction bytes: no other CPU exists yet.
+  MT fall-through/taken/region-exit chains use stable atomic target cells,
+  and hot-head counters live in separate atomic metadata. Release-store
+  publication and x86 acquire loads replace cross-modifying instructions.
+  Do NOT re-enable runtime instruction patches under concurrent execution
+  without a real quiescence protocol. Direct BL calls retain helper dispatch
+  in MT; embedded callee pointers would bypass invalidation.
+  MT Tier-2 regions fuse one complete loop iteration, then use a revocable
+  back-edge. Do not turn that edge into an unbounded internal loop or enable
+  loop-carried LICM/pinning without a safe invalidation boundary. Chain leases
+  return after at most 256 edges and honor `CPU::jit_stop_pc`. Keep both cold
+  and chain-skip frame layouts balanced. Publication revokes every CPU's TLS
+  generation; invalidation checks every region constituent range, clears
+  incoming cells and permanently retires outgoing cells/counters. Code and
+  metadata stay allocated until JIT destruction. `BIFROST_NO_SHARED_JIT=1`
+  retains the per-thread path. Regressions: `jit_mt_tier2`'s eight-thread
+  arithmetic/SMC/MAP_FIXED oracle, `scripts/test_jit_mt.sh` and
+  `scripts/test_jit_mt_publication.sh` (immutable bytes and bounded leases),
+  plus `test_mem_guard`, code-cache pressure and SDL callback tests.
 
 ## Work Guidance
 

@@ -284,6 +284,7 @@ public:
     // Host-managed return boundary for guest SDL thread functions. Nested
     // native call dispatch must unwind when a nonlocal jump reaches it.
     uint64_t jit_stop_pc = 0;
+    uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
     // ── PSTATE flag accessors ────────────────────────────────────────
     void set_flag_n(bool v) { if (v) pstate |= (1u<<31); else pstate &= ~(1u<<31); }
     void set_flag_z(bool v) { if (v) pstate |= (1u<<30); else pstate &= ~(1u<<30); }
