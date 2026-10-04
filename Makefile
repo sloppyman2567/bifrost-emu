@@ -320,28 +320,10 @@ test: $(TARGET)
 	done
 	@echo "--- Done. ---"
 
-# Run JIT tests under BIFROST_JIT_VERIFY=1 and fail on missing fixtures,
-# non-zero emulator exit, or a reported divergence. Capture output in a
-# temporary file so filtering cannot mask the emulator's exit status.
+# Differential replay plus separate threaded oracle runs (no shared-memory replay).
 SHELL := /bin/bash
 verify: $(TARGET)
-	@echo "--- JIT verify mode (divergence check) ---"
-	@set -u; failed=0; count=0; \
-	for f in ctest/jit_*.elf; do \
-	  [ -f "$$f" ] || continue; count=$$((count + 1)); \
-	  log=$$(mktemp); \
-	  echo "--- $$f (verify) ---"; \
-	  if BIFROST_JIT_VERIFY=1 timeout 30 "$(TARGET)" "$$f" </dev/null >"$$log" 2>&1; then rc=0; else rc=$$?; fi; \
-	  if grep -Eq 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' "$$log"; then \
-	    grep -E 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' "$$log" | head -3; \
-	    echo "FAIL: divergence in $$f"; failed=1; \
-	  fi; \
-	  if [ $$rc -ne 0 ]; then echo "FAIL: $$f exited with rc=$$rc"; tail -20 "$$log"; failed=1; fi; \
-	  rm -f "$$log"; \
-	done; \
-	if [ $$count -eq 0 ]; then echo "FAIL: no ctest/jit_*.elf fixtures found; run make setup-tests"; exit 1; fi; \
-	if [ $$failed -ne 0 ]; then exit 1; fi; \
-	echo "JIT verify passed for $$count fixtures."
+	@bash scripts/verify_jit.sh "$(TARGET)"
 
 
 # Cross-compile a test program with the bundled musl toolchain.

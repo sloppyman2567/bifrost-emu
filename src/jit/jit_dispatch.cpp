@@ -9,6 +9,7 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
+#include "debug_flags.h"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -405,8 +406,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     //   - The code buffer is PROT_READ|PROT_EXEC (concurrent reads OK).
     //   - `entry` is a local copy (other threads can't mutate it).
     //   - x86 JIT code is reentrant (each thread has its own CPU/stack).
-    // Verify-mode does code-buffer patching, but it's debug-only and
-    // patches only this block's own slots (no cross-block mutation).
+    // Differential replay is single-thread only: restoring guest memory or
+    // patching live slots while another vCPU executes is unsafe.
     // (Lock was already released above — no unlock needed here.)
     // ── BIFROST_JIT_VERIFY: divergence checker ──────────────────
     // Before running the JIT block, snapshot the CPU state. After the
@@ -428,7 +429,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // epilogue and returns next_pc=branch_target. This forces the JIT
     // to run exactly one iteration of the loop, matching the
     // interpreter's `instr_count` step count.
-    static bool verify_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
+    static const bool verify_ = dbg().jit_verify;
     // BIFROST_JIT_VERIFY_EVERY=N: re-verify each block on its first N
     // run_block dispatches (default 1 = legacy first-dispatch-only).
     // Data-dependent miscompiles (e.g. a shift-count bug that needs
@@ -447,7 +448,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // store blocks; their ref re-run can double-apply stores, so only
     // trust divergences that reproduce and make sense (register splits).
     static bool verify_untracked_ = (getenv("BIFROST_VERIFY_UNTRACKED") != nullptr);
-    if (verify_ && entry.exec_count < verify_every_ &&
+    if (verify_ && !mt_active_.load(std::memory_order_acquire) &&
+        entry.exec_count < verify_every_ &&
         !entry.has_svc && !entry.has_call &&
         (!entry.has_unresolved_store || verify_untracked_)) {
         // Mark this block as verified so subsequent dispatches skip the

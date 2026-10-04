@@ -44,7 +44,7 @@ jobs:
           make generated-check
           make -j2 USE_SDL2=0 USE_THUNK_GL=0
       - name: Run host API checks
-        run: make test-capi test-nb USE_SDL2=0 USE_THUNK_GL=0
+        run: make test-capi test-nb USE_SDL2=0 USE_THUNK_GL=0 MUSL_CC=aarch64-linux-gnu-gcc GLIBC_CC=aarch64-linux-gnu-gcc
       - name: Run strict JIT and interpreter regressions
         run: |
           ./scripts/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --unit --quick --strict
@@ -52,7 +52,9 @@ jobs:
       - name: Run filesystem sandbox boundary regressions
         run: ./scripts/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --integration --strict --filter '^test_sandbox$'
       - name: Run JIT differential verification
-        run: make verify USE_SDL2=0 USE_THUNK_GL=0
+        run: |
+          python3 scripts/test_verify_gate.py
+          make verify USE_SDL2=0 USE_THUNK_GL=0
       - name: Run glibc dynamic-link tests
         run: |
           AARCH64_SYSROOT=/usr/aarch64-linux-gnu ./scripts/setup-rootfs.sh

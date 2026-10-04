@@ -19,3 +19,11 @@ cd ctest_real/minecraft_weekend
 The locally built static ARM64 executable uses the GLFW/OpenGL thunk bridge.
 Keep the `res/` directory with the executable. This is an interactive gameplay
 checkpoint, rather than exhaustive validation of every world or input path.
+
+## Gameplay checkpoint (2026-10-04)
+
+User-supplied daytime gameplay shows terrain, trees and the hotbar. Window stats report an internal render size of 640×360. The FPS in the title is an instantaneous presentation sample, not a sustained benchmark.
+
+![Gameplay checkpoint (2026-10-04)](images/minecraft-weekend-2026-10-04/daytime.png)
+
+![Weekend nighttime lighting](images/minecraft-weekend-2026-10-04/nighttime.png)

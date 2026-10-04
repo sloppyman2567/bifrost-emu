@@ -464,3 +464,11 @@ fallbacks. The run reached normal game/audio/graphics shutdown and the process
 exited normally. Terminal logging recorded rendering startup and CPU reports,
 but no FPS history, so sustained FPS cannot be reconstructed from this log.
 The local diagnostic log is `/tmp/doom3-helper-play-20261004.log`.
+
+## Gameplay screenshots (2026-10-04)
+
+User-supplied Mars City hangar and security-checkpoint screenshots show an NPC, interaction prompts, lighting and HUD rendering. Window stats report 1720×692 with instantaneous presentation samples of 11.4 and 14.2 FPS; these are not sustained benchmarks or proof of animation correctness.
+
+![Doom 3 hangar NPC](images/doom3-2026-10-04/hangar-npc.png)
+
+![Doom 3 security checkpoint](images/doom3-2026-10-04/security-checkpoint.png)

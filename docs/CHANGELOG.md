@@ -12,6 +12,18 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Verification gate and screenshot follow-up
+
+- Suspend unsafe differential replay after the multithread transition and
+  report that limitation. Verify 56 single-thread fixtures plus four unchanged
+  threaded oracle workloads; reject missing/stale fixtures, divergences and
+  failed/timeout exits. Add CI tests for gate failure propagation.
+- Fix headless audio math includes and Android SDL compile guards, and carry
+  the fixture compiler override into CI host API checks.
+- Add all eight October 4 user-supplied screenshots across Neverball, Minecraft
+  Weekend, vkQuake and Doom 3, with captions that distinguish sampled FPS from
+  sustained performance. Preserve the supplied game windows and title stats.
+
 ### Changes since the published August 18 checkpoint
 
 - **JIT and IR:** Tier-2 region compilation, typed/private IR parameters,

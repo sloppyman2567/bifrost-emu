@@ -21,6 +21,7 @@
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "jit/frostjit.hpp"
 #include "core/memory.h"
+#include "debug_flags.h"
 #include <cstdio>
 #include <atomic>
 #include <cstdint>
@@ -424,6 +425,8 @@ void FrostJIT::enter_multithreaded() {
     // the purge. After that every writer checks mt_active_ and bails.
     bool expected = false;
     if (!mt_active_.compare_exchange_strong(expected, true)) return;
+    if (dbg().jit_verify)
+        fprintf(stderr, "[VERIFY] suspended: concurrent guest execution requires oracle tests; shared-memory replay is unsafe\n");
     // Purge every compiled block. This drops all chain slots (patch_chain is
     // disabled from now on, so none are re-created) AND any tier-2 region:
     // a region carries an in-code hot-head counter that writes the code page

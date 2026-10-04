@@ -212,3 +212,13 @@ changes, rather than the JPEG patch alone.
 The user explicitly confirmed normal mouse control during fullscreen gameplay
 and after returning to windowed mode. This closes the earlier fullscreen mouse
 report for the tested local setup; it is interactive user evidence.
+
+## Gameplay checkpoint (2026-10-04)
+
+User-supplied gameplay shows the level, coins, HUD and selected ball model rendering at 1280×720. The FPS in the title is an instantaneous presentation sample, not a sustained benchmark.
+
+![Gameplay checkpoint (2026-10-04)](images/neverball-2026-10-04/gameplay.png)
+
+The record screen is included too; it retains the player alias visible in the supplied image.
+
+![Neverball record screen](images/neverball-2026-10-04/new-record.png)

@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #define NFUN 4000
 #define WORDS 100
 extern uint64_t interp_leaf(uint64_t);
@@ -26,7 +27,7 @@ static void *run(void *arg) {
  }
  return NULL;
 }
-int main(void) {
+int main(int argc, char **argv) {
  code=mmap(NULL,NFUN*WORDS*4,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
  if(code==MAP_FAILED) return 2;
  for(unsigned i=0;i<NFUN;i++) {
@@ -35,6 +36,11 @@ int main(void) {
   p[96]=0xd65f03c0; /* ret */
  }
  __builtin___clear_cache((char*)code,(char*)(code+NFUN*WORDS));
+ if(argc>1 && strcmp(argv[1],"single")==0) {
+  run((void*)20000);
+  if(failed)return 1;
+  puts("jit_cache_pressure: ALL PASS");return 0;
+ }
  pthread_t t[2];
  for(uintptr_t i=0;i<2;i++) if(pthread_create(t+i,NULL,run,(void*)(10000*i))) return 3;
  run((void*)20000);

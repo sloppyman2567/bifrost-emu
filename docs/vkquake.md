@@ -148,3 +148,11 @@ This reproduction supersedes the earlier stale-guest-state diagnosis. Working
 JIT gameplay alone does not establish long-run stability. Texture artifacts
 remain open; input status follows the later user report at the top of this
 document.
+
+## Gameplay checkpoint (2026-10-04)
+
+User-supplied gameplay shows the world, weapon and HUD at 1720×692. Remaining texture artifacts are visible; this does not establish complete rendering correctness. The FPS in the title is an instantaneous presentation sample, not a sustained benchmark.
+
+![Gameplay checkpoint (2026-10-04)](images/vkquake-2026-10-04/gameplay.png)
+
+![vkQuake options screen](images/vkquake-2026-10-04/options.png)

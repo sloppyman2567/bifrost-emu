@@ -74,7 +74,11 @@ BIFROST_JIT_VERIFY=1 ./bifrost-emu ctest/some_regression.elf
 `BIFROST_IR_VALIDATE=1` checks per-op IR contracts, including Tier-2 regions.
 `BIFROST_JIT_VERIFY=1` compares JIT execution with the interpreter; syscalls,
 in-block calls, and memory side effects have documented verification limits,
-so pair it with a focused result check when relevant. CoreMark is a useful
+so pair it with a focused result check when relevant. Replay is suspended
+with an explicit diagnostic once a second guest CPU starts: restoring shared
+memory or patching live code during concurrent execution is unsafe.
+`make verify` uses single-thread fixture modes and separately runs threaded
+result oracles; suspension in a differential fixture fails the gate. CoreMark is a useful
 compute workload, but it does not replace application workloads or targeted
 correctness regressions.
 
@@ -297,6 +301,6 @@ matching the existing BLR path.
 `jit_call_helpers` checks nested arithmetic and callee-written Z/C flags
 across three guest threads. Optional `1000 single` arguments allow a clean
 register/memory verification run with `BIFROST_NO_DIRECT_CALL=1` so the helper
-wrapper is exercised even in a single-threaded process. The multithreaded
-verification run produces the same library replay warnings as the unchanged
-baseline; ordinary engines and QEMU agree on the fixture's results.
+wrapper is exercised even in a single-threaded process. The gate runs that mode for differential checks and separately runs the
+original three-thread workload against its arithmetic/NZCV oracle. Concurrent
+replay is suspended rather than restoring shared memory underneath workers.

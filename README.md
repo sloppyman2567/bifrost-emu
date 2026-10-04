@@ -55,8 +55,9 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
 
 **Current checkpoint (October 4, 2026):** full regression runs passed 257/257
 in JIT mode and 254/254 in interpreter mode, with three JIT-only skips.
-The final small helper cleanup received focused follow-up checks. Concurrent
-JIT verification still has unresolved warnings; see [test evidence](docs/TESTS.md).
+The verification gate now passes 56 single-thread differential fixtures and
+four separate threaded oracle workloads. Shared-memory replay is suspended
+when a second guest CPU starts; see [test evidence](docs/TESTS.md).
 Dispatch and nested-call microbenchmarks improved 2.32× and 1.93× respectively;
 those figures are not whole-game FPS gains. Android APK/ART integration is
 planned for [v2.0](roadmap.md).
@@ -335,10 +336,11 @@ ELFs with `make setup-tests`. External fixtures and desktop/audio availability
 can change coverage. Strict mode fails missing selected fixtures, while
 exit-77 environment skips remain visible.
 
-The ordinary full suites pass, but `make verify` still reports concurrent
-cache-test divergences and a timeout. Do not treat ordinary pass counts as
-proof that the differential gate is clean. See [test evidence](docs/TESTS.md)
-and [fixture licensing and distribution](docs/THIRD_PARTY.md).
+`make verify` checks single-thread differential fixtures and runs the original
+concurrent cache/call workloads separately against their expected results.
+It fails missing/stale fixtures, nonzero exits, timeouts and reported
+divergences. See [test evidence](docs/TESTS.md) and
+[fixture licensing and distribution](docs/THIRD_PARTY.md).
 
 ### Host Input
 

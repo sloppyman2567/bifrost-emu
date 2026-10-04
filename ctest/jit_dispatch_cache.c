@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 
 #define NFUN 8
@@ -61,11 +62,12 @@ int main(int argc, char **argv) {
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (code == MAP_FAILED) return 2;
     for (unsigned i = 0; i < NFUN; ++i) set_function(i, i + 1);
+    int single = argc > 2 && strcmp(argv[2], "single") == 0;
     pthread_t threads[2];
-    for (unsigned i = 0; i < 2; ++i)
+    for (unsigned i = 0; !single && i < 2; ++i)
         if (pthread_create(&threads[i], NULL, run, (void *)(uintptr_t)(10000 * (i + 1)))) return 3;
     run(NULL);
-    for (unsigned i = 0; i < 2; ++i) pthread_join(threads[i], NULL);
+    for (unsigned i = 0; !single && i < 2; ++i) pthread_join(threads[i], NULL);
     set_function(7, 17);
     loops = 512;
     churn = 1;

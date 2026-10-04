@@ -25,14 +25,17 @@
 #include "core/cpu.h"
 
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <dlfcn.h>
 #include <poll.h>
 #include <unistd.h>
+#if defined(BIFROST_USE_SDL2)
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
+#endif
 
 namespace frost {
 
@@ -116,10 +119,12 @@ int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
     if (fmt > 0) format_ = fmt;
     // Best-effort: keep the host window matching the requested geometry so
     // eglQuerySurface and the visible window agree.
+#if defined(BIFROST_USE_SDL2)
     if (sdl_window_) {
         SDL_SetWindowSize(static_cast<SDL_Window*>(sdl_window_), width_,
                           height_);
     }
+#endif
     // Wayland: resize the live wl_egl_window so the next frame renders at
     // the new size (X11 needs nothing — the X server tracks the window).
     if (wl_egl_window_ && wl_egl_fns().ok && wl_egl_fns().window_resize) {
@@ -129,6 +134,7 @@ int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
 }
 
 uint64_t AndroidSurfaceManager::host_native_window() {
+#if defined(BIFROST_USE_SDL2)
     if (!sdl_window_) return 0;
     if (host_native_window_resolved_) return host_native_window_;
     SDL_SysWMinfo info;
@@ -170,6 +176,9 @@ uint64_t AndroidSurfaceManager::host_native_window() {
                      static_cast<unsigned long long>(host_native_window_));
     }
     return host_native_window_;
+#else
+    return 0;
+#endif
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -413,7 +422,7 @@ int AndroidSurfaceManager::looper_poll(CPU& cpu, int timeout_ms, int* out_fd,
 
         // Nothing dispatched — sleep a slice or time out.
         if (clock::now() >= deadline) return LOOPER_POLL_TIMEOUT;
-        SDL_Delay(2);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 }
 
@@ -567,6 +576,7 @@ float AndroidSurfaceManager::motion_axis_value(uint64_t h, int axis,
 // SDL_Keycode → AKEYCODE_* (+ modifier meta bits). Returns 0 (UNKNOWN)
 // for untranslated keys. Values from android/keycodes.h; SDL values from
 // SDL_keycode.h (arrows/F-keys live above 1<<30).
+#if defined(BIFROST_USE_SDL2)
 int32_t AndroidSurfaceManager::sdl_key_to_android(int32_t sdl,
                                                   int32_t* meta_out) {
     if (meta_out) *meta_out = 0;
@@ -615,6 +625,8 @@ int32_t AndroidSurfaceManager::sdl_key_to_android(int32_t sdl,
     return kc;
 }
 
+#endif
+
 void AndroidSurfaceManager::inject_test_tap() {
     std::lock_guard<std::mutex> lk(mu_);
     if (tap_injected_) return;
@@ -639,6 +651,7 @@ void AndroidSurfaceManager::inject_test_tap() {
     pending_.push_back(up);
 }
 
+#if defined(BIFROST_USE_SDL2)
 void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
                                                  void* sdl_event_raw) {
     SDL_Event* e = static_cast<SDL_Event*>(sdl_event_raw);
@@ -728,14 +741,18 @@ void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
     pending_.push_back(ev);
 }
 
+#endif
+
 void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
     // NOTE: this drains the process-global SDL event queue, as does
     // FrostInput::poll. the two managers are never live together
     // (android apk vs linux elf), so no demux is needed (see note there).
     // Track size changes so the driver can fire onNativeWindowResized /
     // onContentRectChanged exactly once per resize.
+#if defined(BIFROST_USE_SDL2)
     SDL_Event e;
     while (SDL_PollEvent(&e)) translate_sdl_event_(cpu, &e);
+#endif
     if (!cpu || !mem_ || surface_handle_ == 0) return;
     if (last_pump_w_ < 0) { last_pump_w_ = width_; last_pump_h_ = height_; return; }
     if (width_ != last_pump_w_ || height_ != last_pump_h_) {

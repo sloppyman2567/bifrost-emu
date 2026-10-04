@@ -13,6 +13,7 @@
 #  include <SDL2/SDL.h>
 #endif
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -64,7 +65,7 @@ inline void store_sample(uint8_t dev_fmt, uint8_t* p, float s) {
     switch (dev_fmt) {
         case 1: p[0] = static_cast<uint8_t>(s * 127.0f + 128.0f); break;
         case 2: {
-            int16_t v = static_cast<int16_t>(lrintf(s * 32767.0f));
+            int16_t v = static_cast<int16_t>(std::lrintf(s * 32767.0f));
             memcpy(p, &v, 2);
             break;
         }

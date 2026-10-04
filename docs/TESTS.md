@@ -41,12 +41,35 @@ out-of-bounds count-table indices. Its input now uses halfwords and checks the
 complete table against an expected histogram; QEMU, interpreter and JIT with
 register/memory verification agree on hash `0x0d693c2a`.
 
-The additional `make verify` sweep is not clean: the multithreaded
-`jit_cache_invalidation` and `jit_cache_pressure` fixtures report differential
-divergences, and cache pressure hits the verifier's 30-second timeout. Both
-fixtures pass ordinary JIT and interpreter execution. Shared-memory replay
-interference is a possible cause, but these verifier failures remain unresolved;
-the full-suite pass counts above do not imply a clean differential sweep.
+### Verification gate repair (2026-10-04)
+
+The earlier concurrent replay warnings were reproduced. The verifier restored
+shared guest memory and patched live code while other guest CPUs could execute;
+this is unsafe and cannot provide a sound differential comparison. Replay now
+stops at the sticky multithread transition, with an explicit diagnostic.
+
+`make verify` passes **56 single-thread differential fixtures plus four threaded
+oracle workloads**. Cache invalidation, pressure, dispatch and call-helper
+fixtures have single-thread modes for differential checks; the gate also runs
+the original concurrent workloads at their original loop counts. Single-thread
+checks force the BL/BLR helper path. Cache pressure has a 120-second replay
+budget; other differential fixtures have 30 seconds, and threaded oracles 60.
+These are separate forms of coverage, not multithread differential verification.
+
+The gate discovers fixtures from source, rejects missing/stale ELFs and any
+reported PC/register/memory divergence or suspended replay, and preserves
+emulator/timeout exit status. `scripts/test_verify_gate.py` exercises failure
+propagation and runs in CI. Follow-up headless units pass **80/80 JIT** and
+**78/78 interpreter**, with two explicit JIT-only skips. Host API checks pass
+**55/55 C API** and **61/61 native bridge**.
+
+Both headless and SDL/GL configurations build. The headless Android surface
+probe requires SDL and fails without it; activity and audio probes pass there.
+After approval review recovered, the desktop Android surface/activity/audio
+probes passed **3/3 in both JIT and interpreter modes** with the SDL/GL build.
+CI's host API step now uses the same system AArch64 compiler as fixture setup;
+headless compilation no longer depends on indirect SDL math includes or
+unconditionally linked Android SDL event/window functions.
 
 The host C API probe likewise assumed an executable guest stack. It now loads
 `ctest/capi_testlib.so` for integer, FP and syscall call probes, preserving the
