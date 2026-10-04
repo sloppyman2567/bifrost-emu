@@ -171,8 +171,9 @@ Comparing the word also handles address reuse without modifying another
 CPU's private cache or adding a global cache lock. The synchronized
 `jit_cache_invalidation` regression covers this path in both engines.
 
-After this repair, the complete interpreter suite passes 249/249 (three
-JIT-only skips), and the JIT unit suite passes 75/75 with IR validation.
+At the October 3 decode-cache repair checkpoint, the complete interpreter
+suite passed 249/249 (three JIT-only skips), and the JIT unit suite passed
+75/75 with IR validation. Current inventory/results are in [TESTS.md](TESTS.md).
 The cross-thread regression passes five interpreter repeats and QEMU.
 
 ## Indexed vector floating-point multiply

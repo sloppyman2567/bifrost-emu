@@ -1,5 +1,9 @@
 # zstd regression
 
+The focused results below describe the October 1 repair checkpoint. Current
+full-suite results and unresolved concurrent-verifier warnings are maintained
+in [TESTS.md](TESTS.md).
+
 `scripts/run_zstd_regression.sh` compresses a deterministic 1.2 MB corpus with
 `ctest_real/zstd-aarch64`, checks every archive with host zstd, and compares the
 restored bytes. It runs default and `--single-thread` compression in both JIT

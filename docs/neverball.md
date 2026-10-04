@@ -1,12 +1,16 @@
 # Neverball
 
+Latest user gameplay confirmation: October 3, 2026. No new issue was reported.
+The dated repair/test results below are historical checkpoints; current
+cross-project suite counts are maintained in [TESTS.md](TESTS.md).
+
 As of 2026-10-02, the user reports Neverball 1.6.0 is effectively fully stable
 in interactive play on Bifrost. Gameplay, replay, fonts and menus, configuration
 persistence, and level-preview rendering are working after the font, SDL,
 JIT memory-guard, and JPEG decoding fixes below.
 
 Earlier testing confirmed monitor and resolution selection, ball-model changes,
-and player-name editing. The latest confirmation follows the JPEG repair and
+and player-name editing. The October 2 confirmation followed the JPEG repair and
 relaunch. This is a user-reported stability milestone; automated checks cover
 the underlying regressions and selected images, rather than every level or a
 long-duration gameplay soak. The user also confirmed mouse control works in

@@ -1,8 +1,9 @@
 # bifrost-emu
 
 **A bridge between worlds** — a fast ARM64 (AArch64) Linux user-mode emulator
-for x86_64 hosts. Run ARM64 Linux applications and games on any x86_64 Linux
-machine without QEMU or a cross-compiler.
+for x86_64 Linux hosts. Run ARM64 Linux applications and selected games
+without QEMU. Running existing binaries needs no cross-compiler; building
+guest tests does.
 
 ```
   ____ _____ ______ _____   ____   _____ _______ 
@@ -28,33 +29,49 @@ binaries on x86_64 Linux hosts. It translates ARM64 instructions to x86_64
 at runtime using a JIT compiler, with a switch-based interpreter fallback.
 
 **What it can do:**
+
 - Run static and dynamically-linked AArch64 ELF binaries
 - Load shared libraries (musl and glibc) with GOT/PLT relocation, TLS,
   ifuncs, and DT_INIT_ARRAY constructors
-- JIT-compile ARM64 to x86_64 native code (10-40x faster than the interpreter on compute benchmarks)
+- JIT-compile ARM64 to x86_64 native code, with interpreter fallback and
+  focused correctness regressions
 - Emulate 200+ Linux syscalls (threads, signals, filesystem, memory)
 - Provide a virtual filesystem (/proc, /dev, /sys, framebuffer, audio)
 - Forward GL/EGL/Vulkan/SDL2/ALSA calls to host libraries (thunking)
 - Run multi-threaded guest programs (clone + futex + per-thread JIT)
-- Run real games end-to-end (SDL2/OpenGL demos, a Minecraft-like voxel
-  game, and teeworlds boot to a stable menu/frame loop under `DISPLAY=:0`)
+- Run SDL2/OpenGL demos and a Minecraft-like voxel game; Teeworlds reaches
+  a rendering menu with sound initialized in the latest launch
 - Run Neverball 1.6.0 with user-confirmed stable gameplay, replay, readable
   menus and fonts, and repaired JPEG previews; see the
   [Neverball setup and validation notes](docs/neverball.md)
 - Run vkQuake 1.33.1 through the Vulkan thunks with user-confirmed gameplay,
   menus, and no sudden crashes during the observed session. Texture corruption
-  and buggy camera behavior remain; see [vkQuake status and screenshots](docs/vkquake.md).
+  remains; the user later reported the mouse issue resolved, with its cause
+  and repeatable input validation still pending. See [vkQuake status](docs/vkquake.md).
+- Run Doom 3 through ARM64 dhewm3, with user-reported extended gameplay,
+  repaired character animation and working audio. Demanding scenes remain
+  slow, and save compatibility depends on the game build; see
+  [Doom 3 status](docs/doom3.md).
+
+**Current checkpoint (October 4, 2026):** full regression runs passed 257/257
+in JIT mode and 254/254 in interpreter mode, with three JIT-only skips.
+The final small helper cleanup received focused follow-up checks. Concurrent
+JIT verification still has unresolved warnings; see [test evidence](docs/TESTS.md).
+Dispatch and nested-call microbenchmarks improved 2.32× and 1.93× respectively;
+those figures are not whole-game FPS gains. Android APK/ART integration is
+planned for [v2.0](roadmap.md).
 
 **What it is NOT:**
+
 - Not a full-system emulator (no kernel — use QEMU-system for that)
-- No APK/ART/Dalvik — Android apps run as bare NativeActivity `.so`s
-  (see below); there is no Java runtime
+- No integrated APK/ART/Dalvik runtime; the standalone Android path targets
+  NativeActivity-style native libraries (see below)
 - Not as mature as QEMU-user — it's a smaller, simpler alternative
 
 ## Quick Start
 
 ```bash
-# Build (requires only g++ and the standard library)
+# Build (see Building for required and optional dependencies)
 make
 
 # Run a static ARM64 binary — silent by default, just shows program output
@@ -147,8 +164,10 @@ The rootfs includes:
 
 ### Android Applications
 
-bifrost-emu runs Android **NativeActivity** apps — the `.so` a game ships
-as — without ART/Java or an APK. The emulator plays the framework role:
+The standalone Android path targets **NativeActivity-style native libraries**
+through `--android`. Surface, activity/looper and audio probes pass in both
+engines; this does not establish compatibility with arbitrary Android game
+`.so` files, Bionic packages or APKs. The emulator plays the framework role:
 it synthesizes the `ANativeActivity` struct, fires
 `onCreate/onStart/onResume/onNativeWindowCreated/...` on guest callbacks,
 and provides `ALooper`, `AInputQueue` (SDL mouse/touch/keyboard → motion/
@@ -166,8 +185,9 @@ key events), `AConfiguration` and `__android_log_*` thunks so
 ```
 
 The rootfs also has `/system/lib64` → `/lib64`, `/vendor/lib64` → `/lib64`
-so Android-style DT_NEEDED entries resolve automatically, and build.prop
-advertises arm64-v8a ABI, SDK 29, ro.kernel.qemu=1.
+as Android-style search-path scaffolding, and build.prop advertises
+arm64-v8a ABI, SDK 29, ro.kernel.qemu=1. These properties do not provide a
+complete Android 10 runtime or prove Android library compatibility.
 
 Integrated APK loading, Bionic compatibility and ART execution are planned
 for v2.0; see the [roadmap](roadmap.md). The current standalone Android path
@@ -253,7 +273,7 @@ make debug
 
 # Static library (for embedding bifrost-emu in other projects)
 make lib
-make test-capi  # build + run the host-side C API test (54 checks)
+make test-capi  # build + run the host-side C API test (55 checks)
 make test-nb    # build + run the native bridge adapter test (61 checks)
 ```
 
@@ -307,16 +327,18 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects 246 test runs: 69 unit,
-86 integration, 1 sandbox, 9 Toybox, 49 static real-world, 7 dynamic glibc real-world,
-15 dynamic-linking, 5 benchmark, and 5 interactive. The dynamic runs need
-a configured rootfs; the real-world dynamic binaries are part of the
-real-world fixture set. `--quick` skips the five benchmarks. Without a
-rootfs, the runner selects 224 runs (219 with `--quick`). Missing guest
-fixtures are reported as skips in developer mode; CI uses `--strict` to
-turn missing selected fixtures into failures. Display/driver exit-77 skips
-remain environment-dependent. See
-[docs/TESTS.md](docs/TESTS.md) for details.
+With all fixtures available, the runner selects **257 tests**, including 80
+unit regressions. Without rootfs-dependent tests it selects 235 (230 with
+`--quick`). Interpreter mode intentionally skips three JIT-only cases.
+Sources live in `ctest/`, `ctest_real/` and `test/`; build their ignored guest
+ELFs with `make setup-tests`. External fixtures and desktop/audio availability
+can change coverage. Strict mode fails missing selected fixtures, while
+exit-77 environment skips remain visible.
+
+The ordinary full suites pass, but `make verify` still reports concurrent
+cache-test divergences and a timeout. Do not treat ordinary pass counts as
+proof that the differential gate is clean. See [test evidence](docs/TESTS.md)
+and [fixture licensing and distribution](docs/THIRD_PARTY.md).
 
 ### Host Input
 
@@ -435,13 +457,13 @@ Key features:
 
 The full API reference and semantics live in `api/bifrost.h`. A
 host-side test (`ctest/test_capi.c`, built via `make test-capi`, wired
-into `make check-all`) covers the API with 54 checks.
+into `make check-all`) covers the API with 55 checks.
 
 ## Android native bridge adapter (`api/native_bridge.h`)
 
-bifrost can act as an ART native bridge (`-XX:NativeBridge`), the
-drop-in replacement for QEMU-TCG in an ATL-style Android translation
-layer. `api/native_bridge.h` is a clean-room ABI mirror of Android's
+bifrost exposes an Android native-bridge integration adapter. Its host
+API tests do not demonstrate an actual ART runtime or a drop-in Android
+translation environment. `api/native_bridge.h` is a clean-room ABI mirror of Android's
 `NativeBridgeCallbacks`; `api/native_bridge.cpp` fills the table over
 the C API:
 
@@ -469,8 +491,9 @@ pre-Q ABI so ART uses the legacy `getTrampoline` path. Host test
 
 ## Performance
 
-On a typical x86_64 host (Ryzen 7 5800X3D, GCC -O3), timings reported
-by the `ctest_real/bench_*.elf` binaries themselves:
+Historical development measurements on a Ryzen 7 5800X3D with GCC -O3,
+reported by `ctest_real/bench_*.elf` itself (not freshly rerun for this
+documentation update):
 
 | Benchmark | Interpreter | JIT | Speedup |
 |-----------|-------------|-----|---------|
@@ -483,16 +506,15 @@ by the `ctest_real/bench_*.elf` binaries themselves:
 Repeatable samples with checksums and host/compiler metadata can be captured
 with `scripts/run_benchmarks.py`; see [docs/TESTS.md](docs/TESTS.md).
 
-The tight-ALU self-loop speedup is the top end; mixed real workloads
-(games, worldgen, GL) land in the 10-40x range. Tight loops benefit
-from the dispatch/flag-skip/regalloc work of the 1.5.4-alpha cycle and the vk.xml registry-driven marshalling of 1.5.5-alpha —
-the interpreter is unchanged and runs ~56 MIPS regardless.
-CoreMark (AArch64 guest) scores ~4,100 iterations/sec on a Ryzen 7
-5800X3D, with all CRCs validated. That is about 9.8% of a published
-41,946 iterations/sec native result for the same CPU
-([CoreMark result](https://zephray.me/coremark/)). The audio callback
-worker starts only when a callback stream opens, so single-threaded guests
-that do not use callback audio retain JIT chaining and tier-2 compilation.
+These compute results do not predict game FPS. Current dispatch/cache and
+short-call benchmarks show targeted improvements, while the observed Doom
+profile still spends most sampled CPU time in translated game/library code.
+Matched scenes and frame-time measurements are required to quantify gameplay
+improvement; see [Doom 3 measurements](docs/doom3.md).
+
+The audio callback worker starts only when a callback stream opens, so
+single-threaded guests without callback audio retain JIT chaining and Tier-2
+compilation. Multithreaded games keep those publication paths disabled.
 
 The JIT uses:
 - **AVX-512** (when available) for 512-bit SIMD
@@ -520,6 +542,11 @@ The JIT uses:
 
 ## Documentation
 
+The current runtime version is **1.5.5**. Older version numbers and test counts
+in dated changelog entries describe their original checkpoints; v2.0 is the
+planned roadmap. The changelog includes the 211-commit unpublished history
+through `aa5dcc7`.
+
 Game setup, screenshots, and current compatibility issues:
 
 - [Neverball](docs/neverball.md)
@@ -536,19 +563,28 @@ Build, test, and maintenance references:
 - [docs/SECURITY.md](docs/SECURITY.md) — BIFROST_ROOT scope and guest trust model
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — Release history
 - [docs/TESTS.md](docs/TESTS.md) — Test suite details
+- [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) — Test distribution and third-party licenses
+- [window stats](docs/window-stats.md) — FPS title, stats window and overlay
 - [bifrost.toml.sample](bifrost.toml.sample) — Config file reference
 
 ## License
 
-[Unlicense](LICENSE) — public domain. Use it for anything.
+Bifrost's original code and original regression tests use the
+[Unlicense](LICENSE). Third-party fixtures, vendored dependencies and game
+assets retain their own terms; the root license does not relicense them.
+See [third-party and test distribution notes](docs/THIRD_PARTY.md).
 
 ## Contributing
 
 1. Fork the repo
 2. Make your changes (follow the existing code style)
-3. Run `make check` — all tests must pass
-4. Run `make verify` — no JIT divergences
-5. Submit a pull request
+3. Build current guest fixtures with `make setup-tests`, then run relevant
+   JIT and interpreter checks; use `make check-all` for provisioned coverage
+4. For JIT changes, read [docs/JIT.md](docs/JIT.md) and run differential checks.
+   Report existing verifier failures separately from newly introduced failures
+5. Preserve upstream notices for reused code and include validation evidence
+   with your pull request. Original contributions, including tests, use the
+   project's Unlicense terms
 
 For bug reports, include:
 - The AArch64 binary (or a minimal reproducer)

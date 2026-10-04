@@ -60,6 +60,11 @@ APK launch, a complete Android framework, or ART runtime execution.
 
 ## Test inventory
 
+Original regression sources ship under Bifrost's Unlicense. Generated guest
+ELFs are rebuilt locally; included and downloaded third-party fixtures keep
+their upstream licenses. See [fixture distribution](THIRD_PARTY.md) for the
+source/binary distinction and game-data boundaries.
+
 The `fcsel_high_regs` regression has 61 checks for high FCSEL source registers,
 FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
@@ -298,7 +303,8 @@ See [neverball.md](neverball.md) for the diagnosis and image coverage.
 
 ## Stability follow-up: 2026-10-02
 
-The current working-tree quick suite passed 238/238 in JIT mode and 236/236
+At the October 2 checkpoint, the working-tree quick suite passed 238/238
+in JIT mode and 236/236
 in interpreter mode, with two intentional interpreter skips (`tier2_smov`
 and the dual-engine `zstd_compression` host harness). Four stale fixtures were
 rebuilt before the clean full JIT rerun. `test_mem_guard` separately passed

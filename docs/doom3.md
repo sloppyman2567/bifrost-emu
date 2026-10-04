@@ -1,6 +1,27 @@
 # Doom 3 (dhewm3)
 
-## Current status (2026-10-03)
+## Current status (2026-10-04)
+
+Default-JIT gameplay, character animation and audio work in the observed demo
+sessions, including the user's approximately 27-minute crash-free recording.
+New underground saves and a fresh save/load round trip restore successfully;
+the older checksum-incompatible save is rejected by the game. Settings,
+viewport/cursor behavior, gamepad coverage and demanding-scene frame pacing
+remain open. Sustained 5 FPS at 3440×1440 is not yet established by a matched
+benchmark.
+
+The latest helper profile sampled 68.07% translated code, 20.69% dispatch/native
+helpers, 0.06% translation, zero interpreter samples and 11.19% other work over
+30 seconds. This includes worker CPU time and is not main-thread frame-time
+attribution or a controlled before/after FPS comparison. See the
+[latest profile](#gameplay-profile-after-helper-optimization).
+
+Current full-suite counts and their final-build coverage limits are in
+[TESTS.md](TESTS.md): 257/257 JIT, 254/254 interpreter with three JIT-only skips,
+then 80/80 JIT unit checks and focused follow-ups after the last helper cleanup.
+Older counts and timings below describe intermediate checkpoints.
+
+## Bring-up and correctness history (2026-10-03)
 
 The official dhewm3 1.5.5 Linux ARM64 binary and the free Linux Doom 3
 Demo are installed under `rootfs/dhewm3/`. The demo contains
@@ -79,9 +100,8 @@ the observed demo sequences, rather than every model or animation.
 The full JIT unit suite passes 75/75 with IR validation enabled.
 
 The user subsequently confirmed that Doom 3 works well in the repaired live
-build. This supports the animation repair and working gameplay; the known
-performance, settings and save-loading limitations below remain separately
-tracked.
+build. This supports the animation repair and working gameplay; performance and settings limitations remain separately tracked. The later
+per-file save-compatibility investigation is recorded under remaining issues.
 
 ### Profile-guided math optimization
 
@@ -100,7 +120,9 @@ measurement, not a whole-game FPS gain. The indexed regression passes all
 unary regression passes all 530 checks. The JIT unit suite passes 76/76,
 and the complete suite passes 253/253 with desktop and audio access.
 Sustained 5 FPS at 3440×1440, including the underground slowdown reported
-after roughly 14 minutes, remains unverified. Save loading remains unresolved.
+after roughly 14 minutes, remains unverified. Save loading was unresolved
+at this checkpoint; the subsequent October 4 checks establish working newer
+saves and a checksum mismatch in an older file.
 
 The next fallback batch adds native FRINTA, signed FCVTAS and scalar lane
 copies. The heavily observed rounding pair was located inside guest libm's
@@ -165,7 +187,7 @@ errors in FCVTL, SHLL, ADDV result width and fused indexed FMLA; these are
 corrected. Verification now retains cross-block flag stores whose elimination
 is valid for execution but caused stale boundary-NZCV comparisons.
 
-The final full suite passes 255/255 under JIT and 252/252 under interpreter
+At this native-gap checkpoint, the full suite passed 255/255 under JIT and 252/252 under interpreter
 with three JIT-only skips. SDL thread lifecycle checks pass separately in both
 engines. Subsequent live gameplay provides the longer validation below;
 instruction probes and suite results alone do not establish a sustained FPS.

@@ -3,15 +3,24 @@
 On 2026-10-02 the user confirmed working gameplay with the repaired default
 JIT build and supplied four screenshots showing the world, HUD, main menu,
 help, and load menu. This is a Vulkan game bring-up milestone, with remaining
-camera and rendering issues; it is not a claim of complete compatibility.
+camera and rendering issues at that checkpoint; it is not a claim of
+complete compatibility. The latest input report is recorded below.
 
-## Latest gameplay check (2026-10-03)
+## Latest input follow-up (2026-10-04)
+
+The user subsequently reported that the mouse issue was resolved. A connection
+with the Doom 3 fixes is suspected by the user but has not been established.
+Treat the excessive-sensitivity notes below as historical repro evidence;
+repeatable axis/sensitivity/focus checks remain pending. Texture corruption
+is still unresolved.
+
+## Earlier gameplay check (2026-10-03)
 
 The user confirmed that vkQuake still runs after the interpreter decode-cache
 repair, but texture corruption and camera issues remain. This is a working
 launch/gameplay checkpoint, not confirmation that those issues are fixed.
 
-## User screenshot checkpoint
+## Historical screenshot checkpoint (2026-10-03)
 
 Follow-up on 2026-10-03: the mapped-memory synchronization repair substantially
 improved texture colors in the user's screenshot. The user subsequently
@@ -81,9 +90,10 @@ guards. `scripts/run_thunk_compat.sh` passes SDL/GL/Vulkan in both engines.
 This repairs the confirmed event-filter defect. Subsequent interactive runs
 still showed excessive sensitivity. Horizontal turning was seen in captures,
 but the user could not confidently assess it because of the large camera
-response; the gameplay input issue remains unresolved.
+response. Input remained unresolved at that checkpoint; the later user
+report above supersedes that status.
 
-## Remaining sensitivity investigation
+## Historical sensitivity investigation (through 2026-10-03)
 
 A bounded SDL capture (`BIFROST_INPUT_TRACE=1`) showed signed horizontal
 movement arriving in relative mode. `BIFROST_INPUT_WATCH` accepts up to 32
@@ -102,9 +112,10 @@ count bits: 182 checks pass under QEMU and both repaired engines. The old
 engines fail USHL by -1. The compiled glibc view probe now also passes with
 its original vectorized call-stub builder.
 
-The user confirmed that sensitivity remains excessive after the shift repair.
-The repair fixes a demonstrated instruction bug, but does not resolve the
-reported camera behavior.
+At that time, the user confirmed excessive sensitivity after the shift repair.
+The repair fixed a demonstrated instruction bug without resolving that
+observed camera behavior. The later resolution has not been traced to a
+specific fix.
 
 The final gameplay segment of the 2026-10-03 recording shows sharp camera
 swings between floor and ceiling. The greyed-out vkQuake window at the end
@@ -114,7 +125,9 @@ physical mouse movement or establish the remaining bug's cause.
 
 ## Pointer corruption fixed
 
-SDL renderer workers use the interpreter even during a default JIT run.
+At the time of this reproduction, SDL renderer workers used the interpreter
+even during a default JIT run. They now use JIT in default mode; explicit
+`--no-jit` retains interpreter execution.
 In `Sky_DrawSky`, `fcsel s31,s25,s24,gt` at guest PC `0x4329b4` matched an
 obsolete, overly broad FP-to-integer conversion handler. It wrote the GPR
 zero-register slot instead of FP register 31. Subsequent pointer copies using
@@ -132,5 +145,6 @@ binary fails the first check and then crashes. The focused FP suite passes
 12/12 in each emulator mode.
 
 This reproduction supersedes the earlier stale-guest-state diagnosis. Working
-JIT gameplay does not establish long-run stability or resolve the camera and
-texture issues recorded above.
+JIT gameplay alone does not establish long-run stability. Texture artifacts
+remain open; input status follows the later user report at the top of this
+document.
