@@ -11,11 +11,30 @@
 #include "frost/display_proxy.hpp"
 #include "core/memory.h"
 #include "opgen_wl.hpp"
+#if defined(BIFROST_USE_SDL2)
 #include <SDL2/SDL.h>
-#include <wayland-util.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+// Public libwayland wire ABI. Only these descriptors are used with dlsym;
+// no host Wayland SDK or link-time library is required by the proxy.
+struct wl_message {
+    const char* name;
+    const char* signature;
+    const wl_interface** types;
+};
+struct wl_interface {
+    const char* name;
+    int version;
+    int method_count;
+    const wl_message* methods;
+    int event_count;
+    const wl_message* events;
+};
+static_assert(sizeof(wl_message) == 24 && sizeof(wl_interface) == 40,
+              "Wayland descriptor ABI requires a 64-bit host");
+
 namespace arm64emu {
 struct HandleHdr {
     uint32_t type;

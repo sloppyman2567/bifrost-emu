@@ -12,6 +12,13 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Fresh-runner CI build repair
+
+- Feature-gate the display proxy's SDL include and remove the build-time
+  Wayland SDK dependency for dynamic protocol descriptors.
+- Use portable overloaded `<cmath>` names in FP/audio code and add a CI
+  header-independence check that catches SDK leaks on provisioned machines.
+
 ### Verification gate and screenshot follow-up
 
 - Suspend unsafe differential replay after the multithread transition and

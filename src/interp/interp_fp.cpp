@@ -604,11 +604,11 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         if (!frdbl) {
                             float a;
                             memcpy(&a, fbuf + i * 4, 4);
-                            float r = (frmode == 0) ? std::rintf(a)
-                                    : (frmode == 1) ? std::roundf(a)
-                                    : (frmode == 2) ? std::floorf(a)
-                                    : (frmode == 4) ? std::truncf(a)
-                                    : std::rintf(a);  // X/I: rint
+                            float r = (frmode == 0) ? std::rint(a)
+                                    : (frmode == 1) ? std::round(a)
+                                    : (frmode == 2) ? std::floor(a)
+                                    : (frmode == 4) ? std::trunc(a)
+                                    : std::rint(a);  // X/I: rint
                             memcpy(fbuf + i * 4, &r, 4);
                         } else {
                             double a;
@@ -1085,7 +1085,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             case 0x6: r = std::fmax(a, b); break;   // FMAXNM
                             case 0x7: r = std::fmin(a, b); break;   // FMINNM
                             case 0xB: r = a * b; break;             // FMULX
-                            case 0xD: r = std::fabsf(a - b); break; // FABD
+                            case 0xD: r = std::fabs(a - b); break; // FABD
                             case 0xE: r = gv(rd, i) + a * b; break; // FMLA (accumulate into Vd)
                             case 0xF: r = gv(rd, i) - a * b; break; // FMLS (accumulate into Vd)
                             default: r = 0; break;
@@ -3700,7 +3700,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                 else if (x == 0.0f) r = std::copysign(INFINITY, x);
                                 else if (std::isinf(x)) r = std::copysign(0.0f, x);
                                 else if (is_sqrt && x < 0.0f) r = std::nan("");
-                                else r = is_sqrt ? (1.0f / std::sqrtf(x)) : (1.0f / x);
+                                else r = is_sqrt ? (1.0f / std::sqrt(x)) : (1.0f / x);
                                 uint32_t rb;
                                 memcpy(&rb, &r, 4);
                                 uint32_t sh = (i & 1) * 32;
@@ -4039,7 +4039,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     write_fp_d(cpu, rd, std::fabs(a - b));
                 } else {
                     float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
-                    write_fp_s(cpu, rd, std::fabsf(a - b));
+                    write_fp_s(cpu, rd, std::fabs(a - b));
                 }
                 return;
             }
@@ -4193,17 +4193,17 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     float a = read_fp_s(cpu, rn), r = 0;
                     switch (opcode) {
                         case 0x0: r = a; break;
-                        case 0x1: r = std::fabsf(a); break;
+                        case 0x1: r = std::fabs(a); break;
                         case 0x2: r = -a; break;
-                        case 0x3: r = std::sqrtf(a); break;
-                        case 0x8: r = std::rintf(a); break;             // FRINTN
-                        case 0x9: r = std::ceilf(a); break;             // FRINTP
-                        case 0xA: r = std::floorf(a); break;            // FRINTM
-                        case 0xB: r = std::truncf(a); break;            // FRINTZ
-                        case 0xC: r = std::roundf(a); break;            // FRINTA (ties-away)
+                        case 0x3: r = std::sqrt(a); break;
+                        case 0x8: r = std::rint(a); break;             // FRINTN
+                        case 0x9: r = std::ceil(a); break;             // FRINTP
+                        case 0xA: r = std::floor(a); break;            // FRINTM
+                        case 0xB: r = std::trunc(a); break;            // FRINTZ
+                        case 0xC: r = std::round(a); break;            // FRINTA (ties-away)
                         // 0xD unused in A64
-                        case 0xE: r = std::rintf(a); break;             // FRINTX
-                        case 0xF: r = std::rintf(a); break;             // FRINTI
+                        case 0xE: r = std::rint(a); break;             // FRINTX
+                        case 0xF: r = std::rint(a); break;             // FRINTI
                         default: r = a; break;
                     }
                     write_fp_s(cpu, rd, r);
@@ -4386,7 +4386,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                 float v = is_unsigned
                                     ? static_cast<float>(static_cast<uint32_t>(src_bits))
                                     : static_cast<float>(static_cast<int32_t>(src_bits));
-                                write_fp_s(cpu, rd, std::ldexpf(v, -fbits));
+                                write_fp_s(cpu, rd, std::ldexp(v, -fbits));
                             }
                         } else {
                             double a = is_double ? read_fp_d(cpu, rn)
@@ -4652,10 +4652,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         if (is_add)      write_fp_s(cpu, rd, a + b);
                         else if (is_min) write_fp_s(cpu, rd, (std::isnan(a) || std::isnan(b))
                                             ? std::numeric_limits<float>::quiet_NaN()
-                                            : std::fminf(a, b));
+                                            : std::fmin(a, b));
                         else             write_fp_s(cpu, rd, (std::isnan(a) || std::isnan(b))
                                             ? std::numeric_limits<float>::quiet_NaN()
-                                            : std::fmaxf(a, b));
+                                            : std::fmax(a, b));
                     }
                     return;
                 }

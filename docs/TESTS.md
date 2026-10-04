@@ -41,6 +41,23 @@ out-of-bounds count-table indices. Its input now uses halfwords and checks the
 complete table against an expected histogram; QEMU, interpreter and JIT with
 register/memory verification agree on hash `0x0d693c2a`.
 
+### Fresh-runner build portability (2026-10-04)
+
+The first pushed CI run failed before tests: the display proxy unconditionally
+included SDL/Wayland SDK headers, and Ubuntu's compiler rejected several
+`std::*f` math names. The SDL include is now feature-gated; dynamically loaded
+Wayland protocol descriptors use their fixed public wire ABI without requiring
+a host development SDK. FP handlers use standard overloaded `<cmath>` names,
+which retain float precision for float operands. The audio rounding call uses
+the same portable form.
+
+`scripts/check_headless_headers.sh` poisons graphics SDK include paths and
+syntax-checks graphics, FP and audio sources; CI runs it even where SDL headers
+are installed. A separate Clang check passes too. Both host builds and the
+JIT/interpreter unit and differential gates are rerun locally. Remote CI results
+remain authoritative for the Ubuntu runner; a local pass does not establish
+remote success.
+
 ### Verification gate repair (2026-10-04)
 
 The earlier concurrent replay warnings were reproduced. The verifier restored

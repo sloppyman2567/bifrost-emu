@@ -20,6 +20,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential python3 libsdl2-dev libgl-dev libegl-dev
+      - name: Check headless SDK independence
+        run: bash scripts/check_headless_headers.sh
       - name: Build headless configuration
         run: make -j2 USE_SDL2=0 USE_THUNK_GL=0
       - name: Build SDL/GL configuration without replacing headless objects
