@@ -8,18 +8,23 @@ C or assembly source fails with a rebuild instruction, so ignored local
 fixtures cannot silently test outdated code. Some integration tests also
 require SDL2, a display, or a configured guest rootfs.
 
-## Full validation (2026-10-03)
+## Latest full validation
 
-The full strict suite passes 252/252 in JIT mode with no skips. After fixing
-interpreter decode-cache reuse to match both PC and the fetched instruction
-word, the full interpreter suite passes 249/249 with three JIT-only skips.
-The cross-thread instruction invalidation regression also passes five
-interpreter repeats and QEMU. JIT unit tests pass 75/75 with IR validation.
+The final strict suite passes **255/255 in JIT mode** with no skips and
+**252/252 in interpreter mode**, with three JIT-only skips. Both runs used
+`BIFROST_IR_VALIDATE=1` and desktop/audio access. The JIT inventory now contains
+78 unit tests. These counts supersede the earlier 252/249 full-suite results.
 
-Both complete runs used desktop/audio access. A restricted sandbox run could
-not initialize display/audio/Vulkan resources and does not replace these
-integration checks. Five stale benchmark fixtures were rebuilt before the
-complete desktop runs.
+The retained Doom gap harness passes 20,000 randomized generated-code checks
+for 625 captured encodings, with zero mismatches and zero explicit IR
+fallbacks. The fixed-oracle guest passes 2,054 checks in QEMU, interpreter and
+JIT with register/memory verification and no divergence logs. SDL thread
+lifecycle/nonlocal-return checks pass separately in both modes. The complete
+fallback-profiler and window-stats regressions also pass independently.
+
+Restricted sandbox runs that cannot initialize desktop/audio/Vulkan resources
+do not replace these integration checks. Rebuild stale guest fixtures before
+interpreting failures as emulator regressions.
 
 ## Test inventory
 
@@ -28,11 +33,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 252 configured test runs:
+The fully provisioned suite contains 255 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 75 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 78 | Focused instruction/JIT regressions in `ctest/` |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -41,12 +46,67 @@ The fully provisioned suite contains 252 configured test runs:
 | Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **252** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **255** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 230 configured runs (225 with `--quick`). These
+tests are not selected, for 233 configured runs (228 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
+
+## Doom JIT, SDL threads and diagnostics
+
+The following focused tests accompany the native instruction and SDL worker
+changes. Standalone host/SDL probes are not additional entries in the 255-run
+inventory unless explicitly registered in `run_tests.sh`.
+
+- `ctest/jit_simd_fp_indexed.c`: 28 indexed FMUL lane, aliasing and upper-half
+  checks, independently validated in QEMU and both engines.
+- `ctest/jit_round_away.c`: 6,984 FRINTA/FCVTAS fixed-oracle cases for ties,
+  adjacent values, signed zero, NaNs and saturation.
+- `ctest/jit_scalar_dup.c`: 60 scalar lane-copy cases covering all 30 valid
+  lane/width combinations with and without source/destination aliasing.
+- `ctest/jit_doom_gap.c`: 2,054 oracle checks, including all conditional
+  compare conditions/NZCV inputs in single/double precision, FCVTL, SHLL,
+  ADDV result width and fused indexed FMLA.
+- `ctest/native_doom_gaps.cpp` with `ctest/doom_gap_opcodes.inc`: actual JIT
+  execution for all 625 captured gap encodings, 32 randomized states each.
+  Checks registers, flags, memory, post-index writeback and exclusive-monitor
+  success/failure. Interpreter comparison complements the independent fixed
+  oracles; it is not itself a hardware oracle. Also passes with
+  `BIFROST_TIER2_HITS=1` to exercise early promotion decisions.
+- `ctest_real/test_sdl_thread.c`: create/wait, eight concurrent workers,
+  detach, and 16 nested `setjmp`/`longjmp` returns. Tests both the JIT SDL
+  runner and the explicit `--no-jit` path.
+- `scripts/test_fallback_profile.sh`: exact concurrent snapshot retention
+  after worker exit, with 192 complete entries and 192,000 counts.
+- `scripts/test_window_stats.sh`: presentation clock, default rendering log,
+  title/idle FPS and enable/disable controls. UI placement, compositor stacking
+  and overlay capture require separate desktop checks; see
+  [window-stats limits](window-stats.md).
+
+```bash
+make -j8 USE_SDL2=1 USE_THUNK_GL=1 build/release-sdl1-gl1/bifrost-emu
+make cross SRC=ctest/jit_doom_gap.c OUT=ctest/jit_doom_gap.elf
+make cross SRC=ctest_real/test_sdl_thread.c OUT=ctest_real/test_sdl_thread.elf
+BIFROST_IR_VALIDATE=1 scripts/run_tests.sh --emu build/release-sdl1-gl1/bifrost-emu --strict
+BIFROST_IR_VALIDATE=1 scripts/run_tests.sh --emu build/release-sdl1-gl1/bifrost-emu --no-jit --strict
+bash scripts/test_native_doom_gaps.sh
+BIFROST_JIT_VERIFY=1 BIFROST_JIT_VERIFY_MEM=1 BIFROST_IR_VALIDATE=1 build/release-sdl1-gl1/bifrost-emu ctest/jit_doom_gap.elf
+build/release-sdl1-gl1/bifrost-emu ctest_real/test_sdl_thread.elf
+build/release-sdl1-gl1/bifrost-emu --no-jit ctest_real/test_sdl_thread.elf
+bash scripts/test_fallback_profile.sh
+EMU=build/release-sdl1-gl1/bifrost-emu bash scripts/test_window_stats.sh
+```
+
+The standalone captured-opcode harness links the built SDL/GL objects and
+expects that configuration. Build all registered guest fixtures with
+`make setup-tests` before running the complete suite on a new checkout.
+
+`ctest/bench_doom_vector_fp.c` and `ctest/bench_doom_round_lane.c` are optional
+instruction-throughput probes, not full-game FPS benchmarks. See
+[Doom 3 validation](doom3.md) for measured scope and the longer user gameplay
+run. Neither the tests nor the recorded presentation counter establish the
+planned v2.0 60+ FPS target across demanding gameplay scenes.
 
 ## Game compatibility follow-up (2026-10-03)
 

@@ -16,6 +16,15 @@ passing a focused test is not a claim of complete Linux ABI compatibility.
 | SDL/GL/Vulkan | Optional SDL2/GL host build; thunk tests run when the host display and driver are available | Headless CI skips display-dependent tests with exit 77. A skip is not evidence that a graphics path works. |
 | Host CPU features | Runtime-gated x86 SIMD paths with fallbacks where implemented | CI does not yet run a hardware-feature matrix across different x86 generations. |
 
+## Android scope and v2.0 plans
+
+The current standalone Android path targets native NativeActivity binaries;
+it does not provide integrated APK/ART execution. The existing native-bridge
+interface is an integration API, not a complete Android framework or runtime.
+Bionic compatibility, integrated ART/JNI, APK loading and selected Android
+game support are planned in the [v2.0 roadmap](../roadmap.md). Keep those plans
+separate from verified current support.
+
 ## CI gates
 
 - Every push and pull request builds headless and SDL/GL configurations in

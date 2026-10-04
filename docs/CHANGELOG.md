@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## Unreleased — native Doom JIT and v2.0 roadmap (2026-10-04)
+
+- Close all 625 explicit IR fallback encodings captured in the Doom run.
+  Add inline conditional FP compares/Q=0 logical operations, native atomic
+  monitor paths and specialized SIMD/structured-memory helpers. Correct
+  shared interpreter FCVTL, SHLL, ADDV width and indexed fused FMLA semantics.
+- Run SDL guest threads with JIT, with per-CPU return sentinels and safe
+  nested call unwinding. Retain interpreter mode and add nonlocal-return
+  regressions. Keep structured-memory fault exits out of Tier-2 regions.
+- Add complete per-thread interpreted-opcode inventories and graphics
+  presentation statistics: title, optional stats window/desktop overlay,
+  and default first-render logging. See [window stats](window-stats.md)
+  for platform and presentation-counter limits.
+- Validation: full JIT 255/255; interpreter 252/252 with three JIT-only skips;
+  20,000 captured-opcode randomized checks; 2,054 QEMU-checked oracle cases;
+  separate SDL lifecycle, fallback-profiler and window-stats checks pass.
+  Document approximately 27 minutes of user-reported crash-free gameplay,
+  while retaining frame-pacing, save-loading and profiler-attribution limits.
+- Add the planned [v2.0 roadmap](../roadmap.md) for Bionic/Android platform
+  compatibility, ART/JNI, Android games, safer cache reuse, sustained Doom 3
+  performance and broader input support. These goals are not shipped features.
+
 ## Unreleased — game compatibility and TLS follow-up (2026-10-03)
 
 - Interpreter: require both PC and the fetched instruction word for decode-cache
