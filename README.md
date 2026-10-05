@@ -232,7 +232,8 @@ Full Bionic/platform compatibility and ART execution remain planned for v2.0;
 see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
 execution, including SpongeBob's CleverTap Activity.
 The separate native-load probe completes 19/21 SpongeBob library checks in all
-three execution modes, including IL2CPP. Unity still needs Media NDK, and the
+three execution modes, including IL2CPP. Unity requires the optional Media NDK
+bundle below, and the
 managed launcher still needs ART/framework startup. Firebase Messaging's
 shutdown abort is traced to shared-mutex cleanup when probed first; an explicit
 Firebase App preload gives a clean exit in all three modes and QEMU. The probe
@@ -240,6 +241,11 @@ reports loading and shutdown separately and supports ordered `--preload` options
 Guest adapters now build
 with automatically fetched official AOSP headers, Bionic variadic logging and
 real guest zlib; see the APK guide for dependency pins and verification limits.
+An optional real ARM64 Media NDK bundle (`tools/android_media.py`, APK installer
+`--media-root`) loads in an isolated Bionic namespace. Its metadata operations
+pass the signed APK gate in all modes. It resolves Unity's Media NDK dependency;
+the next loader blocker is `eglSurfaceAttrib`. Android media services and
+decoding remain unimplemented.
 The native-bridge adapter below is a separate integration interface, not a
 complete Android runtime.
 

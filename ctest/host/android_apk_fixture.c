@@ -1,6 +1,7 @@
 #include "../../guest/android/native_activity.h"
 #include <android/log.h>
 #include <zlib.h>
+#include <media/NdkMediaFormat.h>
 #define main service_manager_checks
 #include "../android_service_manager.c"
 #undef main
@@ -45,7 +46,56 @@ static int log_variadic(const char *format, ...) {
     va_end(args);
     return result;
 }
+static void media_format_checks(void) {
+    // Real AOSP implementation, loaded in the platform namespace. Exercise
+    // ownership/type behavior repeatedly without contacting media services.
+    for (int iteration = 0; iteration < 256; ++iteration) {
+        AMediaFormat *format = AMediaFormat_new(), *copy = AMediaFormat_new();
+        REQUIRE(format && copy);
+        char mime[] = "video/avc";
+        unsigned char bytes[] = {0, 0, 1, 103};
+        AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mime);
+        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, 1920);
+        AMediaFormat_setInt64(format, AMEDIAFORMAT_KEY_DURATION, 1234567890123LL);
+        AMediaFormat_setFloat(format, "float", 1.25f);
+        AMediaFormat_setDouble(format, "double", 2.5);
+        AMediaFormat_setSize(format, "size", 4096);
+        AMediaFormat_setRect(format, "crop", 1, 2, 3, 4);
+        AMediaFormat_setBuffer(format, "csd-0", bytes, sizeof(bytes));
+        mime[0] = 'x'; bytes[3] = 0;
+        const char *text = 0;
+        void *buffer = 0;
+        size_t size = 0;
+        int32_t width = 0, left, top, right, bottom;
+        int64_t duration = 0;
+        float small = 0;
+        double large = 0;
+        REQUIRE(AMediaFormat_getString(format, "mime", &text) && !strcmp(text, "video/avc"));
+        REQUIRE(AMediaFormat_getInt32(format, "width", &width) && width == 1920);
+        REQUIRE(AMediaFormat_getInt64(format, "durationUs", &duration) && duration == 1234567890123LL);
+        REQUIRE(!AMediaFormat_getInt64(format, "width", &duration) && duration == 1234567890123LL);
+        REQUIRE(AMediaFormat_getFloat(format, "float", &small) && small == 1.25f);
+        REQUIRE(AMediaFormat_getDouble(format, "double", &large) && large == 2.5);
+        REQUIRE(AMediaFormat_getSize(format, "size", &size) && size == 4096);
+        REQUIRE(AMediaFormat_getRect(format, "crop", &left, &top, &right, &bottom) &&
+                left == 1 && top == 2 && right == 3 && bottom == 4);
+        REQUIRE(AMediaFormat_getBuffer(format, "csd-0", &buffer, &size) && size == 4 &&
+                ((unsigned char *)buffer)[3] == 103);
+        REQUIRE(AMediaFormat_copy(copy, format) == AMEDIA_OK);
+        AMediaFormat_setString(format, "mime", "changed");
+        AMediaFormat_clear(format);
+        REQUIRE(!AMediaFormat_getInt32(format, "width", &width));
+        REQUIRE(AMediaFormat_getString(copy, "mime", &text) && !strcmp(text, "video/avc"));
+        REQUIRE(AMediaFormat_getBuffer(copy, "csd-0", &buffer, &size) && size == 4 &&
+                ((unsigned char *)buffer)[3] == 103);
+        text = AMediaFormat_toString(copy);
+        REQUIRE(text && strstr(text, "1920") && strstr(text, "video/avc"));
+        REQUIRE(AMediaFormat_delete(format) == AMEDIA_OK && AMediaFormat_delete(copy) == AMEDIA_OK);
+    }
+    printf("apk_media_fixture: REAL FORMAT PASS\n");
+}
 __attribute__((constructor)) static void constructor(void) {
+    media_format_checks();
     REQUIRE(fixture_dependency_value() == 41);
     REQUIRE(log_variadic("abi=%d %.2f %s %lld %d %d %d %d %d %d %d %d", 42, 1.25,
                          "guest", 1234567890123LL, 1, 2, 3, 4, 5, 6, 7, 8) == 1);

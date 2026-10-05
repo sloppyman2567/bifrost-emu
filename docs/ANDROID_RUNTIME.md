@@ -9,7 +9,12 @@ The APK native-load diagnostic now checks real packaged dependencies separately:
 Firebase Messaging's direct probe loads successfully, then double-destroys a
 shared mutex on exit. Explicitly preloading Firebase App fixes that probe's
 cleanup in all three modes and QEMU. See [the APK checkpoint](ANDROID_APK.md)
-for the load-order evidence, Media NDK blocker and official-header/zlib build.
+for the load-order evidence and official-header/zlib build.
+An optional checksum-pinned real Media NDK bundle now supplies the genuine
+library and its isolated native dependencies. Real metadata operations pass
+the signed APK gate in all modes. With this bundle Unity progresses to a
+missing `eglSurfaceAttrib` export; media services/decoding and ART are still
+unimplemented. See the APK guide for provisioning and namespace boundaries.
 
 ## Reproduce
 

@@ -26,6 +26,8 @@ class PackageTests(unittest.TestCase):
         cls.tools = ROOT / "tools/android-tools"
         cls.runtime = ROOT / "tools/android-runtime/rootfs"
         cls.adapters = ROOT / "build/android-adapters"
+        cls.media = ROOT / "build/android-media"
+        package.media.install(cls.media)
         subprocess.run(
             ["python3", str(ROOT / "tools/build-android-adapters.py")],
             check=True,
@@ -94,6 +96,7 @@ class PackageTests(unittest.TestCase):
             str(cls.dependency), str(cls.adapters / "libandroid.so"),
             str(cls.adapters / "liblog.so"), str(cls.adapters / "libz.so"),
             str(cls.adapters / "libEGL.so"), str(cls.adapters / "libGLESv2.so"),
+            str(cls.media / "lib64/libmediandk.so"),
             str(bionic / "libc.so"), "-o", str(cls.native),
         ], check=True, capture_output=True)
         cls.base = cls.apk("base", split="", native=False)
@@ -182,6 +185,7 @@ class PackageTests(unittest.TestCase):
             self.adapters,
             self.tools / "aapt2",
             self.tools / "apksigner.jar",
+            self.media,
         )
 
     def test_signed_split_native_launch_and_persistence(self):
@@ -190,7 +194,25 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(metadata["apk_count"], 2)
         self.assertEqual(metadata["arm64_library_count"], 2)
         self.assertEqual(metadata["launcher"]["kind"], "native_activity")
+        self.assertEqual(metadata["media"]["image_sha256"], package.media.IMAGE_SHA256)
         self.assertEqual((state / "org.bifrost.fixture/package.json").is_file(), True)
+        root = state / "org.bifrost.fixture/rootfs"
+        library = root / "system/lib64/media/libmediandk.so"
+        original = library.read_bytes()
+        try:
+            library.write_bytes(b"broken")
+            with self.assertRaisesRegex(ValueError, "media library/data was modified"):
+                package.launch("org.bifrost.fixture", state, Path("/must/not/execute"))
+        finally:
+            library.write_bytes(original)
+        configuration = root / "linkerconfig/ld.config.txt"
+        original = configuration.read_text()
+        try:
+            configuration.write_text(original + "\n")
+            with self.assertRaisesRegex(ValueError, "media linker namespace was modified"):
+                package.launch("org.bifrost.fixture", state, Path("/must/not/execute"))
+        finally:
+            configuration.write_text(original)
         for mode in ("jit", "interp", "tier2"):
             for backend in ("builtin", "plugin"):
                 cmd = [
@@ -224,6 +246,7 @@ class PackageTests(unittest.TestCase):
                 self.assertIn("abi=42 1.25 guest 1234567890123 1 2 3 4 5 6 7 8", result.stderr)
                 self.assertIn("buffer=2.50 ok", result.stderr)
                 self.assertIn("apk_bionic_fixture: ALL PASS", result.stdout)
+                self.assertIn("apk_media_fixture: REAL FORMAT PASS", result.stdout)
                 self.assertIn("android_service_manager: ALL PASS", result.stdout)
                 self.assertNotRegex(
                     result.stdout + result.stderr, r"Fatal signal|\[crash\]|CANNOT LINK"

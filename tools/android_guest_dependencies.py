@@ -14,8 +14,13 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 BIONIC_REVISION = "361ba86734fb2821a6adcfdf775db8abd04e0de0" # android-15.0.0_r1
+MEDIA_REVISION = "1863cb0ea5a9e1340f11a435618ff863e017da29" # android-15.0.0_r1
 ZLIB_VERSION = "1.3.2"
 ARCHIVES = {
+    "media": (
+        f"https://android.googlesource.com/platform/frameworks/av/+archive/{MEDIA_REVISION}/media/ndk.tar.gz",
+        "6f58997452f80240b5af4ed67578aa0885db4fe193c1b05c821d6ab1cec55b75",
+    ),
     "zlib": (
         "https://zlib.net/fossils/zlib-1.3.2.tar.gz",
         "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
@@ -116,13 +121,15 @@ def extract(name, destination):
 
 
 def prepare_headers(directory):
+    extract("media", directory / "media-ndk")
     for name in ("include", "uapi", "android", "jni"):
         extract(name, directory / name)
     for name in ("ndk", "window", "rect", "log"):
         extract(name, directory / "include/android")
     includes = []
     for path in (directory / "include", directory / "uapi",
-                 directory / "uapi/asm-arm64", directory / "android/uapi", directory / "jni"):
+                 directory / "uapi/asm-arm64", directory / "android/uapi", directory / "jni",
+                 directory / "media-ndk/include"):
         includes += ["-isystem", str(path)]
     return includes
 

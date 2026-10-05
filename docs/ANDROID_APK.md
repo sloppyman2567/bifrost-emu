@@ -53,6 +53,46 @@ Adapter changes require a fresh `--state-root`; the installer deliberately
 rejects replacing different adapters inside an existing app root. Keep the
 original app state when evaluating a new runtime.
 
+## Optional real Media NDK bundle
+
+The Media NDK can run as guest ARM64 code through Bionic. Provision the actual
+Android 15/API-35 implementation from the official AOSP emulator system image;
+the NDK's `.so` link stubs are not runtime libraries:
+
+```bash
+python3 tools/android_media.py
+python3 scripts/android_package.py --state-root android-state/real-media \
+    install /path/to/package.apkm --media-root build/android-media
+```
+
+Provisioning requires `debugfs`, `lpunpack` (Android partition tools) and
+`readelf`. The first download is approximately 734 MiB; extraction needs several
+GiB of temporary disk space. It reads GPT/dynamic partitions and APEX payloads
+without mounting filesystems. The image and complete extracted file set are
+SHA-256 pinned. The source image cache and existing bundles are verified before
+reuse; a modified bundle is rejected. Upstream notices are retained.
+
+The bundle contains the genuine `libmediandk.so`, its 154-library `DT_NEEDED`
+dependency closure (including itself), and ICU data. These libraries load in
+an isolated Bionic `media` namespace under `/system/lib64/media`, sharing only
+the existing Bionic C/math/dynamic-link libraries. The app namespace can access
+`libmediandk.so` through a declared linker namespace link. Its existing
+`libandroid`/EGL/GLES/logging adapters continue to serve application calls.
+Installation verifies the copied libraries before publishing the root, records
+their hashes in the package manifest, and rechecks the files and complete
+namespace configuration on launch/probe/reinstall. Enabling, disabling or
+changing the media bundle requires a fresh app state; reinstall with the same
+`--media-root` to preserve an existing media-enabled installation.
+
+Real `AMediaFormat` allocation, typed fields, copied strings/buffers, format
+copy/clear/description and deletion are exercised in the signed APK gate.
+No Media NDK replacement functions are supplied. Codec/extractor/DRM APIs still
+require Android media services and associated drivers/framework integration;
+calls that wait for unavailable services may block. Codec decoding, playback
+and real Android native-window interoperability are not validated. A future
+host decoder bridge belongs at that service/buffer boundary; the real metadata
+API itself needs no host thunk.
+
 ## Package and runtime ownership
 
 The installer snapshots the bounded input, checks archive paths/member types,
@@ -99,8 +139,8 @@ exports into Bifrost's existing thunks. Assembly wrappers preserve AAPCS64
 arguments and cache trampoline addresses with acquire/release operations.
 Graphics remain behind the [window plugin interface](ANDROID_WINDOW_PLUGINS.md).
 The build automatically fetches AOSP Bionic, NativeActivity, window, rectangle,
-JNI-type and logging headers at pinned Android-15 repository revisions. Public
-ABI declarations come from those headers. Downloaded archives live under
+JNI-type, logging and Media NDK headers at pinned Android-15 repository revisions.
+Public ABI declarations come from those headers. Downloaded archives live under
 ignored `build/android-dependencies`; bounded extraction accepts regular files
 and directories only. Gitiles adds changing archive timestamps, so AOSP pins
 cover sorted regular-file names, lengths and contents with SHA-256. Static
@@ -166,9 +206,13 @@ Tier 2. QEMU reproduces both the double destruction and the clean App-first
 exit. This isolates a load-order problem in the standalone probe; it does not
 establish the managed game's initialization order or successful JNI startup.
 The probe preserves normal Bionic checks and exit handlers. JNI entrypoints are
-located, never invoked. Media NDK, ART and framework startup remain required.
+located, never invoked. Media services, ART and framework startup remain required.
 With the explicit App preload, the full 21-library JIT probe completes 20/21
-loads and clean exits; Unity remains blocked on `libmediandk.so`.
+loads and clean exits in the earlier adapter-only checkpoint; Unity remains
+blocked on `libmediandk.so` there. With the optional real-media bundle, that
+dependency resolves. Unity's next failure is the missing `eglSurfaceAttrib`
+export in the guest EGL adapter, reproduced under JIT, interpreter and Tier 2.
+The local real-media installation uses `android-state/real-media`.
 
 The earlier header checkpoint uses `android-state/bionic-headers`. The updated
 launcher installation uses a fresh `android-state/bionic-mutex-final`:
@@ -187,7 +231,8 @@ make test-android-package
 ./scripts/run_tests.sh --strict --no-jit --filter android_service_manager
 ```
 
-The APK gate requires a native Wayland desktop and GPU. It builds and signs a
+The APK gate requires a native Wayland desktop and GPU and provisions the
+pinned real-media bundle above. It builds and signs a
 base/split NativeActivity fixture with actual AAPT2/API-35 manifest resources
 and apksigner. All six JIT/interpreter/Tier-2 and built-in/plugin combinations
 pass lifecycle, pthread/TLS, split-asset, save persistence, EGL pixel readback
@@ -200,6 +245,11 @@ the command with guest exit 23. The six host test cases also cover path
 and symlink rejection, input growth bounds, signature tampering, signer mismatch,
 version mismatch, downgrade prevention, reordered reinstall, modified installed
 code, and managed-launcher rejection. The fixture does not test ART or JNI.
+The real Media NDK additionally passes 256 repeated metadata ownership/type
+cycles per fixture process in all six backend/execution-mode combinations.
+These checks exercise metadata, not Android media services or decoding.
+Modified installed media libraries and namespace configuration are rejected
+before the emulator can execute.
 
 The complete Linux regression suite passes 273/273 JIT runs and 266/266
 interpreter runs with seven JIT-only skips. The real Bionic bootstrap separately

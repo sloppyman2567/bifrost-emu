@@ -21,6 +21,8 @@ import zipfile
 import android_preflight as preflight
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+import android_media as media
 API = 35
 PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
 RESERVED = {
@@ -33,6 +35,7 @@ RESERVED = {
     "libEGL.so",
     "libGLESv2.so",
     "libz.so",
+    "libmediandk.so",
 }
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
 
@@ -189,9 +192,19 @@ def publish_json(path, value):
             temporary.unlink(missing_ok=True)
 
 
-def install(source, state, runtime, adapters, aapt2, apksigner):
+def app_linker_configuration(has_media=False):
+    return (
+        "dir.app = /system/bin\n\n[app]\nnamespace.default.isolated = true\n"
+        "namespace.default.search.paths = /system/lib64:/apex/com.android.runtime/lib64/bionic\n"
+        "namespace.default.permitted.paths = /data/app:/system/lib64:/apex/com.android.runtime/lib64/bionic\n"
+        + (media.linker_configuration() if has_media else "")
+    )
+
+
+def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None):
     runtime_module = verify_runtime(runtime)
     adapter_metadata = verify_adapters(adapters, runtime_module)
+    media_metadata = media.verify(media_root) if media_root is not None else None
     state.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".apk-validation-", dir=state) as work:
         staging = Path(work)
@@ -325,10 +338,14 @@ def install(source, state, runtime, adapters, aapt2, apksigner):
                         shutil.copy2(adapters / filename, target)
                     (fresh / "linkerconfig").mkdir()
                     (fresh / "linkerconfig/ld.config.txt").write_text(
-                        "dir.app = /system/bin\n\n[app]\nnamespace.default.isolated = true\n"
-                        "namespace.default.search.paths = /system/lib64:/apex/com.android.runtime/lib64/bionic\n"
-                        "namespace.default.permitted.paths = /data/app:/system/lib64:/apex/com.android.runtime/lib64/bionic\n"
+                        app_linker_configuration(bool(media_metadata))
                     )
+                    if media_metadata:
+                        for filename in media_metadata["files"]:
+                            target = fresh / media.guest_path(filename)
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(media_root / filename, target)
+                        verify_media(fresh, media_metadata)
                     (fresh / "data/app").mkdir(parents=True)
                     for relative in [
                         f"data/user/0/{name}/files",
@@ -339,6 +356,11 @@ def install(source, state, runtime, adapters, aapt2, apksigner):
                     shutil.copy2(runtime / "NOTICE.html.gz", fresh / "NOTICE.html.gz")
                     fresh.rename(root)
                 else:
+                    installed_media = previous.get("media") if previous else None
+                    if installed_media != media_metadata:
+                        raise ValueError("Installed media bundle differs; create a fresh app state")
+                    if media_metadata:
+                        verify_media(root, media_metadata)
                     for remote, value in runtime_module.FILE_HASHES.items():
                         if digest(root / "apex/com.android.runtime" / remote) != value:
                             raise ValueError("Installed runtime was modified")
@@ -381,11 +403,25 @@ def install(source, state, runtime, adapters, aapt2, apksigner):
                     "packages": reports,
                     "runtime_files": runtime_module.FILE_HASHES,
                     "adapters": adapter_metadata,
+                    "media": media_metadata,
                     "apk_count": len(packages),
                     "arm64_library_count": len(libraries),
                 }
                 publish_json(metadata_path, metadata)
             return metadata
+
+
+def verify_media(root, metadata):
+    if metadata.get("schema_version") != 1 or metadata.get("image_sha256") != media.IMAGE_SHA256:
+        raise ValueError("Unknown installed media image")
+    media.verify_files(metadata.get("files"))
+    for name, value in metadata["files"].items():
+        path = root / media.guest_path(name)
+        if path.is_symlink() or digest(path) != value:
+            raise ValueError("Installed media library/data was modified")
+    configuration = (root / "linkerconfig/ld.config.txt").read_text()
+    if configuration != app_linker_configuration(True):
+        raise ValueError("Installed media linker namespace was modified")
 
 
 def verify_installed(package, app, metadata):
@@ -408,6 +444,8 @@ def verify_installed(package, app, metadata):
         )
         if digest(target) != value:
             raise ValueError("Installed runtime adapter was modified")
+    if metadata.get("media"):
+        verify_media(root, metadata["media"])
     return code, root
 
 
@@ -546,6 +584,8 @@ def main():
     installer.add_argument(
         "--apksigner", type=Path, default=ROOT / "tools/android-tools/apksigner.jar"
     )
+    installer.add_argument("--media-root", type=Path,
+                           help="verified real Media NDK bundle from tools/android_media.py")
     runner = commands.add_parser("run")
     runner.add_argument("package")
     runner.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
@@ -574,6 +614,7 @@ def main():
                 args.adapters,
                 args.aapt2,
                 args.apksigner,
+                args.media_root,
             )
             print(
                 f"Installed {value['package']} version {value['version_code']}: {value['apk_count']} signed APKs, {value['arm64_library_count']} ARM64 libraries"
