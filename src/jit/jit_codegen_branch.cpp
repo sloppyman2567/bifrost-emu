@@ -68,6 +68,7 @@ void FrostJIT::emit_taken_path_epilogue() {
     // flush here would move the stale-reg bug to the fall-through path.
     flush_all_vregs_keep();
     emit_store(CPU_REG, PC_OFF, RAX);
+    emit_tier2_edge_profile(true);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
     emit_load(RSI, RBP, emu_slot_off()); // rsi = emu
     // ── Taken-path chain slot ──

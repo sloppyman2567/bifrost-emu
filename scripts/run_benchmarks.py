@@ -80,10 +80,17 @@ def validate_output(name: str, output: str) -> str:
     if re.search(r"(?:^|\b)(?:ERROR|FAIL):", output, re.IGNORECASE | re.MULTILINE):
         raise RuntimeError("guest reported ERROR/FAIL")
     if name == "coremark":
-        found = tuple(value.lower() for value in re.findall(r"0x[0-9a-f]+", output, re.IGNORECASE))
-        missing = [value for value in COREMARK_CRC if value not in found]
-        if "CoreMark 1.0" not in output or missing:
-            raise RuntimeError(f"CoreMark output missing expected CRCs: {', '.join(missing)}")
+        expected = {"seedcrc": "0xe9f5", "[0]crclist": "0xe714",
+                    "[0]crcmatrix": "0x1fd7", "[0]crcstate": "0x8e3a",
+                    "[0]crcfinal": "0x25b5"}
+        for label, value in expected.items():
+            if not re.search(r"^\s*" + re.escape(label) + r"\s*:\s*" + value + r"\s*$", output, re.M | re.I):
+                raise RuntimeError(f"CoreMark output has an incorrect or missing {label}")
+        if (not re.search(r"^Iterations\s*:\s*40000\s*$", output, re.M)
+                or "Correct operation validated." not in output
+                or "CoreMark 1.0" not in output
+                or "ERROR!" in output or "Errors detected" in output):
+            raise RuntimeError("CoreMark must validate exactly 40000 iterations")
         return ",".join(COREMARK_CRC)
     elf, expected, _source = BENCHES[name]
     del elf
@@ -100,6 +107,8 @@ def run_sample(emulator: Path, guest: Path, mode: str, timeout: int) -> tuple[fl
     if mode == "interp":
         command.append("--no-jit")
     command.append(str(guest))
+    if guest.name == "coremark.elf":
+        command.extend(["0", "0", "0", "40000"])
     started = time.perf_counter()
     try:
         result = subprocess.run(
@@ -200,6 +209,7 @@ def main() -> int:
             entry: dict[str, object] = {
                 "name": name,
                 "guest_binary": binary_name,
+                "guest_arguments": ["0", "0", "0", "40000"] if name == "coremark" else [],
                 "guest_sha256": sha256_file(guest),
                 "source": source_name,
                 "source_sha256": sha256_file(ROOT / source_name) if source_name else None,

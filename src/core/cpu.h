@@ -20,6 +20,7 @@
 #include <mutex>
 #include <vector>
 namespace arm64emu {
+class Emulator;
 // Saved CPU state for one signal delivery. Signal frames are PER-THREAD
 // (each thread owns its own handler-call stack), so the stack lives in CPU,
 // not in the process-wide SignalTable. The definition lives here rather
@@ -285,6 +286,27 @@ public:
     // native call dispatch must unwind when a nonlocal jump reaches it.
     uint64_t jit_stop_pc = 0;
     uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
+    // Host-only Tier-2 observations. Generated hot completions deposit one
+    // credit using a flag-neutral store; cold exits consume it in C++.
+    // Slots are CPU-local. Collisions can only delay retirement, not create
+    // pressure for an unrelated region. Architectural copies exclude these.
+    struct Tier2FeedbackSlot {
+        uint64_t owner = 0;
+        uint32_t pressure = 0, credit = 0;
+        uint64_t baseline_ns = 0, baseline_exit = 0;
+        uint32_t baseline_work = 0, sample_quota = 256;
+        uint64_t baseline_hash = 0;
+    };
+    static constexpr unsigned TIER2_FEEDBACK_SLOTS = 16;
+    Tier2FeedbackSlot jit_tier2_feedback[TIER2_FEEDBACK_SLOTS]{};
+    // CPU-local, host-only state for bounded real-execution A/B trials.
+    void* jit_tier2_trial = nullptr;
+    uint64_t (*jit_tier2_trial_fn)(CPU*, Emulator*) = nullptr;
+    uint64_t (*jit_tier2_trial_chain_fn)(CPU*, Emulator*) = nullptr;
+    uint32_t jit_tier2_trial_remaining = 0;
+    uint32_t jit_tier2_trial_work = 0;
+    uint64_t jit_tier2_trial_hash = 0;
+
     // ── PSTATE flag accessors ────────────────────────────────────────
     void set_flag_n(bool v) { if (v) pstate |= (1u<<31); else pstate &= ~(1u<<31); }
     void set_flag_z(bool v) { if (v) pstate |= (1u<<30); else pstate &= ~(1u<<30); }

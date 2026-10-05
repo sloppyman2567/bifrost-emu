@@ -33,6 +33,7 @@ struct ProfRunGuard {
     ~ProfRunGuard() { if (active_) prof_in_run_block = saved_; }
 };
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
+    cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
     cpu.jit_chain_budget = 256;
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
@@ -172,74 +173,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-        // ── Tier-2 hot-head detection (opt-in; BIFROST_TIER2=1 enables) ──
-        // Count SLOW-PATH dispatches per block (BlockEntry::exec_count) and
-        // flag the block once it crosses tier2_hits_threshold() — the tier-2
-        // trace/region "hot head" feed (ROADMAP #14, Phase 1; a later task
-        // builds traces from these). Plain increment under the shared lock
-        // (single-threaded per block is typical; the map mutation is under a
-        // lock anyway). This is NOT the interp_only demotion machinery
-        // (tls_hot_pc_counts_ / HOT_PC_THRESHOLD) and the fast paths
-        // (tls_last_block_ / inline cache) stay untouched.
-        if (!mt_active() && tier2_enabled() && !entry.tier2_hot_logged) {
-            uint32_t n = ++it->second.exec_count;
-            if (n >= tier2_hits_threshold()) {
-                it->second.tier2_hot_logged = true;
-                entry.tier2_hot_logged = true;
-                // Stop the block's in-code counter (if any) paying its
-                // per-entry cost now that it has fired.
-                tier2_counter_disable(it->second.tier2_counter_off,
-                                      it->second.tier2_counter_len);
-                tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
-                if (tier2_trace_enabled()) {
-                    fprintf(stderr, "[tier2] hot head pc=0x%llx exec=%u\n",
-                            static_cast<unsigned long long>(pc),
-                            static_cast<unsigned>(n));
-                }
-                // ── Tier-2 Phase 1 step 3 / M1: collect + compile a region ──
-                // The trace walker runs under the shared lock (read-only);
-                // compiling and REGISTERING the region needs the exclusive
-                // lock (it writes blocks_[pc]). Upgrade → compile → register
-                // → downgrade, mirroring the interp_only promotion pattern
-                // above. The region function replaces the single-block fn for
-                // this head PC, so subsequent dispatches run the whole hot
-                // loop body in ONE call (single regalloc pass, no per-block
-                // spill/reload, no per-edge dispatcher round-trips).
-                Tier2Trace trace = collect_tier2_trace(emu, pc);
-                if (trace.ok) {
-                    blocks_mutex_.unlock_shared();
-                    blocks_mutex_.lock();
-                    it = blocks_.find(pc);
-                    if (it != blocks_.end()) {
-                        uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
-                        uint64_t (*rfn)(CPU*, Emulator*) =
-                            compile_tier2_region(emu, trace, &chain_fn);
-                        if (rfn) {
-                            BlockEntry region_entry;
-                            region_entry.fn = rfn;
-                            // Chain-skip: publish the post-frame-setup entry
-                            // (bare chain jmps must skip the frame alloc).
-                            if (chain_skip_enabled() && chain_fn)
-                                region_entry.chain_entry = chain_fn;
-                            region_entry.instr_count = static_cast<int>(trace.total_insts);
-                            region_entry.exec_count = it->second.exec_count;
-                            region_entry.tier2_hot_logged = it->second.tier2_hot_logged;
-                            region_entry.ends_with_branch = true;
-                            region_entry.chained = true;        // region has no chain slot
-                            region_entry.taken_chained = true;
-                            region_entry.interp_only = false;
-                            region_entry.verified_once = true;  // M1: no region verify
-                            it->second = region_entry;
-                            entry = region_entry;
-                        }
-                    }
-                    blocks_mutex_.unlock();
-                    blocks_mutex_.lock_shared();
-                    it = blocks_.find(pc);
-                    if (it != blocks_.end()) entry = it->second;
-                }
-            }
-        }
+        // Tier-2 hotness is counted at generated entries, including chained
+        // entries. Publication has one exclusive-lock path in tier2_fire_region;
+        // this shared table lookup must not mutate counters or publish code.
         // Per-PC hotness tracking (thread-local, no lock needed for the
         // counter, but promoting to interp_only needs exclusive lock).
         // Runtime promotion to interp_only is DISABLED by default: the
@@ -449,8 +385,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // store blocks; their ref re-run can double-apply stores, so only
     // trust divergences that reproduce and make sense (register splits).
     static bool verify_untracked_ = (getenv("BIFROST_VERIFY_UNTRACKED") != nullptr);
-    if (verify_ && !mt_active_.load(std::memory_order_acquire) &&
-        entry.exec_count < verify_every_ &&
+    // Regions have internal loops and no Tier-1 chain/self-loop slots.
+    // Replaying them with a fixed block count (or unpatching offset zero)
+    // is invalid; use their independent result oracles instead.
+    if (verify_ && !mt_active_.load(std::memory_order_acquire) && !entry.is_region &&
+        entry.verify_count < verify_every_ &&
         !entry.has_svc && !entry.has_call &&
         (!entry.has_unresolved_store || verify_untracked_)) {
         // Mark this block as verified so subsequent dispatches skip the
@@ -467,9 +406,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         //
         // Set flag on local copy and on the map entry (brief exclusive lock).
         entry.verified_once = true;
+        ++entry.verify_count;
         blocks_mutex_.lock();
         auto vit = blocks_.find(pc);
-        if (vit != blocks_.end()) vit->second.verified_once = true;
+        if (vit != blocks_.end()) {
+            vit->second.verified_once = true;
+            ++vit->second.verify_count;
+        }
         blocks_mutex_.unlock();
         // Save chain slot bytes and restore to `ret` + NOPs
         uint8_t saved_chain[5];

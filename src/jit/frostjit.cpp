@@ -74,7 +74,17 @@ bool FrostJIT::direct_call_enabled() {
 // opt in with BIFROST_TIER2=1; BIFROST_TIER2=0 explicitly keeps it off.
 // Chaining is independent of this gate, including in multithreaded mode.
 bool FrostJIT::tier2_enabled() {
-    return dbg().tier2;
+    // Fixed-instruction differential replay temporarily patches Tier-1 exits
+    // and restores guest memory. Region promotion can redirect those exits
+    // into whole loops during replay; validate regions with result oracles.
+    if (dbg().tier2 && dbg().jit_verify) {
+        static const bool reported = [] {
+            std::fprintf(stderr, "[tier2] promotion disabled during differential replay; use region result oracles\n");
+            return true;
+        }();
+        (void)reported;
+    }
+    return dbg().tier2 && !dbg().jit_verify;
 }
 uint32_t FrostJIT::tier2_hits_threshold() {
     static const uint32_t hits = [] {

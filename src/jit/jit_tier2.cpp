@@ -1,21 +1,7 @@
-// jit/jit_tier2.cpp — FrostJIT tier-2 trace collection (ROADMAP #14,
-// Phase 1 step 2).
-//
-// Pure data collection: from a hot head (BlockEntry::exec_count crossed
-// tier2_hits_threshold()), walk guest code, translate each instruction to IR
-// with the SAME loop structure as translate_block, and produce a candidate
-// Tier2Trace (a linear list of blocks + side exits). A LATER task compiles
-// that trace as one region with one register allocation. This file emits NO
-// code, never touches blocks_ beyond read-only membership checks, and never
-// compiles anything.
-//
-// Stop classification: an ABORT (call_interp / svc / indirect_br /
-// bl_untranslated / decode_fail / vreg_exhaust) makes the trace unusable
-// (ok stays false). BL aborts only when the callee isn't pre-translated
-// (bl_untranslated); a call-aware trace fuses BL/BLR as BL_CALL/BLR_CALL
-// body ops that invoke the standalone callee fn (see compile_tier2_region).
-// A NORMAL end (cold_entry / revisit / ret / b_exit / b_backedge / block_cap
-// / inst_cap) yields a valid bounded trace; ok is then decided by block count.
+// Tier-2 bounded loop discovery, region optimization and publication.
+// Conditional branches follow measured hot successors; direct jumps and capped
+// straight-line blocks continue inline. Collection emits no host code.
+// Unsupported instructions abort rather than crossing a fault/call boundary.
 //
 // Regalloc contract (IMPORTANT): translate_to_ir allocates scratch vregs from
 // the thread_local g_alloc (vregs 0-32 = arch regs, scratch >= 33).
@@ -30,6 +16,8 @@
 #include "debug_flags.h"
 #include "ir/ir.hpp"
 #include "ir/ir.h"
+#include <chrono>
+#include <time.h>
 #include <algorithm>  // std::find
 #include <cstdint>
 #include <cstdio>
@@ -55,6 +43,285 @@ struct RegionSnapshot {
 };
 }  // namespace
 
+// Emitted after all guest state is flushed at a Tier-1 conditional exit.
+// R11 is free here, RAX retains next_pc, and NZCV is already materialized.
+void FrostJIT::emit_tier2_edge_profile(bool taken) {
+    if (!tier2_branch_profile_) return;
+    emit_mov_imm64(R11, reinterpret_cast<uint64_t>(tier2_branch_profile_));
+    emit_byte(0x41); emit_byte(0x83); emit_byte(0x3B); emit_byte(0); // cmp [r11],0
+    const size_t disabled = emit_jcc_rel32_placeholder(4);
+    const uint8_t offset = taken ? offsetof(Tier2BranchProfile, taken)
+                                 : offsetof(Tier2BranchProfile, fallthrough);
+    // Each outcome stops accumulating at 4096 (MT can overshoot by the
+    // number of concurrent CPUs). No counter wraps or unbounded profiling.
+    emit_byte(0x41); emit_byte(0x81); emit_byte(0x7B); emit_byte(offset);
+    emit_u32(4096);
+    const size_t saturated = emit_jcc_rel32_placeholder(3); // JAE
+    if (mt_active()) emit_byte(0xF0);
+    emit_byte(0x41); emit_byte(0xFF); emit_byte(0x43); emit_byte(offset); // inc [r11+off]
+    for (size_t p : {disabled, saturated})
+        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+}
+void FrostJIT::invalidate_tier2_profiles(uint64_t lo, uint64_t hi) {
+    for (auto it = tier2_profiles_by_pc_.begin(); it != tier2_profiles_by_pc_.end();) {
+        if (it->first >= lo && it->first < hi) {
+            it->second->enabled.store(0, std::memory_order_release);
+            it = tier2_profiles_by_pc_.erase(it);
+        } else ++it;
+    }
+}
+void FrostJIT::clear_tier2_profiles() {
+    for (auto& profile : tier2_branch_profiles_)
+        profile->enabled.store(0, std::memory_order_release);
+    tier2_profiles_by_pc_.clear();
+}
+
+static uint64_t tier2_probe_hash(uint64_t pc) {
+    pc ^= pc >> 33; pc *= 0xff51afd7ed558ccdull;
+    pc ^= pc >> 33; pc *= 0xc4ceb9fe1a85ec53ull;
+    pc ^= pc >> 33;
+    return pc;
+}
+
+// Only private sampling copies carry probes. Public Tier-1 and selected
+// region code has no dormant guard, counter, or scratch-register save.
+void FrostJIT::emit_tier2_work_probe(uint64_t pc, unsigned count) {
+    if (!tier2_sampling_compile_) return;
+    emit_push(RAX); emit_byte(0x9C);
+    emit_byte(0x81); emit_byte(0x83);
+    emit_u32(offsetof(CPU, jit_tier2_trial_work)); emit_u32(count);
+    emit_mov_imm_to_rax(tier2_probe_hash(pc));
+    emit_byte(0x48); emit_byte(0x01); emit_byte(0x83);
+    emit_u32(offsetof(CPU, jit_tier2_trial_hash));
+    emit_byte(0x9D); emit_pop(RAX);
+}
+
+static uint64_t measured_region_entry(CPU* cpu, Emulator* emu, void* trial) {
+    return emu->jit()->tier2_measure(*cpu, *emu, trial);
+}
+static uint64_t thread_cpu_ns() {
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    return uint64_t(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
+}
+
+uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
+    auto& trial = *static_cast<Tier2Trial*>(opaque);
+    auto* monitor = trial.monitor;
+    if (!monitor->enabled.load(std::memory_order_acquire)) return cpu.pc;
+    unsigned decision = trial.decision.load(std::memory_order_acquire);
+    if (decision) return (decision == 1 ? trial.candidate : trial.baseline.fn)(&cpu, &emu);
+    auto& slot = cpu.jit_tier2_feedback[monitor->slot];
+    if (slot.owner != monitor->identity) {
+        slot = CPU::Tier2FeedbackSlot{};
+        slot.owner = monitor->identity;
+    }
+    const bool candidate = slot.baseline_ns != 0;
+    auto fn = candidate ? (trial.candidate_sample ? trial.candidate_sample : trial.candidate)
+                        : (trial.baseline_sample ? trial.baseline_sample : trial.baseline.fn);
+    // Never replay guest memory or restore architectural state: each arm runs
+    // once on the live workload. Matched work/exit signatures make samples
+    // comparable; CLOCK_THREAD_CPUTIME_ID excludes scheduler descheduling.
+    struct Reset {
+        CPU& cpu;
+        ~Reset() {
+            cpu.jit_tier2_trial = nullptr;
+            cpu.jit_tier2_trial_fn = cpu.jit_tier2_trial_chain_fn = nullptr;
+        }
+    } reset{cpu};
+    cpu.jit_tier2_trial = &trial;
+    cpu.jit_tier2_trial_fn = fn;
+    cpu.jit_tier2_trial_chain_fn = candidate
+        ? (trial.candidate_chain_sample ? trial.candidate_chain_sample : trial.candidate_chain)
+        : (trial.baseline_chain_sample ? trial.baseline_chain_sample : trial.baseline.chain_entry);
+    cpu.jit_tier2_trial_remaining = slot.sample_quota;
+    cpu.jit_tier2_trial_work = cpu.jit_tier2_trial_hash = 0;
+    const uint64_t start = thread_cpu_ns();
+    for (unsigned dispatches = 0; dispatches < 2048; ++dispatches) {
+        cpu.jit_chain_budget = 256;
+        fn(&cpu, &emu);
+        if (!cpu.jit_tier2_trial_remaining || !cpu.running ||
+            !monitor->enabled.load(std::memory_order_acquire) || trial.decision.load(std::memory_order_acquire) || cpu.pc < trial.lo || cpu.pc >= trial.hi || cpu.pc == cpu.jit_stop_pc) break;
+        // A lease can expire at a Tier-1 constituent. Resume without compile
+        // work in the timed interval, using retained immutable function refs.
+        fn = nullptr;
+        if (cpu.pc == monitor->head) {
+            // The native edge lease can expire before reaching the head's
+            // trial gate. Account for that completed iteration here as well.
+            if (!--cpu.jit_tier2_trial_remaining) break;
+            fn = cpu.jit_tier2_trial_fn;
+        }
+        else for (const auto& block : trial.baseline_blocks)
+            if (block.first == cpu.pc) { fn = block.second; break; }
+        if (!fn) break;
+    }
+    const uint64_t end = thread_cpu_ns();
+    const uint64_t ns = end > start && start ? end - start : 0;
+    const uint32_t work = cpu.jit_tier2_trial_work;
+    const uint64_t hash = cpu.jit_tier2_trial_hash;
+    const uint64_t exit = cpu.pc;
+    cpu.jit_tier2_trial = nullptr;
+    bool finish = false, keep = false;
+    {
+        std::lock_guard<std::mutex> sample_lock(trial.mutex);
+        if (trial.decision.load(std::memory_order_relaxed)) return exit;
+        ++trial.attempts;
+        // A pair belongs to one vCPU. Reject short, different-path and
+        // different-work samples instead of comparing unrelated executions.
+        if (monitor->enabled.load(std::memory_order_acquire) && ns && (candidate || ns >= 10000) && !cpu.jit_tier2_trial_remaining && exit == monitor->head && work >= 128) {
+            if (!candidate) {
+                slot.baseline_ns = ns; slot.baseline_exit = exit;
+                slot.baseline_work = work; slot.baseline_hash = hash;
+            } else if (slot.baseline_exit == exit && slot.baseline_work == work && slot.baseline_hash == hash) {
+                trial.ratios.push_back(double(ns) / double(slot.baseline_ns));
+                tier2_measured_pairs.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (candidate) slot.baseline_ns = 0;
+        else if (ns && ns < 10000 && !cpu.jit_tier2_trial_remaining && slot.sample_quota < 4096)
+            slot.sample_quota *= 2; // amortize timer cost on very fast loops
+        if (trial.ratios.size() >= 8) {
+            auto ratios = trial.ratios;
+            std::sort(ratios.begin(), ratios.end());
+            const double median = (ratios[3] + ratios[4]) / 2;
+            const unsigned wins = std::count_if(ratios.begin(), ratios.end(), [](double r) { return r < 0.97; });
+            keep = median < 0.97 && wins >= 6;
+            finish = true;
+            if (tier2_trace_enabled())
+                fprintf(stderr, "[tier2] measured head=%llx pairs=%zu candidate/baseline=%.4f wins=%u keep=%d\n",
+                    (unsigned long long)monitor->head, ratios.size(), median, wins, keep);
+        } else if (trial.attempts >= 128) finish = true; // insufficient proof keeps Tier-1
+        if (finish) trial.decision.store(keep ? 1 : 2, std::memory_order_release);
+    }
+    if (finish) finish_tier2_trial(trial, keep);
+    return exit;
+}
+
+void FrostJIT::redirect_tier2_head_locked(uint64_t pc) {
+    auto target = blocks_.find(pc);
+    if (target == blocks_.end()) return;
+    refresh_mt_edges(pc);
+    invalidate_dispatch_cache();
+    if (mt_active()) return;
+    const auto* fn = reinterpret_cast<const uint8_t*>(chain_skip_enabled() && target->second.chain_entry
+        ? target->second.chain_entry : target->second.fn);
+    auto refs = back_refs_.find(pc);
+    if (refs == back_refs_.end()) return;
+    make_writable();
+    for (uint64_t source : refs->second) {
+        auto src = blocks_.find(source);
+        if (src == blocks_.end() || src->second.is_region) continue;
+        for (auto edge : {std::pair<uint64_t, size_t>{src->second.chain_target_pc, src->second.chain_patch_off},
+                           {src->second.taken_chain_target_pc, src->second.taken_chain_patch_off}}) {
+            if (edge.first != pc || !edge.second || edge.second + 5 > CODE_BUF_SIZE) continue;
+            code_buf_[edge.second] = 0xE9;
+            const int32_t rel = static_cast<int32_t>(fn - (code_buf_ + edge.second + 5));
+            memcpy(code_buf_ + edge.second + 1, &rel, 4);
+            if (edge.second == src->second.chain_patch_off) src->second.chained = true;
+            if (edge.second == src->second.taken_chain_patch_off) src->second.taken_chained = true;
+        }
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    make_executable();
+}
+
+// Private ST chains are never registered in the public back-reference graph.
+// Revoke them before the second CPU starts; MT copies use data cells only.
+void FrostJIT::revoke_tier2_samples_locked(Tier2Trial& trial) {
+    if (trial.sampling_revoked) return;
+    trial.sampling_revoked = true;
+    for (auto* edge : trial.sampling_edges) {
+        edge->live = false;
+        edge->target.store(0, std::memory_order_release);
+    }
+    for (auto& item : trial.sampling_blocks) {
+        auto& block = item.second;
+        for (size_t off : {block.chain_patch_off, block.taken_chain_patch_off}) {
+            if (!off || off + 5 > CODE_BUF_SIZE || mt_edge_slots_.count(off)) continue;
+            if (code_buf_[off] != 0xE9) continue;
+            make_writable();
+            std::memset(code_buf_ + off, 0x90, 5);
+            if (!chain_skip_enabled()) code_buf_[off] = 0xC3;
+            make_executable();
+        }
+    }
+}
+
+void FrostJIT::finish_tier2_trial(Tier2Trial& trial, bool keep) {
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    auto head = blocks_.find(trial.monitor->head);
+    if (head == blocks_.end() || head->second.tier2_monitor != trial.monitor ||
+        !trial.monitor->enabled.load(std::memory_order_acquire)) return;
+    revoke_tier2_samples_locked(trial);
+    if (keep) {
+        head->second = trial.candidate_entry;
+        for (auto* edge : trial.baseline_edges) { edge->live = false; edge->target.store(0, std::memory_order_release); }
+        tier2_measured_keeps.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        // Preserve the monitor on the restored baseline so in-flight trial
+        // wrappers are revoked by subsequent mapping invalidation too.
+        const auto dependencies = head->second.inlined_ranges_;
+        head->second = trial.baseline;
+        head->second.inlined_ranges_ = dependencies;
+        head->second.tier2_monitor = trial.monitor;
+        for (auto* edge : trial.candidate_edges) { edge->live = false; edge->target.store(0, std::memory_order_release); }
+        ++tier2_retrains_[trial.monitor->head];
+        tier2_measured_rejections.fetch_add(1, std::memory_order_relaxed);
+    }
+    redirect_tier2_head_locked(trial.monitor->head);
+}
+
+// Tail-called only after the generated frame has been dismantled. All guest
+// state is current, so cache revocation cannot strand live register mappings.
+static uint64_t tier2_feedback_exit(CPU* cpu, Emulator* emu, void* monitor) noexcept {
+    try { if (emu && emu->jit()) emu->jit()->tier2_region_feedback(*cpu, monitor); }
+    catch (...) {} // never unwind into the generated caller
+    return cpu->pc;
+}
+void FrostJIT::tier2_region_feedback(CPU& cpu, void* opaque) {
+    auto* monitor = static_cast<Tier2RegionMonitor*>(opaque);
+    if (cpu.jit_tier2_trial || (monitor && monitor->trial &&
+        monitor->trial->decision.load(std::memory_order_acquire) != 1)) return;
+    if (!monitor || !monitor->enabled.load(std::memory_order_acquire)) return;
+    auto& sample = cpu.jit_tier2_feedback[monitor->slot];
+    if (sample.owner != monitor->identity) {
+        sample.owner = monitor->identity;
+        sample.pressure = 0;
+    }
+    if (sample.credit) {
+        sample.credit = 0;
+        if (sample.pressure) --sample.pressure;
+        return;
+    }
+    if (++sample.pressure < 64) return;
+    sample.pressure = 0;
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    auto head = blocks_.find(monitor->head);
+    if (head == blocks_.end() || head->second.tier2_monitor != monitor ||
+        !monitor->enabled.load(std::memory_order_relaxed)) return;
+    // Select the region and its Tier-1 constituents precisely. Instruction
+    // bytes did not change, so neighboring regions need not be discarded.
+    std::vector<uint64_t> victims;
+    const auto& ranges = head->second.inlined_ranges_;
+    for (const auto& kv : blocks_) {
+        if (kv.first == monitor->head) { victims.push_back(kv.first); continue; }
+        if (kv.second.is_region) continue;
+        const uint64_t end = kv.first + kv.second.instr_count * 4ull;
+        for (const auto& range : ranges)
+            if (kv.first < range.first + range.second * 4ull && end > range.first) {
+                victims.push_back(kv.first); break;
+            }
+    }
+    for (const auto& range : ranges)
+        invalidate_tier2_profiles(range.first, range.first + range.second * 4ull);
+    monitor->enabled.store(0, std::memory_order_release);
+    ++tier2_retrains_[monitor->head];
+    tier2_phase_retirements.fetch_add(1, std::memory_order_relaxed);
+    // Version check, selection and revocation share one critical section:
+    // a concurrent replacement cannot be accidentally retired afterward.
+    retire_blocks_locked(victims);
+}
+
 Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     Tier2Trace trace;
     trace.head_pc = head_pc;
@@ -68,9 +335,8 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     // Same block-size cap as translate_block.
     constexpr int       MAX_BLOCK_REG_PRESSURE = 32;
 
-    // PCs already collected. The walk only ever follows fall-through edges
-    // (taken edges become side exits / back-edges), so a revisit is impossible
-    // in practice — the set is a defensive guard per the tier-2 spec.
+    // Follow fall-through and direct-jump edges. Only a return to the head
+    // closes a region loop; other cycles are bounded by the visited set.
     std::vector<uint64_t> visited;
 
     uint64_t cur_pc = head_pc;
@@ -97,6 +363,16 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
             break;
         }
 
+        // Do not build overlapping regions through an already optimized
+        // head. Entering its published region retains that optimization and
+        // avoids spending code-cache space on rotated copies of the loop.
+        const auto cached = blocks_.find(cur_pc);
+        if (cur_pc != head_pc && cached != blocks_.end() && cached->second.is_region) {
+            trace.stop_reason = "region_entry";
+            aborted = true;
+            break;
+        }
+
         Tier2Trace::Block tb;
         tb.pc = cur_pc;
         tb.ir.start_pc = cur_pc;
@@ -108,7 +384,8 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
         uint64_t ip = cur_pc;
         int instr_count = 0;
         bool block_ended = false;
-        bool trace_ends_after_block = false;  // set by RET / B
+        bool trace_ends_after_block = false;
+        uint64_t next_pc = cur_pc;
 
         while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
             if (trace.total_insts + static_cast<uint64_t>(instr_count) >= MAX_TRACE_INSTS) {
@@ -229,8 +506,46 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                                    d.cls == InstClass::TBNZ);
             if (is_cond_branch) {
                 uint64_t target = ip + static_cast<uint64_t>(d.imm);
+                uint64_t side_pc = target;
+                auto profile = tier2_profiles_by_pc_.find(ip);
+                uint64_t taken = 0, fallthrough = 0;
+                if (profile != tier2_profiles_by_pc_.end()) {
+                    taken = profile->second->taken.load(std::memory_order_relaxed);
+                    fallthrough = profile->second->fallthrough.load(std::memory_order_relaxed);
+                }
+                const uint64_t samples = taken + fallthrough;
+                const bool profiled = samples >= 16;
+                trace.fully_profiled &= profiled;
+                // Keep a head back-edge as the loop terminator. Otherwise
+                // linearize a strongly biased taken successor and make the
+                // original fall-through the cold exit by inverting the IR.
+                const bool follow_taken = profiled && taken * 4 >= samples * 3 &&
+                    target != head_pc && (d.cls != InstClass::Bcond || d.cond < 14) &&
+                    std::find(visited.begin(), visited.end(), target) == visited.end();
+                if (follow_taken) {
+                    IRInst& terminal = tb.ir.insts.back();
+                    if (terminal.op == IROp::BRCOND) {
+                        auto p = terminal.brcond_params(); p.cond ^= 1; p.target = ip + 4;
+                        terminal = IRInst::make_brcond(p, ip);
+                    } else if (terminal.op == IROp::BRCOND_ZERO) {
+                        auto p = terminal.brcond_zero_params(); p.cond ^= 1; p.target = ip + 4;
+                        terminal = IRInst::make_brcond_zero(terminal.src1, p, ip);
+                    } else {
+                        auto p = terminal.brcond_bit_params(); p.cond ^= 1; p.target = ip + 4;
+                        terminal = IRInst::make_brcond_bit(terminal.src1, p, ip);
+                    }
+                    tb.follows_taken = true;
+                    tb.hot_successor = target;
+                    next_pc = target;
+                    side_pc = ip + 4;
+                }
+                if (profiled) {
+                    const uint64_t continued = (follow_taken || target == head_pc)
+                        ? taken : fallthrough;
+                    trace.path_probability *= static_cast<double>(continued) / samples;
+                }
                 tb.side_exits.push_back(
-                    {target, static_cast<int>(tb.ir.insts.size() - 1)});
+                    {side_pc, static_cast<int>(tb.ir.insts.size() - 1)});
                 block_ended = true;
                 // A conditional branch whose TAKEN target is the head is the
                 // loop's back-edge: end the trace HERE (this block's taken edge
@@ -244,22 +559,29 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                 }
                 break;
             }
-            // Unconditional branch: no fall-through — the trace ends here. A
-            // target == head_pc is the loop back-edge (recorded, not followed).
+            // Direct jumps carry no side exit when their target is the next
+            // collected block. Follow them, including non-contiguous bodies;
+            // never follow a cycle that bypasses the region head.
             if (d.cls == InstClass::B) {
                 uint64_t target = ip + static_cast<uint64_t>(d.imm);
                 tb.side_exits.push_back(
                     {target, static_cast<int>(tb.ir.insts.size() - 1)});
-                trace.stop_reason = (target == head_pc) ? "b_backedge" : "b_exit";
-                trace_ends_after_block = true;
+                next_pc = target;
+                if (target == head_pc) {
+                    trace.stop_reason = "b_backedge";
+                    trace_ends_after_block = true;
+                } else if (std::find(visited.begin(), visited.end(), target) != visited.end()) {
+                    trace.stop_reason = "revisit";
+                    trace_ends_after_block = true;
+                }
                 block_ended = true;
                 break;
             }
-            // Any other block-ender (translate_to_ir returned true). All the
-            // terminator classes above are handled explicitly, so this is a
-            // defensive catch — keep the generic contract.
+            // A disabled in-block call can lower to a block-ending jump.
+            // Do not mistake its callee target for a straight-line cap.
             if (ends) {
-                block_ended = true;
+                trace.stop_reason = "unsupported_terminator";
+                aborted = true;
                 break;
             }
             ip += 4;
@@ -267,6 +589,15 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 
         if (aborted) break;
         if (instr_count == 0) break;  // nothing decoded — discard the block
+        if (tb.side_exits.empty() && !trace_ends_after_block) {
+            // The cap stopped before translating ip. Preserve the exact
+            // continuation without pretending a guest branch was executed.
+            next_pc = ip;
+            emit_brcond_fallthru(tb.ir, next_pc, ip);
+            tb.side_exits.push_back({next_pc, static_cast<int>(tb.ir.insts.size() - 1)});
+        } else if (next_pc == cur_pc) {
+            next_pc = ip + 4;
+        }
         // Mirror translate_block: run the IR optimizer on each block BEFORE
         // concatenation. Without it the region IR keeps every
         // STORE_REG→LOAD_REG round-trip that optimize_ir's Pass 1 (store-load
@@ -306,8 +637,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
             trace_ended = true;
             break;
         }
-        // The block ended at `ip`; its fall-through continues the trace.
-        cur_pc = ip + 4;
+        cur_pc = next_pc;
     }
 
     // ── Finalize ────────────────────────────────────────────────────
@@ -375,7 +705,8 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 // alongside translate_block's output). Returns nullptr if the trace shape
 // isn't region-qualified.
 uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
-                                          uint64_t (**chain_out)(CPU*, Emulator*)))(CPU*, Emulator*) {
+                                          uint64_t (**chain_out)(CPU*, Emulator*),
+                                          Tier2RegionMonitor* monitor_override))(CPU*, Emulator*) {
     (void)emu;
     if (chain_out) *chain_out = nullptr;
     // Call-aware regions (Track 1): a trace may now contain BL_CALL/BLR_CALL
@@ -419,35 +750,27 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
     }
 
-    // ── M1 shape validation ──────────────────────────────────────────
-    // The region is a linear fall-through chain; every block must be
-    // terminated by a conditional branch (BRCOND/BRCOND_ZERO/BRCOND_BIT)
-    // with exactly ONE side exit (the taken edge). The LAST block's taken
-    // edge may be the loop back-edge to the head (Lback) — anything else
-    // becomes an ordinary cold exit, so a straight-line (non-looping) chain
-    // of cond-branch blocks is region-qualified too. A NON-last block may
-    // never target the head (a mid-trace back-edge can't be represented by
-    // the single-back-edge layout).
+    // A region is a linearized path with conditional side exits. Direct
+    // jumps may be internal only when their target is the next block.
     for (size_t i = 0; i < nblk; i++) {
         const auto& b = blocks[i];
-        if (b.ir.insts.empty()) return nullptr;
-        if (b.side_exits.size() != 1) return nullptr;
-        int term_idx = static_cast<int>(b.ir.insts.size()) - 1;
+        if (b.ir.insts.empty() || b.side_exits.size() != 1) return nullptr;
+        const int term_idx = static_cast<int>(b.ir.insts.size()) - 1;
         if (b.side_exits[0].second != term_idx) return nullptr;
-        IROp term_op = b.ir.insts[term_idx].op;
-        if (term_op != IROp::BRCOND && term_op != IROp::BRCOND_ZERO &&
-            term_op != IROp::BRCOND_BIT) {
-            // BRCOND_FALLTHRU (an unconditional direct `b target`) is legal
-            // ONLY as the LAST block's term: the walker ends the trace at
-            // every unconditional branch, so a mid-trace one is impossible —
-            // reject defensively. This unlocks the standard GCC loop bottom
-            // `... ; b.eq exit ; body ; b .loop` (cond exit mid-trace +
-            // unconditional back-edge), previously rejected as "term class B".
-            if (!(term_op == IROp::BRCOND_FALLTHRU && i == nblk - 1)) return nullptr;
+        const IRInst& term = b.ir.insts[term_idx];
+        if (term.op == IROp::BRCOND_FALLTHRU) {
+            if (term.fallthru_params().target != b.side_exits[0].first) return nullptr;
+            if (i + 1 < nblk && b.side_exits[0].first != blocks[i + 1].pc)
+                return nullptr;
+        } else if (term.op != IROp::BRCOND && term.op != IROp::BRCOND_ZERO &&
+                   term.op != IROp::BRCOND_BIT) {
+            return nullptr;
+        } else if (i + 1 < nblk &&
+                   (b.follows_taken ? b.hot_successor : b.pc + b.ir.count * 4) !=
+                       blocks[i + 1].pc) {
+            return nullptr;
         }
-        if (i < nblk - 1 && b.side_exits[0].first == trace.head_pc) {
-            return nullptr;  // mid-trace back-edge
-        }
+        if (i + 1 < nblk && b.side_exits[0].first == trace.head_pc) return nullptr;
     }
     // The last block's taken edge → the loop back-edge iff it targets the head.
     bool last_is_backedge = (blocks[nblk - 1].side_exits[0].first == trace.head_pc);
@@ -463,6 +786,16 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // behavior for bisection.
     static const bool t2_linear_ = (getenv("BIFROST_T2_LINEAR") != nullptr);
     if (!last_is_backedge && !t2_linear_) return nullptr;
+    tier2_current_monitor_ = monitor_override;
+    if (!monitor_override && tier2_retrains_[trace.head_pc] < 2) {
+        auto monitor = std::make_unique<Tier2RegionMonitor>();
+        monitor->head = trace.head_pc;
+        static std::atomic<uint64_t> next_identity{1};
+        monitor->identity = next_identity.fetch_add(1, std::memory_order_relaxed);
+        monitor->slot = monitor->identity % CPU::TIER2_FEEDBACK_SLOTS;
+        tier2_current_monitor_ = monitor.get();
+        tier2_region_monitors_.push_back(std::move(monitor));
+    }
     // MT regions fuse a whole loop iteration, then use a revocable edge
     // into the head. This bounds execution and avoids retaining registers
     // or LICM values across an invalidation/scheduling boundary.
@@ -907,8 +1240,11 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     vec_cache_reset();  // regions never use the vec/fp cache (memory paths)
     regalloc_stats_reset();
     size_t block_start = code_buf_used_;
-    int clear_limit = region_max_vreg + 1;
-    if (clear_limit > 4096) clear_limit = 4096;
+    // A region can be smaller than the preceding Tier-1 block. Clearing
+    // only its own vregs leaves stale homes above region_max_vreg, then
+    // publishing that smaller maximum makes the next block skip them too.
+    // Region compilation is rare; reset the entire table, including aborts.
+    constexpr int clear_limit = 4096;
     for (int i = 0; i < clear_limit; i++) {
         vreg_home_[i] = -1;
         vreg_dirty_[i] = false;
@@ -1201,6 +1537,56 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             }
         }
     }
+    // One CPU-local flag-neutral store per completed hot iteration. No
+    // shared atomic increment, register clobber, or per-entry flag save.
+    auto emit_completion_credit = [&] {
+        if (!tier2_current_monitor_) return;
+        const size_t offset = offsetof(CPU, jit_tier2_feedback) +
+            tier2_current_monitor_->slot * sizeof(CPU::Tier2FeedbackSlot) +
+            offsetof(CPU::Tier2FeedbackSlot, credit);
+        emit_byte(0xC7); emit_byte(0x83); // mov dword [rbx+disp32],1
+        emit_u32(static_cast<uint32_t>(offset)); emit_u32(1);
+    };
+    auto emit_trial_backedge = [&] {
+        if (!tier2_sampling_compile_) return;
+        // Preserve the hot path's host flags and codegen flag state. The
+        // quota exit flushes loop-carried pins before returning to the timer.
+        const bool saved_host = flags_in_host_, saved_sub = flags_from_sub_;
+        const uint16_t saved_dirty = dirty_host_regs_;
+        int saved_regs[16]; memcpy(saved_regs, reg_vreg_, sizeof(saved_regs));
+        std::vector<int> saved_homes(vreg_home_, vreg_home_ + 4096);
+        std::vector<bool> saved_vdirty(vreg_dirty_, vreg_dirty_ + 4096);
+        emit_push(RCX);
+        emit_load(RCX, CPU_REG, offsetof(CPU, jit_tier2_trial));
+        emit_byte(0xE3); emit_byte(15); // inactive: skip flag save/quota check
+        emit_byte(0x9C);
+        emit_byte(0x83); emit_byte(0xAB);
+        emit_u32(offsetof(CPU, jit_tier2_trial_remaining)); emit_byte(1);
+        const size_t quota = emit_jcc_rel32_placeholder(4);
+        emit_byte(0x9D);
+        emit_pop(RCX);
+        const size_t hot = emit_jmp_rel32_placeholder();
+        const size_t cold = code_buf_used_;
+        emit_byte(0x9D); emit_pop(RCX);
+        materialize_flags_to_pstate();
+        flush_all_vregs_keep();
+        for (int a = 0; a <= 30; ++a)
+            if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
+        emit_mov_imm_to_rax(trace.head_pc);
+        emit_store(CPU_REG, PC_OFF, RAX);
+        emit_mov_reg(RDI, CPU_REG); emit_load(RSI, RBP, emu_slot_off());
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX); emit_ret();
+        patch_jcc_rel32(quota, static_cast<int32_t>(cold - (quota + 6)));
+        patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
+        flags_in_host_ = saved_host; flags_from_sub_ = saved_sub;
+        dirty_host_regs_ = saved_dirty;
+        memcpy(reg_vreg_, saved_regs, sizeof(saved_regs));
+        for (unsigned v = 0; v < 4096; ++v) {
+            vreg_home_[v] = saved_homes[v]; vreg_dirty_[v] = saved_vdirty[v];
+        }
+    };
     size_t body_start = code_buf_used_;
 
     // ── Compile the region body ───────────────────────────────────────
@@ -1228,6 +1614,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         while (blk < nblk && i > rblocks[blk].term) blk++;
         const IRInst& inst = region_ir[i];
         cur_op_index_ = i;
+        if (i == rblocks[blk].start) emit_tier2_work_probe(rblocks[blk].pc, rblocks[blk].inst_count);
 
         if (i == rblocks[blk].term) {
             // ── Terminating conditional branch (manual) ─────────────
@@ -1293,16 +1680,11 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     break;
                 }
                 case IROp::BRCOND_FALLTHRU: {
-                    // Unconditional direct branch — only the LAST block's term
-                    // (validation guarantees it). No JCC: the back-edge case is
-                    // the plain Lback jmp emitted below; the non-back-edge case
-                    // falls through into the L_exit, whose exit_pc becomes the
-                    // branch target. Record the post-body snapshot so the Lback
-                    // still honors region_flags_loop_carried.
+                    // An internal direct edge is already laid out inline.
+                    // Keep register/flag state live across this boundary.
                     if (blk + 1 != nblk) {
-                        code_buf_used_ = block_start;
-                        make_executable();
-                        return nullptr;
+                        blk++;
+                        continue;
                     }
                     last_term_uncond = true;
                     if (last_is_backedge) {
@@ -1314,6 +1696,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                         if (region_flags_loop_carried) {
                             materialize_flags_to_pstate();
                         }
+                        emit_completion_credit();
+                        emit_trial_backedge();
                         int32_t rel = static_cast<int32_t>(
                             body_start - (code_buf_used_ + 5));
                         emit_byte(0xE9);
@@ -1428,57 +1812,47 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         size_t p = emit_jmp_rel32_placeholder();
         shared_exit_patch_offs.push_back(p);
     };
-    // ── Chain-out exits (2026-08-20): skip the dispatcher on the way out ──
-    // A cold exit whose target block is ALREADY TRANSLATED can tear down the
-    // region frame completely (leaving the dispatcher's return address on
-    // top of the stack) and bare-jmp the target's fn: the target pushes its
-    // own frame ON TOP of that return address and its eventual `ret` pops it
-    // — exactly how non-chain-skip chain edges nest. Saves one dispatcher
-    // round-trip per taken side-exit. Entry contract matches a chain edge:
-    // RDI=cpu, RSI=emu, RBX=cpu, body-entry RSP%%16==8, flags already
-    // materialized by the variable part. Fallbacks to the plain ret-exit
-    // when the target isn't translated (incl. interp_only), under
-    // BIFROST_JIT_VERIFY (verify must see every block boundary), or with
-    // BIFROST_NO_EXITCHAIN=1. Staleness note: if the target later becomes a
-    // tier-2 region itself, this jmp keeps calling its STANDALONE fn —
-    // correct, just not maximally fast (same class as pending_call_sites_).
+    // Region exits use revocable data cells in both modes. Untracked target
+    // constants can execute stale guest instructions after invalidation.
     static const bool no_exitchain_ = (getenv("BIFROST_NO_EXITCHAIN") != nullptr);
-    const bool exitchain_ok =
-        !no_exitchain_ && (getenv("BIFROST_JIT_VERIFY") == nullptr);
-    std::vector<size_t> co_patch_offs;
+    const bool exitchain_ok = !no_exitchain_ && !dbg().jit_verify;
+    std::vector<size_t> cell_exit_patches;
     auto emit_chainout_exit = [&](uint64_t pc) -> bool {
-        if (mt_active()) {
+        if (pc == trace.head_pc) emit_completion_credit();
+        emit_mov_imm_to_rax(pc);
+        emit_store(CPU_REG, PC_OFF, RAX);
+        if (!mt_active()) {
+            if (!exitchain_ok || dbg().no_chain || !lookup_only_locked(pc)) return false;
+            MtEdge* edge = create_chain_edge(pc, true, code_buf_used_);
             emit_mov_imm_to_rax(pc);
             emit_store(CPU_REG, PC_OFF, RAX);
-            emit_mov_reg(RDI, CPU_REG);
-            emit_load(RSI, RBP, emu_slot_off());
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
-            emit_pop(R15); emit_pop(R14); emit_pop(R13);
-            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-            if (exitchain_ok) emit_mt_chain_slot(pc, true);
-            emit_ret();
+            emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&edge->target));
+            cell_exit_patches.push_back(emit_jmp_rel32_placeholder());
             return true;
         }
-        if (!exitchain_ok) return false;
-        uint64_t (*tfn)(CPU*, Emulator*) = lookup_only_locked(pc);
-        if (!tfn) return false;
-        emit_mov_imm_to_rax(pc);              // rax = exit pc
-        emit_store(CPU_REG, PC_OFF, RAX);     // cpu.pc = exit pc
-        emit_mov_imm64(R11, reinterpret_cast<uint64_t>(tfn));
-        size_t p = emit_jmp_rel32_placeholder();
-        co_patch_offs.push_back(p);
+        emit_mov_imm_to_rax(pc);
+        emit_store(CPU_REG, PC_OFF, RAX);
+        emit_mov_reg(RDI, CPU_REG);
+        emit_load(RSI, RBP, emu_slot_off());
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        if (exitchain_ok) emit_mt_chain_slot(pc, true);
+        emit_ret();
         return true;
     };
     if (!skip_exit_sections) {
-    uint64_t exit_pc = rblocks[nblk - 1].pc + rblocks[nblk - 1].inst_count * 4;
-    if (last_term_uncond) exit_pc = rblocks[nblk - 1].side_pc;  // the B target
-    clobber_flags();
-    flush_all_vregs();
-    emit_flush_all_pins();
-    if (!emit_chainout_exit(exit_pc)) {
-        emit_mov_imm_to_rax(exit_pc);
-        emit_shared_exit_jmp();
-    }
+        uint64_t exit_pc = rblocks[nblk - 1].pc + rblocks[nblk - 1].inst_count * 4;
+        if (blocks.back().follows_taken) exit_pc = blocks.back().hot_successor;
+        if (last_term_uncond) exit_pc = rblocks[nblk - 1].side_pc;  // the B target
+        clobber_flags();
+        flush_all_vregs();
+        emit_flush_all_pins();
+        if (exit_pc != trace.head_pc) emit_completion_credit();
+        if (!emit_chainout_exit(exit_pc)) {
+            emit_mov_imm_to_rax(exit_pc);
+            emit_shared_exit_jmp();
+        }
     }
 
     // ── Deferred side-exit epilogues (one per non-last block) ───────
@@ -1504,25 +1878,47 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         materialize_flags_to_pstate();
         flush_all_vregs();
         emit_flush_all_pins();
-        if (!emit_chainout_exit(c.side_pc)) {
+        if (tier2_current_monitor_ && c.side_pc != trace.head_pc) {
+            emit_mov_imm_to_rax(c.side_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
+            emit_mov_reg(RDI, CPU_REG);
+            emit_load(RSI, RBP, emu_slot_off());
+            emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(tier2_current_monitor_));
+            emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&tier2_feedback_exit));
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+            emit_pop(R15); emit_pop(R14); emit_pop(R13);
+            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+            emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3); // tail jmp r11
+        } else if (!emit_chainout_exit(c.side_pc)) {
             emit_mov_imm_to_rax(c.side_pc);
             emit_shared_exit_jmp();
         }
     }
 
-    // ── Chain-out tail: rdi/rsi/teardown, then jmp the target fn ─────
-    // R11 holds the target fn (set inline per exit); pop x6 restores the
-    // callee-saved regs WITHOUT touching R11, leaving the dispatcher's
-    // return address on top of the stack for the target's own `ret`.
-    size_t co_tail_off = 0;
-    if (!co_patch_offs.empty()) {
-        co_tail_off = code_buf_used_;
-        emit_mov_reg(RDI, CPU_REG);           // mov rdi, rbx
-        emit_load(RSI, RBP, emu_slot_off());  // rsi = emu
-        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);  // mov rsp, rbp
+    if (!cell_exit_patches.empty()) {
+        const size_t tail = code_buf_used_;
+        emit_mov_reg(RDI, CPU_REG);
+        emit_load(RSI, RBP, emu_slot_off());
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-        emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);  // jmp r11
+        // Full-frame targets, including chain-skip. Honor stop sentinels
+        // and the dispatch lease before dereferencing the revocable cell.
+        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);
+        emit_u32(offsetof(CPU, jit_stop_pc));
+        const size_t stop = emit_jcc_rel32_placeholder(4);
+        emit_byte(0x83); emit_byte(0xAF);
+        emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+        const size_t budget = emit_jcc_rel32_placeholder(6);
+        emit_load(R11, R11, 0);
+        emit_byte(0x4D); emit_byte(0x85); emit_byte(0xDB);
+        const size_t empty = emit_jcc_rel32_placeholder(4);
+        emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
+        for (size_t p : {stop, budget, empty})
+            patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+        emit_ret();
+        for (size_t p : cell_exit_patches)
+            patch_jmp_rel32(p, static_cast<int32_t>(tail - (p + 5)));
     }
 
     // ── Emit the shared exit tail + patch every exit's jmp ──────────
@@ -1540,8 +1936,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         for (size_t p : shared_exit_patch_offs)
             patch_jmp_rel32(p, static_cast<int32_t>(tail_off - (p + 5)));
     }
-    for (size_t p : co_patch_offs)
-        patch_jmp_rel32(p, static_cast<int32_t>(co_tail_off - (p + 5)));
 
     // ── Loop back-edge (Lback): the last block's taken edge ─────────
     // Only emitted when the last block's taken target is the head (a hot
@@ -1577,36 +1971,21 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // body (compiled with the pin mappings pre-established) reuses them.
     }
     if (!skip_exit_sections && last_is_backedge) {
+        emit_completion_credit();
+        emit_trial_backedge();
         int32_t rel = static_cast<int32_t>(body_start - (code_buf_used_ + 5));
         emit_byte(0xE9);
         emit_u32(static_cast<uint32_t>(rel));  // jmp body_start
     }
 
-    // ── Patch the taken JCCs to their targets ────────────────────────
-    // Each block k's taken JCC was emitted as a forward placeholder
-    // (0F 8x rel32, 6 bytes) at cold[k].jcc_patch (k < nblk-1), the last
-    // block's last_jcc (back-edge → Lback), or the final cold entry's
-    // jcc_patch (linear region). The runtime taken path jumps straight to
-    // its deferred exit, skipping all the not-taken inline body between.
-    for (size_t k = 0; k < nblk; k++) {
-        // An unconditional-branch last block has no JCC to patch (the Lback
-        // is the plain jmp below / the linear exit falls through into the
-        // L_exit whose exit_pc was already set to the branch target).
-        if (k + 1 == nblk && last_term_uncond) continue;
-        size_t target_off;
-        size_t jcc;
-        if (k + 1 < nblk) {
-            target_off = cold_off[k];
-            jcc = cold[k].jcc_patch;
-        } else if (last_is_backedge) {
-            target_off = lback_off;
-            jcc = last_jcc;
-        } else {
-            target_off = cold_off.back();  // the last block's own cold exit
-            jcc = cold.back().jcc_patch;
-        }
-        int64_t rel = static_cast<int64_t>(code_buf_ + target_off - (code_buf_ + jcc + 6));
-        patch_jcc_rel32(jcc, static_cast<int32_t>(rel));
+    // Patch actual conditional exits, not block indices: internal direct
+    // edges have neither a JCC nor a deferred cold snapshot.
+    for (size_t k = 0; k < cold.size(); k++) {
+        const size_t jcc = cold[k].jcc_patch;
+        patch_jcc_rel32(jcc, static_cast<int32_t>(cold_off[k] - (jcc + 6)));
+    }
+    if (last_is_backedge && !last_term_uncond) {
+        patch_jcc_rel32(last_jcc, static_cast<int32_t>(lback_off - (last_jcc + 6)));
     }
 
     // ── Publish the region ───────────────────────────────────────────
@@ -1618,7 +1997,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     if (chain_out && chain_skip_enabled())
         *chain_out = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(
             code_buf_ + region_chain_entry_off);
-    tier2_regions++;
     // TEMP diagnostic (BIFROST_T2_REGIONDUMP): hexdump the published region
     // for offline objdump — same gate name the P2 review session used.
     if (getenv("BIFROST_T2_REGIONDUMP")) {
@@ -1698,21 +2076,86 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         if (old_entry.tier2_hot_logged) {
             return;
         }
-        // Mark hot-logged BEFORE attempting collection/compilation: the same
-        // block always produces the same trace shape, so a failed attempt
-        // would fail identically on every re-fire. One shot per block.
+        Tier2Trace trace = collect_tier2_trace(emu, pc);
+        // Samples lag the entry counter by one iteration. If a constituent
+        // is still cold, retry at most three hotness windows before declining.
+        if (!trace.fully_profiled && ++it->second.tier2_attempts < 3) {
+            auto mt = mt_counter_sites_.find(site);
+            if (mt != mt_counter_sites_.end())
+                mt->second->hits.store(0, std::memory_order_relaxed);
+            else if (site && old_entry.fn) {
+                const uint32_t zero = 0;
+                std::memcpy(reinterpret_cast<uint8_t*>(old_entry.fn) - 8, &zero, sizeof(zero));
+            }
+            tier2_profile_retries.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         it->second.tier2_hot_logged = true;
-        tier2_counter_disable(it->second.tier2_counter_off,
-                              it->second.tier2_counter_len);
+        tier2_counter_disable(it->second.tier2_counter_off, it->second.tier2_counter_len);
         tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
-
+        // Require a likely complete path and actual boundary savings. MT
+        // self-loops cannot retain pins/LICM across iterations and fuse no edges.
+        if (!trace.fully_profiled || trace.path_probability < 0.75 ||
+            (mt_active() && trace.blocks.size() < 2)) {
+            tier2_profit_rejections.fetch_add(1, std::memory_order_relaxed);
+            if (tier2_trace_enabled())
+                std::fprintf(stderr, "[tier2] decline pc=0x%llx profiled=%d survival=%.3f blocks=%zu\n",
+                    (unsigned long long)pc, trace.fully_profiled, trace.path_probability, trace.blocks.size());
+            return;
+        }
+        // Bound total speculative compiler work and permanent code growth.
+        // These are measured budgets, not a claim of predicted speedup.
+        if (tier2_retrains_[pc] >= 2 ||
+            tier2_code_bytes.load(std::memory_order_relaxed) >= 32ull * 1024 * 1024 ||
+            tier2_compile_ns.load(std::memory_order_relaxed) >= 2000000000ull) {
+            tier2_profit_rejections.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        // Sampling compares exact existing Tier-1 block boundaries.
+        if (trace.blocks.size() < 2) {
+            tier2_profit_rejections.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        std::vector<std::pair<uint64_t, uint64_t (*)(CPU*, Emulator*)>> baseline_graph;
+        uint64_t trial_lo = UINT64_MAX, trial_hi = 0;
+        for (const auto& b : trace.blocks) {
+            auto baseline = blocks_.find(b.pc);
+            if (baseline == blocks_.end() || !baseline->second.fn || baseline->second.is_region ||
+                baseline->second.has_call || baseline->second.has_svc || baseline->second.has_selfloop_slot ||
+                baseline->second.instr_count != b.ir.count) {
+                tier2_profit_rejections.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            baseline_graph.push_back({b.pc, baseline->second.fn});
+            trial_lo = std::min(trial_lo, b.pc);
+            trial_hi = std::max<uint64_t>(trial_hi, b.pc + b.ir.count * 4ull);
+        }
+        const auto compile_start = std::chrono::steady_clock::now();
+        const size_t region_start = code_buf_used_;
+        tier2_current_monitor_ = nullptr;
         const size_t old_edge_count = mt_edges_.size();
         const auto old_source_edges = mt_source_refs_[pc];
-        Tier2Trace trace = collect_tier2_trace(emu, pc);  // read-only, we hold the lock
         uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
         uint64_t (*rfn)(CPU*, Emulator*) =
             trace.ok ? compile_tier2_region(emu, trace, &chain_fn) : nullptr;
+        tier2_compile_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - compile_start).count(), std::memory_order_relaxed);
+        tier2_code_bytes.fetch_add(code_buf_used_ - region_start, std::memory_order_relaxed);
+        const size_t region_bytes = code_buf_used_ - region_start;
+        if (!rfn || !ensure_code_space(256)) {
+            if (tier2_current_monitor_)
+                tier2_current_monitor_->enabled.store(0, std::memory_order_release);
+            // Unpublished region edges must not supersede the baseline's
+            // source metadata. Their data cells stay alive but are revoked.
+            for (size_t k = old_edge_count; k < mt_edges_.size(); ++k) {
+                mt_edges_[k]->live = false;
+                mt_edges_[k]->target.store(0, std::memory_order_release);
+            }
+            mt_source_refs_[pc] = old_source_edges;
+            return;
+        }
         if (rfn) {
+            tier2_regions.fetch_add(1, std::memory_order_relaxed);
             if (tier2_trace_enabled()) {
                 fprintf(stderr,
                         "[tier2] in-code region fired pc=0x%llx blocks=%zu insts=%llu\n",
@@ -1721,14 +2164,15 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             }
             BlockEntry region_entry;
             region_entry.fn = rfn;
+            region_entry.emitted_bytes = region_bytes;
             // Chain-skip: publish the post-frame-setup entry so chain edges
             // (bare jmps with the ROOT's rbp/rsp) skip the frame allocation.
             if (chain_skip_enabled() && chain_fn)
                 region_entry.chain_entry = chain_fn;
             region_entry.instr_count = static_cast<int>(trace.total_insts);
-            region_entry.exec_count = old_entry.exec_count;
             region_entry.tier2_hot_logged = true;
             region_entry.is_region = true;
+            region_entry.tier2_monitor = tier2_current_monitor_;
             region_entry.ends_with_branch = true;
             region_entry.chained = true;        // region has no chain slot
             region_entry.taken_chained = true;
@@ -1736,156 +2180,160 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             region_entry.verified_once = true;  // M1: no region verify
             for (const auto& block : trace.blocks)
                 region_entry.inlined_ranges_.push_back({block.pc, block.ir.count});
-            it->second = region_entry;
-            if (mt_active()) {
-                for (MtEdge* edge : old_source_edges) {
-                    edge->live = false;
-                    edge->target.store(0, std::memory_order_release);
+            for (const auto& block : trace.blocks) {
+                auto baseline = blocks_.find(block.pc);
+                if (baseline != blocks_.end()) {
+                    tier2_counter_disable(baseline->second.tier2_counter_off, baseline->second.tier2_counter_len);
+                    baseline->second.tier2_hot_logged = true;
                 }
-                mt_regions_published_.fetch_add(1, std::memory_order_relaxed);
-                invalidate_dispatch_cache(); // revoke every CPU's cached head
-                refresh_mt_edges(pc);
-                for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)
-                    refresh_mt_edges(mt_edges_[k]->target_pc);
-                return; // no instruction rewrites in MT mode
+                const uint64_t end = block.pc + block.ir.count * 4;
+                for (const auto& profile : tier2_profiles_by_pc_)
+                    if (profile.first >= block.pc && profile.first < end)
+                        profile.second->enabled.store(0, std::memory_order_release);
             }
-
-
-            // ── Cache invalidation for the head ────────────────────────
-            // This fire ran INSIDE the old head fn (its in-code prologue
-            // counter), which the dispatcher reached through the thread-local
-            // last-block / inline caches — so those caches still pin the OLD
-            // fn for pc. A self-loop head NEVER returns to the dispatcher
-            // until the loop exits, so the next entry of pc must not hit the
-            // stale cache or the region stays dead (it compiled but never
-            // ran). Invalidate the current thread's entries for pc — we hold
-            // the exclusive blocks_mutex_ and are on the firing thread, so
-            // touching the TLS is safe; the next dispatch falls to the slow
-            // path and finds blocks_[pc] = the region.
-            if (tls_last_block_.pc == pc) tls_last_block_.pc = ~0ULL;
-            inline_cache_erase(pc);
-
-            // ── Re-patch the loop back-edge into the region ──────────
-            // Every trace block whose side exit targets the head is a
-            // back-edge block; its taken chain slot currently `jmp`s to the
-            // OLD head fn (or is still unpatched `ret`). Overwrite it with
-            // `jmp region-fn` unconditionally (patch_chain refuses already-
-            // patched slots — its 0xC3/0x90 guard). The taken-path epilogue
-            // set RDI=cpu/RSI=emu right before the slot, and the region
-            // prologue expects exactly that, so the hijack is transparent.
-            // A block whose taken slot is still unpatched is left alone —
-            // try_chain_block later chains it to the region (blocks_[pc].fn
-            // is the region now), and until then the old head fn handles one
-            // extra iteration then lands in the region via ITS back-edge.
-            // Chain-skip: slots are lease-style bare jmps carrying the ROOT's
-            // frame, so they must enter at the region's chain_entry (past the
-            // frame allocation), not fn.
-            const uint8_t* enter_target = reinterpret_cast<const uint8_t*>(
-                (chain_skip_enabled() && chain_fn) ? chain_fn : rfn);
-            for (const auto& tb : trace.blocks) {
-                if (tb.side_exits.empty() || tb.side_exits[0].first != pc) continue;
-                auto bit = blocks_.find(tb.pc);
-                if (bit == blocks_.end()) continue;
-                size_t off;
-                if (bit->second.has_taken_chain_slot) {
-                    // Cond-branch back-edge: the TAKEN path chain slot (the
-                    // taken-path epilogue set RDI=cpu/RSI=emu before it).
-                    off = bit->second.taken_chain_patch_off;
-                } else if (tb.ir.insts.back().op == IROp::BRCOND_FALLTHRU) {
-                    // Unconditional `b head` back-edge: there is no taken
-                    // slot — the back-edge IS the block's MAIN chain slot
-                    // (BRCOND_FALLTHRU records chain_target_pc_ and uses the
-                    // epilogue chain slot). Repatch it to the region too, or
-                    // the loop keeps jumping to the old head fn forever and
-                    // the region never runs.
-                    off = bit->second.chain_patch_off;
-                } else {
-                    // No usable chain slot — try_chain_block later chains the
-                    // block to the region (blocks_[pc].fn is the region now).
-                    continue;
+            const auto wrapper_start_clock = std::chrono::steady_clock::now();
+            auto trial = std::make_unique<Tier2Trial>();
+            trial->monitor = tier2_current_monitor_;
+            trial->baseline = old_entry;
+            trial->candidate_entry = region_entry;
+            trial->baseline.tier2_hot_logged = true;
+            trial->candidate = rfn; trial->candidate_chain = chain_fn;
+            trial->lo = trial_lo; trial->hi = trial_hi;
+            trial->baseline_blocks = std::move(baseline_graph);
+            trial->baseline_edges = old_source_edges;
+            for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)
+                trial->candidate_edges.push_back(mt_edges_[k].get());
+            const size_t sampling_start = code_buf_used_;
+            const size_t sampling_edge_start = mt_edges_.size();
+            struct SamplingCompileGuard {
+                bool& flag;
+                explicit SamplingCompileGuard(bool& f) : flag(f) { flag = true; }
+                ~SamplingCompileGuard() { flag = false; }
+            };
+            bool samples_ok = true;
+            {
+                SamplingCompileGuard sampling(tier2_sampling_compile_);
+                trial->baseline_blocks.clear();
+                for (const auto& block : trace.blocks) {
+                    BlockEntry copy;
+                    if (!translate_block(emu, block.pc, &copy) || copy.instr_count != block.ir.count ||
+                        copy.has_call || copy.has_svc || copy.has_selfloop_slot) {
+                        samples_ok = false;
+                        break;
+                    }
+                    trial->baseline_blocks.push_back({block.pc, copy.fn});
+                    trial->sampling_blocks.push_back({block.pc, std::move(copy)});
                 }
-                if (off == 0 || off + 5 > CODE_BUF_SIZE) continue;
-                make_writable();  // no-op in non-W^X shared-JIT mode (we bailed above)
-                int32_t rel = static_cast<int32_t>(enter_target -
-                                                   (code_buf_ + off + 5));
-                code_buf_[off] = 0xE9;
-                memcpy(code_buf_ + off + 1, &rel, 4);
-                std::atomic_thread_fence(std::memory_order_release);
-                make_executable();
-                if (tier2_trace_enabled()) {
-                    fprintf(stderr, "[tier2]   back-edge %llx → region (chain slot @0x%zx)\n",
-                            static_cast<unsigned long long>(tb.pc), off);
+                if (samples_ok) {
+                    trial->baseline_sample = trial->sampling_blocks.front().second.fn;
+                    trial->baseline_chain_sample = trial->sampling_blocks.front().second.chain_entry;
+                    trial->candidate_sample = compile_tier2_region(emu, trace,
+                        &trial->candidate_chain_sample, trial->monitor);
+                    samples_ok = trial->candidate_sample != nullptr;
                 }
             }
-
-            // ── Repatch ANY OTHER chain into the head ─────────────────
-            // A 1-block SELF-LOOP region is only ever entered COLD — its
-            // back-edge (tight self-loop slot) is intra-block and can't be
-            // redirected (that would re-run the preheader every iteration),
-            // so the region lives or dies on how the head is REACHED. If the
-            // head is reached via a chain slot in some OTHER block (e.g. the
-            // caller's taken-edge into the self-loop), that slot currently
-            // `jmp`s to the OLD head fn and would bypass the region forever —
-            // the head never returns to the dispatcher. back_refs_[pc] lists
-            // every block whose chain/taken slot targets the head; repatch
-            // them to jmp the region fn (same RDI=cpu/RSI=emu entry contract
-            // as the trace back-edges above). Standalone blocks register in
-            // back_refs_; region fns never do (regions have no chain slots),
-            // so this only touches real blocks.
-            //
-            // SLOT SELECTION (2026-08-20): back_refs_[T] conflates referrers
-            // whose MAIN slot targets T with referrers whose TAKEN slot
-            // targets T (jit_translate.cpp registers both). The old heuristic
-            // (`has_taken_chain_slot ? taken_chain_patch_off :
-            // chain_patch_off`) hijacked the WRONG edge for a block whose
-            // fall-through targets the head but which also has a taken slot
-            // for a DIFFERENT target: block 0x40064c (`b.eq 0x688`, MAIN→
-            // 0x658=head, TAKEN→0x688) got its TAKEN (loop-EXIT) slot
-            // repatched into the region, scrambling the standalone-block
-            // graph so game_demo's hot loop bounced through the region
-            // prologue once per iteration (2.1e9 lock-inc entries = 56s vs
-            // 2.2s). Mirror try_chain_block (jit_cache.cpp): repatch the
-            // MAIN slot when chain_target_pc == pc, the TAKEN slot when
-            // taken_chain_target_pc == pc.
-            auto bref = back_refs_.find(pc);
-            if (bref != back_refs_.end()) {
-                for (uint64_t src_pc : bref->second) {
-                    if (src_pc == pc) continue;  // self — tight slot, not a chain
-                    auto bit = blocks_.find(src_pc);
-                    if (bit == blocks_.end()) continue;
-                    BlockEntry& be = bit->second;
-                    if (be.is_region) continue;      // another region's head — its standalone slots are superseded
-                    if (be.fn == rfn) continue;      // already the region
-                    // Repatch each edge that actually targets the head. A
-                    // block whose BOTH edges target the head gets both.
-                    for (int edge = 0; edge < 2; edge++) {
-                        size_t off;
-                        if (edge == 0) {
-                            if (be.chain_target_pc != pc) continue;
-                            off = be.chain_patch_off;
-                        } else {
-                            if (!be.has_taken_chain_slot ||
-                                be.taken_chain_target_pc != pc)
-                                continue;
-                            off = be.taken_chain_patch_off;
-                        }
-                        if (off == 0 || off + 5 > CODE_BUF_SIZE) continue;
+            for (size_t k = sampling_edge_start; k < mt_edges_.size(); ++k)
+                trial->sampling_edges.push_back(mt_edges_[k].get());
+            tier2_code_bytes.fetch_add(code_buf_used_ - sampling_start, std::memory_order_relaxed);
+            if (!samples_ok || !ensure_code_space(256)) {
+                trial->monitor->enabled.store(0, std::memory_order_release);
+                for (size_t k = old_edge_count; k < mt_edges_.size(); ++k) {
+                    mt_edges_[k]->live = false;
+                    mt_edges_[k]->target.store(0, std::memory_order_release);
+                }
+                mt_source_refs_[pc] = old_source_edges;
+                return;
+            }
+            auto* trial_ptr = trial.get();
+            tier2_current_monitor_->trial = trial_ptr;
+            tier2_trials_.push_back(std::move(trial));
+            // A full-frame entry selects live-work A/B runs. Backedges in an
+            // active run stay entirely in native code until the quota expires.
+            make_writable();
+            const size_t wrapper = code_buf_used_;
+            emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(trial_ptr));
+            emit_byte(0x48); emit_byte(0x39); emit_byte(0x97);
+            emit_u32(offsetof(CPU, jit_tier2_trial)); // cmp [rdi+trial],rdx
+            const size_t outside_trial = emit_jcc_rel32_placeholder(5);
+            emit_byte(0x83); emit_byte(0xAF);
+            emit_u32(offsetof(CPU, jit_tier2_trial_remaining)); emit_byte(1);
+            const size_t quota = emit_jcc_rel32_placeholder(4);
+            emit_load(R11, RDI, offsetof(CPU, jit_tier2_trial_fn));
+            emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
+            const size_t done = code_buf_used_;
+            emit_load(RAX, RDI, PC_OFF); emit_ret();
+            patch_jcc_rel32(quota, static_cast<int32_t>(done - (quota + 6)));
+            patch_jcc_rel32(outside_trial, static_cast<int32_t>(code_buf_used_ - (outside_trial + 6)));
+            emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);
+            emit_u32(offsetof(CPU, jit_tier2_trial)); emit_byte(0);
+            const size_t nested = emit_jcc_rel32_placeholder(5);
+            patch_jcc_rel32(nested, static_cast<int32_t>(done - (nested + 6)));
+            emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&measured_region_entry));
+            emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
+            region_entry.fn = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(code_buf_ + wrapper);
+            if (chain_skip_enabled()) {
+                const size_t chain_wrapper = code_buf_used_;
+                emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(trial_ptr));
+                emit_byte(0x48); emit_byte(0x39); emit_byte(0x97);
+                emit_u32(offsetof(CPU, jit_tier2_trial));
+                const size_t cold_chain = emit_jcc_rel32_placeholder(5);
+                emit_byte(0x83); emit_byte(0xAF);
+                emit_u32(offsetof(CPU, jit_tier2_trial_remaining)); emit_byte(1);
+                const size_t chain_quota = emit_jcc_rel32_placeholder(4);
+                emit_load(R11, RDI, offsetof(CPU, jit_tier2_trial_chain_fn));
+                emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
+                const size_t cold_chain_tail = code_buf_used_;
+                emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+                emit_pop(R15); emit_pop(R14); emit_pop(R13);
+                emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+                const size_t jump = emit_jmp_rel32_placeholder();
+                patch_jmp_rel32(jump, static_cast<int32_t>(wrapper - (jump + 5)));
+                // Quota also needs the root-frame unwind; emit a separate tail.
+                const size_t quota_tail = code_buf_used_;
+                emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+                emit_pop(R15); emit_pop(R14); emit_pop(R13);
+                emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+                emit_load(RAX, RDI, PC_OFF); emit_ret();
+                patch_jcc_rel32(cold_chain, static_cast<int32_t>(cold_chain_tail - (cold_chain + 6)));
+                patch_jcc_rel32(chain_quota, static_cast<int32_t>(quota_tail - (chain_quota + 6)));
+                region_entry.chain_entry = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(code_buf_ + chain_wrapper);
+            }
+            // Bind private chains only to this sampling graph. Cold targets
+            // stay unbound and return before executing unrelated guest work.
+            auto sample_target = [&](uint64_t target, bool full) -> uint64_t (*)(CPU*, Emulator*) {
+                if (target == pc)
+                    return !full && region_entry.chain_entry ? region_entry.chain_entry : region_entry.fn;
+                for (const auto& copy : trial_ptr->sampling_blocks)
+                    if (copy.first == target)
+                        return !full && copy.second.chain_entry ? copy.second.chain_entry : copy.second.fn;
+                return nullptr;
+            };
+            for (auto* edge : trial_ptr->sampling_edges)
+                edge->target.store(reinterpret_cast<uint64_t>(sample_target(edge->target_pc, edge->cold_entry)),
+                    std::memory_order_release);
+            if (!mt_active() && !dbg().no_chain) {
+                for (const auto& copy : trial_ptr->sampling_blocks) {
+                    for (auto exit : {std::pair<uint64_t, size_t>{copy.second.chain_target_pc, copy.second.chain_patch_off},
+                                      {copy.second.taken_chain_target_pc, copy.second.taken_chain_patch_off}}) {
+                        auto target = sample_target(exit.first, false);
+                        if (!target || !exit.second) continue;
                         make_writable();
-                        int32_t rel = static_cast<int32_t>(
-                            enter_target - (code_buf_ + off + 5));
-                        code_buf_[off] = 0xE9;
-                        memcpy(code_buf_ + off + 1, &rel, 4);
-                        std::atomic_thread_fence(std::memory_order_release);
-                        make_executable();
-                        if (tier2_trace_enabled()) {
-                            fprintf(stderr,
-                                    "[tier2]   chain-in %llx → region (slot @0x%zx, %s)\n",
-                                    static_cast<unsigned long long>(src_pc), off,
-                                    edge == 0 ? "main" : "taken");
-                        }
+                        patch_chain(exit.second, reinterpret_cast<const uint8_t*>(target));
                     }
                 }
             }
+            make_executable();
+            const size_t wrapper_bytes = code_buf_used_ - wrapper;
+            tier2_code_bytes.fetch_add(wrapper_bytes, std::memory_order_relaxed);
+            tier2_compile_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - wrapper_start_clock).count(), std::memory_order_relaxed);
+            region_entry.emitted_bytes += wrapper_bytes;
+            it->second = std::move(region_entry);
+            for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)
+                refresh_mt_edges(mt_edges_[k]->target_pc);
+            if (mt_active()) mt_regions_published_.fetch_add(1, std::memory_order_relaxed);
+            redirect_tier2_head_locked(pc);
+
         }
     } catch (...) {
         // Never let a collect/compile/registration failure escape a JIT frame.

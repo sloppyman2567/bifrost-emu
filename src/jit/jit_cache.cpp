@@ -77,36 +77,9 @@ uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
     }
     auto fn = it == blocks_.end() ? nullptr : it->second.fn;
     int cnt = fn ? it->second.instr_count : 1;
-    // Tier-2 metadata writes and publication use the exclusive table lock.
-    if (fn && !mt_active() && tier2_enabled() && !it->second.tier2_hot_logged) {
-        uint32_t n = ++it->second.exec_count;
-        if (n >= tier2_hits_threshold()) {
-            it->second.tier2_hot_logged = true;
-            tier2_counter_disable(it->second.tier2_counter_off,
-                                  it->second.tier2_counter_len);
-            tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
-            Tier2Trace trace = collect_tier2_trace(emu, pc);
-            if (trace.ok) {
-                uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
-                auto rfn = compile_tier2_region(emu, trace, &chain_fn);
-                it = blocks_.find(pc);
-                if (rfn && it != blocks_.end()) {
-                    BlockEntry region;
-                    region.fn = rfn;
-                    if (chain_skip_enabled()) region.chain_entry = chain_fn;
-                    region.instr_count = static_cast<int>(trace.total_insts);
-                    region.exec_count = it->second.exec_count;
-                    region.tier2_hot_logged = true;
-                    region.ends_with_branch = true;
-                    region.chained = region.taken_chained = true;
-                    region.verified_once = true;
-                    it->second = region;
-                    fn = rfn;
-                    cnt = region.instr_count;
-                }
-            }
-        }
-    }
+    // The generated entry counter owns hotness for eligible heads. Keep
+    // publication in tier2_fire_region so all entries retain constituent
+    // ranges, revoke dispatch caches and redirect incoming chains together.
     tls_last_block_ = LastBlockCache{pc, fn, cnt};
     inline_cache_insert(pc, fn, cnt);
     instr_count = cnt;
@@ -121,6 +94,9 @@ void FrostJIT::dump_code_cache_stats() {
             (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
             mt_active() ? 1 : 0);
+    fprintf(stderr, "[JIT] Tier-2 measured payoff: pairs=%llu keeps=%llu rejects=%llu\n",
+        (unsigned long long)tier2_measured_pairs.load(), (unsigned long long)tier2_measured_keeps.load(),
+        (unsigned long long)tier2_measured_rejections.load());
     fprintf(stderr, "[JIT] MT publication: edges=%llu regions=%llu\n",
         (unsigned long long)mt_edges_published_.load(), (unsigned long long)mt_regions_published_.load());
     if (dispatch_stats_enabled_) {
@@ -135,11 +111,10 @@ void FrostJIT::dump_code_cache_stats() {
 }
 // Emit an immutable load/test/jump edge. The dispatcher supplies a bounded
 // lease; expiry or a host callback sentinel returns through the cold tail.
-size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
-    const size_t off = code_buf_used_;
-    if (!target_pc || dbg().no_chain) return off;
+FrostJIT::MtEdge* FrostJIT::create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off) {
     auto cell = std::make_unique<MtEdge>();
     cell->source_pc = current_start_pc_;
+    cell->sampling_private = tier2_sampling_compile_;
     cell->cold_entry = cold_entry;
     cell->target_pc = target_pc;
     MtEdge* edge = cell.get();
@@ -147,6 +122,12 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     mt_edge_refs_[target_pc].push_back(edge);
     mt_source_refs_[current_start_pc_].push_back(edge);
     mt_edge_slots_[off] = edge;
+    return edge;
+}
+size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
+    const size_t off = code_buf_used_;
+    if (!target_pc || dbg().no_chain) return off;
+    MtEdge* edge = create_chain_edge(target_pc, cold_entry, off);
     // cmp rax,[rdi+jit_stop_pc]; je cold exit
     emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);
     emit_u32(offsetof(CPU, jit_stop_pc));
@@ -173,10 +154,10 @@ void FrostJIT::refresh_mt_edges(uint64_t pc) {
         fn = reinterpret_cast<uint64_t>(chain_skip_enabled() && block->second.chain_entry
             ? block->second.chain_entry : block->second.fn);
     for (MtEdge* edge : refs->second) {
-        if (!edge->live) continue;
+        if (!edge->live || edge->sampling_private) continue;
         uint64_t target = edge->cold_entry && block != blocks_.end()
             ? reinterpret_cast<uint64_t>(block->second.fn) : fn;
-        if (edge->target.exchange(target, std::memory_order_release) != target && target)
+        if (edge->target.exchange(target, std::memory_order_release) != target && target && mt_active())
             mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -288,7 +269,8 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     }
 }
 void FrostJIT::chain_back_references(uint64_t target_pc) {
-    if (mt_active()) { refresh_mt_edges(target_pc); return; }
+    refresh_mt_edges(target_pc); // includes tracked ST region exits
+    if (mt_active()) return;
     // Legacy instruction-patching path below is single-thread only.
     // Patch any cached block whose chain_target_pc == target_pc.
     //
@@ -397,7 +379,6 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     else
         hi &= ~Memory::PAGE_MASK;
     if (hi <= lo) { invalidate_all(); return; }
-    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) overlaps [lo, hi).
     std::vector<uint64_t> victims;
@@ -417,8 +398,14 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         }
     }
     if (victims.empty()) return;
-    // Mapping churn in data-only pages cannot change a cached translation.
-    // Revoke all CPUs' dispatch entries only when compiled code is affected.
+    invalidate_tier2_profiles(lo, hi);
+    retire_blocks_locked(victims);
+}
+
+void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
+    // Caller holds the compiler lock and has selected exact victims.
+    if (victims.empty()) return;
+    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     invalidate_dispatch_cache();
     auto unpatch_slot = [&](size_t off) {
         if (mt_active()) {
@@ -428,25 +415,35 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         }
         if (off + 5 > CODE_BUF_SIZE) return;
         if (code_buf_[off] != 0xE9) return;  // not patched — leave alone
-        code_buf_[off] = unpatched;  // single-byte atomic store
+        // Chain-skip falls through all five bytes. Leaving the old rel32
+        // behind would execute displacement bytes as instructions.
+        if (chain_skip_enabled()) std::memset(code_buf_ + off + 1, 0x90, 4);
+        code_buf_[off] = unpatched;
     };
     if (!mt_active()) make_writable();
     for (uint64_t vpc : victims) {
-        if (mt_active()) {
-            retire_mt_source(vpc);
-            auto refs = mt_edge_refs_.find(vpc);
-            if (refs != mt_edge_refs_.end())
-                for (MtEdge* edge : refs->second) edge->target.store(0, std::memory_order_release);
-            auto victim = blocks_.find(vpc);
-            if (victim != blocks_.end()) tier2_counter_disable(victim->second.tier2_counter_off, victim->second.tier2_counter_len);
-        }
+        auto victim_entry = blocks_.find(vpc);
+        if (victim_entry != blocks_.end() && victim_entry->second.tier2_monitor)
+            victim_entry->second.tier2_monitor->enabled.store(0, std::memory_order_release);
+        for (auto& trial : tier2_trials_)
+            if (!trial->monitor->enabled.load(std::memory_order_acquire))
+                revoke_tier2_samples_locked(*trial);
+        retire_mt_source(vpc);
+        auto refs = mt_edge_refs_.find(vpc);
+        if (refs != mt_edge_refs_.end())
+            for (MtEdge* edge : refs->second) edge->target.store(0, std::memory_order_release);
+        if (mt_active() && victim_entry != blocks_.end())
+            tier2_counter_disable(victim_entry->second.tier2_counter_off, victim_entry->second.tier2_counter_len);
         // 2. Unpatch predecessors chained to this victim.
         auto bref = back_refs_.find(vpc);
         if (bref != back_refs_.end()) {
             for (uint64_t src_pc : bref->second) {
                 auto sit = blocks_.find(src_pc);
                 if (sit == blocks_.end()) continue;
-                BlockEntry& se = sit->second;
+                BlockEntry& published = sit->second;
+                BlockEntry& se = published.is_region && published.tier2_monitor &&
+                    published.tier2_monitor->trial && published.tier2_monitor->trial->decision.load() == 0
+                    ? published.tier2_monitor->trial->baseline : published;
                 if (se.chained && se.chain_target_pc == vpc) {
                     unpatch_slot(se.chain_patch_off);
                     se.chained = false;
@@ -474,12 +471,18 @@ void FrostJIT::invalidate_all() {
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
+    clear_tier2_profiles();
+    tier2_retrains_.clear(); // a full code epoch can reuse addresses for different loops
+    for (auto& monitor : tier2_region_monitors_)
+        monitor->enabled.store(0, std::memory_order_release);
+    for (auto& edge : mt_edges_) {
+        edge->live = false;
+        edge->target.store(0, std::memory_order_release);
+    }
+    mt_source_refs_.clear();
+    for (auto& trial : tier2_trials_) revoke_tier2_samples_locked(*trial);
     if (blocks_.empty()) return;
     if (mt_active()) {
-        for (auto& edge : mt_edges_) {
-            edge->live = false;
-            edge->target.store(0, std::memory_order_release);
-        }
         for (auto& counter : mt_hot_counters_) counter->enabled.store(0, std::memory_order_release);
         blocks_.clear(); back_refs_.clear();
         tls_last_block_ = LastBlockCache{};
@@ -491,12 +494,14 @@ void FrostJIT::invalidate_all() {
         BlockEntry& e = kv.second;
         if (e.chained && e.chain_patch_off + 5 <= CODE_BUF_SIZE
             && code_buf_[e.chain_patch_off] == 0xE9) {
+            if (chain_skip_enabled()) std::memset(code_buf_ + e.chain_patch_off + 1, 0x90, 4);
             code_buf_[e.chain_patch_off] = unpatched;
             e.chained = false;
         }
         if (e.taken_chained && e.has_taken_chain_slot
             && e.taken_chain_patch_off + 5 <= CODE_BUF_SIZE
             && code_buf_[e.taken_chain_patch_off] == 0xE9) {
+            if (chain_skip_enabled()) std::memset(code_buf_ + e.taken_chain_patch_off + 1, 0x90, 4);
             code_buf_[e.taken_chain_patch_off] = unpatched;
             e.taken_chained = false;
         }
@@ -520,12 +525,24 @@ void FrostJIT::enter_multithreaded() {
     // including frames retained by a guest call that created the thread.
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     make_writable();
+    clear_tier2_profiles();
+    for (auto& trial : tier2_trials_) revoke_tier2_samples_locked(*trial);
+    for (auto& monitor : tier2_region_monitors_)
+        if (monitor->trial && monitor->trial->decision.load(std::memory_order_acquire) == 0)
+            monitor->enabled.store(0, std::memory_order_release);
+    for (auto& edge : mt_edges_) {
+        edge->live = false;
+        edge->target.store(0, std::memory_order_release);
+    }
+    mt_source_refs_.clear();
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     for (auto& kv : blocks_) {
         auto& entry = kv.second;
         for (size_t off : {entry.chain_patch_off, entry.taken_chain_patch_off})
-            if (off && off + 5 <= CODE_BUF_SIZE && code_buf_[off] == 0xE9)
+            if (off && off + 5 <= CODE_BUF_SIZE && code_buf_[off] == 0xE9) {
+                if (chain_skip_enabled()) std::memset(code_buf_ + off + 1, 0x90, 4);
                 code_buf_[off] = unpatched;
+            }
         tier2_counter_disable(entry.tier2_counter_off, entry.tier2_counter_len, true);
     }
     make_executable();

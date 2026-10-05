@@ -311,8 +311,8 @@ replay is suspended rather than restoring shared memory underneath workers.
 Tier-1 and block chaining are the default. Tier-2 promotion is experimental
 and disabled by default in both single-threaded and MT execution. Opt in with
 `BIFROST_TIER2=1`; `BIFROST_TIER2=0` explicitly disables it. The current MT
-whole-iteration regions can regress application performance. Runtime loop
-hotness and profitability gating remain future work.
+whole-iteration regions can regress application performance. Tight ST self-loop iteration hotness remains future work. Execution payoff
+is measured by bounded live-work A/B trials; admission and feedback follow.
 
 Before the second guest CPU starts, the JIT retires legacy single-thread
 instruction patches and purges the table. New MT blocks use immutable
@@ -357,3 +357,158 @@ invalidation and retranslation preserve the snapshot. It also checks the
 execution lease. The verification gate runs the guest concurrency fixture as an independent oracle,
 not shared-memory differential replay. These checks do not establish a Doom 3
 FPS improvement; measure representative gameplay separately.
+
+## Tier-2 loop discovery and publication
+
+The collector follows direct `B` targets as well as conditional fall-through
+edges. Internal direct edges become inline boundaries, retaining register and
+flag state without a host jump. A body exceeding the 32-instruction block cap
+gets an explicit IR continuation with no additional guest instruction count.
+The existing 64-block/2,048-instruction bounds and loop-only compilation gate
+remain in force. Non-head cycles and unsupported terminators do not become
+loop regions. Collection stops at another published region head to avoid
+compiling rotated copies of an already optimized loop.
+
+Eligible native conditional, direct-branch and capped straight-line blocks
+use generated entry counters for promotion, including chained entries. The
+counter makes at most three attempts per translation while samples warm up. All automatic publication now goes through
+`tier2_fire_region`, retaining each constituent code range and redirecting
+incoming chains. The former dispatch/call-lookup promotion paths did not
+retain those ranges and have been removed. Self-loop iterations that bypass
+the generated entry still do not contribute hotness. Conditional exits collect
+bounded taken/fall-through counts (4,096 per outcome, atomic increments in MT).
+With at least 16 samples, a taken successor with 75% bias is linearized by
+inverting the typed branch and retaining the original fall-through as a cold
+exit. Head back-edges remain loop terminators. Promotion requires all branches
+to be sampled and a product of continuation frequencies of at least 75%.
+This is a profitability heuristic, not a measured speedup; multiplying
+marginal frequencies can underestimate correlated paths. MT single-block loops are declined
+because they fuse no boundaries and cannot retain loop state across entries.
+Tier-1 profiles are disabled on promotion and mapping invalidation; their
+storage outlives published code. Monitored regions deposit a recovery credit
+in a CPU-local slot on completed hot paths. This is one flag-neutral store,
+including ST internal backedges; MT performs no shared atomic increment per
+iteration. A cold exit tail-calls feedback after flushing guest state and
+tearing down the generated frame. It consumes a recovery credit and reduces
+pressure, or increases pressure if no completed path intervened. Pressure of
+64 triggers retraining. This is a conservative recovery/miss heuristic, not
+an estimate of a cold-exit probability. Sixteen CPU-local slots bound metadata;
+colliding regions can delay detection by depositing extra credits or changing
+the slot's owner, but cannot add pressure to another region.
+
+Retirement holds one compiler-lock critical section for version validation,
+exact victim selection and revocation. It retires the head and overlapping
+Tier-1 constituents and resets their profiles, preserving unrelated regions
+on the same page. Mapping changes still use page-granular invalidation. At
+most two retirements per head are allowed in a full code-cache epoch;
+exhausted heads stay in Tier-1. Full invalidation resets that budget.
+Published MT instructions remain immutable throughout retraining. Both ST and
+MT region exits use tracked, revocable target cells, so a rewritten target on
+the next page cannot leave the region executing stale guest instructions. ST
+exit cells share a frame-teardown tail with stop-sentinel and execution-lease
+checks. Promotion redirects their targets; precise/range/full invalidation and
+the MT transition revoke them. Code and cells remain allocated for in-flight
+CPUs. Empty cells return to dispatch until a replacement target is compiled.
+
+Admission requires at least two cached native Tier-1 blocks with exactly the
+trace's block boundaries, without calls or retained self-loop frames. Branch
+profiles choose candidate paths; code size no longer predicts execution payoff.
+Each candidate enters a bounded A/B trial before permanent selection. The
+retained Tier-1 graph and candidate run alternate windows on one vCPU's live
+workload, without replaying memory writes or restoring architectural state.
+
+Both arms execute private instrumented copies with identical work probes at
+matching guest block boundaries. Normal Tier-1 blocks and selected regions
+contain no work probes or inactive probe guards. The selected ST region also
+omits sampling quota checks on its internal backedges. CPU-local counters
+record guest instruction count and a 64-bit block fingerprint; probes preserve
+flags and scratch registers.
+
+Private Tier-1 chains bind only to other blocks in their sampling graph and
+the trial's head gate. Private region exits use the same restricted bindings.
+Cold targets remain unbound and return before executing unrelated guest work,
+including targets inside gaps in the trace's address envelope. Private copies
+never replace public cache entries or join the public ST back-reference graph.
+MT sample edges are private data cells, excluded from public target refresh,
+and revoked on selection or invalidation. ST sample chain slots are separately
+retained and revoked, including before the second CPU starts. Published MT
+instructions remain immutable. Trials suppress constituent hot-counter
+compilation and phase feedback inside the timed interval. A data-cell lease
+expiration at the head also counts as a completed iteration, so dispatcher
+resumptions cannot inflate the work.
+
+Windows initially contain 256 completed iterations. A short baseline window
+increases the CPU-local quota up to 4096 to amortize timing overhead. The
+clock is CLOCK_THREAD_CPUTIME_ID, which measures CPU time consumed by the
+calling host thread, excluding time spent descheduled. Only complete windows
+ending at the head are sampled. A baseline must consume at least 10 us; a
+candidate must match its vCPU's instruction count, fingerprint and exit PC.
+Eight comparable pairs must show a median candidate/baseline ratio below 0.97,
+with at least six pairs below 0.97, to select the region. Slower or noisy
+candidates restore Tier-1. A trial with insufficient evidence after 128
+attempts also restores Tier-1. Version checks and normal revocation protect
+in-flight references across mapping changes and ST-to-MT transition.
+
+The decision measures instrumented execution gain, not lifetime amortization
+of compilation or a guarantee of whole-application speedup. Sampling adds
+short-lived execution cost and retained private code; validate application
+benchmarks as well as local trial decisions. Codegen/retirement oracles select candidates
+deterministically through a test friend; the separate timing oracle uses real
+controlled CPU work to verify both acceptance and rejection, without fake
+clock values. CoreMark comparisons use a fixed 40,000 iterations and labelled
+CRC/validation checks; auto-calibrated iteration counts cannot be compared by
+wall time. Counters expose measured pairs, keeps and rejections.
+
+Automatic compilation stops after 32 MiB of emitted region, private sampling
+and trial-wrapper code or two seconds of measured compilation time per JIT lifetime. Rejected
+unpublished candidates revoke their data cells and preserve baseline metadata.
+These limits bound speculation. Actual timing selects winners, and the
+existing phase-pressure monitor can retire a winner when its path changes.
+Tier-2 stays
+experimental and opt-in. Differential replay disables promotion explicitly:
+its temporary Tier-1 exit patches and guest-memory restoration cannot safely
+cover internal region loops. `BIFROST_JIT_VERIFY` therefore checks Tier-1 while
+the region tests check independent result oracles. Replay counts have their
+own per-block budget, separate from promotion hotness.
+
+Single-thread chain-skip invalidation restores the entire five-byte chain slot
+to NOPs; restoring only its opcode would execute the old displacement bytes.
+MT invalidation continues to revoke atomic target cells.
+
+`bash scripts/test_jit_tier2_discovery.sh` exercises a non-contiguous loop
+containing a 40-instruction body, early exits with loop-carried state,
+non-head page rewriting, full invalidation, non-head cycles and duplicate-region
+avoidance in ST/MT and ordinary/chain-skip modes. The host fixture has an optional
+`benchmark` argument (and `mt` for MT execution); it times two million iterations
+against a closed-form result oracle. This is a synthetic workload, not a
+representative application performance measurement.
+
+Region compilation clears the complete vreg mapping table. Clearing only the
+new region's maximum left homes from a larger preceding Tier-1 block, then
+published a smaller maximum that hid those stale entries from the next reset.
+This corrupted musl pthread startup's loaded function pointer under frequent
+promotion. `scripts/test_jit_tier2_mutex.sh` repeats the mutex result oracle
+with a threshold of 32. Nested call interpreter fallback also uses the existing
+fault trampoline so guest memory exceptions cannot escape generated frames.
+
+ST publication redirects only incoming edges whose recorded Tier-1 target is
+the region head. A collected block may span multiple Tier-1 blocks; guessing
+a back-edge slot from its terminator could bypass a partial block and skip
+guest instructions. The rounding oracle covers this with Tier-2 enabled at
+a low threshold. The discovery harness additionally checks biased branches
+from all three conditional IR families, cold exits after promotion, stale
+profile invalidation, weak-path rejection, sustained phase changes in all three
+conditional families, and nested-call fault delivery.
+
+`bash scripts/test_jit_tier2_measure.sh` verifies measured faster/slower decisions
+and rejection of mismatched work in ST/MT with ordinary/skip chaining. It also
+checks that MT publication changes no existing instruction bytes.
+
+`bash scripts/test_jit_tier2_feedback.sh` checks two regions sharing one page:
+retiring one preserves the other's exact cached function pointer. Isolated
+cold exits followed by recoveries do not cause retirement. Eight host CPUs
+execute a sustained phase change while the neighboring region remains hot,
+checking fixed arithmetic results, retraining and immutable published MT code
+in ordinary and chain-skip modes. The same harness places a region exit target
+on the next page, rewrites that target, and verifies the new result while the
+region itself stays cached.

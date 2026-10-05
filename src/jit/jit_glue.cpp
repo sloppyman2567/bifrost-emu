@@ -286,6 +286,11 @@ void Emulator::dump_periodic_stats(double dt) {
     uint64_t ionly   = jit_->block_profile.interp_only.load(std::memory_order_relaxed);
     uint64_t hot_heads = jit_->tier2_hot_heads.load(std::memory_order_relaxed);
     uint64_t t2_regions = jit_->tier2_regions.load(std::memory_order_relaxed);
+    uint64_t t2_rejections = jit_->tier2_profit_rejections.load(std::memory_order_relaxed);
+    uint64_t t2_retries = jit_->tier2_profile_retries.load(std::memory_order_relaxed);
+    uint64_t t2_retired = jit_->tier2_phase_retirements.load(std::memory_order_relaxed);
+    uint64_t t2_ns = jit_->tier2_compile_ns.load(std::memory_order_relaxed);
+    uint64_t t2_bytes = jit_->tier2_code_bytes.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         for (auto& gt : threads_) {
@@ -303,6 +308,11 @@ void Emulator::dump_periodic_stats(double dt) {
                 ionly     += gt->jit->block_profile.interp_only.load(std::memory_order_relaxed);
                 hot_heads += gt->jit->tier2_hot_heads.load(std::memory_order_relaxed);
                 t2_regions += gt->jit->tier2_regions.load(std::memory_order_relaxed);
+                t2_rejections += gt->jit->tier2_profit_rejections.load(std::memory_order_relaxed);
+                t2_retries += gt->jit->tier2_profile_retries.load(std::memory_order_relaxed);
+                t2_retired += gt->jit->tier2_phase_retirements.load(std::memory_order_relaxed);
+                t2_ns += gt->jit->tier2_compile_ns.load(std::memory_order_relaxed);
+                t2_bytes += gt->jit->tier2_code_bytes.load(std::memory_order_relaxed);
             }
         }
     }
@@ -310,7 +320,7 @@ void Emulator::dump_periodic_stats(double dt) {
     static uint64_t last_instr_, last_blocks_, last_blocks_tr_, last_chains_;
     static uint64_t last_natural_, last_entry_, last_ci_cap_, last_bl_cap_,
                     last_max_sz_, last_decfail_, last_ionly_;
-    static uint64_t last_hot_heads_, last_t2_regions_;
+    static uint64_t last_hot_heads_, last_t2_regions_, last_t2_rejections_, last_t2_retries_;
     uint64_t d_instr     = instr - last_instr_;
     uint64_t d_blocks    = blocks - last_blocks_;
     uint64_t d_blocks_tr = blocks_tr - last_blocks_tr_;
@@ -337,18 +347,25 @@ void Emulator::dump_periodic_stats(double dt) {
             static_cast<unsigned long long>(max_sz - last_max_sz_),
             static_cast<unsigned long long>(decfail - last_decfail_),
             static_cast<unsigned long long>(ionly - last_ionly_));
-    // Tier-2 hot-head count (default ON): blocks that crossed the
+    if (t2_retired || t2_bytes)
+        fprintf(stderr, "[%s] tier2 lifetime: retired=%llu compile_ms=%.3f code_bytes=%llu\n",
+            CODENAME, (unsigned long long)t2_retired, t2_ns / 1e6,
+            (unsigned long long)t2_bytes);
+    // Tier-2 hot-head count (opt-in): blocks that crossed the
     // BIFROST_TIER2_HITS threshold since the last dump. Inert (0) by default.
     fprintf(stderr,
-            "[%s] tier2: hot_heads=%llu regions=%llu\n", CODENAME,
+            "[%s] tier2: hot_heads=%llu regions=%llu rejected=%llu retries=%llu\n", CODENAME,
             static_cast<unsigned long long>(hot_heads - last_hot_heads_),
-            static_cast<unsigned long long>(t2_regions - last_t2_regions_));
+            static_cast<unsigned long long>(t2_regions - last_t2_regions_),
+            static_cast<unsigned long long>(t2_rejections - last_t2_rejections_),
+            static_cast<unsigned long long>(t2_retries - last_t2_retries_));
     last_instr_     = instr;     last_blocks_     = blocks;
     last_blocks_tr_ = blocks_tr; last_chains_     = chains;
     last_natural_   = natural;   last_entry_      = entry;
     last_ci_cap_    = ci_cap;    last_bl_cap_     = bl_cap;
     last_max_sz_    = max_sz;    last_decfail_    = decfail;
     last_ionly_     = ionly;
+    last_t2_rejections_ = t2_rejections; last_t2_retries_ = t2_retries;
     last_hot_heads_ = hot_heads;
     last_t2_regions_ = t2_regions;
     // SIGPROF bucket snapshot too: games/loops that exit via exit_group
@@ -476,7 +493,9 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             FrostJIT::tls_stat_instr_++;
             if ((++FrostJIT::tls_stat_exec_ & 0xFFFF) == 0) jit->flush_stat_tls();
         }
-        emu->step(*cpu);
+        // This helper is itself called through generated frames: guest
+        // memory exceptions must be handled before crossing that boundary.
+        jit_interp_step(emu, cpu);
     }
     return cpu->pc;
 }

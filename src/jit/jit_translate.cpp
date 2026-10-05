@@ -294,7 +294,7 @@ static LeafScanResult leaf_scan(Emulator& emu, uint64_t target) {
     return {};  // no RET within the cap
 }
 // ── translate_block ───────────────────────────────────────────────
-uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
+uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
     if (!code_buf_) return nullptr;
     if (code_budget_exhausted_) {
@@ -302,7 +302,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
         fallback.verified_once = true;
-        blocks_[start_pc] = fallback;
+        if (!private_entry) blocks_[start_pc] = fallback;
         code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
@@ -340,6 +340,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     selfloop_patch_off_ = 0;
     tier2_counter_off_ = 0;
     tier2_counter_len_ = 0;
+    tier2_branch_profile_ = nullptr;
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
@@ -589,7 +590,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                 entry.chained = false;
                 entry.instr_count = instr_count;
                 entry.verified_once = true;  // interp-only: no verify
-                blocks_[start_pc] = entry;
+                if (!private_entry) blocks_[start_pc] = entry;
                 blocks_translated++;
                 block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
@@ -682,7 +683,7 @@ if (demote_interp) {
         entry.chained = false;
         entry.instr_count = instr_count;
         entry.verified_once = true;  // skip verify for interp-only
-        blocks_[start_pc] = entry;
+        if (!private_entry) blocks_[start_pc] = entry;
         blocks_translated++;
         block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
@@ -843,30 +844,26 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // before block_start (see above); the RIP-relative disp32 is known here
     // because that data was emitted first.
     //
-    // Head eligibility: only blocks that could form an M1 region get a
-    // counter. The walker/region compiler require EVERY trace block to end in
-    // a conditional branch (BRCOND/BRCOND_ZERO/BRCOND_BIT) and abort on
-    // SVC/BR/BLR/BL/CALL_INTERP, so a block whose last op is anything else
-    // (B/RET/BRCOND_FALLTHRU/BL_CALL/…) can never be a useful head — its
-    // trace would abort or be rejected. Skipping the counter on those keeps
-    // the per-entry overhead (~6 cycles) off the vast majority of blocks
-    // (calls, returns, syscalls, straight-line fall-throughs).
+    // Native conditional/direct-branch and capped straight-line heads can
+    // participate in a bounded loop region. Calls and fault boundaries are
+    // excluded from entry instrumentation; the collector validates the body.
     bool tier2_head_eligible = false;
     // Chain-skip composes with tier-2 (1.5.4-alpha): the counter sits AFTER
     // chain_entry_off_, so chain edges (bare jmps to chain_entry) count too.
     // Regions entered via a chain edge use the region's own chain-skip entry
     // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
     // vreg-slot layouts compatible.
-    if (tier2_enabled() && !wex_enabled_) {
+    if (tier2_enabled() && !wex_enabled_ && !private_entry) {
         if (!ir_block.insts.empty()) {
             IROp last_op = ir_block.insts.back().op;
             if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||
-                last_op == IROp::BRCOND_BIT) {
+                last_op == IROp::BRCOND_BIT || last_op == IROp::BRCOND_FALLTHRU ||
+                (!block_ended && instr_count == MAX_BLOCK_REG_PRESSURE)) {
                 tier2_head_eligible = true;
                 for (const auto& inst : ir_block.insts) {
                     if (inst.op == IROp::SVC || inst.op == IROp::BR ||
                         inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                        inst.op == IROp::CALL_INTERP) {
+                        inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_STRUCT) {
                         tier2_head_eligible = false;
                         break;
                     }
@@ -875,6 +872,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     if (tier2_head_eligible) {
+        const IRInst& terminal = ir_block.insts.back();
+        if (terminal.op == IROp::BRCOND || terminal.op == IROp::BRCOND_ZERO ||
+            terminal.op == IROp::BRCOND_BIT) {
+            auto profile = std::make_unique<Tier2BranchProfile>();
+            tier2_branch_profile_ = profile.get();
+            auto old = tier2_profiles_by_pc_.find(terminal.arm_pc);
+            if (old != tier2_profiles_by_pc_.end())
+                old->second->enabled.store(0, std::memory_order_release);
+            tier2_profiles_by_pc_[terminal.arm_pc] = profile.get();
+            tier2_branch_profiles_.push_back(std::move(profile));
+        }
         size_t mt_counter_disabled_patch = 0;
         tier2_counter_off_ = code_buf_used_;
         if (mt_active()) {
@@ -1104,6 +1112,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
+    emit_tier2_work_probe(start_pc, ir_block.count);
     // ── Compute liveness: for each vreg, find the last op that uses it ──
     // This lets us free host regs of dead vregs immediately after their
     // last use, instead of keeping them cached until eviction. Without
@@ -1333,6 +1342,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // RAX overwrite) to preserve the interpreter's PC in RAX.
     size_t pc_store_off = code_buf_used_;
     emit_store(CPU_REG, PC_OFF, RAX);
+    emit_tier2_edge_profile(false);
     // ── Chain-capable epilogue ────────────────────────────────────
     // For block chaining we jump directly from one block's epilogue to
     // the next block's prologue. The next prologue reloads RBX from
@@ -1405,7 +1415,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fallback.interp_only_count = 1;
         fallback.instr_count = 1;
         fallback.verified_once = true;
-        blocks_[start_pc] = fallback;
+        if (!private_entry) blocks_[start_pc] = fallback;
         code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
         code_budget_exhausted_ = true;
         // W^X: make the buffer executable again before returning (we may
@@ -1429,6 +1439,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     if (unchainable_end_) chain_target_pc_ = 0;
     BlockEntry entry;
     entry.fn = fn;
+    entry.emitted_bytes = code_buf_used_ - block_start;
     // Chain-skip entry point (BIFROST_CHAIN_SKIP=1): chain slots patch to
     // the body start past the push/frame/reg-setup prologue instead of fn.
     // Only set when the gate is on; otherwise chain slots target fn and
@@ -1489,6 +1500,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         code_buf_[selfloop_patch_off_ + 2] = (self_rel >> 8) & 0xFF;
         code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
         code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
+    }
+    if (private_entry) {
+        *private_entry = std::move(entry);
+        prev_max_vreg_ = max_vreg_;
+        make_executable();
+        return fn;
     }
     // ── Verify-mode memory save/restore: populate store_infos ──────
     // Walk the IR and record every STORE_MEM whose address operand can
@@ -1668,7 +1685,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
         }
     }
-    blocks_[start_pc] = entry;
+    if (!private_entry) blocks_[start_pc] = entry;
     blocks_translated++;
     // Maintain the back-reference index: this block at start_pc has
     // chain_target_pc=T, so add start_pc to back_refs_[T]. This lets

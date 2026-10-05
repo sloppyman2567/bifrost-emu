@@ -52,21 +52,26 @@ class Emulator;
 class Memory;
 // ── Tier-2 trace (ROADMAP #14, Phase 1 step 2) ──────────────────────────
 // A candidate tier-2 trace: a linear run of guest blocks whose IR will be
-// compiled as ONE region with ONE register allocation (a later task). Pure
+// compiled as ONE region with ONE register allocation. Pure
 // data collection — collect_tier2_trace() emits no code, touches no block
 // cache, and compiles nothing.
 struct Tier2Trace {
     struct Block {
         uint64_t pc;            // block start PC
         IRBlock  ir;            // translated IR for this block
-        // Side exits: for each conditional branch in this block whose taken
-        // target leaves the trace, the (target_pc, ir_op_index). A back-edge
-        // to the trace head is recorded here too (target_pc == head_pc).
+        bool follows_taken = false; // conditional hot successor, terminator inverted
+        uint64_t hot_successor = 0; // original target, checked before compilation
+
+        // Terminal edge (target_pc, ir_op_index): conditional taken exit,
+        // direct jump or synthetic cap continuation. The compiler identifies
+        // inline direct edges and the final back-edge to head_pc.
         std::vector<std::pair<uint64_t, int>> side_exits;
     };
     std::vector<Block> blocks;
     uint64_t head_pc = 0;
     uint64_t total_insts = 0;   // sum of block instruction counts
+    double path_probability = 1.0; // measured probability of completing the path
+    bool fully_profiled = true;
     bool ok = false;            // false = trace aborted (never compile)
     const char* stop_reason = nullptr;  // why collection stopped (debug)
 };
@@ -93,6 +98,10 @@ extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, i
 void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site);
 void bifrost_prof_init(class FrostJIT* jit);
 class FrostJIT {
+    struct Tier2Trial;
+    struct BlockEntry;
+    bool tier2_sampling_compile_ = false;
+    friend struct Tier2TestAccess;
 public:
     FrostJIT();
     ~FrostJIT();
@@ -201,6 +210,10 @@ public:
     // region fn). Printed by dump_periodic_stats alongside hot_heads/traces.
     // Inert (0) unless BIFROST_TIER2=1 and a hot head fires.
     std::atomic<uint64_t> tier2_regions{0};
+    std::atomic<uint64_t> tier2_profit_rejections{0}, tier2_profile_retries{0};
+    std::atomic<uint64_t> tier2_measured_pairs{0}, tier2_measured_keeps{0}, tier2_measured_rejections{0};
+    std::atomic<uint64_t> tier2_phase_retirements{0}, tier2_compile_ns{0}, tier2_code_bytes{0};
+
     // Block-end reason profile (BIFROST_BLOCK_PROF=1): why translated
     // blocks stop early. avg instructions/block is the JIT's #1 dispatch
     // overhead lever, and these counters reveal whether blocks split at
@@ -425,7 +438,29 @@ public:
         uint64_t source_pc = 0, target_pc = 0;
         bool live = true; // compiler lock only
         bool cold_entry = false;
+        bool sampling_private = false;
     };
+    struct Tier2BranchProfile {
+        std::atomic<uint32_t> enabled{1}, taken{0}, fallthrough{0};
+    };
+    static_assert(offsetof(Tier2BranchProfile, enabled) == 0);
+    static_assert(sizeof(std::atomic<uint32_t>) == 4);
+    std::vector<std::unique_ptr<Tier2BranchProfile>> tier2_branch_profiles_;
+    std::unordered_map<uint64_t, Tier2BranchProfile*> tier2_profiles_by_pc_;
+    Tier2BranchProfile* tier2_branch_profile_ = nullptr; // current Tier-1 codegen
+    void emit_tier2_edge_profile(bool taken);
+    void invalidate_tier2_profiles(uint64_t lo, uint64_t hi);
+    void clear_tier2_profiles();
+    void retire_blocks_locked(const std::vector<uint64_t>& victims);
+    struct Tier2RegionMonitor {
+        std::atomic<uint32_t> enabled{1};
+        uint64_t head = 0, identity = 0;
+        unsigned slot = 0;
+        Tier2Trial* trial = nullptr;
+    };
+    std::vector<std::unique_ptr<Tier2RegionMonitor>> tier2_region_monitors_;
+    Tier2RegionMonitor* tier2_current_monitor_ = nullptr;
+    std::unordered_map<uint64_t, unsigned> tier2_retrains_; // compiler lock; lifetime budget
     struct MtHotCounter {
         std::atomic<uint32_t> enabled{1}, hits{0};
     };
@@ -438,6 +473,7 @@ public:
     std::vector<std::unique_ptr<MtHotCounter>> mt_hot_counters_;
     std::unordered_map<size_t, MtHotCounter*> mt_counter_sites_;
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
+    MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false);
     void refresh_mt_edges(uint64_t target_pc);
     void retire_mt_source(uint64_t source_pc);
@@ -536,7 +572,7 @@ public:
     // BIFROST_NO_DIRECT_CALL=1 (bisection / debugging).
     static bool direct_call_enabled();
     // Tier-2 (trace/region JIT) env gates (ROADMAP #14). Read once
-    // at first use. Default ON since 2026-08-21; BIFROST_TIER2=0 disables.
+    // at first use. Experimental and opt-in with BIFROST_TIER2=1.
     // BIFROST_TIER2_HITS = the "hot head" threshold (default 1000);
     // BIFROST_TIER2_TRACE=1 logs each hot head as it fires.
     static bool     tier2_enabled();
@@ -548,7 +584,7 @@ public:
     // one region. PURE COLLECTION: emits no code, never touches blocks_ beyond
     // read-only membership checks, and resets g_alloc per block so it never
     // consumes the global regalloc. Call with the block table quiescent (the
-    // hot-head fire site in run_block holds the shared lock). Implemented in
+    // hot-head fire site holds the exclusive lock). Implemented in
     // src/jit/jit_tier2.cpp.
     Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
     // Tier-2 region compilation (ROADMAP #14, Phase 1 step 3 / M1). Compiles
@@ -563,8 +599,8 @@ public:
     // the memory paths). Call with the blocks_mutex_ held EXCLUSIVE (the
     // region fn is written into code_buf_ alongside translate_block's).
     // Returns nullptr if the trace shape isn't region-qualified. The CALLER
-    // replaces blocks_[head_pc].fn with the returned fn (exec_count /
-    // tier2_hot_logged preserved); implemented in src/jit/jit_tier2.cpp.
+    // replaces blocks_[head_pc].fn with the returned fn; publication is
+    // centralized in tier2_fire_region in src/jit/jit_tier2.cpp.
     // chain_out (optional): receives the region's CHAIN-SKIP entry point
     // (code_buf_ + the post-frame-setup label, mirroring BlockEntry.
     // chain_entry for standalone blocks) when chain-skip is enabled. Chain
@@ -573,7 +609,8 @@ public:
     // allocates the unified kChainSkipFrameBytes frame under chain-skip).
     // nullptr when chain-skip is off (fn handles both entries there).
     uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
-                                    uint64_t (**chain_out)(CPU*, Emulator*) = nullptr))(CPU*, Emulator*);
+                                    uint64_t (**chain_out)(CPU*, Emulator*) = nullptr,
+                                    Tier2RegionMonitor* monitor_override = nullptr))(CPU*, Emulator*);
     // Tier-2 in-code fire path (ROADMAP #14, Phase 1 step 4). Called from the
     // per-block hot-head counter emitted in block prologues (BIFROST_TIER2=1):
     // counts CHAINED execution (which never reaches run_block's slow path),
@@ -586,6 +623,14 @@ public:
     // exclusive lock only around the map mutations. Implemented in
     // src/jit/jit_tier2.cpp.
     void tier2_fire_region(Emulator& emu, uint64_t pc, size_t site = 0);
+    void tier2_region_feedback(CPU& cpu, void* monitor);
+    uint64_t tier2_measure(CPU& cpu, Emulator& emu, void* trial);
+private:
+    void emit_tier2_work_probe(uint64_t pc, unsigned count);
+    void finish_tier2_trial(Tier2Trial& trial, bool keep);
+    void redirect_tier2_head_locked(uint64_t pc);
+    void revoke_tier2_samples_locked(Tier2Trial& trial);
+public:
     // Neutralize a block's tier-2 in-code counter after it fires: overwrites
     // the prologue `inc dword[rip]` (6 bytes) with `jmp rel32` past the whole
     // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
@@ -680,20 +725,16 @@ private:
         uint64_t chain_target_pc = 0;  // statically-known next PC, or 0
         bool    chained = false;       // true once the slot has been patched to a jmp
         int     instr_count = 0;      // number of ARM64 instructions in this block
+        size_t emitted_bytes = 0;    // actual host code size for region admission
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
-        // Tier-2 hot-head detection counter (ROADMAP #14, Phase 1). Counts
-        // SLOW-PATH dispatches of this block (incremented under the shared
-        // blocks_mutex_ in run_block; the fast paths never touch it). When it
-        // crosses tier2_hits_threshold() under BIFROST_TIER2=1, the block is
-        // flagged as a "hot head" — a future tier-2 task builds a trace/region
-        // from it. This is NOT the interp_only demotion machinery
-        // (tls_hot_pc_counts_ / HOT_PC_THRESHOLD).
-        uint32_t exec_count = 0;
-        // Set once the block has been flagged as a hot head, so the flag +
-        // trace-fire happen exactly once per block (exec_count keeps counting).
+        // Generated entry counters own Tier-2 hotness. Each translation
+        // bounds promotion attempts; differential replay has a separate budget.
         bool     tier2_hot_logged = false;
+        unsigned tier2_attempts = 0; // bounded retries while branch samples warm up
+        uint64_t verify_count = 0; // independent of Tier-2 entry hotness
+
         // True if this BlockEntry is a tier-2 region fn (registered by
         // tier2_fire_region). Region entries have NO chain slots (their
         // chained/taken_chained are set true and the slots are 0), so any
@@ -702,6 +743,7 @@ private:
         // that has since become a DIFFERENT region's head (overlapping
         // traces share blocks; hijacking those slots cross-wires regions).
         bool     is_region = false;
+        Tier2RegionMonitor* tier2_monitor = nullptr;
         // Offset of the tier-2 in-code hot-head counter (8 bytes of counter
         // state just before the fn entry; the prologue `inc`/`cmp`/`jne` fire
         // path against it). 0 = no counter emitted (block ineligible, or tier-2
@@ -824,6 +866,28 @@ private:
         // inlined leaf must drop its inliner.
         std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     };
+    struct Tier2Trial {
+        Tier2RegionMonitor* monitor = nullptr;
+        BlockEntry baseline, candidate_entry;
+        uint64_t (*candidate)(CPU*, Emulator*) = nullptr;
+        uint64_t (*candidate_chain)(CPU*, Emulator*) = nullptr;
+        // Private instrumented entries; only plain entries can be selected.
+        // Timing tests may override these without publishing non-JIT rel32s.
+        uint64_t (*baseline_sample)(CPU*, Emulator*) = nullptr;
+        uint64_t (*candidate_sample)(CPU*, Emulator*) = nullptr;
+        uint64_t (*baseline_chain_sample)(CPU*, Emulator*) = nullptr;
+        uint64_t (*candidate_chain_sample)(CPU*, Emulator*) = nullptr;
+        uint64_t lo = 0, hi = 0;
+        std::vector<std::pair<uint64_t, uint64_t (*)(CPU*, Emulator*)>> baseline_blocks;
+        std::vector<MtEdge*> baseline_edges, candidate_edges, sampling_edges;
+        std::vector<std::pair<uint64_t, BlockEntry>> sampling_blocks;
+        std::mutex mutex;
+        std::vector<double> ratios;
+        bool sampling_revoked = false; // compiler lock only
+        unsigned attempts = 0;
+        std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
+    };
+    std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;
     std::unordered_map<uint64_t, BlockEntry> blocks_;
     // Back-reference index: maps target_pc → list of source_pcs whose
     // chain_target_pc equals target_pc. Maintained incrementally at
@@ -1593,7 +1657,7 @@ private:
     // Does NOT clear flags_in_host_ — the caller manages that.
     void materialize_flags_to_pstate();
     // Translation entry point.
-    uint64_t (*translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);
+    uint64_t (*translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry = nullptr))(CPU*, Emulator*);
 private:
 };
 } // namespace arm64emu
