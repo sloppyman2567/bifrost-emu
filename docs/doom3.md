@@ -1,6 +1,6 @@
 # Doom 3 (dhewm3)
 
-## Current status (2026-10-04)
+## Current status (2026-10-05)
 
 Use the default tier-1 JIT with MT chaining. Tier-2 is now opt-in via
 `BIFROST_TIER2=1` after a reported gameplay slowdown with MT region promotion.
@@ -10,21 +10,25 @@ new-game session remains unresolved; this default change is not a crash fix.
 
 Default-JIT gameplay, character animation and audio work in the observed demo
 sessions, including the user's approximately 27-minute crash-free recording.
+The October 5 user report adds about 25 minutes of stable gameplay with the
+other games initially running concurrently: mostly 25+ FPS, warm-up dips around
+9–19 FPS and some stretches at 60 FPS. The spider-robot/enemy encounter drops
+to 1–5 FPS. These are user observations, not an instrumented frame-time series.
 New underground saves and a fresh save/load round trip restore successfully;
 the older checksum-incompatible save is rejected by the game. Settings,
 viewport/cursor behavior, gamepad coverage and demanding-scene frame pacing
 remain open. Sustained 5 FPS at 3440×1440 is not yet established by a matched
 benchmark.
 
-The latest helper profile sampled 68.07% translated code, 20.69% dispatch/native
-helpers, 0.06% translation, zero interpreter samples and 11.19% other work over
-30 seconds. This includes worker CPU time and is not main-thread frame-time
-attribution or a controlled before/after FPS comparison. See the
-[latest profile](#gameplay-profile-after-helper-optimization).
+The October 5 capture sampled 80.81% translated code, 13.30% dispatch/native
+helpers, 0.034% translation, 0.004% interpreter and 5.85% other host work.
+The cache grew once and had no overflow or budget fallback. This includes worker
+CPU time and is not main-thread frame-time attribution or a controlled
+before/after FPS comparison. See the [capture analysis](#concurrent-gameplay-capture-2026-10-05).
 
 Current full-suite counts and their final-build coverage limits are in
-[TESTS.md](TESTS.md): 258/258 JIT and 255/255 interpreter with three JIT-only
-skips, plus 81/81 JIT units, 79/79 interpreter units and the MT publication gates.
+[TESTS.md](TESTS.md): 273/273 JIT and 266/266 interpreter with seven JIT-only
+skips. The selected suite includes 95 unit definitions and the MT publication gates.
 Older counts and timings below describe intermediate checkpoints.
 
 ## Bring-up and correctness history (2026-10-03)
@@ -470,6 +474,47 @@ fallbacks. The run reached normal game/audio/graphics shutdown and the process
 exited normally. Terminal logging recorded rendering startup and CPU reports,
 but no FPS history, so sustained FPS cannot be reconstructed from this log.
 The local diagnostic log is `/tmp/doom3-helper-play-20261004.log`.
+
+## Concurrent gameplay capture (2026-10-05)
+
+The detached tier-1 run on `25725e1` recorded 66 periodic 30-second reports
+and 369,637 cumulative CPU samples. Source inspection confirms that SIGPROF
+counters are cumulative, so the percentages below use the last snapshot;
+interval percentages use differences between consecutive snapshots.
+
+- Translated code: 298,699 samples, 80.81%.
+- Dispatch/native helpers: 49,161 samples, 13.30%.
+- Translation: 124 samples, 0.034%.
+- Interpreter: 13 samples, 0.004%.
+- Other host work: 21,640 samples, 5.85%.
+
+The largest dispatch/helper share between consecutive snapshots was 28.30%
+(1,819 of 6,428 samples). The final recorded interval contained 78.64%
+translated code and 17.59% dispatch/helpers. These are sampled process CPU
+shares across guest workers, not frame durations or measurements of GPU time.
+No sampled guest-PC histogram or encounter/frame markers were enabled.
+
+The last cache snapshot had 63,525 blocks, 82,631,379 emitted bytes (about
+78.8 MiB), 128 MiB logical capacity and one growth. Every cache report had
+zero overflows and budget fallbacks. Thirteen throughput intervals translated
+no new blocks. The log reaches game, sound and renderer shutdown and contains
+no fatal-signal or emulator crash markers; an exit status was not recorded.
+
+This capture supports investigating generated-code cost and native helpers
+before treating repeated compilation or cache exhaustion as the principal
+CPU bottleneck. It does not establish the cause of the spider-robot/enemy
+slowdown or explain all warm-up behavior. Shader/asset activity, GPU work,
+game workload and concurrent applications are not isolated by these counters.
+The other games were launched together; their captures cover different lengths,
+so constant contention throughout the Doom run cannot be assumed.
+
+The raw local evidence is
+`bench-results/games-profile-20261005-064633/doom3.log`, with the launch
+configuration in `processes.json` and the complete interpreted-instruction
+inventory in `doom3-fallback.tsv`. Instruction counts are not CPU-time weights.
+The previous October 4 helper capture remains above as historical evidence;
+different scenes and durations prevent interpreting the share change as a
+controlled speedup.
 
 ## Gameplay screenshots (2026-10-04)
 
