@@ -10,6 +10,24 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Concurrent real-game profiling (2026-10-05)
+
+Doom 3, Neverball and Minecraft Weekend were launched as detached desktop
+processes on commit `25725e1`, with default tier-1 JIT, `BIFROST_PROF=1`,
+`BIFROST_STATS_PERIOD=30` and separate `BIFROST_FALLBACK_PROFILE` inventories.
+All three initialized rendering, remained running through the first reporting
+interval and wrote periodic profiles and fallback inventories. The local
+capture is `bench-results/games-profile-20261005-064633/`; `processes.json`
+records commands, working directories and PIDs. Doom's command requests the
+existing underground autosave; the other games use their ordinary launch paths.
+
+These are live concurrent captures, not completed stress-test results or
+controlled FPS comparisons. The games share CPU/GPU resources; startup, focus,
+scene and debug logging affect the measurements. Close each game normally to
+retain shutdown reports. No emulator code or hardware-specific policy changed.
+
+### Complete regression suites
+
 The latest October 5 native APK/service-manager checkpoint passes **273/273 in
 JIT mode** with no skips (223 s) and **266/266 in interpreter mode**, with seven
 JIT-only skips (204 s). Guest fixtures were refreshed with `make setup-tests`
