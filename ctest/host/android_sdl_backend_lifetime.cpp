@@ -1,6 +1,4 @@
 #include "frost/android_window_backend.hpp"
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_syswm.h>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -8,20 +6,7 @@
 #include <string>
 #include <unistd.h>
 
-// Stub only the SDL boundary using its actual public declarations. The backend
-// and dlopen helper library execute unchanged, without needing a compositor.
-static bool fail_wm_info = false;
-extern "C" SDL_bool SDL_GetWindowWMInfo(SDL_Window *, SDL_SysWMinfo *info) {
-  if (fail_wm_info) return SDL_FALSE;
-  info->subsystem = SDL_SYSWM_WAYLAND;
-  info->info.wl.display = reinterpret_cast<wl_display *>(0x1234);
-  info->info.wl.surface = reinterpret_cast<wl_surface *>(0x5678);
-  return SDL_TRUE;
-}
-extern "C" const char *SDL_GetError(void) { return "injected WM query failure"; }
-extern "C" void SDL_SetWindowSize(SDL_Window *, int, int) {}
-
-#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "SDL lifetime check failed at %d: %s\n", __LINE__, #x); return 1; } } while (0)
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "SDL3 lifetime check failed at %d: %s\n", __LINE__, #x); return 1; } } while (0)
 static std::string contents(const char *path) {
   std::ifstream file(path);
   return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
@@ -29,38 +14,58 @@ static std::string contents(const char *path) {
 int main() {
   char log[] = "/tmp/bifrost-wl-lifetime-XXXXXX";
   int fd = mkstemp(log);
-  CHECK(fd >= 0);
-  close(fd);
-  struct Cleanup { const char *path; ~Cleanup() { unlink(path); unsetenv("BIFROST_TEST_WL_LOG"); unsetenv("BIFROST_TEST_WL_CREATE_FAIL"); } } cleanup{log};
+  CHECK(fd >= 0); close(fd);
+  struct Cleanup { const char *path; ~Cleanup() { unlink(path); } } cleanup{log};
   setenv("BIFROST_TEST_WL_LOG", log, 1);
-  int first_window, second_window;
   auto first = frost::make_sdl_android_window_backend();
   auto second = frost::make_sdl_android_window_backend();
-  CHECK(first->attach_host_window(&first_window) == 0);
-  CHECK(second->attach_host_window(&second_window) == 0);
-  fail_wm_info = true;
+  setenv("BIFROST_TEST_SDL_CREATE_FAIL", "1", 1);
+  CHECK(first->open("first", 800, 600) < 0 && !first->binding().window);
+  unsetenv("BIFROST_TEST_SDL_CREATE_FAIL");
+  std::ofstream(log, std::ios::trunc).close();
+  CHECK(first->open("first", 800, 600) == 0);
+  CHECK(second->open("second", 800, 600) == 0);
+  setenv("BIFROST_TEST_SDL_BINDING_FAIL", "1", 1);
   CHECK(first->binding().window == 0);
-  fail_wm_info = false;
+  unsetenv("BIFROST_TEST_SDL_BINDING_FAIL");
   auto one = first->binding(), two = second->binding();
   CHECK(one.window && two.window && one.window != two.window && one.display == two.display);
-  first->detach_host_window();
-  first.reset();
-  CHECK(contents(log) == "load\ncreate\ncreate\ndestroy\n");
+  // Failed host resize never reaches the wrapper; native binding is stable.
+  setenv("BIFROST_TEST_SDL_RESIZE_FAIL", "1", 1);
+  CHECK(first->resize(320, 240, true) < 0);
+  CHECK(first->binding().window == one.window);
+  unsetenv("BIFROST_TEST_SDL_RESIZE_FAIL");
+  frost::AndroidWindowEvent event{};
+  setenv("BIFROST_TEST_SDL_EVENT", "key", 1);
+  CHECK(first->poll(event) == 1 && event.key_code == 29 && event.meta_state == 0x1001 && event.time_ms == 123);
+  setenv("BIFROST_TEST_SDL_EVENT", "pointer", 1);
+  CHECK(first->poll(event) == 1 && event.x == 20 && event.y == 40 && event.action == 0);
+  setenv("BIFROST_TEST_SDL_EVENT", "other-window", 1);
+  CHECK(first->poll(event) == 0 && event.type == 0);
+  unsetenv("BIFROST_TEST_SDL_EVENT");
+  first->close(); first.reset();
+  CHECK(contents(log) == "video-init\nwindow-create\nhost-resize\nvideo-init\nwindow-create\nhost-resize\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
   CHECK(second->resize(320, 240, false) == 0);
   second.reset();
-  CHECK(contents(log) == "load\ncreate\ncreate\ndestroy\nresize\ndestroy\nunload\n");
-  // A failed wrapper allocation must return an empty pair, release its helper
-  // reference and permit recovery without reattaching the borrowed window.
+  CHECK(contents(log).find("resize\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);
+  // Wrapper failure can recover; its helper reference must not leak.
   std::ofstream(log, std::ios::trunc).close();
   first = frost::make_sdl_android_window_backend();
-  CHECK(first->attach_host_window(&first_window) == 0);
+  CHECK(first->open("recover", 800, 600) == 0);
   setenv("BIFROST_TEST_WL_CREATE_FAIL", "1", 1);
   one = first->binding();
   CHECK(!one.window && !one.display);
-  CHECK(contents(log) == "load\nunload\n");
+  CHECK(contents(log).find("load\nunload\n") != std::string::npos);
   unsetenv("BIFROST_TEST_WL_CREATE_FAIL");
   CHECK(first->binding().window != 0);
   first.reset();
-  CHECK(contents(log) == "load\nunload\nload\ncreate\ndestroy\nunload\n");
-  std::puts("android_sdl_backend_lifetime: checks passed");
+  CHECK(contents(log).find("create\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);
+  // Stress repeated window, wrapper, subsystem and module teardown.
+  for (int i = 0; i < 256; ++i) {
+    first = frost::make_sdl_android_window_backend();
+    CHECK(first->open("stress", 800, 600) == 0 && first->binding().window);
+    CHECK(first->resize(320, 240, true) == 0);
+    first->close(); first->close(); first.reset();
+  }
+  std::puts("android_sdl_backend_lifetime: SDL3 checks and 256 teardown cycles passed");
 }

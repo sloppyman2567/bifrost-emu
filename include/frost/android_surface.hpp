@@ -75,11 +75,12 @@ public:
     void set_runner(GuestRunner r);
     void set_fd_resolver(FdResolver r);
 
-    // Called by DisplayThunk after the DisplayProxy window exists.
-    // sdl_window is the host SDL_Window*.
-    bool set_host_sdl_window(void* sdl_window);
-    bool ready() const { return sdl_window_ != nullptr; }
-    bool uses_host_window(void* window) const { return sdl_window_ == window; }
+    // Backend owns its host window; no SDL pointer crosses this interface.
+    bool open_host_window();
+    void close_host_window();
+    bool ready() const { return window_open_; }
+    // Commit geometry only when the backend accepts the host notification.
+    int handle_host_resize(int32_t width, int32_t height);
 
     // ── ANativeWindow shims (v1 API, unchanged) ────────────────────────
     // ANativeWindow_fromSurface: returns the singleton shim handle (0 on
@@ -106,7 +107,7 @@ public:
     uint64_t host_native_window();
     // The native display the guest's eglGetDisplay(EGL_DEFAULT_DISPLAY)
     // should wrap so it lands on the SAME connection as the surface:
-    // wl_display* on Wayland, nullptr on X11 (default display is fine).
+    // wl_display* on Wayland, Display* on X11.
     void* native_display() const;
     // Install at startup, before a host window or guest surface exists.
     bool install_window_backend(std::unique_ptr<AndroidWindowBackend> backend);
@@ -293,14 +294,10 @@ public:
     arm64emu::Memory* mem_ = nullptr;
     GuestRunner runner_;
     FdResolver fd_resolver_;
-    void translate_sdl_event_(arm64emu::CPU* cpu, void* sdl_event);  // SDL_Event*
+    void translate_window_event_(const AndroidWindowEvent& event);
 
- public:
-    // ── SDL→Android keycode translation (exposed for tests) ───────────
-    static int32_t sdl_key_to_android(int32_t sdl_key, int32_t* meta_out);
-
- private:
-    void* sdl_window_ = nullptr;
+    bool window_open_ = false;
+    int64_t pointer_down_time_ms_ = 0;
     std::unique_ptr<AndroidWindowBackend> window_backend_;
     uint64_t surface_handle_ = 0;   // 0 = not created yet
     int refs_ = 0;

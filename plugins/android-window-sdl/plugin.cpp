@@ -16,16 +16,16 @@ int32_t create(void **out) {
   catch (...) { return -EIO; }
 }
 void destroy(void *instance) { delete static_cast<AndroidWindowBackend *>(instance); }
-int32_t attach(void *instance, void *window) {
-  try { return static_cast<AndroidWindowBackend *>(instance)->attach_host_window(window); }
+int32_t open(void *instance, const char *title, int32_t w, int32_t h) {
+  try { return static_cast<AndroidWindowBackend *>(instance)->open(title, w, h); }
   catch (...) { return -EIO; }
 }
-void detach(void *instance) { static_cast<AndroidWindowBackend *>(instance)->detach_host_window(); }
+void close(void *instance) { static_cast<AndroidWindowBackend *>(instance)->close(); }
 int32_t resize(void *instance, int32_t w, int32_t h, uint32_t host) {
   try { return static_cast<AndroidWindowBackend *>(instance)->resize(w, h, host != 0); }
   catch (...) { return -EIO; }
 }
-int32_t binding(void *instance, bifrost_android_window_binding_v1 *out) {
+int32_t binding(void *instance, bifrost_android_window_binding_v2 *out) {
   *out = {};
   try {
     auto value = static_cast<AndroidWindowBackend *>(instance)->binding();
@@ -34,11 +34,16 @@ int32_t binding(void *instance, bifrost_android_window_binding_v1 *out) {
     return 0;
   } catch (...) { return -EIO; }
 }
-const bifrost_android_window_plugin_v1 api = {
-    BIFROST_ANDROID_WINDOW_ABI_V1, sizeof(api), "sdl-egl-plugin",
-    create, destroy, attach, detach, resize, binding};
+int32_t poll(void *instance, bifrost_android_window_event_v2 *out) {
+  *out = {};
+  try { return static_cast<AndroidWindowBackend *>(instance)->poll(*out); }
+  catch (...) { *out = {}; return -EIO; }
+}
+const bifrost_android_window_plugin_v2 api = {
+    BIFROST_ANDROID_WINDOW_ABI_V2, sizeof(api), "sdl3-egl-plugin",
+    create, destroy, open, close, resize, binding, poll};
 }
 extern "C" __attribute__((visibility("default")))
-const bifrost_android_window_plugin_v1 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {
-  return host_abi == BIFROST_ANDROID_WINDOW_ABI_V1 ? &api : nullptr;
+const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {
+  return host_abi == BIFROST_ANDROID_WINDOW_ABI_V2 ? &api : nullptr;
 }

@@ -216,17 +216,18 @@ See [APK setup, validation and limits](docs/ANDROID_APK.md), the
 [Android architecture](docs/ANDROID_ARCHITECTURE.md). Virtual Binder devices
 support bounded transactions and object handles. `--android-services` adds a
 native service-manager registry; see [Binder limits and tests](docs/ANDROID_BINDER.md).
-The native surface adapter now has an injectable window backend, verified with
-native Wayland EGL presentation and pixel readback. Its [window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md)
-also records the repaired XWayland socket path and remaining Mesa EGL/GLX failures.
-Window backends can also be loaded through a versioned host C ABI: build the
-optional SDL/EGL module with `make android-window-plugin`, then supply
+The Android surface adapter uses an SDL3 window backend behind a versioned
+host C plugin interface. Plugins own their windows and return native EGL handles
+and normalized input events; no SDL object crosses the interface. Guest SDL2
+thunks remain compatible with SDL2. Build the optional module with
+`make android-window-plugin`, then pass
 `--android-window-plugin ./build/release-sdl1-gl1/plugins/android-window-sdl.so`
-before `--android` or the guest ELF. The default backend remains built in.
-The plugin refinement passes 33 native Wayland surface checks with both
-backends/engines, twelve CLI cases in SDL and headless builds, and the SDL
-helper-lifetime oracle. The full-suite checkpoint above includes these changes;
-standalone Tier-2, Android, TLS, graphics ABI and lifecycle regressions also pass.
+before `--android` or the guest ELF. V1 plugins must be rebuilt for ABI V2.
+Failed resizes preserve reported geometry and unsupported formats return errors.
+The V2 checkpoint passes 21 focused graphics tests in each engine, host/CLI
+contracts, 256 SDL3 teardown cycles and a complete signed APK gate; these are
+not a new full-suite or gameplay-performance claim. See the
+[window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md) for coverage and limits.
 
 Full Bionic/platform compatibility and ART execution remain planned for v2.0;
 see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
@@ -303,7 +304,8 @@ complete Android runtime.
 - Linux x86_64 host
 
 Optional (for full feature set):
-- **SDL2 dev headers** (`./tools/fetch-sdl2-headers.sh`) — for framebuffer window
+- **SDL2 dev headers** (`./tools/fetch-sdl2-headers.sh`) — for framebuffer and guest SDL2 thunks
+- **SDL3 dev headers >=3.2**, plus the SDL3 runtime — for Android host windows
 - **AArch64 cross-toolchain** — for cross-compiling test binaries
 
 ### Build
@@ -313,8 +315,11 @@ Optional (for full feature set):
 # when sdl2-config is available (BIFROST_USE_SDL2 / GL/EGL thunks)
 make
 
-# Force a headless build even if SDL2 is installed
-make USE_SDL2=0
+# Force a headless build even if SDL2/SDL3 are installed
+make USE_SDL2=0 USE_SDL3=0
+
+# Android SDL3 host windows; preserve guest SDL2 thunk support
+make USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1
 
 # Force the SDL2 build (errors if sdl2-config is not installed)
 make USE_SDL2=1

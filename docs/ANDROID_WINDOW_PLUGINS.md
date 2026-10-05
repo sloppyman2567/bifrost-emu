@@ -1,47 +1,77 @@
 # Android window plugins
 
-`AndroidWindowBackend` is the internal host-side C++ interface. The default
-`sdl-egl` implementation wraps the existing DisplayProxy window and resolves
-its X11 native window or Wayland EGL wrapper. AndroidSurfaceManager owns the
-backend and retains guest handles, reference bookkeeping, activity callbacks
-and input delivery. The backend receives no guest Memory or CPU capability.
+## Current interface (2026-10-05)
 
-Install a backend with `install_window_backend()` before attaching a host
-window or issuing any guest surface handle. Live replacement is rejected:
-changing a backend would invalidate existing EGL surfaces. The host window is
-borrowed; its owner detaches it before destruction. The SDL implementation
-releases its Wayland EGL wrapper at detach, before SDL destroys the wl_surface.
-Its helper-library reference is owned by that backend and released after wrapper
-destruction, including when a shared-object plugin unloads. Failed bindings
-return an empty window/display pair and can recover on a later attempt.
-Window and display are resolved together so Wayland EGL uses one connection.
-Attach, resize and EGL binding operations belong to the display thread.
+`AndroidWindowBackend` owns its host window, native EGL binding and input source.
+The default `sdl3-egl` backend uses SDL3. Guest SDL2 thunks, SDL2 surface conversion,
+Linux DisplayProxy and framebuffer/audio paths retain their existing SDL2 ABI.
+AndroidSurfaceManager retains guest handles, reference bookkeeping, activity
+callbacks and input delivery; the backend receives no guest Memory or CPU.
+There is no borrowed `SDL_Window*` in the plugin interface.
 
-Attach and resize return explicit errors. A failed attach preserves the current
-borrowed window; a failed resize preserves the reported dimensions and format.
-Negative dimensions or format are rejected. Width and height must both be zero
-or both positive; zeros restore the adapter's base 800×600/RGBA8888 settings,
-following the [NDK geometry contract](https://developer.android.com/ndk/reference/group/a-native-window#anativewindow_setbuffersgeometry).
-This single-window adapter also resizes the host window; it does not yet separate
-physical window dimensions from Android buffer dimensions or negotiate buffer
-formats. Detach is infallible and idempotent. Independent adapter contexts can be
-constructed with an owned backend; their destruction detaches before destroying
-it. The emulator's existing thunk/activity wiring still uses its singleton
-context, so this does not establish multiple simultaneous Android runtimes.
+Install before opening a window or issuing any guest surface handle. Live backend
+replacement is rejected because it would invalidate existing EGL objects. Calls
+belong to the display thread. The emulator still wires one singleton Android
+runtime and one window; multiple concurrent runtimes and SDL event demultiplexing
+between independent contexts are not implemented.
+
+The SDL3 backend opens a window without an extra SDL renderer. On Wayland it owns
+its `wl_egl_window` and keeps the helper DSO loaded until wrapper destruction;
+on X11 it returns the window ID and its actual `Display*`. The native display
+and window belong to the same connection. Failed binding resolution returns
+an empty pair and can recover later. Close releases the wrapper before destroying
+the host window, balances its SDL video-subsystem reference and is idempotent.
+It uses `SDL_QuitSubSystem`, never process-global `SDL_Quit`.
+
+SDL3 functions are resolved explicitly from `libSDL3.so.0` with `dlopen`/`dlsym`.
+This avoids mixing SDL2 and SDL3 functions with overlapping symbol names; the
+[upstream SDL2 compatibility implementation](https://github.com/libsdl-org/sdl2-compat/blob/main/src/sdl2_compat.c)
+uses the same explicit SDL3 lookup approach. No SDL3 symbols are linked globally.
+The [SDL3 window-properties API](https://wiki.libsdl.org/SDL3/SDL_GetWindowProperties)
+supplies the native handles. SDL3 development headers >=3.2 are optional at
+build time (`pkg-config sdl3`); a build without them, or a missing runtime DSO,
+returns `-ENOSYS` when opening the default Android window. Other guest SDL2
+paths continue to work. `USE_SDL3` defaults to `USE_SDL2` and can be selected
+independently. `make USE_SDL2=0 USE_SDL3=0 USE_THUNK_GL=0` disables both.
+
+Resize operations commit reported dimensions only after backend success,
+including host resize notifications. Failed notifications are logged and preserve
+the manager's previous geometry; the backend must likewise preserve its buffer
+geometry. SDL3 resize failure is checked before modifying its EGL wrapper. Pixel geometry
+is converted to SDL logical window dimensions on scaled displays.
+Negative geometry is rejected; both dimensions must be zero or both positive.
+Zeros restore the adapter's base 800×600 settings. The adapter supports only
+RGBA8888: other positive formats now return `-ENOTSUP` instead of reporting
+an unsupported format as successful. Separate Android buffer queues, format
+negotiation and independent physical/buffer sizing are still absent.
 
 ## Loadable host modules
 
-The public C header [android_window_plugin.h](../include/bifrost/android_window_plugin.h)
-defines host ABI version 1. A plugin exports
-`bifrost_android_window_plugin_get_api(uint32_t host_abi)` and returns an immutable
-descriptor with its version, size, name and create/destroy/attach/detach/resize/
-binding callbacks. The loader checks the entire required prefix before creating
-an instance. Status callbacks return zero or a negative errno; invalid positive
-or out-of-range status values become `-EPROTO`. Binding errors discard the whole
-window/display pair. Plugins must preserve state on failed attach/resize, avoid
-reentry and never throw across the C boundary.
+[android_window_plugin.h](../include/bifrost/android_window_plugin.h) defines
+**host ABI version 2**. Plugins export
+`bifrost_android_window_plugin_get_api(uint32_t host_abi)` and return an immutable
+version/size/name descriptor with create, destroy, open, close, resize, binding
+and poll callbacks. Open owns or internally borrows a window; ownership never
+crosses as an SDL object. Binding returns only native EGL handles. V1 binaries
+are incompatible and rejected explicitly; rebuild plugins for V2. The old
+SDL-pointer callbacks are not silently reinterpreted.
 
-Load a module explicitly before `--android` or the guest ELF:
+Status callbacks return zero or negative errno. Poll is nonblocking and returns
+1 for an event, 0 for an empty queue, or negative errno. Events carry Android
+keycodes/actions/meta bits, monotonic milliseconds and surface-pixel pointer
+coordinates, without SDL enums or structs. V2 supports a single pointer per
+event, not Android multitouch. The SDL3 adapter filters by its own window ID,
+converts mouse coordinates to pixels and preserves modifier state. Event work
+is bounded per pump. Invalid statuses, types, geometry, actions and nonfinite
+pointer values become `-EPROTO`; error/empty outputs discard poisoned data.
+
+The loader validates the descriptor before instance creation. Plugins must
+preserve geometry on failed resize, leave a failed open closed, avoid reentry
+and never throw across the C boundary. Partial create failures are destroyed.
+Close/destroy finish before module unload; workers must stop/join during destroy.
+Host module paths contain `/`, with no guest soname search or rootfs remapping.
+Modules load with `RTLD_NOW | RTLD_LOCAL`. These are trusted native modules,
+not a security sandbox.
 
 ```bash
 make android-window-plugin
@@ -49,83 +79,55 @@ make android-window-plugin
   ctest_real/test_android_surface.elf
 ```
 
-The optional SDL/EGL module is built from `plugins/android-window-sdl/plugin.cpp`
-and the same backend implementation as the built-in default. It exports only
-the C entry point and does not link libbifrost. Leaving the option unset uses
-the built-in backend. `--android` consumes subsequent arguments as guest arguments,
-so place the plugin option before it. Host help/config-only requests do not load
-it, including config-only requests on the `--android` launch path. Guest arguments
-named `--print-config` or `--config` are not parsed as host options.
+The optional module shares the built-in SDL3 implementation, exports only the
+C entry point and links neither libbifrost nor SDL2/SDL3. Place the option before
+`--android` or the ELF. Help/config-only host requests do not load the module.
+Presentation remains in the EGL thunk (`eglSwapBuffers`); input comes from the
+backend's normalized event stream. This is a window interface, not a general
+Binder/media/ART plugin ABI or framework Surface/BufferQueue implementation.
+See [APK launch and limits](ANDROID_APK.md).
 
-Module paths are host filesystem paths containing `/`, with no guest soname
-search or rootfs remapping. The loader uses `RTLD_NOW | RTLD_LOCAL` so missing
-dependencies fail during loading and plugin symbols are not made globally
-available; see [dlopen semantics](https://man7.org/linux/man-pages/man3/dlopen.3.html).
-These are trusted native host modules, not sandboxed guest code. No guest
-Memory/CPU capability or C++ object crosses the public interface. Destroy handles
-partially created instances after creation failure. The module remains loaded
-until successful instances have detached and all plugin destruction callbacks
-have returned.
+## Validation and reproduction
 
-This checkpoint extracts window handling. It does not yet provide a general
-Binder service plugin registry, framework Surface/BufferQueue parcel handling,
-multiple Android surfaces or an ABI for complete Android platform plugins.
-Version 1 covers only host window binding and geometry.
-Presentation remains in the existing EGL thunk (`eglSwapBuffers`); plugins
-provide the native binding that it uses. SDL input remains in the activity
-adapter. Android runtime mode now uses guest platform shim DSOs for this bridge
-through the real Bionic linker; the signed native APK fixture verifies both
-built-in and loadable backends. See [APK launch and limits](ANDROID_APK.md).
+Completed checks:
 
-## Reproduction
+- Host backend and C plugin contracts in SDL-enabled and headless builds,
+  including open failure, geometry rollback, unsupported formats, legacy ABI
+  rejection, invalid event rejection, partial-create cleanup and
+  close/destroy-before-unload. Twelve CLI cases pass in each build.
+- SDL3/helper DSO lifetime oracle, including failed creation, failed resize,
+  binding recovery, modifier/pixel conversion and 256 teardown cycles. Its
+  synthetic display has 2× pixel density and exercises logical/pixel sizing.
+- Focused Android/SDL/EGL/Wayland regressions: 21/21 JIT and 21/21 interpreter
+  with desktop/GPU access, after rebuilding the changed ARM64 surface fixture.
+- Final signed APK suite: six unittest cases in 67.182 seconds. Real Bionic and
+  Media NDK plus built-in/plugin × JIT/interpreter/Tier-2 native Wayland graphics
+  pass with SDL3's `SDL_VIDEO_DRIVER=wayland` set explicitly.
+
+The initial sandbox run blocked the cross compiler and reported the stale surface
+fixture; restricted GPU access also produced Mesa errors in the framebuffer test.
+The subsequent provisioned focused reruns passed. Concurrent Doom 3/Neverball/
+Minecraft Weekend smoke attempts used software rendering inside that sandbox;
+they do not establish hardware performance or a gameplay stability checkpoint.
+After testing was authorized again, a separate bounded Neverball run initialized
+OpenGL on the Radeon GPU with no logged fatal error. It was forcibly stopped
+at the smoke-check deadline; this is startup/rendering evidence, not a clean
+shutdown or sustained gameplay result.
+Testing was stopped at the user's request and resumed only after authorization.
+Final X11 Android rendering and a full-suite rerun are not claimed for this V2
+checkpoint. Earlier full-suite numbers below describe older commits.
+
+These commands open windows; run them only when desktop testing is wanted:
 
 ```bash
 make -j6
-make test-android-window-backend
-make test-android-window-plugin
-make test-android-window-plugin-cli # requires the cross-built ctest/hello.elf
-make test-android-sdl-backend # SDL headers; fake SDL boundary, real dlopen lifetime
-make android-window-plugin
+make test-android-window-backend test-android-window-plugin-cli
+make test-android-sdl-backend
 make cross SRC=ctest_real/test_android_surface.c OUT=ctest_real/test_android_surface.elf
-./scripts/run_tests.sh --filter 'android_surface|android_activity|sdl_gl_triangle'
-./scripts/run_tests.sh --no-jit --filter 'android_surface|android_activity|sdl_gl_triangle'
-bash scripts/run_android_surface_demo.sh
-SDL_VIDEODRIVER=wayland ./bifrost-emu ctest_real/test_android_surface.elf
-SDL_VIDEODRIVER=wayland ./bifrost-emu --no-jit ctest_real/test_android_surface.elf
-SDL_VIDEODRIVER=wayland ./bifrost-emu \
-  --android-window-plugin ./build/release-sdl1-gl1/plugins/android-window-sdl.so \
-  ctest_real/test_android_surface.elf
+SDL_VIDEO_DRIVER=wayland ./bifrost-emu ctest_real/test_android_surface.elf
+SDL_VIDEO_DRIVER=wayland ./bifrost-emu --android-window-plugin \
+  ./build/release-sdl1-gl1/plugins/android-window-sdl.so ctest_real/test_android_surface.elf
 ```
-
-Host tests check delegation, failure rollback, independent context teardown and
-replacement rejection after attachment or handle issuance. A separately compiled
-C shared object verifies descriptor rejection, partial-create cleanup, poisoned
-binding rejection and detach/destroy-before-unload ordering. Both host targets
-also run without SDL and are included in CI, `make ci` and `make check-all`.
-The SDL helper-lifetime oracle stubs SDL through its actual public declarations
-and loads an independently compiled helper DSO. It checks concurrent backend
-references, wrapper-before-helper destruction and recovery after WM query or
-wrapper allocation failure. This runs in CI's SDL build job without a compositor.
-The ARM64 surface fixture creates a real EGL window, reads back its clear color, presents it, checks
-geometry and destroys its EGL objects. Demo mode displays changing colors for
-ten seconds. This is a musl-static ARM64 adapter fixture, not an Android APK
-or a test of the real Bionic linker and Android framework.
-
-Native Wayland verification: forcing `SDL_VIDEODRIVER=wayland` passes all 33
-surface checks in both JIT and interpreter mode, including EGL window creation,
-GPU pixel readback, presentation, geometry error/reset semantics and teardown.
-Both the built-in backend and the loadable SDL/EGL module pass these checks.
-SDL cannot select its X11 backend in these runs. This does not validate the downloaded Mesa demos.
-
-The plugin refinement passes both host contract targets in SDL and headless
-builds, plus all twelve CLI startup/help/error cases in each build. Headless SDK
-independence passes. Focused Android/Binder/syscall, SDL triangle, socket and
-XWayland regressions pass 10/10 in both engines. The separate pinned Bionic
-bootstrap still passes all six fixed/random ASLR and execution configurations.
-The October 5 full-suite rerun of `700e8e0` includes these plugin changes:
-272/272 JIT tests and 265/265 interpreter tests pass, with seven JIT-only
-interpreter skips. Differential verification passes 60 fixtures and five
-threaded result oracles. See [the complete validation scope](TESTS.md).
 
 ## Independent downloaded programs
 

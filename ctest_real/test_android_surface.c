@@ -157,8 +157,8 @@ int main(int argc, char** argv) {
         "other half-zero geometry rejected");
     chk(ANativeWindow_getWidth(win) == 640 && ANativeWindow_getHeight(win) == 480,
         "invalid geometry preserves dimensions");
-    chk(ANativeWindow_setBuffersGeometry(win, 320, 240, 2) == 0,
-        "set alternate reported format");
+    chk(ANativeWindow_setBuffersGeometry(win, 320, 240, 2) == -95,
+        "unsupported format rejected");
     chk(ANativeWindow_setBuffersGeometry(win, 0, 0, 0) == 0,
         "zero geometry restores base settings");
     chk(ANativeWindow_getWidth(win) == base_width &&

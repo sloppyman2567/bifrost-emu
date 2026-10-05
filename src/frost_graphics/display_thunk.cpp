@@ -252,19 +252,12 @@ void DisplayThunk::set_wl_fd_publisher(WlFdPublisher p) {
     impl_->wl_fd_publisher_ = std::move(p);
     if (impl_->proxy_) impl_->proxy_->set_fd_publisher(impl_->wl_fd_publisher_);
 }
-void* DisplayThunk::ensure_android_window() {
-    if (!impl_ || !impl_->mem) return nullptr;
-    if (!impl_->proxy_) {
-        impl_->proxy_ = std::make_unique<DisplayProxy>();
-        impl_->proxy_->set_memory(impl_->mem);
-    }
-    if (!impl_->proxy_->ready()) impl_->proxy_->init(800, 600, impl_->mem);
-    if (!impl_->proxy_->ready()) return nullptr;
+bool DisplayThunk::ensure_android_window() {
+    if (!impl_ || !impl_->mem) return false;
     auto& mgr = frost::AndroidSurfaceManager::instance();
     mgr.set_memory(impl_->mem);
-    if (!mgr.set_host_sdl_window(impl_->proxy_->host_window())) return nullptr;
-    mgr.host_native_window();
-    return impl_->proxy_->host_window();
+    if (!mgr.open_host_window()) return false;
+    return mgr.host_native_window() != 0;
 }
 void DisplayThunk::register_function_(const std::string& lib,
                                         const std::string& sym,
@@ -1172,22 +1165,8 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
 
-        // ── ANativeWindow shims require the host window ───────────────
-        if (!impl_->proxy_) {
-            impl_->proxy_ = std::make_unique<DisplayProxy>();
-            impl_->proxy_->set_memory(impl_->mem);
-        }
-        if (!impl_->proxy_->ready()) {
-            impl_->proxy_->init(800, 600, impl_->mem);
-        }
-        if (impl_->proxy_->ready()) {
-            mgr.set_host_sdl_window(impl_->proxy_->host_window());
-            // Eagerly resolve the host native window + wl_display NOW so
-            // the guest's later eglGetDisplay(EGL_DEFAULT_DISPLAY)
-            // substitution (same wl_display connection) is armed before
-            // any EGL call.
-            mgr.host_native_window();
-        }
+        // Open the backend-owned window before resolving the EGL pair.
+        ensure_android_window();
         if (n == "ANativeWindow_fromSurface") {
             // (JNIEnv*, jobject) — both opaque; v1 is a single-surface
             // singleton. Returns 0 (NULL) when no host window exists,

@@ -38,6 +38,8 @@ LDFLAGS  ?= -pthread
 BUILD_PROFILE ?= release
 USE_SDL2 ?= 1
 USE_THUNK_GL ?= 1
+# Android host window only; guest SDL2 thunk ABI remains unchanged.
+USE_SDL3 ?= $(USE_SDL2)
 BUILD_DIR ?= build/$(BUILD_PROFILE)-sdl$(USE_SDL2)-gl$(USE_THUNK_GL)
 OBJDIR   := $(BUILD_DIR)
 TARGET   ?= $(BUILD_DIR)/bifrost-emu
@@ -90,6 +92,16 @@ ifeq ($(USE_SDL2),1)
         LDFLAGS  += $(SDL2_LIBS)
     else
         $(warning "sdl2-config not found — building headless (install libsdl2-dev for SDL2)")
+    endif
+endif
+
+ifeq ($(USE_SDL3),1)
+    SDL3_CFLAGS := $(shell pkg-config --cflags sdl3 2>/dev/null)
+    SDL3_AVAILABLE := $(shell pkg-config --exists 'sdl3 >= 3.2.0' 2>/dev/null && echo yes)
+    ifeq ($(SDL3_AVAILABLE),yes)
+        CXXFLAGS += $(SDL3_CFLAGS) -DBIFROST_USE_SDL3
+    else
+        $(warning "SDL3 development headers unavailable; Android window backend returns ENOSYS")
     endif
 endif
 
@@ -242,7 +254,7 @@ $(CONFIG_STAMP): FORCE
 	@mkdir -p $(OBJDIR)
 	@tmp="$@.tmp"; { \
 	  printf '%s\n' 'CXX=$(CXX)' 'CXXFLAGS=$(CXXFLAGS)' 'LDFLAGS=$(LDFLAGS)' \
-	    'USE_SDL2=$(USE_SDL2)' 'USE_THUNK_GL=$(USE_THUNK_GL)' 'BUILD_PROFILE=$(BUILD_PROFILE)'; \
+	    'USE_SDL2=$(USE_SDL2)' 'USE_SDL3=$(USE_SDL3)' 'USE_THUNK_GL=$(USE_THUNK_GL)' 'BUILD_PROFILE=$(BUILD_PROFILE)'; \
 	} > "$$tmp"; \
 	if ! cmp -s "$$tmp" "$@"; then mv "$$tmp" "$@"; else rm -f "$$tmp"; fi
 
@@ -512,13 +524,14 @@ test-android-window-backend: $(LIB)
 
 .PHONY: test-android-sdl-backend
 test-android-sdl-backend:
-ifneq ($(SDL2_CFLAGS),)
+ifeq ($(SDL3_AVAILABLE),yes)
 	@mkdir -p $(OBJDIR)/test-wayland
+	$(CC) -std=c11 -Wall -Wextra -fPIC -shared ctest/host/android_sdl3_fixture.c $(SDL3_CFLAGS) -o $(OBJDIR)/test-wayland/libSDL3.so.0
 	$(CC) -std=c11 -Wall -Wextra -fPIC -shared ctest/host/wayland_egl_lifetime_fixture.c -o $(OBJDIR)/test-wayland/libwayland-egl.so.1
 	$(CXX) $(CXXFLAGS) ctest/host/android_sdl_backend_lifetime.cpp src/frost_graphics/android_window_backend.cpp -o $(OBJDIR)/android_sdl_backend_lifetime -pthread -ldl
 	LD_LIBRARY_PATH=$(abspath $(OBJDIR)/test-wayland) ./$(OBJDIR)/android_sdl_backend_lifetime
 else
-	@echo "error: test-android-sdl-backend requires USE_SDL2=1 and SDL2 development headers" >&2
+	@echo "error: test-android-sdl-backend requires USE_SDL3=1 and SDL3 development headers" >&2
 	@exit 1
 endif
 
@@ -536,7 +549,7 @@ android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
 
 $(ANDROID_WINDOW_PLUGIN): plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp include/frost/android_window_backend.hpp include/bifrost/android_window_plugin.h Makefile $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp -o $@ $(SDL2_LIBS) -pthread -ldl
+	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp -o $@ -pthread -ldl
 
 test-android-window-plugin: $(LIB)
 	$(CC) -std=c11 -Wall -Wextra -Iinclude -fPIC -shared ctest/host/android_window_plugin_fixture.c -o $(OBJDIR)/android_window_plugin_fixture.so

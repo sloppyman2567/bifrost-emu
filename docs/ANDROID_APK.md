@@ -13,7 +13,7 @@ Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK co
 downloads; no full Android SDK installation is required.
 
 ```bash
-make -j6 USE_SDL2=1 USE_THUNK_GL=1
+make -j6 USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1
 python3 tools/fetch-android-runtime.py
 python3 tools/fetch-aapt2.py
 python3 tools/fetch-android-package-tools.py
@@ -27,7 +27,7 @@ python3 scripts/android_package.py run org.example.package
 python3 scripts/android_package.py probe org.example.package
 python3 scripts/android_package.py probe org.example.package --library libunity.so
 
-# Use the existing loadable window backend instead of the built-in backend.
+# Use the loadable SDL3 window backend instead of the built-in backend.
 python3 scripts/android_package.py run org.example.package \
     --android-window-plugin build/release-sdl1-gl1/plugins/android-window-sdl.so
 ```

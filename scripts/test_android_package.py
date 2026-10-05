@@ -234,6 +234,7 @@ class PackageTests(unittest.TestCase):
                 env = {
                     **os.environ,
                     "SDL_VIDEODRIVER": "wayland",
+                    "SDL_VIDEO_DRIVER": "wayland",
                     "BIFROST_TIER2": "1" if mode == "tier2" else "0",
                     "BIFROST_TIER2_HITS": "32",
                 }

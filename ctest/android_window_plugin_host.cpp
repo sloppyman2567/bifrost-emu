@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
   CHECK(!frost::load_android_window_backend("soname.so", error) && error.find("explicit host path") != std::string::npos);
   CHECK(!frost::load_android_window_backend("/does/not/exist.so", error) && !error.empty());
   CHECK(!frost::load_android_window_backend(argv[2], error) && error.find("entry point") != std::string::npos);
-  for (const char *invalid : {"null-api", "bad-version", "bad-size", "missing-callback", "empty-name", "create-null", "create-fail"}) {
+  for (const char *invalid : {"null-api", "bad-version", "legacy-version", "bad-size", "missing-callback", "empty-name", "create-null", "create-fail"}) {
     mode(invalid);
     std::ofstream(log, std::ios::trunc).close();
     CHECK(!frost::load_android_window_backend(argv[1], error) && !error.empty());
@@ -40,22 +40,18 @@ int main(int argc, char **argv) {
   CHECK(std::string(backend->name()) == "c-fixture");
   {
     frost::AndroidSurfaceManager manager(std::move(backend));
-    int first_window, second_window;
-    CHECK(manager.set_host_sdl_window(&first_window));
+    CHECK(manager.open_host_window());
     CHECK(manager.host_native_window() == (uint64_t(800) << 32 | 600));
-    CHECK(manager.native_display() == &first_window);
-    mode("attach-fail");
-    CHECK(!manager.set_host_sdl_window(&second_window));
-    CHECK(manager.uses_host_window(&first_window) && manager.native_display() == &first_window);
+    CHECK(manager.native_display() != nullptr);
     mode("resize-fail");
-    CHECK(manager.set_buffers_geometry(320, 240, 2) == -ENOTSUP);
+    CHECK(manager.set_buffers_geometry(320, 240, 1) == -ENOTSUP);
     CHECK(manager.width() == 800 && manager.height() == 600 && manager.format() == 1);
     mode("positive-status");
     CHECK(manager.set_buffers_geometry(320, 240, 0) == -EPROTO);
     mode("binding-fail");
     CHECK(manager.host_native_window() == 0 && manager.native_display() == nullptr);
     mode("");
-    CHECK(manager.set_buffers_geometry(320, 240, 2) == 0);
+    CHECK(manager.set_buffers_geometry(320, 240, 1) == 0);
     CHECK(manager.host_native_window() == (uint64_t(320) << 32 | 240));
     CHECK(manager.set_buffers_geometry(-1, 240, 0) == -EINVAL);
     CHECK(manager.set_buffers_geometry(0, 240, 0) == -EINVAL);
@@ -65,24 +61,36 @@ int main(int argc, char **argv) {
     CHECK(contents(log).find("unload") == std::string::npos);
     CHECK(manager.from_surface() != 0);
     CHECK(!manager.install_window_backend(frost::make_sdl_android_window_backend()));
-    // Destructor must detach the borrowed window while the DSO is resident.
+    // Destructor must close the owned window while the DSO is resident.
   }
-  CHECK(contents(log) == "create\nattach\ndetach\ndestroy\nunload\n");
+  CHECK(contents(log) == "create\nopen\nclose\ndestroy\nunload\n");
+  // Poll has its own positive-success contract; poison is discarded.
+  auto polling = frost::load_android_window_backend(argv[1], error);
+  CHECK(polling);
+  frost::AndroidWindowEvent event{};
+  for (const char *invalid : {"poll-invalid", "poll-positive", "poll-fail", "poll-nan", "poll-key-invalid"}) {
+    mode(invalid);
+    CHECK(polling->poll(event) < 0 && event.type == 0);
+  }
+  mode("poll-resize");
+  CHECK(polling->poll(event) == 1 && event.width == 640 && event.height == 480);
+  mode("");
+  CHECK(polling->poll(event) == 0 && event.type == 0);
+  polling.reset();
   // Multiple instances must retain independent geometry and module references.
   std::ofstream(log, std::ios::trunc).close();
   auto first = std::make_unique<frost::AndroidSurfaceManager>(
       frost::load_android_window_backend(argv[1], error));
   auto second = std::make_unique<frost::AndroidSurfaceManager>(
       frost::load_android_window_backend(argv[1], error));
-  int first_window, second_window;
-  CHECK(first->set_host_sdl_window(&first_window));
-  CHECK(second->set_host_sdl_window(&second_window));
+  CHECK(first->open_host_window());
+  CHECK(second->open_host_window());
   CHECK(first->set_buffers_geometry(128, 64, 0) == 0);
   CHECK(second->host_native_window() == (uint64_t(800) << 32 | 600));
   first.reset();
   CHECK(contents(log).find("unload") == std::string::npos);
-  CHECK(second->native_display() == &second_window);
+  CHECK(second->native_display() != nullptr);
   second.reset();
-  CHECK(contents(log) == "create\ncreate\nattach\nattach\ndetach\ndestroy\ndetach\ndestroy\nunload\n");
+  CHECK(contents(log) == "create\ncreate\nopen\nopen\nclose\ndestroy\nclose\ndestroy\nunload\n");
   std::puts("android_window_plugin_host: checks passed");
 }

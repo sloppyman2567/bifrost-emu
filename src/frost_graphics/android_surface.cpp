@@ -1,7 +1,7 @@
 // frost_graphics/android_surface.cpp — Android NativeActivity layer
 //
 // v1 (see android_surface.hpp): ANativeWindow shims backed by the
-// DisplayProxy host SDL window; EGL window-surface interception in
+// backend-owned host window; EGL window-surface interception in
 // GraphicThunk substitutes the host native window for the shim handle.
 //
 // v2 (2026-08): NativeActivity lifecycle driver state, ALooper registry,
@@ -33,9 +33,6 @@
 #include <stdexcept>
 #include <poll.h>
 #include <unistd.h>
-#if defined(BIFROST_USE_SDL2)
-#include <SDL2/SDL.h>
-#endif
 
 namespace frost {
 
@@ -52,17 +49,30 @@ void AndroidSurfaceManager::set_fd_resolver(FdResolver r) {
     fd_resolver_ = std::move(r);
 }
 
-bool AndroidSurfaceManager::set_host_sdl_window(void* sdl_window) {
-    if (sdl_window_ == sdl_window) return true;
-    if (!sdl_window) {
-        window_backend_->detach_host_window();
-    } else if (int error = window_backend_->attach_host_window(sdl_window)) {
-        std::fprintf(stderr, "[android] window backend %s attach failed (%d)\n",
+bool AndroidSurfaceManager::open_host_window() {
+    if (ready()) return true;
+    int error = window_backend_->open("Bifrost Android", width_, height_);
+    if (error) {
+        std::fprintf(stderr, "[android] window backend %s open failed (%d)\n",
                      window_backend_->name(), error);
         return false;
     }
-    sdl_window_ = sdl_window;
+    window_open_ = true;
     return true;
+}
+
+void AndroidSurfaceManager::close_host_window() {
+    window_backend_->close();
+    window_open_ = false;
+}
+
+int AndroidSurfaceManager::handle_host_resize(int32_t width, int32_t height) {
+    if (width <= 0 || height <= 0) return -EINVAL;
+    int error = window_backend_->resize(width, height, false);
+    if (error) return error;
+    width_ = width;
+    height_ = height;
+    return 0;
 }
 
 uint64_t AndroidSurfaceManager::from_surface() {
@@ -87,6 +97,7 @@ void AndroidSurfaceManager::release(uint64_t handle) {
 int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
                                                     int32_t fmt) {
     if (w < 0 || h < 0 || fmt < 0 || (w == 0) != (h == 0)) return -EINVAL;
+    if (fmt && fmt != kFormatRGBA8888) return -ENOTSUP;
     int32_t width = w ? w : kBaseWidth, height = h ? h : kBaseHeight;
     int error = window_backend_->resize(width, height, true);
     if (error) return error;
@@ -112,7 +123,7 @@ AndroidSurfaceManager::AndroidSurfaceManager(std::unique_ptr<AndroidWindowBacken
 }
 
 AndroidSurfaceManager::~AndroidSurfaceManager() {
-    window_backend_->detach_host_window();
+    window_backend_->close();
 }
 
 bool AndroidSurfaceManager::install_window_backend(std::unique_ptr<AndroidWindowBackend> backend) {
@@ -514,60 +525,6 @@ float AndroidSurfaceManager::motion_axis_value(uint64_t h, int axis,
 // v2: SDL event pump → Android input/lifecycle translation
 // ═══════════════════════════════════════════════════════════════════
 
-// SDL_Keycode → AKEYCODE_* (+ modifier meta bits). Returns 0 (UNKNOWN)
-// for untranslated keys. Values from android/keycodes.h; SDL values from
-// SDL_keycode.h (arrows/F-keys live above 1<<30).
-#if defined(BIFROST_USE_SDL2)
-int32_t AndroidSurfaceManager::sdl_key_to_android(int32_t sdl,
-                                                  int32_t* meta_out) {
-    if (meta_out) *meta_out = 0;
-    int32_t meta_shift = 0x01;   // AMETA_SHIFT_ON
-    int32_t meta_alt = 0x02;     // AMETA_ALT_ON
-    int32_t meta_ctrl = 0x1000;  // AMETA_CTRL_ON
-    int32_t kc = 0;
-    if (sdl >= 'a' && sdl <= 'z') {
-        kc = 29 + (sdl - 'a');           // AKEYCODE_A..Z
-    } else if (sdl >= 'A' && sdl <= 'Z') {
-        kc = 29 + (sdl - 'A');
-        if (meta_out) *meta_out |= meta_shift;
-    } else if (sdl >= '0' && sdl <= '9') {
-        kc = 7 + (sdl - '0');            // AKEYCODE_0..9
-    } else {
-        switch (sdl) {
-        case SDLK_SPACE:     kc = 62;  break;  // AKEYCODE_SPACE
-        case SDLK_RETURN:
-        case SDLK_KP_ENTER:  kc = 66;  break;  // AKEYCODE_ENTER
-        case SDLK_BACKSPACE: kc = 67;  break;  // AKEYCODE_DEL
-        case SDLK_ESCAPE:    kc = 111; break;  // AKEYCODE_ESCAPE
-        case SDLK_TAB:       kc = 61;  break;  // AKEYCODE_TAB
-        case SDLK_DELETE:    kc = 112; break;  // AKEYCODE_FORWARD_DEL
-        case SDLK_LEFT:      kc = 21;  break;
-        case SDLK_RIGHT:     kc = 22;  break;
-        case SDLK_UP:        kc = 19;  break;
-        case SDLK_DOWN:      kc = 20;  break;
-        case SDLK_HOME:      kc = 122; break;
-        case SDLK_END:       kc = 123; break;
-        case SDLK_PAGEUP:    kc = 92;  break;
-        case SDLK_PAGEDOWN:  kc = 93;  break;
-        case SDLK_INSERT:    kc = 124; break;
-        case SDLK_LSHIFT:    kc = 59;  if (meta_out) *meta_out |= meta_shift; break;
-        case SDLK_RSHIFT:    kc = 60;  if (meta_out) *meta_out |= meta_shift; break;
-        case SDLK_LCTRL:     kc = 129; if (meta_out) *meta_out |= meta_ctrl; break;
-        case SDLK_RCTRL:     kc = 130; if (meta_out) *meta_out |= meta_ctrl; break;
-        case SDLK_LALT:      kc = 57;  if (meta_out) *meta_out |= meta_alt; break;
-        case SDLK_RALT:      kc = 58;  if (meta_out) *meta_out |= meta_alt; break;
-        default:
-            if (sdl >= SDLK_F1 && sdl <= SDLK_F12)
-                kc = 131 + (sdl - SDLK_F1);
-            break;
-        }
-    }
-    if (kc == 0) return 0;
-    return kc;
-}
-
-#endif
-
 void AndroidSurfaceManager::inject_test_tap() {
     std::lock_guard<std::mutex> lk(mu_);
     if (tap_injected_) return;
@@ -592,105 +549,50 @@ void AndroidSurfaceManager::inject_test_tap() {
     pending_.push_back(up);
 }
 
-#if defined(BIFROST_USE_SDL2)
-void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
-                                                 void* sdl_event_raw) {
-    SDL_Event* e = static_cast<SDL_Event*>(sdl_event_raw);
+void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e) {
+    if (e.type == BIFROST_WINDOW_CLOSE) { request_quit(); return; }
+    if (e.type == BIFROST_WINDOW_RESIZE) {
+        if (int error = handle_host_resize(e.width, e.height))
+            std::fprintf(stderr, "[android] window backend %s resize failed (%d)\n",
+                         window_backend_->name(), error);
+        return;
+    }
     InputEvent ev{};
-    switch (e->type) {
-    case SDL_QUIT:
-        request_quit();
-        return;
-    case SDL_WINDOWEVENT:
-        if (e->window.event == SDL_WINDOWEVENT_CLOSE) {
-            request_quit();
-        } else if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-            int w = e->window.data1, h = e->window.data2;
-            if (w > 0) width_ = w;
-            if (h > 0) height_ = h;
-            window_backend_->resize(width_, height_, false);
-            // Lifecycle notification happens in pump_host_events below.
-        }
-        return;
-    case SDL_MOUSEBUTTONDOWN:
-    case SDL_MOUSEBUTTONUP: {
-        if (e->button.button != SDL_BUTTON_LEFT) return;  // single pointer
-        ev.type = IE_TYPE_MOTION;
-        ev.source = SRC_TOUCHSCREEN;
-        ev.action = e->type == SDL_MOUSEBUTTONDOWN ? ACT_DOWN : ACT_UP;
-        ev.pointer_count = 1;
-        ev.pointers[0] = TouchPointer{static_cast<float>(e->button.x),
-                                      static_cast<float>(e->button.y),
-                                      1.0f, 1.0f, 0};
-        break;
-    }
-    case SDL_MOUSEMOTION: {
-        ev.type = IE_TYPE_MOTION;
-        ev.source = SRC_TOUCHSCREEN;
-        bool pressed = e->motion.state & SDL_BUTTON_LMASK;
-        ev.action = pressed ? ACT_MOVE : ACT_HOVER_MOVE;
-        ev.pointer_count = 1;
-        ev.pointers[0] = TouchPointer{static_cast<float>(e->motion.x),
-                                      static_cast<float>(e->motion.y),
-                                      pressed ? 1.0f : 0.0f, 1.0f, 0};
-        break;
-    }
-    case SDL_FINGERDOWN:
-    case SDL_FINGERUP:
-    case SDL_FINGERMOTION: {
-        ev.type = IE_TYPE_MOTION;
-        ev.source = SRC_TOUCHSCREEN;
-        ev.action = e->type == SDL_FINGERDOWN  ? ACT_DOWN
-                  : e->type == SDL_FINGERUP    ? ACT_UP
-                                               : ACT_MOVE;
-        ev.pointer_count = 1;
-        // SDL finger coords are normalized [0,1].
-        ev.pointers[0] = TouchPointer{
-            e->tfinger.x * static_cast<float>(width_),
-            e->tfinger.y * static_cast<float>(height_),
-            e->tfinger.pressure, 1.0f,
-            static_cast<int>(e->tfinger.fingerId & 0x7fffffff)};
-        break;
-    }
-    case SDL_KEYDOWN:
-    case SDL_KEYUP: {
-        if (e->type == SDL_KEYDOWN && e->key.repeat) return;  // no auto-repeat downs
-        int32_t meta = 0;
-        int32_t kc = sdl_key_to_android(static_cast<int32_t>(e->key.keysym.sym),
-                                        &meta);
-        if (kc == 0) return;  // untranslated key — drop silently
+    if (e.type == BIFROST_WINDOW_KEY) {
         ev.type = IE_TYPE_KEY;
         ev.source = SRC_KEYBOARD;
-        ev.action = e->type == SDL_KEYDOWN ? ACT_DOWN : ACT_UP;
-        ev.key_code = kc;
-        ev.scan_code = e->key.keysym.scancode;
-        ev.meta_state = meta;
-        ev.repeat_count = 0;
-        break;
-    }
-    default:
-        return;
-    }
+        ev.action = e.action;
+        ev.key_code = e.key_code;
+        ev.scan_code = e.scan_code;
+        ev.meta_state = e.meta_state;
+        ev.repeat_count = e.repeat_count;
+    } else if (e.type == BIFROST_WINDOW_POINTER) {
+        ev.type = IE_TYPE_MOTION;
+        ev.source = SRC_TOUCHSCREEN;
+        ev.action = e.action;
+        ev.pointer_count = 1;
+        ev.pointers[0] = TouchPointer{e.x, e.y, e.pressure, 1.0f, e.pointer_id};
+    } else { return; }
     std::lock_guard<std::mutex> lk(mu_);
-    if (pending_.size() >= 256) pending_.pop_front();  // cap: drop oldest
-    next_time_ms_ += 16;
-    ev.down_time_ms = next_time_ms_;
-    ev.event_time_ms = next_time_ms_;
+    if (pending_.size() >= 256) pending_.pop_front();
+    if (e.type == BIFROST_WINDOW_POINTER && e.action == ACT_DOWN)
+        pointer_down_time_ms_ = e.time_ms;
+    ev.down_time_ms = e.type == BIFROST_WINDOW_POINTER ? pointer_down_time_ms_ : e.time_ms;
+    ev.event_time_ms = e.time_ms;
     pending_.push_back(ev);
 }
 
-#endif
-
 void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
-    // NOTE: this drains the process-global SDL event queue, as does
-    // FrostInput::poll. the two managers are never live together
-    // (android apk vs linux elf), so no demux is needed (see note there).
-    // Track size changes so the driver can fire onNativeWindowResized /
-    // onContentRectChanged exactly once per resize.
-#if defined(BIFROST_USE_SDL2)
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) translate_sdl_event_(cpu, &e);
-#endif
+    // Bound plugin work per pump, including a plugin that never reports empty.
+    for (unsigned i = 0; i < 256; ++i) {
+        AndroidWindowEvent event{};
+        int result = window_backend_->poll(event);
+        if (result <= 0) {
+            if (result < 0) std::fprintf(stderr, "[android] window event poll failed (%d)\n", result);
+            break;
+        }
+        translate_window_event_(event);
+    }
     if (!cpu || !mem_ || surface_handle_ == 0) return;
     if (last_pump_w_ < 0) { last_pump_w_ = width_; last_pump_h_ = height_; return; }
     if (width_ != last_pump_w_ || height_ != last_pump_h_) {
