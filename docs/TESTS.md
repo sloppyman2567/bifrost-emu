@@ -228,7 +228,7 @@ The host C API probe likewise assumed an executable guest stack. It now loads
 `ctest/capi_testlib.so` for integer, FP and syscall call probes, preserving the
 non-executable-stack contract. `make test-capi` passes 55/55 checks;
 `make test-nb` passes 61/61. These host API tests are separate from the main
-257-run guest inventory.
+guest inventory at that checkpoint.
 
 Android surface, activity/looper and audio integration probes pass in both
 engines. This verifies those existing native Android contracts, not integrated
@@ -246,23 +246,23 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 257 configured test runs:
+The fully provisioned suite contains 272 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 80 | Focused instruction/JIT regressions in `ctest/` |
+| Unit | 94 | Focused guest instruction/JIT regressions and registered host JIT gates |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
 | Real-world static | 49 | BusyBox and Toybox command checks; BusyBox may be fetched by the runner |
 | Real-world dynamic (glibc) | 7 | Part of the real-world fixture set; requires rootfs libraries |
-| Dynamic | 15 | Dynamically linked musl/glibc tests; requires rootfs and built fixtures |
+| Dynamic | 16 | Dynamically linked musl/glibc and XWayland tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **257** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **272** | Includes the sandbox and rootfs-dependent dynamic runs |
 
-Without a configured rootfs, the 7 dynamic real-world runs and 15 dynamic
-tests are not selected, for 235 configured runs (230 with `--quick`). These
+Without a configured rootfs, the 7 dynamic real-world runs and 16 dynamic
+tests are not selected, for 249 configured runs (244 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 
@@ -298,7 +298,7 @@ harness passes 20,000 checks with no mismatches on the final build.
 ## Doom JIT, SDL threads and diagnostics
 
 The following focused tests accompany the native instruction and SDL worker
-changes. Standalone host/SDL probes are not additional entries in the 257-run
+changes. Standalone host/SDL probes are not additional entries in the main
 inventory unless explicitly registered in `run_tests.sh`.
 
 - `ctest/jit_simd_fp_indexed.c`: 28 indexed FMUL lane, aliasing and upper-half

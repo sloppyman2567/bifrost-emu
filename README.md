@@ -351,9 +351,9 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects **257 tests**, including 80
-unit regressions. Without rootfs-dependent tests it selects 235 (230 with
-`--quick`). Interpreter mode intentionally skips three JIT-only cases.
+With all fixtures available, the runner selects **272 tests**, including 94
+unit regressions. Without rootfs-dependent tests it selects 249 (244 with
+`--quick`). Interpreter mode intentionally skips seven JIT-only cases.
 Sources live in `ctest/`, `ctest_real/` and `test/`; build their ignored guest
 ELFs with `make setup-tests`. External fixtures and desktop/audio availability
 can change coverage. Strict mode fails missing selected fixtures, while
