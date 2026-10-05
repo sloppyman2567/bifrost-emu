@@ -20,6 +20,15 @@ are historical records, and v2.0 remains planned.
 - Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
   reported renderer fault remain unresolved. No controlled FPS claim is made.
 
+### SIMD&FP register-offset Q scaling (2026-10-05)
+
+- Scale the index of `ldr/str qN, [xn, xm, lsl #4]` by 16 in the interpreter
+  and IR translator; both used the size field (0), so Q accesses landed at
+  base + i. This corrupted ART's class-linker method records (`ptr << 32`
+  SIGSEGV, `Unexpected state: 6656`). The pinned ART bootstrap now completes
+  boot class linking but does not yet reach `ART_VM_OK`.
+- Add `ctest/jit_simd_ldst_regoff.c` (9 checks; passes JIT, interpreter, QEMU).
+
 ### Window statistics defaults
 
 - Show emulator version and presentation stats in game titles by default;

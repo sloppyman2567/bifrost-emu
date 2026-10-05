@@ -387,6 +387,8 @@ UNIT_TESTS=(
     # the prfop field's register number); LDAPR/LDAPRB/LDAPRH (ARMv8.3 RCpc
     # acquire loads) were misdecoded as an LSE CAS.
     "jit_prfm_ldapr|ctest/jit_prfm_ldapr.elf||5|checks passed"
+    # SIMD&FP LDR/STR register offset: Q forms scale the index by 16.
+    "jit_simd_ldst_regoff|ctest/jit_simd_ldst_regoff.elf||5|checks passed"
     # Compatibility syscalls: permissive no-ops (NUMA/ioprio/timeofday/
     # vhangup/swapoff) and explicit -ENOSYS/-EPERM stubs (fanotify/bpf/
     # userfaultfd/mqueue/quotactl).

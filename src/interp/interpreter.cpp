@@ -1258,10 +1258,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint8_t option = d.extend;
                 uint8_t S = d.shift;
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
-                uint64_t off = extend_reg(cpu.regs[d.rm], option, S ? size : 0, true);
+                // A 128-bit Q access scales the index by 16 (LSL #4), not
+                // by `size` (00); unscaled, ART's hash-set stores landed at
+                // base + i instead of base + 16 * i.
+                const bool is_q = d.is_vec && (opc & 2) && size == 0;
+                const uint8_t scale = is_q ? 4 : size;
+                uint64_t off = extend_reg(cpu.regs[d.rm], option, S ? scale : 0, true);
                 uint64_t addr = base + off;
                 if (d.is_vec) {
-                    bool is_q = (opc & 2) && size == 0;
                     int nbytes = is_q ? 16 : (1 << size);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;

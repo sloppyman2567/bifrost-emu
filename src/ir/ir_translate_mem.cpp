@@ -58,8 +58,9 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // Register offset: addr = base + extend_reg(rm, option, S ? size : 0)
                 uint16_t idx = load_arm_reg(block, d.rm);
                 // Apply extend (UXTB..SXTX). For LDR/STR register-offset,
-                // the shift is d.size if d.shift&1 is set, else 0.
-                uint8_t shift_amt = (d.shift & 1) ? d.size : 0;
+                // S=1 shifts by the access size's log2: d.size, except a
+                // 128-bit Q access (size 00), which scales by 16 (LSL #4).
+                uint8_t shift_amt = (d.shift & 1) ? (vec_q ? 4 : d.size) : 0;
                 uint16_t ext = apply_extend(block, idx, d.extend, shift_amt);
                 addr = g_alloc.alloc();
                 block.insts.push_back(IRInst::make(IROp::ADD, addr, base, ext));

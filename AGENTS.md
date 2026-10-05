@@ -811,6 +811,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `(inst & 0x3FFFFC00) == 0x38BFC000` is now checked FIRST and mapped to
   `LDAR` (acquire, `excl_low6=0x3F`, no reservation). LSE atom_op only uses
   0..8, so 0xC cannot collide. Regression: `ctest/jit_prfm_ldapr.c`.
+- **SIMD&FP LDR/STR register-offset scaling (2026-10-05).** With S=1 the
+  index shifts by log2(access bytes): B/H/S/D use `size`, but Q encodes
+  `size=00, opc=1x` and MUST shift by 4. Both the interpreter's
+  `LDR_REG/STR_REG` case and `ir_translate_mem.cpp` used `size` (0), so
+  `str q0, [x23, x9, lsl #4]` wrote to base + i. ART's class-linker
+  `CopiedMethodRecord` hash set then held records 4 bytes off: `ptr << 32`
+  SIGSEGVs in `ArtMethod::CopyFrom` and `class_linker.cc:7893 Unexpected
+  state: 6656`. Regression: `ctest/jit_simd_ldst_regoff.c`.
 - **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
   Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
