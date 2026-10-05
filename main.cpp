@@ -83,6 +83,7 @@ static void print_banner() {
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
+        "    --android-services provide the API-35 Binder service-manager subset\n"
         "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
         "    --print-config     print resolved config and exit\n"
         "    -V, --version      show version and exit\n"
@@ -193,6 +194,7 @@ int main(int argc, char** argv) {
     // or for debugging.
     bool use_jit = true;
     bool android_runtime = false;
+    bool android_services = false;
     std::string android_window_plugin;
     std::string fb_dump_path;
     std::string audio_dump_path;
@@ -259,6 +261,7 @@ int main(int argc, char** argv) {
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
+        if (a == "--android-services")      { android_services = true; arg_i++; continue; }
         if (a == "--android-window-plugin") {
             if (arg_i + 1 >= argc) {
                 fprintf(stderr, "bifrost-emu: --android-window-plugin requires a PATH argument\n");
@@ -355,6 +358,7 @@ int main(int argc, char** argv) {
             for (int i = arg_i + 2; i < argc; i++) guest_argv.push_back(argv[i]);
             if (raw_tty) set_raw_terminal();
             Emulator emu;
+            if (android_services) emu.enable_android_services();
             // Mirror the normal path's CLI-over-config precedence
             // (applied below the loop there; here the branch exits early).
             emu.set_verbose(verbose || cfg.log_verbose);
@@ -435,6 +439,7 @@ int main(int argc, char** argv) {
     if (raw_tty) set_raw_terminal();
     Emulator emu;
     emu.set_android_runtime(android_runtime);
+    if (android_services) emu.enable_android_services();
     emu.set_verbose(cfg.log_verbose);
     emu.set_trace(cfg.log_trace);
     emu.set_brk_verbose(cfg.log_brk_verbose);

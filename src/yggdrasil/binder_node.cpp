@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 namespace arm64emu::yggdrasil {
 static_assert(sizeof(bf_binder_transaction) == 64);
@@ -152,6 +153,8 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     std::shared_ptr<Node> destination_owner;
     int reply_tid = 0;
     if (cmd == BF_BC_TRANSACTION) {
+        if (tx.target == 0 && domain_->service_manager)
+            return service_transaction(tx, mem, tid);
         if (tx.target == 0) target = domain_->manager;
         else if (tx.target <= UINT32_MAX) {
             auto handle = handles_.find(static_cast<uint32_t>(tx.target));
@@ -295,7 +298,7 @@ int BinderNode::ioctl_thread(uint32_t request, uint64_t arg, Memory& mem, CPU& c
                 obj = mem.load<bf_flat_binder>(arg);
                 if (obj.type != BF_BINDER_TYPE_BINDER || (obj.flags & 0x1000)) return -EINVAL;
             } // Legacy BINDER_SET_CONTEXT_MGR ignores its argument.
-            if (domain_->manager) return -EBUSY;
+            if (domain_->manager || domain_->service_manager) return -EBUSY;
             domain_->manager = this; domain_->manager_ptr = obj.binder;
             domain_->manager_cookie = obj.cookie; return 0;
         }

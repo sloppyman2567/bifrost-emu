@@ -1,8 +1,9 @@
 # Android native runtime bootstrap
 
 Checkpoint: October 5, 2026. Bifrost can enter a real guest ARM64 Android
-linker and execute a Bionic-linked test program. It cannot yet launch APKs,
-ART or SpongeBob's managed Activity.
+linker and execute Bionic-linked programs. Signed APK installation and native-only
+NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROID_APK.md).
+ART and SpongeBob's managed Activity remain unsupported.
 
 ## Reproduce
 
@@ -98,6 +99,6 @@ adds, including operand aliases and all valid widths. `jit_crc32` covers
 2,048 IEEE/Castagnoli cases with an independent bitwise oracle. Both instruction
 fixtures also pass QEMU and Tier-1 differential verification.
 
-The complete Linux regression suite passes 272/272 in default JIT mode and
-265/265 in interpreter mode (seven JIT-only tests skipped). A fresh installation
+The complete Linux regression suite passes 273/273 in default JIT mode and
+266/266 in interpreter mode (seven JIT-only tests skipped). A fresh installation
 of the pinned runtime also passes all six Bionic bootstrap variants above.

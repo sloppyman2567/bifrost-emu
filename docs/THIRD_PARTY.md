@@ -40,6 +40,19 @@ fetched to exercise behavior beyond the synthetic tests:
   `ctest_real/voxelspace/libs/libfixmath/LICENSE`.
 - **Vulkan headers:** upstream license information remains under
   `tools/vulkan-headers/LICENSE.md` and `tools/vulkan-headers/LICENSES/`.
+- **Android runtime and packaging tools:** the ignored Bionic runtime is
+  checksum-pinned to AOSP `prebuilts/runtime` and retains `NOTICE.html.gz`;
+  each installed app root receives a copy. The packaging fetchers download
+  AAPT2, apksigner and the API-35 manifest fixture library from official AOSP
+  prebuilts. `tools/fetch-android-package-tools.py` pins apksigner to SHA-256
+  `9469c60e5e40fc5c44a2f2338509cb6600cdf065e9b50f9fa3ca6c5be5bae6a9`
+  and android.jar to
+  `ee568219aa3754977207a8fd849fdbf3a299658dd26dd0907d39ca830587f8aa`
+  at `android-15.0.0_r1` in
+  [AOSP prebuilts/sdk](https://android.googlesource.com/platform/prebuilts/sdk/+/android-15.0.0_r1/).
+  These downloads retain their upstream terms and are not redistributed by
+  the source commit. Generated regression APKs use a temporary test key and
+  original fixture code; commercial APKs and installed app state stay local.
 
 This lists the main fixture bundles, not a complete dependency/license audit.
 Preserve per-file notices and inspect the exact upstream revision and linked

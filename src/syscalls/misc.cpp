@@ -46,6 +46,7 @@
 #include "frost/thunk.hpp"
 #include "frost/audio_thunk.hpp"    //
 #include "frost/display_thunk.hpp"  //
+#include "frost/android_surface.hpp"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"  // HostNode (for socket fd registration)
 #include <errno.h>
@@ -1047,6 +1048,45 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // a0 (x0) = `mem` from glibc = TCB pointer (= future TPIDR_EL0).
         //   - non-zero: caller-allocated (normal pthread_create path)
         //   - 0: allocate a new block (rare)
+        case 0x100E: { // Native APK launcher event/input-queue adapter.
+            if (!emu.android_runtime()) { ret_host(-EPERM); return 0; }
+            auto& manager = frost::AndroidSurfaceManager::instance();
+            if (cpu.regs[0] == 0) {
+                manager.pump_host_events(&cpu);
+                cpu.regs[0] = manager.quit_requested();
+            } else if (cpu.regs[0] == 1) cpu.regs[0] = manager.input_queue_handle();
+            else ret_host(-EINVAL);
+            return 0;
+        }
+        case 0x100D: { // Android guest shim: resolve an explicit adapter export.
+            if (!emu.android_runtime()) { ret_host(-EPERM); return 0; }
+            auto string_arg = [&](uint64_t address) {
+                std::string value;
+                for (size_t i = 0; i < 128; ++i) {
+                    char c = static_cast<char>(emu.mem_.load<uint8_t>(address + i));
+                    if (!c) return value;
+                    value.push_back(c);
+                }
+                throw EmuError("oversized Android shim symbol");
+            };
+            try {
+                auto library = string_arg(cpu.regs[0]);
+                auto symbol = string_arg(cpu.regs[1]);
+                uint64_t address = 0;
+                if (library == "libEGL.so" || library == "libGLESv2.so") {
+                    if (auto* thunk = emu.graphics_.thunk(); thunk && thunk->enabled()) {
+                        address = thunk->resolve(library, symbol);
+                        if (!address && library == "libGLESv2.so" && symbol == "glReadPixels")
+                            address = thunk->resolve("libGL.so.1", symbol);
+                    }
+                } else if (library == "libandroid.so" || library == "liblog.so") {
+                    if (auto* thunk = emu.graphics_.display_thunk(); thunk && thunk->enabled())
+                        address = thunk->resolve(library, symbol);
+                }
+                cpu.regs[0] = address;
+            } catch (const EmuError&) { ret_host(-EFAULT); }
+            return 0;
+        }
         case 0x1001: {
             if (dbg().dynlink_trace) {
                 fprintf(stderr, "[tls-alloc] syscall 0x1001 called: "

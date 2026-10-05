@@ -24,8 +24,8 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (272 test runs):
-#   Unit         94  — focused guest and host JIT regressions
+# Fully provisioned suite (273 test runs):
+#   Unit         95  — focused guest and host JIT regressions
 #   Integration  86  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
@@ -34,7 +34,7 @@
 #   Dynamic      16  — musl/glibc and XWayland tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 249 runs (244 with --quick); fixtures may be skipped.
+# Without a rootfs: 250 runs (245 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -395,6 +395,7 @@ UNIT_TESTS=(
     "jit_flags_passthrough|ctest/jit_flags_passthrough.elf||10|checks passed"
     "socket_msg_layout|ctest/socket_msg_layout.elf||10|checks passed"
     "android_syscall_options|ctest/android_syscall_options.elf||10|checks passed"
+    "android_service_manager|ctest/android_service_manager.elf||10|android_service_manager: ALL PASS"
     "test_misc_extended|ctest/test_misc_extended.elf||5|ALL TESTS PASSED"
 )
 
@@ -933,6 +934,7 @@ run_test() {
     local -a test_env=("${RUN_ENV[@]}")
     # This fixture specifically checks region codegen, which is opt-in.
     [[ "$name" == tier2_smov ]] && test_env+=(BIFROST_TIER2=1)
+    [[ "$name" == android_service_manager ]] && test_runner=("$EMU" "${EMU_FLAGS[@]}" --android-services "${test_command[@]}")
     if [ "$mode" = "HOST_JIT" ]; then
         # Host harnesses invoke the requested emulator themselves. This
         # zstd harness checks both engines, so run it once in the JIT suite.

@@ -38,6 +38,7 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdexcept>
 namespace arm64emu::yggdrasil {
 // /dev directory listing. Only the entries we actually handle.
 static std::vector<DirNode::Entry> dev_entries() {
@@ -113,7 +114,10 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         if ((flags & O_ACCMODE) != O_RDWR) { *err_out = -EINVAL; return nullptr; }
         std::lock_guard<std::mutex> lock(binder_mu_);
         auto& domain = binder_domains_[path];
-        if (!domain) domain = std::make_shared<BinderDomain>();
+        if (!domain) {
+            domain = std::make_shared<BinderDomain>();
+            domain->service_manager = android_services_ && path == "/dev/binder";
+        }
         return std::make_unique<BinderNode>(domain, flags);
     }
     // /dev/null, /dev/zero → host passthrough
@@ -216,6 +220,12 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
 } // namespace arm64emu::yggdrasil
 
 namespace arm64emu::yggdrasil {
+void Yggdrasil::enable_android_services() {
+    std::lock_guard<std::mutex> lock(binder_mu_);
+    if (!binder_domains_.empty())
+        throw std::logic_error("Android services must be selected before opening Binder");
+    android_services_ = true;
+}
 void Yggdrasil::stop_binder() {
     std::lock_guard<std::mutex> lock(binder_mu_);
     for (auto& entry : binder_domains_) {

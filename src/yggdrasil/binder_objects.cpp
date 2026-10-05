@@ -32,7 +32,7 @@ int BinderNode::reference_command(uint32_t command, const uint8_t* bytes) {
         --pending; return 0;
     }
     uint32_t id; memcpy(&id, bytes, 4);
-    if (id == 0) return domain_->manager ? 0 : -EINVAL;
+    if (id == 0) return domain_->manager || domain_->service_manager ? 0 : -EINVAL;
     auto it = handles_.find(id);
     if (it == handles_.end()) return -EINVAL;
     auto& h = it->second;
@@ -61,6 +61,18 @@ void BinderNode::drop_buffer_references(uint64_t address) {
     buffer_references_.erase(it);
 }
 void BinderNode::release_all_references() {
+    auto closing = weak_from_this();
+    for (auto it = domain_->services.begin(); it != domain_->services.end();) {
+        const auto& owner = it->second.object->owner;
+        // Compare weak ownership without temporarily promoting another peer.
+        // Dropping that peer's last shared reference can reenter teardown and
+        // erase registry entries while this iterator is still in use.
+        bool same_owner = !owner.owner_before(closing) && !closing.owner_before(owner);
+        if (owner.expired() || same_owner) {
+            change_reference(it->second.object, -1, 0);
+            it = domain_->services.erase(it);
+        } else ++it;
+    }
     for (auto& entry : owned_objects_) entry.second->alive = false;
     for (auto& entry : handles_) {
         auto& h = entry.second;

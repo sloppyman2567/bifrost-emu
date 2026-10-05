@@ -1,6 +1,6 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress. Updated October 4, 2026. Except for checkpoints explicitly
+Status: in progress. Updated October 5, 2026. Except for checkpoints explicitly
 marked implemented below, these are development targets, not compatibility
 guarantees or a release date.
 
@@ -15,6 +15,14 @@ Build a dedicated Bionic/Android syscall and platform compatibility layer
 on the existing AArch64 Linux syscall implementation. Bionic uses Linux
 syscalls; this work must also cover the Android userspace environment,
 runtime libraries, loader behavior and required platform services.
+
+Implemented native checkpoint: real guest linker64/Bionic startup, signed
+base/split installation, native-only NativeActivity launch, extracted assets,
+persistent per-app storage, plugin-backed graphics and a bounded native Binder
+service registry. The packaged fixture passes all six execution-mode/window
+backend combinations. [APK setup and boundaries](docs/ANDROID_APK.md) document
+the exact scope. Managed Activities, ART/JNI, resources and platform services
+remain targets; successful SpongeBob installation does not establish launch.
 
 - Select and document an initial Android API/runtime version. Expand from
   a tested baseline instead of claiming every Android release works.

@@ -73,8 +73,9 @@ multiple Android surfaces or an ABI for complete Android platform plugins.
 Version 1 covers only host window binding and geometry.
 Presentation remains in the existing EGL thunk (`eglSwapBuffers`); plugins
 provide the native binding that it uses. SDL input remains in the activity
-adapter. Android runtime mode still needs guest platform shim DSOs before it
-can use this bridge through the real Bionic linker.
+adapter. Android runtime mode now uses guest platform shim DSOs for this bridge
+through the real Bionic linker; the signed native APK fixture verifies both
+built-in and loadable backends. See [APK launch and limits](ANDROID_APK.md).
 
 ## Reproduction
 

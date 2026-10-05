@@ -57,6 +57,9 @@ class Yggdrasil {
 public:
     Yggdrasil();
     void stop_binder();
+    // Select before opening Binder devices. Only /dev/binder gets a manager;
+    // hardware/vendor domains retain the raw transport contract.
+    void enable_android_services();
     static bool binder_device_stat(const std::string& path, struct stat* st);
     // Resolve a guest path to a Node. Returns nullptr on failure (with
     // errno set via the `*err_out` parameter).
@@ -183,6 +186,7 @@ public:
     }
 private:
     std::mutex binder_mu_;
+    bool android_services_ = false;
     std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;
     std::string elf_path_;
     std::vector<std::string> argv_;

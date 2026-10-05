@@ -45,6 +45,7 @@ tools/sdl2-debs/
 tools/sdl2-sdk/
 tools/android-tools/
 tools/android-runtime/
+android-state/
 tools/graphics-smoke/
 
 # Editor / IDE

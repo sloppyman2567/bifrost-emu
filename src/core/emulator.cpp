@@ -308,6 +308,21 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         entry_ = loaded.entry;
         interp_base_ = loaded.base_addr;
         has_lse_ = has_lse_ || loaded.has_lse;
+        // Guest shim DSOs resolve only explicit adapter exports. Bionic
+        // continues to own all ELF relocation/TLS; no custom linker is made.
+        if (auto* thunk = graphics_.thunk(); thunk && thunk->enabled()) {
+            thunk->init(mem_);
+            wire_thunk_glfw_cb_runner_();
+            wire_thunk_sdl_thread_runner_();
+        }
+        if (auto* thunk = graphics_.display_thunk(); thunk && thunk->enabled())
+            thunk->init(mem_);
+        // The shared syscall dispatcher probes every thunk namespace.
+        // An enabled but uninitialized audio thunk returns ENOSYS before
+        // the dispatcher can reach an Android display symbol.
+        if (auto* thunk = graphics_.audio_thunk(); thunk && thunk->enabled())
+            thunk->init(mem_);
+        wire_thunk_android_runner_();
         if (verbose_) fprintf(stderr, "[android-runtime] linker64 base=0x%llx entry=0x%llx page_size=%llu\n",
             static_cast<unsigned long long>(interp_base_),
             static_cast<unsigned long long>(entry_),

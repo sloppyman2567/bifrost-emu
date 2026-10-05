@@ -53,20 +53,20 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   slow, and save compatibility depends on the game build; see
   [Doom 3 status](docs/doom3.md).
 
-**Full-suite checkpoint (October 5, 2026, including loadable window plugins):**
-runs passed 272/272 in JIT mode and 265/265 in interpreter mode, with seven JIT-only skips.
+**Full-suite checkpoint (October 5, 2026, including native APKs and services):**
+runs passed 273/273 in JIT mode and 266/266 in interpreter mode, with seven JIT-only skips.
 The verification gate now passes 60 single-thread differential fixtures and
 five separate threaded oracle workloads. Shared-memory replay is suspended
 when a second guest CPU starts; see [test evidence](docs/TESTS.md).
 Dispatch and nested-call microbenchmarks improved 2.32× and 1.93× respectively;
-those figures are not whole-game FPS gains. Android APK/ART integration is
-planned for [v2.0](roadmap.md).
+those figures are not whole-game FPS gains. Signed native APK launch now works;
+ART/framework integration remains planned for [v2.0](roadmap.md).
 
 **What it is NOT:**
 
 - Not a full-system emulator (no kernel — use QEMU-system for that)
-- No integrated APK/ART/Dalvik runtime; the standalone Android path targets
-  NativeActivity-style native libraries (see below)
+- No ART/Dalvik or full Android framework; the APK path supports native-only
+  NativeActivity launch (see below)
 - Not as mature as QEMU-user — it's a smaller, simpler alternative
 
 ## Quick Start
@@ -197,10 +197,24 @@ complete Android 10 runtime or prove Android library compatibility.
 
 An experimental `--android-runtime --rootfs PATH /guest/program` profile now
 boots a real guest linker64 and passes a pinned Bionic native fixture covering
-constructors, pthread/TLS and dlopen in both engines. See the
+constructors, pthread/TLS and dlopen in both engines. The signed APK installer
+uses this profile for native-only Activities, with split assets and persistent
+per-app data:
+
+```bash
+python3 tools/fetch-android-runtime.py
+python3 tools/fetch-aapt2.py
+python3 tools/fetch-android-package-tools.py
+make android-runtime-adapters
+python3 scripts/android_package.py install /path/to/package.apkm
+python3 scripts/android_package.py run org.example.package
+```
+
+See [APK setup, validation and limits](docs/ANDROID_APK.md), the
 [bootstrap instructions](docs/ANDROID_RUNTIME.md) and
 [Android architecture](docs/ANDROID_ARCHITECTURE.md). Virtual Binder devices
-support bounded transactions and object handles; see [Binder limits and tests](docs/ANDROID_BINDER.md).
+support bounded transactions and object handles. `--android-services` adds a
+native service-manager registry; see [Binder limits and tests](docs/ANDROID_BINDER.md).
 The native surface adapter now has an injectable window backend, verified with
 native Wayland EGL presentation and pixel readback. Its [window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md)
 also records the repaired XWayland socket path and remaining Mesa EGL/GLX failures.
@@ -213,9 +227,9 @@ backends/engines, twelve CLI cases in SDL and headless builds, and the SDL
 helper-lifetime oracle. The full-suite checkpoint above includes these changes;
 standalone Tier-2, Android, TLS, graphics ABI and lifecycle regressions also pass.
 
-Integrated APK loading, full Bionic/platform compatibility and ART execution
-remain planned for v2.0; see the [roadmap](roadmap.md). The standalone Android path
-supports NativeActivity-style native binaries. The native-bridge adapter
+Full Bionic/platform compatibility and ART execution remain planned for v2.0;
+see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
+execution, including SpongeBob's CleverTap Activity. The native-bridge adapter
 below is a separate integration interface, not a complete Android runtime.
 
 ## Architecture
@@ -351,8 +365,8 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects **272 tests**, including 94
-unit regressions. Without rootfs-dependent tests it selects 249 (244 with
+With all fixtures available, the runner selects **273 tests**, including 95
+unit regressions. Without rootfs-dependent tests it selects 250 (245 with
 `--quick`). Interpreter mode intentionally skips seven JIT-only cases.
 Sources live in `ctest/`, `ctest_real/` and `test/`; build their ignored guest
 ELFs with `make setup-tests`. External fixtures and desktop/audio availability

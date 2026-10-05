@@ -94,6 +94,7 @@ public:
         mem_.set_data_top_byte_ignore(enabled);
     }
     bool android_runtime() const { return android_runtime_; }
+    void enable_android_services() { vfs_.enable_android_services(); }
     std::atomic<uint32_t> guest_membarrier_registrations{0};
     std::atomic<int> guest_dumpable{1};
     std::atomic<bool> guest_thp_disabled{false};

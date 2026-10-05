@@ -524,6 +524,14 @@ endif
 
 ANDROID_WINDOW_PLUGIN := $(OBJDIR)/plugins/android-window-sdl.so
 .PHONY: android-window-plugin test-android-window-plugin test-android-window-plugin-cli
+
+.PHONY: android-runtime-adapters test-android-package
+android-runtime-adapters:
+	python3 tools/build-android-adapters.py
+
+test-android-package: $(TARGET) android-window-plugin android-runtime-adapters
+	python3 scripts/test_android_package.py --emu $(abspath $(TARGET)) --plugin $(abspath $(ANDROID_WINDOW_PLUGIN))
+
 android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
 
 $(ANDROID_WINDOW_PLUGIN): plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp include/frost/android_window_backend.hpp include/bifrost/android_window_plugin.h Makefile $(CONFIG_STAMP)

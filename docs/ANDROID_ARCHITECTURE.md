@@ -1,10 +1,11 @@
 # Android APK execution architecture
 
 Status: runtime foundations implemented, October 5, 2026. Real Bionic native
-bootstrap, virtual Binder transport and an injectable native window backend
-are available. APK/ART/framework execution is not implemented. Reproduction
+bootstrap, signed native APK loading, a bounded native service manager and an
+injectable native window backend are available. ART/framework execution is
+not implemented. Reproduction
 and limits are in [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md),
-[ANDROID_BINDER.md](ANDROID_BINDER.md) and
+[ANDROID_APK.md](ANDROID_APK.md), [ANDROID_BINDER.md](ANDROID_BINDER.md) and
 [ANDROID_WINDOW_PLUGINS.md](ANDROID_WINDOW_PLUGINS.md).
 
 ## Proposed runtime boundary
@@ -63,9 +64,18 @@ thread-local storage, pthreads and dlopen; it does not establish ART startup or
 complete Android linker namespace compatibility. The existing Linux custom
 linker path remains available for Linux programs and native adapter fixtures.
 
+The package tool validates signatures and a consistent base/split set, then
+publishes immutable code plus persistent per-app data. Its Bionic-linked guest
+launcher opens the native entry library with actual `dlopen`; platform shim
+DSOs resolve explicit existing thunk exports. The signed NativeActivity fixture
+passes real graphics, asset, storage, lifecycle, TLS and service-call checks.
+It has no JavaVM/JNIEnv and cannot launch managed Activities.
+
 Virtual `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder` provide bounded
 transactions, replies and flat-object handle translation within one emulator.
-Framework services, descriptor transfer and death subscriptions remain missing.
+The opt-in `--android-services` registry implements named native service
+registration/discovery and callable handles using a bounded API-35 AIDL parcel
+subset. Framework services, descriptor transfer and death subscriptions remain missing.
 The native surface adapter delegates window binding and resize to an injectable
 C++ backend, with a versioned host C ABI for loadable window modules. The SDL
 backend passes native Wayland EGL pixel readback and presentation. Full Android
@@ -81,13 +91,14 @@ its current callers; it is not the foundation of this guest-ART design.
 - **Android runtime profile:** separate runtime root, API/build identity,
   properties, library paths and capability list. Select it explicitly; keep
   existing Linux loading behavior. Native fixtures use `--android-runtime
-  --rootfs PATH /guest/program`; packaged-app launch is still proposed. Retain
+  --rootfs PATH /guest/program`; signed native-only APKs use the package launcher. Retain
   the current bare-library command for adapter testing.
 - **Package installation:** inspect manifests, select compatible ARM64 and
   resource splits, validate package/version/signing consistency, and publish
   an installation atomically. Keep package code read-only and data/cache
   directories separate. Bound ZIP processing and reject unsafe paths. The
-  current read-only preflight tool is reconnaissance, not an installer.
+  package tool implements consistent-set installation; resource configuration
+  selection remains future work. The separate read-only preflight tool is reconnaissance.
 - **Guest linker:** own relocations, dlopen, TLS and namespace decisions.
   Supply deliberate namespace configuration and guest shim DSOs; never fall
   through to host x86 ELF libraries. Namespace isolation is a genuine loader
@@ -165,9 +176,10 @@ requirements remain to be established by dependency analysis and execution.
 
 ## Next bounded task
 
-The explicit bootstrap profile, checked guest linker startup and a pinned
-Bionic fixture now work. Extend native acceptance with namespace isolation,
-signals, mapping lifecycle and guest shim DSOs; then obtain and audit one
-matching ART/libcore artifact set for milestone 2. The bootstrap APEX is a
+The explicit bootstrap, signed native APK launcher, guest shim DSOs and native
+service registry now work. The next managed-runtime gate requires obtaining
+and auditing one matching ART/libcore artifact set, then executing a DEX-to-JNI
+fixture with GC and thread attachment. Native lifecycle/resource coverage still
+needs expansion beyond the documented subset. The bootstrap APEX is a
 native test dependency, not a complete API 35 platform installation. Do not
 modify the Tier-2 policy merely to make Android startup appear faster.

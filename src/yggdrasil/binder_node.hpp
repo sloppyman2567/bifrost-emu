@@ -9,6 +9,17 @@
 #include <set>
 namespace arm64emu::yggdrasil {
 class BinderNode;
+struct BinderObject {
+    std::weak_ptr<Node> owner;
+    uint64_t pointer = 0, cookie = 0;
+    uint32_t strong = 0, weak = 0;
+    bool alive = true;
+    uint32_t pending_strong = 0, pending_weak = 0;
+};
+struct BinderService {
+    std::shared_ptr<BinderObject> object;
+    uint32_t dump_priority;
+};
 // One domain per device per emulator. Never connects to host Binder services.
 struct BinderDomain {
     // Weak peer promotion can release the last Node on scope exit; allow
@@ -18,6 +29,8 @@ struct BinderDomain {
     BinderNode* manager = nullptr; // protected by mutex; destructor removes it
     uint64_t manager_ptr = 0, manager_cookie = 0;
     bool stopped = false;
+    bool service_manager = false;
+    std::map<std::string, BinderService> services;
 };
 class BinderNode final : public Node {
 public:
@@ -36,13 +49,7 @@ public:
     void invalidate_mapping(uint64_t, uint64_t) override;
     int protect_mapping(uint64_t, uint64_t, uint64_t) override;
 private:
-    struct Object {
-        std::weak_ptr<Node> owner;
-        uint64_t pointer, cookie;
-        uint32_t strong = 0, weak = 0;
-        bool alive = true;
-        uint32_t pending_strong = 0, pending_weak = 0;
-    };
+    using Object = BinderObject;
     struct Handle {
         std::shared_ptr<Object> object;
         uint32_t strong = 0, weak = 0, temporary_strong = 0, temporary_weak = 0;
@@ -88,5 +95,6 @@ private:
     void change_reference(const std::shared_ptr<Object>&, int strong, int weak);
     void drop_buffer_references(uint64_t);
     void release_all_references();
+    int service_transaction(const bf_binder_transaction&, Memory&, int tid);
 };
 }

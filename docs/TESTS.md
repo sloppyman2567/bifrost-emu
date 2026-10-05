@@ -10,9 +10,11 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
-The October 5 rerun of commit `700e8e0` passes **272/272 in JIT mode** with no
-skips (172 s) and **265/265 in interpreter mode**, with seven JIT-only skips
-(203 s). Guest fixtures were refreshed with `make setup-tests` before testing.
+The latest October 5 native APK/service-manager checkpoint passes **273/273 in
+JIT mode** with no skips (223 s) and **266/266 in interpreter mode**, with seven
+JIT-only skips (204 s). Guest fixtures were refreshed with `make setup-tests`
+before testing. The previous `700e8e0` window-plugin checkpoint passed 272/272
+and 265/265 respectively.
 These runs include the loadable window-plugin refinement, Android Binder/syscall
 foundations, widening SIMD and CRC instructions, BFM insertion masks, chained NZCV preservation, socket message
 layout and real guest libX11/XWayland rendering. They supersede the October 4
@@ -63,6 +65,32 @@ fallback-profiler and window-stats regressions also pass independently.
 Restricted sandbox runs that cannot initialize desktop/audio/Vulkan resources
 do not replace these integration checks. Rebuild stale guest fixtures before
 interpreting failures as emulator regressions.
+
+### Signed native APK and service-manager gate (2026-10-05)
+
+`make test-android-package` builds and signs a real base/split NativeActivity
+APK and runs it through guest linker64/Bionic. All six JIT/interpreter/Tier-2
+and built-in/plugin combinations pass on native Wayland, checking constructor
+and TLS state, pthread isolation, split assets, persistent saves, lifecycle
+callbacks, EGL pixel readback and a real invocation through a discovered Binder
+handle. Six host test cases also exercise signature/signer/version rejection,
+installation rollback, path/member validation, snapshot growth bounds, reordered
+reinstall, downgrade prevention, modified-code rejection and managed-launcher
+rejection. This gate requires the provisioned Android tools, JDK, Clang/LLD,
+native Wayland desktop and GPU; it is separate from the main suite.
+
+`android_service_manager` is registered in the main runner, which supplies
+`--android-services` for this fixture. Its 52 checks pass in both engines and
+through Bionic inside the APK. Raw Binder behavior remains covered by the
+existing transport/object/exit fixtures. See [APK limits](ANDROID_APK.md) and
+[service-manager scope](ANDROID_BINDER.md).
+
+The six real Bionic bootstrap configurations pass again after adapter
+initialization. The SDL/GL and headless C API, native bridge and window/backend
+contracts, twelve plugin CLI cases, SDL helper lifetime and graphics SDK
+independence checks also pass. These focused checks supplement the complete
+273/266 regression runs; the older standalone results retain their original
+scope and counts.
 
 ### Window plugin contracts (2026-10-05)
 
@@ -246,11 +274,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 272 configured test runs:
+The fully provisioned suite contains 273 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 94 | Focused guest instruction/JIT regressions and registered host JIT gates |
+| Unit | 95 | Focused guest instruction/JIT regressions and registered host JIT gates |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -259,10 +287,10 @@ The fully provisioned suite contains 272 configured test runs:
 | Dynamic | 16 | Dynamically linked musl/glibc and XWayland tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **272** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **273** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 16 dynamic
-tests are not selected, for 249 configured runs (244 with `--quick`). These
+tests are not selected, for 250 configured runs (245 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 

@@ -50,8 +50,37 @@ streams return `EINVAL`; transactions with unsupported objects receive
 an `EINVAL` extended error. Handle 0 is pinned while its manager endpoint is open.
 Each endpoint is limited to 1,024 objects/handles and each parcel to 64 objects.
 
-Android servicemanager/framework compatibility remains unverified. This checkpoint
-does not establish APK or SpongeBob startup.
+The opt-in service-manager subset below supports named native endpoints. Full
+Android servicemanager/framework compatibility and SpongeBob startup remain
+unverified.
+
+## Native service-manager subset
+
+`--android-services` reserves handle 0 on `/dev/binder` for a host-owned registry.
+Without this flag, the existing guest context-manager contract is unchanged.
+`/dev/hwbinder` and `/dev/vndbinder` retain independent raw contexts. Select
+the mode before opening a Binder endpoint; an explicit guest context-manager
+registration is rejected while the host manager is selected.
+
+The wire subset follows Android 15's kernel-Binder
+[IServiceManager AIDL](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/binder/aidl/android/os/IServiceManager.aidl)
+and [Parcel interface header](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/binder/Parcel.cpp):
+StrictMode, WorkSource, `SYST` and the String16 interface descriptor.
+It implements interface discovery, `getService`, `checkService`, `addService`
+and dump-priority-filtered `listServices`, with bounded ASCII names and aligned
+parcels. Lookups are nonblocking. Unknown transaction codes return Android's
+`UNKNOWN_TRANSACTION` status; malformed parcels fail explicitly.
+
+The registry holds strong references to real guest Binder objects. Lookup
+returns callable translated handles, whose receive-buffer references follow
+the existing acquire/free/release rules. Owner teardown removes its services.
+Limits are 256 registered services, 127-byte names and the existing per-endpoint
+handle, queue and receive-arena budgets. No placeholder framework services
+are registered. Notifications, lazy services, declarations, permission policy
+and complete platform servicemanager behavior are outside this subset.
+
+The package launcher enables this mode automatically; see
+[signed native APK launch](ANDROID_APK.md).
 
 ## Syscall options
 
@@ -80,8 +109,11 @@ make cross SRC=ctest/android_binder.c OUT=ctest/android_binder.elf
 make cross SRC=ctest/android_binder_objects.c OUT=ctest/android_binder_objects.elf
 make cross SRC=ctest/android_binder_exit.c OUT=ctest/android_binder_exit.elf
 make cross SRC=ctest/android_syscall_options.c OUT=ctest/android_syscall_options.elf
+make cross SRC=ctest/android_service_manager.c OUT=ctest/android_service_manager.elf
 ./scripts/run_tests.sh --filter 'android_binder|android_syscall_options'
 ./scripts/run_tests.sh --no-jit --filter 'android_binder|android_syscall_options'
+./scripts/run_tests.sh --filter android_service_manager
+./scripts/run_tests.sh --no-jit --filter android_service_manager
 bash scripts/test_android_bionic.sh
 ```
 
@@ -97,8 +129,15 @@ barrier behaviors on a host supporting the expedited commands. The pinned real
 Bionic fixture also opens/maps Binder and checks `prctl` through actual Bionic
 wrappers, in fixed/random ASLR and interpreter/JIT/Tier-2 configurations.
 
-At the October 5 checkpoint, the complete Linux suites pass 272/272 in JIT
-mode and 265/265 in interpreter mode (seven JIT-only tests skipped). These
+The service-manager fixture checks 52 behaviors, including descriptor/name
+validation, registration, lookup, a real invocation through the discovered
+handle, reference ownership, priority filtering and service-owner teardown.
+It also runs inside the signed APK through the real Bionic wrappers. These
+are subset tests; they do not prove compatibility with guest libbinder or the
+Android framework as a whole.
+
+At the latest October 5 checkpoint, the complete Linux suites pass 273/273 in JIT
+mode and 266/266 in interpreter mode (seven JIT-only tests skipped). These
 runs include the mapping registry, device discovery, object transfer and
 XWayland/JIT regressions. The separate real Bionic bootstrap passes its six
 fixed/random ASLR and execution-mode configurations.
