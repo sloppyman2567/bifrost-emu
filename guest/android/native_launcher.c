@@ -14,7 +14,7 @@ static int decimal(const char *text, int limit) {
 }
 int main(int argc, char **argv, char **envp) {
     (void)envp;
-    int probe = argc == 3 && !strcmp(argv[1], "--probe");
+    int probe = argc >= 3 && !strcmp(argv[1], "--probe");
     // library, entrypoint, internal files, external files, assets, SDK, frames
     if (!probe && argc != 8) {
         printf("native launcher: invalid package launch arguments\n");
@@ -36,15 +36,34 @@ int main(int argc, char **argv, char **envp) {
     // An absolute dlopen path does not make sibling DT_NEEDED libraries
     // searchable. Configure the real guest linker before loading any app DSO.
     android_update_LD_LIBRARY_PATH(directory);
-    void *library = dlopen(path, 2); // RTLD_NOW: resolve every dependency.
+    // Probe prerequisites are explicit, ordered RTLD_LOCAL loads. Keep their
+    // handles alive through process exit, just like the target library.
+    if (probe) {
+        for (int i = 3; i < argc; ++i) {
+            if (!dlopen(argv[i], RTLD_NOW)) {
+                printf("native probe: PRELOAD_FAIL %s: %s\n", argv[i], dlerror());
+                fflush(stdout);
+                return 126;
+            }
+            printf("native probe: PRELOAD_OK %s\n", argv[i]);
+            if (fflush(stdout))
+                return 126;
+        }
+    }
+    void *library = dlopen(path, RTLD_NOW); // Resolve every dependency.
     if (!library) {
         printf("%s: %s\n", probe ? "native probe: LOAD_FAIL" : "native launcher", dlerror());
+        fflush(stdout);
         return 126;
     }
     if (probe) {
         // dlopen runs constructors, but JNI_OnLoad and Activity entrypoints
         // are deliberately not called without a real JavaVM/framework.
         printf("native probe: LOAD_OK %s JNI_OnLoad=%p\n", path, dlsym(library, "JNI_OnLoad"));
+        // Exit handlers can abort before stdio cleanup. Preserve the completed
+        // loading phase without treating it as a successful process shutdown.
+        if (fflush(stdout))
+            return 126;
         return 0;
     }
     void (*create)(ANativeActivity *, void *, size_t) = dlsym(library, argv[2]);

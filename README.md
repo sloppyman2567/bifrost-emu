@@ -233,7 +233,11 @@ see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
 execution, including SpongeBob's CleverTap Activity.
 The separate native-load probe completes 19/21 SpongeBob library checks in all
 three execution modes, including IL2CPP. Unity still needs Media NDK, and the
-managed launcher still needs ART/framework startup. Guest adapters now build
+managed launcher still needs ART/framework startup. Firebase Messaging's
+shutdown abort is traced to shared-mutex cleanup when probed first; an explicit
+Firebase App preload gives a clean exit in all three modes and QEMU. The probe
+reports loading and shutdown separately and supports ordered `--preload` options.
+Guest adapters now build
 with automatically fetched official AOSP headers, Bionic variadic logging and
 real guest zlib; see the APK guide for dependency pins and verification limits.
 The native-bridge adapter below is a separate integration interface, not a

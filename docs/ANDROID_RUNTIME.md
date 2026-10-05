@@ -6,8 +6,10 @@ NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROI
 ART and SpongeBob's managed Activity remain unsupported.
 The APK native-load diagnostic now checks real packaged dependencies separately:
 19/21 SpongeBob libraries complete loading/cleanup in all three execution modes.
-See [the APK checkpoint](ANDROID_APK.md) for the Media NDK and Firebase Messaging
-blockers and the official-header/zlib build.
+Firebase Messaging's direct probe loads successfully, then double-destroys a
+shared mutex on exit. Explicitly preloading Firebase App fixes that probe's
+cleanup in all three modes and QEMU. See [the APK checkpoint](ANDROID_APK.md)
+for the load-order evidence, Media NDK blocker and official-header/zlib build.
 
 ## Reproduce
 

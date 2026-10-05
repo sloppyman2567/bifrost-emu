@@ -72,8 +72,21 @@ class PackageTests(unittest.TestCase):
         ] + headers
         cls.dependency = cls.work / "libfixture_dependency.so"
         source = cls.work / "dependency.c"
-        source.write_text("int fixture_dependency_value(void) { return 41; }\n")
+        source.write_text(
+            '#include <stdlib.h>\n#include <unistd.h>\n'
+            'extern int __cxa_atexit(void (*)(void *), void *, void *);\n'
+            'int fixture_dependency_value(void) { return 41; }\n'
+            'static void exit_failure(void *unused) {\n'
+            '    (void)unused;\n'
+            '    if (getenv("BIFROST_FIXTURE_EXIT_FAILURE")) _exit(23);\n'
+            '}\n'
+            '__attribute__((constructor)) static void register_exit_failure(void) {\n'
+            '    static int dso;\n'
+            '    __cxa_atexit(exit_failure, 0, &dso);\n'
+            '}\n'
+        )
         subprocess.run(compiler + ["-Wl,-soname,libfixture_dependency.so", str(source),
+                       str(bionic / "libc.so"),
                        "-o", str(cls.dependency)], check=True, capture_output=True)
         cls.native = cls.work / "libfixture.so"
         subprocess.run(compiler + [
@@ -230,10 +243,29 @@ class PackageTests(unittest.TestCase):
         ], capture_output=True, text=True, timeout=75)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Native load probe: 2/2 loaded", result.stdout)
+        self.assertIn("2/2 exited cleanly", result.stdout)
         self.assertIn("abi=42 1.25 guest 1234567890123 1 2 3 4 5 6 7 8", result.stdout)
+        command = [
+            "python3", str(ROOT / "scripts/android_package.py"), "--state-root", str(state),
+            "probe", "org.bifrost.fixture", "--emu", str(ARGS.emu),
+            "--library", "libfixture.so", "--preload", "libfixture_dependency.so",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("native probe: PRELOAD_OK ", result.stdout)
+        # A real guest destructor exits nonzero after successful dlopen. The
+        # load marker must survive, and cleanup failure must still fail the CLI.
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60,
+                                env={**os.environ, "BIFROST_GUEST_ENV": "BIFROST_FIXTURE_EXIT_FAILURE=1"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("loaded, process failed (exit 23)", result.stdout)
+        self.assertIn("1/1 loaded; 0/1 exited cleanly", result.stdout)
         with self.assertRaisesRegex(ValueError, "packaged ARM64"):
             package.probe("org.bifrost.fixture", state, Path("/must/not/execute"),
                           ["../libfixture.so"])
+        with self.assertRaisesRegex(ValueError, "Preload requires packaged ARM64"):
+            package.probe("org.bifrost.fixture", state, Path("/must/not/execute"),
+                          preloads=["../libfixture.so"])
         # Reinstallation must retain saved data and publish the same immutable code.
         self.assertEqual(
             self.install(self.bundle, state)["guest_code"], metadata["guest_code"]

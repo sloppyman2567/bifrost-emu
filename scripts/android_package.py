@@ -458,7 +458,7 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0):
     return subprocess.run(command, check=False).returncode
 
 
-def probe(package, state, emu, libraries=None, no_jit=False, timeout=45):
+def probe(package, state, emu, libraries=None, no_jit=False, timeout=45, preloads=None):
     """Run real Bionic dlopen/constructors in a fresh process per installed DSO."""
     if not PACKAGE.fullmatch(package):
         raise ValueError("Invalid package name")
@@ -476,12 +476,16 @@ def probe(package, state, emu, libraries=None, no_jit=False, timeout=45):
         selected = list(dict.fromkeys(libraries)) if libraries else available
         if not selected or any(name not in available for name in selected):
             raise ValueError("Probe requires packaged ARM64 library names")
+        prerequisites = list(dict.fromkeys(preloads or []))
+        if any(name not in available for name in prerequisites):
+            raise ValueError("Preload requires packaged ARM64 library names")
     failures = 0
+    loaded_count = 0
     for library in selected:
         command = [str(emu)] + (["--no-jit"] if no_jit else []) + [
             "--android-runtime", "--android-services", "--rootfs", str(root),
             "/system/bin/bifrost-native", "--probe", code + "/lib/arm64/" + library,
-        ]
+        ] + [code + "/lib/arm64/" + name for name in prerequisites]
         # Constructors can print arbitrarily much. Spool instead of accumulating
         # subprocess output in memory; show only a bounded diagnostic tail.
         with tempfile.TemporaryFile() as output:
@@ -501,18 +505,26 @@ def probe(package, state, emu, libraries=None, no_jit=False, timeout=45):
             length = output.tell()
             output.seek(0)
             fatal = False
+            loaded = False
             carry = b""
             for block in iter(lambda: output.read(65536), b""):
                 text = carry + block
                 fatal |= bool(re.search(rb"Fatal signal|\[crash\]|FORTIFY:|CANNOT LINK", text))
+                loaded |= b"native probe: LOAD_OK " in text
                 carry = text[-32:]
             output.seek(max(0, length - 8192))
             tail = output.read().decode("utf-8", errors="replace")
-        success = status == 0 and not fatal and "native probe: LOAD_OK " in tail
+        success = status == 0 and not fatal and loaded
+        loaded_count += loaded
         failures += not success
-        print(f"{library}: {'loaded' if success else 'failed'} (exit {status})", flush=True)
+        if success:
+            result = "loaded, exited cleanly"
+        else:
+            result = "loaded, process failed" if loaded else "load failed"
+        print(f"{library}: {result} (exit {status})", flush=True)
         print(tail, end="" if tail.endswith("\n") else "\n", flush=True)
-    print(f"Native load probe: {len(selected) - failures}/{len(selected)} loaded; JNI/framework startup not attempted")
+    print(f"Native load probe: {loaded_count}/{len(selected)} loaded; "
+          f"{len(selected) - failures}/{len(selected)} exited cleanly; JNI/framework startup not attempted")
     return 1 if failures else 0
 
 
@@ -548,6 +560,7 @@ def main():
     diagnostic = commands.add_parser("probe", help="dlopen native libraries without JNI/Activity startup")
     diagnostic.add_argument("package")
     diagnostic.add_argument("--library", action="append", help="packaged basename; repeatable, default all")
+    diagnostic.add_argument("--preload", action="append", help="packaged basename to load first; repeatable in order")
     diagnostic.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
     diagnostic.add_argument("--no-jit", action="store_true")
     diagnostic.add_argument("--timeout", type=int, default=45, help="seconds per library, 1..300")
@@ -568,7 +581,7 @@ def main():
             return 0
         if args.command == "probe":
             return probe(args.package, args.state_root, args.emu.resolve(), args.library,
-                         args.no_jit, args.timeout)
+                         args.no_jit, args.timeout, args.preload)
         if not 0 <= args.frames <= 36000:
             raise ValueError("--frames must be in 0..36000")
         return launch(

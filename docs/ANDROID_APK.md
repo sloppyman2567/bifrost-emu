@@ -34,14 +34,19 @@ python3 scripts/android_package.py run org.example.package \
 
 Installation accepts a single APK or a ZIP/APKM/APKS containing one consistent
 base/split set. It does not select among bundletool device variants. Use
-`--state-root PATH` before `install` or `run` to choose a different state directory.
+`--state-root PATH` before `install`, `run` or `probe` to choose a different state directory.
 `run --no-jit` uses the interpreter; `--frames N` bounds redraw cycles for tests,
 and zero runs until the window closes. Bifrost flags precede its guest ELF.
 `probe --no-jit` also uses the interpreter. Repeat `--library` to select a subset;
-the default checks all installed ARM64 libraries. `--timeout` bounds each process
+the default checks all installed ARM64 libraries. Repeat `--preload BASENAME` to
+load packaged prerequisites in the given order before each target, with Bionic's
+normal `RTLD_LOCAL` scope. No application-specific ordering is inferred.
+`--timeout` bounds each process
 to 1..300 seconds (45 by default), including its descendants. Diagnostics print
 a bounded output tail, reject fatal markers even with exit zero, and return
-nonzero if any library fails. This executes native constructors and cleanup;
+nonzero if any library fails. A flushed `LOAD_OK` marker records successful
+`dlopen` separately from process exit: `loaded, process failed` still fails the
+command. This executes native constructors and cleanup;
 it is a loading diagnostic, not an APK launch or a side-effect-free inspection.
 
 Adapter changes require a fresh `--state-root`; the installer deliberately
@@ -143,16 +148,35 @@ compatibility evidence. The native probe now completes loading and process
 cleanup for 19/21 libraries under JIT, interpreter and opt-in Tier 2, including
 `libmain`, `libil2cpp`, Firebase Analytics/App/AppCheck/Crashlytics and the native
 Crashlytics libraries. Unity reaches a missing `libmediandk.so` dependency.
-Firebase Messaging aborts with a destroyed-mutex FORTIFY error in both Bifrost
-engines and QEMU using the same libraries; this probe does not establish its
-cause or successful JNI initialization. JNI entrypoints are located, never
-invoked. Media NDK, ART and framework startup remain required.
+Firebase Messaging finishes `dlopen` but aborts during process exit when probed
+directly. Its cause is now traced: App and Messaging both export
+`firebase::messaging::ListenerImpl::g_mutex`. Loading Messaging and its App
+dependency together makes both constructors register the same mutex address
+with `__cxa_atexit`, using distinct DSO handles. The App destructor
+`firebase::Mutex::~Mutex` at offset `0x1936a0` destroys it twice; the observed
+Bionic state changes from `0x4000` to the destroyed marker `0xffff` before the
+second call, matching the [pinned Bionic mutex implementation](https://android.googlesource.com/platform/bionic/+/361ba86734fb2821a6adcfdf775db8abd04e0de0/libc/bionic/pthread_mutex.cpp).
+The registrations belong to App (`__dso_handle` at `0x3ddb88`) and
+Messaging (`0x139f8`); the shared object resolves to Messaging at `0x140d8`.
+These offsets refer to this packaged version, not a general Firebase ABI.
 
-The local refinement installation uses `android-state/bionic-headers`:
+Explicitly loading App first with `RTLD_LOCAL` gives each DSO its own mutex
+address and completes Messaging cleanup under JIT, interpreter and opt-in
+Tier 2. QEMU reproduces both the double destruction and the clean App-first
+exit. This isolates a load-order problem in the standalone probe; it does not
+establish the managed game's initialization order or successful JNI startup.
+The probe preserves normal Bionic checks and exit handlers. JNI entrypoints are
+located, never invoked. Media NDK, ART and framework startup remain required.
+With the explicit App preload, the full 21-library JIT probe completes 20/21
+loads and clean exits; Unity remains blocked on `libmediandk.so`.
+
+The earlier header checkpoint uses `android-state/bionic-headers`. The updated
+launcher installation uses a fresh `android-state/bionic-mutex-final`:
 
 ```bash
-python3 scripts/android_package.py --state-root android-state/bionic-headers \
-    probe com.tiltingpoint.spongebob
+python3 scripts/android_package.py --state-root android-state/bionic-mutex-final \
+    probe com.tiltingpoint.spongebob --library libFirebaseCppMessaging.so \
+    --preload libFirebaseCppApp-13_8_0.so
 ```
 
 ## Verification
@@ -170,7 +194,9 @@ pass lifecycle, pthread/TLS, split-asset, save persistence, EGL pixel readback
 and service-handle invocation checks. The signed fixture also verifies sibling
 dependency loading, mixed integer/FP/string/stack variadic logs, a known CRC,
 an independently generated compressed stream and zlib round trips. Its two
-libraries pass the standalone loading probe. The six host test cases also cover path
+libraries pass the standalone loading probe. Ordered preloads and a real guest
+exit-handler failure also pass: the latter preserves `LOAD_OK` while failing
+the command with guest exit 23. The six host test cases also cover path
 and symlink rejection, input growth bounds, signature tampering, signer mismatch,
 version mismatch, downgrade prevention, reordered reinstall, modified installed
 code, and managed-launcher rejection. The fixture does not test ART or JNI.
@@ -178,6 +204,7 @@ code, and managed-launcher rejection. The fixture does not test ART or JNI.
 The complete Linux regression suite passes 273/273 JIT runs and 266/266
 interpreter runs with seven JIT-only skips. The real Bionic bootstrap separately
 passes all six fixed/random ASLR and execution-mode configurations.
-For this refinement, the full Linux runs initially rejected two stale fixtures;
+For the preceding Bionic/header refinement, the full Linux runs initially
+rejected two stale fixtures;
 after rebuilding, both cases passed in each mode. Aggregate coverage remains
 273 passing JIT runs and 266 passing interpreter runs with seven JIT-only skips.
