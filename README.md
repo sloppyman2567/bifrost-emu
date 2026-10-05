@@ -53,10 +53,10 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   slow, and save compatibility depends on the game build; see
   [Doom 3 status](docs/doom3.md).
 
-**Full-suite checkpoint (October 5, 2026, before loadable window plugins):** runs passed 272/272
-in JIT mode and 265/265 in interpreter mode, with seven JIT-only skips.
-The verification gate now passes 56 single-thread differential fixtures and
-four separate threaded oracle workloads. Shared-memory replay is suspended
+**Full-suite checkpoint (October 5, 2026, including loadable window plugins):**
+runs passed 272/272 in JIT mode and 265/265 in interpreter mode, with seven JIT-only skips.
+The verification gate now passes 60 single-thread differential fixtures and
+five separate threaded oracle workloads. Shared-memory replay is suspended
 when a second guest CPU starts; see [test evidence](docs/TESTS.md).
 Dispatch and nested-call microbenchmarks improved 2.32× and 1.93× respectively;
 those figures are not whole-game FPS gains. Android APK/ART integration is
@@ -210,8 +210,8 @@ optional SDL/EGL module with `make android-window-plugin`, then supply
 before `--android` or the guest ELF. The default backend remains built in.
 The plugin refinement passes 33 native Wayland surface checks with both
 backends/engines, twelve CLI cases in SDL and headless builds, and the SDL
-helper-lifetime oracle. Focused regressions pass 10/10 in each engine; the
-earlier full-suite checkpoint above predates these changes.
+helper-lifetime oracle. The full-suite checkpoint above includes these changes;
+standalone Tier-2, Android, TLS, graphics ABI and lifecycle regressions also pass.
 
 Integrated APK loading, full Bionic/platform compatibility and ART execution
 remain planned for v2.0; see the [roadmap](roadmap.md). The standalone Android path

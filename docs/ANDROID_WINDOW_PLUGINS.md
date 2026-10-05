@@ -121,7 +121,10 @@ builds, plus all twelve CLI startup/help/error cases in each build. Headless SDK
 independence passes. Focused Android/Binder/syscall, SDL triangle, socket and
 XWayland regressions pass 10/10 in both engines. The separate pinned Bionic
 bootstrap still passes all six fixed/random ASLR and execution configurations.
-The prior full-suite checkpoint below predates these plugin changes.
+The October 5 full-suite rerun of `700e8e0` includes these plugin changes:
+272/272 JIT tests and 265/265 interpreter tests pass, with seven JIT-only
+interpreter skips. Differential verification passes 60 fixtures and five
+threaded result oracles. See [the complete validation scope](TESTS.md).
 
 ## Independent downloaded programs
 

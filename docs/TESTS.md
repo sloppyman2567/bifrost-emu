@@ -10,10 +10,11 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
-The October 5 full suite passes **272/272 in JIT mode** with no skips (240 s)
-and **265/265 in interpreter mode**, with seven JIT-only skips (204 s).
-These runs include the Android Binder/syscall foundations, widening SIMD and
-CRC instructions, BFM insertion masks, chained NZCV preservation, socket message
+The October 5 rerun of commit `700e8e0` passes **272/272 in JIT mode** with no
+skips (172 s) and **265/265 in interpreter mode**, with seven JIT-only skips
+(203 s). Guest fixtures were refreshed with `make setup-tests` before testing.
+These runs include the loadable window-plugin refinement, Android Binder/syscall
+foundations, widening SIMD and CRC instructions, BFM insertion masks, chained NZCV preservation, socket message
 layout and real guest libX11/XWayland rendering. They supersede the October 4
 258/255 full-suite checkpoint; the additional verification results below retain
 their original scope.
@@ -27,13 +28,30 @@ checks in both engines, with both built-in and loadable SDL/EGL backends. Downlo
 Mesa demos still fail at EGL/GLX integration; see the
 [window backend validation](ANDROID_WINDOW_PLUGINS.md).
 
-All 17 additional verification groups pass: generated files, header independence,
-toolchain fetching, verification-gate tests, C API/native bridge, differential
-verification, MT mode controls, immutable MT publication, code cache, CPU and
-fallback profiling, Doom native/compatibility probes, SDL formats, TLS and
-threaded TLS, and window statistics. Differential verification covers 56
-fixtures and five threaded oracle workloads. Tier-2-specific checks explicitly
-enable promotion even though normal execution now defaults to tier 1.
+The refreshed checks also pass:
+
+- Generated-source consistency; existing Vulkan generator warnings remain.
+- C API **57/57** and native bridge **61/61**, plus backend/plugin contracts
+  and twelve CLI cases, in both SDL/GL and headless builds. The SDL helper
+  lifetime oracle and graphics SDK independence check pass.
+- Differential verification: **60 fixtures and five threaded result oracles**.
+- Tier-2 discovery, feedback and timing measurements in single-threaded and
+  multithreaded modes, with ordinary chaining and chain skipping; twenty
+  mutex promotion-stress runs; MT mode controls and immutable publication.
+- Cache pressure/growth, CPU/fallback profiling, Doom native/compatibility
+  probes, SDL formats, late TLS/threaded TLS and window statistics.
+- Android loader checks with fixed/random ASLR, preflight tests, all six
+  Bionic bootstrap configurations, toolchain-fetch and verification-gate tests.
+- SDL/GL/Vulkan thunk compatibility in both engines, 64 SDL lifecycle cycles
+  in JIT mode, and zstd host-validated compression/decompression in both engines.
+
+All 25 standalone regression groups pass. Additional headless checks pass
+**94/94 JIT units**, **88/88 interpreter units** with six JIT-only skips,
+the sandbox boundary test, and static glibc startup in both engines. Native
+Wayland passes **33/33** surface checks with each built-in/plugin and
+JIT/interpreter combination. Suite timings include concurrent validation;
+they are not comparative performance measurements. Tier-2-specific checks
+explicitly enable promotion even though normal execution defaults to tier 1.
 
 The retained Doom gap harness passes 20,000 randomized generated-code checks
 for 625 captured encodings, with zero mismatches and zero explicit IR
@@ -58,7 +76,7 @@ and in headless builds; SDK independence also passes. CI runs these gates.
 The focused Android/Binder/syscall, SDL triangle, socket message and XWayland
 subset passes 10/10 in each engine after this refinement. The real pinned
 Bionic bootstrap passes all six ASLR/mode configurations. These are focused
-checks; the full-suite counts above belong to the earlier XWayland checkpoint.
+checks; the full-suite rerun above also includes this refinement.
 
 Review follow-up also checks that config-only NativeActivity invocations avoid
 plugin loading, and guest config flags do not change host startup. The SDL
