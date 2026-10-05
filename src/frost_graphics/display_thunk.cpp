@@ -1071,7 +1071,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 std::string text = guest_str(cpu.regs[2]);
                 std::fprintf(stderr, "[android-log] %s: %s\n",
                              tag.c_str(), text.c_str());
-                cpu.regs[0] = 0;
+                cpu.regs[0] = 1;
                 return 0;
             }
             // __android_log_print / __android_log_buf_print: varargs fmt

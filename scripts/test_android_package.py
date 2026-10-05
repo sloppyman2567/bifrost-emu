@@ -2,6 +2,7 @@
 """Signed split installation, rollback, real Bionic and native Wayland APK gate."""
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -56,33 +57,32 @@ class PackageTests(unittest.TestCase):
             capture_output=True,
         )
         bionic = cls.runtime / "apex/com.android.runtime/lib64/bionic"
-        cls.native = cls.work / "libfixture.so"
-        subprocess.run(
-            [
-                "clang",
-                "--target=aarch64-linux-android35",
-                "-fuse-ld=lld",
-                "-nostdlib",
-                "-ffreestanding",
-                "-O2",
-                "-Wall",
-                "-Wextra",
-                "-fPIC",
-                "-shared",
-                "-Wl,-z,max-page-size=16384",
-                "-Wl,-z,defs",
-                "-Wl,-soname,libfixture.so",
-                str(ROOT / "ctest/host/android_apk_fixture.c"),
-                str(cls.adapters / "libandroid.so"),
-                str(cls.adapters / "libEGL.so"),
-                str(cls.adapters / "libGLESv2.so"),
-                str(bionic / "libc.so"),
-                "-o",
-                str(cls.native),
-            ],
-            check=True,
-            capture_output=True,
+        spec = importlib.util.spec_from_file_location(
+            "android_guest_dependencies", ROOT / "tools/android_guest_dependencies.py"
         )
+        dependencies = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(dependencies)
+        headers = dependencies.prepare_headers(cls.work / "headers")
+        dependencies.extract("zlib", cls.work / "zlib")
+        headers += ["-isystem", str(cls.work / "zlib" / ("zlib-" + dependencies.ZLIB_VERSION))]
+        compiler = [
+            "clang", "--target=aarch64-linux-android35", "-fuse-ld=lld",
+            "-nostdlib", "-ffreestanding", "-O2", "-Wall", "-Wextra", "-fPIC",
+            "-shared", "-Wl,-z,max-page-size=16384", "-Wl,-z,defs",
+        ] + headers
+        cls.dependency = cls.work / "libfixture_dependency.so"
+        source = cls.work / "dependency.c"
+        source.write_text("int fixture_dependency_value(void) { return 41; }\n")
+        subprocess.run(compiler + ["-Wl,-soname,libfixture_dependency.so", str(source),
+                       "-o", str(cls.dependency)], check=True, capture_output=True)
+        cls.native = cls.work / "libfixture.so"
+        subprocess.run(compiler + [
+            "-Wl,-soname,libfixture.so", str(ROOT / "ctest/host/android_apk_fixture.c"),
+            str(cls.dependency), str(cls.adapters / "libandroid.so"),
+            str(cls.adapters / "liblog.so"), str(cls.adapters / "libz.so"),
+            str(cls.adapters / "libEGL.so"), str(cls.adapters / "libGLESv2.so"),
+            str(bionic / "libc.so"), "-o", str(cls.native),
+        ], check=True, capture_output=True)
         cls.base = cls.apk("base", split="", native=False)
         cls.split = cls.apk("arm64", split="config.arm64_v8a", native=True)
         cls.bundle = cls.work / "fixture.apkm"
@@ -134,6 +134,7 @@ class PackageTests(unittest.TestCase):
         if native:
             with zipfile.ZipFile(apk, "a") as archive:
                 archive.write(cls.native, "lib/arm64-v8a/libfixture.so")
+                archive.write(cls.dependency, "lib/arm64-v8a/libfixture_dependency.so")
                 archive.writestr("assets/split.txt", "APK split asset\n")
         cls.sign(apk, key)
         return apk
@@ -174,7 +175,7 @@ class PackageTests(unittest.TestCase):
         state = self.work / "launch-state"
         metadata = self.install(self.bundle, state)
         self.assertEqual(metadata["apk_count"], 2)
-        self.assertEqual(metadata["arm64_library_count"], 1)
+        self.assertEqual(metadata["arm64_library_count"], 2)
         self.assertEqual(metadata["launcher"]["kind"], "native_activity")
         self.assertEqual((state / "org.bifrost.fixture/package.json").is_file(), True)
         for mode in ("jit", "interp", "tier2"):
@@ -207,6 +208,8 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(
                     result.returncode, 0, result.stdout + "\n" + result.stderr
                 )
+                self.assertIn("abi=42 1.25 guest 1234567890123 1 2 3 4 5 6 7 8", result.stderr)
+                self.assertIn("buffer=2.50 ok", result.stderr)
                 self.assertIn("apk_bionic_fixture: ALL PASS", result.stdout)
                 self.assertIn("android_service_manager: ALL PASS", result.stdout)
                 self.assertNotRegex(
@@ -220,6 +223,17 @@ class PackageTests(unittest.TestCase):
             ).read_bytes(),
             b"\x06",
         )
+        # Diagnostics run constructors without invoking Activity callbacks or JNI.
+        result = subprocess.run([
+            "python3", str(ROOT / "scripts/android_package.py"), "--state-root", str(state),
+            "probe", "org.bifrost.fixture", "--emu", str(ARGS.emu), "--timeout", "30",
+        ], capture_output=True, text=True, timeout=75)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Native load probe: 2/2 loaded", result.stdout)
+        self.assertIn("abi=42 1.25 guest 1234567890123 1 2 3 4 5 6 7 8", result.stdout)
+        with self.assertRaisesRegex(ValueError, "packaged ARM64"):
+            package.probe("org.bifrost.fixture", state, Path("/must/not/execute"),
+                          ["../libfixture.so"])
         # Reinstallation must retain saved data and publish the same immutable code.
         self.assertEqual(
             self.install(self.bundle, state)["guest_code"], metadata["guest_code"]

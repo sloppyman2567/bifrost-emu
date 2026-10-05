@@ -8,7 +8,7 @@ require guest ART and Android framework startup.
 
 ## Setup and use
 
-Provision Python 3, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
+Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
 `java` and `keytool`. The signing and manifest tools are checksum-pinned AOSP
 downloads; no full Android SDK installation is required.
 
@@ -22,6 +22,11 @@ make android-runtime-adapters android-window-plugin
 python3 scripts/android_package.py install /path/to/package.apkm
 python3 scripts/android_package.py run org.example.package
 
+# Diagnose native loading even when the package has a managed launcher.
+# Each library gets a fresh process; constructors run, JNI_OnLoad does not.
+python3 scripts/android_package.py probe org.example.package
+python3 scripts/android_package.py probe org.example.package --library libunity.so
+
 # Use the existing loadable window backend instead of the built-in backend.
 python3 scripts/android_package.py run org.example.package \
     --android-window-plugin build/release-sdl1-gl1/plugins/android-window-sdl.so
@@ -32,6 +37,16 @@ base/split set. It does not select among bundletool device variants. Use
 `--state-root PATH` before `install` or `run` to choose a different state directory.
 `run --no-jit` uses the interpreter; `--frames N` bounds redraw cycles for tests,
 and zero runs until the window closes. Bifrost flags precede its guest ELF.
+`probe --no-jit` also uses the interpreter. Repeat `--library` to select a subset;
+the default checks all installed ARM64 libraries. `--timeout` bounds each process
+to 1..300 seconds (45 by default), including its descendants. Diagnostics print
+a bounded output tail, reject fatal markers even with exit zero, and return
+nonzero if any library fails. This executes native constructors and cleanup;
+it is a loading diagnostic, not an APK launch or a side-effect-free inspection.
+
+Adapter changes require a fresh `--state-root`; the installer deliberately
+rejects replacing different adapters inside an existing app root. Keep the
+original app state when evaluating a new runtime.
 
 ## Package and runtime ownership
 
@@ -66,10 +81,39 @@ The pinned runtime's provenance and 4 KiB pages/16 KiB ELF alignment are covered
 in [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md). This does not establish a complete
 API-35 platform implementation.
 
+Before app loading, the guest launcher gives Bionic the packaged library
+directory through the pinned `libdl_android` platform entrypoint
+`android_update_LD_LIBRARY_PATH`. This makes sibling `DT_NEEDED` libraries
+searchable within the isolated process. It is an internal platform API tied to
+this runtime, not a public NDK compatibility promise. Bionic's descriptor-path
+checks use translated guest `/proc/self/fd` identities and guest-root paths;
+the host descriptor with the same number must never decide namespace access.
+
 Guest `libandroid`, `liblog`, `libEGL` and `libGLESv2` adapters resolve explicit
 exports into Bifrost's existing thunks. Assembly wrappers preserve AAPCS64
 arguments and cache trampoline addresses with acquire/release operations.
 Graphics remain behind the [window plugin interface](ANDROID_WINDOW_PLUGINS.md).
+The build automatically fetches AOSP Bionic, NativeActivity, window, rectangle,
+JNI-type and logging headers at pinned Android-15 repository revisions. Public
+ABI declarations come from those headers. Downloaded archives live under
+ignored `build/android-dependencies`; bounded extraction accepts regular files
+and directories only. Gitiles adds changing archive timestamps, so AOSP pins
+cover sorted regular-file names, lengths and contents with SHA-256. Static
+upstream zlib archives use their published archive SHA-256. Every cache reuse
+is reverified; adapter metadata records source URLs and checksum kinds.
+
+Guest `liblog` formats print/vprint/buffer-print arguments using real Bionic
+`vsnprintf`, preserving the ARM64 `va_list` ABI, then sends a fixed string to
+the existing stderr bridge. Successful writes return one, as specified by
+[Android's logging API](https://developer.android.com/ndk/reference/group/logging).
+Formatting is capped at 1023 bytes; buffers share one sink. This does not supply
+logd, property-based filtering or the full logging API. Log assertions terminate
+through Bionic `abort` rather than reporting success.
+
+`libz.so` is genuine guest ARM64 [zlib 1.3.2](https://zlib.net/), compiled from
+the pinned upstream release against the real Bionic library and AOSP headers.
+Compression/decompression executes in the guest; no host zlib pointer or
+callback ABI crosses this boundary. Its license accompanies the installed DSO.
 Private syscalls `0x100D` (adapter resolution) and `0x100E` (event pump/input
 queue) require the Android runtime profile. They are not Android kernel APIs.
 
@@ -95,7 +139,21 @@ The user-provided SpongeBob 5.11.5 set installs successfully: nine signed APKs
 and 21 ARM64 libraries. Launch rejects
 `com.clevertap.unity.CleverTapOverrideActivity` before executing the emulator
 because it requires ART/framework startup. Installation is not game-play
-compatibility evidence.
+compatibility evidence. The native probe now completes loading and process
+cleanup for 19/21 libraries under JIT, interpreter and opt-in Tier 2, including
+`libmain`, `libil2cpp`, Firebase Analytics/App/AppCheck/Crashlytics and the native
+Crashlytics libraries. Unity reaches a missing `libmediandk.so` dependency.
+Firebase Messaging aborts with a destroyed-mutex FORTIFY error in both Bifrost
+engines and QEMU using the same libraries; this probe does not establish its
+cause or successful JNI initialization. JNI entrypoints are located, never
+invoked. Media NDK, ART and framework startup remain required.
+
+The local refinement installation uses `android-state/bionic-headers`:
+
+```bash
+python3 scripts/android_package.py --state-root android-state/bionic-headers \
+    probe com.tiltingpoint.spongebob
+```
 
 ## Verification
 
@@ -109,7 +167,10 @@ The APK gate requires a native Wayland desktop and GPU. It builds and signs a
 base/split NativeActivity fixture with actual AAPT2/API-35 manifest resources
 and apksigner. All six JIT/interpreter/Tier-2 and built-in/plugin combinations
 pass lifecycle, pthread/TLS, split-asset, save persistence, EGL pixel readback
-and service-handle invocation checks. The six host test cases also cover path
+and service-handle invocation checks. The signed fixture also verifies sibling
+dependency loading, mixed integer/FP/string/stack variadic logs, a known CRC,
+an independently generated compressed stream and zlib round trips. Its two
+libraries pass the standalone loading probe. The six host test cases also cover path
 and symlink rejection, input growth bounds, signature tampering, signer mismatch,
 version mismatch, downgrade prevention, reordered reinstall, modified installed
 code, and managed-launcher rejection. The fixture does not test ART or JNI.
@@ -117,3 +178,6 @@ code, and managed-launcher rejection. The fixture does not test ART or JNI.
 The complete Linux regression suite passes 273/273 JIT runs and 266/266
 interpreter runs with seven JIT-only skips. The real Bionic bootstrap separately
 passes all six fixed/random ASLR and execution-mode configurations.
+For this refinement, the full Linux runs initially rejected two stale fixtures;
+after rebuilding, both cases passed in each mode. Aggregate coverage remains
+273 passing JIT runs and 266 passing interpreter runs with seven JIT-only skips.

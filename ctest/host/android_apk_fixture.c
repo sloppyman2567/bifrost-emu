@@ -1,4 +1,6 @@
 #include "../../guest/android/native_activity.h"
+#include <android/log.h>
+#include <zlib.h>
 #define main service_manager_checks
 #include "../android_service_manager.c"
 #undef main
@@ -27,6 +29,7 @@ static int initialized, phase, presented;
 static void *display;
 static void *surface;
 static void *context;
+extern int fixture_dependency_value(void);
 #define REQUIRE(x)                                                                                 \
     do {                                                                                           \
         if (!(x)) {                                                                                \
@@ -35,7 +38,33 @@ static void *context;
             _exit(1);                                                                              \
         }                                                                                          \
     } while (0)
-__attribute__((constructor)) static void constructor(void) { initialized = 41; }
+static int log_variadic(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int result = __android_log_vprint(4, "apk-fixture", format, args);
+    va_end(args);
+    return result;
+}
+__attribute__((constructor)) static void constructor(void) {
+    REQUIRE(fixture_dependency_value() == 41);
+    REQUIRE(log_variadic("abi=%d %.2f %s %lld %d %d %d %d %d %d %d %d", 42, 1.25,
+                         "guest", 1234567890123LL, 1, 2, 3, 4, 5, 6, 7, 8) == 1);
+    REQUIRE(__android_log_buf_print(0, 4, "apk-fixture", "buffer=%.2f %s", 2.5, "ok") == 1);
+    // Standard CRC oracle and a stream generated outside the guest implementation.
+    REQUIRE(crc32(0, (const unsigned char *)"123456789", 9) == 0xcbf43926UL);
+    unsigned char compressed[128], decoded[32];
+    unsigned long size = sizeof(compressed), restored = sizeof(decoded);
+    REQUIRE(compress(compressed, &size, (const unsigned char *)"guest zlib roundtrip", 21) == Z_OK);
+    REQUIRE(uncompress(decoded, &restored, compressed, size) == Z_OK && restored == 21 &&
+            !memcmp(decoded, "guest zlib roundtrip", 21));
+    static const unsigned char stream[] = {120, 156, 75, 47, 77, 45, 46, 81, 168, 202, 201,
+                                          76, 82, 40, 202, 47, 205, 75, 41, 41, 202, 44, 0,
+                                          0, 82, 211, 8, 1};
+    restored = sizeof(decoded);
+    REQUIRE(uncompress(decoded, &restored, stream, sizeof(stream)) == Z_OK && restored == 20 &&
+            !memcmp(decoded, "guest zlib roundtrip", 20));
+    initialized = 41;
+}
 static void *worker(void *p) {
     (void)p;
     REQUIRE(tls == 17);

@@ -117,6 +117,9 @@ public:
     // True when `path` (a canonical getcwd-style path) lies inside the
     // canonical sandbox root (boundary-aware). False when unresolvable.
     static bool path_inside_root(const char* path);
+    // Kernel /proc target for a real host fd, with the canonical sandbox
+    // prefix removed so linker/realpath callers see a guest absolute path.
+    static int fd_link_target(int host_fd, std::string& target);
     // Explicit-dirfd open: absolute paths behave exactly like open()
     // (dirfd ignored per POSIX); relative paths resolve under host_dirfd
     // (a real host dir fd; AT_FDCWD keeps legacy host-cwd behavior).

@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -31,6 +32,7 @@ RESERVED = {
     "liblog.so",
     "libEGL.so",
     "libGLESv2.so",
+    "libz.so",
 }
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
 
@@ -161,6 +163,8 @@ def verify_adapters(adapters, runtime):
         "liblog.so",
         "libEGL.so",
         "libGLESv2.so",
+        "libz.so",
+        "libz.so.LICENSE",
     }
     if (
         metadata.get("runtime_archive_sha256") != runtime.SHA256
@@ -384,6 +388,29 @@ def install(source, state, runtime, adapters, aapt2, apksigner):
             return metadata
 
 
+def verify_installed(package, app, metadata):
+    """Shared integrity gate for Activity launch and native-library diagnostics."""
+    code = metadata["guest_code"]
+    if not re.fullmatch("/data/app/" + re.escape(package) + r"-[0-9a-f]{24}", code):
+        raise ValueError("Invalid installed code path")
+    root = app / "rootfs"
+    for path, value in metadata["files"].items():
+        if digest(root / code.lstrip("/") / path) != value:
+            raise ValueError(f"Installed package was modified: {path}")
+    for remote, value in metadata["runtime_files"].items():
+        if digest(root / "apex/com.android.runtime" / remote) != value:
+            raise ValueError("Installed Bionic runtime was modified")
+    for filename, value in metadata["adapters"]["files"].items():
+        target = (
+            root
+            / ("system/bin" if filename == "bifrost-native" else "system/lib64")
+            / filename
+        )
+        if digest(target) != value:
+            raise ValueError("Installed runtime adapter was modified")
+    return code, root
+
+
 def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0):
     if not PACKAGE.fullmatch(package):
         raise ValueError("Invalid package name")
@@ -407,24 +434,7 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0):
         relative = "lib/arm64/lib" + library + ".so"
         if relative not in metadata["files"]:
             raise ValueError("NativeActivity has no packaged ARM64 entry library")
-        code = metadata["guest_code"]
-        if not re.fullmatch("/data/app/" + re.escape(package) + r"-[0-9a-f]{24}", code):
-            raise ValueError("Invalid installed code path")
-        root = app / "rootfs"
-        for path, value in metadata["files"].items():
-            if digest(root / code.lstrip("/") / path) != value:
-                raise ValueError(f"Installed package was modified: {path}")
-        for remote, value in metadata["runtime_files"].items():
-            if digest(root / "apex/com.android.runtime" / remote) != value:
-                raise ValueError("Installed Bionic runtime was modified")
-        for filename, value in metadata["adapters"]["files"].items():
-            target = (
-                root
-                / ("system/bin" if filename == "bifrost-native" else "system/lib64")
-                / filename
-            )
-            if digest(target) != value:
-                raise ValueError("Installed runtime adapter was modified")
+        code, root = verify_installed(package, app, metadata)
         command = [str(emu)]
         if no_jit:
             command += ["--no-jit"]
@@ -446,6 +456,64 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0):
         ]
     # No compiler, custom linker, synthetic TLS or host library search in launch.
     return subprocess.run(command, check=False).returncode
+
+
+def probe(package, state, emu, libraries=None, no_jit=False, timeout=45):
+    """Run real Bionic dlopen/constructors in a fresh process per installed DSO."""
+    if not PACKAGE.fullmatch(package):
+        raise ValueError("Invalid package name")
+    if not 1 <= timeout <= 300:
+        raise ValueError("Probe timeout must be in 1..300 seconds")
+    app = state / package
+    with app_lock(app):
+        metadata = json.loads((app / "package.json").read_text())
+        code, root = verify_installed(package, app, metadata)
+        available = sorted(
+            path.removeprefix("lib/arm64/")
+            for path in metadata["files"]
+            if path.startswith("lib/arm64/") and path.endswith(".so")
+        )
+        selected = list(dict.fromkeys(libraries)) if libraries else available
+        if not selected or any(name not in available for name in selected):
+            raise ValueError("Probe requires packaged ARM64 library names")
+    failures = 0
+    for library in selected:
+        command = [str(emu)] + (["--no-jit"] if no_jit else []) + [
+            "--android-runtime", "--android-services", "--rootfs", str(root),
+            "/system/bin/bifrost-native", "--probe", code + "/lib/arm64/" + library,
+        ]
+        # Constructors can print arbitrarily much. Spool instead of accumulating
+        # subprocess output in memory; show only a bounded diagnostic tail.
+        with tempfile.TemporaryFile() as output:
+            with subprocess.Popen(command, stdout=output, stderr=output, start_new_session=True) as process:
+                try:
+                    status = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    status = 124
+                finally:
+                    # A constructor can fork. End the entire diagnostic session,
+                    # including descendants, before advancing to the next DSO.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+            length = output.tell()
+            output.seek(0)
+            fatal = False
+            carry = b""
+            for block in iter(lambda: output.read(65536), b""):
+                text = carry + block
+                fatal |= bool(re.search(rb"Fatal signal|\[crash\]|FORTIFY:|CANNOT LINK", text))
+                carry = text[-32:]
+            output.seek(max(0, length - 8192))
+            tail = output.read().decode("utf-8", errors="replace")
+        success = status == 0 and not fatal and "native probe: LOAD_OK " in tail
+        failures += not success
+        print(f"{library}: {'loaded' if success else 'failed'} (exit {status})", flush=True)
+        print(tail, end="" if tail.endswith("\n") else "\n", flush=True)
+    print(f"Native load probe: {len(selected) - failures}/{len(selected)} loaded; JNI/framework startup not attempted")
+    return 1 if failures else 0
 
 
 def main():
@@ -477,6 +545,12 @@ def main():
         default=0,
         help="bounded redraw cycles; zero runs until window close",
     )
+    diagnostic = commands.add_parser("probe", help="dlopen native libraries without JNI/Activity startup")
+    diagnostic.add_argument("package")
+    diagnostic.add_argument("--library", action="append", help="packaged basename; repeatable, default all")
+    diagnostic.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    diagnostic.add_argument("--no-jit", action="store_true")
+    diagnostic.add_argument("--timeout", type=int, default=45, help="seconds per library, 1..300")
     args = parser.parse_args()
     try:
         if args.command == "install":
@@ -492,6 +566,9 @@ def main():
                 f"Installed {value['package']} version {value['version_code']}: {value['apk_count']} signed APKs, {value['arm64_library_count']} ARM64 libraries"
             )
             return 0
+        if args.command == "probe":
+            return probe(args.package, args.state_root, args.emu.resolve(), args.library,
+                         args.no_jit, args.timeout)
         if not 0 <= args.frames <= 36000:
             raise ValueError("--frames must be in 0..36000")
         return launch(

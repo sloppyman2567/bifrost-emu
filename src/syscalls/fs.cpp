@@ -20,6 +20,7 @@
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/host_node.hpp"
 #include "yggdrasil/node.hpp"
+#include "yggdrasil/dir_node.hpp"
 #include <cerrno>
 #include <climits>
 #include <sys/statfs.h>
@@ -99,6 +100,23 @@ static bool is_proc_exe_path(const std::string& p) {
     if (pid.empty() || pid.find_first_not_of("0123456789") != std::string::npos) return false;
     std::string tail = p.substr(slash + 1);
     return tail == "exe" || tail == "exe/";
+}
+// Return -2 for unrelated paths, -1 for malformed descriptor names, otherwise
+// the guest fd. Never pass a guest fd number directly to the host procfs.
+static int proc_link_fd(const std::string& path) {
+    for (const char* prefix : {"/proc/self/fd/", "/proc/thread-self/fd/", "/proc/1/fd/"}) {
+        size_t length = std::strlen(prefix);
+        if (path.compare(0, length, prefix) != 0) continue;
+        if (path.size() == length) return -1;
+        int fd = 0;
+        for (size_t i = length; i < path.size(); ++i) {
+            char c = path[i];
+            if (c < '0' || c > '9' || fd > (INT_MAX - (c - '0')) / 10) return -1;
+            fd = fd * 10 + (c - '0');
+        }
+        return fd;
+    }
+    return -2;
 }
 // Fill a synthetic struct stat for the guest ELF as seen through the
 // /proc/<pid>/exe symlink: lstat (AT_SYMLINK_NOFOLLOW) yields a symlink
@@ -947,6 +965,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // For all other paths, call the host readlinkat so symlinks
             // and regular files behave correctly.
             if (a1 != 0) {
+                if (a3 == 0) { ret_err(EINVAL); return 0; }
                 // Read the path string from guest memory, bounded by
                 // PATH_MAX (4096 incl nul). Reuse the same limit as
                 // Yggdrasil::read_path so long paths don't truncate.
@@ -965,8 +984,29 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (c == 0) break;
                     path_bytes.push_back(c);
                 }
-                std::string path_str(reinterpret_cast<const char*>(path_bytes.data()),
-                                     path_bytes.size());
+                std::string path_str(path_bytes.begin(), path_bytes.end());
+                if (path_bytes.size() == MAX_PATH_SCAN) { ret_err(ENAMETOOLONG); return 0; }
+                std::string proc_path = path_str;
+                if (!path_str.empty() && path_str[0] != '/' && static_cast<int>(a0) != -100) {
+                    auto directory = std::dynamic_pointer_cast<yggdrasil::DirNode>(
+                        fds_.get(static_cast<int>(a0)));
+                    if (directory) proc_path = directory->name() + "/" + path_str;
+                } else if (!path_str.empty() && path_str[0] != '/') {
+                    proc_path = vfs_.get_cwd() + "/" + path_str;
+                }
+                int proc_fd = proc_link_fd(proc_path);
+                if (proc_fd != -2) {
+                    auto node = proc_fd >= 0 ? fds_.get(proc_fd) : nullptr;
+                    if (!node || node->host_fd() < 0) { ret_err(ENOENT); return 0; }
+                    std::string target;
+                    int error = yggdrasil::Yggdrasil::fd_link_target(node->host_fd(), target);
+                    if (error) { ret_err(-error); return 0; }
+                    size_t count = std::min<size_t>(a3, target.size());
+                    try { mem_.write(a2, target.data(), count); }
+                    catch (...) { ret_err(EFAULT); return 0; }
+                    ret_host(count);
+                    return 0;
+                }
                 if (is_proc_exe_path(path_str)) {
                     if (a3 == 0) { ret_err(EINVAL); return 0; }
                     // readlink truncates to bufsiz and never appends a NUL.

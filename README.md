@@ -208,6 +208,7 @@ python3 tools/fetch-android-package-tools.py
 make android-runtime-adapters
 python3 scripts/android_package.py install /path/to/package.apkm
 python3 scripts/android_package.py run org.example.package
+python3 scripts/android_package.py probe org.example.package --library libunity.so
 ```
 
 See [APK setup, validation and limits](docs/ANDROID_APK.md), the
@@ -229,8 +230,14 @@ standalone Tier-2, Android, TLS, graphics ABI and lifecycle regressions also pas
 
 Full Bionic/platform compatibility and ART execution remain planned for v2.0;
 see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
-execution, including SpongeBob's CleverTap Activity. The native-bridge adapter
-below is a separate integration interface, not a complete Android runtime.
+execution, including SpongeBob's CleverTap Activity.
+The separate native-load probe completes 19/21 SpongeBob library checks in all
+three execution modes, including IL2CPP. Unity still needs Media NDK, and the
+managed launcher still needs ART/framework startup. Guest adapters now build
+with automatically fetched official AOSP headers, Bionic variadic logging and
+real guest zlib; see the APK guide for dependency pins and verification limits.
+The native-bridge adapter below is a separate integration interface, not a
+complete Android runtime.
 
 ## Architecture
 

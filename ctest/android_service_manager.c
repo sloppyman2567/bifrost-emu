@@ -1,18 +1,10 @@
-#ifdef __ANDROID__
-#include "../guest/android/bionic.h"
-#define O_RDWR 2
-#define O_NONBLOCK 0x800
-#define PROT_READ 1
-#define MAP_PRIVATE 2
-#define MAP_FAILED ((void *)-1)
-#else
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
-#endif
 #include "../include/bifrost/binder_abi.h"
 static int checks;
 #define CHECK(x)                                                                                   \

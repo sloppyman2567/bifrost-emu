@@ -484,6 +484,21 @@ bool Yggdrasil::path_inside_root(const char* path) {
     if (std::strncmp(path, canon.c_str(), n) != 0) return false;
     return path[n] == '\0' || path[n] == '/';
 }
+int Yggdrasil::fd_link_target(int host_fd, std::string& target) {
+    char proc[64], buffer[PATH_MAX + 1];
+    snprintf(proc, sizeof(proc), "/proc/self/fd/%d", host_fd);
+    ssize_t size = ::readlink(proc, buffer, PATH_MAX);
+    if (size < 0) return -errno;
+    if (size == PATH_MAX) return -ENAMETOOLONG;
+    target.assign(buffer, static_cast<size_t>(size));
+    const std::string root = sandbox_root_canonical();
+    if (!root.empty() && root != "/" && target.compare(0, root.size(), root) == 0 &&
+        (target.size() == root.size() || target[root.size()] == '/')) {
+        target.erase(0, root.size());
+        if (target.empty()) target = "/";
+    }
+    return 0;
+}
 // ── dirfd confinement decision ────────────────────────────────────
 // True when `host_dirfd` resolves inside the sandbox root, meaning
 // RESOLVE_IN_ROOT lookups under it stay confined. AT_FDCWD is judged by

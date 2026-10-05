@@ -238,7 +238,7 @@ int main(void){
     chk(AKeyEvent_getKeyCode((AInputEvent*)0x1)==0, "getKeyCode invalid -> 0");
 
     // ── liblog stubs ─────────────────────────────────────────────────
-    chk(__android_log_write(4,"bifrost-test","hello")==0, "log_write");
+    chk(__android_log_write(4,"bifrost-test","hello")==1, "log_write");
     chk(__android_log_print(4,"bifrost-test","num=%d str=%s",42,"hi")>0, "log_print");
 
     printf("test_android_activity: ALL PASS (%d checks)\n", checks);

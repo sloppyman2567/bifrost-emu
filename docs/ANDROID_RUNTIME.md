@@ -4,6 +4,10 @@ Checkpoint: October 5, 2026. Bifrost can enter a real guest ARM64 Android
 linker and execute Bionic-linked programs. Signed APK installation and native-only
 NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROID_APK.md).
 ART and SpongeBob's managed Activity remain unsupported.
+The APK native-load diagnostic now checks real packaged dependencies separately:
+19/21 SpongeBob libraries complete loading/cleanup in all three execution modes.
+See [the APK checkpoint](ANDROID_APK.md) for the Media NDK and Firebase Messaging
+blockers and the official-header/zlib build.
 
 ## Reproduce
 

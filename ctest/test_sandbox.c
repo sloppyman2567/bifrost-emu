@@ -136,6 +136,35 @@ int main(void) {
         CHECK(f >= 0, "/proc/self/cmdline still works");
         if (f >= 0) close(f);
     }
+    // 7b. Guest descriptor readlinks.
+    // Descriptor links must use guest identities, including dup and dirfd
+    // forms. A high guest fd deliberately differs from the wrapped host fd.
+    {
+        int f = open("/sub/real.txt", O_RDONLY);
+        int high = f >= 0 ? fcntl(f, F_DUPFD, 300) : -1;
+        CHECK(high >= 300, "duplicate descriptor for proc fd translation");
+        if (high >= 0) {
+            char path[80], target[4096];
+            snprintf(path, sizeof(path), "/proc/self/fd/%d", high);
+            ssize_t n = readlink(path, target, sizeof(target));
+            CHECK(n == 13 && !memcmp(target, "/sub/real.txt", 13), "proc fd reports guest-root path");
+            char clipped[2] = {'?', '?'};
+            CHECK(readlink(path, clipped, 1) == 1 && clipped[0] == '/' && clipped[1] == '?',
+                  "proc fd truncation has no NUL");
+            int directory = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+            snprintf(path, sizeof(path), "%d", high);
+            n = readlinkat(directory, path, target, sizeof(target));
+            CHECK(n == 13 && !memcmp(target, "/sub/real.txt", 13), "proc fd relative directory lookup");
+            if (directory >= 0) close(directory);
+            snprintf(path, sizeof(path), "/proc/1/fd/%d", high);
+            CHECK(readlink(path, target, sizeof(target)) == 13, "guest process fd alias");
+            close(high);
+            errno = 0;
+            CHECK(readlink(path, target, sizeof(target)) < 0 && errno == ENOENT,
+                  "closed guest descriptor is absent");
+        }
+        if (f >= 0) close(f);
+    }
     // 8. In-root mkdir/unlink/rename keep working (no regression).
     {
         CHECK(mkdir("/newdir", 0755) == 0, "mkdir in root works");

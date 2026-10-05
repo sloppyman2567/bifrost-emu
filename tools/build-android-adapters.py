@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from android_guest_dependencies import build_zlib, prepare_headers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -132,7 +133,11 @@ def build(runtime, output):
         prefix=".android-adapters-", dir=output.parent
     ) as work:
         staging = Path(work)
+        common += prepare_headers(staging / "headers")
+        dependencies = build_zlib(staging, bionic, common)
         for library, names in groups.items():
+            if library == "liblog.so":
+                names = ["__android_log_write"]
             assembly = staging / (library + ".S")
             assembly.write_text(shim(library, names))
             inputs = [str(assembly)]
@@ -141,6 +146,8 @@ def build(runtime, output):
                     str(ROOT / "guest/android/assets.c"),
                     str(bionic / "libc.so"),
                 ]
+            if library == "liblog.so":
+                inputs += [str(ROOT / "guest/android/log.c"), str(bionic / "libc.so")]
             subprocess.run(
                 common
                 + ["-fPIC", "-shared", "-Wl,-soname," + library]
@@ -160,16 +167,18 @@ def build(runtime, output):
                 str(staging / "libandroid.so"),
                 str(bionic / "libc.so"),
                 str(bionic / "libdl.so"),
+                str(bionic / "libdl_android.so"),
                 "-Wl,--allow-shlib-undefined",
                 "-o",
                 str(staging / "bifrost-native"),
             ],
             check=True,
         )
-        names = list(groups) + ["bifrost-native"]
+        names = list(groups) + ["bifrost-native", "libz.so", "libz.so.LICENSE"]
         metadata = {
             "schema_version": 1,
             "runtime_archive_sha256": module.SHA256,
+            "dependencies": dependencies,
             "files": {
                 name: hashlib.sha256((staging / name).read_bytes()).hexdigest()
                 for name in names

@@ -14,18 +14,38 @@ static int decimal(const char *text, int limit) {
 }
 int main(int argc, char **argv, char **envp) {
     (void)envp;
+    int probe = argc == 3 && !strcmp(argv[1], "--probe");
     // library, entrypoint, internal files, external files, assets, SDK, frames
-    if (argc != 8) {
+    if (!probe && argc != 8) {
         printf("native launcher: invalid package launch arguments\n");
         return 2;
     }
-    int sdk = decimal(argv[6], 35), frames = decimal(argv[7], 36000);
+    int sdk = probe ? 35 : decimal(argv[6], 35);
+    int frames = probe ? 0 : decimal(argv[7], 36000);
     if (sdk != 35 || frames < 0)
         return 2;
-    void *library = dlopen(argv[1], 2);
+    const char *path = argv[probe ? 2 : 1];
+    size_t length = strlen(path), slash = length;
+    while (slash && path[slash - 1] != '/')
+        --slash;
+    if (path[0] != '/' || slash <= 1 || length >= 4096)
+        return 2;
+    char directory[4096];
+    memcpy(directory, path, slash - 1);
+    directory[slash - 1] = 0;
+    // An absolute dlopen path does not make sibling DT_NEEDED libraries
+    // searchable. Configure the real guest linker before loading any app DSO.
+    android_update_LD_LIBRARY_PATH(directory);
+    void *library = dlopen(path, 2); // RTLD_NOW: resolve every dependency.
     if (!library) {
-        printf("native launcher: %s\n", dlerror());
+        printf("%s: %s\n", probe ? "native probe: LOAD_FAIL" : "native launcher", dlerror());
         return 126;
+    }
+    if (probe) {
+        // dlopen runs constructors, but JNI_OnLoad and Activity entrypoints
+        // are deliberately not called without a real JavaVM/framework.
+        printf("native probe: LOAD_OK %s JNI_OnLoad=%p\n", path, dlsym(library, "JNI_OnLoad"));
+        return 0;
     }
     void (*create)(ANativeActivity *, void *, size_t) = dlsym(library, argv[2]);
     if (!create) {
