@@ -171,3 +171,7 @@ passes 267/268, with seven JIT-only skips and one AAudio callback failure that
 passes in isolation; the full interpreter run is not clean. The earlier native
 checkpoint passed 273/273 and 266/266 respectively. All six Bionic bootstrap
 variants pass after the mmap/procfs changes; see [test evidence](TESTS.md).
+The subsequent AAudio wake-up fix passes 20 callback stress runs, including
+injected delayed waits in both engines, and four neighboring audio/thread tests
+per engine. This resolves a reproducible lost-notification race without raising
+the guest fixture's callback deadline; full-suite totals above remain historical.

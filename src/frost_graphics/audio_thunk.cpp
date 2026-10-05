@@ -56,7 +56,7 @@ struct AudioThunkImpl {
     std::unique_ptr<CPU> pump_cpu;
     std::thread pump_thread;
     std::atomic<bool> pump_go{false};
-    bool pump_enabled = false;
+    std::atomic<bool> pump_enabled{false};
     std::condition_variable callback_cv;
     std::mutex pump_mu;             // guards stream maps and callback state
     std::mutex pump_wait_mu;
@@ -151,7 +151,15 @@ struct AudioThunkImpl {
     std::map<uint64_t, AaBuilder> aa_builders_;
 
     void wake_pump() {
-        pump_wake_generation.fetch_add(1, std::memory_order_release);
+        // Serialize the predicate change with wait_for's unlock-and-wait.
+        // An atomic generation alone does not prevent notify_one landing
+        // after the predicate read but before the worker actually sleeps.
+        // Callers may hold pump_mu; the waiter never takes it while holding
+        // pump_wait_mu, so the lock order is always pump_mu -> pump_wait_mu.
+        {
+            std::lock_guard<std::mutex> lock(pump_wait_mu);
+            pump_wake_generation.fetch_add(1, std::memory_order_release);
+        }
         pump_cv.notify_one();
     }
 
@@ -173,7 +181,10 @@ struct AudioThunkImpl {
 
     ~AudioThunkImpl() { shutdown_pumps(); }
     void shutdown_pumps() {
-        pump_go = false;
+        {
+            std::lock_guard<std::mutex> lock(pump_wait_mu);
+            pump_go = false;
+        }
         pump_cv.notify_all();
         if (pump_thread.joinable()) pump_thread.join();
         pump_enabled = false;

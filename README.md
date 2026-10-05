@@ -57,6 +57,8 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
 275/275 passed in JIT mode. Interpreter passed 267/268, with seven JIT-only
 skips; the AAudio callback failure passed an isolated rerun. The full interpreter
 run remains a recorded failure; see [test evidence](docs/TESTS.md).
+A subsequent callback-worker wake-up fix passes 20 audio stress runs and
+four focused audio/thread tests per engine; the full suite has not been rerun.
 The verification gate now passes 60 single-thread differential fixtures and
 five separate threaded oracle workloads. Shared-memory replay is suspended
 when a second guest CPU starts; see [test evidence](docs/TESTS.md).

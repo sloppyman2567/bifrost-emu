@@ -99,6 +99,44 @@ Restricted sandbox runs that cannot initialize desktop/audio/Vulkan resources
 do not replace these integration checks. Rebuild stale guest fixtures before
 interpreting failures as emulator regressions.
 
+### Audio callback wake-up regression
+
+The subsequent audio fix reproduces these two checks failing in both engines
+by delaying the host wait entry, and fixes the worker's lost-notification race.
+The focused audio/thread gate passes **4/4 in each engine**; the new callback
+stress gate passes **20/20 runs** across both engines and normal/delayed waits.
+A 12-second offscreen Neverball run with the SDL dummy sound backend keeps
+the mixer active through 553 callbacks, with nonempty stream backlogs at each
+sample. The bounded run was ended by timeout; it is not extended gameplay or
+an audible-output check. The full suites have not been rerun after this fix.
+
+```bash
+bash scripts/test_audio_callbacks.sh
+SDL_AUDIODRIVER=dummy ./scripts/run_tests.sh --filter '^(android_audio|linux_audio|audio_test|sdl_thread)$'
+SDL_AUDIODRIVER=dummy ./scripts/run_tests.sh --no-jit --filter '^(android_audio|linux_audio|audio_test|sdl_thread)$'
+```
+
+The callback worker formerly changed its atomic wake generation and notified
+without taking the wait mutex. Notification could land after a false predicate
+read and before the condition variable's atomic unlock-and-wait, leaving the
+worker asleep until its 250 ms idle timeout. Generation changes and shutdown
+now take the wait mutex; stream state retains its separate mutex, which the
+waiter never acquires while holding the wait mutex. The worker-enabled flag is
+atomic because dispatch can inspect it from another guest thread.
+
+The stress script builds a test-only host interposer that delays the first
+timed wait per thread by 200 ms, widening this interval without changing guest
+deadlines or emulator scheduling. The original binary fails all three captured
+injected runs in each engine, while the fixed binary passes. Both
+`pthread_cond_timedwait` and `pthread_cond_clockwait` are intercepted for older
+and newer glibc/libstdc++ combinations; this is not a substitute for running on
+those versions. See the [C++ condition-variable contract](https://eel.is/c++draft/thread.condition.condvar).
+
+The guest fixture checks initially paused startup, 256-frame callbacks and
+continued delivery. It now returns AAudio's integer CONTINUE result rather than
+using a void callback, and tests blocking writes on a separate callback-free
+stream, matching the [AAudio callback contract](https://developer.android.com/ndk/reference/group/audio#AAudioStream_dataCallback).
+
 ### Signed native APK and service-manager gate (2026-10-05)
 
 `make test-android-package` builds and signs a real base/split NativeActivity

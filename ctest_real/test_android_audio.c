@@ -1,8 +1,7 @@
 /* test_android_audio.c — exercises the AAudio + OpenSL ES thunk arms.
  *
- * Headless-safe: no host audio device needed — the AudioEngine counts
- * bytes in its WAV-dump backend. Exits 0 = ALL PASS; 77 = skip when
- * libaaudio/libOpenSLES don't resolve (non-Android rootfs).
+ * Use SDL_AUDIODRIVER=dummy to run without a host sound device.
+ * Exits 0 = ALL PASS; 1 = a failed check.
  *
  * Build:
  *   make cross SRC=ctest_real/test_android_audio.c OUT=ctest_real/test_android_audio.elf
@@ -40,7 +39,7 @@ static uint64_t bifrost_dlsym(uint64_t h, const char* sym) {
 /* guest data callback: fills the bounce with a square wave */
 static atomic_uint cb_hits = 0;
 static atomic_uint cb_last_frames = 0;
-static void data_cb(void* stream, void* userdata, void* audioData,
+static int32_t data_cb(void* stream, void* userdata, void* audioData,
                     int32_t numFrames) {
     (void)stream; (void)userdata;
     int16_t* out = (int16_t*)audioData;
@@ -50,6 +49,7 @@ static void data_cb(void* stream, void* userdata, void* audioData,
     atomic_store_explicit(&cb_last_frames, (unsigned)numFrames,
                           memory_order_relaxed);
     atomic_fetch_add_explicit(&cb_hits, 1, memory_order_release);
+    return 0; /* AAUDIO_CALLBACK_RESULT_CONTINUE */
 }
 /* OpenSL buffer-queue callback */
 static uint64_t bq_hits = 0;
@@ -87,7 +87,8 @@ int main(void) {
         close_t cls = (close_t)SYM(ha, "AAudioStream_close");
         CHECK(bnew && sf && sc && sr && sframes && sdcb && op && st && wr && gst && cls,
               "AAudio symbols resolve");
-        if (bnew && op && wr && sframes) {
+        if (bnew && sf && sc && sr && sframes && sdcb && op && st &&
+            wr && gst && cls) {
             void* b = NULL;
             CHECK(bnew(&b) == 0 && b != NULL, "builder_new");
             sf(b, 1);       /* I16 */
@@ -97,13 +98,20 @@ int main(void) {
             sdcb(b, (void*)data_cb, NULL);
             void* stream = NULL;
             CHECK(op(b, &stream) == 0 && stream != NULL, "openStream");
-            if (st) (void)st(stream);
+            /* Give the paused worker a chance to enter its idle wait.
+             * Starting a stream must wake it, rather than waiting for its
+             * 250 ms idle timeout. */
+            const struct timespec idle = { .tv_sec = 0, .tv_nsec = 25000000 };
+            nanosleep(&idle, NULL);
+            CHECK(atomic_load_explicit(&cb_hits, memory_order_acquire) == 0,
+                  "AAudio callback stays paused before start");
+            CHECK(st && st(stream) == 0, "requestStart");
             int32_t state = gst ? gst(stream) : -1;
             CHECK(state == 4 /*Started*/, "getState == Started");
             /* Verify the independent guest-TLS worker invokes callbacks at
              * the requested frame count, rather than only opening a stream. */
             for (unsigned i = 0; i < 100 &&
-                    atomic_load_explicit(&cb_hits, memory_order_acquire) == 0;
+                    atomic_load_explicit(&cb_hits, memory_order_acquire) < 3;
                  i++) {
                 const struct timespec delay = { .tv_sec = 0,
                                                 .tv_nsec = 1000000 };
@@ -114,9 +122,20 @@ int main(void) {
             CHECK(atomic_load_explicit(&cb_last_frames, memory_order_relaxed)
                       == 256,
                   "AAudio callback uses configured frame count");
-            /* blocking write also works alongside the callback pump */
-            CHECK(wr(stream, pcm, 4800, 0) == 4800, "blocking write");
+            CHECK(atomic_load_explicit(&cb_hits, memory_order_acquire) >= 3,
+                  "AAudio CONTINUE keeps callbacks running");
             if (cls) (void)cls(stream);
+            /* AAudio forbids write() on an active callback stream. Test
+             * blocking writes using a separate stream without a callback. */
+            sdcb(b, NULL, NULL);
+            stream = NULL;
+            CHECK(op(b, &stream) == 0 && stream != NULL,
+                  "open blocking stream");
+            if (stream) {
+                CHECK(st(stream) == 0, "start blocking stream");
+                CHECK(wr(stream, pcm, 4800, 0) == 4800, "blocking write");
+                CHECK(cls(stream) == 0, "close blocking stream");
+            }
         }
     }
 
