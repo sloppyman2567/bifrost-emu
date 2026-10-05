@@ -107,6 +107,51 @@ def image_archive(archive):
     return archive
 
 
+def extract_system(archive, temporary):
+    """Extract the fixed system partition from an already verified SDK archive."""
+    # The pinned emulator disk is GPT containing a dynamic super partition.
+    # Read its bounded partition table rather than mounting host filesystems.
+    with zipfile.ZipFile(archive) as package:
+        member = package.getinfo("arm64-v8a/system.img")
+        if member.file_size != 1622147072:
+            raise ValueError("Unexpected Android system disk size")
+        disk = temporary / "disk.img"
+        with package.open(member) as source, disk.open("wb") as output:
+            copy_bytes(source, output, member.file_size)
+        notice = package.getinfo("arm64-v8a/NOTICE.txt")
+        if notice.file_size > 8 * 1024 * 1024:
+            raise ValueError("Oversized Android notice")
+        notice_data = package.read(notice)
+    with disk.open("rb") as source:
+        source.seek(512)
+        header = source.read(512)
+        if header[:8] != b"EFI PART":
+            raise ValueError("Missing Android GPT header")
+        table, count, stride = struct.unpack_from("<QII", header, 72)
+        if count > 128 or stride != 128 or table * 512 + count * stride > disk.stat().st_size:
+            raise ValueError("Invalid Android GPT partition table")
+        source.seek(table * 512)
+        partitions = [source.read(stride) for _ in range(count)]
+        selected = [item for item in partitions
+                    if item[56:128].decode("utf-16le").rstrip("\0") == "super"]
+        if len(selected) != 1:
+            raise ValueError("Missing Android super partition")
+        start, end = struct.unpack_from("<QQ", selected[0], 32)
+        if start > end or (end + 1) * 512 > disk.stat().st_size:
+            raise ValueError("Invalid Android super partition bounds")
+        source.seek(start * 512)
+        image = temporary / "super.img"
+        with image.open("wb") as output:
+            copy_bytes(source, output, (end - start + 1) * 512)
+    disk.unlink()
+    partitions = temporary / "partitions"
+    partitions.mkdir()
+    subprocess.run(["lpunpack", "-p", "system", str(image), str(partitions)],
+                   capture_output=True, check=True, timeout=120)
+    system = partitions / "system.img"
+    return system, notice_data
+
+
 def install(destination, archive=None):
     if destination.exists():
         return verify(destination)
@@ -119,46 +164,8 @@ def install(destination, archive=None):
         temporary = Path(work)
         staging = temporary / "bundle"
         staging.mkdir()
-        # The pinned emulator disk is GPT containing a dynamic super partition.
-        # Read its bounded partition table rather than mounting host filesystems.
-        with zipfile.ZipFile(archive) as package:
-            member = package.getinfo("arm64-v8a/system.img")
-            if member.file_size != 1622147072:
-                raise ValueError("Unexpected Android system disk size")
-            disk = temporary / "disk.img"
-            with package.open(member) as source, disk.open("wb") as output:
-                copy_bytes(source, output, member.file_size)
-            notice = package.getinfo("arm64-v8a/NOTICE.txt")
-            if notice.file_size > 8 * 1024 * 1024:
-                raise ValueError("Oversized Android notice")
-            (staging / "NOTICE.txt").write_bytes(package.read(notice))
-        with disk.open("rb") as source:
-            source.seek(512)
-            header = source.read(512)
-            if header[:8] != b"EFI PART":
-                raise ValueError("Missing Android GPT header")
-            table, count, stride = struct.unpack_from("<QII", header, 72)
-            if count > 128 or stride != 128 or table * 512 + count * stride > disk.stat().st_size:
-                raise ValueError("Invalid Android GPT partition table")
-            source.seek(table * 512)
-            partitions = [source.read(stride) for _ in range(count)]
-            selected = [item for item in partitions
-                        if item[56:128].decode("utf-16le").rstrip("\0") == "super"]
-            if len(selected) != 1:
-                raise ValueError("Missing Android super partition")
-            start, end = struct.unpack_from("<QQ", selected[0], 32)
-            if start > end or (end + 1) * 512 > disk.stat().st_size:
-                raise ValueError("Invalid Android super partition bounds")
-            source.seek(start * 512)
-            image = temporary / "super.img"
-            with image.open("wb") as output:
-                copy_bytes(source, output, (end - start + 1) * 512)
-        disk.unlink()
-        partitions = temporary / "partitions"
-        partitions.mkdir()
-        subprocess.run(["lpunpack", "-p", "system", str(image), str(partitions)],
-                       capture_output=True, check=True, timeout=120)
-        system = partitions / "system.img"
+        system, notice = extract_system(archive, temporary)
+        (staging / "NOTICE.txt").write_bytes(notice)
         apex = temporary / "i18n.apex"
         dump(system, "/system/apex/com.android.i18n.apex", apex)
         with zipfile.ZipFile(apex) as package:

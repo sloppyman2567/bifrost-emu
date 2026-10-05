@@ -24,8 +24,8 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (273 test runs):
-#   Unit         95  — focused guest and host JIT regressions
+# Fully provisioned suite (275 test runs):
+#   Unit         97  — focused guest and host JIT regressions
 #   Integration  86  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
@@ -34,7 +34,7 @@
 #   Dynamic      16  — musl/glibc and XWayland tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 250 runs (245 with --quick); fixtures may be skipped.
+# Without a rootfs: 252 runs (247 with --quick); fixtures may be skipped.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -249,6 +249,8 @@ fi
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(
+    "proc_exe|ctest/test_proc_exe.elf||5|test_proc_exe: ALL PASS"
+    "mmap_hint|ctest/test_mmap_hint.elf||10|test_mmap_hint: ALL PASS"
     "hello|ctest/hello.elf||5"
     "addsub_imm|ctest/jit_addsub_imm.elf||5|PASS"
     "bitfield|ctest/jit_bitfield.elf||5|PASS"

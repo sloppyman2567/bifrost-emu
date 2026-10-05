@@ -224,7 +224,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // Protection controls access, not the new mapping's contents.
             // Anonymous replacements must be zeroed even for PROT_NONE;
             // file-backed replacements must preload before protection applies.
-            uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
             // MAP_NORESERVE (0x4000 on AArch64 asm-generic — NOT 0x40!)
             // / PROT_NONE mappings are VIRTUAL reservations on real
             // Linux — they cost no memory until touched. Route them
@@ -241,7 +240,20 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     true, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
                 if (mapped != 0) emu.invalidate_jit_range(addr, length);
             } else {
-                mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve,
+                // An ordinary hint never replaces live memory. ART probes
+                // the low address space for its compressed-reference heap;
+                // always ignoring its hints makes that search spin when the
+                // default mmap cursor has already moved above 4 GiB.
+                mapped = 0;
+                uint64_t preferred = addr & ~Memory::PAGE_MASK;
+                if (preferred >= Memory::PAGE_SIZE && preferred <= UINT64_MAX - length) {
+                    std::lock_guard<std::mutex> brk_lock(brk_mu_);
+                    if (!(preferred < brk_ && brk_start_ < preferred + length)) {
+                        mapped = mem_.mmap_hint(preferred, length, virt_reserve,
+                            Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
+                    }
+                }
+                if (!mapped) mapped = mem_.mmap_alloc(length, 0, virt_reserve,
                     Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
             }
             // BUGFIX: mmap_alloc returns 0 on failure (size cap, invalid

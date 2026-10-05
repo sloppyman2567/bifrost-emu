@@ -10,6 +10,10 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://android.googlesource.com/platform/prebuilts/sdk/+/android-15.0.0_r1/"
 FILES = {
+    "d8.jar": (
+        "tools/linux/lib/d8.jar",
+        "875fab053a6d1bce99751d7a529fa7f80e408550275a2919d76fa4cea56d5819",
+    ),
     "apksigner.jar": (
         "tools/linux/lib/apksigner.jar",
         "9469c60e5e40fc5c44a2f2338509cb6600cdf065e9b50f9fa3ca6c5be5bae6a9",

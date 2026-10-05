@@ -278,15 +278,29 @@ std::unique_ptr<Node> Yggdrasil::open_host(const std::string& guest_path,
 // ── Confined raw opens ──────────────────────────────────────────────
 // Central choke point for every guest-controlled host open (open/openat,
 // execve, chdir). Absolute sandboxed paths resolve under the cached root
-// fd with RESOLVE_IN_ROOT; everything else keeps legacy behavior.
+// fd with RESOLVE_IN_ROOT; relative paths are confined when cwd is inside
+// the root. A cwd outside the root keeps legacy game-asset access.
 // Returns a host fd or -1 with errno set (O_DIRECT retry included).
 int Yggdrasil::open_host_fd(const std::string& guest_path, int flags,
                             mode_t mode) {
     std::string root = sandbox_root_str();
     std::string host_path = map_guest_path(guest_path, root.c_str());
     if (host_path.empty()) { errno = ENOENT; return -1; }  // denied proc path
+    bool confine = uses_sandbox(root, guest_path);
+    if (!confine && host_path.front() != '/' && dirfd_confined(AT_FDCWD)) {
+        char cwd[PATH_MAX];
+        if (!::getcwd(cwd, sizeof(cwd))) return -1;
+        const std::string canonical = sandbox_root_canonical();
+        // Resolve relative paths under the guest root, preserving legal
+        // ../ traversal and absolute symlinks within it. Using cwd itself
+        // as RESOLVE_IN_ROOT would incorrectly make every subdir a root.
+        if (!canonical.empty() && path_inside_root(cwd)) {
+            host_path = root + "/" + std::string(cwd).substr(canonical.size()) + "/" + host_path;
+            confine = true;
+        }
+    }
     int fd = -1;
-    if (uses_sandbox(root, guest_path)) {
+    if (confine) {
         fd = open_rooted(root, host_path, flags, mode);
     } else {
         fd = ::openat(AT_FDCWD, host_path.c_str(), flags, mode);
@@ -298,11 +312,10 @@ int Yggdrasil::open_host_fd(const std::string& guest_path, int flags,
     // this difference. If the open fails with EINVAL and O_DIRECT is set,
     // retry without O_DIRECT.
     if (fd < 0 && errno == EINVAL && (flags & O_DIRECT)) {
-        if (uses_sandbox(root, guest_path)) {
+        if (confine) {
             fd = open_rooted(root, host_path, flags & ~O_DIRECT, mode);
         } else {
-            fd = ::openat(AT_FDCWD, host_path.c_str(), flags & ~O_DIRECT,
-                          mode);
+            fd = ::openat(AT_FDCWD, host_path.c_str(), flags & ~O_DIRECT, mode);
         }
     }
     return fd;
@@ -312,11 +325,9 @@ int Yggdrasil::open_host_fd(const std::string& guest_path, int flags,
 // that dir via RESOLVE_IN_ROOT; without one it is plain openat.
 int Yggdrasil::open_host_at(int host_dirfd, const std::string& relpath,
                             int flags, mode_t mode) {
-    // AT_FDCWD keeps legacy host-cwd behavior verbatim (the host cwd may
-    // live outside the sandbox and games depend on it) — callers only
-    // pass real dirfds here.
-    if (host_dirfd == AT_FDCWD)
-        return ::openat(AT_FDCWD, relpath.c_str(), flags, mode);
+    // Include AT_FDCWD once chdir has moved inside the root. Outside-root
+    // cwd retains the existing host-relative game-asset behavior.
+    if (host_dirfd == AT_FDCWD) return open_host_fd(relpath, flags, mode);
     if (dirfd_confined(host_dirfd) && have_openat2()) {
 #ifdef SYS_openat2
         struct open_how how {};

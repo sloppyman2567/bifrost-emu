@@ -181,6 +181,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             e.label = "[stack]";
             out.push_back(e);
         }
+        // Match Linux's address ordering, including allocations above 4 GiB.
+        std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+            return a.start < b.start;
+        });
         return out;
     });
     // Wire up guest cwd tracking. The host cwd is meaningless because
@@ -236,6 +240,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // Linux /proc/self/exe is absolute even when argv[0] is relative.
     // Keep argv/AT_EXECFN unchanged, and strip the sandbox's host prefix.
     if (char* resolved = ::realpath(host_elf_path.c_str(), nullptr)) {
+        const std::string backing_path = resolved;
         elf_path_ = resolved;
         free(resolved);
         const std::string mapped_root = yggdrasil::Yggdrasil::remap_path("/");
@@ -249,7 +254,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 free(root);
             }
         }
-        vfs_.set_elf_path(elf_path_);
+        vfs_.set_elf_path(elf_path_, backing_path);
     }
 
     std::vector<uint8_t> data;
@@ -1283,6 +1288,7 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     for (auto e : envp_addrs) push(e);
     push(0);
     for (auto v : auxv) push(v);
+    vfs_.set_initial_stack(sp);
     return sp;
 }
 // resolve pc to module name + offset for crash logs. copies the

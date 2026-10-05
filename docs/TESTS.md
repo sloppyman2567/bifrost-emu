@@ -28,7 +28,22 @@ retain shutdown reports. No emulator code or hardware-specific policy changed.
 
 ### Complete regression suites
 
-The latest October 5 native APK/service-manager checkpoint passes **273/273 in
+The October 5 ART-foundation checkpoint passes **275/275 in JIT mode** (192 s).
+The interpreter full run passes **267/268** (165 s), with seven JIT-only skips:
+`android_audio` misses its AAudio callback/frame-count checks within the
+fixture's 100 one-millisecond waits. Its isolated rerun passes, but the full
+run remains recorded as a failure; this is not a clean 268/268 claim.
+It adds `proc_exe` (ELF-backed proc opens, flag translation, ordered maps and
+guest startstack) and `mmap_hint` (64 collision/reuse cycles plus lazy 1 GiB
+reservations). The final focused memory/procfs/sandbox gate passes six cases;
+the Bionic bootstrap passes all six fixed/random-address execution variants.
+A fresh extraction independently reproduces the 309-file ART inventory and
+the 156-file Media NDK inventory after sharing their disk extractor.
+Real ART loads in both engines but encounters unsupported UADALP before
+VM creation; the experimental DEX/JNI test deliberately remains a failing
+development gate. See [the ART checkpoint](ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
+
+The earlier October 5 native APK/service-manager checkpoint passes **273/273 in
 JIT mode** with no skips (223 s) and **266/266 in interpreter mode**, with seven
 JIT-only skips (204 s). Guest fixtures were refreshed with `make setup-tests`
 before testing. The previous `700e8e0` window-plugin checkpoint passed 272/272
@@ -292,11 +307,11 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](vkquake.md).
 
-The fully provisioned suite contains 273 configured test runs:
+The fully provisioned suite contains 275 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 95 | Focused guest instruction/JIT regressions and registered host JIT gates |
+| Unit | 97 | Focused guest instruction/JIT regressions and registered host JIT gates |
 | Integration | 86 | Guest programs and subsystem checks in `ctest_real/` and `test/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
@@ -305,10 +320,10 @@ The fully provisioned suite contains 273 configured test runs:
 | Dynamic | 16 | Dynamically linked musl/glibc and XWayland tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **273** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **275** | Includes the sandbox and rootfs-dependent dynamic runs |
 
 Without a configured rootfs, the 7 dynamic real-world runs and 16 dynamic
-tests are not selected, for 250 configured runs (245 with `--quick`). These
+tests are not selected, for 252 configured runs (247 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 

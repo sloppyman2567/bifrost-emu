@@ -40,6 +40,29 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 namespace arm64emu {
+// AArch64 overrides these four asm-generic open flag positions. VFS nodes
+// receive host flags; translate at the syscall boundary, including fcntl.
+static int open_flags_to_host(int guest) {
+    constexpr int directory = 0x4000, nofollow = 0x8000;
+    constexpr int direct = 0x10000, largefile = 0x20000;
+    int host = guest & ~(directory | nofollow | direct | largefile);
+    if (guest & directory) host |= O_DIRECTORY;
+    if (guest & nofollow) host |= O_NOFOLLOW;
+    if (guest & direct) host |= O_DIRECT;
+    if (guest & largefile) host |= O_LARGEFILE;
+    return host;
+}
+static int open_flags_to_guest(int host) {
+    // x86_64's kernel reports the large-file bit even though libc's
+    // O_LARGEFILE macro is zero for its 64-bit callers.
+    constexpr int host_largefile = 0x8000;
+    int guest = host & ~(O_DIRECTORY | O_NOFOLLOW | O_DIRECT | host_largefile);
+    if (host & O_DIRECTORY) guest |= 0x4000;
+    if (host & O_NOFOLLOW) guest |= 0x8000;
+    if (host & O_DIRECT) guest |= 0x10000;
+    if (host & host_largefile) guest |= 0x20000;
+    return guest;
+}
 // ── Helper: resolve a guest dirfd to a host dirfd ─────────────────────
 // The guest passes a dirfd to *at syscalls (openat, fstatat, unlinkat, etc.).
 // This can be:
@@ -156,6 +179,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         // host passthrough internally.
         case 56: { // openat
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            const int host_flags = open_flags_to_host(static_cast<int>(a2));
             int err = 0;
             // Apply guest umask to the creation mode (kernel behavior).
             mode_t mode = static_cast<mode_t>(a3) & ~emu.guest_umask();
@@ -168,16 +192,16 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 // EBADF (Linux semantics).
                 int hfd = resolve_dirfd(fds_, a0);
                 if (hfd == -100) {
-                    node = vfs_.open(path, static_cast<int>(a2), mode, &err);
+                    node = vfs_.open(path, host_flags, mode, &err);
                 } else if (hfd < 0) {
                     ret_err(EBADF); return 0;
                 } else {
-                    node = vfs_.open_at(hfd, path, static_cast<int>(a2),
+                    node = vfs_.open_at(hfd, path, host_flags,
                                         mode, &err);
                 }
             } else {
                 // Absolute path: dirfd is ignored per POSIX.
-                node = vfs_.open(path, static_cast<int>(a2), mode, &err);
+                node = vfs_.open(path, host_flags, mode, &err);
             }
             if (!node) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(err != 0 ? err : -ENOENT));
@@ -397,7 +421,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // → nullptr → -EBADF. Fix: wrap each pipe end in a yggdrasil::HostNode
             // and register via FdTable::allocate, returning the guest fds.
             int hfds[2];
-            int r = ::pipe2(hfds, static_cast<int>(a1));
+            int r = ::pipe2(hfds, open_flags_to_host(static_cast<int>(a1)));
             if (r < 0) { ret_errno(); return 0; }
             int g0 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[0], O_RDONLY));
             int g1 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[1], O_WRONLY));
@@ -1107,14 +1131,15 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     // VNodes like /dev/fb0, memfd-backed /proc/*).
                     if (hfd >= 0) {
                         int r = ::fcntl(hfd, F_GETFL);
-                        ret_host(r < 0 ? node->flags() : r);
+                        ret_host(open_flags_to_guest(r < 0 ? node->flags() : r));
                     } else {
-                        ret_host(node->flags());
+                        ret_host(open_flags_to_guest(node->flags()));
                     }
                     return 0;
                 }
                 case F_SETFL: {  // 4 — set file status flags (O_NONBLOCK etc.)
-                    int settable = a2 & (O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME);
+                    int settable = open_flags_to_host(static_cast<int>(a2)) &
+                                   (O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME);
                     if (hfd >= 0) {
                         // Host first: on failure guest state must not change.
                         int r = ::fcntl(hfd, F_SETFL, settable);

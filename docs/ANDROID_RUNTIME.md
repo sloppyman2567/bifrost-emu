@@ -3,7 +3,9 @@
 Checkpoint: October 5, 2026. Bifrost can enter a real guest ARM64 Android
 linker and execute Bionic-linked programs. Signed APK installation and native-only
 NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROID_APK.md).
-ART and SpongeBob's managed Activity remain unsupported.
+ART VM creation and SpongeBob's managed Activity remain unsupported. A separate
+same-image ART/libcore provisioner and experimental DEX/JNI bootstrap now exist;
+see the bounded checkpoint below.
 The APK native-load diagnostic now checks real packaged dependencies separately:
 19/21 SpongeBob libraries complete loading/cleanup in all three execution modes.
 Firebase Messaging's direct probe loads successfully, then double-destroys a
@@ -58,6 +60,60 @@ not create its Linux custom DynamicLinker or synthetic TLS block for this
 profile. ELF load bias respects PT_LOAD alignment; interpreter reservation
 protects holes and prevents later mmap allocations overlapping the image.
 
+## Experimental same-image ART bootstrap
+
+The managed-runtime experiment uses a separate root from the small Bionic
+bootstrap and the Media NDK namespace. It extracts ARM64 ART, Bionic, libcore,
+ICU, Conscrypt, timezone data and native dependencies from the official
+[API-35 ARM64 SDK image, revision 2](https://dl.google.com/android/repository/sys-img/android/arm64-v8a-35_r02.zip).
+Its build identity is `AE3A.240806.019/12368160`, with image SHA-256
+`1e6ae4fca6449c07278a333311f0ef29c5101d1e3e18ba48fbe9bd2dc5006926`.
+The provisioner verifies the archive and all 309 extracted file hashes,
+symlink targets and executable flags. It keeps the upstream notices and
+records the native dependency graph in `bifrost-art.json`. This is a bootstrap
+artifact set, without a framework installation or boot image.
+
+```bash
+python3 tools/android_art.py
+python3 tools/build-android-jni.py --javac /path/to/javac
+BIFROST_NO_ASLR=1 python3 scripts/test_android_jni.py --timeout 60
+```
+
+Requirements: Python 3.11+, `debugfs`, `lpunpack`, `readelf`, Clang/LLD and a
+JDK 17+. The image download is approximately 734 MiB; extraction needs several GiB
+of scratch disk space. An existing verified Media NDK source archive is reused.
+The DEX compiler is checksum-pinned D8 from AOSP `android-15.0.0_r1`.
+Generated runtime files and fixtures stay under ignored `build/` directories.
+
+The runner copies the verified runtime into a temporary root, adds writable
+data and fixtures, enforces a timeout, and saves logs plus JSON results in
+`build/android-jni-results/`. The launcher calls the real `JNI_CreateJavaVM`
+with ART JIT disabled, CheckJNI enabled and a small 16/64 MiB heap. The fixture
+is intended to load an ARM64 JNI library, register a native method, access an
+array/string, call back into Java and shut down cleanly. Success requires its
+marker and a zero exit; `ART_LOAD_OK` alone does not pass the gate.
+
+October 5 checkpoint: real ART loads. The fixed-address JIT probe now reaches
+unsupported `UADALP` (`0x6e206b17`, `uadalp v23.8h, v24.16b`) during VM creation,
+after about 11 seconds. VM creation and the DEX/JNI marker do not pass.
+The interpreter probe also loads ART and terminates with guest SIGILL.
+GC, thread attachment, exceptions and managed Activity startup remain unverified.
+This experiment neither registers a fake JavaVM nor changes the existing
+native-only APK launch contract. JNI objects and calls remain guest-owned,
+consistent with [Android's JNI guidance](https://developer.android.com/ndk/guides/jni-tips).
+
+The experiment exposed and repaired ordinary mmap hint handling, ARM64 open
+flag translation, executable procfs opens and main-stack metadata. Low hints
+try a free range at or above the requested address inside the direct window,
+then use the ordinary allocator when none fits. They never replace occupied
+mappings; fixed mapping behavior remains separate. Virtual hinted reservations
+discard old contents lazily. `/proc/self/stat` reports the actual initial guest
+SP, needed by [Bionic's main-stack lookup](https://android.googlesource.com/platform/bionic/+/refs/tags/android-15.0.0_r1/libc/bionic/pthread_internal.cpp).
+Other stat accounting fields remain approximate or zero, and maps permissions
+remain the existing coarse view. `/proc/self/exe` follows the selected executable
+file; `O_PATH|O_NOFOLLOW` symlink descriptors are explicitly unsupported, and
+reopening an executable after it is deleted/replaced is not modeled.
+
 ## Pointer tags and page sizes
 
 Bionic's Scudo allocator uses top-byte tags internally even without MTE.
@@ -110,6 +166,8 @@ adds, including operand aliases and all valid widths. `jit_crc32` covers
 2,048 IEEE/Castagnoli cases with an independent bitwise oracle. Both instruction
 fixtures also pass QEMU and Tier-1 differential verification.
 
-The complete Linux regression suite passes 273/273 in default JIT mode and
-266/266 in interpreter mode (seven JIT-only tests skipped). A fresh installation
-of the pinned runtime also passes all six Bionic bootstrap variants above.
+The ART-foundation Linux suite passes 275/275 in default JIT mode. Interpreter
+passes 267/268, with seven JIT-only skips and one AAudio callback failure that
+passes in isolation; the full interpreter run is not clean. The earlier native
+checkpoint passed 273/273 and 266/266 respectively. All six Bionic bootstrap
+variants pass after the mmap/procfs changes; see [test evidence](TESTS.md).

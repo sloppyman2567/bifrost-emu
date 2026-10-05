@@ -170,6 +170,11 @@ public:
     uint64_t mmap_fixed_noreplace(uint64_t addr, uint64_t size,
                                   bool noreserve = false,
                                   uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE);
+    // Ordinary hint: try this address, then the next free low-window gap.
+    // Never replaces mappings; returns 0 if the caller should use its
+    // default allocator. Check and reservation share the same lock.
+    uint64_t mmap_hint(uint64_t addr, uint64_t size, bool noreserve,
+                       uint8_t prot);
     // Atomic MAP_FIXED replace: evict overlapping allocations, restore host
     // prot on reclaimed guard pages, reclaim free ranges, and track the new
     // mapping under one mu_ hold (no untrack/alloc gap for racing mmaps).
@@ -320,6 +325,8 @@ private:
     };
     bool range_mapped_locked(uint64_t lo, uint64_t hi) const;
     bool range_overlaps_locked(uint64_t lo, uint64_t hi) const;
+    uint64_t mmap_noreplace(uint64_t addr, uint64_t size, bool noreserve,
+                            uint8_t prot, bool ordinary_hint);
     bool mapping_prot_at_locked(uint64_t addr, uint8_t& prot) const;
     bool range_accessible(uint64_t addr, size_t size, uint8_t access) const;
     bool high_range_mapped_locked(uint64_t lo, uint64_t hi,

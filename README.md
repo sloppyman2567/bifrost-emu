@@ -53,8 +53,10 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   slow, and save compatibility depends on the game build; see
   [Doom 3 status](docs/doom3.md).
 
-**Full-suite checkpoint (October 5, 2026, including native APKs and services):**
-runs passed 273/273 in JIT mode and 266/266 in interpreter mode, with seven JIT-only skips.
+**Full-suite checkpoint (October 5, 2026, including ART foundations):**
+275/275 passed in JIT mode. Interpreter passed 267/268, with seven JIT-only
+skips; the AAudio callback failure passed an isolated rerun. The full interpreter
+run remains a recorded failure; see [test evidence](docs/TESTS.md).
 The verification gate now passes 60 single-thread differential fixtures and
 five separate threaded oracle workloads. Shared-memory replay is suspended
 when a second guest CPU starts; see [test evidence](docs/TESTS.md).
@@ -229,6 +231,9 @@ contracts, 256 SDL3 teardown cycles and a complete signed APK gate; these are
 not a new full-suite or gameplay-performance claim. See the
 [window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md) for coverage and limits.
 
+An experimental same-image ART/libcore root and DEX/JNI fixture can now be
+provisioned separately. ART loads, but VM creation reaches unsupported UADALP;
+managed execution has not passed. See [the ART checkpoint](docs/ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
 Full Bionic/platform compatibility and ART execution remain planned for v2.0;
 see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
 execution, including SpongeBob's CleverTap Activity.
@@ -387,8 +392,8 @@ make check-all
 ./scripts/run_tests.sh --filter "sig|brk|pipe"
 ```
 
-With all fixtures available, the runner selects **273 tests**, including 95
-unit regressions. Without rootfs-dependent tests it selects 250 (245 with
+With all fixtures available, the runner selects **275 tests**, including 97
+unit regressions. Without rootfs-dependent tests it selects 252 (247 with
 `--quick`). Interpreter mode intentionally skips seven JIT-only cases.
 Sources live in `ctest/`, `ctest_real/` and `test/`; build their ignored guest
 ELFs with `make setup-tests`. External fixtures and desktop/audio availability

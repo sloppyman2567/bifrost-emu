@@ -50,6 +50,12 @@ fetched to exercise behavior beyond the synthetic tests:
   `ee568219aa3754977207a8fd849fdbf3a299658dd26dd0907d39ca830587f8aa`
   at `android-15.0.0_r1` in
   [AOSP prebuilts/sdk](https://android.googlesource.com/platform/prebuilts/sdk/+/android-15.0.0_r1/).
+  The same fetcher pins D8 to SHA-256
+  `875fab053a6d1bce99751d7a529fa7f80e408550275a2919d76fa4cea56d5819`.
+  The separate ART experiment extracts a verified API-35 ARM64 revision-2 SDK
+  image using `tools/android_art.py`, retains its `NOTICE.txt` and APEX notices,
+  and records all runtime file hashes. It reuses the same pinned image as the
+  Media NDK provisioner; see [runtime provenance](ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
   These downloads retain their upstream terms and are not redistributed by
   the source commit. Generated regression APKs use a temporary test key and
   original fixture code; commercial APKs and installed app state stay local.

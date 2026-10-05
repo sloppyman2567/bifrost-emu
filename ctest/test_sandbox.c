@@ -242,6 +242,9 @@ int main(void) {
     // cwd (an absolute open would pass regardless).
     {
         CHECK(chdir("/sub") == 0, "chdir into sub for fchdir test");
+        int parentfd = open("../sub/real.txt", O_RDONLY);
+        CHECK(parentfd >= 0, "relative parent traversal inside guest root works");
+        if (parentfd >= 0) close(parentfd);
         int outfd = open("outlink", O_RDONLY | O_DIRECTORY);
         CHECK(outfd < 0, "open escaping dir blocked");
         if (outfd >= 0) {

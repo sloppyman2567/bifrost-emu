@@ -13,6 +13,7 @@
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/memfd_node.hpp"
 #include "yggdrasil/dir_node.hpp"
+#include "yggdrasil/host_node.hpp"
 #include "core/memory.h"
 #include "frost/graphics.hpp"
 #include <cerrno>
@@ -72,6 +73,7 @@ static std::vector<DirNode::Entry> proc_self_entries() {
         {"cmdline", 0x1 /*DT_REG*/},
         {"comm",    0x1 /*DT_REG*/},
         {"maps",    0x1 /*DT_REG*/},
+        {"stat",    0x1 /*DT_REG*/},
         {"status",  0x1 /*DT_REG*/},
         {"auxv",    0x1 /*DT_REG*/},
         {"environ", 0x1 /*DT_REG*/},
@@ -95,9 +97,26 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
     // Also serves /proc/<pid>/exe (the guest's getpid() returns 1, and
     // Qt resolves its own binary via /proc/<pid>/exe). stat/lstat/readlink
     // on these paths are served synthetically in the fstatat/statx/readlinkat
-    // syscall handlers; this open path lets guests read the target string.
+    // syscall handlers. Opening follows the link to the executable itself:
+    // Bionic realpath() uses O_PATH followed by /proc/self/fd/<fd>.
     if (is_proc_exe_path(path)) {
-        return serve_static(elf_path_, flags);
+        if (flags & O_NOFOLLOW) {
+            // O_PATH|O_NOFOLLOW needs a synthetic symlink descriptor; do not
+            // return an unrelated regular-file descriptor for that request.
+            *err_out = (flags & O_PATH) ? -ENOTSUP : -ELOOP;
+            return nullptr;
+        }
+        if (!(flags & O_PATH) && ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC))) {
+            *err_out = -ETXTBSY;
+            return nullptr;
+        }
+        if (elf_backing_path_.empty()) return open_host(elf_path_, flags, 0, err_out);
+        // This path comes from the loader, never from a guest-controlled proc
+        // pathname. A relative ELF explicitly loaded outside rootfs still has
+        // a real backing file and must not be remapped a second time.
+        int fd = ::open(elf_backing_path_.c_str(), flags);
+        if (fd < 0) { *err_out = -errno; return nullptr; }
+        return std::make_unique<HostNode>(fd, flags);
     }
     // ── /proc/self/cmdline → argv[0]\0argv[1]\0... ──────────────────
     if (path == "/proc/self/cmdline") {
@@ -126,6 +145,24 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             comm.push_back('\n');
             return comm;
         }, flags);
+    }
+    // Bionic finds the main stack via stat field 28, then /proc/self/maps.
+    // Host passthrough supplied the emulator's host SP, outside guest maps.
+    // Keep unmodeled accounting fields zero rather than exposing host state.
+    if (path == "/proc/self/stat" || path == "/proc/1/stat") {
+        std::string stat = "1 (bifrost) R";
+        for (unsigned field = 4; field <= 52; ++field) {
+            stat += ' ';
+            switch (field) {
+                case 5: case 6: case 20: stat += "1"; break;
+                case 8: stat += "-1"; break;
+                case 18: stat += "20"; break;
+                case 28: stat += std::to_string(initial_stack_); break;
+                default: stat += "0"; break;
+            }
+        }
+        stat += '\n';
+        return serve_static(stat, flags);
     }
     // ── /proc/self/maps → real memory layout (LAZY) ─────────────────
     // The maps provider may return different results each time (memory

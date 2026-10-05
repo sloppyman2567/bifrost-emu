@@ -939,13 +939,39 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve,
 }
 uint64_t Memory::mmap_fixed_noreplace(uint64_t addr, uint64_t size,
                                       bool noreserve, uint8_t prot) {
+    return mmap_noreplace(addr, size, noreserve, prot, false);
+}
+uint64_t Memory::mmap_hint(uint64_t addr, uint64_t size, bool noreserve, uint8_t prot) {
+    uint64_t result = mmap_noreplace(addr, size, noreserve, prot, true);
+    return result == UINT64_MAX ? 0 : result;
+}
+uint64_t Memory::mmap_noreplace(uint64_t addr, uint64_t size, bool noreserve,
+                               uint8_t prot, bool ordinary_hint) {
     if (size == 0 || (addr & PAGE_MASK) || size > UINT64_MAX - PAGE_MASK)
         return 0;
     const uint64_t aligned_size = (size + PAGE_MASK) & ~PAGE_MASK;
     if (!is_valid_guest_range(addr, aligned_size)) return 0;
     if (!noreserve && size > MAX_MMAP_LENGTH) return 0;
-    const uint64_t end = addr + aligned_size;
     std::unique_lock<std::shared_mutex> g(mu_);
+    if (ordinary_hint && direct_window_ && addr < DIRECT_WINDOW_SIZE) {
+        if (aligned_size > DIRECT_WINDOW_SIZE - addr) return 0;
+        // Keep a colliding low hint in the low address space when possible.
+        // ART's compressed-reference allocator otherwise probes one page at
+        // a time, repeatedly allocating and discarding a high-address heap.
+        const uint64_t count = aligned_size / PAGE_SIZE;
+        uint64_t first = addr / PAGE_SIZE, free_pages = 0;
+        for (uint64_t page = first; page < DIRECT_WINDOW_SIZE / PAGE_SIZE; ++page) {
+            if (direct_page_flags_[page].load(std::memory_order_relaxed) & PAGE_MAPPED) {
+                first = page + 1;
+                free_pages = 0;
+            } else if (++free_pages == count) {
+                break;
+            }
+        }
+        if (free_pages != count) return 0;
+        addr = first * PAGE_SIZE;
+    }
+    const uint64_t end = addr + aligned_size;
     if (range_overlaps_locked(addr, end)) return UINT64_MAX;
     const uint64_t stack_bottom = stack_top_ - STACK_SIZE;
     if (addr < stack_top_ && end > stack_bottom) return 0;
@@ -962,7 +988,14 @@ uint64_t Memory::mmap_fixed_noreplace(uint64_t addr, uint64_t size,
     if (direct_window_ && addr < DIRECT_WINDOW_SIZE) {
         uint64_t low_hi = std::min<uint64_t>(end, DIRECT_WINDOW_SIZE);
         if (!set_direct_prot(addr, low_hi, PROT_READ | PROT_WRITE)) return 0;
-        std::memset(direct_window_ + addr, 0, low_hi - addr);
+        // Hinted virtual reservations can span GiBs. Discard old contents
+        // without touching every page; ordinary mappings retain eager zeroing.
+        if (noreserve) {
+            if (::madvise(direct_window_ + addr, low_hi - addr, MADV_DONTNEED) < 0)
+                return 0;
+        } else {
+            std::memset(direct_window_ + addr, 0, low_hi - addr);
+        }
     }
     size_t pages_added = 0;
     if (!noreserve) {

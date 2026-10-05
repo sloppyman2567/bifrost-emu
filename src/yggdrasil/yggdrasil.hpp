@@ -82,8 +82,8 @@ public:
     // internally and by execve/chdir which need the fd, not a Node.
     static int open_host_fd(const std::string& guest_path, int flags,
                             mode_t mode = 0);
-    // Confined open relative to an already-open host dir fd (explicit
-    // guest dirfd). Callers pass only relative paths and real dirfds.
+    // Confined open relative to a host directory fd or AT_FDCWD. A cwd
+    // outside the configured root retains legacy host-relative access.
     static int open_host_at(int host_dirfd, const std::string& relpath,
                             int flags, mode_t mode = 0);
     // Confined O_RDONLY|O_DIRECTORY open for chdir preparation.
@@ -122,7 +122,7 @@ public:
     static int fd_link_target(int host_fd, std::string& target);
     // Explicit-dirfd open: absolute paths behave exactly like open()
     // (dirfd ignored per POSIX); relative paths resolve under host_dirfd
-    // (a real host dir fd; AT_FDCWD keeps legacy host-cwd behavior).
+    // (a real host dir fd, or AT_FDCWD with the same confinement policy).
     // ProcFS/DevFS only match absolute paths, so relative opens go
     // straight to the confined host helper.
     std::unique_ptr<Node> open_at(int host_dirfd,
@@ -130,8 +130,12 @@ public:
                                   int flags, mode_t mode, int* err_out);
     // Set the ELF path (used by /proc/self/exe). Called once from
     // Emulator::load_elf_file().
-    void set_elf_path(const std::string& path) { elf_path_ = path; }
+    void set_elf_path(const std::string& path, const std::string& backing_path = {}) {
+        elf_path_ = path;
+        elf_backing_path_ = backing_path;
+    }
     const std::string& elf_path() const { return elf_path_; }
+    void set_initial_stack(uint64_t address) { initial_stack_ = address; }
     // Set the argv vector (used by /proc/self/cmdline). Called once
     // from Emulator::load_elf_file().
     void set_argv(const std::vector<std::string>& argv) { argv_ = argv; }
@@ -192,6 +196,9 @@ private:
     bool android_services_ = false;
     std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;
     std::string elf_path_;
+    // Exact host file selected by the ELF loader, independent of guest cwd.
+    std::string elf_backing_path_;
+    uint64_t initial_stack_ = 0;
     std::vector<std::string> argv_;
     ::arm64emu::FrostGraphics* gfx_ = nullptr;
     ::arm64emu::Audio* audio_ = nullptr;
