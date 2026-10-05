@@ -166,12 +166,13 @@ adds, including operand aliases and all valid widths. `jit_crc32` covers
 2,048 IEEE/Castagnoli cases with an independent bitwise oracle. Both instruction
 fixtures also pass QEMU and Tier-1 differential verification.
 
-The ART-foundation Linux suite passes 275/275 in default JIT mode. Interpreter
-passes 267/268, with seven JIT-only skips and one AAudio callback failure that
-passes in isolation; the full interpreter run is not clean. The earlier native
+After audio fix `9403911`, the strict ART-foundation Linux suite passes 275/275
+in default JIT mode and 268/268 in interpreter mode, with seven expected
+JIT-only skips. AAudio passes in both full runs. The earlier native
 checkpoint passed 273/273 and 266/266 respectively. All six Bionic bootstrap
 variants pass after the mmap/procfs changes; see [test evidence](TESTS.md).
 The subsequent AAudio wake-up fix passes 20 callback stress runs, including
 injected delayed waits in both engines, and four neighboring audio/thread tests
 per engine. This resolves a reproducible lost-notification race without raising
-the guest fixture's callback deadline; full-suite totals above remain historical.
+the guest fixture's callback deadline. The older interpreter checkpoint's
+267/268 result remains recorded in [test evidence](TESTS.md).

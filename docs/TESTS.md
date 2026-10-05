@@ -28,6 +28,10 @@ retain shutdown reports. No emulator code or hardware-specific policy changed.
 
 ### Complete regression suites
 
+The October 5 strict reruns after audio fix `9403911` pass **275/275 in JIT
+mode** (147 s, zero skips) and **268/268 in interpreter mode** (132 s, seven
+expected JIT-only skips). `android_audio` passes in both complete workloads.
+
 The October 5 ART-foundation checkpoint passes **275/275 in JIT mode** (192 s).
 The interpreter full run passes **267/268** (165 s), with seven JIT-only skips:
 `android_audio` misses its AAudio callback/frame-count checks within the
@@ -108,7 +112,8 @@ stress gate passes **20/20 runs** across both engines and normal/delayed waits.
 A 12-second offscreen Neverball run with the SDL dummy sound backend keeps
 the mixer active through 553 callbacks, with nonempty stream backlogs at each
 sample. The bounded run was ended by timeout; it is not extended gameplay or
-an audible-output check. The full suites have not been rerun after this fix.
+an audible-output check. Subsequent strict full-suite reruns pass 275/275 JIT
+and 268/268 interpreter, including Android audio; see the totals above.
 
 ```bash
 bash scripts/test_audio_callbacks.sh

@@ -54,11 +54,10 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   [Doom 3 status](docs/doom3.md).
 
 **Full-suite checkpoint (October 5, 2026, including ART foundations):**
-275/275 passed in JIT mode. Interpreter passed 267/268, with seven JIT-only
-skips; the AAudio callback failure passed an isolated rerun. The full interpreter
-run remains a recorded failure; see [test evidence](docs/TESTS.md).
-A subsequent callback-worker wake-up fix passes 20 audio stress runs and
-four focused audio/thread tests per engine; the full suite has not been rerun.
+After the audio wake-up fix, strict full-suite reruns pass 275/275 in JIT
+mode and 268/268 in interpreter mode, with seven expected JIT-only skips.
+AAudio passes in both full runs; 20 callback stress runs and four focused
+audio/thread tests per engine also pass. See [test evidence](docs/TESTS.md).
 The verification gate now passes 60 single-thread differential fixtures and
 five separate threaded oracle workloads. Shared-memory replay is suspended
 when a second guest CPU starts; see [test evidence](docs/TESTS.md).
