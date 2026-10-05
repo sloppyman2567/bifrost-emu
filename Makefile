@@ -468,6 +468,7 @@ generated-check: opgen-check opgen-thunk-check wlgen-check vkmarshal-check vkxml
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
+	$(MAKE) test-android-window-backend test-android-window-plugin-cli
 	$(MAKE) verify
 	./scripts/run_tests.sh --emu $(TARGET) --unit --quick --strict
 	./scripts/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
@@ -482,6 +483,7 @@ ci: setup-tests generated-check $(TARGET)
 check-all: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
+	$(MAKE) test-android-window-backend test-android-window-plugin-cli
 	@./scripts/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
@@ -507,6 +509,36 @@ test-capi: lib $(TARGET) $(CAPI_TESTLIB)
 test-android-window-backend: $(LIB)
 	$(CXX) $(CXXFLAGS) ctest/android_window_backend_host.cpp $(LIB) -o $(OBJDIR)/android_window_backend_host $(LDFLAGS)
 	./$(OBJDIR)/android_window_backend_host
+
+.PHONY: test-android-sdl-backend
+test-android-sdl-backend:
+ifneq ($(SDL2_CFLAGS),)
+	@mkdir -p $(OBJDIR)/test-wayland
+	$(CC) -std=c11 -Wall -Wextra -fPIC -shared ctest/host/wayland_egl_lifetime_fixture.c -o $(OBJDIR)/test-wayland/libwayland-egl.so.1
+	$(CXX) $(CXXFLAGS) ctest/host/android_sdl_backend_lifetime.cpp src/frost_graphics/android_window_backend.cpp -o $(OBJDIR)/android_sdl_backend_lifetime -pthread -ldl
+	LD_LIBRARY_PATH=$(abspath $(OBJDIR)/test-wayland) ./$(OBJDIR)/android_sdl_backend_lifetime
+else
+	@echo "error: test-android-sdl-backend requires USE_SDL2=1 and SDL2 development headers" >&2
+	@exit 1
+endif
+
+ANDROID_WINDOW_PLUGIN := $(OBJDIR)/plugins/android-window-sdl.so
+.PHONY: android-window-plugin test-android-window-plugin test-android-window-plugin-cli
+android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
+
+$(ANDROID_WINDOW_PLUGIN): plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp include/frost/android_window_backend.hpp include/bifrost/android_window_plugin.h Makefile $(CONFIG_STAMP)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp -o $@ $(SDL2_LIBS) -pthread -ldl
+
+test-android-window-plugin: $(LIB)
+	$(CC) -std=c11 -Wall -Wextra -Iinclude -fPIC -shared ctest/host/android_window_plugin_fixture.c -o $(OBJDIR)/android_window_plugin_fixture.so
+	$(CC) -std=c11 -Iinclude -fPIC -shared -DBIFROST_TEST_NO_ENTRY ctest/host/android_window_plugin_fixture.c -o $(OBJDIR)/android_window_plugin_no_entry.so
+	$(CXX) $(CXXFLAGS) ctest/android_window_plugin_host.cpp $(LIB) -o $(OBJDIR)/android_window_plugin_host $(LDFLAGS)
+	./$(OBJDIR)/android_window_plugin_host ./$(OBJDIR)/android_window_plugin_fixture.so ./$(OBJDIR)/android_window_plugin_no_entry.so
+
+# Requires setup-tests (or a cross-built ctest/hello.elf); never silently skip.
+test-android-window-plugin-cli: $(TARGET) test-android-window-plugin
+	python3 scripts/test_android_window_plugin_cli.py --emu $(TARGET) --plugin $(OBJDIR)/android_window_plugin_fixture.so
 
 # Cross-compile the guest AArch64 shared object used by the native bridge
 # host test (a -nostdlib -shared lib with JNI-shaped functions; must be

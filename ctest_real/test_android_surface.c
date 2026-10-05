@@ -143,10 +143,29 @@ int main(int argc, char** argv) {
     chk(ANativeWindow_getHeight(win) > 0, "getHeight positive");
     chk(ANativeWindow_getFormat(win) == 1 /* WINDOW_FORMAT_RGBA_8888 */,
         "getFormat RGBA8888");
+    int base_width = ANativeWindow_getWidth(win);
+    int base_height = ANativeWindow_getHeight(win);
     chk(ANativeWindow_setBuffersGeometry(win, 640, 480, 0) == 0,
         "setBuffersGeometry");
     chk(ANativeWindow_getWidth(win) == 640, "width updated to 640");
     chk(ANativeWindow_getHeight(win) == 480, "height updated to 480");
+    chk(ANativeWindow_setBuffersGeometry(win, -1, 480, 0) == -22,
+        "negative geometry rejected");
+    chk(ANativeWindow_setBuffersGeometry(win, 0, 480, 0) == -22,
+        "half-zero geometry rejected");
+    chk(ANativeWindow_setBuffersGeometry(win, 640, 0, 0) == -22,
+        "other half-zero geometry rejected");
+    chk(ANativeWindow_getWidth(win) == 640 && ANativeWindow_getHeight(win) == 480,
+        "invalid geometry preserves dimensions");
+    chk(ANativeWindow_setBuffersGeometry(win, 320, 240, 2) == 0,
+        "set alternate reported format");
+    chk(ANativeWindow_setBuffersGeometry(win, 0, 0, 0) == 0,
+        "zero geometry restores base settings");
+    chk(ANativeWindow_getWidth(win) == base_width &&
+        ANativeWindow_getHeight(win) == base_height && ANativeWindow_getFormat(win) == 1,
+        "base dimensions and format restored");
+    chk(ANativeWindow_setBuffersGeometry(win, 640, 480, 0) == 0,
+        "restore EGL test geometry");
     ANativeWindow_acquire(win);
     ANativeWindow_release(win);
 

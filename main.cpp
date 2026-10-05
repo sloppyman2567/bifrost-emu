@@ -38,6 +38,7 @@
 #include "bifrost/config.hpp"
 #include "decoder.hpp"
 #include "frost/window_stats.hpp"
+#include "frost/android_surface.hpp"
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -82,6 +83,7 @@ static void print_banner() {
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
+        "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
         "    --print-config     print resolved config and exit\n"
         "    -V, --version      show version and exit\n"
         "    -h, --help         show this message\n"
@@ -168,6 +170,17 @@ static std::string host_path_for(const std::string& guest_path,
     return root + guest_path;
 }
 // ── Main ─────────────────────────────────────────────────────────────────
+static bool install_android_window_plugin(const std::string& path) {
+    if (path.empty()) return true;
+    std::string error;
+    auto backend = frost::load_android_window_backend(path, error);
+    if (backend && frost::AndroidSurfaceManager::instance().install_window_backend(std::move(backend)))
+        return true;
+    fprintf(stderr, "bifrost-emu: %s\n", error.empty() ?
+            "window plugin cannot initialize or replace an active backend" : error.c_str());
+    return false;
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
         return arm64emu::window_stats::ui_main(std::atoi(argv[2]));
@@ -180,6 +193,7 @@ int main(int argc, char** argv) {
     // or for debugging.
     bool use_jit = true;
     bool android_runtime = false;
+    std::string android_window_plugin;
     std::string fb_dump_path;
     std::string audio_dump_path;
     uint64_t jit_threshold = 0;  // 0 = use JIT from start
@@ -196,10 +210,17 @@ int main(int argc, char** argv) {
     // below, AFTER the config file is loaded, so they override config.
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
+        // Guest argv and option values are not host options. In particular,
+        // a guest's --print-config must not suppress plugin initialization.
+        if (a == "--" || a == "--android" || a.empty() || a[0] != '-') break;
         if (a == "--config") {
             if (i + 1 < argc) { config_path = argv[i + 1]; i++; }
         } else if (a == "--print-config") {
             print_config_only = true;
+        } else if (a == "--rootfs" || a == "--jit-threshold" ||
+                   a == "--fb-dump" || a == "--audio-dump" ||
+                   a == "--android-window-plugin") {
+            if (i + 1 < argc) i++;
         }
     }
     if (!config_path.empty()) {
@@ -238,6 +259,23 @@ int main(int argc, char** argv) {
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
+        if (a == "--android-window-plugin") {
+            if (arg_i + 1 >= argc) {
+                fprintf(stderr, "bifrost-emu: --android-window-plugin requires a PATH argument\n");
+                return 2;
+            }
+            if (!android_window_plugin.empty()) {
+                fprintf(stderr, "bifrost-emu: only one --android-window-plugin is allowed\n");
+                return 2;
+            }
+            android_window_plugin = argv[arg_i + 1];
+            if (android_window_plugin.empty()) {
+                fprintf(stderr, "bifrost-emu: window plugin path cannot be empty\n");
+                return 2;
+            }
+            arg_i += 2;
+            continue;
+        }
         if (a == "--config")                { arg_i += 2; continue; }  // already handled
         if (a == "--print-config")          { arg_i++; continue; }
         // Equivalent to `BIFROST_ROOT=PATH bifrost-emu ...` but more
@@ -305,6 +343,9 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "bifrost-emu: --android requires a PATH argument\n");
                 return 2;
             }
+            // Use the common resolved-config exit without creating an
+            // emulator or loading any plugin for this early-launch branch.
+            if (print_config_only) break;
             // --android libfoo.so runs a NativeActivity .so as the main
             // image. We steal the rest of argv as guest argv[0..] so the
             // rest of main can reuse the same argv vector.
@@ -327,6 +368,10 @@ int main(int argc, char** argv) {
                                                 : cfg.jit_threshold);
             if (cfg.forward_host_signals) emu.install_host_signal_handlers();
             try {
+                if (!install_android_window_plugin(android_window_plugin)) {
+                    restore_terminal();
+                    return 2;
+                }
                 emu.load_android_activity(android_so, guest_argv);
                 int code = emu.run_android();
                 restore_terminal();
@@ -399,6 +444,10 @@ int main(int argc, char** argv) {
         emu.install_host_signal_handlers();  // forward host signals to guest
     }
     try {
+        if (!install_android_window_plugin(android_window_plugin)) {
+            restore_terminal();
+            return 2;
+        }
         emu.load_elf_file(elf_path, guest_argv);
         int code = emu.run();
         restore_terminal();

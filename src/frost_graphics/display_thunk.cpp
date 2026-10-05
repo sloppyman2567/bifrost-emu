@@ -262,7 +262,7 @@ void* DisplayThunk::ensure_android_window() {
     if (!impl_->proxy_->ready()) return nullptr;
     auto& mgr = frost::AndroidSurfaceManager::instance();
     mgr.set_memory(impl_->mem);
-    mgr.set_host_sdl_window(impl_->proxy_->host_window());
+    if (!mgr.set_host_sdl_window(impl_->proxy_->host_window())) return nullptr;
     mgr.host_native_window();
     return impl_->proxy_->host_window();
 }
@@ -1219,7 +1219,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = static_cast<uint64_t>(
                 static_cast<int64_t>(mgr.format()));
         } else if (n == "ANativeWindow_setBuffersGeometry") {
-            // (window, width, height, format); 0 keeps the current value.
+            // (window, width, height, format); zero restores base settings.
             cpu.regs[0] = static_cast<uint64_t>(mgr.set_buffers_geometry(
                 static_cast<int32_t>(cpu.regs[1]),
                 static_cast<int32_t>(cpu.regs[2]),

@@ -48,6 +48,8 @@ public:
     // ANativeWindow format codes (android/rect.h + nativewindow.h).
     static constexpr int32_t kFormatRGBA8888 = 1;
     static constexpr int32_t kFormatRGBX8888 = 2;
+    static constexpr int32_t kBaseWidth = 800;
+    static constexpr int32_t kBaseHeight = 600;
 
     // ── v2 handle ranges (same unmistakable 0xA9xx style) ──────────────
     static constexpr uint64_t kLooperBase = 0xA90001000000ULL;
@@ -63,6 +65,10 @@ public:
     using FdResolver = std::function<int(int guest_fd)>;
 
     static AndroidSurfaceManager& instance();
+    // Independent host adapter context, useful to embedders and plugins.
+    // Throws if the backend cannot accept the initial geometry.
+    explicit AndroidSurfaceManager(std::unique_ptr<AndroidWindowBackend> backend);
+    ~AndroidSurfaceManager();
 
     // ── Wiring (Emulator side) ─────────────────────────────────────────
     void set_memory(arm64emu::Memory* m) { mem_ = m; }
@@ -71,7 +77,7 @@ public:
 
     // Called by DisplayThunk after the DisplayProxy window exists.
     // sdl_window is the host SDL_Window*.
-    void set_host_sdl_window(void* sdl_window);
+    bool set_host_sdl_window(void* sdl_window);
     bool ready() const { return sdl_window_ != nullptr; }
     bool uses_host_window(void* window) const { return sdl_window_ == window; }
 
@@ -89,7 +95,8 @@ public:
     int32_t width() const { return width_; }
     int32_t height() const { return height_; }
     int32_t format() const { return format_; }
-    // ANativeWindow_setBuffersGeometry: 0 = keep current dimension.
+    // ANativeWindow_setBuffersGeometry: both dimensions must be zero or
+    // positive. Zero restores the adapter's base geometry/format.
     int32_t set_buffers_geometry(int32_t w, int32_t h, int32_t fmt);
 
     // The host-side native window value host EGL expects for
@@ -297,8 +304,8 @@ public:
     std::unique_ptr<AndroidWindowBackend> window_backend_;
     uint64_t surface_handle_ = 0;   // 0 = not created yet
     int refs_ = 0;
-    int32_t width_ = 800;
-    int32_t height_ = 600;
+    int32_t width_ = kBaseWidth;
+    int32_t height_ = kBaseHeight;
     int32_t format_ = kFormatRGBA8888;
 
     // ── Activity state (v2) ────────────────────────────────────────────

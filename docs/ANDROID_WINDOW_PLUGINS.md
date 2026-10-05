@@ -1,6 +1,6 @@
-# Built-in Android window plugins
+# Android window plugins
 
-`AndroidWindowBackend` is an injectable host-side C++ interface. The default
+`AndroidWindowBackend` is the internal host-side C++ interface. The default
 `sdl-egl` implementation wraps the existing DisplayProxy window and resolves
 its X11 native window or Wayland EGL wrapper. AndroidSurfaceManager owns the
 backend and retains guest handles, reference bookkeeping, activity callbacks
@@ -11,12 +11,66 @@ window or issuing any guest surface handle. Live replacement is rejected:
 changing a backend would invalidate existing EGL surfaces. The host window is
 borrowed; its owner detaches it before destruction. The SDL implementation
 releases its Wayland EGL wrapper at detach, before SDL destroys the wl_surface.
+Its helper-library reference is owned by that backend and released after wrapper
+destruction, including when a shared-object plugin unloads. Failed bindings
+return an empty window/display pair and can recover on a later attempt.
 Window and display are resolved together so Wayland EGL uses one connection.
 Attach, resize and EGL binding operations belong to the display thread.
 
+Attach and resize return explicit errors. A failed attach preserves the current
+borrowed window; a failed resize preserves the reported dimensions and format.
+Negative dimensions or format are rejected. Width and height must both be zero
+or both positive; zeros restore the adapter's base 800×600/RGBA8888 settings,
+following the [NDK geometry contract](https://developer.android.com/ndk/reference/group/a-native-window#anativewindow_setbuffersgeometry).
+This single-window adapter also resizes the host window; it does not yet separate
+physical window dimensions from Android buffer dimensions or negotiate buffer
+formats. Detach is infallible and idempotent. Independent adapter contexts can be
+constructed with an owned backend; their destruction detaches before destroying
+it. The emulator's existing thunk/activity wiring still uses its singleton
+context, so this does not establish multiple simultaneous Android runtimes.
+
+## Loadable host modules
+
+The public C header [android_window_plugin.h](../include/bifrost/android_window_plugin.h)
+defines host ABI version 1. A plugin exports
+`bifrost_android_window_plugin_get_api(uint32_t host_abi)` and returns an immutable
+descriptor with its version, size, name and create/destroy/attach/detach/resize/
+binding callbacks. The loader checks the entire required prefix before creating
+an instance. Status callbacks return zero or a negative errno; invalid positive
+or out-of-range status values become `-EPROTO`. Binding errors discard the whole
+window/display pair. Plugins must preserve state on failed attach/resize, avoid
+reentry and never throw across the C boundary.
+
+Load a module explicitly before `--android` or the guest ELF:
+
+```bash
+make android-window-plugin
+./bifrost-emu --android-window-plugin ./build/release-sdl1-gl1/plugins/android-window-sdl.so \
+  ctest_real/test_android_surface.elf
+```
+
+The optional SDL/EGL module is built from `plugins/android-window-sdl/plugin.cpp`
+and the same backend implementation as the built-in default. It exports only
+the C entry point and does not link libbifrost. Leaving the option unset uses
+the built-in backend. `--android` consumes subsequent arguments as guest arguments,
+so place the plugin option before it. Host help/config-only requests do not load
+it, including config-only requests on the `--android` launch path. Guest arguments
+named `--print-config` or `--config` are not parsed as host options.
+
+Module paths are host filesystem paths containing `/`, with no guest soname
+search or rootfs remapping. The loader uses `RTLD_NOW | RTLD_LOCAL` so missing
+dependencies fail during loading and plugin symbols are not made globally
+available; see [dlopen semantics](https://man7.org/linux/man-pages/man3/dlopen.3.html).
+These are trusted native host modules, not sandboxed guest code. No guest
+Memory/CPU capability or C++ object crosses the public interface. Destroy handles
+partially created instances after creation failure. The module remains loaded
+until successful instances have detached and all plugin destruction callbacks
+have returned.
+
 This checkpoint extracts window handling. It does not yet provide a general
 Binder service plugin registry, framework Surface/BufferQueue parcel handling,
-multiple Android surfaces, external shared-object loading or a stable C ABI.
+multiple Android surfaces or an ABI for complete Android platform plugins.
+Version 1 covers only host window binding and geometry.
 Presentation remains in the existing EGL thunk (`eglSwapBuffers`); plugins
 provide the native binding that it uses. SDL input remains in the activity
 adapter. Android runtime mode still needs guest platform shim DSOs before it
@@ -27,25 +81,47 @@ can use this bridge through the real Bionic linker.
 ```bash
 make -j6
 make test-android-window-backend
+make test-android-window-plugin
+make test-android-window-plugin-cli # requires the cross-built ctest/hello.elf
+make test-android-sdl-backend # SDL headers; fake SDL boundary, real dlopen lifetime
+make android-window-plugin
 make cross SRC=ctest_real/test_android_surface.c OUT=ctest_real/test_android_surface.elf
 ./scripts/run_tests.sh --filter 'android_surface|android_activity|sdl_gl_triangle'
 ./scripts/run_tests.sh --no-jit --filter 'android_surface|android_activity|sdl_gl_triangle'
 bash scripts/run_android_surface_demo.sh
 SDL_VIDEODRIVER=wayland ./bifrost-emu ctest_real/test_android_surface.elf
 SDL_VIDEODRIVER=wayland ./bifrost-emu --no-jit ctest_real/test_android_surface.elf
+SDL_VIDEODRIVER=wayland ./bifrost-emu \
+  --android-window-plugin ./build/release-sdl1-gl1/plugins/android-window-sdl.so \
+  ctest_real/test_android_surface.elf
 ```
 
-The host test installs a second backend, checks delegation and rejects backend
-replacement after attachment or handle issuance. The ARM64 surface fixture
-creates a real EGL window, reads back its clear color, presents it, checks
+Host tests check delegation, failure rollback, independent context teardown and
+replacement rejection after attachment or handle issuance. A separately compiled
+C shared object verifies descriptor rejection, partial-create cleanup, poisoned
+binding rejection and detach/destroy-before-unload ordering. Both host targets
+also run without SDL and are included in CI, `make ci` and `make check-all`.
+The SDL helper-lifetime oracle stubs SDL through its actual public declarations
+and loads an independently compiled helper DSO. It checks concurrent backend
+references, wrapper-before-helper destruction and recovery after WM query or
+wrapper allocation failure. This runs in CI's SDL build job without a compositor.
+The ARM64 surface fixture creates a real EGL window, reads back its clear color, presents it, checks
 geometry and destroys its EGL objects. Demo mode displays changing colors for
 ten seconds. This is a musl-static ARM64 adapter fixture, not an Android APK
 or a test of the real Bionic linker and Android framework.
 
-Native Wayland verification: forcing `SDL_VIDEODRIVER=wayland` passes all 25
+Native Wayland verification: forcing `SDL_VIDEODRIVER=wayland` passes all 33
 surface checks in both JIT and interpreter mode, including EGL window creation,
-GPU pixel readback, presentation, dimensions and teardown. SDL cannot select its
-X11 backend in these runs. This does not validate the downloaded Mesa demos.
+GPU pixel readback, presentation, geometry error/reset semantics and teardown.
+Both the built-in backend and the loadable SDL/EGL module pass these checks.
+SDL cannot select its X11 backend in these runs. This does not validate the downloaded Mesa demos.
+
+The plugin refinement passes both host contract targets in SDL and headless
+builds, plus all twelve CLI startup/help/error cases in each build. Headless SDK
+independence passes. Focused Android/Binder/syscall, SDL triangle, socket and
+XWayland regressions pass 10/10 in both engines. The separate pinned Bionic
+bootstrap still passes all six fixed/random ASLR and execution configurations.
+The prior full-suite checkpoint below predates these plugin changes.
 
 ## Independent downloaded programs
 

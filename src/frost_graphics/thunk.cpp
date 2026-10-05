@@ -1249,9 +1249,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         (getenv("BIFROST_NO_DISPLAY_SUBST") != nullptr);
     if (entry.name == "eglGetDisplay" && !no_disp_subst) {
         auto& mgr = frost::AndroidSurfaceManager::instance();
-        if (cpu.regs[0] == 0 && mgr.ready() && mgr.native_display()) {
-            cpu.regs[0] =
-                reinterpret_cast<uint64_t>(mgr.native_display());
+        if (cpu.regs[0] == 0 && mgr.ready()) {
+            if (void* display = mgr.native_display())
+                cpu.regs[0] = reinterpret_cast<uint64_t>(display);
         }
     }
     // ── Android surface interception (eglCreateWindowSurface) ────────

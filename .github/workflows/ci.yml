@@ -29,6 +29,8 @@ jobs:
           make -j2 USE_SDL2=1 USE_THUNK_GL=1
           test -x build/release-sdl0-gl0/bifrost-emu
           test -x build/release-sdl1-gl1/bifrost-emu
+      - name: Check SDL Wayland helper lifetime and recovery
+        run: make test-android-sdl-backend USE_SDL2=1 USE_THUNK_GL=1
 
   guest-correctness:
     name: Guest correctness and glibc runtime
@@ -51,6 +53,8 @@ jobs:
           make -j2 USE_SDL2=0 USE_THUNK_GL=0
       - name: Run host API checks
         run: make test-capi test-nb USE_SDL2=0 USE_THUNK_GL=0 GLIBC_CC=aarch64-linux-gnu-gcc
+      - name: Run Android window plugin contract checks without SDL
+        run: make test-android-window-backend test-android-window-plugin-cli USE_SDL2=0 USE_THUNK_GL=0
       - name: Run glibc static startup regression
         run: |
           aarch64-linux-gnu-gcc -static -O2 ctest/hello.c -o build/hello-glibc-static.elf

@@ -67,8 +67,9 @@ Virtual `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder` provide bounded
 transactions, replies and flat-object handle translation within one emulator.
 Framework services, descriptor transfer and death subscriptions remain missing.
 The native surface adapter delegates window binding and resize to an injectable
-C++ backend; the SDL backend passes native Wayland EGL pixel readback and
-presentation. Full Android Surface/BufferQueue service integration remains work
+C++ backend, with a versioned host C ABI for loadable window modules. The SDL
+backend passes native Wayland EGL pixel readback and presentation. Full Android
+Surface/BufferQueue service integration remains work
 for the platform layer.
 
 The existing native-bridge adapter has scalar trampolines but no complete

@@ -1,5 +1,6 @@
 #include "frost/android_window_backend.hpp"
 #include <cstdio>
+#include <cerrno>
 #include <dlfcn.h>
 #include <mutex>
 #if defined(BIFROST_USE_SDL2)
@@ -8,47 +9,55 @@
 #endif
 namespace frost {
 namespace {
-// Keep the module loaded while a backend has a Wayland EGL wrapper. Function
-// local initialization also makes probing safe across multiple backends.
+// Each backend owns its library reference until its wrapper is destroyed.
+// A process-static handle would leak a reference on every plugin reload;
+// closing one during static teardown could precede the manager's destructor.
 struct WlEglFns {
+  WlEglFns() {
+    handle = dlopen("libwayland-egl.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!handle) return;
+    window_create = reinterpret_cast<decltype(window_create)>(
+        dlsym(handle, "wl_egl_window_create"));
+    window_destroy = reinterpret_cast<decltype(window_destroy)>(
+        dlsym(handle, "wl_egl_window_destroy"));
+    window_resize = reinterpret_cast<decltype(window_resize)>(
+        dlsym(handle, "wl_egl_window_resize"));
+    if (!window_create || !window_destroy || !window_resize) {
+      dlclose(handle);
+      handle = nullptr;
+      window_create = nullptr;
+      window_destroy = nullptr;
+      window_resize = nullptr;
+    }
+  }
+  ~WlEglFns() { if (handle) dlclose(handle); }
+  WlEglFns(const WlEglFns &) = delete;
+  WlEglFns &operator=(const WlEglFns &) = delete;
   void *handle = nullptr;
   void *(*window_create)(void *, int, int) = nullptr;
   void (*window_destroy)(void *) = nullptr;
   void (*window_resize)(void *, int, int, int, int) = nullptr;
 };
-const WlEglFns &wl_egl_fns() {
-  static const WlEglFns functions = [] {
-    WlEglFns f;
-    f.handle = dlopen("libwayland-egl.so.1", RTLD_LAZY | RTLD_LOCAL);
-    if (!f.handle)
-      return f;
-    f.window_create = reinterpret_cast<decltype(f.window_create)>(
-        dlsym(f.handle, "wl_egl_window_create"));
-    f.window_destroy = reinterpret_cast<decltype(f.window_destroy)>(
-        dlsym(f.handle, "wl_egl_window_destroy"));
-    f.window_resize = reinterpret_cast<decltype(f.window_resize)>(
-        dlsym(f.handle, "wl_egl_window_resize"));
-    if (!f.window_create || !f.window_destroy || !f.window_resize) {
-      dlclose(f.handle);
-      f = {};
-    }
-    return f;
-  }();
-  return functions;
-}
-
 class SdlAndroidWindowBackend final : public AndroidWindowBackend {
 public:
   ~SdlAndroidWindowBackend() override { clear_binding(); }
   const char *name() const noexcept override { return "sdl-egl"; }
-  void attach_host_window(void *window) override {
+  int attach_host_window(void *window) override {
+    if (!window) return -EINVAL;
     std::lock_guard<std::mutex> lock(mu_);
     if (sdl_window_ == window)
-      return;
+      return 0;
     clear_binding();
     sdl_window_ = window;
+    return 0;
   }
-  void resize(int32_t width, int32_t height, bool resize_host) override {
+  void detach_host_window() noexcept override {
+    std::lock_guard<std::mutex> lock(mu_);
+    clear_binding();
+    sdl_window_ = nullptr;
+  }
+  int resize(int32_t width, int32_t height, bool resize_host) override {
+    if (width <= 0 || height <= 0) return -EINVAL;
     std::lock_guard<std::mutex> lock(mu_);
     width_ = width;
     height_ = height;
@@ -58,8 +67,9 @@ public:
 #else
     (void)resize_host;
 #endif
-    if (wl_egl_window_ && wl_egl_fns().window_resize)
-      wl_egl_fns().window_resize(wl_egl_window_, width, height, 0, 0);
+    if (wl_egl_window_)
+      wl_egl_fns_->window_resize(wl_egl_window_, width, height, 0, 0);
+    return 0;
   }
   AndroidWindowBinding binding() override {
     std::lock_guard<std::mutex> lock(mu_);
@@ -73,11 +83,10 @@ public:
     if (!SDL_GetWindowWMInfo(static_cast<SDL_Window *>(sdl_window_), &info)) {
       std::fprintf(stderr, "[android] SDL_GetWindowWMInfo failed: %s\n",
                    SDL_GetError());
-      host_native_window_resolved_ = true;
       return {};
     }
     if (info.subsystem == SDL_SYSWM_X11) {
-      host_native_window_ = reinterpret_cast<uint64_t>(info.info.x11.window);
+      host_native_window_ = static_cast<uint64_t>(info.info.x11.window);
     } else if (info.subsystem == SDL_SYSWM_WAYLAND) {
       // Host EGL's Wayland platform consumes a wl_egl_window* (NOT the
       // raw wl_surface). Create one from the SDL window's wl_surface.
@@ -85,9 +94,9 @@ public:
       // must wrap THE SAME connection or Mesa rejects the surface
       // (wl_surfaces are connection-private).
       wl_display_ = info.info.wl.display;
-      const WlEglFns &fns = wl_egl_fns();
-      if (fns.window_create) {
-        void *w = fns.window_create(info.info.wl.surface, width_, height_);
+      wl_egl_fns_ = std::make_unique<WlEglFns>();
+      if (wl_egl_fns_->window_create) {
+        void *w = wl_egl_fns_->window_create(info.info.wl.surface, width_, height_);
         wl_egl_window_ = w;
         host_native_window_ = reinterpret_cast<uint64_t>(w);
       } else {
@@ -99,11 +108,15 @@ public:
                    static_cast<int>(info.subsystem));
       host_native_window_ = 0;
     }
-    host_native_window_resolved_ = true;
-    if (host_native_window_) {
-      std::fprintf(stderr, "[android] host native window = 0x%llx\n",
-                   static_cast<unsigned long long>(host_native_window_));
+    if (!host_native_window_) {
+      // Do not expose a display without a native window, and allow a later
+      // attempt to recover from a transient SDL/helper allocation failure.
+      clear_binding();
+      return {};
     }
+    host_native_window_resolved_ = true;
+    std::fprintf(stderr, "[android] host native window = 0x%llx\n",
+                 static_cast<unsigned long long>(host_native_window_));
     return {host_native_window_, wl_display_};
 #else
     return {};
@@ -112,9 +125,10 @@ public:
 
 private:
   void clear_binding() {
-    if (wl_egl_window_ && wl_egl_fns().window_destroy)
-      wl_egl_fns().window_destroy(wl_egl_window_);
+    if (wl_egl_window_)
+      wl_egl_fns_->window_destroy(wl_egl_window_);
     wl_egl_window_ = nullptr;
+    wl_egl_fns_.reset();
     wl_display_ = nullptr;
     host_native_window_ = 0;
     host_native_window_resolved_ = false;
@@ -122,6 +136,7 @@ private:
   std::mutex mu_;
   void *sdl_window_ = nullptr;
   void *wl_egl_window_ = nullptr;
+  std::unique_ptr<WlEglFns> wl_egl_fns_;
   void *wl_display_ = nullptr;
   uint64_t host_native_window_ = 0;
   bool host_native_window_resolved_ = false;

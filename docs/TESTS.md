@@ -22,7 +22,8 @@ The BFM oracle passes 184,320 cases in JIT, interpreter and QEMU, and under
 Tier-2 and differential verification. The chained flags oracle passes 20,000
 checks in both engines, QEMU and Tier-2. The XWayland fixture draws a window,
 performs 100 round-trips and verifies server pixels through actual guest libX11.
-Native Wayland Android surface checks pass 25/25 in both engines. Downloaded
+The later window-plugin refinement passes 33/33 native Wayland Android surface
+checks in both engines, with both built-in and loadable SDL/EGL backends. Downloaded
 Mesa demos still fail at EGL/GLX integration; see the
 [window backend validation](ANDROID_WINDOW_PLUGINS.md).
 
@@ -44,6 +45,27 @@ fallback-profiler and window-stats regressions also pass independently.
 Restricted sandbox runs that cannot initialize desktop/audio/Vulkan resources
 do not replace these integration checks. Rebuild stale guest fixtures before
 interpreting failures as emulator regressions.
+
+### Window plugin contracts (2026-10-05)
+
+`make test-android-window-backend test-android-window-plugin-cli` checks owned
+backend lifetime, failure rollback, independent adapter contexts, malformed C
+plugin descriptors, partial-create cleanup, binding failure and unload ordering.
+The CLI gate additionally checks twelve startup/help/error cases using the cross-built
+`ctest/hello.elf`. Both host targets and the CLI gate pass with SDL/GL enabled
+and in headless builds; SDK independence also passes. CI runs these gates.
+
+The focused Android/Binder/syscall, SDL triangle, socket message and XWayland
+subset passes 10/10 in each engine after this refinement. The real pinned
+Bionic bootstrap passes all six ASLR/mode configurations. These are focused
+checks; the full-suite counts above belong to the earlier XWayland checkpoint.
+
+Review follow-up also checks that config-only NativeActivity invocations avoid
+plugin loading, and guest config flags do not change host startup. The SDL
+helper-lifetime oracle passes wrapper destruction before library close,
+simultaneous backend references and recovery from transient binding failures.
+It uses the real SDL declarations with a stub WM query and a separately loaded
+helper library, while native Wayland pixel readback remains the rendering check.
 
 ### Fresh-fixture corrections (2026-10-04)
 

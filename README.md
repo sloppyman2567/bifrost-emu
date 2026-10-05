@@ -53,7 +53,7 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   slow, and save compatibility depends on the game build; see
   [Doom 3 status](docs/doom3.md).
 
-**Current checkpoint (October 5, 2026):** full regression runs passed 272/272
+**Full-suite checkpoint (October 5, 2026, before loadable window plugins):** runs passed 272/272
 in JIT mode and 265/265 in interpreter mode, with seven JIT-only skips.
 The verification gate now passes 56 single-thread differential fixtures and
 four separate threaded oracle workloads. Shared-memory replay is suspended
@@ -204,6 +204,14 @@ support bounded transactions and object handles; see [Binder limits and tests](d
 The native surface adapter now has an injectable window backend, verified with
 native Wayland EGL presentation and pixel readback. Its [window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md)
 also records the repaired XWayland socket path and remaining Mesa EGL/GLX failures.
+Window backends can also be loaded through a versioned host C ABI: build the
+optional SDL/EGL module with `make android-window-plugin`, then supply
+`--android-window-plugin ./build/release-sdl1-gl1/plugins/android-window-sdl.so`
+before `--android` or the guest ELF. The default backend remains built in.
+The plugin refinement passes 33 native Wayland surface checks with both
+backends/engines, twelve CLI cases in SDL and headless builds, and the SDL
+helper-lifetime oracle. Focused regressions pass 10/10 in each engine; the
+earlier full-suite checkpoint above predates these changes.
 
 Integrated APK loading, full Bionic/platform compatibility and ART execution
 remain planned for v2.0; see the [roadmap](roadmap.md). The standalone Android path

@@ -29,12 +29,12 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <dlfcn.h>
+#include <cerrno>
+#include <stdexcept>
 #include <poll.h>
 #include <unistd.h>
 #if defined(BIFROST_USE_SDL2)
 #include <SDL2/SDL.h>
-#include <SDL2/SDL_syswm.h>
 #endif
 
 namespace frost {
@@ -52,10 +52,17 @@ void AndroidSurfaceManager::set_fd_resolver(FdResolver r) {
     fd_resolver_ = std::move(r);
 }
 
-void AndroidSurfaceManager::set_host_sdl_window(void* sdl_window) {
-    if (sdl_window_ == sdl_window) return;
+bool AndroidSurfaceManager::set_host_sdl_window(void* sdl_window) {
+    if (sdl_window_ == sdl_window) return true;
+    if (!sdl_window) {
+        window_backend_->detach_host_window();
+    } else if (int error = window_backend_->attach_host_window(sdl_window)) {
+        std::fprintf(stderr, "[android] window backend %s attach failed (%d)\n",
+                     window_backend_->name(), error);
+        return false;
+    }
     sdl_window_ = sdl_window;
-    window_backend_->attach_host_window(sdl_window);
+    return true;
 }
 
 uint64_t AndroidSurfaceManager::from_surface() {
@@ -79,10 +86,13 @@ void AndroidSurfaceManager::release(uint64_t handle) {
 
 int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
                                                     int32_t fmt) {
-    if (w > 0) width_ = w;
-    if (h > 0) height_ = h;
-    if (fmt > 0) format_ = fmt;
-    window_backend_->resize(width_, height_, true);
+    if (w < 0 || h < 0 || fmt < 0 || (w == 0) != (h == 0)) return -EINVAL;
+    int32_t width = w ? w : kBaseWidth, height = h ? h : kBaseHeight;
+    int error = window_backend_->resize(width, height, true);
+    if (error) return error;
+    width_ = width;
+    height_ = height;
+    format_ = fmt ? fmt : kFormatRGBA8888;
     return 0;
 }
 
@@ -93,11 +103,21 @@ void* AndroidSurfaceManager::native_display() const {
     return window_backend_->binding().display;
 }
 AndroidSurfaceManager::AndroidSurfaceManager()
-    : window_backend_(make_sdl_android_window_backend()) {}
+    : AndroidSurfaceManager(make_sdl_android_window_backend()) {}
+
+AndroidSurfaceManager::AndroidSurfaceManager(std::unique_ptr<AndroidWindowBackend> backend)
+    : window_backend_(std::move(backend)) {
+    if (!window_backend_ || window_backend_->resize(width_, height_, false))
+        throw std::runtime_error("Android window backend cannot initialize geometry");
+}
+
+AndroidSurfaceManager::~AndroidSurfaceManager() {
+    window_backend_->detach_host_window();
+}
 
 bool AndroidSurfaceManager::install_window_backend(std::unique_ptr<AndroidWindowBackend> backend) {
     if (!backend || ready() || surface_handle_) return false;
-    backend->resize(width_, height_, false);
+    if (backend->resize(width_, height_, false)) return false;
     window_backend_ = std::move(backend);
     return true;
 }
