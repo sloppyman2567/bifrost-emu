@@ -10,11 +10,21 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
-The latest strict suite passes **258/258 in JIT mode** with no skips (121 s)
-and **255/255 in interpreter mode**, with three JIT-only skips (155 s).
-These runs cover the tier-1 default, MT publication changes and default window
-titles. The focused unit suites pass 81/81 JIT and 79/79 interpreter. These
-counts supersede the earlier 257/254 full-suite results.
+The October 5 full suite passes **272/272 in JIT mode** with no skips (240 s)
+and **265/265 in interpreter mode**, with seven JIT-only skips (204 s).
+These runs include the Android Binder/syscall foundations, widening SIMD and
+CRC instructions, BFM insertion masks, chained NZCV preservation, socket message
+layout and real guest libX11/XWayland rendering. They supersede the October 4
+258/255 full-suite checkpoint; the additional verification results below retain
+their original scope.
+
+The BFM oracle passes 184,320 cases in JIT, interpreter and QEMU, and under
+Tier-2 and differential verification. The chained flags oracle passes 20,000
+checks in both engines, QEMU and Tier-2. The XWayland fixture draws a window,
+performs 100 round-trips and verifies server pixels through actual guest libX11.
+Native Wayland Android surface checks pass 25/25 in both engines. Downloaded
+Mesa demos still fail at EGL/GLX integration; see the
+[window backend validation](ANDROID_WINDOW_PLUGINS.md).
 
 All 17 additional verification groups pass: generated files, header independence,
 toolchain fetching, verification-gate tests, C API/native bridge, differential

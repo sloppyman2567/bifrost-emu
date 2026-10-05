@@ -9,6 +9,7 @@
 // pointers via guest_to_host_ptr(); we store a small handle header at
 // each guest address so we can recover our proxy state on entry.
 #include "frost/display_proxy.hpp"
+#include "frost/android_surface.hpp"
 #include "core/memory.h"
 #include "opgen_wl.hpp"
 #if defined(BIFROST_USE_SDL2)
@@ -63,6 +64,10 @@ void DisplayProxy::shutdown() {
     SDL_Window* w = (SDL_Window*)window_;
     SDL_Renderer* r = (SDL_Renderer*)renderer_;
     SDL_Texture* t = (SDL_Texture*)texture_;
+    // The Android backend borrows this window. Drop its EGL wrapper while the
+    // underlying wl_surface is still alive, before SDL destroys the window.
+    if (w && frost::AndroidSurfaceManager::instance().uses_host_window(w))
+        frost::AndroidSurfaceManager::instance().set_host_sdl_window(nullptr);
     if (t) SDL_DestroyTexture(t);
     if (r) SDL_DestroyRenderer(r);
     if (w) { window_stats::forget(w); SDL_DestroyWindow(w); }

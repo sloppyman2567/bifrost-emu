@@ -16,6 +16,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <string.h>
+#include <unistd.h>
 
 // ── Android NDK types (minimal) ───────────────────────────────────────
 typedef struct ANativeWindow ANativeWindow;
@@ -111,8 +113,16 @@ typedef unsigned    (*eglGetError_t)(void);
 typedef void (*glViewport_t)(int, int, int, int);
 typedef void (*glClearColor_t)(float, float, float, float);
 typedef void (*glClear_t)(unsigned);
+typedef void (*glReadPixels_t)(int, int, int, int, unsigned, unsigned, void*);
 
-int main(void) {
+int main(int argc, char** argv) {
+    int demo_seconds = 0;
+    if (argc == 3 && !strcmp(argv[1], "--demo-seconds")) {
+        char* end;
+        long value = strtol(argv[2], &end, 10);
+        if (*end || value < 1 || value > 60) return 2;
+        demo_seconds = (int)value;
+    } else if (argc != 1) return 2;
     printf("test_android_surface: start\n");
 
     // ── libandroid.so → ANativeWindow shims ─────────────────────────
@@ -234,13 +244,27 @@ int main(void) {
     if (!hgl) hgl = bifrost_dlopen("libGLESv2.so.2", 1);
     chk(hgl != 0, "dlopen GL library");
     glViewport_t glViewport; glClearColor_t glClearColor; glClear_t glClear;
+    glReadPixels_t glReadPixels;
     LOAD(hgl, glViewport_t, glViewport);
     LOAD(hgl, glClearColor_t, glClearColor);
     LOAD(hgl, glClear_t, glClear);
+    LOAD(hgl, glReadPixels_t, glReadPixels);
     glViewport(0, 0, 640, 480);
     glClearColor(0.15f, 0.35f, 0.75f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    unsigned char pixel[4] = {0};
+    glReadPixels(320, 240, 1, 1, 0x1908 /* RGBA */, 0x1401 /* UNSIGNED_BYTE */, pixel);
+    chk(pixel[0] >= 36 && pixel[0] <= 40 && pixel[1] >= 87 && pixel[1] <= 91 &&
+        pixel[2] >= 189 && pixel[2] <= 193, "rendered pixel matches clear color");
     chk(eglSwapBuffers(dpy, surf) != 0, "eglSwapBuffers (presents)");
+    // Optional visible demo; the regular regression remains a single frame.
+    for (int frame = 0; frame < demo_seconds * 60; ++frame) {
+        float phase = (frame % 180) / 180.0f;
+        glClearColor(phase, 0.35f, 1.0f - phase, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (!eglSwapBuffers(dpy, surf)) return 1;
+        usleep(16667);
+    }
 
     EGLint qw = 0, qh = 0;
     chk(eglQuerySurface(dpy, surf, EGL_WIDTH, &qw) && qw == 640,

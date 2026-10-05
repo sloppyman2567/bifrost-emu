@@ -375,7 +375,8 @@ GLIBC_DYN_SRCS := \
 	ctest_real/test_dyn_pthread_min.c \
 	ctest_real/test_dyn_threads.c \
 	ctest_real/test_dyn_pthread_stress.c \
-	ctest_real/test_dyn_pthread_8thread.c
+	ctest_real/test_dyn_pthread_8thread.c \
+	ctest_real/xwayland_wire.c
 
 # Dynamically-linked variants whose .elf name differs from the source.
 MUSL_DYN_PAIRS := ctest_real/hello_dyn_musl.elf:ctest_real/hello_dyn.c \
@@ -427,6 +428,12 @@ setup-tests:
 	for src in $(GLIBC_DYN_SRCS); do \
 		elf="$${src%.c}.elf"; \
 		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
+		if [ "$$src" = ctest_real/xwayland_wire.c ]; then \
+			if [ -f rootfs/usr/lib/libX11.so.6 ] && [ -f /usr/include/X11/Xlib.h ]; then \
+				$$CC -O2 -idirafter /usr/include "$$src" -Lrootfs/usr/lib -Wl,-rpath-link,rootfs/usr/lib -l:libX11.so.6 -o "$$elf" && count=$$((count + 1)); \
+			fi; \
+			continue; \
+		fi; \
 		if $$CC -O2 -o "$$elf" "$$src" 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \
@@ -495,6 +502,11 @@ test-capi: lib $(TARGET) $(CAPI_TESTLIB)
 	@$(CXX) $(OBJDIR)/test_capi_host.o $(LIB) -o $(OBJDIR)/test_capi_host $(LDFLAGS)
 	@echo "=== Running host C API test ==="
 	@./$(OBJDIR)/test_capi_host
+
+.PHONY: test-android-window-backend
+test-android-window-backend: $(LIB)
+	$(CXX) $(CXXFLAGS) ctest/android_window_backend_host.cpp $(LIB) -o $(OBJDIR)/android_window_backend_host $(LDFLAGS)
+	./$(OBJDIR)/android_window_backend_host
 
 # Cross-compile the guest AArch64 shared object used by the native bridge
 # host test (a -nostdlib -shared lib with JNI-shaped functions; must be

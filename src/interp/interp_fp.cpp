@@ -832,26 +832,26 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // for strings near page boundaries, breaking curl's URL parser.
             // ADDP: 0 Q 0 01110 size 1 Rm 0 101111 Rn Rd (base 0x0E20BC00)
             // Adds pairwise elements from Vn and Vm, placing results in Vd.
-            case 0x0E20BC00: {  // ADDP (vector), 8B/16B
-                int elems = Q ? 16 : 8;
-                uint8_t buf_n[16], buf_m[16], buf_d[16];
+            case 0x0E20BC00: case 0x0E60BC00:
+            case 0x0EA0BC00: case 0x0EE0BC00: {
+                if (size == 3 && !Q) throw DecodeError(cpu.pc, op);
+                const int esize = 1 << size;
+                const int elems = (Q ? 16 : 8) / esize;
+                uint8_t buf_n[16], buf_m[16], buf_d[16] = {};
                 memcpy(buf_n, &cpu.v_lo[rn], 8);
                 if (Q) memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
                 memcpy(buf_m, &cpu.v_lo[rm], 8);
                 if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
-                // Pairwise add: for 16B, pairs are (n[0]+n[1]), (n[2]+n[3]), ...
-                // For the two-register form, it's pairwise within the
-                // concatenation. Actually, ADDP vD.16b, vN.16b, vM.16b
-                // does: vD[i] = vN[2i] + vN[2i+1] for i=0..7,
-                //        vD[8+i] = vM[2i] + vM[2i+1] for i=0..7.
-                for (int i = 0; i < elems/2; i++) {
-                    buf_d[i] = buf_n[2*i] + buf_n[2*i+1];
-                    if (Q) buf_d[elems/2 + i] = buf_m[2*i] + buf_m[2*i+1];
-                }
-                if (!Q) {
-                    // 8B form: only 4 results from Vn, 4 from Vm
-                    for (int i = 0; i < 4; i++) {
-                        buf_d[4+i] = buf_m[2*i] + buf_m[2*i+1];
+                // Both sources contribute even with Q=0. Snapshot them before
+                // writing, then truncate each sum to its original lane width.
+                for (int source = 0; source < 2; ++source) {
+                    const uint8_t* input = source ? buf_m : buf_n;
+                    for (int i = 0; i < elems / 2; ++i) {
+                        uint64_t a = 0, b = 0;
+                        memcpy(&a, input + 2 * i * esize, esize);
+                        memcpy(&b, input + (2 * i + 1) * esize, esize);
+                        const uint64_t sum = a + b;
+                        memcpy(buf_d + (source * elems / 2 + i) * esize, &sum, esize);
                     }
                 }
                 memcpy(&cpu.v_lo[rd], buf_d, 8);
@@ -1850,6 +1850,33 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     sum += v;
                 }
                 cpu.v_lo[rd] = sum & ((1ULL << (esize*8))-1);
+                cpu.v_hi[rd] = 0;
+                return;
+            }
+            // SADDLV/UADDLV: widen the horizontal sum to twice the lane
+            // width. Keep bit16 in the match: dropping it aliases these
+            // reductions with the later SUQADD/USQADD accumulator handler.
+            if ((op & 0x9F3FFC00) == 0x0E303800) {
+                if (size == 3 || (size == 2 && !Q))
+                    throw DecodeError(cpu.pc, op);
+                const int esize = 1 << size;
+                const int bits = esize * 8;
+                const int elems = (Q ? 16 : 8) / esize;
+                const bool uns = (op >> 29) & 1;
+                uint8_t source[16] = {};
+                memcpy(source, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(source + 8, &cpu.v_hi[rn], 8);
+                int64_t sum = 0;
+                for (int i = 0; i < elems; ++i) {
+                    uint64_t value = 0;
+                    memcpy(&value, source + i * esize, esize);
+                    if (!uns && (value & (1ULL << (bits - 1))))
+                        sum += static_cast<int64_t>(value) - (1LL << bits);
+                    else
+                        sum += static_cast<int64_t>(value);
+                }
+                const uint64_t mask = bits == 32 ? ~0ULL : (1ULL << (bits * 2)) - 1;
+                cpu.v_lo[rd] = static_cast<uint64_t>(sum) & mask;
                 cpu.v_hi[rd] = 0;
                 return;
             }

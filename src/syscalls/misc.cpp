@@ -463,15 +463,15 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +16: struct iovec* msg_iov    (8 bytes)
             //   +24: size_t    msg_iovlen    (8 bytes)
             //   +32: void*     msg_control   (8 bytes)
-            //   +40: socklen_t msg_controllen (4 bytes)
-            //   +44: int       msg_flags     (4 bytes)
+            //   +40: size_t    msg_controllen (8 bytes)
+            //   +48: int       msg_flags     (4 bytes)
             if (!a1) { ret_err(EFAULT); return 0; }
             uint64_t msg_name = mem_.load<uint64_t>(a1);
             uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
             uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
             uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
-            uint32_t msg_controllen = mem_.load<uint32_t>(a1 + 40);
+            uint64_t msg_controllen = mem_.load<uint64_t>(a1 + 40);
             // Marshal iovec array: each entry is (void* base, size_t len).
             if (msg_iovlen > 1024) msg_iovlen = 1024;  // sanity cap
             std::vector<iovec> iovs(msg_iovlen);
@@ -494,7 +494,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // Marshal msg_control (cmsg buffer).
             // The control buffer is opaque to the host kernel; we just
             // copy it verbatim. The guest and host share the same
-            // cmsghdr layout (both are Linux AArch64).
+            // cmsghdr layout (AArch64 and x86_64 Linux both use LP64 here).
             std::vector<uint8_t> ctrl_buf;
             if (msg_control && msg_controllen) {
                 if (msg_controllen > 4096) msg_controllen = 4096;
@@ -539,7 +539,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
             uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
-            uint32_t msg_controllen = mem_.load<uint32_t>(a1 + 40);
+            uint64_t msg_controllen = mem_.load<uint64_t>(a1 + 40);
             if (msg_iovlen > 1024) msg_iovlen = 1024;
             std::vector<iovec> iovs(msg_iovlen);
             std::vector<std::vector<uint8_t>> iov_bufs(msg_iovlen);
@@ -638,12 +638,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                     fclose(f);
                 }
             }
-            // Write received data back to guest iovec buffers.
-            for (uint64_t i = 0; i < msg_iovlen; i++) {
+            // A short receive changes only bytes actually delivered. MSG_TRUNC
+            // can report more bytes than fit; limit copyback to staged capacity.
+            uint64_t remaining = static_cast<uint64_t>(r);
+            for (uint64_t i = 0; i < msg_iovlen && remaining; ++i) {
                 uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
-                if (iov_bufs[i].size() > 0) {
-                    mem_.write(base, iov_bufs[i].data(), iov_bufs[i].size());
-                }
+                size_t received = std::min<uint64_t>(remaining, iov_bufs[i].size());
+                if (received) mem_.write(base, iov_bufs[i].data(), received);
+                remaining -= received;
             }
             // Write source address back.
             if (msg_name && msg_namelen) {
@@ -661,10 +663,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (actual_ctrl > 0) {
                     mem_.write(msg_control, ctrl_buf.data(), actual_ctrl);
                 }
-                mem_.store<uint32_t>(a1 + 40, actual_ctrl);
+                mem_.store<uint64_t>(a1 + 40, actual_ctrl);
             }
-            // Write msg_flags back.
-            mem_.store<uint32_t>(a1 + 44, static_cast<uint32_t>(host_msg.msg_flags));
+            mem_.store<uint64_t>(a1 + 40, host_msg.msg_controllen);
+            // AArch64 LP64 flags follow the full eight-byte control length.
+            mem_.store<uint32_t>(a1 + 48, static_cast<uint32_t>(host_msg.msg_flags));
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
@@ -709,6 +712,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── faccessat2 (syscall 439) ─────────────────────────────────
         case 439: { // faccessat2(dirfd, pathname, mode, flags)
             std::string path = Yggdrasil::read_path(mem_, a1);
+            struct stat device_stat;
+            if (Yggdrasil::binder_device_stat(path, &device_stat)) {
+                if ((a2 & ~uint64_t(7)) || (a3 & ~uint64_t(0x100 | 0x200 | 0x1000))) {
+                    ret_err(EINVAL); return 0;
+                }
+                if (a2 & 1) { ret_err(EACCES); return 0; }
+                ret_host(0); return 0;
+            }
             std::string host = Yggdrasil::remap_path(path);
             int r = ::faccessat(static_cast<int>(a0), host.c_str(),
                                static_cast<int>(a2), static_cast<int>(a3));

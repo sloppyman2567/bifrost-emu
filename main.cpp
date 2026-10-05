@@ -81,6 +81,7 @@ static void print_banner() {
         "    --rootfs PATH      set rootfs for dynamic linking (BIFROST_ROOT)\n"
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
+        "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
         "    --print-config     print resolved config and exit\n"
         "    -V, --version      show version and exit\n"
         "    -h, --help         show this message\n"
@@ -178,6 +179,7 @@ int main(int argc, char** argv) {
     // The interpreter is the fallback for programs that hit a JIT bug
     // or for debugging.
     bool use_jit = true;
+    bool android_runtime = false;
     std::string fb_dump_path;
     std::string audio_dump_path;
     uint64_t jit_threshold = 0;  // 0 = use JIT from start
@@ -235,6 +237,7 @@ int main(int argc, char** argv) {
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
+        if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
         if (a == "--config")                { arg_i += 2; continue; }  // already handled
         if (a == "--print-config")          { arg_i++; continue; }
         // Equivalent to `BIFROST_ROOT=PATH bifrost-emu ...` but more
@@ -245,6 +248,7 @@ int main(int argc, char** argv) {
                 return 2;
             }
             setenv("BIFROST_ROOT", argv[arg_i + 1], 1);
+            cfg.rootfs_path = argv[arg_i + 1];
             arg_i += 2;
             continue;
         }
@@ -385,6 +389,7 @@ int main(int argc, char** argv) {
     // buffer input for guest line-oriented stdio (fgets, gets, scanf, …).
     if (raw_tty) set_raw_terminal();
     Emulator emu;
+    emu.set_android_runtime(android_runtime);
     emu.set_verbose(cfg.log_verbose);
     emu.set_trace(cfg.log_trace);
     emu.set_brk_verbose(cfg.log_brk_verbose);

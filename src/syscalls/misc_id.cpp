@@ -190,6 +190,20 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             };
             uint32_t option = static_cast<uint32_t>(a0);
             switch (option) {
+                case PR_SET_DUMPABLE:
+                    if (a1 > 1) { ret_err(EINVAL); return 0; }
+                    emu.guest_dumpable.store(static_cast<int>(a1)); ret_host(0); return 0;
+                case PR_SET_TIMERSLACK:
+                    cpu.timer_slack_ns = a1 ? a1 : cpu.timer_slack_default_ns; ret_host(0); return 0;
+                case PR_SET_NO_NEW_PRIVS:
+                    if (a1 != 1 || a2 || a3 || a4) { ret_err(EINVAL); return 0; }
+                    cpu.no_new_privs = true; ret_host(0); return 0;
+                case PR_SET_THP_DISABLE:
+                    if (a1 > 1 || a2 || a3 || a4) { ret_err(EINVAL); return 0; }
+                    emu.guest_thp_disabled.store(a1 != 0); ret_host(0); return 0;
+                case 55: // PR_SET_TAGGED_ADDR_CTRL: MTE remains unsupported.
+                case 56: // PR_GET_TAGGED_ADDR_CTRL
+                    ret_err(EINVAL); return 0;
                 case PR_SET_NAME: {  // 15 — set process name (comm)
                     // Read the name from guest memory (a1). Max 16 bytes
                     // (15 + NUL). The kernel truncates, doesn't error.
@@ -223,20 +237,16 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 case PR_SET_PDEATHSIG:  // 1 — set parent-death signal
-                case PR_SET_DUMPABLE:   // 4
                 case PR_SET_KEEPCAPS:   // 8
                 case PR_SET_TIMING:     // 14
                 case PR_SET_SECCOMP:    // 22 — we don't implement seccomp
                 case PR_CAPBSET_DROP:   // 24
                 case PR_SET_TSC:        // 26
                 case PR_SET_SECUREBITS: // 28
-                case PR_SET_TIMERSLACK: // 29
                 case PR_TASK_PERF_EVENTS_DISABLE:
                 case PR_TASK_PERF_EVENTS_ENABLE:
                 case PR_MCE_KILL:       // 33
                 case PR_SET_CHILD_SUBREAPER: // 36
-                case PR_SET_NO_NEW_PRIVS:   // 38
-                case PR_SET_THP_DISABLE:    // 41
                 case PR_SET_PTRACER:        // 0x59616d61
                     // Accept and ignore — we don't enforce these in the
                     // sandbox. Returning 0 (success) is safe.
@@ -252,7 +262,7 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 case PR_GET_DUMPABLE:    // 3
-                    ret_host(1);  // SUID_DUMP_USER
+                    ret_host(emu.guest_dumpable.load());
                     return 0;
                 case PR_GET_KEEPCAPS:    // 7
                     ret_host(0);
@@ -273,7 +283,7 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(0);
                     return 0;
                 case PR_GET_TIMERSLACK:  // 30
-                    ret_host(50000);  // 50 us default
+                    ret_host(cpu.timer_slack_ns);
                     return 0;
                 case PR_MCE_KILL_GET:    // 34
                     ret_host(0);  // PR_MCE_KILL_DEFAULT
@@ -286,7 +296,8 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(0);
                     return 0;
                 case PR_GET_NO_NEW_PRIVS:    // 39
-                    ret_host(0);  // not set
+                    if (a1 || a2 || a3 || a4) { ret_err(EINVAL); return 0; }
+                    ret_host(cpu.no_new_privs ? 1 : 0);
                     return 0;
                 case PR_GET_TID_ADDRESS: {  // 40
                     // Write the address of the TID field to a1.
@@ -298,7 +309,8 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 case PR_GET_THP_DISABLE:  // 42
-                    ret_host(0);
+                    if (a1 || a2 || a3 || a4) { ret_err(EINVAL); return 0; }
+                    ret_host(emu.guest_thp_disabled.load() ? 1 : 0);
                     return 0;
                 case PR_CAP_AMBIENT:  // 47 — sub-operations via a1
                     // PR_CAP_AMBIENT_IS_SET/RAISE/etc. Return 0.

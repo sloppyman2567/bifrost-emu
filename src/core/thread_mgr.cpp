@@ -474,6 +474,7 @@ void Emulator::wake_all_futexes() {
     }
 }
 void Emulator::kill_other_threads(CPU& caller) {
+    vfs_.stop_binder();
     // Snapshot victims under the lock; stop + join outside it (a victim
     // in thread exit takes futex shard locks; joining under threads_mu_
     // while another path takes threads_mu_ inside would deadlock).

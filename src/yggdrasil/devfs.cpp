@@ -20,6 +20,7 @@
 //     /dev/urandom uses getrandom(GRND_NONBLOCK) — both non-blocking
 //     on modern Linux, but the underlying pool selection differs.
 #include "yggdrasil/yggdrasil.hpp"
+#include "yggdrasil/binder_node.hpp"
 #include "yggdrasil/host_node.hpp"
 #include "yggdrasil/memfd_node.hpp"
 #include "yggdrasil/fb_node.hpp"
@@ -41,6 +42,7 @@ namespace arm64emu::yggdrasil {
 // /dev directory listing. Only the entries we actually handle.
 static std::vector<DirNode::Entry> dev_entries() {
     return {
+        {"binder", 0x2}, {"hwbinder", 0x2}, {"vndbinder", 0x2},
         {"null",    0x2 /*DT_CHR*/},
         {"zero",    0x2 /*DT_CHR*/},
         {"urandom", 0x2 /*DT_CHR*/},
@@ -106,6 +108,13 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
     // ── /dev directory listing ─────────────────────────────────────
     if (path == "/dev" || path == "/dev/") {
         return std::make_unique<DirNode>("/dev", dev_entries(), flags);
+    }
+    if (path == "/dev/binder" || path == "/dev/hwbinder" || path == "/dev/vndbinder") {
+        if ((flags & O_ACCMODE) != O_RDWR) { *err_out = -EINVAL; return nullptr; }
+        std::lock_guard<std::mutex> lock(binder_mu_);
+        auto& domain = binder_domains_[path];
+        if (!domain) domain = std::make_shared<BinderDomain>();
+        return std::make_unique<BinderNode>(domain, flags);
     }
     // /dev/null, /dev/zero → host passthrough
     if (path == "/dev/null" || path == "/dev/zero") {
@@ -205,3 +214,23 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
     return nullptr;  // not a /dev path we handle
 }
 } // namespace arm64emu::yggdrasil
+
+namespace arm64emu::yggdrasil {
+void Yggdrasil::stop_binder() {
+    std::lock_guard<std::mutex> lock(binder_mu_);
+    for (auto& entry : binder_domains_) {
+        std::lock_guard<std::recursive_mutex> guard(entry.second->mutex);
+        entry.second->stopped = true;
+        entry.second->ready.notify_all();
+    }
+    binder_domains_.clear();
+}
+}
+
+namespace arm64emu::yggdrasil {
+bool Yggdrasil::binder_device_stat(const std::string& path, struct stat* st) {
+    if (path != "/dev/binder" && path != "/dev/hwbinder" && path != "/dev/vndbinder") return false;
+    memset(st, 0, sizeof(*st)); st->st_mode = S_IFCHR | 0666; st->st_nlink = 1;
+    return true;
+}
+}

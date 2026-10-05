@@ -920,6 +920,15 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 d.rm        = (inst >> 16) & 0x1F;
                 d.rn        = (inst >> 5) & 0x1F;
                 d.rd        = inst & 0x1F;
+                // CRC32: size is opcode[1:0], Castagnoli is opcode[2].
+                // X forms use sf=1; the accumulator/result remain W registers.
+                if (d.dp_opcode >= 0x10 && d.dp_opcode <= 0x17) {
+                    d.imm = d.dp_opcode & 3;
+                    if (bit29 || d.sf != (d.imm == 3)) return false;
+                    d.cls = InstClass::CRC32;
+                    d.is_sub = (d.dp_opcode >> 2) & 1;
+                    return true;
+                }
                 switch (d.dp_opcode) {
                     case 2:  d.cls = InstClass::UDIV; return true;
                     case 3:  d.cls = InstClass::SDIV; return true;
@@ -927,17 +936,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     case 9:  d.cls = InstClass::LSR;  return true;
                     case 10: d.cls = InstClass::ASR;  return true;
                     case 11: d.cls = InstClass::ROR;  return true;
-                    // CRC32 instructions (opcodes 0x10-0x1F).
-                    // dp_opcode bits[15:10] selects B/H/W/X + C (bit13);
-                    // Rm bits[20:16] is the data register, not size.
-                    case 0x10: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 0; return true; // CRC32B
-                    case 0x11: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 1; return true; // CRC32H
-                    case 0x12: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 2; return true; // CRC32W
-                    case 0x14: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 3; return true; // CRC32X
-                    case 0x18: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 0; return true; // CRC32CB
-                    case 0x19: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 1; return true; // CRC32CH
-                    case 0x1A: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 2; return true; // CRC32CW
-                    case 0x1C: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 3; return true; // CRC32CX
                     default: d.cls = InstClass::UNKNOWN; return false;
                 }
             }

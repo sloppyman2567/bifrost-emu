@@ -2105,8 +2105,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             reduce(0);
             int32_t dlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             if (q) {
+                // Load Vm before any destination write: Vd may alias Vm.
+                load_vec(3, static_cast<int>(inst.src2));
                 store_lo(0, dlo);
-                load_vec(0, static_cast<int>(inst.src2));
+                movdqa(0, 3);
                 reduce(0);
                 store_lo(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
             } else {

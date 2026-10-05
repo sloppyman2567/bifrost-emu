@@ -11,8 +11,13 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 namespace arm64emu {
 ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data) {
+    return load(mem, data, Options{});
+}
+ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
+                                  const Options& options) {
     if (data.size() < 64) throw EmuError("file too small to be ELF");
     if (data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F')
         throw EmuError("not an ELF file");
@@ -37,6 +42,7 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     memcpy(&e_shnum, p + 60, 2);
     memcpy(&e_shstrndx, p + 62, 2);
     if (e_machine != 183) throw EmuError("not AArch64 ELF");
+    if (e_type != 2 && e_type != 3) throw EmuError("ELF: expected ET_EXEC or ET_DYN");
     if (e_phoff == 0 || e_phnum == 0) throw EmuError("no program headers");
     if (e_phoff >= data.size() || e_phentsize < 56)
         throw EmuError("ELF: bad program-header table layout");
@@ -61,6 +67,39 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         memcpy(&h.p_align, pp + 48, 8);
         phdrs.push_back(h);
     }
+    // Validate the complete load plan before mapping or writing any segment.
+    // ELF alignment can exceed the runtime's page size (e.g. Android 16 KiB
+    // alignment on a 4 KiB system); the load bias must preserve it.
+    uint64_t alignment = Memory::PAGE_SIZE;
+    uint64_t image_end = 0;
+    bool has_load = false;
+    for (const auto& h : phdrs) {
+        if (h.p_type != 1) continue;
+        has_load = true;
+        if (h.p_filesz > h.p_memsz || h.p_offset > data.size() ||
+            h.p_filesz > data.size() - h.p_offset)
+            throw EmuError("ELF: invalid PT_LOAD file range");
+        if (h.p_vaddr > UINT64_MAX - h.p_memsz ||
+            h.p_vaddr + h.p_memsz > UINT64_MAX - Memory::PAGE_MASK)
+            throw EmuError("ELF: PT_LOAD address overflow");
+        if (h.p_align > 1) {
+            if ((h.p_align & (h.p_align - 1)) ||
+                (h.p_vaddr & (h.p_align - 1)) != (h.p_offset & (h.p_align - 1)))
+                throw EmuError("ELF: invalid PT_LOAD alignment");
+            alignment = std::max(alignment, h.p_align);
+        }
+        image_end = std::max(image_end, h.p_vaddr + h.p_memsz);
+    }
+    if (!has_load) throw EmuError("ELF: no loadable segments");
+    if (!options.apply_relocations) {
+        bool entry_valid = false;
+        for (const auto& h : phdrs)
+            if (h.p_type == 1 && (h.p_flags & 1) && h.p_memsz >= 4 &&
+                e_entry >= h.p_vaddr && e_entry - h.p_vaddr <= h.p_memsz - 4)
+                entry_valid = true;
+        if (!entry_valid || (e_entry & 3))
+            throw EmuError("ELF: entry point is not aligned executable code");
+    }
     Loaded info{};
     info.entry = e_entry;
     info.phent = e_phentsize;
@@ -80,17 +119,47 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     // causing host SIGSEGV during dynamic linker initialization.
     if (e_type == 3) {  // ET_DYN (PIE or shared library)
         uint64_t base = mem.pie_base();
+        if (options.reserve_image) {
+            const uint64_t span = (image_end + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+            if (alignment > Memory::MAX_MMAP_LENGTH ||
+                span > Memory::MAX_MMAP_LENGTH - alignment)
+                throw EmuError("ELF: interpreter reservation too large");
+            base = mem.mmap_alloc(span + alignment, 0, false, 0);
+            if (!base) throw EmuError("ELF: cannot reserve interpreter image");
+            const uint64_t aligned_base = (base + alignment - 1) & ~(alignment - 1);
+            // Return alignment padding to the allocator, retaining the entire
+            // image span so later guest mmap calls cannot overlap the linker.
+            if (aligned_base > base) mem.untrack_allocation(base, aligned_base - base);
+            const uint64_t tail = base + span + alignment - (aligned_base + span);
+            if (tail) mem.untrack_allocation(aligned_base + span, tail);
+            base = aligned_base;
+        } else {
+            if (base > UINT64_MAX - (alignment - 1))
+                throw EmuError("ELF: load-bias alignment overflow");
+            base = (base + alignment - 1) & ~(alignment - 1);
+        }
+        if (image_end > UINT64_MAX - Memory::PAGE_MASK - base ||
+            e_entry > UINT64_MAX - base)
+            throw EmuError("ELF: biased image address overflow");
         info.base_addr = base;
         info.entry += base;
+    } else if (options.reserve_image) {
+        throw EmuError("ELF: interpreter must be ET_DYN");
     }
     // Detect PT_INTERP (dynamic linker path).
     for (auto& h : phdrs) {
         if (h.p_type == 3) {  // PT_INTERP
-            if (h.p_offset + h.p_filesz <= data.size()) {
+            if (h.p_filesz < 2 || h.p_filesz > 4096 || h.p_offset > data.size() ||
+                h.p_filesz > data.size() - h.p_offset ||
+                data[h.p_offset + h.p_filesz - 1] != 0)
+                throw EmuError("ELF: invalid PT_INTERP path");
+            {
                 info.interp.assign(reinterpret_cast<const char*>(data.data() + h.p_offset), h.p_filesz);
                 // Strip trailing NUL.
                 if (!info.interp.empty() && info.interp.back() == '\0')
                     info.interp.pop_back();
+                if (info.interp.find('\0') != std::string::npos)
+                    throw EmuError("ELF: embedded NUL in PT_INTERP path");
             }
             break;
         }
@@ -105,7 +174,8 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     for (auto& h : phdrs) {
         if (h.p_type != 1) continue;  // PT_LOAD only
         uint64_t vaddr = h.p_vaddr + info.base_addr;
-        mem.map_range(vaddr, h.p_memsz);
+        if (h.p_memsz && !mem.map_range(vaddr, h.p_memsz))
+            throw EmuError("ELF: cannot map PT_LOAD");
         if (h.p_filesz > 0) {
             if (h.p_offset + h.p_filesz > data.size())
                 throw EmuError("PT_LOAD file range out of bounds");
@@ -119,8 +189,13 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         if (h.p_memsz > h.p_filesz) {
             uint64_t bss_start = vaddr + h.p_filesz;
             uint64_t bss_size = h.p_memsz - h.p_filesz;
-            std::vector<uint8_t> zeros(bss_size, 0);
-            mem.write(bss_start, zeros.data(), bss_size);
+            const uint8_t zeros[65536] = {};
+            while (bss_size) {
+                const uint64_t count = std::min<uint64_t>(bss_size, sizeof(zeros));
+                mem.write(bss_start, zeros, count);
+                bss_start += count;
+                bss_size -= count;
+            }
         }
         if (h.p_memsz) {
             uint64_t end = vaddr + h.p_memsz;
@@ -147,8 +222,12 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     if (info.phdr_addr == 0 && !phdrs.empty()) {
         for (auto& h : phdrs) {
             if (h.p_type == 1) {
-                info.phdr_addr = h.p_vaddr + info.base_addr + e_phoff;
-                break;
+                if (e_phoff >= h.p_offset && e_phoff - h.p_offset <= h.p_filesz &&
+                    static_cast<uint64_t>(e_phnum) * e_phentsize <=
+                        h.p_filesz - (e_phoff - h.p_offset)) {
+                    info.phdr_addr = h.p_vaddr + info.base_addr + e_phoff - h.p_offset;
+                    break;
+                }
             }
         }
     }
@@ -194,7 +273,7 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         if (info.has_lse) break;
     }
     // Process RELA relocations (.rela.plt and .rela.dyn if present).
-    if (e_shoff > 0 && e_shnum > 0 && e_shentsize >= 40) {
+    if (options.apply_relocations && e_shoff > 0 && e_shnum > 0 && e_shentsize >= 40) {
         uint64_t shstr_off = e_shoff + static_cast<uint64_t>(e_shstrndx) * e_shentsize;
         if (shstr_off + e_shentsize <= data.size()) {
             for (uint16_t i = 0; i < e_shnum; i++) {

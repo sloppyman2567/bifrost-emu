@@ -26,6 +26,7 @@
 #ifndef FROST_ANDROID_SURFACE_HPP_
 #define FROST_ANDROID_SURFACE_HPP_
 
+#include "frost/android_window_backend.hpp"
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -72,6 +73,7 @@ public:
     // sdl_window is the host SDL_Window*.
     void set_host_sdl_window(void* sdl_window);
     bool ready() const { return sdl_window_ != nullptr; }
+    bool uses_host_window(void* window) const { return sdl_window_ == window; }
 
     // ── ANativeWindow shims (v1 API, unchanged) ────────────────────────
     // ANativeWindow_fromSurface: returns the singleton shim handle (0 on
@@ -98,7 +100,10 @@ public:
     // The native display the guest's eglGetDisplay(EGL_DEFAULT_DISPLAY)
     // should wrap so it lands on the SAME connection as the surface:
     // wl_display* on Wayland, nullptr on X11 (default display is fine).
-    void* native_display() const { return wl_display_; }
+    void* native_display() const;
+    // Install at startup, before a host window or guest surface exists.
+    bool install_window_backend(std::unique_ptr<AndroidWindowBackend> backend);
+    const char* window_backend_name() const { return window_backend_->name(); }
 
     // ── NativeActivity lifecycle (v2) ──────────────────────────────────
     // ANativeActivityCallbacks slots (MODERN NDK layout — the first five
@@ -230,7 +235,7 @@ public:
     };
 
  private:
-    AndroidSurfaceManager() = default;
+    AndroidSurfaceManager();
     // Resolve a guest event handle to its live slot (nullptr if stale).
     const InputEvent* find_event(uint64_t handle) const;
 
@@ -289,10 +294,7 @@ public:
 
  private:
     void* sdl_window_ = nullptr;
-    uint64_t host_native_window_ = 0;
-    bool host_native_window_resolved_ = false;
-    void* wl_egl_window_ = nullptr;  // Wayland: live wl_egl_window*
-    void* wl_display_ = nullptr;     // Wayland: SDL's wl_display connection
+    std::unique_ptr<AndroidWindowBackend> window_backend_;
     uint64_t surface_handle_ = 0;   // 0 = not created yet
     int refs_ = 0;
     int32_t width_ = 800;

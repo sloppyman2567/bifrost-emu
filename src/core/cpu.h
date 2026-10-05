@@ -80,6 +80,9 @@ public:
     // tid, and is_fork_process is set so getpid() returns the host PID
     // instead of 1. This lets the child detect it's a forked process
     // (getpid() != parent_pid) and reset signal handlers accordingly.
+    bool no_new_privs = false;
+    uint64_t timer_slack_ns = 50000;
+    uint64_t timer_slack_default_ns = 50000;
     int tid = 1;
     bool is_fork_process = false;  // true for fork() children (no CLONE_VM)
     // Per-CPU memory page cache for the hot path. Avoids mutex+hash on
@@ -341,6 +344,9 @@ public:
         tpidr_el0 = src.tpidr_el0;
         tpidrro_el0 = src.tpidrro_el0;
         tid = src.tid;
+        no_new_privs = src.no_new_privs;
+        timer_slack_ns = src.timer_slack_ns;
+        timer_slack_default_ns = src.timer_slack_ns;
         is_fork_process = src.is_fork_process;
         // page_cache, decode_cache: NOT copied (per-thread, fresh in child)
         set_tid_address_ptr = 0;   // child starts with no clear_child_tid

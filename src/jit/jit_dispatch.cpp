@@ -703,18 +703,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // JIT-state restores at the end still run unconditionally.
         if (ref.pc == jit_next) {
         // PCs match — compare register state.
-        // pstate comparison note: only meaningful when this block READS
-        // pstate as an input (reads_pstate_before_set, from the same
-        // flags_loop_carried_ pre-scan the JIT uses for the cross-block
-        // flag-materialize skip). A block that never consumes pstate before
-        // setting its own flags may legitimately see STALE pstate at its
-        // boundary — a predecessor that knew it was clean skipped (or
-        // jmp-pasted) the pstate materialize, so comparing the JIT's
-        // (stale) output pstate against the interpreter's (fresh) value is
-        // a guaranteed false positive, not a codegen bug. Such blocks'
-        // flag correctness is still fully checked: a miscompiled flag-setter
-        // drives the block's own conditional branch wrong, which the PC
-        // divergence check above catches.
+        // Local input metadata limits the existing pstate comparison below.
+        // It is not a transitive liveness proof: a flag-neutral block can
+        // pass NZCV to a later consumer. Cross-block exits preserve flags;
+        // jit_flags_passthrough independently checks chained execution,
+        // which differential replay cannot exercise in the same way.
         bool diverged = false;
         for (int i = 0; i < 31; i++) {
             if (cpu.regs[i] != ref.regs[i]) {

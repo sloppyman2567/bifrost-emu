@@ -93,6 +93,12 @@ public:
     uint64_t pie_base() const { return pie_base_; }
     uint64_t stack_top() const { return stack_top_; }
     static bool aslr_disabled();
+    // Configure once before starting any guest CPU. Android/Bionic uses
+    // top-byte tags for internal allocator pointers even without MTE.
+    void set_data_top_byte_ignore(bool enabled) { data_top_byte_ignore_ = enabled; }
+    uint64_t data_address(uint64_t addr) const {
+        return data_top_byte_ignore_ ? addr & 0x00FFFFFFFFFFFFFFULL : addr;
+    }
     // ── Page cache (per-thread, lock-free) ────────────────────────────
     // Each CPU keeps its own PageCache so the hot path avoids the page
     // map mutex. The cache stores a raw pointer into the vector's data;
@@ -120,6 +126,8 @@ public:
     bool map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
     bool mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot);
+    // Install a read-only shared device backing into an existing direct-window VMA.
+    bool map_device_readonly(uint64_t addr, uint64_t size, int host_fd);
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
     // Validate a whole thunk output range before a host call has side effects.
@@ -295,6 +303,7 @@ public:
     uint8_t* guest_to_host_ptr(uint64_t guest_addr,
                                uint8_t access = GUEST_PROT_READ,
                                size_t size = 1) const {
+        if (!(access & GUEST_PROT_EXEC)) guest_addr = data_address(guest_addr);
         if (size && in_direct_window(guest_addr) &&
             size <= DIRECT_WINDOW_SIZE - guest_addr &&
             range_accessible(guest_addr, size, access)) {
@@ -303,6 +312,7 @@ public:
         return nullptr;
     }
 private:
+    bool data_top_byte_ignore_ = false;
     static constexpr uint8_t PAGE_MAPPED = GUEST_PAGE_MAPPED;
     struct HighMapping {
         uint64_t end = 0;

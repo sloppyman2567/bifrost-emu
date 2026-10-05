@@ -370,6 +370,7 @@ void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
     if (lo < hi) set_high_mapping_locked(lo, hi, prot, combine);
 }
 void Memory::check_access(uint64_t addr, size_t size, uint8_t access) const {
+    if (!(access & GUEST_PROT_EXEC)) addr = data_address(addr);
     if (size == 0) return;
     uint64_t end;
     if (__builtin_add_overflow(addr, static_cast<uint64_t>(size), &end))
@@ -411,6 +412,19 @@ bool Memory::range_accessible(uint64_t addr, size_t size, uint8_t access) const 
     } catch (const UnmappedMemory&) {
         return false;
     }
+}
+bool Memory::map_device_readonly(uint64_t addr, uint64_t size, int host_fd) {
+    if (!direct_window_ || !size || (addr & PAGE_MASK) || (size & PAGE_MASK) ||
+        addr >= DIRECT_WINDOW_SIZE || size > DIRECT_WINDOW_SIZE - addr) return false;
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    if (!range_mapped_locked(addr, addr + size)) return false;
+    void* result = ::mmap(direct_window_ + addr, size, PROT_READ,
+                          MAP_SHARED | MAP_FIXED, host_fd, 0);
+    if (result == MAP_FAILED) return false;
+    for (uint64_t p = addr / PAGE_SIZE; p < (addr + size) / PAGE_SIZE; ++p)
+        direct_page_flags_[p].store(PAGE_MAPPED | GUEST_PROT_READ, std::memory_order_release);
+    page_epoch_.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 bool Memory::mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot) {
     if ((addr & PAGE_MASK) || (prot & ~uint8_t(7))) return false;
@@ -479,6 +493,7 @@ bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
     return range_accessible(addr, size, 0);
 }
 void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
+    addr = data_address(addr);
     if (n == 0) return;
     check_access(addr, n, GUEST_PROT_WRITE);
     // A direct-window access may straddle the 4 GiB storage boundary. Make
@@ -649,6 +664,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
 }
 void Memory::read_access(uint64_t addr, void* dst, size_t n, PageCache* pc,
                          uint8_t access) const {
+    if (!(access & GUEST_PROT_EXEC)) addr = data_address(addr);
     if (n == 0) return;
     check_access(addr, n, access);
     // BUGFIX: same integer-overflow guard as write() — `addr + n` can
@@ -1573,6 +1589,7 @@ void Memory::remove_free_range(uint64_t addr, uint64_t size) {
     }
 }
 bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
+    addr = data_address(addr);
     check_access(addr, sizeof(uint32_t), GUEST_PROT_READ | GUEST_PROT_WRITE);
     // BUGFIX: the old code only consulted the sparse pages_ map and never
     // the 4 GiB direct window. For any atomic address below 4 GiB (which
@@ -1654,6 +1671,7 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
     return true;
 }
 bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
+    addr = data_address(addr);
     check_access(addr, sizeof(uint64_t), GUEST_PROT_READ | GUEST_PROT_WRITE);
     // See atomic_cas_32 for the direct-window rationale.
     // BUGFIX: same integer-overflow guard as atomic_cas_32, plus
@@ -1788,6 +1806,7 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
 }
 std::unique_ptr<Memory> Memory::clone_for_fork() const {
     auto child = std::make_unique<Memory>(false);
+    child->data_top_byte_ignore_ = data_top_byte_ignore_;
     // Snapshot bytes before restoring the original protection state.
     auto snapshots = snapshot_pages();
     constexpr size_t DIRECT_PAGES = DIRECT_WINDOW_SIZE / PAGE_SIZE;

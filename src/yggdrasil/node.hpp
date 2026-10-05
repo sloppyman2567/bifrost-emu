@@ -33,7 +33,7 @@ namespace arm64emu {
 }
 namespace arm64emu::yggdrasil {
 // ── Node: abstract file handle ────────────────────────────────────────
-class Node {
+class Node : public std::enable_shared_from_this<Node> {
 public:
     virtual ~Node() = default;
     // Read up to `n` bytes at `off` into `buf`. Returns bytes read, or
@@ -65,6 +65,15 @@ public:
     static constexpr int IOCTL_NOT_HANDLED = -0x7fffffff;
     virtual int ioctl(uint32_t /*request*/, uint64_t /*argp*/,
                       Memory& /*mem*/) { return IOCTL_NOT_HANDLED; }
+    virtual int ioctl_thread(uint32_t request, uint64_t argp, Memory& mem, CPU&) {
+        return ioctl(request, argp, mem);
+    }
+    // Virtual devices may own their guest mmap; default uses the file path.
+    virtual int64_t mmap_guest(Memory&, uint64_t, uint64_t, uint64_t,
+                              uint64_t, uint64_t) { return IOCTL_NOT_HANDLED; }
+    virtual bool owns_guest_mappings() const { return false; }
+    virtual void invalidate_mapping(uint64_t, uint64_t) {}
+    virtual int protect_mapping(uint64_t, uint64_t, uint64_t) { return 0; }
     // Whether this Node supports seeking (pipes/sockets don't).
     virtual bool seekable() const { return true; }
     // Hint for fcntl F_GETFL — default to O_RDWR.

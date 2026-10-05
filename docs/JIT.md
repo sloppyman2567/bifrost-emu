@@ -101,6 +101,25 @@ shift at width 32, including shifted operands produced by `apply_shift()` and
 constant folding. See [zstd regression notes](zstd.md) and the
 `jit_variable_shift_source` / `jit_shifted_operand_width` regressions.
 
+## Bitfield insertion and NZCV passthrough
+
+BFM must apply both architectural write and top masks. For BFXIL
+(`imms >= immr`), the destination mask is only the low `imms-immr+1` bits.
+Rotating the write mask alone also inserts unwanted bits at the top of Rd.
+This corrupted libX11 request sequence numbers and broke XWayland replies.
+`jit_bfm_masks` covers all 5,120 W/X immediate pairs with 36 source/destination
+combinations each (184,320 checks), independently checked under QEMU.
+
+Cross-block NZCV materialization cannot be removed using only a successor's
+local flag-consumer scan. A flag-neutral block may forward flags to another
+block, return them to its caller or be replaced by invalidation. The JIT now
+preserves NZCV on cross-block conditional exits and no longer retroactively
+patches those stores out. Existing internal self-loop handling remains.
+`jit_flags_passthrough` covers taken and fall-through edges through neutral
+blocks with a later conditional consumer, including warmed chained execution.
+The old JIT fails both regressions. `xwayland_wire` additionally checks a real
+guest libX11 connection, 100 round-trips and server-side pixel readback.
+
 ## Integer vector multiply and Q width
 
 The SSE4.1 lowering of 32-bit vector `MUL` uses `PMULLD`, encoded as
@@ -112,6 +131,21 @@ Q=0 writes the low 64 bits and clears `v_hi`; Q=1 computes both halves.
 widths with fixed expected products, independently checked under QEMU.
 
 ## Shared SIMD fallback semantics
+
+Android linker bootstrap exposed SADDLV/UADDLV aliasing the saturating
+accumulate interpreter handler after bit 16 was discarded. Their reference
+implementation now widens the horizontal sum correctly. H/S/D vector ADDP
+also has width-aware fallback semantics; byte ADDP remains native and loads
+its second source before writing an aliased destination. `jit_simd_addlv`
+checks 2,624 cases in both engines and QEMU.
+
+CRC32 decoding uses opcode bits[1:0] for input size and bit 2 for the
+Castagnoli polynomial, with sf=1 only for the X input form. The former
+mapping rejected valid X/C forms and confused CRC32CB with CRC32X. The
+reference tables are now generated at compile time from the reflected
+polynomials instead of erroneous hand-copied entries. `jit_crc32` checks
+2,048 cases against a bitwise oracle, QEMU and differential verification.
+CRC32 retains the normal interpreter fallback in JIT mode.
 
 Vector FMOV immediates use the interpreter fallback in JIT mode. Scalar
 DUP element reads now use native `SIMD_SCALAR_DUP`; their reference bugs affected both engines and

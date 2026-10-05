@@ -65,6 +65,14 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 int64_t guest_fd = static_cast<int64_t>(a4);
+                auto device = emu.fds().get(static_cast<int>(guest_fd));
+                if (device) {
+                    int64_t result = device->mmap_guest(mem_, addr, length, prot, flags, a5);
+                    if (result != yggdrasil::Node::IOCTL_NOT_HANDLED) {
+                        cpu.regs[0] = static_cast<uint64_t>(result);
+                        return 0;
+                    }
+                }
                 int host_fd = guest_fd >= 0
                     ? resolve_host_fd(emu, static_cast<int>(guest_fd)) : -1;
                 if (host_fd < 0) {
@@ -228,6 +236,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             if (flags & BIFROST_MAP_FIXED) {
                 // Populate writable first; requested permissions are applied
                 // after file-backed contents have been copied.
+                emu.fds().invalidate_device_mappings(addr, length);
                 mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve,
                     true, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
                 if (mapped != 0) emu.invalidate_jit_range(addr, length);
@@ -332,6 +341,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
             }
+            emu.fds().invalidate_device_mappings(a0, a1);
             mem_.untrack_allocation(a0, a1);
             // Unmapped bytes are gone — drop JIT translations of the range
             // so a later reuse of these addresses can't run stale code.
@@ -344,6 +354,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
             }
+            int device_error = emu.fds().protect_device_mappings(a0, a1, a2);
+            if (device_error) { ret_host(static_cast<uint64_t>(device_error)); return 0; }
             if (!mem_.mprotect_guest(a0, a1, static_cast<uint8_t>(a2))) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
@@ -408,6 +420,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
+            int device_error = emu.fds().protect_device_mappings(old_addr, old_len, 6);
+            if (device_error) { ret_host(static_cast<uint64_t>(device_error)); return 0; }
+            if (fixed) emu.fds().invalidate_device_mappings(a4, new_len);
             uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size,
                 (a3 & MAYMOVE) != 0, fixed ? a4 : 0);
             if (result == 0) {

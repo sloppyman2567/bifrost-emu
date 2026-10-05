@@ -134,10 +134,8 @@ FCVTZS  0xBF21FC00   0x0E21B800   CVTF       2   size == 2
 FCVTZU  0xBF21FC00   0x2E21B800   CVTF       3   size == 2
 
 # ── ADDP (vector, pairwise add) ──────────────────────────────────────────
-# Interp's ADDP is BYTE-pair only — correct for size=0 (8B/16B) alone; the
-# size-stripped case label feeds H/S/D pairs through byte logic. Guard
-# `size == 0` keeps the common 8B/16B form native and leaves H/S/D ADDP on
-# the interpreter untouched.
+# Native lowering is BYTE-pair only. H/S/D forms use the width-aware
+# interpreter implementation through the normal fallback.
 ADDP    0xBF20FC00   0x0E20BC00   ADDP       0   size == 0
 
 # ── XTN family (vector narrowing) ────────────────────────────────────────

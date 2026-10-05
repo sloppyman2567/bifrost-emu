@@ -30,6 +30,7 @@
 #include "bifrost/types.hpp"
 #include "yggdrasil/node.hpp"
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -50,10 +51,13 @@ namespace arm64emu {
     class Memory;
 }
 namespace arm64emu::yggdrasil {
+struct BinderDomain;
 // ── Yggdrasil: path → Node resolver ───────────────────────────────────
 class Yggdrasil {
 public:
     Yggdrasil();
+    void stop_binder();
+    static bool binder_device_stat(const std::string& path, struct stat* st);
     // Resolve a guest path to a Node. Returns nullptr on failure (with
     // errno set via the `*err_out` parameter).
     //
@@ -178,6 +182,8 @@ public:
         return cwd_getter_ ? cwd_getter_() : guest_cwd_;
     }
 private:
+    std::mutex binder_mu_;
+    std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;
     std::string elf_path_;
     std::vector<std::string> argv_;
     ::arm64emu::FrostGraphics* gfx_ = nullptr;
@@ -226,9 +232,14 @@ public:
     bool is_open(int fd) const;
     // Number of open fds.
     size_t size() const;
+    void invalidate_device_mappings(uint64_t addr, uint64_t size);
+    int protect_device_mappings(uint64_t addr, uint64_t size, uint64_t prot);
 private:
     // guest fd → shared Node. shared_ptr so dup()/dup2() can alias.
     mutable std::mutex mu_;
     std::unordered_map<int, std::shared_ptr<Node>> table_;
+    std::vector<std::weak_ptr<Node>> mapping_devices_;
+    std::atomic<bool> has_mapping_devices_{false};
+    std::vector<std::shared_ptr<Node>> mapping_devices_snapshot();
 };
 } // namespace arm64emu::yggdrasil

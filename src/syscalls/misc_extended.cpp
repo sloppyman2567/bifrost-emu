@@ -43,6 +43,7 @@
 #include "yggdrasil/host_node.hpp"
 #include <algorithm>
 #include <cstring>
+#include <sys/syscall.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -736,21 +737,32 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── membarrier (283) ──────────────────────────────────────────
-        // Issues a memory barrier on all (or a subset of) threads.
-        // For our purposes the JIT already emits proper fence
-        // instructions where needed, so this is essentially a no-op.
-        case 283: { // membarrier(cmd, flags)
-            int cmd = static_cast<int>(a0);
-            // Accept all standard commands (0..5); they all just need to
-            // ensure memory ordering across CPUs. Since we run a single
-            // process with shared memory, the host's atomic_thread_fence
-            // is sufficient. Return 0 (success) for all supported cmds.
-            if (cmd >= 0 && cmd <= 5) {
-                std::atomic_thread_fence(std::memory_order_seq_cst);
-                ret_host(0); return 0;
+        case 283: {
+            // Guest CPUs run as host threads. A host membarrier supplies the
+            // cross-thread ordering that a caller-local fence cannot provide.
+            // RSEQ and CPU-targeted requests need guest scheduling semantics.
+#ifdef SYS_membarrier
+            constexpr uint32_t mask = 1 | 2 | 4 | 8 | 16 | 32 | 64;
+            if (a1 || a0 > UINT32_MAX) { ret_host(-EINVAL); return 0; }
+            long supported = ::syscall(SYS_membarrier, 0, 0, 0);
+            if (supported < 0) { ret_errno(); return 0; }
+            uint32_t command = static_cast<uint32_t>(a0);
+            if (command == 0) { ret_host(static_cast<uint32_t>(supported) & mask); return 0; }
+            if (command == 512) { ret_host(emu.guest_membarrier_registrations.load()); return 0; }
+            if ((command & (command - 1)) || !(command & mask & supported)) {
+                ret_host(-EINVAL); return 0;
             }
-            ret_host(static_cast<int64_t>(-ENOSYS));
-            return 0;
+            uint32_t registration = command == 8 ? 16 : command == 32 ? 64 : 0;
+            if (registration && !(emu.guest_membarrier_registrations.load() & registration)) {
+                ret_host(-EPERM); return 0;
+            }
+            long result = ::syscall(SYS_membarrier, command, 0, 0);
+            if (result < 0) { ret_errno(); return 0; }
+            if (command & (4 | 16 | 64)) emu.guest_membarrier_registrations.fetch_or(command);
+            ret_host(result); return 0;
+#else
+            ret_host(-ENOSYS); return 0;
+#endif
         }
         // ── copy_file_range (285) ─────────────────────────────────────
         // Copies data between two file descriptors without userspace

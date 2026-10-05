@@ -43,6 +43,9 @@ tools/sdl2-debs/
 
 # SDL2 SDK (extracted by tools/fetch-sdl2-headers.sh)
 tools/sdl2-sdk/
+tools/android-tools/
+tools/android-runtime/
+tools/graphics-smoke/
 
 # Editor / IDE
 .vscode/

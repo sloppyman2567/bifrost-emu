@@ -1234,7 +1234,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
-    pending_flag_mat_.clear();
     chain_entry_off_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();  // regions never use the vec/fp cache (memory paths)

@@ -55,6 +55,12 @@ namespace arm64emu {
 // ── ELF loader (definition lives in src/frontend/elf_loader.cpp) ──────
 class ElfLoader {
 public:
+    struct Options {
+        // A guest dynamic linker owns all relocations, including its own.
+        bool apply_relocations = true;
+        // Reserve an aligned ET_DYN image in the mmap arena (for PT_INTERP).
+        bool reserve_image = false;
+    };
     struct Loaded {
         uint64_t entry;
         uint64_t phdr_addr;
@@ -66,6 +72,8 @@ public:
         std::string interp;  // PT_INTERP path (dynamic linker), empty if static
     };
     static Loaded load(Memory& mem, const std::vector<uint8_t>& data);
+    static Loaded load(Memory& mem, const std::vector<uint8_t>& data,
+                       const Options& options);
 };
 // Forward-declare DynamicLinker (defined in src/frontend/dynamic_linker.h).
 class DynamicLinker;
@@ -80,6 +88,15 @@ public:
     Emulator& operator=(const Emulator&) = delete;
     // ── Lifecycle (public) ────────────────────────────────────────────
     void load_elf_file(const std::string& path, std::vector<std::string>& argv);
+    // Bootstrap profile: Bionic's linker owns relocation and TLS setup.
+    void set_android_runtime(bool enabled) {
+        android_runtime_ = enabled;
+        mem_.set_data_top_byte_ignore(enabled);
+    }
+    bool android_runtime() const { return android_runtime_; }
+    std::atomic<uint32_t> guest_membarrier_registrations{0};
+    std::atomic<int> guest_dumpable{1};
+    std::atomic<bool> guest_thp_disabled{false};
     int  run();
     // Load the embedded AArch64 vDSO into guest memory and return its
     // base address (for AT_SYSINFO_EHDR). Returns 0 on failure. The vDSO
@@ -362,6 +379,7 @@ private:
     uint64_t vdso_size_ = 0;    // vDSO mapped size (page-rounded), for fast-path PC checks
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
+    bool android_runtime_ = false;
     bool trace_ = false;
     bool brk_verbose_ = true; // controlled by cfg.log_brk_verbose / -q flag
     std::string elf_path_;

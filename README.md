@@ -53,8 +53,8 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   slow, and save compatibility depends on the game build; see
   [Doom 3 status](docs/doom3.md).
 
-**Current checkpoint (October 4, 2026):** full regression runs passed 257/257
-in JIT mode and 254/254 in interpreter mode, with three JIT-only skips.
+**Current checkpoint (October 5, 2026):** full regression runs passed 272/272
+in JIT mode and 265/265 in interpreter mode, with seven JIT-only skips.
 The verification gate now passes 56 single-thread differential fixtures and
 four separate threaded oracle workloads. Shared-memory replay is suspended
 when a second guest CPU starts; see [test evidence](docs/TESTS.md).
@@ -195,8 +195,18 @@ as Android-style search-path scaffolding, and build.prop advertises
 arm64-v8a ABI, SDK 29, ro.kernel.qemu=1. These properties do not provide a
 complete Android 10 runtime or prove Android library compatibility.
 
-Integrated APK loading, Bionic compatibility and ART execution are planned
-for v2.0; see the [roadmap](roadmap.md). The current standalone Android path
+An experimental `--android-runtime --rootfs PATH /guest/program` profile now
+boots a real guest linker64 and passes a pinned Bionic native fixture covering
+constructors, pthread/TLS and dlopen in both engines. See the
+[bootstrap instructions](docs/ANDROID_RUNTIME.md) and
+[Android architecture](docs/ANDROID_ARCHITECTURE.md). Virtual Binder devices
+support bounded transactions and object handles; see [Binder limits and tests](docs/ANDROID_BINDER.md).
+The native surface adapter now has an injectable window backend, verified with
+native Wayland EGL presentation and pixel readback. Its [window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md)
+also records the repaired XWayland socket path and remaining Mesa EGL/GLX failures.
+
+Integrated APK loading, full Bionic/platform compatibility and ART execution
+remain planned for v2.0; see the [roadmap](roadmap.md). The standalone Android path
 supports NativeActivity-style native binaries. The native-bridge adapter
 below is a separate integration interface, not a complete Android runtime.
 

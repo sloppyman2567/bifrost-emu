@@ -465,7 +465,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
         // ── BFM (bitfield insert) ───────────────────────────────────
         // BFM Rd, Rn, #immr, #imms:
-        //   mask = ROR(Ones(imms+1), immr, width)
+        //   mask = DecodeBitMasks.wmask & DecodeBitMasks.tmask
         //   Rd = (Rd & ~mask) | (ROR(Rn, immr) & mask)
         // We compute mask and ~mask at translation time (they're immediates).
         // For the ROR(Rn, immr), we use SHL+SHR+OR which the JIT handles
@@ -476,12 +476,15 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             int width = d.sf ? 64 : 32;
             int immr = d.immr % width;
             int imms = d.imms;
-            // Compute mask = ROR(Ones(imms+1), immr, width)
+            // BFXIL replaces only the low (imms-immr+1) destination bits.
+            // Using wmask alone also inserts wrapped source bits at the top
+            // of Rd; the architectural tmask excludes that wrapped portion.
             uint64_t welem = (imms + 1 >= 64) ? ~0ULL : ((1ULL << (imms + 1)) - 1);
             if (width == 32) welem &= 0xFFFFFFFFULL;
             uint64_t mask;
-            if (immr == 0) {
-                mask = welem;
+            if (imms >= immr) {
+                int bits = imms - immr + 1;
+                mask = bits == 64 ? ~0ULL : ((1ULL << bits) - 1);
             } else {
                 mask = (welem >> immr) | (welem << (width - immr));
                 if (width == 32) mask &= 0xFFFFFFFFULL;

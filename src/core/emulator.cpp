@@ -63,6 +63,7 @@ Emulator::~Emulator() {
         std::lock_guard<std::mutex> g(threads_mu_);
         for (auto& gt : threads_) gt->cpu.running = false;
     }
+    vfs_.stop_binder();
     wake_all_futexes();
     join_threads();
     // Stop + join the periodic reporter (it captures `this`).
@@ -78,6 +79,29 @@ void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
 }
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
+    if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
+                            path.empty() || path.front() != '/'))
+        throw EmuError("Android runtime bootstrap requires --rootfs and an absolute guest ELF path");
+    // Read Android runtime images through the same confined VFS as guest opens.
+    auto read_android_elf = [this](const std::string& guest_path) {
+        int err = 0;
+        auto node = vfs_.open(guest_path, O_RDONLY, 0, &err);
+        if (!node) throw EmuError("cannot open Android runtime ELF " + guest_path +
+                                  ": " + strerror(err < 0 ? -err : ENOENT));
+        struct stat st{};
+        if (node->fstat(&st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+            st.st_size > 512LL * 1024 * 1024)
+            throw EmuError("invalid or oversized Android runtime ELF " + guest_path);
+        std::vector<uint8_t> bytes(static_cast<size_t>(st.st_size));
+        size_t offset = 0;
+        while (offset < bytes.size()) {
+            ssize_t n = node->read(offset, bytes.data() + offset, bytes.size() - offset);
+            if (n == -EINTR) continue;
+            if (n <= 0) throw EmuError("short read of Android runtime ELF " + guest_path);
+            offset += static_cast<size_t>(n);
+        }
+        return bytes;
+    };
     // IFUNC resolvers can read Linux auxiliary data at low addresses while
     // the dynamic linker is running. Keep the emulator's zero page mapped
     // before loading or relocating any guest objects.
@@ -206,8 +230,9 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // This keeps /proc/self/exe consistent with the guest's view of the
     // filesystem (Qt derives applicationDirPath from it).
     const std::string host_elf_path = yggdrasil::Yggdrasil::remap_path(path);
-    FILE* f = fopen(host_elf_path.c_str(), "rb");
-    if (!f) throw EmuError("cannot open " + host_elf_path + ": " + strerror(errno));
+    FILE* f = android_runtime_ ? nullptr : fopen(host_elf_path.c_str(), "rb");
+    if (!android_runtime_ && !f)
+        throw EmuError("cannot open " + host_elf_path + ": " + strerror(errno));
     // Linux /proc/self/exe is absolute even when argv[0] is relative.
     // Keep argv/AT_EXECFN unchanged, and strip the sandbox's host prefix.
     if (char* resolved = ::realpath(host_elf_path.c_str(), nullptr)) {
@@ -227,16 +252,23 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         vfs_.set_elf_path(elf_path_);
     }
 
+    std::vector<uint8_t> data;
+    if (android_runtime_) {
+        data = read_android_elf(path);
+    } else {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); throw EmuError("empty or invalid ELF"); }
-    std::vector<uint8_t> data(sz);
+    data.resize(sz);
     if (fread(data.data(), 1, sz, f) != static_cast<size_t>(sz)) {
         fclose(f); throw EmuError("short read on " + host_elf_path);
     }
     fclose(f);
-    auto info = ElfLoader::load(mem_, data);
+    }
+    ElfLoader::Options load_options;
+    load_options.apply_relocations = !android_runtime_;
+    auto info = ElfLoader::load(mem_, data, load_options);
     entry_ = info.entry;
     prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
@@ -259,7 +291,28 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     //       linker (ld-musl / ld-linux) and let it run its own code
     //       (debug path).
     uint64_t interp_base = 0;
-    if (!info.interp.empty()) {
+    if (android_runtime_) {
+        if (info.interp != "/system/bin/linker64" &&
+            info.interp != "/apex/com.android.runtime/bin/linker64")
+            throw EmuError("Android runtime bootstrap requires a Bionic linker64 PT_INTERP");
+        if (!info.phdr_addr)
+            throw EmuError("Android runtime ELF has no mapped program-header table");
+        auto interpreter = read_android_elf(info.interp);
+        ElfLoader::Options interpreter_options;
+        interpreter_options.apply_relocations = false;
+        interpreter_options.reserve_image = true;
+        auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
+        if (!loaded.interp.empty())
+            throw EmuError("Android linker64 must not itself require PT_INTERP");
+        dyn_linker_.reset();
+        entry_ = loaded.entry;
+        interp_base_ = loaded.base_addr;
+        has_lse_ = has_lse_ || loaded.has_lse;
+        if (verbose_) fprintf(stderr, "[android-runtime] linker64 base=0x%llx entry=0x%llx page_size=%llu\n",
+            static_cast<unsigned long long>(interp_base_),
+            static_cast<unsigned long long>(entry_),
+            static_cast<unsigned long long>(Memory::PAGE_SIZE));
+    } else if (!info.interp.empty()) {
         // First, try the native (in-emulator) dynamic linker. This is
         // faster and more reliable because we don't depend on the
         // guest-side ld.so working correctly under emulation.
@@ -806,7 +859,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // Static binaries have no PT_INTERP, so the block above never runs —
     // but GraphicThunk / runtime dlopen (syscalls 0x1002/0x1003) still
     // need a DynamicLinker + thunk trampolines. Create a minimal one.
-    if (!dyn_linker_) {
+    if (!android_runtime_ && !dyn_linker_) {
         dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
         if (auto* thunk = graphics_.thunk()) {
             if (thunk->enabled()) {
@@ -886,7 +939,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // Static binaries may still have a DynamicLinker for thunk/dlopen
     // support without a static TLS block — only skip scratch when the
     // linker actually installed a TLS TP.
-    if (!dyn_linker_ || dyn_linker_->static_tls_size() == 0) {
+    if (!android_runtime_ && (!dyn_linker_ || dyn_linker_->static_tls_size() == 0)) {
         if (main_cpu_.tpidr_el0 == 0) {
             const uint64_t TLS_SCRATCH_SIZE = 65536;  // 64 KiB
             uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
@@ -1165,7 +1218,7 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     mem_.write(sp, platform_str, sizeof(platform_str));
     uint64_t platform_addr = sp;
     std::vector<uint64_t> auxv = {
-        6,  4096,            // AT_PAGESZ
+        6,  Memory::PAGE_SIZE, // AT_PAGESZ: runtime granule, not ELF p_align
         3,  phdr_addr_,      // AT_PHDR
         4,  phent_,          // AT_PHENT
         5,  phnum_,          // AT_PHNUM

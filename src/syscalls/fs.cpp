@@ -791,7 +791,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +0x9C: stx_dio_offset_align (u32), ... (rest is padding)
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat st;
-            if (is_proc_exe_path(raw_path)) {
+            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st)) {
+                if (a2 & ~uint64_t(0x100 | 0x800 | 0x1000 | 0x6000)) { ret_err(EINVAL); return 0; }
+                if ((a2 & 0x6000) == 0x6000) { ret_err(EINVAL); return 0; }
+            } else if (is_proc_exe_path(raw_path)) {
                 proc_exe_stat(elf_path_,
                               (static_cast<int>(a2) & AT_SYMLINK_NOFOLLOW) != 0, &st);
             } else {
@@ -870,7 +873,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // see correct file sizes, types, and permissions.
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat st;
-            if (is_proc_exe_path(raw_path)) {
+            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st)) {
+                if (a3 & ~uint64_t(0x100 | 0x800 | 0x1000)) { ret_err(EINVAL); return 0; }
+            } else if (is_proc_exe_path(raw_path)) {
                 proc_exe_stat(elf_path_,
                               (static_cast<int>(a3) & AT_SYMLINK_NOFOLLOW) != 0, &st);
             } else {
@@ -1161,11 +1166,18 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // x3 holds caller garbage. Forwarding it to the host faccessat
             // as `flags` made every access() fail with EINVAL, breaking
             // fontconfig's FcConfigFilename existence checks.
+            std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            struct stat device_stat;
+            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &device_stat)) {
+                if (a2 & ~uint64_t(7)) { ret_err(EINVAL); return 0; }
+                if (a2 & 1) { ret_err(EACCES); return 0; }
+                ret_host(0); return 0;
+            }
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
             }
-            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(raw_path);
             int r = ::faccessat(hfd, path.c_str(), static_cast<int>(a2), 0);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);

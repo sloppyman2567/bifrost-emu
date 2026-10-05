@@ -82,6 +82,10 @@ int FdTable::allocate(std::shared_ptr<Node> node) {
     std::lock_guard<std::mutex> g(mu_);
     int fd = 0;
     while (table_.count(fd)) fd++;
+    if (node->owns_guest_mappings()) {
+        mapping_devices_.push_back(node);
+        has_mapping_devices_.store(true, std::memory_order_release);
+    }
     table_[fd] = std::move(node);
     return fd;
 }
@@ -149,3 +153,26 @@ size_t FdTable::size() const {
     return table_.size();
 }
 } // namespace arm64emu::yggdrasil
+
+namespace arm64emu::yggdrasil {
+std::vector<std::shared_ptr<Node>> FdTable::mapping_devices_snapshot() {
+    std::vector<std::shared_ptr<Node>> nodes;
+    if (!has_mapping_devices_.load(std::memory_order_acquire)) return nodes;
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto it = mapping_devices_.begin(); it != mapping_devices_.end();) {
+        if (auto node = it->lock()) { nodes.push_back(std::move(node)); ++it; }
+        else it = mapping_devices_.erase(it);
+    }
+    if (mapping_devices_.empty()) has_mapping_devices_.store(false, std::memory_order_release);
+    return nodes;
+}
+void FdTable::invalidate_device_mappings(uint64_t addr, uint64_t size) {
+    for (auto& node : mapping_devices_snapshot()) node->invalidate_mapping(addr, size);
+}
+int FdTable::protect_device_mappings(uint64_t addr, uint64_t size, uint64_t prot) {
+    for (auto& node : mapping_devices_snapshot()) {
+        int error = node->protect_mapping(addr, size, prot); if (error) return error;
+    }
+    return 0;
+}
+}

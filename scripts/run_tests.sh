@@ -292,6 +292,8 @@ UNIT_TESTS=(
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
+    "simd_addlv|ctest/jit_simd_addlv.elf||5|checks passed"
+    "crc32_instructions|ctest/jit_crc32.elf||5|checks passed"
     "simd_sat_narrow|ctest/jit_simd_sat_narrow.elf||5|672 checks passed"
     "simd_sat|ctest/test_simd_sat.elf||5|ALL PASS"
     "fp_pw_elem|ctest/jit_fp_pw_elem.elf||5|ALL PASS"
@@ -386,6 +388,13 @@ UNIT_TESTS=(
     # Compatibility syscalls: permissive no-ops (NUMA/ioprio/timeofday/
     # vhangup/swapoff) and explicit -ENOSYS/-EPERM stubs (fanotify/bpf/
     # userfaultfd/mqueue/quotactl).
+    "android_binder_exit|ctest/android_binder_exit.elf||5|checks passed"
+    "android_binder|ctest/android_binder.elf||10|checks passed"
+    "android_binder_objects|ctest/android_binder_objects.elf||10|checks passed"
+    "jit_bfm_masks|ctest/jit_bfm_masks.elf||30|checks passed"
+    "jit_flags_passthrough|ctest/jit_flags_passthrough.elf||10|checks passed"
+    "socket_msg_layout|ctest/socket_msg_layout.elf||10|checks passed"
+    "android_syscall_options|ctest/android_syscall_options.elf||10|checks passed"
     "test_misc_extended|ctest/test_misc_extended.elf||5|ALL TESTS PASSED"
 )
 
@@ -664,6 +673,7 @@ INTEGRATION_TESTS=(
 # These require the rootfs and toolchains. Skipped if not present.
 # Uses a special env prefix (BIFROST_ROOT) to enable rootfs sandboxing.
 DYNAMIC_TESTS=(
+    "xwayland_wire|ctest_real/xwayland_wire.elf||15|checks passed"
     "hello_dyn_musl|ctest_real/hello_dyn_musl.elf||5|Hello, dynamic world"
     "test_dyn_write|ctest_real/test_dyn_write.elf||5|dyn_write_ok"
     # NEW (Turn 74): glibc dynamic tests. These verify the R_AARCH64_COPY
