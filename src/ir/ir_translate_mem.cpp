@@ -143,6 +143,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if (sign_ext) {
                     uint16_t ext = g_alloc.alloc();
                     emit_sext(block, ext, val, static_cast<uint8_t>(width * 8));
+                    // opc=11 (LDRSB/LDRSH Wt) writes a W register: bits
+                    // [63:32] are zero, not sign copies (opc=10 is the X form).
+                    if (d.opc_ls & 1) {
+                        uint16_t w = g_alloc.alloc();
+                        emit_zext(block, w, ext, 32);
+                        ext = w;
+                    }
                     store_arm_reg(block, d.rt, ext);
                 } else if (width < 8) {
                     uint16_t ext = g_alloc.alloc();
@@ -301,10 +308,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 mp.width = static_cast<uint8_t>(width);
                 mp.offset = static_cast<uint64_t>(mem_off);
                 emit_load_mem(block, val1, addr, mp, cur_pc);
-                // Sign-extend or zero-extend if needed (for 32-bit)
+                // 32-bit pairs: opc=01 is LDPSW (sign-extend to 64), opc=00
+                // is LDP Wt (zero-extend).
+                const bool ldpsw = (opc == 1);
                 if (width < 8) {
                     uint16_t ext1 = g_alloc.alloc();
-                    emit_zext(block, ext1, val1, static_cast<uint8_t>(width * 8));
+                    if (ldpsw) emit_sext(block, ext1, val1, 32);
+                    else       emit_zext(block, ext1, val1, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext1);
                 } else {
                     store_arm_reg(block, d.rt, val1);
@@ -316,7 +326,8 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit_load_mem(block, val2, addr, mp2, cur_pc);
                 if (width < 8) {
                     uint16_t ext2 = g_alloc.alloc();
-                    emit_zext(block, ext2, val2, static_cast<uint8_t>(width * 8));
+                    if (ldpsw) emit_sext(block, ext2, val2, 32);
+                    else       emit_zext(block, ext2, val2, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt2, ext2);
                 } else {
                     store_arm_reg(block, d.rt2, val2);

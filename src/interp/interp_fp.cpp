@@ -663,6 +663,32 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 memcpy(&cpu.v_hi[rd], result + 8, 8);
                 return;
             }
+            // CLS (U=0) / CLZ (U=1), vector: opcode 00100. Like ADDLP, they
+            // differ from SQXTN/UQXTN (opcode 10100) only in bit16, which the
+            // switch key discards, so match them first with bit16 kept.
+            if ((op & 0x9F3FFC00) == 0x0E204800) {
+                if (size == 3) throw DecodeError(cpu.pc, op);
+                const int bits = 8 << size;
+                const uint64_t mask = (1ULL << bits) - 1;  // bits <= 32
+                const bool clz = (op >> 29) & 1;
+                uint64_t halves[2] = {cpu.v_lo[rn], cpu.v_hi[rn]};
+                for (int h = 0; h < (Q ? 2 : 1); ++h) {
+                    uint64_t& half = halves[h];
+                    uint64_t out = 0;
+                    for (int at = 0; at < 64; at += bits) {
+                        uint64_t v = (half >> at) & mask;
+                        if (!clz && (v >> (bits - 1)))  // CLS counts sign copies
+                            v = ~v & mask;
+                        int n = 0;
+                        for (int b = bits - 1; b >= 0 && !((v >> b) & 1); --b) ++n;
+                        out |= static_cast<uint64_t>(clz ? n : n - 1) << at;
+                    }
+                    half = out;
+                }
+                cpu.v_lo[rd] = halves[0];
+                cpu.v_hi[rd] = Q ? halves[1] : 0;  // Q=0 zeroes the upper 64
+                return;
+            }
             switch (sub_noq) {
             // ── DUP (general): sf 0 0 11110 00 0 imm5 0000 0 1 Rn Rd ──
             // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).

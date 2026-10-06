@@ -121,7 +121,8 @@ static std::string sandbox_root_canonical() {
 }
 // True when `guest_path` is subject to sandbox confinement under `root`:
 // the path is absolute and not one of the passthrough carve-outs (/proc,
-// /dev, exact-$XAUTHORITY). Must stay in sync with map_guest_path below.
+// /dev except /dev/socket, exact-$XAUTHORITY). Must stay in sync with
+// map_guest_path below.
 // Takes the root explicitly so callers snapshot getenv() once.
 static bool uses_sandbox(const std::string& root,
                          const std::string& guest_path) {
@@ -133,7 +134,10 @@ static bool uses_sandbox(const std::string& root,
                (p.size() == n || p[n] == '/');
     };
     if (is_under(guest_path, "/proc")) return false;
-    if (is_under(guest_path, "/dev")) return false;
+    // /dev/socket holds Android init-style service sockets (logdw, ...):
+    // they belong to the guest root, unlike host /dev devices.
+    if (is_under(guest_path, "/dev") && !is_under(guest_path, "/dev/socket"))
+        return false;
     const char* xauth = getenv("XAUTHORITY");
     if (xauth && xauth[0] == '/' && guest_path == xauth) return false;
     return true;
@@ -224,7 +228,9 @@ std::string map_guest_path(const std::string& guest_path,
         guest_path.compare(0, 15, "/proc/self/mem/") == 0)
         return std::string();
     if (is_under(guest_path, "/proc")) return guest_path;
-    if (is_under(guest_path, "/dev")) return guest_path;
+    // Keep in sync with uses_sandbox(): /dev/socket maps into the root.
+    if (is_under(guest_path, "/dev") && !is_under(guest_path, "/dev/socket"))
+        return guest_path;
     // X11 clients need to read the host X auth cookie. If the guest opens
     // the exact path the host XAUTHORITY points at, pass it through
     // unchanged — it lives in the host session dir (e.g. /run/user/...),
@@ -484,6 +490,9 @@ Yggdrasil::ParentDir Yggdrasil::open_parent(int host_dirfd,
 }
 bool Yggdrasil::sandbox_inside_root() {
     return !sandbox_root_str().empty();
+}
+std::string Yggdrasil::sandbox_root_path() {
+    return sandbox_root_canonical();
 }
 bool Yggdrasil::path_inside_root(const char* path) {
     if (!path || !path[0]) return false;

@@ -1318,6 +1318,9 @@ private:
     // the call, the caller falls through to the integer switch.
     // Defined in jit_codegen_fp.cpp.
     void emit_fp_round_away(bool is_double); // XMM0 in/out; scratch XMM1/2, RAX/RCX
+    // RAX (integer) -> XMM0 in the target precision, ONE rounding step.
+    // Scratch RAX/RCX. Defined in jit_codegen_fp.cpp.
+    void emit_int_to_fp_xmm0(bool is_double, bool is_unsigned, bool is_64bit_src);
     bool compile_ir_inst_fp_(const IRInst& inst);
     bool fp_handled_ = false;  // reset before each compile_ir_inst_fp_ call
     // ── FP-arithmetic / SIMD sub-dispatchers (split out of

@@ -47,6 +47,10 @@ public:
     int     flags() const override { return flags_; }
     void    set_flags(int f) override { flags_ = f; }
     int host_fd() const override { return fd_; }
+    // Report the file as root:root and read-only (0444), as init-created
+    // files appear to Android guests; Bionic refuses property areas
+    // otherwise.
+    void present_root_owned() { root_owned_ = true; }
 private:
     MemfdNode(int fd, int flags,
               std::function<std::string()> regenerator = nullptr)
@@ -58,6 +62,7 @@ private:
     int regenerate_();
     int fd_;
     int flags_;
+    bool root_owned_ = false;
     std::function<std::string()> regenerator_;
 };
 } // namespace arm64emu::yggdrasil

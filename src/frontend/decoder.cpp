@@ -160,12 +160,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
     // Load/Store Pair post-index (V=0) + Load/Store Exclusive.
     case 0x08: {
         if ((inst >> 29) & 1) {
-            if (((inst >> 23) & 7) != 1) return false;
+            // bits[25:23]: 001 = post-index, 000 = LDNP/STNP. The
+            // non-temporal hint has no architectural effect: LDNP/STNP are
+            // signed-offset pairs without writeback (bionic memcpy uses them).
+            const uint8_t pair_mode = (inst >> 23) & 7;
+            if (pair_mode > 1) return false;
             uint8_t opc = (inst >> 30) & 3;
+            if (pair_mode == 0 && (opc & 1)) return false;  // no LDNPSW
             d.is_vec    = false;
             d.is_load   = (inst >> 22) & 1;
-            d.mode      = 1;
-            d.writeback = true;
+            d.mode      = pair_mode == 0 ? 2 : 1;
+            d.writeback = pair_mode == 1;
             int16_t imm7 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 15) & 0x7F, 7));
             int esize = (opc == 2) ? 8 : 4;
             d.disp = imm7 * esize;
@@ -390,7 +395,9 @@ bool decode(DecodedInst& d, uint32_t inst) {
             return true;
         }
         uint8_t mode_check = (inst >> 23) & 7;
-        if (mode_check != 1 && mode_check != 2 && mode_check != 3) return false;
+        if (mode_check > 3) return false;
+        // Mode 0 is LDNP/STNP: a signed-offset pair without writeback.
+        if (mode_check == 0) mode_check = 2;
         uint8_t opc = (inst >> 30) & 3;
         // bit[26] = V: 1 = SIMD/FP, 0 = GPR.
         // GPR LDP/STP (opc=0 → 32-bit, opc=2 → 64-bit) must have is_vec=false

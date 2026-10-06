@@ -60,6 +60,8 @@ public:
     // Select before opening Binder devices. Only /dev/binder gets a manager;
     // hardware/vendor domains retain the raw transport contract.
     void enable_android_services();
+    // Serve Bionic system properties at /dev/__properties__ (Android runtime).
+    void enable_android_properties() { android_properties_ = true; }
     static bool binder_device_stat(const std::string& path, struct stat* st);
     // Resolve a guest path to a Node. Returns nullptr on failure (with
     // errno set via the `*err_out` parameter).
@@ -114,6 +116,8 @@ public:
                                  const std::string& guest_path);
     // True when a BIFROST_ROOT sandbox is active.
     static bool sandbox_inside_root();
+    // Canonical host path of the BIFROST_ROOT sandbox ("" when inactive).
+    static std::string sandbox_root_path();
     // True when `path` (a canonical getcwd-style path) lies inside the
     // canonical sandbox root (boundary-aware). False when unresolvable.
     static bool path_inside_root(const char* path);
@@ -194,6 +198,9 @@ public:
 private:
     std::mutex binder_mu_;
     bool android_services_ = false;
+    bool android_properties_ = false;
+    std::once_flag property_area_once_;
+    std::string property_area_;  // built from the root on first open
     std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;
     std::string elf_path_;
     // Exact host file selected by the ELF loader, independent of guest cwd.

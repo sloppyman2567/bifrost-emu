@@ -137,7 +137,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             // FMOV (FP↔FP register): native path.
             // Encoding: 0x1E604000 (double) or 0x1E204000 (single).
-            // FMOV Dd, Dn → v_lo[rd] = v_lo[rn]; v_hi[rd] = v_hi[rn]
+            // FMOV Dd, Dn → v_lo[rd] = v_lo[rn]; v_hi[rd] = 0
             // FMOV Sd, Sn → v_lo[rd] = v_lo[rn] (low 32 bits); v_hi[rd] = 0
             // Single FP_MOV IR op (codegen = vmovsd/vmovss between the v_lo/
             // v_hi slots). The old 4-op FMOV_F2G→(IMM/AND)→FMOV_G2F(→FHI2G/

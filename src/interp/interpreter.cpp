@@ -55,6 +55,14 @@ static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_i
     }
     return res;
 }
+// Extend a loaded integer per the load/store `opc` field: opc=1x sign-
+// extends (LDRSB/LDRSH/LDRSW). opc=11 targets a W register, so the result
+// is sign-extended to 32 bits and bits[63:32] are ZERO, not sign copies.
+static uint64_t extend_loaded(uint64_t v, uint8_t opc, int width_bytes) {
+    if (!(opc & 2)) return v;
+    v = sign_extend(v, width_bytes * 8);
+    return (opc & 1) ? (v & 0xFFFFFFFFULL) : v;
+}
 // Set NZCV from a subtraction: a - b = a + ~b + 1
 static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
                               bool set_flags) {
@@ -595,8 +603,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.is_sub) res = set_sub_flags(cpu, a, b, width, d.set_flags);
                 else          res = set_add_flags(cpu, a, b, 0, width, d.set_flags);
                 if (!d.sf) res &= 0xFFFFFFFF;
+                // Rd=31 is SP only in the extended form without S
+                // (d.writes_sp); the shifted form discards into XZR.
                 if (d.rd == 31) {
-                    if (!d.set_flags) cpu.sp = res;
+                    if (extended && !d.set_flags) cpu.sp = res;
                 } else {
                     cpu.regs[d.rd] = res;
                 }
@@ -1049,6 +1059,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t v1 = 0, v2 = 0;
                         mem_.read(addr, &v1, esize, pcache);
                         mem_.read(addr + esize, &v2, esize, pcache);
+                        if (opc == 1) {  // LDPSW: sign-extend both words to 64
+                            v1 = sign_extend(v1, 32);
+                            v2 = sign_extend(v2, 32);
+                        }
                         if (d.rt  != 31) cpu.regs[d.rt]  = v1;
                         if (d.rt2 != 31) cpu.regs[d.rt2] = v2;
                     } else {
@@ -1182,7 +1196,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t v = 0;
                     mem_.read(addr, &v, width_bytes, pcache);
                     if (d.rt != 31) {
-                        if (opc & 2) v = sign_extend(v, width_bytes * 8);
+                        v = extend_loaded(v, opc, width_bytes);
                         cpu.regs[d.rt] = v;
                     }
                 } else {
@@ -1238,7 +1252,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t v = 0;
                     mem_.read(addr, &v, width_bytes, pcache);
                     if (d.rt != 31) {
-                        if (opc & 2) v = sign_extend(v, width_bytes * 8);
+                        v = extend_loaded(v, opc, width_bytes);
                         cpu.regs[d.rt] = v;
                     }
                 } else {
@@ -1292,7 +1306,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t v = 0;
                     mem_.read(addr, &v, width_bytes, pcache);
                     if (d.rt != 31) {
-                        if (opc & 2) v = sign_extend(v, width_bytes * 8);
+                        v = extend_loaded(v, opc, width_bytes);
                         cpu.regs[d.rt] = v;
                     }
                 } else {

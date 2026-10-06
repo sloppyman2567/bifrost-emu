@@ -72,7 +72,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::MOVK: {
             uint16_t cur = load_arm_reg(block, d.rd);
             uint64_t mask = ~(static_cast<uint64_t>(0xFFFF) << (d.hw * 16));
-            if (!d.sf) mask |= 0xFFFFFFFF00000000ULL;
+            // MOVK Wd writes a W register: bits[63:32] become ZERO.
+            if (!d.sf) mask &= 0xFFFFFFFFULL;
             uint16_t mv = load_imm(block, mask);
             uint16_t bits = load_imm(block, static_cast<uint64_t>(d.imm16) << (d.hw * 16));
             uint16_t masked = g_alloc.alloc();
@@ -786,6 +787,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── Bcond ───────────────────────────────────────────────────
         case InstClass::Bcond: {
             uint64_t target = cur_pc + d.imm;
+            // AL (1110) and NV (1111) both branch unconditionally on
+            // AArch64; arm_cond_to_x86 has no "always" Jcc for them.
+            if (d.cond >= 0xE) {
+                emit_brcond_fallthru(block, target, cur_pc);
+                block.ends_with_branch = true;
+                return true;
+            }
             BrCondParams bp;
             bp.cond = d.cond;
             bp.target = target;

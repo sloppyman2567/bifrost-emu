@@ -204,8 +204,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // 8-bit CAS needs cmpxchg r/m8 (0x0F 0xB0); the fast path only
             // emits cmpxchg r/m32/r64 (0x0F 0xB1). 16-bit CAS also works
             // but let's be conservative and fall back for sub-32-bit CAS.
+            // Byte-wide atomics fall back too: the fast path below only
+            // knows 16/32/64-bit operand sizes, so a byte op was emitted as
+            // a 32-bit lock xchg/xadd/cmpxchg — SWPALB rewrote the three
+            // neighbouring bytes and every LD*B returned 4 bytes.
             if ((atom_op >= 0x4 && atom_op <= 0x7) ||
-                (atom_op >= 0xC && w < 4)) {
+                (atom_op >= 0xC && w < 4) || w == 1) {
                 emit_call_interp(inst.arm_pc, false);
                 if (is_load && inst.dest != 0) {
                     emit_load_arm(RAX, static_cast<int>(ap.reg_idx));

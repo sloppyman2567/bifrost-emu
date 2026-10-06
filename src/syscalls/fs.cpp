@@ -570,26 +570,34 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 req_total += len;
             }
             bool xprobe = dbg().xprobe;
-            for (uint64_t i = 0; i < cnt; i++) {
+            // Gather into ONE write: writev is a single operation. Per-iovec
+            // writes split a datagram (liblog's header/priority/tag/message
+            // reached logd as four packets) and let other threads interleave
+            // on pipes and stream sockets. Same 64 MiB defensive cap as
+            // before, applied to the total.
+            constexpr uint64_t kWritevCap = 64 * 1024 * 1024;
+            std::vector<uint8_t> gathered;
+            gathered.reserve(static_cast<size_t>(std::min<uint64_t>(req_total, kWritevCap)));
+            for (uint64_t i = 0; i < cnt && gathered.size() < kWritevCap; i++) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
+                len = std::min<uint64_t>(len, kWritevCap - gathered.size());
                 if (len == 0) continue;
-                // Defensive cap: if len is absurdly large, the iovec is
-                // corrupted (JIT codegen bug). Clamp to avoid OOM crash.
-                if (len > 64 * 1024 * 1024) {
-                    len = 64 * 1024 * 1024;
-                }
-                std::vector<uint8_t> tmp(len);
-                mem_.read(base, tmp.data(), len);
-                ssize_t n = node->write(UINT64_MAX, tmp.data(), len);
+                const size_t at = gathered.size();
+                gathered.resize(at + static_cast<size_t>(len));
+                mem_.read(base, gathered.data() + at, static_cast<size_t>(len));
+            }
+            if (!gathered.empty()) {
+                ssize_t n = node->write(UINT64_MAX, gathered.data(), gathered.size());
                 if (xprobe && static_cast<int>(a0) == 3 && n > 0) {
+                    const auto& t = gathered;
                     fprintf(stderr, "[XWBYTES] hfd=%d n=%zd hex=%02x%02x%02x%02x %02x%02x%02x%02x\n",
-                            node->host_fd(), n, tmp[0], tmp[1], tmp[2], tmp[3],
-                            len>4?tmp[4]:0, len>5?tmp[5]:0, len>6?tmp[6]:0, len>7?tmp[7]:0);
+                            node->host_fd(), n, t[0], t.size()>1?t[1]:0, t.size()>2?t[2]:0,
+                            t.size()>3?t[3]:0, t.size()>4?t[4]:0, t.size()>5?t[5]:0,
+                            t.size()>6?t[6]:0, t.size()>7?t[7]:0);
                 }
                 if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
-                total += n;
-                if (static_cast<size_t>(n) < len) break;
+                total = n;
             }
             if (xprobe && static_cast<int>(a0) == 3 && node->host_fd() >= 0 && total > 0) {
                 uint8_t rb[2000] = {0};

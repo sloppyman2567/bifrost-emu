@@ -218,7 +218,18 @@ bool Memory::would_exceed_page_limit(size_t num_pages) const {
 bool Memory::set_direct_prot(uint64_t lo, uint64_t hi, int prot) const {
     if (!direct_window_ || lo >= hi || lo >= DIRECT_WINDOW_SIZE) return true;
     hi = std::min<uint64_t>(hi, DIRECT_WINDOW_SIZE);
-    return ::mprotect(direct_window_ + lo, hi - lo, prot) == 0;
+    // The host never executes the window; the interpreter and JIT READ guest
+    // code from it. Guest PROT_EXEC therefore maps to host PROT_READ, and
+    // the window is never host-executable. Passing PROT_EXEC through made an
+    // execute-only guest mapping (legal on AArch64, used by the Android
+    // framework) host execute-only on CPUs with protection keys, so
+    // translating it SIGSEGV'd the emulator. Guest reads of such pages are
+    // still refused by check_access(); JIT inline window loads rely on host
+    // protection and can read them (documented in AGENTS.md).
+    int host = PROT_NONE;
+    if (prot & (PROT_READ | PROT_EXEC)) host |= PROT_READ;
+    if (prot & PROT_WRITE) host |= PROT_WRITE;
+    return ::mprotect(direct_window_ + lo, hi - lo, host) == 0;
 }
 void Memory::split_high_mapping_locked(uint64_t at) {
     auto it = high_mappings_.upper_bound(at);

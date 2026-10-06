@@ -458,6 +458,33 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 fprintf(stderr, "\n");
             }
+            // A pathname socket that exists inside BIFROST_ROOT (e.g. Android's
+            // /dev/socket/logdw provided by a test harness) is reached through
+            // the confined parent directory. Otherwise the guest path stays a
+            // host path: guest libX11 connects to the host's /tmp/.X11-unix.
+            struct sockaddr_un rooted = {};
+            const auto* un = reinterpret_cast<const struct sockaddr_un*>(&ss);
+            if (ss.ss_family == AF_UNIX && un->sun_path[0] == '/' &&
+                yggdrasil::Yggdrasil::sandbox_inside_root()) {
+                const std::string guest(un->sun_path,
+                    strnlen(un->sun_path, len - offsetof(struct sockaddr_un, sun_path)));
+                auto pd = yggdrasil::Yggdrasil::open_parent(-1, guest);
+                struct stat st;
+                if (pd.valid() &&
+                    ::fstatat(pd.fd, pd.base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+                    S_ISSOCK(st.st_mode)) {
+                    rooted.sun_family = AF_UNIX;
+                    const int n = snprintf(rooted.sun_path, sizeof(rooted.sun_path),
+                                           "/proc/self/fd/%d/%s", pd.fd, pd.base.c_str());
+                    if (n > 0 && static_cast<size_t>(n) < sizeof(rooted.sun_path)) {
+                        int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&rooted),
+                                          static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + n + 1));
+                        if (r < 0) { ret_errno(); return 0; }
+                        ret_host(0);
+                        return 0;
+                    }
+                }
+            }
             int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
             if (dbg().xtrace) {
                 fprintf(stderr, "[XCONN] gfd=%llu hfd=%d res=%d ", (unsigned long long)a0, hfd, r);

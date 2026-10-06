@@ -60,6 +60,18 @@ extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
         int si_code = e.segv_code();
         arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGSEGV,
                        si_code, e.addr);
+    } catch (arm64emu::DecodeError&) {
+        // Same mapping as the interpreter run loop: an undefined
+        // instruction is guest SIGILL (zero-page pc: SIGSEGV). Letting the
+        // exception reach JIT frames (no unwind info) called
+        // std::terminate and killed the emulator instead of the guest.
+        const uint64_t fault_pc = cpu->pc;
+        if (fault_pc < 4096)
+            arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGSEGV,
+                                     arm64emu::SEGV_MAPERR_EMU, fault_pc);
+        else
+            arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGILL,
+                                     arm64emu::ILL_ILLOPC_EMU, fault_pc);
     }
     if (step_trace_) {
         fprintf(stderr, "    [step] pc=0x%llx done x0=0x%llx x24=0x%llx pstate=0x%x\n",

@@ -92,6 +92,7 @@ public:
     void set_android_runtime(bool enabled) {
         android_runtime_ = enabled;
         mem_.set_data_top_byte_ignore(enabled);
+        if (enabled) vfs_.enable_android_properties();
     }
     bool android_runtime() const { return android_runtime_; }
     void enable_android_services() { vfs_.enable_android_services(); }

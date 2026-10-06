@@ -372,6 +372,13 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (d != RAX) {
                 emit_mov_reg(d, RAX);  // copy src1 to d, preserving src1 in RAX
             }
+            // CLZ Wd reads only Wn: drop bits[63:32] (mov r32, r32) so the
+            // 64-bit count minus 32 below is exact even when Xn's upper
+            // half is non-zero.
+            if (inst.clz_params().bits == 32) {
+                if (d >= 8) emit_byte(0x45);
+                emit_byte(0x89); emit_byte(modrm(3, d & 7, d & 7));
+            }
             emit_lzcnt_reg(d, d);  // lzcnt d, d (in-place on d)
             // For 32-bit CLZ: x86 LZCNT counts 64-bit leading zeros.
             // ARM 32-bit CLZ should only count the lower 32 bits.

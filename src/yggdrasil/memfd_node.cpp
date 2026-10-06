@@ -85,6 +85,12 @@ ssize_t MemfdNode::lseek(int64_t off, int whence) {
 }
 int MemfdNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
-    return r < 0 ? -errno : 0;
+    if (r < 0) return -errno;
+    if (root_owned_) {
+        st->st_uid = 0;
+        st->st_gid = 0;
+        st->st_mode = S_IFREG | 0444;
+    }
+    return 0;
 }
 } // namespace arm64emu::yggdrasil

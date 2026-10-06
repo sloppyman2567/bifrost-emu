@@ -18,7 +18,7 @@ APEXES = {
 FILES_SHA256 = "380cddb785f861e0c04e7c84307280968010b024a405dd557fde5e2f1a89bd7b"
 
 
-def native_dependencies(root, system):
+def native_dependencies(root, system, limit=512):
     """Close DT_NEEDED plus libnativeloader's configured public preloads."""
     for name in ("public.libraries.txt", "llndk.libraries.txt"):
         dump(system, "/system/etc/" + name, root / "system/etc" / name)
@@ -45,7 +45,7 @@ def native_dependencies(root, system):
         if not LIBRARY.fullmatch(name):
             raise ValueError(f"Unsafe ART dependency: {name}")
         if name not in candidates:
-            if len(candidates) >= 512:
+            if len(candidates) >= limit:
                 raise ValueError("Oversized ART dependency graph")
             target = root / "system/lib64" / name
             dump(system, "/system/lib64/" + name, target)

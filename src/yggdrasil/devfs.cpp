@@ -27,6 +27,7 @@
 #include "yggdrasil/audio_node.hpp"
 #include "yggdrasil/input_node.hpp"
 #include "yggdrasil/dir_node.hpp"
+#include "yggdrasil/android_properties.hpp"
 #include "audio/audio.h"
 #include "frost/graphics.hpp"
 #include "frost/input.hpp"
@@ -119,6 +120,21 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
             domain->service_manager = android_services_ && path == "/dev/binder";
         }
         return std::make_unique<BinderNode>(domain, flags);
+    }
+    // Android system properties (Bionic "pre-split" single prop_area).
+    if (path == "/dev/__properties__" && android_properties_) {
+        if ((flags & O_ACCMODE) != O_RDONLY) { *err_out = -EACCES; return nullptr; }
+        std::call_once(property_area_once_, [this] {
+            size_t skipped = 0;
+            property_area_ = build_property_area(
+                load_android_properties(sandbox_root_path()), &skipped);
+            if (skipped)
+                fprintf(stderr, "[android] %zu system properties did not fit\n", skipped);
+        });
+        auto node = MemfdNode::create("bifrost-properties", property_area_, flags);
+        if (!node) { *err_out = -errno; return nullptr; }
+        node->present_root_owned();
+        return node;
     }
     // /dev/null, /dev/zero → host passthrough
     if (path == "/dev/null" || path == "/dev/zero") {

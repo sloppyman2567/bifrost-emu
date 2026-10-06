@@ -29,6 +29,41 @@
 #include <cmath>
 #include <vector>
 namespace arm64emu {
+// SCVTF/UCVTF core: convert the integer in RAX to XMM0 (single or double).
+// Signed 32-bit uses cvtsi2s* eax; everything else converts a 64-bit value.
+// Unsigned 32-bit zero-extends first (Xn's upper half is not part of Wn).
+// Unsigned x >= 2^63 halves with a sticky low bit, converts, and doubles:
+// y = (x >> 1) | (x & 1) keeps round-to-nearest-even exact in one rounding
+// (the GCC/LLVM lowering). cvt(x - 2^63) + 2^63 rounds twice (1-ULP errors).
+void FrostJIT::emit_int_to_fp_xmm0(bool is_double, bool is_unsigned, bool is_64bit_src) {
+    const uint8_t prefix = is_double ? 0xF2 : 0xF3;
+    auto cvt64 = [&] {  // cvtsi2sd/ss xmm0, rax
+        emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A); emit_byte(0xC0);
+    };
+    if (!is_unsigned) {
+        emit_byte(prefix);
+        if (is_64bit_src) emit_byte(0x48);
+        emit_byte(0x0F); emit_byte(0x2A); emit_byte(0xC0);  // cvtsi2s* xmm0, rax/eax
+        return;
+    }
+    if (!is_64bit_src) {  // < 2^32: one signed 64-bit convert is exact-rounded
+        emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
+        cvt64();
+        return;
+    }
+    emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0);   // test rax, rax
+    const size_t jns_small = emit_jcc_rel32_placeholder(0x9);  // JNS: x < 2^63
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1);   // mov rcx, rax
+    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);   // and ecx, 1
+    emit_byte(0x48); emit_byte(0xD1); emit_byte(0xE8);   // shr rax, 1
+    emit_byte(0x48); emit_byte(0x09); emit_byte(0xC8);   // or rax, rcx
+    cvt64();
+    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC0);  // adds* xmm0, xmm0
+    const size_t jmp_done = emit_jmp_rel32_placeholder();
+    patch_jcc_rel32(jns_small, static_cast<int32_t>(code_buf_used_ - (jns_small + 6)));
+    cvt64();
+    patch_jmp_rel32(jmp_done, static_cast<int32_t>(code_buf_used_ - (jmp_done + 5)));
+}
 // Round by truncating first, then adjust only when the fractional magnitude
 // is >= 0.5. Adding 0.5 to the input would mis-round values just below a tie
 // and large already-integral values. Scratch XMM0-2 stay below pinned XMM3-15.
