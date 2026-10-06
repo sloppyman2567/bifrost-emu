@@ -388,6 +388,7 @@ GLIBC_DYN_SRCS := \
 	ctest_real/test_dyn_threads.c \
 	ctest_real/test_dyn_pthread_stress.c \
 	ctest_real/test_dyn_pthread_8thread.c \
+	ctest_real/test_dyn_main_locks.c \
 	ctest_real/xwayland_wire.c
 
 # Dynamically-linked variants whose .elf name differs from the source.

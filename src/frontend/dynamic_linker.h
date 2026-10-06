@@ -155,6 +155,9 @@ struct LoadedObject {
     // Late TLS modules use a TP-relative slot while static surplus remains;
     // otherwise their DTV entry points to a separately allocated block.
     bool       tls_static_slot = false;
+    // glibc's libthread_db descriptors (`_thread_db_*`, absolute address).
+    // They live only in .symtab, which resolve_symbol() never searches.
+    std::unordered_map<std::string, uint64_t> thread_db_syms;
 };
 class DynamicLinker {
 public:
@@ -731,6 +734,17 @@ private:
     // 2.36 (Arm GNU 13.2) libc.so.6 disassembly of pthread_create and
     // the _thread_db_rtld_global__dl_stack_* descriptors.
     void init_nptl_stack_lists_();
+    // Main-thread part of glibc's __tls_init_tp, which our native linker
+    // replaces: store the tid in the initial struct pthread (rwlocks and
+    // error-checking mutexes compare it with the owner) and link the
+    // descriptor into dl_stack_user. Offsets come from libthread_db
+    // descriptors; without them this is a no-op.
+    void init_main_thread_descriptor_(const CPU& cpu);
+    // Record `_thread_db_*` symbols from the file's .symtab into obj.
+    void collect_thread_db_symbols_(const std::vector<uint8_t>& data,
+                                    uint64_t base, LoadedObject& obj);
+    // Look up a libthread_db symbol: .dynsym first, then .symtab records.
+    uint64_t resolve_thread_db_symbol_(const std::string& name) const;
     // If `target` falls within obj's PT_TLS (.tdata) segment, also
     // store `value` at the corresponding offset in the static TLS
     // block. This is needed because allocate_static_tls() copies

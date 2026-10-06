@@ -829,6 +829,19 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   as a host register and clobbered a live one (FWD-only; every OpenSSL
   SHA-256 digest was wrong under the JIT). Regression:
   `ctest/jit_two_operand_pressure.c` (the real SHA-256 round block).
+- **Native dynlink stands in for glibc's `__tls_init_tp` (2026-10-05).**
+  `init_main_thread_descriptor_()` stores the main thread's tid in its
+  `struct pthread` (at `tp - _thread_db_sizeof_pthread`) and links
+  `pd->list` into `dl_stack_user`. Without the tid, main-thread rwlocks and
+  error-checking/recursive mutexes returned EDEADLK and OpenSSL 3 loaded no
+  provider. Offsets come from glibc's `_thread_db_*` descriptors
+  (`{size_bits, count, offset}`, offset at +8), which are `.symtab`-only:
+  `parse_dynamic` collects them into `LoadedObject::thread_db_syms`, read
+  via `resolve_thread_db_symbol_()`. `init_nptl_stack_lists_` uses the same
+  lookup; its old `.dynsym`-only lookup always fell back to the glibc 2.36
+  offsets, wrong for the 2.42 rootfs. Do not hardcode struct offsets.
+  `specific[0]`/`user_stack` have no descriptors and stay unset. Regression:
+  `ctest_real/test_dyn_main_locks.c`.
 - **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
   Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
@@ -1180,13 +1193,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **279 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **280 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **279 pass /
+  (interactive + real-world are the standard default) = **280 pass /
   0 fail / 0 skip**. Subsets: `--quick` (no benches, 223),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
@@ -1198,7 +1211,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **279 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **280 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three

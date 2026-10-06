@@ -701,6 +701,7 @@ bool DynamicLinker::link(CPU& cpu,
     // program runs pthread_create. See init_nptl_stack_lists_() for the
     // full rationale. (No-op for musl, which has no _rtld_global.)
     init_nptl_stack_lists_();
+    init_main_thread_descriptor_(cpu);
     if (init_runner_) {
         uint64_t early_init = resolve_symbol("__libc_early_init");
         if (early_init != 0) {
@@ -1611,11 +1612,10 @@ void DynamicLinker::patch_rtld_funnel_() {
 //   _thread_db_rtld_global__dl_stack_used  (12-byte descriptor)
 //   _thread_db_rtld_global__dl_stack_user  (12-byte descriptor)
 //
-// Each descriptor is `{ uint32_t struct_offset; uint32_t struct_size;
-// uint32_t field_offset_lo; uint32_t field_offset_hi }` — the field
-// offset within `struct rtld_global` is at byte +8 (a 32-bit LE value).
-// (struct_offset/struct_size are libthread_db bookkeeping; we only
-// need the field offset.)
+// Each descriptor is `uint32_t[3] = { size_in_bits, element_count,
+// byte_offset }` (nptl_db/db_info.c); the field offset within
+// `struct rtld_global` is the 32-bit value at byte +8. The descriptors
+// are .symtab-only locals, found via resolve_thread_db_symbol_().
 //
 // The three list heads are CONTIGUOUS 16-byte `list_t`s:
 //   stack_used  @ desc_used.offset
@@ -1636,6 +1636,115 @@ void DynamicLinker::patch_rtld_funnel_() {
 // against double-init: if a head already points to itself (or to a
 // non-zero value — meaning ld-linux init already ran), we leave it
 // alone so we never corrupt a populated list.
+// ── libthread_db descriptors ──────────────────────────────────────────
+// glibc's nptl_db/db_info.c emits `const uint32_t _thread_db_sizeof_<T>`
+// and, per field, `const uint32_t _thread_db_<T>_<field>[3] =
+// { size_in_bits, element_count, byte_offset }`. They are local symbols
+// (.symtab only), so stripped libcs simply yield nothing here.
+void DynamicLinker::collect_thread_db_symbols_(const std::vector<uint8_t>& data,
+                                               uint64_t base, LoadedObject& obj) {
+    constexpr uint32_t SHT_SYMTAB = 2;
+    constexpr size_t SHDR_SIZE = 64;
+    uint64_t shoff = 0;
+    uint16_t shentsize = 0, shnum = 0;
+    memcpy(&shoff,     data.data() + 40, 8);
+    memcpy(&shentsize, data.data() + 58, 2);
+    memcpy(&shnum,     data.data() + 60, 2);
+    if (shoff == 0 || shentsize < SHDR_SIZE || shoff > data.size() ||
+        static_cast<uint64_t>(shnum) * shentsize > data.size() - shoff)
+        return;
+    auto section = [&](uint32_t index, uint32_t& type, uint64_t& offset,
+                       uint64_t& size, uint32_t& link) {
+        const uint8_t* s = data.data() + shoff + static_cast<uint64_t>(index) * shentsize;
+        memcpy(&type,   s + 4,  4);
+        memcpy(&offset, s + 24, 8);
+        memcpy(&size,   s + 32, 8);
+        memcpy(&link,   s + 40, 4);
+    };
+    for (uint32_t i = 0; i < shnum; ++i) {
+        uint32_t type, link, str_type, str_link;
+        uint64_t off, size, str_off, str_size;
+        section(i, type, off, size, link);
+        if (type != SHT_SYMTAB || link >= shnum) continue;
+        section(link, str_type, str_off, str_size, str_link);
+        if (off > data.size() || size > data.size() - off ||
+            str_off > data.size() || str_size > data.size() - str_off)
+            return;
+        const char* strtab = reinterpret_cast<const char*>(data.data() + str_off);
+        static const char kPrefix[] = "_thread_db_";
+        for (uint64_t pos = off; pos + sizeof(Elf64_Sym) <= off + size;
+             pos += sizeof(Elf64_Sym)) {
+            Elf64_Sym sym;
+            memcpy(&sym, data.data() + pos, sizeof(sym));
+            if (sym.st_shndx == SHN_UNDEF_ || sym.st_name >= str_size) continue;
+            const char* name = strtab + sym.st_name;
+            const size_t max_len = str_size - sym.st_name;
+            if (strnlen(name, max_len) == max_len ||
+                strncmp(name, kPrefix, sizeof(kPrefix) - 1) != 0)
+                continue;
+            obj.thread_db_syms.emplace(name, base + sym.st_value);
+        }
+        return;
+    }
+}
+uint64_t DynamicLinker::resolve_thread_db_symbol_(const std::string& name) const {
+    if (uint64_t addr = resolve_symbol(name)) return addr;
+    for (const auto& obj : objects_) {
+        auto it = obj.thread_db_syms.find(name);
+        if (it != obj.thread_db_syms.end()) return it->second;
+    }
+    return 0;
+}
+// glibc's __tls_init_tp (ld.so) runs `pd->tid = set_tid_address(&pd->tid)`
+// and `list_add(&pd->list, &GL(dl_stack_user))` for the initial thread.
+// Our native linker skips ld.so's startup, so pd->tid stayed 0: every
+// rwlock and error-checking/recursive mutex on the main thread compares
+// the owner against it and failed with EDEADLK. OpenSSL 3 takes an
+// rwlock while creating its default library context, so no provider
+// could load. struct pthread sits directly below TP (THREAD_SELF =
+// tp - 1), sized by _thread_db_sizeof_pthread. specific[0] and
+// user_stack have no descriptors and are left to glibc's fallbacks.
+void DynamicLinker::init_main_thread_descriptor_(const CPU& cpu) {
+    if (is_musl_) return;
+    const uint64_t size_sym = resolve_thread_db_symbol_("_thread_db_sizeof_pthread");
+    const uint64_t tid_desc = resolve_thread_db_symbol_("_thread_db_pthread_tid");
+    if (size_sym == 0 || tid_desc == 0) return;
+    try {
+        const uint32_t pthread_size = mem_.load<uint32_t>(size_sym);
+        const uint32_t tid_bits = mem_.load<uint32_t>(tid_desc);
+        const uint32_t tid_off = mem_.load<uint32_t>(tid_desc + 8);
+        const uint64_t tp = thread_pointer();
+        if (pthread_size == 0 || pthread_size > TLS_PRE_TCB_SIZE ||
+            tid_bits != 32 || tid_off + 4u > pthread_size || tp < pthread_size)
+            return;
+        const uint64_t pd = tp - pthread_size;
+        if (mem_.load<int32_t>(pd + tid_off) == 0)
+            mem_.store<int32_t>(pd + tid_off, cpu.tid);
+        // list_add(&pd->list, &dl_stack_user); heads are initialized above.
+        const uint64_t list_desc = resolve_thread_db_symbol_("_thread_db_pthread_list");
+        const uint64_t user_desc =
+            resolve_thread_db_symbol_("_thread_db_rtld_global__dl_stack_user");
+        const uint64_t rtld = resolve_symbol("_rtld_global");
+        if (list_desc == 0 || user_desc == 0 || rtld == 0) return;
+        const uint32_t list_off = mem_.load<uint32_t>(list_desc + 8);
+        if (list_off + 16u > pthread_size) return;
+        const uint64_t node = pd + list_off;
+        const uint64_t head = rtld + mem_.load<uint32_t>(user_desc + 8);
+        const uint64_t first = mem_.load<uint64_t>(head);
+        if (mem_.load<uint64_t>(node) != 0 || first == 0) return;
+        mem_.store<uint64_t>(node, first);       // node->next
+        mem_.store<uint64_t>(node + 8, head);    // node->prev
+        mem_.store<uint64_t>(first + 8, node);   // first->prev
+        mem_.store<uint64_t>(head, node);        // head->next
+        if (dynlink_trace_enabled())
+            fprintf(stderr, "[dynlink] main struct pthread @0x%llx: tid=%d "
+                    "(sizeof %u, tid@+%u, list@+%u)\n",
+                    static_cast<unsigned long long>(pd), cpu.tid,
+                    pthread_size, tid_off, list_off);
+    } catch (...) {
+        // Unreadable descriptor or TLS block: leave glibc's state alone.
+    }
+}
 void DynamicLinker::init_nptl_stack_lists_() {
     uint64_t rtld = resolve_symbol("_rtld_global");
     if (rtld == 0) {
@@ -1650,9 +1759,9 @@ void DynamicLinker::init_nptl_stack_lists_() {
     uint64_t off_user  = 0x1168;
     uint64_t off_cache = 0x1178;
     bool dynamic = false;
-    uint64_t desc_used = resolve_symbol(
+    uint64_t desc_used = resolve_thread_db_symbol_(
         "_thread_db_rtld_global__dl_stack_used");
-    uint64_t desc_user = resolve_symbol(
+    uint64_t desc_user = resolve_thread_db_symbol_(
         "_thread_db_rtld_global__dl_stack_user");
     if (desc_used != 0 && desc_user != 0) {
         try {
@@ -1979,6 +2088,7 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         error_ = "parse_dynamic: invalid program header table in " + obj.name;
         return false;
     }
+    collect_thread_db_symbols_(data, base, obj);
     // Find PT_DYNAMIC in program headers.
     uint64_t dyn_vaddr = 0, dyn_filesz = 0;
     for (int i = 0; i < e_phnum; i++) {

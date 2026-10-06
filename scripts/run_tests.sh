@@ -704,6 +704,9 @@ DYNAMIC_TESTS=(
     # for the "8-thread race" bug (context.md Turn 78 Issue #3). Tests
     # 8 threads x 4 waves with __thread long tls_array[8] per thread.
     "test_dyn_pthread_8thread|ctest_real/test_dyn_pthread_8thread.elf||30|test_dyn_pthread_8thread: ALL PASS"
+    # Main-thread struct pthread tid: rwlocks and error-checking/recursive
+    # mutexes on the main thread returned EDEADLK (OpenSSL 3 providers).
+    "test_dyn_main_locks|ctest_real/test_dyn_main_locks.elf||10|test_dyn_main_locks: ALL PASS"
     "test_dlopen|ctest_real/test_dlopen.elf||15|test_dlopen: ALL PASS"
     # Loader thread-safety regression: 4 dlopen/dlsym/dlclose threads x 500
     # iterations + dladdr/dl_iterate_phdr workers. Verifies the loader mutex

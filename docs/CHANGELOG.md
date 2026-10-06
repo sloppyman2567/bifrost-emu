@@ -20,13 +20,22 @@ are historical records, and v2.0 remains planned.
 - Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
   reported renderer fault remain unresolved. No controlled FPS claim is made.
 
-### OpenSSL 3 correctness: JIT register pressure (2026-10-05)
+### OpenSSL 3 correctness: JIT register pressure and glibc main thread (2026-10-05)
 
 - JIT: `ensure_two_vregs()` could evict its other operand under full
   register pressure, and its fallback passed `force_two_vregs_to()`
   arguments in the wrong order, clobbering a live host register. Every
   OpenSSL SHA-256 digest was wrong under the JIT. Add
   `ctest/jit_two_operand_pressure.c` (1,920 checks; QEMU-checked).
+- Native dynamic linker: set the glibc main thread's `struct pthread` tid
+  and list link, as `__tls_init_tp` does. Main-thread rwlocks and
+  error-checking/recursive mutexes no longer fail with EDEADLK, so OpenSSL 3
+  providers load. Read glibc's `.symtab` libthread_db descriptors for all
+  offsets; NPTL stack-list heads now use glibc 2.42's real offsets instead
+  of the 2.36 fallback. Add `ctest_real/test_dyn_main_locks.c`.
+- Verified with OpenSSL 3.0.17 SHA-1/SHA-256/AES-128-GCM over 4 MiB against
+  host Python, scalar/NEON/crypto paths, JIT and interpreter.
+
 ### AArch64 crypto and pairwise-widening SIMD (2026-10-05)
 
 - Correct the PMULL (`0x0EE0E000`) encoding, add 8-bit PMULL/PMULL2, and
