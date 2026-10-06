@@ -21,13 +21,16 @@ missing `eglSurfaceAttrib` export; media services/decoding and managed
 ## Android 15 framework probe
 
 The same pinned API-35 image now supplies `app_process64`, framework boot jars,
-and the mainline APEX native libraries. Framework provisioning schema 3
-verifies 706 files and exports a linker namespace for every installed boot
+and the mainline APEX native libraries. Framework provisioning schema 4
+verifies 917 files and exports a linker namespace for every installed boot
 APEX, including `com_android_tethering`. Each delegates to the same canonical
 native-library scope so JNI loading does not instantiate a second ART VM.
-This bootstrap layout does not reproduce production Android namespace isolation.
-Older schema-2 framework roots must be re-provisioned in a fresh destination;
-preserve the old directory if it is still useful for comparison.
+Schema 4 adds `framework-res.apk`, `fonts.xml`, `font_fallback.xml` and
+`/system/fonts`: `Resources.getSystem()` and text layout need them before an
+Activity draws. This bootstrap layout does not reproduce production Android
+namespace isolation. Older schema-2/3 framework roots must be re-provisioned
+in a fresh destination; preserve the old directory if it is still useful for
+comparison.
 
 ```bash
 python3 tools/android_framework.py
@@ -38,6 +41,11 @@ java -cp tools/android-tools/d8.jar com.android.tools.r8.D8 --min-api 26 \
 timeout -s KILL 165 python3 scripts/test_android_framework.py --mode jit --timeout 150
 timeout -s KILL 165 python3 scripts/test_android_framework.py --mode interp --timeout 150
 ```
+
+`--services` enables Bifrost's Binder service registry
+(`--android-services`). `--library` copies a probe JNI `.so` into
+`/data/local/tmp`. `BIFROST_BINDER_TRACE=1` logs Binder transactions,
+registry calls and failures.
 
 Both Bifrost engines reach `FRAMEWORK_OK` and exit zero with ART's nterp and
 its own JIT enabled; no `-Xint` or `dalvik.vm.usejit=false` override is needed.
@@ -55,6 +63,35 @@ backings now retain kernel aliases across unmap, replacement, remap and fork;
 `msync` writes back, and `MADV_DONTNEED` refaults file data. Binder arenas stay
 inside the direct window even after high ART reservations. Native Bifrost
 callers unwind after guest process exit instead of reaching libc's fallback trap.
+
+The Android profile leaves guest page 0 unmapped, as Linux does
+(`mmap_min_addr`). ART's implicit null checks need that fault: its SIGSEGV
+handler converts it into `NullPointerException`. Bifrost's Linux profiles
+still map a readable zero page for legacy guests. With it mapped, nterp read
+a zero method entry point from a null `ArtMethod*` and jumped to address 0.
+`/proc/self/maps` reports the linker's real extent and omits an empty
+`[heap]`, so lines never overlap. Bionic takes the first line containing the
+initial SP as the main stack; the old 256 MiB `[interp]` guess could win.
+ART then computed a negative `madvise` length below the stack. `madvise` now
+returns `EINVAL` for wrapping ranges like Linux `do_madvise`; it previously
+zeroed every page above the start, including libc text. This caused the
+layout-dependent early SIGILL recorded in [test evidence](TESTS.md).
+
+### Activity creation checkpoint
+
+A local Activity probe (kept outside the repository) passes in both engines
+with `--services`: 118.8 s JIT and 220.9 s interpreter. It calls
+`ActivityThread.systemMain()`, loads the preinstalled font map, then runs
+`Instrumentation.newActivity` and `callActivityOnCreate`. The Activity's
+`onCreate` runs and the decor view, including a title `TextView`, inflates.
+`Typeface.loadPreinstalledSystemFontMap()` stands in for
+`handleBindApplication`, which loads fonts when lazy Typeface initialization is
+enabled. Missing system services are in-process Java Binder stubs installed in
+`ServiceManager.sCache`. Display returns one 480×800 display; package reports
+no features; settings returns empty values. The `activity` and `activity_task`
+stubs return only the provider and Activity controller. Window reports no
+navigation bar and animator scale 1.0. Activity resume, window attachment,
+surfaces, drawing, input and real system services remain unimplemented.
 
 The image's boot artifacts still fail ART's read-barrier compatibility check;
 ART falls back to imageless execution. QEMU gets past the repaired mainline

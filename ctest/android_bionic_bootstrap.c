@@ -19,9 +19,45 @@ extern void* dlopen(const char*, int);
 extern void* dlsym(void*, const char*);
 extern int dlclose(void*);
 extern char* dlerror(void);
+typedef struct FILE FILE;
+extern FILE* fopen(const char*, const char*);
+extern char* fgets(char*, int, FILE*);
+extern int fclose(FILE*);
+extern int sscanf(const char*, const char*, ...);
+extern pthread_t pthread_self(void);
+extern int pthread_getattr_np(pthread_t, void*);
+extern int pthread_attr_getstack(const void*, void**, unsigned long*);
+extern int pthread_attr_destroy(void*);
 static __thread int tls_value __attribute__((aligned(64))) = 17;
 static int constructed;
 __attribute__((constructor)) static void initialize(void) { constructed = 41; }
+// Bionic and ART find the main stack via the first /proc/self/maps line
+// containing the initial SP, so lines must not overlap and the reported
+// stack must contain this frame (ART madvises below it).
+static int check_main_stack(void) {
+    FILE* maps = fopen("/proc/self/maps", "re");
+    if (!maps) return 1;
+    char line[512];
+    unsigned long previous_end = 0, low, high;
+    int overlap = 0;
+    while (fgets(line, sizeof(line), maps))
+        if (sscanf(line, "%lx-%lx", &low, &high) == 2) {
+            if (low < previous_end || high <= low) {
+                if (!overlap) printf("overlapping maps line after %lx: %s", previous_end, line);
+                overlap = 1;
+            }
+            previous_end = high;
+        }
+    fclose(maps);
+    if (overlap) return 2;
+    unsigned long attr[8] __attribute__((aligned(16))) = {0};
+    void* base = 0;
+    unsigned long size = 0;
+    if (pthread_getattr_np(pthread_self(), attr) ||
+        pthread_attr_getstack(attr, &base, &size) || pthread_attr_destroy(attr)) return 3;
+    unsigned long frame = (unsigned long)__builtin_frame_address(0);
+    return frame > (unsigned long)base && frame < (unsigned long)base + size ? 0 : 4;
+}
 static void* worker(void* unused) {
     (void)unused;
     if (tls_value != 17) return (void*)1;
@@ -34,6 +70,9 @@ int main(int argc, char** argv, char** envp) {
     if (argc != 1 || constructed != 41 || tls_value != 17) return 1;
     if (getauxval(6) != 4096 || getpagesize() != 4096 || !getauxval(7)) return 2;
     printf("Bionic: constructors and auxv passed (page=%d)\n", getpagesize());
+    int stack = check_main_stack();
+    if (stack) { printf("main stack check failed: %d\n", stack); return 9; }
+    printf("Bionic: /proc/self/maps and main-thread stack bounds passed\n");
     tls_value = 31;
     *__errno() = 11;
     pthread_t thread;

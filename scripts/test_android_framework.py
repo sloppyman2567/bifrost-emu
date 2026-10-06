@@ -68,7 +68,8 @@ class LogdReceiver:
         self.sock.close()
 
 
-def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=()):
+def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
+        libraries=()):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
@@ -77,6 +78,10 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         (root / "data/local/tmp").mkdir(parents=True)
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
         shutil.copy2(probe, root / "data/local/tmp/probe.dex")
+        for library in libraries:
+            if not library.name.endswith(".so") or not library.is_file():
+                raise ValueError("Probe libraries must be regular .so files")
+            shutil.copy2(library, root / "data/local/tmp" / library.name)
         if properties:
             # The serializer keeps the first definition of a key, so
             # prepended overrides beat the image's build.prop.
@@ -111,6 +116,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())
             environment["BIFROST_TIER2"] = "0"
             arguments = [str(emu)] + (["--no-jit"] if mode == "interp" else [])
+            if services:
+                arguments += ["--android-services"]
             arguments += ["--android-runtime", "--rootfs", str(root), "/system/bin/app_process64"] + program
         log_path = output / (mode + ".log")
         started = time.monotonic()
@@ -153,6 +160,8 @@ if __name__ == "__main__":
                         help="Extra ART runtime option (repeatable), e.g. -Xint")
     parser.add_argument("--prop", action="append", default=[], metavar="KEY=VALUE",
                         help="System property override (repeatable)")
+    parser.add_argument("--services", action="store_true", help="Enable Bifrost's Binder service registry")
+    parser.add_argument("--library", type=Path, action="append", default=[], help="Copy a probe JNI library into /data/local/tmp")
     args = parser.parse_args()
     if not 1 <= args.timeout <= 300:
         parser.error("timeout must be between 1 and 300 seconds")
@@ -166,4 +175,4 @@ if __name__ == "__main__":
             args.emu = ROOT / "bifrost-emu"
     sys.exit(0 if run(args.emu.resolve(), args.runtime_root.resolve(), args.art_root.resolve(),
                       args.probe.resolve(), args.mode, args.output.resolve(), args.timeout,
-                      args.art_option, args.prop) else 1)
+                      args.art_option, args.prop, args.services, args.library) else 1)

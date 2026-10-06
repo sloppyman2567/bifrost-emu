@@ -10,6 +10,31 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Android Activity creation (2026-10-06)
+
+The strict Linux suite passes **287/287 JIT** and **280/280 interpreter**,
+with seven expected JIT-only skips (168 s and 133 s). The committed framework
+probe passes on a schema-4 root in 54.9 s JIT and 136.5 s interpreter. The ART
+JNI fixture passes in both engines. The loader fixture passes, and the package
+tests pass 6/6. All six Bionic bootstrap variants pass. A local Activity probe
+reaches `FRAMEWORK_OK` after `onCreate` (118.8 s JIT, 220.9 s interpreter);
+see [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
+
+Focused additions:
+
+- `test_mem_guard`: wrapping `madvise` ranges return `EINVAL` and keep a
+  mapped page above the start intact; a huge valid range still returns
+  promptly. The pre-change binary fails the wrap check. QEMU passes.
+- `android_bionic_bootstrap`: `/proc/self/maps` lines must not overlap, and
+  the main thread's `pthread_getattr_np` stack must contain the current frame.
+  Restoring only the old 256 MiB `[interp]` line fails the overlap check.
+- `android_service_manager`: Java-style `PING_TRANSACTION` with
+  `FLAG_COLLECT_NOTED_APP_OPS | TF_ACCEPT_FDS` (55 checks, both engines).
+
+The early `app_process64` SIGILL below was reproduced and explained: the
+linker landed within 256 MiB below the stack, the stack lookup selected the
+`[interp]` line, and ART's wrapped `madvise` zeroed libc text.
+
 ### Android framework regressions (2026-10-06)
 
 The complete strict Linux suite passes **287/287 JIT** and **280/280
@@ -29,8 +54,8 @@ The final reviewed framework runs pass in 54.397 s (JIT) and 106.818 s
 (interpreter), recorded under `build/android-framework-results/final-reviewed/`.
 One earlier JIT trial stopped at an early guest SIGILL in `app_process64`
 (`build/android-framework-results/final-art-jit/jit.json`), before
-`libopenjdk` loaded. It did not recur in the three stress repeats or final
-reviewed run; these passes do not establish that intermittent issue's cause.
+`libopenjdk` loaded. Its layout-dependent cause is fixed in the Activity
+checkpoint above.
 
 The bounded real Android 15 `app_process64` probe reaches `FRAMEWORK_OK` and
 exits zero in both Bifrost engines with ART nterp and ART JIT enabled. See

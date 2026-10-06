@@ -12,6 +12,18 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Android Activity creation (2026-10-06)
+
+- Leave guest page 0 unmapped in the Android profile so ART's implicit null
+  checks raise `NullPointerException` instead of jumping to address 0.
+- Report the linker's real extent in `/proc/self/maps` and omit an empty
+  `[heap]`. Return `EINVAL` from `madvise` for wrapping ranges. Together these
+  fix the layout-dependent early SIGILL in `app_process64`.
+- Answer Binder `PING_TRANSACTION` in the host registry and accept
+  `FLAG_COLLECT_NOTED_APP_OPS`. Add `BIFROST_BINDER_TRACE`.
+- Framework provisioning schema 4 adds framework resources and fonts.
+- A local probe creates a real Activity through `onCreate` in both engines.
+
 ### Android 15 framework initialization (2026-10-06)
 
 - Fix BLR X30 target capture in interpreter/IR; ART nterp method calls now

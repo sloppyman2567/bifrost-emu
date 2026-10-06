@@ -71,8 +71,12 @@ and [Parcel interface header](https://android.googlesource.com/platform/framewor
 StrictMode, WorkSource, `SYST` and the String16 interface descriptor.
 It implements interface discovery, `getService`, `checkService`, `addService`
 and dump-priority-filtered `listServices`, with bounded ASCII names and aligned
-parcels. Lookups are nonblocking. Unknown transaction codes return Android's
-`UNKNOWN_TRANSACTION` status; malformed parcels fail explicitly.
+parcels. Lookups are nonblocking. `PING_TRANSACTION` returns status 0, as
+libbinder's first use of handle 0 requires. Unknown transaction codes return
+Android's `UNKNOWN_TRANSACTION` status; malformed parcels fail explicitly.
+Transactions accept Java's `FLAG_COLLECT_NOTED_APP_OPS` (2) and `TF_ACCEPT_FDS`
+(0x10); neither makes a call one-way. `BIFROST_BINDER_TRACE=1` logs
+transactions, registry calls and failure replies.
 
 The registry holds strong references to real guest Binder objects. Lookup
 returns callable translated handles, whose receive-buffer references follow

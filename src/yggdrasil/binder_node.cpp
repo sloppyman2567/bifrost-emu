@@ -1,6 +1,8 @@
 #include "yggdrasil/binder_node.hpp"
 #include "core/memory.h"
 #include "core/cpu.h"
+#include "debug_flags.h"
+#include <cstdio>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -122,6 +124,8 @@ int BinderNode::free_buffer(Memory& mem, uint64_t addr) {
     return 0;
 }
 void BinderNode::fail(int tid, uint32_t command, int error) {
+    if (dbg().binder_trace)
+        fprintf(stderr, "[binder] tid=%d failure command=%#x errno=%d\n", tid, command, error);
     auto& detail = errors_[tid];
     detail = {detail.id + 1, command, -error};
     replies_[tid].push_back(Event{command});
@@ -142,9 +146,13 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
         return reference_command(cmd, bytes);
     if (cmd != BF_BC_TRANSACTION && cmd != BF_BC_REPLY) return -EINVAL;
     bf_binder_transaction tx; memcpy(&tx, bytes, sizeof(tx));
+    if (dbg().binder_trace)
+        fprintf(stderr, "[binder] transaction tid=%d target=%llu code=%#x flags=%#x data=%llu offsets=%llu\n",
+                tid, (unsigned long long)tx.target, tx.code, tx.flags,
+                (unsigned long long)tx.data_size, (unsigned long long)tx.offsets_size);
     if (tx.data_size > LIMIT || tx.offsets_size > 512 ||
         ((tx.data_size + 7) & ~uint64_t(7)) + tx.offsets_size > LIMIT ||
-        (tx.flags & ~(BF_TF_ONE_WAY | BF_TF_CLEAR_BUF | 0x08u | 0x10u))) {
+        (tx.flags & ~(BF_TF_ONE_WAY | BF_TF_COLLECT_NOTED_APP_OPS | BF_TF_CLEAR_BUF | 0x08u | 0x10u))) {
         fail(tid, BF_BR_FAILED_REPLY, EINVAL); return 0;
     }
     BinderNode* target = nullptr;

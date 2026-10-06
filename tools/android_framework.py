@@ -21,7 +21,7 @@ import android_art
 # boot_classpaths): the primary boot.oat records its jars in the
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
-SCHEMA = 3
+SCHEMA = 4
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -197,6 +197,15 @@ def install(destination, art_root, archive=None):
         missing = [jar for jar in primary + mainline if not (root / jar.lstrip("/")).is_file()]
         if missing:
             raise ValueError("Boot classpath jars missing: " + ", ".join(missing))
+        # Resources.getSystem() and the software text renderer require these
+        # image assets even before an Activity asks for its first window.
+        dump(system, "/system/framework/framework-res.apk", root / "system/framework/framework-res.apk")
+        for name in ("fonts.xml", "font_fallback.xml"):
+            dump(system, "/system/etc/" + name, root / "system/etc" / name)
+        subprocess.run(["debugfs", "-R", "rdump /system/fonts .", str(system.resolve())],
+                       cwd=root / "system", capture_output=True, check=True, timeout=60)
+        if not (root / "system/fonts").is_dir():
+            raise ValueError("Framework font extraction failed")
         dump(system, "/system/bin/app_process64", root / "system/bin/app_process64")
         (root / "system/bin/app_process64").chmod(0o755)
         graph, preloads = android_art.native_dependencies(root, system, limit=1024)

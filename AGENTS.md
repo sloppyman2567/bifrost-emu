@@ -40,9 +40,21 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - Native call guards must unwind a stopped CPU after `exit_group`, preserving
   its successful status (`jit_call_exit`). Binder receive arenas must use a
   free low-window hole after high ART reservations (`android_binder`).
-- Framework provisioning schema 3 includes mainline APEX native libraries and
-  exported namespaces. See `docs/ANDROID_RUNTIME.md` for the bounded framework
-  probe and its remaining service/Activity boundaries.
+- The Android profile leaves guest page 0 unmapped (Linux `mmap_min_addr`):
+  ART's implicit null checks need the SIGSEGV to become NullPointerException.
+  Linux profiles keep the readable zero page; do not unify them.
+- `/proc/self/maps` lines must never overlap: Bionic takes the first line
+  containing the initial SP as the main stack. The `[interp]` line is the
+  linker's real extent (`interp_end_`), not a size guess. `madvise` returns
+  EINVAL for wrapping ranges like Linux `do_madvise` (ART passes a negative
+  length when stack bounds are wrong). Regressions: `test_mem_guard`, the
+  maps/stack check in `ctest/android_bionic_bootstrap.c`.
+- The host Binder registry answers `PING_TRANSACTION` and accepts Java's
+  `FLAG_COLLECT_NOTED_APP_OPS`; `BIFROST_BINDER_TRACE=1` traces transactions.
+- Framework provisioning schema 4 adds mainline APEX native libraries,
+  exported namespaces, framework resources and fonts. See
+  `docs/ANDROID_RUNTIME.md` for the framework probe, the Activity creation
+  checkpoint and remaining service/window boundaries.
 
 ## Local Contracts
 
@@ -1237,13 +1249,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **282 pass /
-  0 fail / 0 skip**: unit + integration + toybox + real-world +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **287 pass /
+  0 fail / 0 skip**; `--no-jit` = 280 pass + 7 JIT-only skips: unit +
+  integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **282 pass /
+  (interactive + real-world are the standard default) = **287 pass /
   0 fail / 0 skip**. Subsets: `--quick` (no benches, 223),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).

@@ -376,6 +376,7 @@ private:
     uint64_t phnum_ = 0;
     uint64_t phent_ = 0;
     uint64_t interp_base_ = 0;  // dynamic linker load address (0 if static)
+    uint64_t interp_end_ = 0;   // end of its last PT_LOAD, for /proc/self/maps
     uint64_t prog_entry_ = 0;   // original program entry (for AT_ENTRY)
     uint64_t vdso_base_ = 0;    // vDSO ELF load address (for AT_SYSINFO_EHDR)
     uint64_t vdso_size_ = 0;    // vDSO mapped size (page-rounded), for fast-path PC checks

@@ -104,8 +104,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     };
     // IFUNC resolvers can read Linux auxiliary data at low addresses while
     // the dynamic linker is running. Keep the emulator's zero page mapped
-    // before loading or relocating any guest objects.
-    mem_.map_range(0, Memory::PAGE_SIZE);
+    // before loading or relocating any guest objects. The Android profile
+    // leaves it unmapped like Linux (mmap_min_addr): ART's implicit null
+    // checks need the fault to raise NullPointerException, and Bionic's
+    // linker passes resolvers a real argument block.
+    if (!android_runtime_) mem_.map_range(0, Memory::PAGE_SIZE);
     elf_path_ = path;
     // Initialize the guest process name (comm) to the ELF basename.
     // This matches the Linux kernel behavior: the initial comm is the
@@ -141,7 +144,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             out.push_back(e);
         }
         // Heap (brk): from brk_start_ to brk_.
-        if (brk_start_ > 0 && brk_ >= brk_start_) {
+        if (brk_start_ > 0 && brk_ > brk_start_) {  // Linux omits an empty [heap]
             yggdrasil::Yggdrasil::MapEntry e;
             e.start = brk_start_;
             e.end   = brk_;
@@ -149,11 +152,13 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             e.label = "[heap]";
             out.push_back(e);
         }
-        // Dynamic linker range.
-        if (interp_base_ > 0) {
+        // Dynamic linker image. Report its real extent: Bionic and glibc
+        // find the main stack by taking the first maps line that contains
+        // the initial SP, so an oversized guess here can swallow the stack.
+        if (interp_base_ > 0 && interp_end_ > interp_base_) {
             yggdrasil::Yggdrasil::MapEntry e;
             e.start = interp_base_;
-            e.end   = interp_base_ + 0x10000000;  // 256 MiB upper bound
+            e.end   = (interp_end_ + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
             std::snprintf(e.perms, sizeof(e.perms), "rwxp");
             e.label = "[interp]";
             out.push_back(e);
@@ -164,6 +169,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             uint64_t a = kv.first, s = kv.second;
             // Skip the heap region (already emitted above).
             if (a == brk_start_) continue;
+            // The Android linker's reservation is the [interp] line above.
+            if (interp_base_ && a == interp_base_) continue;
             // Skip the TLS scratch area near brk_start_ (it's part of the
             // mmap region but we want to show it as anon).
             yggdrasil::Yggdrasil::MapEntry e;
@@ -283,6 +290,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     phent_ = info.phent;
     has_lse_ = info.has_lse;
     interp_base_ = 0;
+    interp_end_ = 0;
     // If the binary has a PT_INTERP (dynamic linker), load it.
     // The dynamic linker's entry point becomes the real entry point;
     // the binary's entry is passed via AT_ENTRY in auxv.
@@ -312,6 +320,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         dyn_linker_.reset();
         entry_ = loaded.entry;
         interp_base_ = loaded.base_addr;
+        interp_end_ = loaded.end_addr;
         has_lse_ = has_lse_ || loaded.has_lse;
         // Guest shim DSOs resolve only explicit adapter exports. Bionic
         // continues to own all ELF relocation/TLS; no custom linker is made.
@@ -866,6 +875,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     }
                     uint64_t end = addr + p_memsz;
                     if (end > end_addr_) end_addr_ = end;
+                    if (end > interp_end_) interp_end_ = end;
                 }
                 // The entry point is the interpreter's entry (relative to interp_base).
                 // Skip this if we used native dynlink — we run the main
@@ -969,8 +979,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     }
     // Map the zero page so NULL dereferences return 0 instead of
     // crashing. libc code often has NULL checks that only work if
-    // the load itself doesn't fault.
-    mem_.map_range(0, 4096);
+    // the load itself doesn't fault. Not for Android (see above).
+    if (!android_runtime_) mem_.map_range(0, 4096);
     main_cpu_.pc = entry_;
     main_cpu_.running = true;
     main_cpu_.tid = 1;  // main thread TID

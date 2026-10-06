@@ -1,6 +1,8 @@
 #include "core/memory.h"
 #include "yggdrasil/android_parcel.hpp"
 #include "yggdrasil/binder_node.hpp"
+#include "debug_flags.h"
+#include <cstdio>
 #include <algorithm>
 
 namespace arm64emu::yggdrasil {
@@ -26,6 +28,11 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
     uint64_t free_bytes = 0;
     for (const auto &range : free_)
         free_bytes += range.second;
+    if (dbg().binder_trace)
+        fprintf(stderr, "[binder] registry tid=%d code=%#x flags=%#x data=%llu offsets=%llu mapped=%d memory=%d free=%llu queued=%llu\n",
+                tid, tx.code, tx.flags, (unsigned long long)tx.data_size,
+                (unsigned long long)tx.offsets_size, !!mapping_, memory_ == &mem,
+                (unsigned long long)free_bytes, (unsigned long long)queued_bytes_);
     if (!mapping_ || memory_ != &mem || tx.flags & BF_TF_ONE_WAY ||
         replies_[tid].size() + 2 > 256 || queued_bytes_ > free_bytes ||
         reservation > free_bytes - queued_bytes_) {
@@ -40,7 +47,13 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
         if (!data.empty())
             mem.read(tx.buffer, data.data(), data.size());
         AndroidParcelReader input(data);
-        if (tx.code == 0x5f4e5446) { // INTERFACE_TRANSACTION
+        if (tx.code == 0x5f504e47) { // PING_TRANSACTION: no interface token
+            input.finish();
+            if (tx.offsets_size)
+                throw std::invalid_argument("unexpected Binder objects");
+            result.write<int32_t>(0);
+            reply.transaction.flags = STATUS_CODE;
+        } else if (tx.code == 0x5f4e5446) { // INTERFACE_TRANSACTION
             input.finish();
             if (tx.offsets_size)
                 throw std::invalid_argument("unexpected Binder objects");

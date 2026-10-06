@@ -5,7 +5,10 @@
 //      page-round into covering — and freeing — every live mapping).
 //   2. MAP_FIXED_NOREPLACE refuses to overlap the main stack.
 //   3. madvise over an enormous length returns promptly (it used to walk
-//      one page at a time, ~2^52 iterations, hanging the emulator).
+//      one page at a time, ~2^52 iterations, hanging the emulator), and a
+//      wrapping length is rejected with EINVAL like Linux do_madvise. ART
+//      passes a negative length when its stack bounds are wrong; applying
+//      it zeroed every page above the start, including libc's text.
 //   4. Above-the-4GiB-window MAP_FIXED map/write/read/unmap cycles run
 //      sequentially across several regions (sparse pages_ path).
 //
@@ -52,12 +55,25 @@ static int test_noreplace_stack(void) {
     return 0;
 }
 
-// 3. madvise over a huge length must return promptly.
+// 3. madvise: wrapping lengths fail, huge ones return promptly.
 static int test_madvise_huge(void) {
-    int r = madvise((void*)0x100000000UL, (size_t)0xFFFFFFFFFFFFF000UL,
-                    MADV_DONTNEED);
-    (void)r;  // the point is that it returns at all (no host hang)
-    return 0;
+    unsigned char* page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) return -1;
+    page[0] = 0x5A;
+    // start + PAGE_ALIGN(len) wraps past zero: EINVAL, nothing discarded.
+    errno = 0;
+    if (madvise((void*)0x100000000UL, (size_t)0xFFFFFFFFFFFFF000UL,
+                MADV_DONTNEED) != -1 || errno != EINVAL) return -2;
+    errno = 0;
+    if (madvise((void*)0x1000UL, (size_t)-1, MADV_DONTNEED) != -1 ||
+        errno != EINVAL) return -3;
+    if (page[0] != 0x5A) return -4;
+    // Huge but valid: Linux may report ENOMEM for unmapped holes.
+    errno = 0;
+    int r = madvise((void*)0x100000000UL, (size_t)1 << 46, MADV_DONTNEED);
+    if (r != 0 && errno != ENOMEM) return -5;
+    return munmap(page, 4096) ? -6 : 0;
 }
 
 // 4. Above-window MAP_FIXED r/w cycles. Kept single-threaded: concurrent

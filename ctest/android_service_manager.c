@@ -70,6 +70,9 @@ static int find(uint32_t wanted, void *value) {
 static int transact(int fd, uint32_t code, uint64_t *offsets, size_t count,
                     struct bf_binder_transaction *reply) {
     struct bf_binder_transaction tx = {0};
+    // Java proxies pass FLAG_COLLECT_NOTED_APP_OPS plus TF_ACCEPT_FDS.
+    // Neither flag changes the synchronous transaction into a one-way call.
+    tx.flags = BF_TF_COLLECT_NOTED_APP_OPS | 0x10;
     tx.code = code;
     tx.data_size = length;
     tx.buffer = (uintptr_t)parcel;
@@ -90,6 +93,9 @@ int main(void) {
     CHECK(ioctl(server, BF_BINDER_SET_CONTEXT_MGR, 0) < 0);
     struct bf_binder_transaction reply;
     length = 0;
+    CHECK(transact(client, 0x5f504e47, 0, 0, &reply));
+    CHECK(reply.flags == 8 && *(int32_t *)(uintptr_t)reply.buffer == 0);
+    CHECK(!release_reply(client, &reply));
     CHECK(transact(client, 0x5f4e5446, 0, 0, &reply));
     CHECK(!reply.flags && *(int32_t *)(uintptr_t)reply.buffer == 26);
     CHECK(!release_reply(client, &reply));

@@ -53,6 +53,8 @@ struct bf_binder_error { uint32_t id, command; int32_t param; };
 #define BF_BR_NOOP BF_IO('r',12)
 #define BF_BR_FAILED_REPLY BF_IO('r',17)
 #define BF_TF_ONE_WAY 1u
+/* Android IBinder.FLAG_COLLECT_NOTED_APP_OPS is passed through to Binder. */
+#define BF_TF_COLLECT_NOTED_APP_OPS 2u
 #define BF_TF_CLEAR_BUF 0x20u
 #define BF_BINDER_TYPE_BINDER 0x73622a85u
 #define BF_BINDER_TYPE_WEAK_BINDER 0x77622a85u

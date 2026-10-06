@@ -491,7 +491,13 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)a0,
                         (unsigned long)a1, (long long)(int64_t)a2);
             }
-            if (a0 & Memory::PAGE_MASK) {
+            // Linux do_madvise: the page-rounded length must not wrap, and
+            // neither may start + length. ART computes a negative length
+            // when its stack bounds are wrong; applying it would discard
+            // every page above the start address.
+            const uint64_t madvise_len = (a1 + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
+            if ((a0 & Memory::PAGE_MASK) || (a1 && !madvise_len) ||
+                a0 + madvise_len < a0) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
             }
