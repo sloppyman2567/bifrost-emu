@@ -33,6 +33,7 @@ namespace arm64emu {
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <string>
 #include <sys/types.h>  // mode_t
 #include <thread>
@@ -195,6 +196,15 @@ public:
     const std::string& guest_comm() const { return guest_comm_; }
     // Guest umask (tracked separately from host for sandbox isolation
     // and JIT verify-mode correctness).
+    // Linux do_group_exit: exit_group or a fatal default signal on ANY
+    // guest thread ends the whole process with `code` (first request
+    // wins). Stops the caller, the main CPU and every guest thread, wakes
+    // futex sleepers and kicks blocked host threads. run() then joins
+    // everything and returns the code. Callable from any guest thread.
+    void group_exit(CPU& caller, int code);
+    bool group_exit_requested() const {
+        return group_exit_.load(std::memory_order_acquire);
+    }
     mode_t guest_umask() const { return guest_umask_; }
     void set_guest_umask(mode_t m) { guest_umask_ = m & 0777; }
     // Build the default guest environment, propagating locale/timezone-
@@ -407,6 +417,12 @@ private:
     // doesn't see false-positive divergences from the host umask being
     // changed twice). Also provides sandbox isolation.
     mode_t guest_umask_ = 0022;  // default: rwxr-xr-x → rw-r--r--
+    std::atomic<bool> group_exit_{false};
+    std::atomic<int> group_exit_code_{0};
+    // Host thread running run()'s main loop, kicked by a worker's
+    // group_exit. Unset in a fork child created from a worker thread.
+    pthread_t main_host_thread_{};
+    std::atomic<bool> main_host_thread_set_{false};
     // Decode cache type alias (constants + CacheEntry type live on CPU).
     using CacheEntry = CPU::CacheEntry;
     // ── Thread management (for clone()) ───────────────────────────────
@@ -725,8 +741,8 @@ private:
     // Wake every futex waiter in every shard (execve kill assist).
     void wake_all_futexes();
     // 1.5.4-alpha: stop + join every SDL worker thread. Real Linux
-    // exit_group kills ALL threads; our exit_group handler only clears
-    // the calling CPU's running flag. SDL threads spawned via
+    // exit_group kills ALL threads; group_exit() stops the guest threads
+    // but not these. SDL threads spawned via
     // SDL_CreateThread run in REAL host std::threads and may be blocked
     // in host SDL calls (SDL_SemWait, SDL_Delay) at that point. This
     // sets each thread's cpu.running=false (so its interpreter loop

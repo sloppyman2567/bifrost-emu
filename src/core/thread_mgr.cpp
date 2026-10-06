@@ -152,9 +152,9 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
         if (!deliver_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
             // No handler installed — default disposition terminates the
-            // thread. deliver_signal already set cpu.running=false and
-            // cpu.exit_code=128+signo. throw site is quiet by default,
-            // so this is the crash line.
+            // process: deliver_signal already called group_exit with
+            // 128+signo. throw site is quiet by default, so this is the
+            // crash line.
             std::string mod;
             uint64_t off = 0;
             try {
@@ -413,18 +413,63 @@ void Emulator::join_threads() {
     // can take threads_mu_ on some exit paths (find_cpu_by_tid,
     // invalidate_jit_range) — joining while holding it deadlocks. Same
     // reasoning as kill_other_threads' comment.
-    std::vector<std::shared_ptr<GuestThread>> victims;
+    //
+    // After the main thread's own exit the process lives until the last
+    // thread exits, or until a group exit (exit_group / fatal signal on a
+    // worker) stops them all: poll instead of blocking in join so that
+    // request reaches threads already moved out of threads_. Repeat until
+    // no thread is left, since survivors may spawn more.
+    for (;;) {
+        std::vector<std::shared_ptr<GuestThread>> victims;
+        {
+            std::lock_guard<std::mutex> g(threads_mu_);
+            victims.swap(threads_);
+        }
+        if (victims.empty()) return;
+        for (auto& gt : victims) {
+            if (gt->host_thread.joinable())
+                ::pthread_kill(gt->host_thread.native_handle(), KICK_SIGNAL);
+        }
+        bool stopped = false;
+        for (auto& gt : victims) {
+            if (!gt->host_thread.joinable()) continue;
+            while (!gt->finished.load(std::memory_order_acquire)) {
+                if (!stopped && group_exit_requested()) {
+                    stopped = true;
+                    for (auto& v : victims) v->cpu.running = false;
+                    wake_all_futexes();
+                }
+                if (stopped) ::pthread_kill(gt->host_thread.native_handle(), KICK_SIGNAL);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            gt->host_thread.join();
+        }
+    }
+}
+void Emulator::group_exit(CPU& caller, int code) {
+    caller.exit_code = code;
+    caller.running = false;
+    bool expected = false;
+    if (!group_exit_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;  // another thread already ended the process
+    group_exit_code_.store(code, std::memory_order_release);
+    if (&caller != &main_cpu_) {
+        main_cpu_.exit_code = code;
+        main_cpu_.running = false;
+    }
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        victims.swap(threads_);
+        for (auto& gt : threads_) {
+            gt->cpu.running = false;
+            if (&gt->cpu != &caller && gt->host_thread.joinable())
+                ::pthread_kill(gt->host_thread.native_handle(), KICK_SIGNAL);
+        }
     }
-    for (auto& gt : victims) {
-        if (gt->host_thread.joinable())
-            ::pthread_kill(gt->host_thread.native_handle(), KICK_SIGNAL);
-    }
-    for (auto& gt : victims) {
-        if (gt->host_thread.joinable()) gt->host_thread.join();
-    }
+    wake_all_futexes();
+    // Interrupt the main loop's host syscall (sleep, read, ...).
+    if (&caller != &main_cpu_ && main_host_thread_set_.load(std::memory_order_acquire) &&
+        !::pthread_equal(main_host_thread_, ::pthread_self()))
+        ::pthread_kill(main_host_thread_, KICK_SIGNAL);
 }
 void Emulator::reap_finished_threads() {
     // Detached SDL threads are joined + freed here too.
@@ -693,6 +738,8 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
             (void)new std::thread(std::move(stats_reporter_thread_));
         }
         alive_threads_.store(0);
+        // The child's only host thread is the forking one.
+        main_host_thread_set_.store(&parent_cpu == &main_cpu_, std::memory_order_release);
         // Host threads don't survive fork(): release thunk-owned pump
         // threads (audio etc.) so their shutdown join() can't hang the
         // child, and let them spawn fresh ones.

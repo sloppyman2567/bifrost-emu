@@ -12,6 +12,17 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Group-wide process exit (2026-10-06)
+
+- `exit_group` and fatal default signals end the whole process from any
+  thread. A fatal signal used to stop only the receiving thread, so ART's
+  `Process.killProcess(myPid(), 9)` left its daemon threads running and the
+  emulator never exited; `exit_group` from a worker never stopped the main
+  thread. Cross-thread fatal signals now take effect at send time instead of
+  waiting in a queue the blocked target never drains.
+- Threads created in a fork child return the child's pid from `getpid`
+  (they returned their own tid, so `kill(getpid(), ...)` failed).
+
 ### /proc/self/fd reopen and openat2 (2026-10-06)
 
 - `open("/proc/self/fd/N")` reopens the file behind guest descriptor N.

@@ -1373,6 +1373,8 @@ int Emulator::run() {
             }
         });
     }
+    main_host_thread_ = ::pthread_self();
+    main_host_thread_set_.store(true, std::memory_order_release);
     while (main_cpu_.running) {
         try {
             // Optional PC trace for debugging. Gated by env var so
@@ -1617,8 +1619,12 @@ int Emulator::run() {
             }
         }
     }
-    // Wait for any spawned threads to exit
+    // Group exit (exit_group / fatal signal on any thread): stop the rest
+    // now. Otherwise main merely exited and the process lives until the
+    // last thread does (join_threads also honors a later group exit).
+    if (group_exit_requested()) kill_other_threads(main_cpu_);
     join_threads();
+    main_host_thread_set_.store(false, std::memory_order_release);
     // Also stop + join SDL worker threads: exit_group only clears the
     // calling CPU's running flag, so SDL threads may still be running
     // (one may be blocked in a host SDL call). Without this, ~Emulator
@@ -1658,6 +1664,7 @@ int Emulator::run() {
         stats_reporter_stop_.store(true, std::memory_order_relaxed);
         stats_reporter_thread_.join();
     }
+    if (group_exit_requested()) return group_exit_code_.load(std::memory_order_acquire);
     return main_cpu_.exit_code;
 }
 // ── Per-instruction step (decode cache + trace) ───────────────────────

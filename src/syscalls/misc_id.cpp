@@ -333,8 +333,11 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             // "if (getpid() != TT.pid) signal(SIGINT, SIG_DFL)").
             // Without this, the forked child inherits SIG_IGN from the
             // parent and Ctrl+C can't interrupt foreground commands.
+            // A fork child's pid is its host pid (fork_guest gives the
+            // forking thread that tid), for every thread: threads created
+            // in the child inherit is_fork_process but have their own tid.
             if (cpu.is_fork_process) {
-                ret_host(static_cast<uint64_t>(cpu.tid));
+                ret_host(static_cast<uint64_t>(::getpid()));
             } else {
                 ret_host(1);
             }

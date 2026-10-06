@@ -833,6 +833,22 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   CF (270bb8a). Measured ~+10.7% tier2 CoreMark cumulative with the
   indexed-window-addressing reapply. Merge gate (60s+ clean game) MET
   after the R8 fix: 75s run, zero asserts, world tick 4488.
+- **Process exit is group-wide (`Emulator::group_exit`).** `exit_group` and
+  every fatal default signal (`deliver_signal`'s terminate branches, frame
+  build failure) end the whole process from ANY thread, like Linux
+  `do_group_exit`: the first code wins, main and all guest threads stop,
+  futex sleepers wake, blocked host threads get `KICK_SIGNAL`, and `run()`
+  reaps them and returns the code. Never stop only the receiving CPU: ART's
+  self-SIGKILL then left daemon threads running and `join_threads()` waited
+  forever. Cross-thread `kill`/`tkill`/`tgkill` of a fatal unblocked
+  SIG_DFL signal (or SIGKILL) group-exits at send time
+  (`signal_kills_process`, Linux `complete_signal`): a queued signal is only
+  drained at a 4K-block boundary, which a target blocked in a host syscall
+  never reaches. Main's own `exit` still keeps the process alive until the
+  last thread exits (`join_threads` polls and honors a later group exit).
+  Fork-child threads report the host pid from `getpid`. Known gap: queued
+  HANDLED signals still reach a target blocked in a host syscall late (no
+  kick + EINTR path). Regression: `ctest/test_group_exit.c`.
 - **Crash reports are shared (`src/core/crash_report.{h,cpp}`)**: every
   fatal guest crash prints one short `[crash]` line (reason, pc + module
   via `find_object_by_addr`, sp/x30/fault) plus a `last=` line (last

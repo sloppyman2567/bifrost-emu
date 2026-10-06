@@ -733,13 +733,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 94: { // exit_group
             // Linux exit_group terminates EVERY thread in the process, not
-            // just the caller. Stop + reap the siblings here; otherwise
-            // their host threads keep running and the main run loop's
-            // join_threads() blocks forever (and can deadlock on
-            // threads_mu_ if a worker calls find_cpu_by_tid/invalidate).
-            emu.kill_other_threads(cpu);
-            cpu.running = false;
-            cpu.exit_code = static_cast<int>(a0);
+            // just the caller — including the main thread when a worker
+            // calls it. From main, stop + reap the siblings here; from a
+            // worker, group_exit stops main and run() reaps the rest.
+            if (&cpu == &emu.main_cpu()) emu.kill_other_threads(cpu);
+            emu.group_exit(cpu, static_cast<int>(a0));
             return 0;
         }
         // ── signalfd4 (syscall 74) ────────────────────────────────────

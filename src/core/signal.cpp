@@ -483,6 +483,12 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr) {
 // default disposition (terminate or ignore). Returns true if a handler
 // was set up to run (caller must NOT overwrite cpu.regs[0]); false if
 // the signal was dropped, queued, or terminated the process.
+bool signal_kills_process(Emulator& emu, const CPU& target, int signo) {
+    if (signo == BIFROST_SIGKILL) return true;
+    if (!default_terminates(signo) || SignalTable::is_blocked(target, signo)) return false;
+    const std::optional<SigAction> act = emu.signals().lookup(signo);
+    return !act || act->handler == 0;
+}
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {
     const bool trace = signal_trace_enabled();
@@ -537,8 +543,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     // SIG_DFL: apply the default disposition.
     if (!act || act->handler == 0) {
         if (default_terminates(signo)) {
-            cpu.running = false;
-            cpu.exit_code = 128 + signo;
+            emu.group_exit(cpu, 128 + signo);
             if (default_dumps_core(signo)) {
                 fprintf(stderr, "[%s] signal %d (default core dump): "
                         "fault_addr=0x%llx pc=0x%llx\n",
@@ -577,8 +582,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
             CODENAME, signo,
             static_cast<unsigned long long>(handler_addr));
         if (default_terminates(signo)) {
-            cpu.running = false;
-            cpu.exit_code = 128 + signo;
+            emu.group_exit(cpu, 128 + signo);
         }
         return false;
     }
@@ -588,8 +592,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const uint64_t tramp = map_sigreturn_trampoline(emu.mem());
     if (tramp == 0) {
         if (default_terminates(signo)) {
-            cpu.running = false;
-            cpu.exit_code = 128 + signo;
+            emu.group_exit(cpu, 128 + signo);
         }
         return false;
     }
@@ -617,8 +620,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     try {
         build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
     } catch (const UnmappedMemory&) {
-        cpu.running = false;
-        cpu.exit_code = 128 + BIFROST_SIGSEGV;
+        emu.group_exit(cpu, 128 + BIFROST_SIGSEGV);
         return false;
     }
     // Save full CPU state in our internal frame for rt_sigreturn.

@@ -278,6 +278,13 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr);
 // if the default disposition was applied.
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code = SI_USER_EMU, uint64_t fault_addr = 0);
+// Linux complete_signal(): SIGKILL, or a SIG_DFL signal whose default
+// action terminates and that `target` does not block, ends the whole
+// process at send time. Cross-thread senders check this instead of
+// queueing: a target sitting in a blocking host syscall would not drain
+// the queue. (Linux limits this to non-core-dump signals; Bifrost writes
+// no core, so it applies to all terminating defaults.)
+bool signal_kills_process(Emulator& emu, const CPU& target, int signo);
 // Deliver any pending signals that are no longer blocked. Called after
 // rt_sigprocmask unblocks signals. Returns the number of signals delivered.
 int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab);

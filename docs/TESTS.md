@@ -22,6 +22,12 @@ bootstrap variants pass. See [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
 
 Focused additions:
 
+- `test_group_exit`: forked children with live threads: main SIGKILLing
+  itself, a worker's `kill(getpid(), SIGTERM)`, and a worker's
+  `exit_group(7)` (main sleeping or spinning) each end the process within
+  10 s; a fork child's new thread reports the child's pid; main's
+  `pthread_exit` keeps the process until a worker's `exit(5)`. Passes
+  natively on the host kernel; the pre-change binary fails all 6.
 - `test_proc_fd_reopen`: `open("/proc/self/fd/N")` reopens the guest
   descriptor's memfd or file with its own offset, including a guest-only fd
   number (100) and `/proc/self/fd/<dirfd>/name`; a closed fd gives `ENOENT`
