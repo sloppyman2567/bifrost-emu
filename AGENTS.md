@@ -52,6 +52,16 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   EINVAL for wrapping ranges like Linux `do_madvise` (ART passes a negative
   length when stack bounds are wrong). Regressions: `test_mem_guard`, the
   maps/stack check in `ctest/android_bionic_bootstrap.c`.
+- `madvise(MADV_REMOVE)` follows `mm/madvise.c` `madvise_remove`: punch a
+  hole (`fallocate`) in writable shared file mappings, `EINVAL` for private
+  anonymous storage, `EACCES` for read-only shared, `ENOMEM` for holes. Never
+  return success without zeroing: ART's CMC arena release (with
+  userfaultfd) zeroes an arena itself only when `MADV_REMOVE` fails with
+  `EINVAL`, and stale arena bytes became DexCache type entries (SIGSEGV on a
+  string used as a class). QEMU 11.1's `EOPNOTSUPP` breaks ART the same way,
+  so it is no reference here. Known gap: shared anonymous and private file
+  mappings are plain private storage, so both get `EINVAL` (Linux: punch and
+  `EACCES`). Regression: `ctest/test_madv_remove.c`.
 - The host Binder registry answers `PING_TRANSACTION` and accepts Java's
   `FLAG_COLLECT_NOTED_APP_OPS`; `BIFROST_BINDER_TRACE=1` traces transactions.
 - Framework provisioning schema 4 adds mainline APEX native libraries,
@@ -1258,15 +1268,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **287 pass /
-  0 fail / 0 skip**; `--no-jit` = 280 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **288 pass /
+  0 fail / 0 skip**; `--no-jit` = 281 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **287 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 282),
+  (interactive + real-world are the standard default) = **288 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 283),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

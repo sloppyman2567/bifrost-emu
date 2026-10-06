@@ -77,6 +77,18 @@ returns `EINVAL` for wrapping ranges like Linux `do_madvise`; it previously
 zeroed every page above the start, including libc text. This caused the
 layout-dependent early SIGILL recorded in [test evidence](TESTS.md).
 
+With userfaultfd available, ART uses the CMC collector, and its linear-alloc
+arena release (`TrackedArena::ReleasePages` in
+`runtime/base/gc_visited_arena_pool.cc`) first tries `MADV_REMOVE`. It zeroes
+the arena itself only when that fails with `EINVAL`, as it does on Linux for
+private anonymous memory. `madvise` used to report success for
+`MADV_REMOVE` without doing anything. Recycled arenas kept stale boot-image
+string references, and new DexCache resolved-type arrays were carved from
+them. Method resolution then treated a `"Alg.Alias.Signature..."` string as
+a class (SIGSEGV at `0x2e676c51`). `MADV_REMOVE` now follows the kernel's
+`madvise_remove`. QEMU 11.1 crashes the same way: it returns `EOPNOTSUPP`
+for every `MADV_REMOVE`, so it is no reference for this path.
+
 ### Activity creation checkpoint
 
 `guest/android/ActivityProbe.java` creates a real Activity through `onCreate`.

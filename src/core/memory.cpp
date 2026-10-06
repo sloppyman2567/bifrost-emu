@@ -1784,6 +1784,77 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
         }
     }
 }
+int Memory::madvise_remove(uint64_t addr, uint64_t len) {
+    if (!len) return 0;
+    const uint64_t end = addr + len;
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    // Adjacent pages of one file are punched with a single fallocate. Both
+    // the window alias and a sparse page's host view map the file shared,
+    // so the hole reads back as zero through either.
+    const SharedBacking* run = nullptr;
+    uint64_t run_offset = 0, run_length = 0;
+    auto punch = [&]() -> int {
+        if (!run_length) return 0;
+        const int result = ::fallocate(run->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                                       static_cast<off_t>(run_offset),
+                                       static_cast<off_t>(run_length));
+        run_length = 0;
+        return result < 0 ? errno : 0;
+    };
+    // Linux stops at the first failing VMA after finishing the earlier ones.
+    auto visit = [&](uint64_t at) -> int {
+        const Page* page = page_storage_locked(at);
+        int error = 0;
+        if (!page || !page->backing) error = EINVAL;
+        else if (!page->backing->writable) error = EACCES;
+        if (error) {
+            const int punched = punch();
+            return punched ? punched : error;
+        }
+        const uint64_t offset = page->backing->file_offset + page->offset;
+        if (run == page->backing.get() && run_offset + run_length == offset) {
+            run_length += PAGE_SIZE;
+            return 0;
+        }
+        if (int punched = punch()) return punched;
+        run = page->backing.get();
+        run_offset = offset;
+        run_length = PAGE_SIZE;
+        return 0;
+    };
+    int unmapped = 0;
+    uint64_t at = addr;
+    if (direct_window_ && at < DIRECT_WINDOW_SIZE) {
+        const uint64_t low_end = std::min<uint64_t>(end, DIRECT_WINDOW_SIZE);
+        for (; at < low_end; at += PAGE_SIZE) {
+            if (!(direct_page_flags_[at / PAGE_SIZE].load(std::memory_order_relaxed) &
+                  PAGE_MAPPED)) {
+                unmapped = ENOMEM;
+                continue;
+            }
+            if (int error = visit(at)) return error;
+        }
+    }
+    // Above the window, walk the coalesced mapping list so holes cost
+    // nothing; visit() ends the walk at the first page without a file.
+    auto it = high_mappings_.upper_bound(at);
+    if (it != high_mappings_.begin()) --it;
+    while (at < end) {
+        while (it != high_mappings_.end() && it->second.end <= at) ++it;
+        if (it == high_mappings_.end() || it->first >= end) {
+            unmapped = ENOMEM;
+            break;
+        }
+        if (it->first > at) {
+            unmapped = ENOMEM;
+            at = it->first;
+        }
+        for (const uint64_t stop = std::min(end, it->second.end); at < stop; at += PAGE_SIZE)
+            if (int error = visit(at)) return error;
+    }
+    if (int error = punch()) return error;
+    return unmapped;
+}
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;
     // Merge with a previous adjacent free range.

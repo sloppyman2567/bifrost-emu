@@ -219,6 +219,16 @@ public:
     // → AllocBlock: full). Zero in place (never erase pages_ entries —
     // erasing would dangle cached PageCache pointers).
     void madvise_dontneed(uint64_t addr, uint64_t len);
+    // MADV_REMOVE (mm/madvise.c madvise_remove): punch a hole in the file
+    // behind a writable shared mapping, so the pages read back as zero.
+    // Pages are visited in address order and the first failure stops:
+    // EINVAL for storage with no file (private anonymous), EACCES for a
+    // shared mapping of a read-only fd. Unmapped holes give ENOMEM once
+    // the rest is done. addr is page-aligned and len page-rounded; returns
+    // 0 or a host errno. ART's CMC arena release relies on EINVAL for
+    // private arenas: success makes it skip zeroing them, and stale bytes
+    // become live DexCache entries.
+    int madvise_remove(uint64_t addr, uint64_t len);
     // Isolated callback-stack allocation (2026-08-25): usable_size bytes
     // with a PROT_NONE guard page on BOTH sides, placed like a normal
     // mmap_alloc block. Host-thread guest callbacks (audio pump, GLFW /

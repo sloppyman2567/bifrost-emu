@@ -349,6 +349,9 @@ UNIT_TESTS=(
     # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
     # and above-window MAP_FIXED r/w cycles run sequentially.
     "test_mem_guard|ctest/test_mem_guard.elf||20|ALL PASS"
+    # MADV_REMOVE: hole punch for writable shared files, EINVAL for private
+    # anonymous (ART's CMC arena release depends on it), EACCES, ENOMEM.
+    "test_madv_remove|ctest/test_madv_remove.elf||10|ALL PASS"
     "test_memory_permissions|ctest/test_memory_permissions.elf||30|ALL PASS"
     # Fixed mapping contents, concurrent fd reads during mmap, mremap
     # relocation contracts, and active alternate-stack changes (47 checks).

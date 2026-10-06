@@ -12,6 +12,15 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### MADV_REMOVE (2026-10-06)
+
+- `madvise(MADV_REMOVE)` now punches a hole in writable shared file mappings
+  and returns `EINVAL`/`EACCES`/`ENOMEM` like Linux, instead of reporting
+  success without doing anything. With userfaultfd, ART's CMC collector
+  zeroes a released arena only when `MADV_REMOVE` fails with `EINVAL`.
+  Recycled arenas kept stale strings that became DexCache type entries, and
+  `app_process64` crashed on a string used as a class pointer.
+
 ### Activity probe and glibc main-stack bounds (2026-10-06)
 
 - Add `guest/android/ActivityProbe.java` and the runner's `--main-class`.

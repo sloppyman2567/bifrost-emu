@@ -22,6 +22,12 @@ bootstrap variants pass. See [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
 
 Focused additions:
 
+- `test_madv_remove`: `MADV_REMOVE` punches a hole in writable shared memfd
+  mappings below and above the direct window (page reads zero, file size
+  kept), returns `EINVAL` for private anonymous memory without touching it,
+  `EACCES` for a read-only shared file, and `ENOMEM` for holes. The same
+  source passes natively on the host kernel; the pre-change binary fails 8
+  of 18 checks. QEMU 11.1 is not a reference (it returns `EOPNOTSUPP`).
 - `test_mem_guard`: wrapping `madvise` ranges return `EINVAL` and keep a
   mapped page above the start intact; a huge valid range still returns
   promptly. The pre-change binary fails the wrap check. QEMU passes.

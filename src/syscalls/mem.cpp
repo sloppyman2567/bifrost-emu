@@ -506,10 +506,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // vkQuake's mimalloc decommits freed
             // segments this way and reuses them as initially-zero pages;
             // a no-op here kept stale data and shredded its heap
-            // (AllocBlock: full). Other advices stay no-op (pure hints).
+            // (AllocBlock: full). MADV_REMOVE (9) is not a hint either:
+            // see Memory::madvise_remove. Other advices stay no-op.
             if ((int64_t)a2 == 4 /* MADV_DONTNEED */) {
                 mem_.madvise_dontneed(a0, a1);
                 emu.invalidate_jit_range(a0, a1);
+            } else if ((int64_t)a2 == 9 /* MADV_REMOVE */) {
+                const int error = mem_.madvise_remove(a0, madvise_len);
+                emu.invalidate_jit_range(a0, madvise_len);
+                ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
+                return 0;
             }
             ret_host(0);
             return 0;
