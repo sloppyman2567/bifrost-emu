@@ -338,6 +338,10 @@ UNIT_TESTS=(
     # delivery through the per-CPU pending queue + per-CPU signal frames.
     "test_signal_semantics|ctest/test_signal_semantics.elf||20|ALL PASS"
     "test_sigreturn_context|ctest/test_sigreturn_context.elf||20|ALL PASS"
+    # rt_sigtimedwait blocks/dequeues instead of always returning EAGAIN.
+    "test_sigtimedwait|ctest/test_sigtimedwait.elf||20|15/15 checks passed"
+    # FUTEX_CMP_REQUEUE takes nr_requeue from the timeout slot, not val3.
+    "test_futex_requeue|ctest/test_futex_requeue.elf||15|4/4 checks passed"
     # fork() with live guest threads: the child must not inherit joinable
     # host std::threads for threads that no longer exist.
     "test_fork_threads|ctest/test_fork_threads.elf||20|ALL PASS"

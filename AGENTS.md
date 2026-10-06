@@ -842,6 +842,24 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   offsets, wrong for the 2.42 rootfs. Do not hardcode struct offsets.
   `specific[0]`/`user_stack` have no descriptors and stay unset. Regression:
   `ctest_real/test_dyn_main_locks.c`.
+- **`rt_sigtimedwait` blocks for real (2026-10-05).** `misc_signal.cpp`
+  treats the waited set as blocked while waiting (pending members land in
+  `cpu.sigpending`), folds cross-thread queue entries into `sigpending`,
+  returns and dequeues the lowest ready member without running its
+  handler, and ends with EINTR when another unblocked signal's handler runs
+  (`sigsuspend_saved_mask` keeps the caller's mask in that frame). It
+  sleeps in 10 ms slices because cross-thread `tgkill` queues without
+  kicking the target. The old EAGAIN stub made `sigwait()` spin (ART's
+  signal catcher at ~1.27M calls/s). Regression: `ctest/test_sigtimedwait.c`.
+- **FUTEX_REQUEUE/CMP_REQUEUE count is the timeout slot (2026-10-05).**
+  `nr_requeue = (u32)a3` as in Linux; `val3` is only the CMP comparison.
+  Using `val3` as the count moved 0 waiters for sequence 0 and hung ART's
+  first condition-variable broadcast. **Known gap:** requeue is still
+  emulated by waking the source waiters (C++ condition variables cannot
+  move waiters), so a woken waiter that re-waits on the OLD address misses
+  the later wake on uaddr2. ART and glibc tolerate this; real per-waiter
+  requeue needs movable wait records across every futex path.
+  Regression: `ctest/test_futex_requeue.c`.
 - **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
   Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
@@ -1193,13 +1211,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **280 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **282 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **280 pass /
+  (interactive + real-world are the standard default) = **282 pass /
   0 fail / 0 skip**. Subsets: `--quick` (no benches, 223),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
@@ -1211,7 +1229,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **280 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **282 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three

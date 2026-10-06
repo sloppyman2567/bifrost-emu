@@ -964,8 +964,26 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                             return 0;
                         }
                     }
+                    // The requeue count travels in the timeout slot as an
+                    // integer (Linux: val2 = (u32)(unsigned long)utime);
+                    // val3 is only the CMP_REQUEUE comparison value. Using
+                    // val3 as the count requeued 0 waiters whenever the
+                    // compared sequence was 0, so ART's condition-variable
+                    // broadcast (nr_wake 0, nr_requeue INT32_MAX) never
+                    // woke its waiter and VM startup hung.
                     int nr_wake = static_cast<int>(val);
-                    int nr_requeue = static_cast<int>(val3);
+                    int nr_requeue = static_cast<int>(static_cast<uint32_t>(timeout_ptr));
+                    if (dbg().futex_trace) {
+                        fprintf(stderr, "[FUTX t%d] REQUEUE op=%u addr=%#llx addr2=%#llx "
+                                "wake=%d requeue=%d val3=%u pc=0x%llx\n",
+                                cpu.tid, (unsigned)op, (unsigned long long)uaddr,
+                                (unsigned long long)uaddr2, nr_wake, nr_requeue,
+                                val3, (unsigned long long)cpu.pc);
+                    }
+                    if (nr_wake < 0 || nr_requeue < 0) {
+                        ret_err(EINVAL);
+                        return 0;
+                    }
                     if (uaddr2 == 0 && nr_requeue > 0) {
                         ret_err(EINVAL);
                         return 0;

@@ -20,6 +20,18 @@ are historical records, and v2.0 remains planned.
 - Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
   reported renderer fault remain unresolved. No controlled FPS claim is made.
 
+### Real ART VM startup: rt_sigtimedwait and futex requeue (2026-10-05)
+
+- Implement `rt_sigtimedwait` (dequeue a pending member of the set, block
+  until one arrives or the timeout expires, EINTR for other handlers). The
+  EAGAIN stub made ART's signal catcher spin on `sigwait()`.
+- `FUTEX_CMP_REQUEUE` takes its requeue count from the timeout slot, not
+  `val3`; ART's first condition-variable broadcast never woke the main
+  thread. Negative counts return EINVAL.
+- The pinned ART bootstrap now reaches `ART_VM_OK` and passes its DEX/JNI
+  fixture under the JIT and the interpreter. Add `ctest/test_sigtimedwait.c`
+  and `ctest/test_futex_requeue.c` (QEMU-checked).
+
 ### OpenSSL 3 correctness: JIT register pressure and glibc main thread (2026-10-05)
 
 - JIT: `ensure_two_vregs()` could evict its other operand under full

@@ -3,9 +3,9 @@
 Checkpoint: October 5, 2026. Bifrost can enter a real guest ARM64 Android
 linker and execute Bionic-linked programs. Signed APK installation and native-only
 NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROID_APK.md).
-ART VM creation and SpongeBob's managed Activity remain unsupported. A separate
-same-image ART/libcore provisioner and experimental DEX/JNI bootstrap now exist;
-see the bounded checkpoint below.
+A separate same-image ART/libcore provisioner and DEX/JNI bootstrap now create
+a real ART VM and pass their JNI fixture; see the bounded checkpoint below.
+SpongeBob's managed Activity remains unsupported.
 The APK native-load diagnostic now checks real packaged dependencies separately:
 19/21 SpongeBob libraries complete loading/cleanup in all three execution modes.
 Firebase Messaging's direct probe loads successfully, then double-destroys a
@@ -15,8 +15,8 @@ for the load-order evidence and official-header/zlib build.
 An optional checksum-pinned real Media NDK bundle now supplies the genuine
 library and its isolated native dependencies. Real metadata operations pass
 the signed APK gate in all modes. With this bundle Unity progresses to a
-missing `eglSurfaceAttrib` export; media services/decoding and ART are still
-unimplemented. See the APK guide for provisioning and namespace boundaries.
+missing `eglSurfaceAttrib` export; media services/decoding and managed
+(ART-backed) Activity startup are still unimplemented. See the APK guide for provisioning and namespace boundaries.
 
 ## Reproduce
 
@@ -100,14 +100,18 @@ array/string, call back into Java and shut down cleanly. Success requires
 `ART_LOAD_OK`, `ART_VM_OK`, the fixture's marker and a zero exit; ART logs go
 to stderr (`-Xuse-stderr-logger`). `--mode qemu` runs the same root under
 `qemu-aarch64` as a reference: with this pinned image it reaches `ART_VM_OK`
-and passes, while Bifrost currently completes boot class linking but stops
-before `ART_VM_OK`.
+and passes in about a second. Bifrost passes too (about 84 s under the JIT;
+the slow part is imageless boot-class verification with ART's own
+interpreter).
 
-October 5 checkpoint: real ART loads. The fixed-address JIT probe now reaches
-unsupported `UADALP` (`0x6e206b17`, `uadalp v23.8h, v24.16b`) during VM creation,
-after about 11 seconds. VM creation and the DEX/JNI marker do not pass.
-The interpreter probe also loads ART and terminates with guest SIGILL.
-GC, thread attachment, exceptions and managed Activity startup remain unverified.
+October 5 checkpoint: real ART creates its VM (`ART_VM_OK`) and the DEX/JNI
+fixture passes in both JIT and interpreter modes. Getting there needed the
+pairwise-widening SIMD ops (`UADALP` and family), 16× index scaling for
+`ldr/str q, [xn, xm, lsl #4]` (it corrupted the class linker's method
+records), a real `rt_sigtimedwait` (ART's signal catcher spun on the EAGAIN
+stub) and the `FUTEX_CMP_REQUEUE` requeue count (ART's condition-variable
+broadcast never woke the main thread). GC, thread attachment, exceptions and
+managed Activity startup remain unverified.
 This experiment neither registers a fake JavaVM nor changes the existing
 native-only APK launch contract. JNI objects and calls remain guest-owned,
 consistent with [Android's JNI guidance](https://developer.android.com/ndk/guides/jni-tips).
