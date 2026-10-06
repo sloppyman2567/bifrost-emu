@@ -1047,27 +1047,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     } else if (inst.op == IROp::LOAD_REG) {
                         if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
                             first_read[inst.src1] = static_cast<uint16_t>(i);
-                    } else if (inst.dest <= 30 &&
-                               (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
-                                inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
-                                inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
-                                inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
-                                inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
-                                inst.op == IROp::SIMD_UMOV ||
-                                inst.op == IROp::LOAD_MEM || inst.op == IROp::ATOMIC)) {
-                        // These ops write an arch GPR dest DIRECTLY (via
-                        // store_reg_to_vreg / set_vreg_reg), bypassing
-                        // STORE_REG — so the pin would hold a stale value.
-                        // LOAD_MEM/ATOMIC write the loaded result into the
-                        // dest vreg directly, abandoning any pin (the value
-                        // lands in a scratch register the next iteration
-                        // clobbers). Deliberately an EXPLICIT list, NOT a
-                        // dest<=30 catch-all: branch ops (BRCOND/BRCOND_ZERO/
-                        // BRCOND_BIT/BRCOND_FALLTHRU/BRCOND_SKIP/BR/BL_CALL/
-                        // BLR_CALL/CALL_INTERP/SVC) carry a DUMMY dest=0 that
-                        // would otherwise flag x0 as directly written and kill
-                        // the x0 pin (bench_mips's loop-invariant address
-                        // base).
+                    } else if (writes_arch_gpr_directly(inst)) {
+                        // Bypasses STORE_REG: never pin it (see the helper).
                         direct_write[inst.dest] = true;
                     }
                 }

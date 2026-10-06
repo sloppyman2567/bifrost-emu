@@ -22,6 +22,11 @@ bootstrap variants pass. See [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
 
 Focused additions:
 
+- `jit_tier2_smov`: an SMOV-written, loop-carried `x3` must reach the next
+  iteration both when the loop is fallen into (Tier-2 path) and when it is
+  branched into, so the self-loop block sees the pre-SMOV value first. The
+  pre-change binary fails the branch-in loop (4000 instead of 7999); QEMU
+  and the interpreter pass.
 - `test_jit_thread_invalidate`: two threads keep calling a JIT-translated
   page while main replaces it (`MAP_FIXED`, write, `mprotect` RX) 400 times
   on alternating pages; every call returns a published value. Runs with the

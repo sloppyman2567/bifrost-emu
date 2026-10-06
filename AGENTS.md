@@ -269,7 +269,11 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   LOAD_REG of `dest` substitutes a stale cached vreg. If you add another
   such op, mirror the SIMD_UMOV case (ir_optimize.cpp) or FWD will silently
   corrupt values (this broke jit_neon's umov tests, and test_simd_sat's smov
-  case blocked the default-flip). Verified 198/198 under FWD=1; it gives only ~4% on chunkmesh_mesh
+  case blocked the default-flip). The same op must also be in
+  `FrostJIT::writes_arch_gpr_directly()` (frostjit.hpp), which both the
+  self-loop and Tier-2 pin selectors use: a pinned register written that
+  way keeps its stale value across the back-edge (Tier-1 lacked SIMD_SMOV;
+  `jit_tier2_smov`'s branch-in loop got 4000 instead of 7999). Verified 198/198 under FWD=1; it gives only ~4% on chunkmesh_mesh
   (the real cost there is regalloc spill/reload bloat, not round-trips).
   **FIXED (2026-08-14): the deterministic corruption under `BIFROST_ENABLE_FWD=1`
   (bench_mips printed ~1 GB of spaces + `done: acc=0x0c5a4000` instead of

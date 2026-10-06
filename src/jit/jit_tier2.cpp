@@ -933,27 +933,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     } else if (inst.op == IROp::LOAD_REG) {
                         if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
                             first_read[inst.src1] = static_cast<uint16_t>(i);
-                    } else if (inst.dest <= 30 &&
-                               (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
-                                inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
-                                inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
-                                inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
-                                inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
-                                inst.op == IROp::SIMD_UMOV ||
-                                inst.op == IROp::SIMD_SMOV ||
-                                inst.op == IROp::LOAD_MEM || inst.op == IROp::ATOMIC)) {
-                        // Direct arch-GPR writers (store_reg_to_vreg /
-                        // set_vreg_reg), bypassing STORE_REG — the pin would
-                        // hold a stale value. LOAD_MEM/ATOMIC write the
-                        // loaded result into the dest vreg directly
-                        // (set_vreg_reg(inst.dest, RAX) / store_reg_to_vreg),
-                        // so a pinned vreg's value would land in a plain
-                        // scratch register that the NEXT iteration's code
-                        // freely clobbers — the pin is abandoned and the
-                        // loop-carried value is lost (CoreMark region
-                        // corruption: wrong CRCs). EXPLICIT list, NOT a
-                        // dest<=30 catch-all: branch ops carry a dummy
-                        // dest=0 that would wrongly flag x0.
+                    } else if (writes_arch_gpr_directly(inst)) {
+                        // Bypasses STORE_REG: never pin it. LOAD_MEM/ATOMIC
+                        // results would otherwise land in a scratch register
+                        // the next iteration clobbers (CoreMark region CRCs).
                         direct_write[inst.dest] = true;
                     }
                 }

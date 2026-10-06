@@ -12,6 +12,13 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Self-loop SMOV pinning (2026-10-06)
+
+- A self-loop block could pin a register that `smov` writes, so the next
+  iteration read the value from before the `smov`. Tier-2 regions already
+  excluded SMOV; both pin selectors now share one list of ops that write a
+  general register directly.
+
 ### Per-thread JIT crash (2026-10-06)
 
 - With `BIFROST_NO_SHARED_JIT=1`, another thread's code invalidation (any

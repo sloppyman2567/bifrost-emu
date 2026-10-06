@@ -1128,6 +1128,27 @@ private:
     int8_t   arch_pin_[32];
     uint16_t pinned_host_regs_ = 0;
     bool     keep_store_dest_ = false;
+    // IR ops that write an arch GPR `dest` (<= 30) directly via
+    // store_reg_to_vreg / set_vreg_reg instead of STORE_REG. Pin selection
+    // must skip those registers: the pin would keep the stale value, and
+    // LOAD_MEM/ATOMIC results would land in a scratch register the next
+    // iteration clobbers. Explicit list, NOT a dest<=30 catch-all: branch
+    // ops carry a dummy dest=0 and FP ops use dest for FP register numbers.
+    // Shared by the self-loop and Tier-2 selectors (Tier-1 once lacked
+    // SIMD_SMOV and lost loop-carried SMOV results).
+    static bool writes_arch_gpr_directly(const IRInst& inst) {
+        switch (inst.op) {
+            case IROp::CSEL: case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG:
+            case IROp::UBFM: case IROp::SBFM:
+            case IROp::FP_F2I: case IROp::FP_F2I_FIXED:
+            case IROp::FMOV_F2G: case IROp::FMOV_FHI2G:
+            case IROp::SIMD_UMOV: case IROp::SIMD_SMOV:
+            case IROp::LOAD_MEM: case IROp::ATOMIC:
+                return inst.dest <= 30;
+            default:
+                return false;
+        }
+    }
     // Max vreg used in this block.
     int max_vreg_ = 0;
     // Max vreg from the previous block — used to bound the array-clearing
