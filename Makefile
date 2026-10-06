@@ -347,7 +347,7 @@ cross:
 	@extra="$(CROSS_EXTRA)"; \
 	case "$(SRC)" in \
 		ctest/test_lse_inline.c) extra="$$extra -march=armv8.1-a+lse";; \
-		ctest_real/test_sha256_full.c) extra="$$extra -march=armv8-a+crypto";; \
+		ctest_real/test_sha256_full.c|ctest_real/test_sha256_crypto.c) extra="$$extra -march=armv8-a+crypto";; \
 	esac; \
 	$(CROSS_CC) -static -O2 $$extra -o $(OUT) $(SRC)
 	@echo "Built $(OUT)"
@@ -421,7 +421,7 @@ setup-tests:
 		extra=""; \
 		case "$$src" in \
 			ctest/test_lse_inline.c) extra="-march=armv8.1-a+lse";; \
-			ctest_real/test_sha256_full.c) extra="-march=armv8-a+crypto";; \
+			ctest_real/test_sha256_full.c|ctest_real/test_sha256_crypto.c) extra="-march=armv8-a+crypto";; \
 			ctest_real/test_*vulkan*.c) extra="-Ictest_real/vulkan_headers/include";; \
 		esac; \
 		if $$CC -static -O2 $$extra -o "$$elf" "$$src" 2>/dev/null; then \

@@ -627,6 +627,42 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     return;
                 }
             }
+            // SADDLP/UADDLP/SADALP/UADALP: pair adjacent lanes, widen,
+            // optionally accumulate. Keep bits[20:16] in the match: bit16
+            // distinguishes ADDLP from XTN/SQXTUN, which the switch's mask
+            // otherwise discards. Snapshot both operands for Rd == Rn.
+            if ((op & 0x9F3FBC00) == 0x0E202800) {
+                if (size == 3) throw DecodeError(cpu.pc, op);
+                const int bytes = 1 << size;
+                const int bits = bytes * 8;
+                const int wide_bytes = bytes * 2;
+                const int pairs = (Q ? 16 : 8) / wide_bytes;
+                const bool uns = (op >> 29) & 1;
+                const bool accumulate = (op >> 14) & 1;
+                uint8_t source[16], accumulator[16], result[16] = {};
+                memcpy(source, &cpu.v_lo[rn], 8);
+                memcpy(source + 8, &cpu.v_hi[rn], 8);
+                memcpy(accumulator, &cpu.v_lo[rd], 8);
+                memcpy(accumulator + 8, &cpu.v_hi[rd], 8);
+                for (int i = 0; i < pairs; ++i) {
+                    int64_t sum = 0;
+                    for (int lane = 0; lane < 2; ++lane) {
+                        uint64_t value = 0;
+                        memcpy(&value, source + (2 * i + lane) * bytes, bytes);
+                        sum += !uns && (value & (1ULL << (bits - 1)))
+                            ? static_cast<int64_t>(value) - (1LL << bits)
+                            : static_cast<int64_t>(value);
+                    }
+                    uint64_t value = 0;
+                    if (accumulate)
+                        memcpy(&value, accumulator + i * wide_bytes, wide_bytes);
+                    value += static_cast<uint64_t>(sum);
+                    memcpy(result + i * wide_bytes, &value, wide_bytes);
+                }
+                memcpy(&cpu.v_lo[rd], result, 8);
+                memcpy(&cpu.v_hi[rd], result + 8, 8);
+                return;
+            }
             switch (sub_noq) {
             // ── DUP (general): sf 0 0 11110 00 0 imm5 0000 0 1 Rn Rd ──
             // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).

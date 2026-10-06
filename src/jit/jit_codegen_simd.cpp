@@ -1797,7 +1797,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // PMULL/PMULL2 — use PCLMULQDQ when available.
             if ((sub_op == 4 || sub_op == 5) && has_pclmulqdq()) {
                 clobber_flags();
-                // PCLMULQDQ path is XMM-only (movsd/pclmulqdq/pinsrq); the
+                // PCLMULQDQ path is XMM-only (movq/pclmulqdq/psrldq); the
                 // AESE/AESD fallback goes through emit_call_interp, which
                 // self-flushes. No GPR flush needed.
                 int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -1806,72 +1806,23 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
                 int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-                // Load src1 into XMM0 (low 64 bits in bits[63:0]).
-                // movsd xmm0, [rbx+off1lo]
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, off1lo);
-                // Load src2 into XMM1 (low 64 bits in bits[63:0]).
-                // movsd xmm1, [rbx+off2lo]
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1, CPU_REG, off2lo);
-                if (sub_op == 4) {
-                    // PMULL: multiply low 64 bits, produce 128-bit result.
-                    // pclmulqdq xmm0, xmm1, 0x00  (imm=0x00 selects low×low)
-                    // Encoding: 66 0F 3A 44 /r ib
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x44);
-                    emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
-                    emit_byte(0x00);  // imm8 = 0x00 (low × low)
-                } else {
-                    // PMULL2: multiply high 64 bits, produce 128-bit result.
-                    // Need to load the high halves into bits[63:0] of XMM0/XMM1
-                    // because pclmulqdq operates on the low 64 bits of each
-                    // operand (selected by the imm).
-                    //
-                    // Actually, pclmulqdq imm bits select which 64-bit half
-                    // of each source to use:
-                    //   imm[0] = 0: src1 low 64, 1: src1 high 64
-                    //   imm[4] = 0: src2 low 64, 1: src2 high 64
-                    // So for PMULL2 (high × high), imm = 0x11.
-                    // We need the full 128-bit values in XMM0/XMM1.
-                    //
-                    // Reload with movdqa (128-bit load) instead of movsd.
-                    // movdqa xmm0, [rbx+off1lo]  (requires 16-byte aligned;
-                    //   our v_lo/v_hi are 8-byte apart, NOT 16-byte aligned)
-                    // Use movdqu (unaligned) instead: F3 0F 6F /r
-                    // But we need to load v_lo AND v_hi into one XMM.
-                    // v_lo is at V_LO_OFF + src1*8, v_hi is at V_HI_OFF + src1*8.
-                    // V_LO_OFF = 288, V_HI_OFF = 544. They're 256 bytes apart,
-                    // NOT adjacent. So we can't load both with one movdqu.
-                    //
-                    // Instead: load v_lo into bits[63:0] of xmm0, v_hi into
-                    // bits[127:64] via pinsrq.
-                    // movsd  xmm0, [rbx+off1lo]   ; bits[63:0] = v_lo, bits[127:64] = 0
-                    // pinsrq xmm0, [rbx+off1hi], 1 ; bits[127:64] = v_hi
-                    // pinsrq = 66 0F 3A 22 /r ib
-                    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-                    emit_modrm_disp(0, CPU_REG, off1lo);
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x22);
-                    emit_modrm_disp(0, CPU_REG, off1hi);
-                    emit_byte(0x01);  // imm8 = 1 (high 64 bits)
-                    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-                    emit_modrm_disp(1, CPU_REG, off2lo);
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x22);
-                    emit_modrm_disp(1, CPU_REG, off2hi);
-                    emit_byte(0x01);
-                    // pclmulqdq xmm0, xmm1, 0x11  (high × high)
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x44);
-                    emit_byte(0xC1);
-                    emit_byte(0x11);  // imm8 = 0x11 (high × high)
-                }
-                // Store the 128-bit result: bits[63:0] → v_lo, bits[127:64] → v_hi.
-                // movsd [rbx+offdlo], xmm0
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
-                emit_modrm_disp(0, CPU_REG, offdlo);
-                // pextrq [rbx+offdhi], xmm0, 1  (extract bits[127:64])
-                // pextrq = 66 0F 3A 16 /r ib
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x16);
+                // Select the architectural source half before loading. MOVQ
+                // zeroes the other half and needs only SSE2, avoiding PINSRQ/
+                // PEXTRQ and their extra SSE4.1 and REX.W requirements.
+                const int32_t source1 = sub_op == 4 ? off1lo : off1hi;
+                const int32_t source2 = sub_op == 4 ? off2lo : off2hi;
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(0, CPU_REG, source1);  // movq xmm0, m64
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(1, CPU_REG, source2);  // movq xmm1, m64
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x44);
+                emit_byte(0xC1); emit_byte(0x00);      // pclmulqdq xmm0,xmm1,0
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                emit_modrm_disp(0, CPU_REG, offdlo);   // movq m64, xmm0
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73);
+                emit_byte(0xD8); emit_byte(0x08);      // psrldq xmm0,8
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
                 emit_modrm_disp(0, CPU_REG, offdhi);
-                emit_byte(0x01);  // imm8 = 1 (high 64 bits)
                 return true;
             }
             // AESE/AESD/AESMC/AESIMC — fall back to CALL_INTERP.

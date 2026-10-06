@@ -20,6 +20,17 @@ are historical records, and v2.0 remains planned.
 - Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
   reported renderer fault remain unresolved. No controlled FPS claim is made.
 
+### AArch64 crypto and pairwise-widening SIMD (2026-10-05)
+
+- Correct the PMULL (`0x0EE0E000`) encoding, add 8-bit PMULL/PMULL2, and
+  narrow the XTN-family masks so SADDLP/UADDLP/SADALP/UADALP reach their new
+  interpreter implementation. JIT PMULL uses MOVQ instead of SSE4.1
+  PINSRQ/PEXTRQ.
+- Fix SHA1C/P/M (no round constant, Sn read-only), SHA1SU0/SU1 and
+  SHA256SU0/SU1 to match the architectural pseudocode (checked against QEMU).
+- Add `ctest/jit_simd_pairlong.c` and `ctest/jit_simd_pmull.c`; replace the
+  SHA-256 tests with QEMU-checked literal vectors.
+
 ### SIMD&FP register-offset Q scaling (2026-10-05)
 
 - Scale the index of `ldr/str qN, [xn, xm, lsl #4]` by 16 in the interpreter

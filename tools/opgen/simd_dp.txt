@@ -100,7 +100,7 @@ UMOV    0xBFE0FC00   0x0E003C00   UMOV       0   -
 
 # ── AES / PMULL (AESE row covers AESD/AESMC/AESIMC via bits[11:10]) ──────
 AESE    0xFFFFFC00   0x4E284800   CRYPTO     0   -
-PMULL   0xFFE0FC00   0x4E60E000   CRYPTO     4   -
+PMULL   0xFFE0FC00   0x0EE0E000   CRYPTO     4   -
 PMULL2  0xFFE0FC00   0x4EE0E000   CRYPTO     5   -
 
 # ── PMISC: CNT/NOT/RBIT/ABS/NEG (2-reg misc) ─────────────────────────────
@@ -144,10 +144,12 @@ ADDP    0xBF20FC00   0x0E20BC00   ADDP       0   size == 0
 # src/8b dst, 1 -> 32/16, 2 -> 64/32. Always reads the FULL 128-bit source.
 # Q=0 writes low 64 bits + zeroes high; Q=1 (the *2 variants) writes the
 # HIGH 64 bits preserving the low half. size==3 is a DecodeError.
-XTN     0xBF20FC00   0x0E202800   XTN        0   size < 3
-SQXTUN  0xBF20FC00   0x2E202800   XTN        1   size < 3
-SQXTN   0xBF20FC00   0x0E204800   XTN        2   size < 3
-UQXTN   0xBF20FC00   0x2E204800   XTN        3   size < 3
+# Keep bits[20:16] fixed at 00001. ADDLP has 00000 and must remain on
+# the pairwise-widening interpreter fallback rather than narrowing here.
+XTN     0xBF3FFC00   0x0E212800   XTN        0   size < 3
+SQXTUN  0xBF3FFC00   0x2E212800   XTN        1   size < 3
+SQXTN   0xBF3FFC00   0x0E214800   XTN        2   size < 3
+UQXTN   0xBF3FFC00   0x2E214800   XTN        3   size < 3
 
 # ── TBL/TBX (vector table lookup, 1-2 source regs) ───────────────────────
 # Encoding: 0 Q 0 0 1110 size 0 0 Rm op2 L Rn Rd. op2 = bit12 (TBX), L =

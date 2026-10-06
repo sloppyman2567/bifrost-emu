@@ -31,7 +31,7 @@
 //   SHA256H2 Qd, Qn, Vm.4S        0x5E005000  mask 0xFFE0FC00  (3-operand)
 //   SHA256SU0 Vd.4S, Vn.4S        0x5E282800  mask 0xFFFFFC00
 //   SHA256SU1 Vd.4S, Vn.4S, Vm.4S 0x5E006000  mask 0xFFE0FC00  (3-operand)
-//   PMULL   Vd.1Q, Vn.1D, Vm.1D   0x4E60E000  mask 0xFFE0FC00
+//   PMULL   Vd.1Q, Vn.1D, Vm.1D   0x0EE0E000  mask 0xFFE0FC00
 //   PMULL2  Vd.1Q, Vn.2D, Vm.2D   0x4EE0E000  mask 0xFFE0FC00
 //
 // IMPORTANT: SHA1C/SHA1P/SHA1M have an unusual operand layout:
@@ -201,68 +201,32 @@ static inline uint32_t sha1h(uint32_t e) {
 static inline uint32_t sha1_ch (uint32_t b, uint32_t c, uint32_t d) { return (b & c) ^ (~b & d); }
 static inline uint32_t sha1_par(uint32_t b, uint32_t c, uint32_t d) { return b ^ c ^ d; }
 static inline uint32_t sha1_maj(uint32_t b, uint32_t c, uint32_t d) { return (b & c) ^ (b & d) ^ (c & d); }
-// SHA1C/SHA1P/SHA1M: 4-round SHA-1 hash update.
-//   Qd = accumulator {A,B,C,D} (4 × 32 bits, A in word 0)
-//   Sn = E (the 5th state word, from Vn[0])
-//   Vm.4S = 4 schedule words W[t..t+3]
-//   Returns: new {A,B,C,D} in Qd, new E returned separately.
-//
-// Per ARM ARM SHA1hash (op=0 for C, 1 for P, 2 for M):
-//   for i = 0..3:
-//     T = ROL(A, 5) + f(B,C,D) + E + W[i] + K
-//     E = D; D = C; C = ROL(B, 30); B = A; A = T
-//   K = 0x5A827999 for SHA1C (rounds 0..19)
-//   K = 0x6ED9EBA1 for SHA1P (rounds 20..39)
-//   K = 0x8F1BBCDC for SHA1M (rounds 40..59)
-//   (sha1_round picks K by RoundKind.)
-//
-// Note: The ARM ARM SHA1hash pseudocode uses K per-instruction:
-//   SHA1C: K = 0x5A827999
-//   SHA1P: K = 0x6ED9EBA1
-//   SHA1M: K = 0x8F1BBCDC
-// (These are the standard SHA-1 round constants for the 3 round-groups.)
-static const uint32_t SHA1_K_C   = 0x5A827999u;
-static const uint32_t SHA1_K_P   = 0x6ED9EBA1u;
-static const uint32_t SHA1_K_M   = 0x8F1BBCDCu;
+// SHA1C/SHA1P/SHA1M update Qd only; Sn is a read-only E input.
+// Vm contains four schedule words with their round constants already added.
 template<int RoundKind>  // 0=C, 1=P, 2=M
-static inline uint32_t sha1_round(uint32_t qd[4], uint32_t e, const uint32_t vm[4]) {
+static inline void sha1_round(uint32_t qd[4], uint32_t e, const uint32_t vm[4]) {
     uint32_t a = qd[0], b = qd[1], c = qd[2], d = qd[3];
-    uint32_t k = (RoundKind == 0) ? SHA1_K_C :
-                 (RoundKind == 1) ? SHA1_K_P : SHA1_K_M;
     for (int i = 0; i < 4; i++) {
         uint32_t f;
         if (RoundKind == 0)      f = sha1_ch (b, c, d);
         else if (RoundKind == 1) f = sha1_par(b, c, d);
         else                     f = sha1_maj(b, c, d);
-        uint32_t t = rotl32(a, 5) + f + e + vm[i] + k;
+        uint32_t t = rotl32(a, 5) + f + e + vm[i];
         e = d; d = c; c = rotl32(b, 30); b = a; a = t;
     }
     qd[0] = a; qd[1] = b; qd[2] = c; qd[3] = d;
-    return e;
 }
-// SHA1SU0 Vd.4S, Vn.4S, Vm.4S: Vd[i] = Vd[i] XOR Vn[i] XOR Vm[i]
-// Three-operand XOR. The old helper had only 2 operands (missing Vm)
-// and was never dispatched — fixed and now dispatched by exec_crypto.
+// Snapshot operands before writing: Rd may alias either source.
 static inline void sha1su0(uint32_t vd[4], const uint32_t vn[4],
-                            const uint32_t vm[4]) {
-    for (int i = 0; i < 4; i++) vd[i] = vd[i] ^ vn[i] ^ vm[i];
+                           const uint32_t vm[4]) {
+    const uint32_t t[4] = {vd[2], vd[3], vn[0], vn[1]};
+    for (int i = 0; i < 4; ++i) vd[i] ^= t[i] ^ vm[i];
 }
-// SHA1SU1 Vd.4S, Vn.4S: full SHA1 schedule update.
-// Per ARM ARM SHA1schedule(operand1=Vd, operand2=Vn):
-//   T[i] = Vd[i] XOR Vn[i]              for i=0..3
-//   T[i] = ROR(T[i] XOR T[(i+2) MOD 4], 31)   for i=0..3  (in-place)
-//   Vd[i] = T[i]
-// Note the in-place update: T[2] uses the new T[0], T[3] uses new T[1].
-// ROR(x, 31) == ROL(x, 1).
 static void sha1su1(uint32_t vd[4], const uint32_t vn[4]) {
-    uint32_t t[4];
-    for (int i = 0; i < 4; i++) t[i] = vd[i] ^ vn[i];
-    // In-place chained update.
-    t[0] = rotr32(t[0] ^ t[2], 31);
-    t[1] = rotr32(t[1] ^ t[3], 31);
-    t[2] = rotr32(t[2] ^ t[0], 31);  // uses new t[0]
-    t[3] = rotr32(t[3] ^ t[1], 31);  // uses new t[1]
-    for (int i = 0; i < 4; i++) vd[i] = t[i];
+    const uint32_t t[4] = {vd[0] ^ vn[1], vd[1] ^ vn[2],
+                           vd[2] ^ vn[3], vd[3]};
+    for (int i = 0; i < 4; ++i) vd[i] = rotl32(t[i], 1);
+    vd[3] ^= rotl32(t[0], 2);
 }
 // ── SHA-256 building blocks ────────────────────────────────────────────
 // SHA256SU0/SU1: message schedule updates.
@@ -312,7 +276,7 @@ static void sha256h(uint32_t qd[4], const uint32_t qn[4],
 }
 // SHA256H2 Qd, Qn, Vm.4S: 4-round SHA-256 hash update (part 2).
 //   Qd = {E,F,G,H} (source AND dest — the "high" 4 words)
-//   Qn = {A,B,C,D} (read-only — typically the result of the prior SHA256H)
+//   Qn = {A,B,C,D} (read-only — the original input to SHA256H)
 //   Vm.4S = 4 pre-added (W[t..t+3] + K[t..t+3]) words
 //   Result Qd = new {E,F,G,H}
 //
@@ -333,35 +297,21 @@ static void sha256h2(uint32_t qd[4], const uint32_t qn[4],
     }
     qd[0] = e; qd[1] = f; qd[2] = g; qd[3] = h;
 }
-// SHA256SU0 Vd.4S, Vn.4S: schedule update part 0.
-// Per ARM ARM SHA256schedule(operand1=Vd, operand2=Vn):
-//   D[i] = Vn[i] + sig0(Vd[(i+1) MOD 4]) + Vd[(i+2) MOD 4]
-// where sig0(x) = ROR(x,7) XOR ROR(x,18) XOR (x >> 3).
-// Vd holds the older 4 schedule words (W[i..i+3]); Vn holds W[i+4..i+7].
-// The old implementation had an extra "+ Vd[i]" term that doesn't appear
-// in the ARM ARM pseudocode — removed.
+// SHA256SU0 adds sigma0 of the next schedule word to each old word.
 static void sha256su0(uint32_t vd[4], const uint32_t vn[4]) {
-    uint32_t old_vd[4] = {vd[0], vd[1], vd[2], vd[3]};
-    for (int i = 0; i < 4; i++) {
-        vd[i] = vn[i] + sha256sig0(old_vd[(i + 1) & 3]) + old_vd[(i + 2) & 3];
-    }
+    const uint32_t next[4] = {vd[1], vd[2], vd[3], vn[0]};
+    for (int i = 0; i < 4; ++i) vd[i] += sha256sig0(next[i]);
 }
-// SHA256SU1 Vd.4S, Vn.4S, Vm.4S: schedule update part 1.
-// Per ARM ARM SHA256schedule2(operand1=Vd, operand2=Vn, operand3=Vm):
-//   T[i] = Vn[i] + sig1(Vm[i]) + Vm[(i+1) MOD 4] + Vm[(i+2) MOD 4]
-//   D[i] = Vd[i] + sig0(T[(i+1) MOD 4]) + T[(i+2) MOD 4] + T[i]
-// where sig0/sig1 are the SHA-256 schedule functions.
-// Vd = W[i+12..i+15] (older), Vn = W[i+8..i+11] (middle), Vm = W[i..i+3] (newest).
+// SHA256SU1 finishes W[t..t+3]. The last two words depend on the
+// newly produced first two words, rather than wrapping source indices.
 static void sha256su1(uint32_t vd[4], const uint32_t vn[4],
                        const uint32_t vm[4]) {
-    uint32_t t[4];
-    for (int i = 0; i < 4; i++) {
-        t[i] = vn[i] + sha256sig1(vm[i]) + vm[(i + 1) & 3] + vm[(i + 2) & 3];
-    }
-    uint32_t old_vd[4] = {vd[0], vd[1], vd[2], vd[3]};
-    for (int i = 0; i < 4; i++) {
-        vd[i] = old_vd[i] + sha256sig0(t[(i + 1) & 3]) + t[(i + 2) & 3] + t[i];
-    }
+    const uint32_t middle[4] = {vn[1], vn[2], vn[3], vm[0]};
+    const uint32_t tail[2] = {vm[2], vm[3]};
+    vd[0] += middle[0] + sha256sig1(tail[0]);
+    vd[1] += middle[1] + sha256sig1(tail[1]);
+    vd[2] += middle[2] + sha256sig1(vd[0]);
+    vd[3] += middle[3] + sha256sig1(vd[1]);
 }
 // ── PMULL/PMULL2: polynomial multiplication (low/high halves) ──────────
 // Carry-less multiplication of two 64-bit values, producing a 128-bit
@@ -443,8 +393,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
-    // ── SHA1SU0 (0x5E003000) — 3-operand XOR. ─────────────────────
-    // Vd.4S = Vd.4S XOR Vn.4S XOR Vm.4S
+    // ── SHA1SU0 (0x5E003000) — schedule update. ─────────────────────
     // Encoding: 0x5E003000 | (Rm<<16) | (Rn<<5) | Rd, mask 0xFFE0FC00.
     // (Note: the encoding constant is 0x5E003000, NOT 0x5E000800 —
     // bits[15:10] = 001100, not 000010. Verified against binutils.)
@@ -460,25 +409,14 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         return true;
     }
     // ── SHA1C/SHA1P/SHA1M (0x5E000000/0x5E001000/0x5E002000) ──────
-    // 4-round SHA-1 hash update. Per ARM ARM SHA1hash pseudocode:
-    //   Qd = {A,B,C,D} (128-bit accumulator, source AND dest)
-    //   Sn = E (32-bit, read from Vn[0]; written back with new E)
-    //   Vm.4S = 4 schedule words W[t..t+3]
-    //   K = 0x5A827999 (SHA1C), 0x6ED9EBA1 (SHA1P), 0x8F1BBCDC (SHA1M)
-    //   for i=0..3:
-    //     T = ROL(A,5) + f(B,C,D) + E + W[i] + K
-    //     E=D; D=C; C=ROL(B,30); B=A; A=T
-    //   Qd ← {A,B,C,D}; Sn ← E
-    // Both Qd and Sn are destinations. The new E is written to Vn[0]
-    // (low 32 bits of Vn), preserving the high 96 bits of Vn.
+    // Sn is read-only; only Qd receives the four-round result.
     if ((op & 0xFFE0FC00) == 0x5E000000) {  // SHA1C
         uint32_t vd[4], vm[4];
         load_vreg(cpu, rd, vd);
         load_vreg(cpu, rm, vm);
         uint32_t e = static_cast<uint32_t>(cpu.v_lo[rn]);
-        e = sha1_round<0>(vd, e, vm);
+        sha1_round<0>(vd, e, vm);
         store_vreg(cpu, rd, vd);
-        cpu.v_lo[rn] = (cpu.v_lo[rn] & 0xFFFFFFFF00000000ULL) | e;
         return true;
     }
     if ((op & 0xFFE0FC00) == 0x5E001000) {  // SHA1P
@@ -486,9 +424,8 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         load_vreg(cpu, rd, vd);
         load_vreg(cpu, rm, vm);
         uint32_t e = static_cast<uint32_t>(cpu.v_lo[rn]);
-        e = sha1_round<1>(vd, e, vm);
+        sha1_round<1>(vd, e, vm);
         store_vreg(cpu, rd, vd);
-        cpu.v_lo[rn] = (cpu.v_lo[rn] & 0xFFFFFFFF00000000ULL) | e;
         return true;
     }
     if ((op & 0xFFE0FC00) == 0x5E002000) {  // SHA1M
@@ -496,9 +433,8 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         load_vreg(cpu, rd, vd);
         load_vreg(cpu, rm, vm);
         uint32_t e = static_cast<uint32_t>(cpu.v_lo[rn]);
-        e = sha1_round<2>(vd, e, vm);
+        sha1_round<2>(vd, e, vm);
         store_vreg(cpu, rd, vd);
-        cpu.v_lo[rn] = (cpu.v_lo[rn] & 0xFFFFFFFF00000000ULL) | e;
         return true;
     }
     // ── SHA256H/SHA256H2 (0x5E004000/0x5E005000) ──────────────────
@@ -552,14 +488,33 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
+    // PMULL/PMULL2 byte lanes: Q selects the source half, while the
+    // destination always receives eight widened 16-bit polynomial products.
+    if ((op & 0xBFE0FC00) == 0x0E20E000) {
+        const bool high = (op >> 30) & 1;
+        const uint64_t a = high ? cpu.v_hi[rn] : cpu.v_lo[rn];
+        const uint64_t b = high ? cpu.v_hi[rm] : cpu.v_lo[rm];
+        uint64_t result[2] = {};
+        for (int lane = 0; lane < 8; ++lane) {
+            const uint16_t x = (a >> (lane * 8)) & 0xff;
+            const uint8_t y = (b >> (lane * 8)) & 0xff;
+            uint16_t product = 0;
+            for (int bit = 0; bit < 8; ++bit)
+                if ((y >> bit) & 1) product ^= x << bit;
+            result[lane / 4] |= static_cast<uint64_t>(product) << ((lane % 4) * 16);
+        }
+        cpu.v_lo[rd] = result[0];
+        cpu.v_hi[rd] = result[1];
+        return true;
+    }
     // ── PMULL/PMULL2 (size=11, 64-bit polynomial multiply) ──────────
-    // PMULL  Vd.1Q, Vn.1D, Vm.1D: 0x4E60E000 | (Rm<<16) | (Rn<<5) | Rd
+    // PMULL  Vd.1Q, Vn.1D, Vm.1D: 0x0EE0E000 | (Rm<<16) | (Rn<<5) | Rd
     // PMULL2 Vd.1Q, Vn.2D, Vm.2D: 0x4EE0E000 | (Rm<<16) | (Rn<<5) | Rd
     // Mask: 0xFFE0FC00 (preserves bits[31:21] including size, plus
     // bits[15:10] opcode). The size field (bits[23:22]) MUST be 11 for
     // 64-bit polynomial multiply — that's what distinguishes PMULL from
     // the 8-bit form (size=00, used by GHASH byte-wise).
-    if ((op & 0xFFE0FC00) == 0x4E60E000) {  // PMULL
+    if ((op & 0xFFE0FC00) == 0x0EE0E000) {  // PMULL
         uint64_t a = cpu.v_lo[rn];
         uint64_t b = cpu.v_lo[rm];
         __uint128_t r = pmull_64(a, b);
