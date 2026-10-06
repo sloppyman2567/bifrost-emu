@@ -358,6 +358,9 @@ UNIT_TESTS=(
     # exit_group / fatal default signals from any thread end the process;
     # main pthread_exit does not; fork-child threads share getpid().
     "test_group_exit|ctest/test_group_exit.elf||60|ALL PASS"
+    # Cross-thread JIT invalidation of a running thread's blocks (also run
+    # with per-thread JITs in the "Per-thread JIT" category below).
+    "test_jit_thread_invalidate|ctest/test_jit_thread_invalidate.elf||60|ALL PASS"
     "test_memory_permissions|ctest/test_memory_permissions.elf||30|ALL PASS"
     # Fixed mapping contents, concurrent fd reads during mmap, mremap
     # relocation contracts, and active alternate-stack changes (47 checks).
@@ -1122,6 +1125,15 @@ if [ "$RUN_INTEGRATION" = "1" ]; then
             record_failure "test_sandbox" "could not provision sandbox fixtures"
         fi
     fi
+fi
+# BIFROST_NO_SHARED_JIT=1 gives each thread its own JIT; other threads
+# still invalidate it while it runs.
+if [ "$RUN_UNIT" = "1" ]; then
+    OLD_RUN_ENV=("${RUN_ENV[@]}")
+    RUN_ENV=("BIFROST_NO_SHARED_JIT=1" "${RUN_ENV[@]}")
+    run_category "Per-thread JIT" \
+        "test_jit_thread_invalidate_perthread|ctest/test_jit_thread_invalidate.elf||60|ALL PASS"
+    RUN_ENV=("${OLD_RUN_ENV[@]}")
 fi
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"
 [ "$RUN_TOYBOX" = "1" ]      && run_category "Toybox tests"      "${TOYBOX_TESTS[@]}"

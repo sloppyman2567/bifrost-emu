@@ -23,6 +23,9 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "debug_flags.h"
+#include "bifrost/version.hpp"  // CODENAME
+#include <sys/mman.h>
+#include <cerrno>
 #include <cstdio>
 #include <atomic>
 #include <cstdint>
@@ -513,6 +516,19 @@ void FrostJIT::enter_multithreaded() {
         tier2_counter_disable(entry.tier2_counter_off, entry.tier2_counter_len, true);
     }
     make_executable();
+    // MT publication appends code while other host threads execute from
+    // this buffer, and they invalidate it. A W^X toggle (per-thread JIT
+    // mode keeps W^X on) flips the WHOLE buffer to RW under them: SIGSEGV
+    // ACCERR on their next fetch. MT code stays RWX, like the shared JIT.
+    if (wex_enabled_) {
+        if (mprotect(code_buf_, code_buf_limit_, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            wex_enabled_ = false;
+        } else {
+            jit_disabled_.store(true, std::memory_order_relaxed);
+            fprintf(stderr, "[%s] frostJIT: cannot make code buffer RWX for threads: %s\n",
+                    CODENAME, strerror(errno));
+        }
+    }
     invalidate_dispatch_cache();
     blocks_.clear(); back_refs_.clear();
 }

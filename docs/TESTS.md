@@ -22,6 +22,11 @@ bootstrap variants pass. See [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
 
 Focused additions:
 
+- `test_jit_thread_invalidate`: two threads keep calling a JIT-translated
+  page while main replaces it (`MAP_FIXED`, write, `mprotect` RX) 400 times
+  on alternating pages; every call returns a published value. Runs with the
+  shared JIT and again with `BIFROST_NO_SHARED_JIT=1`. QEMU passes; the
+  pre-change binary dumps core in per-thread mode.
 - `test_group_exit`: forked children with live threads: main SIGKILLing
   itself, a worker's `kill(getpid(), SIGTERM)`, and a worker's
   `exit_group(7)` (main sleeping or spinning) each end the process within

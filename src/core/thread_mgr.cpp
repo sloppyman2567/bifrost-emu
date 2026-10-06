@@ -381,14 +381,19 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         gt->jit = std::make_unique<FrostJIT>();
         if (gt->jit) {
             gt->jit->set_direct_window(mem_.direct_window(), &mem_);
+            // Other threads invalidate this JIT (invalidate_jit_range) while
+            // its owner executes from it: single-thread W^X toggling made
+            // the running buffer RW (SIGSEGV ACCERR on the next fetch).
+            gt->jit->enter_multithreaded();
         }
     }
-    // Shared-JIT mode safety: before a second vCPU can execute, unpatch all
-    // chain slots and permanently disable runtime code writes, so the RWX
-    // shared code buffer is never modified under a running core (x86 needs
-    // the executing core to serialize after a code write). No-op in
-    // per-thread-JIT mode and after the first spawn.
-    if (gt->jit == nullptr && jit_) jit_->enter_multithreaded();
+    // Before a second vCPU can execute, unpatch all chain slots and
+    // permanently disable runtime code writes, so the RWX code buffer is
+    // never modified under a running core (x86 needs the executing core to
+    // serialize after a code write). The main JIT needs this in per-thread
+    // mode too: workers invalidate it while main runs. No-op after the
+    // first spawn.
+    if (jit_) jit_->enter_multithreaded();
     alive_threads_.fetch_add(1);
     if (libc_single_threaded_addr_) {
         mem_.store<uint32_t>(libc_single_threaded_addr_, 0);

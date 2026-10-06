@@ -12,6 +12,14 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Per-thread JIT crash (2026-10-06)
+
+- With `BIFROST_NO_SHARED_JIT=1`, another thread's code invalidation (any
+  `mmap`/`munmap`/`mprotect` over translated code) toggled the running
+  thread's W^X code buffer to RW, and the emulator died with a host SIGSEGV.
+  Per-thread JITs and the main JIT now enter multithreaded mode, whose code
+  buffer stays RWX and whose instructions are never patched in place.
+
 ### Group-wide process exit (2026-10-06)
 
 - `exit_group` and fatal default signals end the whole process from any

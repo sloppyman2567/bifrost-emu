@@ -989,7 +989,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   generation; invalidation checks every region constituent range, clears
   incoming cells and permanently retires outgoing cells/counters. Code and
   metadata stay allocated until JIT destruction. `BIFROST_NO_SHARED_JIT=1`
-  retains the per-thread path. Regressions: `jit_mt_tier2`'s eight-thread
+  retains the per-thread path, but per-thread JITs are invalidated by other
+  threads too: each enters MT mode at creation, the main JIT before the
+  second vCPU starts, and `enter_multithreaded()` makes the buffer RWX
+  (W^X off). A W^X toggle from another thread made a running thread's whole
+  buffer RW (host SIGSEGV ACCERR). Regressions: `test_jit_thread_invalidate`
+  (shared and "Per-thread JIT" categories), `jit_mt_tier2`'s eight-thread
   arithmetic/SMC/MAP_FIXED oracle, `scripts/test_jit_mt.sh` and
   `scripts/test_jit_mt_publication.sh` (immutable bytes and bounded leases),
   plus `test_mem_guard`, code-cache pressure and SDL callback tests.
