@@ -2207,6 +2207,7 @@ struct IRBlock {
     // Optimization stats (filled by optimize_ir)
     int dce_removed = 0;
     int fold_subst  = 0;
+    bool fwd_enabled = false;  // load-forwarding ran (BIFROST_BLOCK_TRACE reports it)
     IRBlock() = default;
 };
 // Translate a single ARM64 instruction into IR ops.

@@ -123,6 +123,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   SIGSEGV/SIGBUS reporter (guest address + full register file + pc); this is
   how the TLS bug above was localized. Guards are opt-in only (they leak the
   guard page VA for the debug run).
+- **Fault/block/FWD traces** (`docs/JIT.md`): `BIFROST_FAULT_TRACE=1` logs
+  each fault-signal delivery (with `jit-block=` when a memory guard left a
+  block) and its `rt_sigreturn` register changes; `BIFROST_BLOCK_TRACE=lo-hi,…`
+  logs every cold/chained entry of blocks starting in range (prologue hook
+  after `chain_entry_off_`); `BIFROST_FWD_RANGES=lo-hi,…` limits FWD to
+  those blocks. Each trace line is ONE `fprintf` (threads interleave
+  otherwise). ART relocates its boot image every run, so fixed ranges do not
+  carry across Android runs.
 - Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP

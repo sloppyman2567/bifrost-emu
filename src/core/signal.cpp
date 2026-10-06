@@ -35,6 +35,7 @@
 #include "core/signal.h"
 #include "arm64_emu.hpp"
 #include "core/crash_report.h"  // TEMP-NEVERBALL-DEBUG
+#include "debug_flags.h"
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -489,8 +490,50 @@ bool signal_kills_process(Emulator& emu, const CPU& target, int signo) {
     const std::optional<SigAction> act = emu.signals().lookup(signo);
     return !act || act->handler == 0;
 }
+uint64_t& fault_trace_block_pc() {
+    thread_local uint64_t block_pc = 0;
+    return block_pc;
+}
+static bool is_fault_signal(int signo) {
+    return signo == BIFROST_SIGSEGV || signo == BIFROST_SIGBUS || signo == BIFROST_SIGILL ||
+           signo == BIFROST_SIGFPE || signo == BIFROST_SIGTRAP;
+}
+// Trace lines are built in one buffer and written by a single fprintf, so
+// lines from concurrent guest threads never interleave.
+void fault_trace_sigreturn(const CPU& restored, const SignalFrame& frame) {
+    if (!is_fault_signal(frame.signo)) return;
+    char line[1536];
+    size_t n = 0;
+    auto add = [&](const char* fmt, auto... args) {
+        if (n < sizeof(line)) n += snprintf(line + n, sizeof(line) - n, fmt, args...);
+    };
+    add("[fault] tid=%d return sig=%d pc=0x%llx", restored.tid, frame.signo,
+        static_cast<unsigned long long>(restored.pc));
+    if (restored.pc != frame.pc)
+        add(" (fault pc=0x%llx)", static_cast<unsigned long long>(frame.pc));
+    for (int i = 0; i < 31; ++i) {
+        if (restored.regs[i] != frame.regs[i])
+            add(" x%d:0x%llx->0x%llx", i, static_cast<unsigned long long>(frame.regs[i]),
+                static_cast<unsigned long long>(restored.regs[i]));
+    }
+    if (restored.sp != frame.sp)
+        add(" sp:0x%llx->0x%llx", static_cast<unsigned long long>(frame.sp),
+            static_cast<unsigned long long>(restored.sp));
+    fprintf(stderr, "%s\n", line);
+}
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {
+    if (dbg().fault_trace && is_fault_signal(signo)) {
+        char block[40] = "";
+        if (uint64_t block_pc = fault_trace_block_pc())
+            snprintf(block, sizeof(block), " jit-block=0x%llx",
+                     static_cast<unsigned long long>(block_pc));
+        fprintf(stderr, "[fault] tid=%d sig=%d code=%d addr=0x%llx pc=0x%llx%s sp=0x%llx lr=0x%llx\n",
+                cpu.tid, signo, si_code, static_cast<unsigned long long>(fault_addr),
+                static_cast<unsigned long long>(cpu.pc), block,
+                static_cast<unsigned long long>(cpu.sp),
+                static_cast<unsigned long long>(cpu.regs[30]));
+    }
     const bool trace = signal_trace_enabled();
     if (trace) {
         fprintf(stderr, "[signal] deliver_signal: signo=%d si_code=%d "

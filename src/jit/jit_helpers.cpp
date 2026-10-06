@@ -7,6 +7,7 @@
 //     interpreter for one instruction)
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
+#include "debug_flags.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -122,7 +123,12 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_load(RDI, RBP, emu_slot_off());
     emit_mov_reg(RSI, CPU_REG);
-    emit_call_aligned(&jit_interp_step, 0);
+    if (dbg().fault_trace) {
+        emit_mov_imm64(RDX, current_start_pc_);
+        emit_call_aligned(&jit_guard_step, 0);
+    } else {
+        emit_call_aligned(&jit_interp_step, 0);
+    }
     emit_load(RAX, CPU_REG, PC_OFF);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
     emit_pop(R15); emit_pop(R14); emit_pop(R13);

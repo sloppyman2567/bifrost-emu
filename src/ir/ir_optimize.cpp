@@ -23,6 +23,7 @@
 // the x86 codegen.
 #include "ir/ir.hpp"
 #include "core/emulator.h"
+#include "debug_flags.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -232,6 +233,10 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // never hoist them. FWD is verified correct (2026-08-15 fix + suites);
     // forcing it here only affects region IR, never the standalone JIT.
     bool fwd_requested = !fwd_off_ || force_fwd;
+    // BIFROST_FWD_RANGES bisects FWD bugs by block start address.
+    const auto& fwd_ranges = dbg().fwd_ranges;
+    if (!fwd_ranges.empty() && !bifrost::DebugFlags::in_ranges(fwd_ranges, block.start_pc))
+        fwd_requested = false;
     bool block_has_atomics = false;
     if (fwd_requested) {
         for (const auto& inst : block.insts) {
@@ -245,6 +250,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
         }
     }
     bool fwd_enabled = fwd_requested && !block_has_atomics;
+    block.fwd_enabled = fwd_enabled;
     ConstMap consts;
     CopyMap  copies;
     // Last vreg → index in insts that defined it (for store-load fwd).

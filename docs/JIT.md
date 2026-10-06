@@ -115,6 +115,35 @@ result oracles; suspension in a differential fixture fails the gate. CoreMark is
 compute workload, but it does not replace application workloads or targeted
 correctness regressions.
 
+### Fault, block-entry and FWD bisection traces
+
+These opt-in switches are parsed once in `include/debug_flags.h`. Each
+trace line is written by a single `fprintf`, so lines from concurrent guest
+threads do not interleave.
+
+```bash
+BIFROST_FAULT_TRACE=1 ./bifrost-emu app.elf
+BIFROST_BLOCK_TRACE=0x400000-0x401000 ./bifrost-emu app.elf
+BIFROST_FWD_RANGES=0x400000-0x480000,0x500000-0x500100 ./bifrost-emu app.elf
+```
+
+- `BIFROST_FAULT_TRACE` prints one `[fault]` line per delivered
+  SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGTRAP: thread, signal, si_code, address,
+  pc, sp and lr. When a JIT memory guard left its block to interpret the
+  faulting instruction, the line adds `jit-block=` with that block's start.
+  The matching `rt_sigreturn` prints the resume pc and every general
+  register and SP that the handler or ucontext changed.
+- `BIFROST_BLOCK_TRACE=lo-hi[,...]` makes blocks starting in those ranges
+  log every cold and chained entry: pc, whether FWD ran, x0-x7, sp and lr.
+  Self-loop iterations re-enter past the prologue and are not logged.
+- `BIFROST_FWD_RANGES=lo-hi[,...]` restricts FWD to blocks starting in those
+  ranges, including Tier-2 regions that otherwise force it on.
+
+Ranges are guest pcs, `[lo, hi)`. They are only stable when the code's load
+address is: Android's ART relocates its boot image on every run, even with
+`BIFROST_NO_ASLR=1`. To compare two modes, diff their fault and block traces
+by method rather than by fixed address ranges.
+
 ## Conditional compares and register forwarding
 
 CCMP and CCMN only define NZCV flags. Their IR `dest=0` is a placeholder,

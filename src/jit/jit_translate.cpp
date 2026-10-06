@@ -832,6 +832,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // skips its own prologue still reads that slot. Disabled mode leaves
     // chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
+    // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
+    // counter below, it runs before anything is cached, so the caller-saved
+    // registers are free. Self-loop iterations re-enter past the prologue
+    // and are not logged.
+    if (bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc)) {
+        emit_mov_reg(RDI, CPU_REG);
+        emit_mov_imm64(RSI, start_pc);
+        emit_mov_imm64(RDX, ir_block.fwd_enabled ? 1 : 0);
+        emit_call_aligned(&jit_trace_block_entry, 0);
+    }
     // ── Tier-2 in-code hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
     // Emitted here (after chain_entry_off_, before the R10 window load and
     // vec prologue loads) so BOTH cold entries (falling through the prologue)

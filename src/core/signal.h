@@ -278,6 +278,14 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr);
 // if the default disposition was applied.
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code = SI_USER_EMU, uint64_t fault_addr = 0);
+// BIFROST_FAULT_TRACE: start pc of the JIT block whose memory guard is
+// interpreting the current instruction on this thread (0 otherwise), so a
+// fault line can name the block that was left mid-way.
+uint64_t& fault_trace_block_pc();
+// BIFROST_FAULT_TRACE: log a returning fault frame's resume pc and every
+// general register the handler (or ucontext) changed. `restored` is the CPU
+// after restore_ucontext; `frame` is the delivery-time snapshot.
+void fault_trace_sigreturn(const CPU& restored, const SignalFrame& frame);
 // Linux complete_signal(): SIGKILL, or a SIG_DFL signal whose default
 // action terminates and that `target` does not block, ends the whole
 // process at send time. Cross-thread senders check this instead of

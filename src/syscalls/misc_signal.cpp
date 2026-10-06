@@ -7,6 +7,7 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
+#include "debug_flags.h"
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
@@ -222,6 +223,7 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 // TLS has no slot in the baseline AArch64 ucontext ABI.
                 cpu.tpidr_el0 = frame.tpidr_el0;
                 cpu.tpidrro_el0 = frame.tpidrro_el0;
+                if (dbg().fault_trace) fault_trace_sigreturn(cpu, frame);
             }
             if (cpu.sigpending.load() != 0)
                 deliver_pending_signals(emu, cpu, signals_);

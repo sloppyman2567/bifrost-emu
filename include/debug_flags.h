@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <string>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace bifrost {
@@ -44,6 +45,10 @@ struct DebugFlags {
     bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
     bool jit_verify = false;  // BIFROST_JIT_VERIFY: presence enables differential replay
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
+    using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
+    Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
+    Ranges block_trace;  // BIFROST_BLOCK_TRACE=lo-hi,... — log every entry of blocks starting here
+    bool fault_trace = false;  // BIFROST_FAULT_TRACE — one line per fault signal + its sigreturn
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     std::vector<uint64_t> input_watch; // BIFROST_INPUT_WATCH — comma-separated guest u32 addresses
@@ -92,7 +97,30 @@ struct DebugFlags {
 
     static bool env(const char* name) { return std::getenv(name) != nullptr; }
 
+    static bool in_ranges(const Ranges& ranges, uint64_t pc) {
+        for (const auto& r : ranges)
+            if (pc >= r.first && pc < r.second) return true;
+        return false;
+    }
+
  private:
+    // "lo-hi[,lo-hi...]" (any strtoull base, e.g. 0x70000000-0x71000000).
+    // Parsing stops at the first malformed or empty range.
+    static Ranges parse_ranges(const char* p) {
+        Ranges ranges;
+        while (p && *p) {
+            char* end = nullptr;
+            uint64_t lo = std::strtoull(p, &end, 0);
+            if (end == p || *end != '-') break;
+            const char* q = end + 1;
+            uint64_t hi = std::strtoull(q, &end, 0);
+            if (end == q || (*end && *end != ',') || hi <= lo) break;
+            ranges.push_back({lo, hi});
+            p = *end ? end + 1 : end;
+        }
+        return ranges;
+    }
+
     static DebugFlags parse() {
         DebugFlags f;
         if (const char* budget = std::getenv("BIFROST_JIT_CACHE_MB")) {
@@ -127,6 +155,9 @@ struct DebugFlags {
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
+        f.fwd_ranges = parse_ranges(std::getenv("BIFROST_FWD_RANGES"));
+        f.block_trace = parse_ranges(std::getenv("BIFROST_BLOCK_TRACE"));
+        f.fault_trace = all || env("BIFROST_FAULT_TRACE");
         f.no_chain = env("BIFROST_NO_CHAIN");
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");

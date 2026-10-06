@@ -83,6 +83,25 @@ extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
                 cpu->pstate);
     }
 }
+// BIFROST_FAULT_TRACE: memory-guard exits call this instead of
+// jit_interp_step so a fault delivered by the step names its block.
+extern "C" void jit_guard_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint64_t block_pc) {
+    arm64emu::fault_trace_block_pc() = block_pc;
+    jit_interp_step(emu, cpu);
+    arm64emu::fault_trace_block_pc() = 0;
+}
+// BIFROST_BLOCK_TRACE: called from the prologue of blocks whose start pc
+// is in range, after the chain-skip entry, so chained entries log too.
+// Architectural registers are all in cpu.regs at block entry. One fprintf
+// per line keeps concurrent threads' lines intact.
+extern "C" void jit_trace_block_entry(arm64emu::CPU* cpu, uint64_t block_pc, uint64_t fwd) {
+    const auto* r = cpu->regs;
+    auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+    fprintf(stderr, "[block] tid=%d pc=0x%llx fwd=%d x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx "
+            "x4=0x%llx x5=0x%llx x6=0x%llx x7=0x%llx sp=0x%llx lr=0x%llx\n",
+            cpu->tid, u(block_pc), static_cast<int>(fwd), u(r[0]), u(r[1]), u(r[2]), u(r[3]),
+            u(r[4]), u(r[5]), u(r[6]), u(r[7]), u(cpu->sp), u(r[30]));
+}
 // ── jit_vdso_clock_svc — JIT native vDSO clock fast path ───────────────
 // Emitted by the JIT for SVC instructions that live inside the vDSO
 // mapping (the gettimeofday/clock_gettime/clock_getres stubs). Unlike

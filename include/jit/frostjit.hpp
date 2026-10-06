@@ -86,6 +86,11 @@ void regalloc_stats_reset();
 const regalloc_stats_t& regalloc_stats_get();
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
+// BIFROST_FAULT_TRACE memory-guard exit: jit_interp_step with the block's
+// start pc recorded for the [fault] line (jit_interp.cpp).
+extern "C" void jit_guard_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
+// BIFROST_BLOCK_TRACE prologue hook: logs one block entry (jit_interp.cpp).
+extern "C" void jit_trace_block_entry(CPU* cpu, uint64_t block_pc, uint64_t fwd);
 extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" void jit_native_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
