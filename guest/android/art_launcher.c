@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
     printf("ART_LOAD_OK\n");
     fflush(stdout);
     JavaVMOption options[] = {
-        {"-Xint", 0}, {"-Xusejit:false", 0}, {"-Xcheck:jni", 0},
+        {"-Xuse-stderr-logger", 0}, {"-Xint", 0}, {"-Xusejit:false", 0}, {"-Xcheck:jni", 0},
         {"-Xms16m", 0}, {"-Xmx64m", 0},
         {"-Xnoimage-dex2oat", 0}, {"-Ximage:/nonexistent/boot.art", 0},
         {"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:"

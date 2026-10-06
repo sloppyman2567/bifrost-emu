@@ -68,15 +68,21 @@ ICU, Conscrypt, timezone data and native dependencies from the official
 [API-35 ARM64 SDK image, revision 2](https://dl.google.com/android/repository/sys-img/android/arm64-v8a-35_r02.zip).
 Its build identity is `AE3A.240806.019/12368160`, with image SHA-256
 `1e6ae4fca6449c07278a333311f0ef29c5101d1e3e18ba48fbe9bd2dc5006926`.
-The provisioner verifies the archive and all 309 extracted file hashes,
-symlink targets and executable flags. It keeps the upstream notices and
-records the native dependency graph in `bifrost-art.json`. This is a bootstrap
-artifact set, without a framework installation or boot image.
+The provisioner verifies the archive and all 529 extracted file hashes,
+symlink targets and executable flags. Besides the DT_NEEDED closure it extracts
+the image's `public.libraries.txt` preloads (libnativeloader opens them at VM
+startup) and their dependencies. It keeps the upstream notices and records the
+dependency graph and preload list in `bifrost-art.json` (schema 2; older
+runtime directories must be re-provisioned). The generated linker config gives
+each boot APEX its own namespace linked to one shared default namespace, so
+JNI loads never create a second libart. This is a bootstrap artifact set,
+without a framework installation or boot image.
 
 ```bash
 python3 tools/android_art.py
 python3 tools/build-android-jni.py --javac /path/to/javac
 BIFROST_NO_ASLR=1 python3 scripts/test_android_jni.py --timeout 60
+python3 scripts/test_android_jni.py --mode qemu   # qemu-aarch64 reference run
 ```
 
 Requirements: Python 3.11+, `debugfs`, `lpunpack`, `readelf`, Clang/LLD and a
@@ -90,8 +96,12 @@ data and fixtures, enforces a timeout, and saves logs plus JSON results in
 `build/android-jni-results/`. The launcher calls the real `JNI_CreateJavaVM`
 with ART JIT disabled, CheckJNI enabled and a small 16/64 MiB heap. The fixture
 is intended to load an ARM64 JNI library, register a native method, access an
-array/string, call back into Java and shut down cleanly. Success requires its
-marker and a zero exit; `ART_LOAD_OK` alone does not pass the gate.
+array/string, call back into Java and shut down cleanly. Success requires
+`ART_LOAD_OK`, `ART_VM_OK`, the fixture's marker and a zero exit; ART logs go
+to stderr (`-Xuse-stderr-logger`). `--mode qemu` runs the same root under
+`qemu-aarch64` as a reference: with this pinned image it reaches `ART_VM_OK`
+and passes, while Bifrost currently completes boot class linking but stops
+before `ART_VM_OK`.
 
 October 5 checkpoint: real ART loads. The fixed-address JIT probe now reaches
 unsupported `UADALP` (`0x6e206b17`, `uadalp v23.8h, v24.16b`) during VM creation,

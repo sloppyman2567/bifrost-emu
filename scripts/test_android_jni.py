@@ -40,8 +40,15 @@ def run(emu, runtime, fixture, mode, output, timeout):
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
         for name in ("bifrost-art", "libbifrost-jni.so", "classes.dex"):
             shutil.copy2(fixture / name, files / name)
-        arguments = [str(emu)] + (["--no-jit"] if mode == "interp" else [])
-        arguments += ["--android-runtime", "--rootfs", str(root), "/data/local/tmp/bifrost-art", "Bootstrap"]
+        if mode == "qemu":
+            # QEMU's AT_EXECFN contains the host-prefixed executable path.
+            # Select the same ART section in this temporary copy only.
+            config = root / "linkerconfig/ld.config.txt"
+            config.write_text("dir.art = " + str(files) + "\n" + config.read_text())
+            arguments = [str(emu), "-L", str(root), str(files / "bifrost-art"), "Bootstrap"]
+        else:
+            arguments = [str(emu)] + (["--no-jit"] if mode == "interp" else [])
+            arguments += ["--android-runtime", "--rootfs", str(root), "/data/local/tmp/bifrost-art", "Bootstrap"]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
         environment["BIFROST_TIER2"] = "0"
@@ -64,7 +71,8 @@ def run(emu, runtime, fixture, mode, output, timeout):
                     child.wait()
             code = child.returncode
         seen, tail = inspect_log(log_path)
-        passed = code == 0 and not timed_out and "android_jni_bootstrap: ALL PASS" in seen
+        passed = code == 0 and not timed_out and {"ART_LOAD_OK", "ART_VM_OK",
+                                                        "android_jni_bootstrap: ALL PASS"} <= seen
         passed = passed and not seen.intersection(("Fatal signal", "[crash]", "JNI DETECTED ERROR"))
         passed = bool(passed)
         result = {"mode": mode, "passed": passed, "returncode": code,
@@ -79,14 +87,22 @@ def run(emu, runtime, fixture, mode, output, timeout):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    parser.add_argument("--emu", type=Path, help="Emulator executable; defaults to Bifrost or qemu-aarch64 for qemu mode")
     parser.add_argument("--runtime-root", type=Path, default=ROOT / "build/android-art/rootfs")
     parser.add_argument("--fixture", type=Path, default=ROOT / "build/android-jni")
     parser.add_argument("--output", type=Path, default=ROOT / "build/android-jni-results")
-    parser.add_argument("--mode", choices=("jit", "interp"), default="jit")
+    parser.add_argument("--mode", choices=("jit", "interp", "qemu"), default="jit")
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
     if not 1 <= args.timeout <= 300:
         parser.error("timeout must be between 1 and 300 seconds")
+    if args.emu is None:
+        if args.mode == "qemu":
+            qemu = shutil.which("qemu-aarch64")
+            if not qemu:
+                parser.error("qemu-aarch64 is required for qemu mode; pass --emu /path/to/qemu-aarch64")
+            args.emu = Path(qemu)
+        else:
+            args.emu = ROOT / "bifrost-emu"
     sys.exit(0 if run(args.emu.resolve(), args.runtime_root.resolve(), args.fixture.resolve(),
                      args.mode, args.output.resolve(), args.timeout) else 1)
