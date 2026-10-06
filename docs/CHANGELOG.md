@@ -20,6 +20,13 @@ are historical records, and v2.0 remains planned.
 - Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
   reported renderer fault remain unresolved. No controlled FPS claim is made.
 
+### OpenSSL 3 correctness: JIT register pressure (2026-10-05)
+
+- JIT: `ensure_two_vregs()` could evict its other operand under full
+  register pressure, and its fallback passed `force_two_vregs_to()`
+  arguments in the wrong order, clobbering a live host register. Every
+  OpenSSL SHA-256 digest was wrong under the JIT. Add
+  `ctest/jit_two_operand_pressure.c` (1,920 checks; QEMU-checked).
 ### AArch64 crypto and pairwise-widening SIMD (2026-10-05)
 
 - Correct the PMULL (`0x0EE0E000`) encoding, add 8-bit PMULL/PMULL2, and

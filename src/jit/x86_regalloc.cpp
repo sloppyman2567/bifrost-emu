@@ -345,12 +345,11 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
 // review). This helper re-reads BOTH homes after the last evicting
 // call and re-establishes whichever operand lost its home, so the
 // caller never observes a stale register number or an unmapped
-// operand. Convergence: the re-ensure of an evicted operand needs a
-// victim only when every alloc reg is occupied, and Belady never
-// evicts an operand whose next use is the current op (lowest possible
-// score) while any other occupant exists — terminating for any pool
-// with >= 2 non-pinned regs. Pathological smaller pools fall back to
-// force_two_vregs_to (fixed RAX/RCX placement, eviction-safe).
+// operand. next_use_after() excludes the current op, so an operand
+// that dies here scores as dead and is Belady's FIRST victim: loading
+// v1 under full pressure evicted v2, and re-loading v2 then evicted v1.
+// v2's register is therefore pinned while v1 loads. Pools too small for
+// that (all but two regs pinned) fall back to fixed RAX/RCX placement.
 void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
     if (v1 == v2) {
         int r = ensure_vreg(v1);
@@ -358,15 +357,15 @@ void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
         *r2 = r;
         return;
     }
-    ensure_vreg(v2);
+    const int h2 = ensure_vreg(v2);
+    const uint32_t saved_pins = pinned_host_regs_;
+    pinned_host_regs_ |= 1u << h2;
     ensure_vreg(v1);
-    if (vreg_home_[v2] < 0) ensure_vreg(v2);  // v1's ensure evicted v2
+    pinned_host_regs_ = saved_pins;
     *r1 = vreg_home_[v1];
     *r2 = vreg_home_[v2];
-    if (*r1 < 0 || *r2 < 0) {
-        // Defensive: sub-2-reg pools (all pinned but two) — fixed
-        // placement is eviction-safe by construction.
-        force_two_vregs_to(v1, v2, RAX, RCX);
+    if (*r1 < 0 || *r2 < 0 || *r1 == *r2) {
+        force_two_vregs_to(v1, RAX, v2, RCX);
         *r1 = vreg_home_[v1];
         *r2 = vreg_home_[v2];
     }

@@ -391,6 +391,8 @@ UNIT_TESTS=(
     "jit_prfm_ldapr|ctest/jit_prfm_ldapr.elf||5|checks passed"
     # SIMD&FP LDR/STR register offset: Q forms scale the index by 16.
     "jit_simd_ldst_regoff|ctest/jit_simd_ldst_regoff.elf||5|checks passed"
+    # Two-operand ALU loads under full register pressure (OpenSSL SHA-256).
+    "jit_two_operand_pressure|ctest/jit_two_operand_pressure.elf||5|1920/1920 checks passed"
     # Compatibility syscalls: permissive no-ops (NUMA/ioprio/timeofday/
     # vhangup/swapoff) and explicit -ENOSYS/-EPERM stubs (fanotify/bpf/
     # userfaultfd/mqueue/quotactl).

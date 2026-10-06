@@ -819,6 +819,16 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `CopiedMethodRecord` hash set then held records 4 bytes off: `ptr << 32`
   SIGSEGVs in `ArtMethod::CopyFrom` and `class_linker.cc:7893 Unexpected
   state: 6656`. Regression: `ctest/jit_simd_ldst_regoff.c`.
+- **Two-operand loads under full register pressure (2026-10-05).**
+  `next_use_after()` excludes the current op, so an operand that dies at
+  this op scores as dead and is Belady's first eviction victim.
+  `ensure_two_vregs()` therefore pins v2's host reg while loading v1; do
+  not remove the pin. Its tiny-pool fallback is
+  `force_two_vregs_to(v1, RAX, v2, RCX)` — the signature is
+  `(src1, reg1, src2, reg2)`; the old `(v1, v2, RAX, RCX)` call used a vreg
+  as a host register and clobbered a live one (FWD-only; every OpenSSL
+  SHA-256 digest was wrong under the JIT). Regression:
+  `ctest/jit_two_operand_pressure.c` (the real SHA-256 round block).
 - **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
   Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
@@ -1170,13 +1180,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **278 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **279 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **278 pass /
+  (interactive + real-world are the standard default) = **279 pass /
   0 fail / 0 skip**. Subsets: `--quick` (no benches, 223),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
@@ -1188,7 +1198,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **278 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **279 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three
