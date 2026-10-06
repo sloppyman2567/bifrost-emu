@@ -7,7 +7,7 @@ tmp_dir=$(mktemp -d /tmp/bifrost-audio-callbacks.XXXXXX)
 trap 'rm -rf -- "$tmp_dir"' EXIT
 make -C "$repo_dir" cross SRC="$repo_dir/ctest_real/test_android_audio.c" OUT="$tmp_dir/guest.elf"
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -shared -fPIC -O2 \
-    "$repo_dir/ctest/audio_wait_delay.c" -ldl -pthread -o "$tmp_dir/wait-delay.so"
+    "$repo_dir/ctest/host/audio_wait_delay.c" -ldl -pthread -o "$tmp_dir/wait-delay.so"
 for mode in jit interp; do
     flags=()
     [[ "$mode" == interp ]] && flags+=(--no-jit)

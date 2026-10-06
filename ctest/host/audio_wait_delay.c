@@ -1,4 +1,4 @@
-/* Host fault injection for scripts/test_audio_callbacks.sh.
+/* Host-only fault injection for scripts/test_audio_callbacks.sh.
  * Widen the predicate-read -> unlock-and-wait interval once per thread.
  * A correct notifier takes the wait mutex and therefore cannot lose its
  * notification in this interval. This is never linked into the emulator. */
