@@ -488,11 +488,19 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const bool trace = signal_trace_enabled();
     if (trace) {
         fprintf(stderr, "[signal] deliver_signal: signo=%d si_code=%d "
-                "fault_addr=0x%llx cpu.tid=%d cpu.sigmask=0x%llx\n",
+                "fault_addr=0x%llx cpu.tid=%d cpu.sigmask=0x%llx "
+                "pc=0x%llx lr=0x%llx\n",
                 signo, si_code,
                 static_cast<unsigned long long>(fault_addr),
                 cpu.tid,
-                static_cast<unsigned long long>(cpu.sigmask));
+                static_cast<unsigned long long>(cpu.sigmask),
+                static_cast<unsigned long long>(cpu.pc),
+                static_cast<unsigned long long>(cpu.regs[30]));
+    }
+    if (trace && (signo == BIFROST_SIGSEGV || signo == BIFROST_SIGBUS)) {
+        for (int i = 0; i < 31; ++i)
+            fprintf(stderr, "[signal] fault x%d=0x%llx\n", i,
+                    static_cast<unsigned long long>(cpu.regs[i]));
     }
     if (signo < 1 || signo > MAX_SIGNAL) {
         return false;
