@@ -310,16 +310,30 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
             try_patch(src_pc);
         }
     }
-    // Defensive fallback: also scan all blocks in case the index missed
-    // any (e.g. blocks translated before the index was added). This is
-    // O(N) but only runs when back_refs_ lacks the entry, which is rare.
-    // Skip the scan if the index hit covered everything — for hot loops
-    // the index always hits, so this stays O(k).
-    if (it == back_refs_.end()) {
-        for (auto& kv : blocks_) {
-            try_patch(kv.first);
+    // No entry means no block's chain slot targets target_pc: every slot is
+    // registered at translate time and add_back_ref never drops a live one.
+    // The old fallback scanned ALL blocks here whenever the entry was
+    // missing, which is the normal case for a fresh call or return target,
+    // so translation cost grew with the square of the block count (ART
+    // spent ~96% of its translate time in that scan).
+}
+void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
+    // Memory cap. Patched slots never need their entry again, so rebuild
+    // from the slots that are still unpatched instead of clearing.
+    constexpr size_t kBackRefCap = 1000000;
+    if (back_refs_.size() >= kBackRefCap) {
+        back_refs_.clear();
+        for (const auto& kv : blocks_) {
+            const BlockEntry& e = kv.second;
+            if (!e.chained && e.chain_target_pc != 0)
+                back_refs_[e.chain_target_pc].push_back(kv.first);
+            if (!e.taken_chained && e.has_taken_chain_slot &&
+                e.taken_chain_target_pc != 0 &&
+                e.taken_chain_target_pc != e.chain_target_pc)
+                back_refs_[e.taken_chain_target_pc].push_back(kv.first);
         }
     }
+    back_refs_[target_pc].push_back(src_pc);
 }
 void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;

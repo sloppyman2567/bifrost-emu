@@ -889,10 +889,13 @@ private:
     // Try to chain `entry` to its already-translated target (if any),
     // and try to chain any existing blocks whose target is `pc`.
     void try_chain_block(uint64_t pc, BlockEntry& entry);
-    // Scan all cached blocks and chain any whose target is `target_pc`.
-    // Uses back_refs_ for O(k) lookup; falls back to O(N) scan only if
-    // the index is missing (defensive — should never happen).
+    // Chain every cached block whose chain slot targets `target_pc`,
+    // found through back_refs_ in O(k). No entry means no block targets it.
     void chain_back_references(uint64_t target_pc);
+    // Record that `src_pc`'s chain slot targets `target_pc`. Past the size
+    // cap the index is rebuilt from blocks_ with unpatched slots only, so
+    // no live reference is ever dropped.
+    void add_back_ref(uint64_t target_pc, uint64_t src_pc);
     // ── x86 emitters ────────────────────────────────────────────────
     void emit_byte(uint8_t b);
     void emit_u32(uint32_t v);

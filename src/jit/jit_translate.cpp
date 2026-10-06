@@ -1678,32 +1678,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     if (!private_entry) blocks_[start_pc] = entry;
     blocks_translated++;
-    // Maintain the back-reference index: this block at start_pc has
-    // chain_target_pc=T, so add start_pc to back_refs_[T]. This lets
-    // chain_back_references(T) find this block in O(k) instead of
-    // scanning all blocks.
-    //
-    // Cap: if back_refs_ grows too large (rare — only happens for
-    // very long-running programs with millions of unique PCs), clear
-    // it and let it rebuild lazily. This prevents unbounded memory
-    // growth. The cap is generous (1M entries ≈ 50MB) so it never
-    // fires in practice.
-    if (chain_target_pc_ != 0) {
-        if (back_refs_.size() > 1000000) {
-            back_refs_.clear();
-        }
-        back_refs_[chain_target_pc_].push_back(start_pc);
-    }
-    // The taken-path edge is chained too: add start_pc to its target's
-    // back-ref list so chain_back_references(T) can patch the taken slot
-    // when T gets translated later (e.g. a loop whose back-edge target is
+    // Maintain the back-reference index: this block's fall-through and
+    // taken slots target T, so chain_back_references(T) finds it in O(k)
+    // when T is translated later (e.g. a loop whose back-edge target is
     // only translated on the second iteration).
-    if (taken_chain_target_pc_ != 0 && taken_chain_target_pc_ != chain_target_pc_) {
-        if (back_refs_.size() > 1000000) {
-            back_refs_.clear();
-        }
-        back_refs_[taken_chain_target_pc_].push_back(start_pc);
-    }
+    if (chain_target_pc_ != 0) add_back_ref(chain_target_pc_, start_pc);
+    if (taken_chain_target_pc_ != 0 && taken_chain_target_pc_ != chain_target_pc_)
+        add_back_ref(taken_chain_target_pc_, start_pc);
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.
     // BIFROST_NO_CHAIN disables chaining for debugging.

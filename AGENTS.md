@@ -842,6 +842,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   offsets, wrong for the 2.42 rootfs. Do not hardcode struct offsets.
   `specific[0]`/`user_stack` have no descriptors and stay unset. Regression:
   `ctest_real/test_dyn_main_locks.c`.
+- **`chain_back_references` is O(k), never O(N) (2026-10-05).** Every
+  chain slot is registered in `back_refs_` at translate time
+  (`add_back_ref`), so a missing entry means nothing targets that pc. Do not
+  re-add the old "defensive" full-`blocks_` scan for missing entries: a
+  fresh call/return target has no entry, so the scan ran for most new
+  blocks and translation cost grew with the square of the block count
+  (ART: ~96% of translate samples, 84 s JIT bootstrap; 25 s after). The
+  1M-key cap rebuilds the index from unpatched slots instead of clearing it.
 - **`rt_sigtimedwait` blocks for real (2026-10-05).** `misc_signal.cpp`
   treats the waited set as blocked while waiting (pending members land in
   `cpu.sigpending`), folds cross-thread queue entries into `sigpending`,

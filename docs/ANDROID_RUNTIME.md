@@ -100,9 +100,9 @@ array/string, call back into Java and shut down cleanly. Success requires
 `ART_LOAD_OK`, `ART_VM_OK`, the fixture's marker and a zero exit; ART logs go
 to stderr (`-Xuse-stderr-logger`). `--mode qemu` runs the same root under
 `qemu-aarch64` as a reference: with this pinned image it reaches `ART_VM_OK`
-and passes in about a second. Bifrost passes too (about 84 s under the JIT;
-the slow part is imageless boot-class verification with ART's own
-interpreter).
+and passes in about a second. Bifrost passes too, in about 25 s under the
+JIT; dispatch between short blocks (~50% of samples) and interpreter
+fallbacks (~28%) dominate the remaining time.
 
 October 5 checkpoint: real ART creates its VM (`ART_VM_OK`) and the DEX/JNI
 fixture passes in both JIT and interpreter modes. Getting there needed the

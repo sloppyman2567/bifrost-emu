@@ -20,6 +20,16 @@ are historical records, and v2.0 remains planned.
 - Doom 3 tier-1 gameplay remains scene-dependent; tier-2 profitability and the
   reported renderer fault remain unresolved. No controlled FPS claim is made.
 
+### JIT block chaining no longer scans every block (2026-10-05)
+
+- `chain_back_references` fell back to scanning all translated blocks
+  whenever its back-reference index had no entry for a new block, which is
+  the normal case for call and return targets. Translation cost grew with
+  the square of the block count: ART's JIT bootstrap spent ~96% of its
+  translate samples there. The index is complete, so the scan is gone; its
+  size cap now rebuilds from unpatched slots instead of clearing. ART's JIT
+  bootstrap drops from 84 s to ~25 s.
+
 ### Real ART VM startup: rt_sigtimedwait and futex requeue (2026-10-05)
 
 - Implement `rt_sigtimedwait` (dequeue a pending member of the set, block
