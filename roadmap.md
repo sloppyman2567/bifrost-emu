@@ -68,6 +68,11 @@ Acceptance: a DEX test calls a native ARM64 library and receives a callback;
 a mixed managed/native Android sample survives GC, pause/resume and thread
 shutdown; a selected game reaches interactive gameplay.
 
+Checkpoint (October 5): the pinned guest ART creates its VM and passes the
+DEX/JNI fixture (`scripts/test_android_jni.py`) in JIT and interpreter modes,
+in ~25 s under the JIT versus ~1 s under QEMU. The framework subset, GC under
+load, pause/resume and Activity launch remain open.
+
 ## Android graphics, audio and lifecycle
 
 - Extend EGL/OpenGL ES/Vulkan, ANativeWindow and buffer ownership so
@@ -134,6 +139,13 @@ NZCV, stack alignment, vector publication and callback stop guards retain
 correctness coverage.
 
 
+- **Next (deferred, October 5): ART startup profile.** After the
+  back-reference scan fix, ART's JIT bootstrap spends ~50% of samples in
+  dispatch (blocks average ~4 instructions) and ~28% in interpreter
+  fallbacks. List the instruction encodings ART runs through the
+  interpreter (`BIFROST_CLASS_PROF=1`, `BIFROST_FALLBACK_PROFILE`) and give
+  the hottest ones native IR, then measure block length and chaining before
+  touching dispatch. Measure with `BIFROST_PROF=1 BIFROST_STATS_PERIOD=10`.
 - Instrument per-thread cache hits/misses, compile time, retranslation,
   invalidation reasons, code bytes, growth, eviction and fallback decisions.
 - Confirm revisited unchanged code reuses its translation. Distinguish JIT
