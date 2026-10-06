@@ -760,6 +760,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
         // ── BR / BLR ────────────────────────────────────────────────
         case InstClass::BR: case InstClass::BLR: {
+            // Snapshot Rn before STORE_REG X30, including BLR X30.
+            uint16_t target = load_arm_reg(block, d.rn);
             if (d.cls == InstClass::BLR) {
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
@@ -767,12 +769,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // Native call-within-block for indirect calls (function
                     // pointers): the worldgen noise `.compute` wrappers and
                     // recursion otherwise re-dispatch on every indirect call.
-                    uint16_t target = load_arm_reg(block, d.rn);
                     block.insts.push_back(IRInst::make(IROp::BLR_CALL, 0, target, 0));
                     return false;  // does NOT end the block
                 }
             }
-            uint16_t target = load_arm_reg(block, d.rn);
             block.insts.push_back(IRInst::make(IROp::BR, 0, target, 0));
             block.ends_with_branch = true;
             return true;

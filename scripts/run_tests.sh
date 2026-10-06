@@ -24,17 +24,17 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (275 test runs):
-#   Unit         97  — focused guest and host JIT regressions
+# Fully provisioned suite (287 selected test runs):
+#   Unit        108  — focused guest and host JIT regressions
 #   Integration  86  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   49  — static BusyBox/Toybox commands
 #   Real-world dynamic 7 — glibc binaries; rootfs required
-#   Dynamic      16  — musl/glibc and XWayland tests; rootfs required
+#   Dynamic      17  — musl/glibc and XWayland tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
 #   Interactive   5  — stdin-driven tests
-# Without a rootfs: 252 runs (247 with --quick); fixtures may be skipped.
+# Rootfs-dependent tests require a rootfs; --strict rejects missing fixtures.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -404,6 +404,11 @@ UNIT_TESTS=(
     "android_binder|ctest/android_binder.elf||10|checks passed"
     "android_binder_objects|ctest/android_binder_objects.elf||10|checks passed"
     "jit_bfm_masks|ctest/jit_bfm_masks.elf||30|checks passed"
+    "jit_android_semantics|ctest/jit_android_semantics.elf||10|checks passed"
+    "jit_literal_load|ctest/jit_literal_load.elf||10|checks passed"
+    "test_shared_alias|ctest/test_shared_alias.elf||30|checks passed"
+    "jit_call_exit|ctest/jit_call_exit.elf||10|checks passed"
+    "jit_blr_lr|ctest/jit_blr_lr.elf||10|checks passed"
     "jit_flags_passthrough|ctest/jit_flags_passthrough.elf||10|checks passed"
     "socket_msg_layout|ctest/socket_msg_layout.elf||10|checks passed"
     "android_syscall_options|ctest/android_syscall_options.elf||10|checks passed"

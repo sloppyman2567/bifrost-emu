@@ -1422,6 +1422,7 @@ int Emulator::run() {
             }
             break;
         } catch (DecodeError& e) {
+            if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());
             // pointer calls and genuinely illegal instructions.
             //
             // On real ARM64 Linux:

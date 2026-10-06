@@ -12,6 +12,21 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Android 15 framework initialization (2026-10-06)
+
+- Fix BLR X30 target capture in interpreter/IR; ART nterp method calls now
+  invoke the intended callee instead of treating a method pointer as its result.
+- Preserve shared file aliases across low/high mappings, fork/remap and partial
+  unmap/replacement, including file writeback and read-only protection checks.
+- Add literal W/X/LDRSW and SIMD loads used by ART-generated code; reset their
+  addressing flag when interpreter decode-cache entries are reused.
+- Export mainline APEX namespaces and extract their native libraries (framework
+  provisioning schema 3). Keep Binder arenas in available direct-window holes.
+- Unwind native callers after guest exit_group and finish the main-Looper probe
+  from its dispatched callback. The real framework probe passes with ART JIT on.
+- Add focused regression coverage for these paths and `bc58e6a` instruction
+  repairs; build real dlopen fixtures with glibc rather than musl's static stub.
+
 ### Validation of the current checkpoint
 
 - Strict guest suite: 258/258 JIT; 255/255 interpreter with three JIT-only skips.

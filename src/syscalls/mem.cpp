@@ -12,6 +12,7 @@
 #include "debug_flags.h"
 #include "syscalls/syscalls.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
 #include <sys/mman.h>
@@ -79,6 +80,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EBADF)));
                     return 0;
                 }
+                // Check access before MAP_FIXED can evict the old mapping.
+                const int mode = ::fcntl(host_fd, F_GETFL) & O_ACCMODE;
+                if (mode == O_WRONLY || ((flags & 1) && (prot & PROT_WRITE) && mode == O_RDONLY)) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EACCES)));
+                    return 0;
+                }
                 struct stat st;
                 if (::fstat(host_fd, &st) < 0) {
                     ret_errno();
@@ -141,7 +148,15 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // We continue into the regular MAP_FIXED path by setting
                 // the BIFROST_MAP_FIXED bit conceptually (no-op since we
                 // already placed the allocation).
-                if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0) {
+                if ((flags & 1) && !(flags & BIFROST_MAP_ANONYMOUS)) {
+                    int error = mem_.map_shared_file(addr, length,
+                        resolve_host_fd(emu, static_cast<int>(a4)), a5, prot);
+                    if (error) {
+                        mem_.untrack_allocation(addr, length);
+                        ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
+                        return 0;
+                    }
+                } else if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0) {
                     int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
                     if (host_fd >= 0) {
                         struct stat st;
@@ -283,7 +298,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // standard mechanism for mapping executables and shared
             // libraries) skipped the file-load branch and the guest saw
             // zero pages. Fix: check the correct bit.
-            if ((a3 & BIFROST_MAP_ANONYMOUS) == 0) {
+            if ((flags & 1) && !(flags & BIFROST_MAP_ANONYMOUS)) {
+                int error = mem_.map_shared_file(mapped, length,
+                    resolve_host_fd(emu, static_cast<int>(a4)), a5, prot);
+                if (error) {
+                    mem_.untrack_allocation(mapped, length);
+                    emu.invalidate_jit_range(mapped, length);
+                    ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
+                    return 0;
+                }
+            } else if ((a3 & BIFROST_MAP_ANONYMOUS) == 0) {
                 int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
                 if (host_fd >= 0) {
                     struct stat st;
@@ -368,8 +392,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             int device_error = emu.fds().protect_device_mappings(a0, a1, a2);
             if (device_error) { ret_host(static_cast<uint64_t>(device_error)); return 0; }
-            if (!mem_.mprotect_guest(a0, a1, static_cast<uint8_t>(a2))) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+            int error = ENOMEM;
+            if (!mem_.mprotect_guest(a0, a1, static_cast<uint8_t>(a2), &error)) {
+                ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
                 return 0;
             }
             if (a1) emu.invalidate_jit_range(a0, a1);
@@ -456,8 +481,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 227: { // msync(addr, length, flags) — AArch64 227
-            // No-op: our sparse pages are always in sync.
-            ret_host(0);
+            int error = mem_.sync_shared(a0, a1, static_cast<int>(a2));
+            ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
             return 0;
         }
         case 233: { // madvise
@@ -471,7 +496,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             // MADV_DONTNEED (4): Linux discards the pages — the next
-            // access reads zeros. vkQuake's mimalloc decommits freed
+            // access refaults shared file data or anonymous zeros.
+            // vkQuake's mimalloc decommits freed
             // segments this way and reuses them as initially-zero pages;
             // a no-op here kept stale data and shredded its heap
             // (AllocBlock: full). Other advices stay no-op (pure hints).

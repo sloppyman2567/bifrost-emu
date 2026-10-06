@@ -63,8 +63,10 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             next_pc = cpu.regs[d.rn];
             return;
         case InstClass::BLR:
-            cpu.regs[30] = cpu.pc + 4;
+            // Capture the target before writing LR: BLR X30 is legal and
+            // used by ART nterp to call a method's quick entry point.
             next_pc = cpu.regs[d.rn];
+            cpu.regs[30] = cpu.pc + 4;
             return;
         case InstClass::RET:
             // RET Rn branches to regs[Rn]. Rn==31 (XZR) is encodable and

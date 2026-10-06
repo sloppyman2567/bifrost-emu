@@ -10,6 +10,58 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Android framework regressions (2026-10-06)
+
+The complete strict Linux suite passes **287/287 JIT** and **280/280
+interpreter**, with seven expected JIT-only skips. These runs use normal
+SDL/GL builds and host graphics access. A graphics-disabled diagnostic build
+fails ten graphics/audio tests; sandboxed Vulkan cannot enumerate a device.
+Those diagnostic failures are not counted as passing full-suite results.
+The final reviewed build completes these suites in 164 s and 134 s,
+respectively (`build/framework-final-full-{jit,interp}.log`). The added FMOV
+register-copy oracle was subsequently checked in both engines, QEMU and
+JIT differential verification.
+
+Three consecutive framework JIT stress runs also pass with ART JIT enabled
+(54.010 s, 53.676 s and 57.605 s). The interpreter repeat passes in 103.846 s.
+These are bounded correctness runs, not a controlled performance benchmark.
+The final reviewed framework runs pass in 54.397 s (JIT) and 106.818 s
+(interpreter), recorded under `build/android-framework-results/final-reviewed/`.
+One earlier JIT trial stopped at an early guest SIGILL in `app_process64`
+(`build/android-framework-results/final-art-jit/jit.json`), before
+`libopenjdk` loaded. It did not recur in the three stress repeats or final
+reviewed run; these passes do not establish that intermittent issue's cause.
+
+The bounded real Android 15 `app_process64` probe reaches `FRAMEWORK_OK` and
+exits zero in both Bifrost engines with ART nterp and ART JIT enabled. See
+[ANDROID_RUNTIME.md](ANDROID_RUNTIME.md) for provisioning, exact commands and
+remaining framework boundaries. QEMU on the same schema-3 root loads the
+mainline connectivity JNI library, then stops at the missing host Binder device.
+
+Focused additions:
+
+- `jit_blr_lr`: 20,000 checks of BLR X30 target/link ordering versus a scratch
+  register target; default JIT, interpreter and QEMU, plus native-call opt-out.
+- `jit_android_semantics`: 58 oracles for the instruction repairs in `bc58e6a`,
+  passing both engines and QEMU. Its `no-trap` argument omits SIGILL delivery
+  during JIT differential replay (55 remaining checks).
+- `jit_literal_load`: 111 checks for W/X/LDRSW and S/D/Q literal forms, positive
+  and negative displacements, XZR/prefetch, and decode-cache victim reuse.
+  Both engines, QEMU, IR validation and JIT differential verification pass.
+- `jit_call_exit`: nested BL/BLR calls into exit_group; traps after each return
+  make process status zero the oracle. Native-call opt-out and chain-skip pass.
+- `test_shared_alias`: 22,053 checks of low/high RW/R/RX coherence, offsets,
+  msync, MADV_DONTNEED, replacement, closed fds, fork, repeated remap, read-only
+  fd permissions and execution through a high RX alias. Both engines and QEMU pass.
+- `android_binder`: 61 checks, now including arena placement after a high fixed
+  mapping and preservation of that existing allocation.
+
+The two earlier dlopen failures also occur with the pre-change main binary
+(`f6020a2`): their local fixtures were musl static-pie binaries using musl's
+unsupported dynamic-loading stub. Rebuilding them as glibc dynamic makes both
+pass on the pre-change and updated binaries. `GLIBC_DYN_SRCS` now selects the
+correct toolchain/link flags; Makefile changes invalidate its stale fixtures.
+
 ### Concurrent real-game profiling (2026-10-05)
 
 Doom 3, Neverball and Minecraft Weekend were launched as detached desktop

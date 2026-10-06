@@ -13,6 +13,7 @@
 // access private state: threads_, threads_mu_, next_tid_, alive_threads_.
 #include "core/emulator.h"
 #include "core/crash_report.h"
+#include "debug_flags.h"
 #include "core/memory.h"
 #include "core/signal.h"   // exit_robust_list helper
 #include "frontend/dynamic_linker.h"  // allocate_thread_tls (SDL threads)
@@ -141,6 +142,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             }
         }
     } catch (DecodeError& e) {
+        if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());
         // calls and illegal instructions in worker threads, matching the
         // main-thread behavior (see emulator.cpp's DecodeError handler).
         // pc < 4096 = NULL deref / zero page → SIGSEGV.

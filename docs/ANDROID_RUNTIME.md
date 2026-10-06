@@ -1,6 +1,6 @@
 # Android native runtime bootstrap
 
-Checkpoint: October 5, 2026. Bifrost can enter a real guest ARM64 Android
+Checkpoint: October 6, 2026. Bifrost can enter a real guest ARM64 Android
 linker and execute Bionic-linked programs. Signed APK installation and native-only
 NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROID_APK.md).
 A separate same-image ART/libcore provisioner and DEX/JNI bootstrap now create
@@ -17,6 +17,51 @@ library and its isolated native dependencies. Real metadata operations pass
 the signed APK gate in all modes. With this bundle Unity progresses to a
 missing `eglSurfaceAttrib` export; media services/decoding and managed
 (ART-backed) Activity startup are still unimplemented. See the APK guide for provisioning and namespace boundaries.
+
+## Android 15 framework probe
+
+The same pinned API-35 image now supplies `app_process64`, framework boot jars,
+and the mainline APEX native libraries. Framework provisioning schema 3
+verifies 706 files and exports a linker namespace for every installed boot
+APEX, including `com_android_tethering`. Each delegates to the same canonical
+native-library scope so JNI loading does not instantiate a second ART VM.
+This bootstrap layout does not reproduce production Android namespace isolation.
+Older schema-2 framework roots must be re-provisioned in a fresh destination;
+preserve the old directory if it is still useful for comparison.
+
+```bash
+python3 tools/android_framework.py
+mkdir -p build/framework-probe/classes
+javac --release 8 -d build/framework-probe/classes guest/android/FrameworkProbe.java
+java -cp tools/android-tools/d8.jar com.android.tools.r8.D8 --min-api 26 \
+  --output build/framework-probe build/framework-probe/classes/FrameworkProbe.class
+timeout -s KILL 165 python3 scripts/test_android_framework.py --mode jit --timeout 150
+timeout -s KILL 165 python3 scripts/test_android_framework.py --mode interp --timeout 150
+```
+
+Both Bifrost engines reach `FRAMEWORK_OK` and exit zero with ART's nterp and
+its own JIT enabled; no `-Xint` or `dalvik.vm.usejit=false` override is needed.
+The probe enters Android's main Looper and dispatches a Handler message. It
+exits from that callback because Android forbids quitting the main MessageQueue.
+It checks framework class loading, Build metadata, liblog and Process.myPid.
+Logs, logd messages and JSON results are in `build/android-framework-results/`.
+The runner's internal deadline kills its process group with SIGKILL.
+
+The nterp failure was an emulator `BLR X30` ordering error: overwriting LR
+before reading the target skipped `Float.isNaN`, so HashMap interpreted a
+method pointer as a boolean. ART's JIT then exposed independent copies of its
+shared RW/RX file aliases and missing PC-relative literal loads. Shared file
+backings now retain kernel aliases across unmap, replacement, remap and fork;
+`msync` writes back, and `MADV_DONTNEED` refaults file data. Binder arenas stay
+inside the direct window even after high ART reservations. Native Bifrost
+callers unwind after guest process exit instead of reaching libc's fallback trap.
+
+The image's boot artifacts still fail ART's read-barrier compatibility check;
+ART falls back to imageless execution. QEMU gets past the repaired mainline
+namespace/native loading and aborts when framework initialization requires
+`/dev/binder`, which this host reference does not provide. The probe proves a
+framework initialization/event-loop checkpoint, not Activity launch, Android
+service completeness, APK compatibility or booting a full Android system.
 
 ## Reproduce
 

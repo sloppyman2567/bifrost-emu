@@ -24,31 +24,27 @@ public final class FrameworkProbe {
         check(((Integer) i.invoke(null, "FrameworkProbe", "hello from the framework")) > 0,
               "android.util.Log.i writes through liblog");
 
-        // A main Looper, a Handler message and a quit: the event loop every
+        // A main Looper and a Handler message: the event loop every
         // Activity runs on.
         Class<?> looper = Class.forName("android.os.Looper");
         looper.getMethod("prepareMainLooper").invoke(null);
         Object main = looper.getMethod("getMainLooper").invoke(null);
         Class<?> handlerClass = Class.forName("android.os.Handler");
         Object handler = handlerClass.getConstructor(looper).newInstance(main);
-        final boolean[] ran = {false};
-        Runnable task = () -> {
-            ran[0] = true;
-            try {
-                looper.getMethod("quit").invoke(main);
-            } catch (ReflectiveOperationException e) {
-                throw new RuntimeException(e);
-            }
-        };
-        handlerClass.getMethod("post", Runnable.class).invoke(handler, task);
-        looper.getMethod("loop").invoke(null);
-        check(ran[0], "Handler message ran on the main Looper");
-
         Class<?> process = Class.forName("android.os.Process");
         int pid = (Integer) process.getMethod("myPid").invoke(null);
         check(pid > 0, "android.os.Process.myPid() > 0 (got " + pid + ")");
 
-        System.out.println(failures == 0 ? "FRAMEWORK_OK" : "FRAMEWORK_FAIL " + failures);
-        System.exit(failures == 0 ? 0 : 1);
+        Runnable task = () -> {
+            check(true, "Handler message ran on the main Looper");
+            // Android's main MessageQueue cannot quit. Finish the process
+            // from its dispatched callback instead of invoking Looper.quit().
+            System.out.println(failures == 0 ? "FRAMEWORK_OK" : "FRAMEWORK_FAIL " + failures);
+            System.exit(failures == 0 ? 0 : 1);
+        };
+        check((Boolean) handlerClass.getMethod("post", Runnable.class).invoke(handler, task),
+              "Handler.post accepted the message");
+        looper.getMethod("loop").invoke(null);
+        throw new IllegalStateException("Main Looper returned before the probe completed");
     }
 }

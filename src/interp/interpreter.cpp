@@ -1158,13 +1158,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             case InstClass::STR_IMM: {
                 uint8_t size = d.size;
                 uint8_t opc = d.opc_ls;
-                uint16_t imm12 = (d.raw >> 10) & 0xFFF;
-                uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
+                uint64_t base = d.pc_relative ? cpu.pc
+                    : (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 if (d.is_vec) {
                     bool is_q = (opc & 2) && size == 0;
                     int nbytes = is_q ? 16 : (1 << size);
-                    uint64_t scale = is_q ? 4 : size;
-                    uint64_t addr = base + (static_cast<uint64_t>(imm12) << scale);
+                    uint64_t addr = base + d.disp;
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
@@ -1190,7 +1189,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                uint64_t addr = base + (imm12 << size);
+                uint64_t addr = base + d.disp;
                 int width_bytes = 1 << size;
                 if (d.is_load) {
                     uint64_t v = 0;

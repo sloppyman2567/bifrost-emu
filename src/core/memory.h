@@ -13,7 +13,8 @@
 //      window directly: `mov rax, [window_base + guest_addr]`.
 //   2. A sparse `pages_` map for addresses ≥ 4 GiB (sigreturn
 //      trampoline, dynamic-linker interpreter, and any explicit high
-//      MAP_FIXED allocations). Backed by std::vector<uint8_t> per page.
+//      MAP_FIXED allocations). Backed by owned page bytes or coherent
+//      host MAP_SHARED aliases.
 //
 // The guest heap (mmap_alloc base) and the main thread's stack live
 // INSIDE the direct window (see MMAP_BASE_MIN / STACK_TOP below) so the
@@ -125,9 +126,14 @@ public:
     // if it would exceed the page cap (nothing is mapped in that case).
     bool map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
-    bool mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot);
+    bool mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot,
+                        int* error = nullptr);
     // Install a read-only shared device backing into an existing direct-window VMA.
     bool map_device_readonly(uint64_t addr, uint64_t size, int host_fd);
+    // Replace existing storage with coherent file aliases. Returns a host errno.
+    int map_shared_file(uint64_t addr, uint64_t size, int fd, uint64_t offset,
+                        uint8_t prot);
+    int sync_shared(uint64_t addr, uint64_t size, int flags);
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
     // Validate a whole thunk output range before a host call has side effects.
@@ -160,10 +166,13 @@ public:
     // When `hint` is non-zero, the allocation is placed at exactly `hint`
     // (MAP_FIXED semantic). Existing pages at that address are REPLACED
     // with fresh zeroed pages — matches Linux kernel behavior.
+    // direct_only selects an unmapped heap hole inside the direct window
+    // under mu_, ignoring hints; for device aliases, not MAP_FIXED callers.
     uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0,
                         bool noreserve = false,
                         uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE |
-                                       GUEST_PROT_EXEC);
+                                       GUEST_PROT_EXEC,
+                        bool direct_only = false);
     // Atomic MAP_FIXED_NOREPLACE: checks all guest mappings and reserves
     // the exact range under mu_. Returns UINT64_MAX for overlap, 0 for
     // allocation/validation failure, or the mapped address on success.
@@ -201,7 +210,8 @@ public:
         above_window_next_ = DIRECT_WINDOW_SIZE;
     }
     // Linux MADV_DONTNEED semantics (2026-09-03, vkQuake AllocBlock hunt):
-    // zero the covered bytes WITHOUT unmapping (address space stays).
+    // discard covered pages WITHOUT unmapping (address space stays).
+    // Anonymous pages become zero; shared file pages refault from the file.
     // vkQuake's bundled mimalloc decommits freed segments with DONTNEED
     // and reuses them as "initially zero" pages; our old no-op kept stale
     // data, so reused-as-zero metadata/pages held garbage and the heap
@@ -342,7 +352,35 @@ private:
                      uint8_t access) const;
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;
-    mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
+    // A shared backing owns its host mapping and fd independently of guest fds.
+    // Individual pages retain it across partial munmap and VMA splits.
+    struct SharedBacking {
+        uint8_t* base = nullptr;
+        uint64_t size = 0, file_offset = 0;
+        int fd = -1;
+        bool writable = false;
+        ~SharedBacking();
+    };
+    struct Page {
+        std::vector<uint8_t> bytes;
+        std::shared_ptr<SharedBacking> backing;
+        uint64_t offset = 0;
+        Page(std::vector<uint8_t> value) : bytes(std::move(value)) {}
+        Page(std::shared_ptr<SharedBacking> owner, uint64_t at)
+            : backing(std::move(owner)), offset(at) {}
+        uint8_t* data() { return backing ? backing->base + offset : bytes.data(); }
+        const uint8_t* data() const { return backing ? backing->base + offset : bytes.data(); }
+        uint8_t* begin() { return data(); }
+        uint8_t* end() { return data() + PAGE_SIZE; }
+        uint8_t& operator[](size_t i) { return data()[i]; }
+        const uint8_t& operator[](size_t i) const { return data()[i]; }
+    };
+    mutable std::unordered_map<uint64_t, Page> pages_;
+    // Direct-window aliases use kernel mappings; metadata is only for lifecycle.
+    std::map<uint64_t, Page> direct_shared_pages_;
+    // Caller holds mu_; regular sparse pages can have no shared backing.
+    const Page* page_storage_locked(uint64_t addr) const;
+    void detach_direct_shared_locked(uint64_t lo, uint64_t hi);
     std::unordered_map<uint64_t, uint64_t> allocations_;
     // Reclaimed (munmap'd) address ranges available for reuse, keyed by
     // start address → size. Kept coalesced/merged so mmap_alloc can do a

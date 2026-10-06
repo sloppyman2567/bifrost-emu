@@ -15,13 +15,13 @@
 // clobbering main_cpu_) would corrupt the register file of the thread
 // running guest code and crash with decode errors.
 //
-// Build (static musl so it runs without a DynamicLinker-provided
-// runtime — we exercise the pure syscall paths; run alongside the
-// dynamic glibc/musl suite for full coverage):
-//   make cross SRC=ctest_real/test_dlopen_mt.c OUT=ctest_real/test_dlopen_mt.elf
+// Build (glibc dynamic; musl static-pie uses an unsupported dlopen stub):
+//   tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc \
+//     -O2 -pthread -o ctest_real/test_dlopen_mt.elf ctest_real/test_dlopen_mt.c -ldl
 //
 // Run:
 //   BIFROST_ROOT=./rootfs ./bifrost-emu ctest_real/test_dlopen_mt.elf
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

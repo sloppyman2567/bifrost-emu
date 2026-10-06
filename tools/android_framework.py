@@ -21,7 +21,7 @@ import android_art
 # boot_classpaths): the primary boot.oat records its jars in the
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
-SCHEMA = 2
+SCHEMA = 3
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -87,8 +87,8 @@ def environment(primary, mainline):
             "BOOTCLASSPATH": ":".join([dex2oat] + mainline)}
 
 
-def extract_javalib(system, apex, work, root):
-    """Extract one APEX's javalib directory (jars only)."""
+def extract_mainline(system, apex, work, root):
+    """Extract boot jars and native libraries from one mainline APEX."""
     listing = subprocess.run(["debugfs", "-R", "ls /system/apex", str(system.resolve())],
                              capture_output=True, text=True, check=True, timeout=30).stdout
     for suffix in ("apex", "capex"):
@@ -115,8 +115,43 @@ def extract_javalib(system, apex, work, root):
     destination.mkdir(parents=True, exist_ok=True)
     subprocess.run(["debugfs", "-R", "rdump /javalib .", str(image.resolve())],
                    cwd=destination, capture_output=True, check=True, timeout=60)
+    # JNI libraries are opened by boot classes, so DT_NEEDED alone cannot
+    # discover them. Some Java-only APEXes legitimately lack lib64.
+    listing = subprocess.run(["debugfs", "-R", "ls -p /", str(image.resolve())],
+                             capture_output=True, text=True, check=True, timeout=30).stdout
+    names = {line.split("/")[5] for line in listing.splitlines()
+             if len(line.split("/")) >= 7}
+    if "lib64" in names:
+        subprocess.run(["debugfs", "-R", "rdump /lib64 .", str(image.resolve())],
+                       cwd=destination, capture_output=True, check=True, timeout=60)
+        if not (destination / "lib64").is_dir():
+            raise ValueError(f"Native APEX extraction failed: {apex}")
+    if not (destination / "javalib").is_dir():
+        raise ValueError(f"Java APEX extraction failed: {apex}")
     image.unlink()
     archive.unlink(missing_ok=True)
+
+
+def framework_linker_configuration(apexes, paths):
+    """Export every installed boot APEX to libnativeloader."""
+    if not all(re.fullmatch(r"com\.android\.[a-z0-9.]+", name) for name in apexes):
+        raise ValueError("Unsafe framework APEX name")
+    namespaces = [name.replace(".", "_") for name in apexes]
+    config = ("dir.art = /system/bin\n"
+              "dir.art = /apex/com.android.art/bin\n"
+              "dir.art = /data/local/tmp\n\n[art]\n"
+              "additional.namespaces = " + ",".join(namespaces) + "\n"
+              "namespace.default.isolated = true\n"
+              "namespace.default.visible = true\n"
+              "namespace.default.search.paths = " + ":".join(paths) + "\n"
+              "namespace.default.permitted.paths = /apex:/system:/data/local/tmp\n")
+    for name, namespace in zip(apexes, namespaces):
+        prefix = "namespace." + namespace
+        config += (prefix + ".isolated = true\n" + prefix + ".visible = true\n" +
+                   prefix + ".permitted.paths = /apex/" + name + "\n" +
+                   prefix + ".links = default\n" +
+                   prefix + ".link.default.allow_all_shared_libs = true\n")
+    return config
 
 
 def install(destination, art_root, archive=None):
@@ -158,7 +193,7 @@ def install(destination, art_root, archive=None):
                 dump(system, jar, root / jar.lstrip("/"))
         for apex in sorted({jar.split("/")[2].removeprefix("com.android.") for jar in mainline}):
             if not (root / "apex" / f"com.android.{apex}" / "javalib").is_dir():
-                extract_javalib(system, apex, work, root)
+                extract_mainline(system, apex, work, root)
         missing = [jar for jar in primary + mainline if not (root / jar.lstrip("/")).is_file()]
         if missing:
             raise ValueError("Boot classpath jars missing: " + ", ".join(missing))
@@ -167,7 +202,14 @@ def install(destination, art_root, archive=None):
         graph, preloads = android_art.native_dependencies(root, system, limit=1024)
         # app_process64 lives in /system/bin; give it the same linker section.
         config = root / "linkerconfig/ld.config.txt"
-        config.write_text("dir.art = /system/bin\n" + config.read_text())
+        apexes = sorted(path.name for path in (root / "apex").iterdir() if path.is_dir())
+        # Preserve the ART bootstrap's single canonical library scope. Each
+        # exported identity delegates there, avoiding duplicate VM globals.
+        paths = ["/apex/com.android.runtime/lib64/bionic"]
+        paths += [f"/apex/{name}/lib64" for name in apexes
+                  if (root / "apex" / name / "lib64").is_dir()]
+        paths += ["/system/lib64"]
+        config.write_text(framework_linker_configuration(apexes, paths))
         files = android_art.inventory(root)
         metadata = {"schema_version": SCHEMA,
                     "purpose": "Android framework on guest ART; services and Activity launch not implemented",

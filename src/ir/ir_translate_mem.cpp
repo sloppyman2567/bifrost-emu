@@ -47,7 +47,8 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 vec_q = (d.opc_ls & 2) && d.size == 0;
                 vec_nbytes = vec_q ? 16 : (1 << d.size);
             }
-            uint16_t base = load_arm_reg(block, d.rn, true);  // base reg 31 = SP
+            uint16_t base = d.pc_relative ? load_imm(block, cur_pc)
+                : load_arm_reg(block, d.rn, true);  // base reg 31 = SP
             // ── Compute the load/store address ──
             // For post-index (mode=1): load/store from `base`, writeback `base + disp`.
             // For pre-index  (mode=2): load/store from `base + disp`, writeback `base + disp`.

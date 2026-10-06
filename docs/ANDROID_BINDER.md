@@ -25,6 +25,9 @@ and [driver implementation](https://raw.githubusercontent.com/torvalds/linux/v6.
   pointer/cookie pairs, and strong/weak reference commands with owner notifications.
 
 Receive arenas use offset-zero `MAP_PRIVATE` with `PROT_READ`, up to 4 MiB.
+Receive arenas reserve an unoccupied range below the direct-window boundary,
+even after ART has installed high fixed mappings. The focused Binder fixture
+checks this placement and verifies that a preceding high mapping survives.
 The driver writes through a separate writable host alias of a private memfd;
 CPU stores remain blocked by real read-only host page permissions. There is
 no writable interval in the guest mapping. The memfd is never exposed as a
@@ -117,7 +120,7 @@ make cross SRC=ctest/android_service_manager.c OUT=ctest/android_service_manager
 bash scripts/test_android_bionic.sh
 ```
 
-The Binder fixture checks 57 behaviors including data round-trip, reply routing,
+The Binder fixture checks 61 behaviors including data round-trip, reply routing,
 read-only protection, malformed requests, isolated device contexts, peer close,
 invalidated receive mappings, blocking delivery and signal interruption. Mapping hooks track only virtual mapping devices;
 ordinary Linux mmap/protection calls avoid scanning the file table. The

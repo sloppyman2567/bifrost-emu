@@ -66,7 +66,7 @@ int64_t BinderNode::mmap_guest(Memory& mem, uint64_t addr, uint64_t length,
     if (!length || length > 4 * LIMIT || offset || prot != 1 ||
         (flags & 3) != 2 || (flags & (0x10 | 0x100000))) return -EINVAL;
     uint64_t size = (length + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
-    uint64_t result = mem.mmap_alloc(size, addr, false, 1);
+    uint64_t result = mem.mmap_alloc(size, addr, false, 1, true);
     if (!result) return -ENOMEM;
     int fd = ::memfd_create("bifrost-binder-arena", MFD_CLOEXEC);
     if (fd < 0) { mem.untrack_allocation(result, size); return -ENOMEM; }

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -54,10 +55,20 @@ int main(void) {
     int32_t version=0; CHECK(ioctl(client,BF_BINDER_VERSION,&version)==0 && version==8);
     CHECK(ioctl(client,BF_BINDER_VERSION,(void*)-1)==-1 && errno==EINVAL);
     CHECK(ioctl(client,_IO('b',99),0)==-1 && errno==ENOTTY);
+    // ART maps high-address boot images before opening Binder. Receive
+    // arenas still need contiguous backing in the emulator's direct window.
+    void* high=mmap((void*)0x7100000000ULL,4096,PROT_READ|PROT_WRITE,
+                    MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+    CHECK(high==(void*)0x7100000000ULL);
+    if (high==MAP_FAILED) return 1;
+    *(volatile unsigned*)high=0x12345678;
     size_t arena=65536;
     void* sm=mmap(0,arena,PROT_READ,MAP_PRIVATE,server,0);
     void* cm=mmap(0,arena,PROT_READ,MAP_PRIVATE,client,0);
     CHECK(sm!=MAP_FAILED && cm!=MAP_FAILED && sm!=cm);
+    CHECK((uintptr_t)sm<0x100000000ULL && (uintptr_t)cm<0x100000000ULL);
+    CHECK(*(volatile unsigned*)high==0x12345678);
+    CHECK(munmap(high,4096)==0);
     int alias=dup(client);CHECK(alias>=0 && close(client)==0);client=alias;
     CHECK(ioctl(client,BF_BINDER_VERSION,&version)==0 && version==8);
     CHECK(mmap(0,4096,PROT_READ,MAP_PRIVATE,client,0)==MAP_FAILED && errno==EBUSY);

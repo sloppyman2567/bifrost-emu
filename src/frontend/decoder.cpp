@@ -131,6 +131,9 @@ static bool decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf,
 bool decode(DecodedInst& d, uint32_t inst) {
     d.raw = inst;
     d.cls = InstClass::UNKNOWN;
+    // Interpreter cache entries are reused; addressing mode must not leak
+    // from a literal load into a later ordinary load/store in this slot.
+    d.pc_relative = false;
     // Pre-extract truly common fields.
     d.rd    = inst & 0x1F;
     d.rn    = (inst >> 5) & 0x1F;
@@ -693,7 +696,26 @@ bool decode(DecodedInst& d, uint32_t inst) {
     // V=1 (case 0x1C) variants route here. All v0 masks require
     // bit 29 = 1.
     case 0x18: case 0x1C: {
-        if (!((inst >> 29) & 1)) return false;
+        if (!((inst >> 29) & 1)) {
+            // Literal loads share the width/extension contract of LDR_IMM,
+            // but their base is PC and imm19 is a signed byte displacement.
+            const unsigned opc = inst >> 30;
+            d.is_vec = (inst >> 26) & 1;
+            if (opc == 3) {
+                if (d.is_vec) return false; // reserved SIMD literal encoding
+                d.cls = InstClass::HINT;    // PRFM (literal) must not access memory
+                return true;
+            }
+            d.cls = InstClass::LDR_IMM;
+            d.pc_relative = true;
+            d.is_load = true;
+            d.rt = inst & 31;
+            d.disp = arm64emu::sign_extend((inst >> 5) & 0x7ffff, 19) * 4;
+            d.size = opc == 1 ? 3 : 2;
+            d.opc_ls = (!d.is_vec && opc == 2) ? 2 : 1;
+            if (d.is_vec && opc == 2) { d.size = 0; d.opc_ls = 3; } // Q
+            return true;
+        }
         bool    bit21  = (inst >> 21) & 1;
         bool    bit26  = (inst >> 26) & 1;  // V
         uint8_t mode_b = (inst >> 10) & 3;

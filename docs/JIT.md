@@ -4,6 +4,39 @@ This guide maps the AArch64-to-x86_64 JIT and records the steps for changing
 instruction support without letting decode, translation, optimization, and
 code generation drift apart.
 
+## Android interpreter and generated-code contracts
+
+`BLR` must capture its target before updating X30. ART's nterp uses
+`ldr lr, [method, ...]; blr lr`; reading X30 after writing the return address
+skips the callee and leaves its input in the result register. Keep the
+interpreter and IR translator ordered alike. `jit_blr_lr` checks the exact
+link address and compares X30-target calls with ordinary register targets.
+See the [Arm BLR pseudocode](https://www.scs.stanford.edu/~zyedidia/arm64/blr.html).
+
+Native BL/BLR callers must unwind when `CPU.running` becomes false, as well
+as on `jit_stop_pc`. Otherwise `exit_group` returns through cached native
+callers and executes libc's deliberate trap after the syscall.
+`jit_call_exit` puts traps after every nested return; exit zero is its oracle.
+
+Literal loads decode to the existing `LDR_IMM` width/extension contract with
+`pc_relative=true` and a signed, scaled displacement. Both backends use the
+instruction PC as the base, including for negative offsets. Reset the flag
+on every decode: cache victims retain their other instruction fields. W loads clear
+upper bits; LDRSW sign-extends; S/D loads clear the unused vector bits; Q loads
+fill both halves. Literal PRFM is a hint. The reserved SIMD opc=3 encoding
+remains illegal. `jit_literal_load` and the generated RX code in
+`test_shared_alias` cover these paths. Reference:
+[Arm literal-load pseudocode](https://www.scs.stanford.edu/~zyedidia/arm64/ldr_lit_gen.html).
+
+`jit_android_semantics` covers the preceding Android instruction repairs:
+W-target sign-extending loads, LDPSW, non-temporal pairs, vector CLZ/CLS,
+shifted ADD/SUB to XZR, MOVK W, unconditional AL/NV branches, CLZ W,
+FMOV D upper-half clearing (immediate, GPR and FP-register sources),
+FCVTZU saturation, UCVTF rounding, byte LSE
+atomics, and guest SIGILL for an illegal opcode. Use its `no-trap` argument
+for JIT differential replay, which does not deliver the fixture's guest
+signal handler.
+
 ## Translation path
 
 ```text

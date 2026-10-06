@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <shared_mutex>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 namespace arm64emu {
@@ -424,20 +425,111 @@ bool Memory::range_accessible(uint64_t addr, size_t size, uint8_t access) const 
         return false;
     }
 }
+Memory::SharedBacking::~SharedBacking() {
+    if (base) ::munmap(base, size);
+    if (fd >= 0) ::close(fd);
+}
+const Memory::Page* Memory::page_storage_locked(uint64_t addr) const {
+    if (in_direct_window(addr)) {
+        auto it = direct_shared_pages_.find(addr / PAGE_SIZE);
+        return it == direct_shared_pages_.end() ? nullptr : &it->second;
+    }
+    auto it = pages_.find(addr / PAGE_SIZE);
+    return it == pages_.end() ? nullptr : &it->second;
+}
+void Memory::detach_direct_shared_locked(uint64_t lo, uint64_t hi) {
+    // Restore anonymous storage before zero/reuse, rather than overwriting
+    // a live file through the former MAP_SHARED alias. The ordered index
+    // limits partial unmap to intersecting pages; batch adjacent aliases
+    // into one host mapping operation rather than a syscall per page.
+    auto it = direct_shared_pages_.lower_bound(lo / PAGE_SIZE);
+    while (it != direct_shared_pages_.end() && it->first * PAGE_SIZE < hi) {
+        const uint64_t addr = it->first * PAGE_SIZE;
+        uint64_t end = addr + PAGE_SIZE;
+        auto next = std::next(it);
+        while (next != direct_shared_pages_.end() && next->first * PAGE_SIZE == end && end < hi) {
+            end += PAGE_SIZE;
+            ++next;
+        }
+        void* mapped = ::mmap(direct_window_ + addr, end - addr,
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (mapped == MAP_FAILED) throw std::bad_alloc();
+        it = direct_shared_pages_.erase(it, next);
+    }
+}
+int Memory::map_shared_file(uint64_t addr, uint64_t size, int fd,
+                            uint64_t offset, uint8_t prot) {
+    if (!size || (addr & PAGE_MASK) || (offset & PAGE_MASK) ||
+        size > UINT64_MAX - PAGE_MASK) return EINVAL;
+    const uint64_t length = (size + PAGE_MASK) & ~PAGE_MASK;
+    if (!is_valid_guest_range(addr, length) || offset > INT64_MAX - length)
+        return EINVAL;
+    auto owner = std::make_shared<SharedBacking>();
+    owner->fd = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (owner->fd < 0) return errno;
+    const int mode = ::fcntl(fd, F_GETFL);
+    const int host_prot = PROT_READ | ((mode & O_ACCMODE) != O_RDONLY ? PROT_WRITE : 0);
+    if ((prot & GUEST_PROT_WRITE) && !(host_prot & PROT_WRITE)) return EACCES;
+    void* storage = ::mmap(nullptr, length, host_prot, MAP_SHARED, fd, offset);
+    if (storage == MAP_FAILED) return errno;
+    owner->writable = host_prot & PROT_WRITE;
+    owner->base = static_cast<uint8_t*>(storage);
+    owner->size = length;
+    owner->file_offset = offset;
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    if (!range_mapped_locked(addr, addr + length)) return EINVAL;
+    size_t missing = 0;
+    for (uint64_t a = direct_window_ ? std::max<uint64_t>(addr, DIRECT_WINDOW_SIZE) : addr;
+         a < addr + length; a += PAGE_SIZE)
+        if (pages_.find(a / PAGE_SIZE) == pages_.end()) ++missing;
+    if (would_exceed_page_limit(missing)) return ENOMEM;
+    const uint64_t low_end = std::min<uint64_t>(addr + length, DIRECT_WINDOW_SIZE);
+    if (direct_window_ && addr < low_end) {
+        int low_prot = 0;
+        if (prot & (GUEST_PROT_READ | GUEST_PROT_EXEC)) low_prot |= PROT_READ;
+        if (prot & GUEST_PROT_WRITE) low_prot |= PROT_WRITE;
+        void* alias = ::mmap(direct_window_ + addr, low_end - addr, low_prot,
+                            MAP_SHARED | MAP_FIXED, fd, offset);
+        if (alias == MAP_FAILED) return errno;
+        for (uint64_t a = addr; a < low_end; a += PAGE_SIZE)
+            direct_shared_pages_.insert_or_assign(a / PAGE_SIZE, Page(owner, a - addr));
+    }
+    for (uint64_t a = direct_window_ ? std::max(addr, low_end) : addr;
+         a < addr + length; a += PAGE_SIZE) {
+        auto result = pages_.insert_or_assign(a / PAGE_SIZE, Page(owner, a - addr));
+        if (result.second) total_pages_.fetch_add(1, std::memory_order_relaxed);
+    }
+    set_mapping_locked(addr, addr + length, prot, false);
+    page_epoch_.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+}
+int Memory::sync_shared(uint64_t addr, uint64_t size, int flags) {
+    if ((addr & PAGE_MASK) || (flags & ~(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) ||
+        ((flags & MS_ASYNC) && (flags & MS_SYNC))) return EINVAL;
+    if (size > UINT64_MAX - addr) return EINVAL;
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    if (!range_mapped_locked(addr, addr + size)) return ENOMEM;
+    std::unordered_set<SharedBacking*> synced;
+    auto sync = [&](const auto& pages) {
+        for (const auto& item : pages) {
+            const uint64_t at = item.first * PAGE_SIZE;
+            const auto& owner = item.second.backing;
+            if (at + PAGE_SIZE <= addr || at >= addr + size || !owner ||
+                !synced.insert(owner.get()).second) continue;
+            if (::msync(owner->base, owner->size, flags) < 0) return errno;
+        }
+        return 0;
+    };
+    int error = sync(direct_shared_pages_);
+    return error ? error : sync(pages_);
+}
 bool Memory::map_device_readonly(uint64_t addr, uint64_t size, int host_fd) {
     if (!direct_window_ || !size || (addr & PAGE_MASK) || (size & PAGE_MASK) ||
         addr >= DIRECT_WINDOW_SIZE || size > DIRECT_WINDOW_SIZE - addr) return false;
-    std::unique_lock<std::shared_mutex> lock(mu_);
-    if (!range_mapped_locked(addr, addr + size)) return false;
-    void* result = ::mmap(direct_window_ + addr, size, PROT_READ,
-                          MAP_SHARED | MAP_FIXED, host_fd, 0);
-    if (result == MAP_FAILED) return false;
-    for (uint64_t p = addr / PAGE_SIZE; p < (addr + size) / PAGE_SIZE; ++p)
-        direct_page_flags_[p].store(PAGE_MAPPED | GUEST_PROT_READ, std::memory_order_release);
-    page_epoch_.fetch_add(1, std::memory_order_relaxed);
-    return true;
+    return map_shared_file(addr, size, host_fd, 0, GUEST_PROT_READ) == 0;
 }
-bool Memory::mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot) {
+bool Memory::mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot, int* error) {
+    if (error) *error = ENOMEM;
     if ((addr & PAGE_MASK) || (prot & ~uint8_t(7))) return false;
     if (size == 0) return true;
     uint64_t end;
@@ -447,6 +539,15 @@ bool Memory::mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot) {
     if (end <= addr) return false;
     std::unique_lock<std::shared_mutex> g(mu_);
     if (!range_mapped_locked(addr, end)) return false;
+    if (prot & GUEST_PROT_WRITE) {
+        for (uint64_t at = addr; at < end; at += PAGE_SIZE) {
+            const Page* page = page_storage_locked(at);
+            if (page && page->backing && !page->backing->writable) {
+                if (error) *error = EACCES;
+                return false;
+            }
+        }
+    }
     uint64_t low_hi = std::min<uint64_t>(end, DIRECT_WINDOW_SIZE);
     if (direct_window_ && addr < low_hi &&
         !set_direct_prot(addr, low_hi, prot)) return false;
@@ -744,7 +845,7 @@ void Memory::read_access(uint64_t addr, void* dst, size_t n, PageCache* pc,
     }
 }
 uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve,
-                            uint8_t prot) {
+                            uint8_t prot, bool direct_only) {
     // BIFROST_ALLOC_TRACE=1: print every mmap_alloc (addr,size) — used to
     // audit placement/overlap of thunk bounces vs callback scratch stacks.
     static const bool alloc_trace_ = getenv("BIFROST_ALLOC_TRACE") != nullptr;
@@ -763,6 +864,30 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve,
     uint64_t base = hint;
     uint64_t aligned_size = (size + PAGE_MASK) & ~PAGE_MASK;
     bool reused = false;
+    if (direct_only) {
+        // Device aliases require contiguous host backing in the direct
+        // window. A high MAP_FIXED must not force subsequent Binder arenas
+        // onto the sparse path. Find an unmapped heap hole under the same
+        // lock as allocation, including PROT_NONE reservations as occupied.
+        if (!direct_window_) return 0;
+        const uint64_t limit = std::min<uint64_t>(DIRECT_WINDOW_SIZE,
+                                                 stack_top_ - STACK_SIZE);
+        if (aligned_size > limit - MMAP_BASE_MIN) return 0;
+        base = 0;
+        uint64_t run = 0;
+        for (uint64_t at = MMAP_BASE_MIN; at < limit; at += PAGE_SIZE) {
+            if (direct_page_flags_[at / PAGE_SIZE].load(std::memory_order_relaxed) & PAGE_MAPPED)
+                run = 0;
+            else
+                run += PAGE_SIZE;
+            if (run >= aligned_size) {
+                base = at + PAGE_SIZE - aligned_size;
+                break;
+            }
+        }
+        if (!base) return 0;
+        reused = true;  // consume overlapping free ranges and zero backing
+    }
     if (base == 0) {
         // BUGFIX: reuse a reclaimed (munmap'd) range first instead of
         // always bumping. The bump allocator never recycled address
@@ -1111,6 +1236,7 @@ uint64_t Memory::mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve
                 (void)::mprotect(direct_window_ + s, PAGE_SIZE, PROT_READ | PROT_WRITE);
         }
     }
+    detach_direct_shared_locked(lo, hi);
     remove_free_range(lo, aligned_size);
     // Fresh-zero anonymous semantics for the window (the window IS the
     // storage, so there is no lazy fault path here). Sparse pages stay lazy
@@ -1203,6 +1329,68 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (fixed_addr && ((fixed_addr & PAGE_MASK) ||
         !is_valid_guest_range(fixed_addr, new_aligned) ||
         (old_addr < fixed_addr + new_aligned && fixed_addr < old_end))) return 0;
+    std::shared_ptr<SharedBacking> shared;
+    uint64_t shared_offset = 0;
+    std::vector<uint8_t> shared_prots;
+    {
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        if (const Page* first = page_storage_locked(old_addr)) {
+            shared = first->backing;
+            shared_offset = first->offset;
+        }
+        if (shared) {
+            auto allocation = allocations_.find(old_addr);
+            if (allocation == allocations_.end() || allocation->second != old_aligned) return 0;
+            struct stat original;
+            if (::fstat(shared->fd, &original) < 0) return 0;
+            for (uint64_t at = old_addr; at < old_end; at += PAGE_SIZE) {
+                const Page* page = page_storage_locked(at);
+                uint8_t prot;
+                if (!page || !page->backing ||
+                    page->backing->file_offset + page->offset !=
+                        shared->file_offset + shared_offset + at - old_addr ||
+                    !mapping_prot_at_locked(at, prot)) return 0;
+                if (page->backing != shared) {
+                    struct stat current;
+                    if (::fstat(page->backing->fd, &current) < 0 ||
+                        current.st_dev != original.st_dev || current.st_ino != original.st_ino)
+                        return 0;
+                }
+                shared_prots.push_back(prot);
+            }
+        }
+    }
+    if (shared && (fixed_addr || new_aligned > old_aligned)) {
+        const uint64_t offset = shared->file_offset + shared_offset;
+        if (!fixed_addr) {
+            uint64_t tail = mmap_hint(old_end, new_aligned - old_aligned, true,
+                                      shared_prots.back());
+            if (tail) {
+                int error = map_shared_file(tail, new_aligned - old_aligned,
+                    shared->fd, offset + old_aligned, shared_prots.back());
+                if (!error) {
+                    std::unique_lock<std::shared_mutex> lock(mu_);
+                    allocations_.erase(tail);
+                    allocations_[old_addr] = new_aligned;
+                    return old_addr;
+                }
+                untrack_allocation(tail, new_aligned - old_aligned);
+            }
+        }
+        if (!may_move) return 0;
+        uint64_t target = fixed_addr
+            ? mmap_fixed_replace(fixed_addr, new_aligned, true, true, shared_prots.back())
+            : mmap_alloc(new_aligned, 0, true, shared_prots.back());
+        if (!target) return 0;
+        if (map_shared_file(target, new_aligned, shared->fd, offset, shared_prots.back())) {
+            untrack_allocation(target, new_aligned);
+            return 0;
+        }
+        for (size_t i = 0; i < shared_prots.size() && i * PAGE_SIZE < new_aligned; ++i)
+            (void)mprotect_guest(target + i * PAGE_SIZE, PAGE_SIZE, shared_prots[i]);
+        untrack_allocation(old_addr, old_aligned);
+        return target;
+    }
     // Shrink: keep the same address, reclaim the tail pages + address
     // range so repeated realloc-shrink doesn't march the page cap.
     if (!fixed_addr && new_aligned <= old_aligned) {
@@ -1213,6 +1401,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         const uint64_t fend = old_end;
         it->second = new_aligned;
         if (fstart < fend) {
+            detach_direct_shared_locked(fstart, fend);
             for (uint64_t s = fstart; s < fend; s += PAGE_SIZE) {
                 if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
                 auto pit = pages_.find(s / PAGE_SIZE);
@@ -1507,6 +1696,7 @@ std::unique_lock<std::shared_mutex> g(mu_);
     }
     // Remove mapping state even when the range was installed through
     // map_range (ELF PT_LOAD, brk, stacks, vDSO) rather than mmap_alloc.
+    detach_direct_shared_locked(lo, hi);
     const uint64_t low_hi = std::min<uint64_t>(hi, DIRECT_WINDOW_SIZE);
     if (direct_window_ && lo < low_hi) {
         (void)set_direct_prot(lo, low_hi, PROT_NONE);
@@ -1550,6 +1740,10 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
             std::unique_lock<std::shared_mutex> g(mu_);
             for (uint64_t s = start; s < wend; s += PAGE_SIZE) {
                 if (guard_pages_.count(s / PAGE_SIZE)) continue;
+                if (direct_shared_pages_.count(s / PAGE_SIZE)) {
+                    (void)::madvise(direct_window_ + s, PAGE_SIZE, MADV_DONTNEED);
+                    continue;
+                }
                 const uint8_t flags = direct_page_flags_[s / PAGE_SIZE].load(
                     std::memory_order_relaxed);
                 if (!(flags & PAGE_MAPPED)) continue;
@@ -1583,7 +1777,11 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
         uint64_t lo = (pb > start) ? pb : start;
         uint64_t hi = (page_end < end) ? page_end : end;
         if (hi <= lo) continue;
-        std::memset(kv.second.data() + (lo - pb), 0, hi - lo);
+        if (kv.second.backing) {
+            (void)::madvise(kv.second.data(), PAGE_SIZE, MADV_DONTNEED);
+        } else {
+            std::memset(kv.second.data() + (lo - pb), 0, hi - lo);
+        }
     }
 }
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
@@ -1784,7 +1982,8 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
     std::vector<PageSnapshot> out;
     // 1. Pages from the sparse pages_ map (addresses >= 4 GiB).
     for (const auto& [page_num, data] : pages_) {
-        out.push_back({page_num * PAGE_SIZE, data});
+        out.push_back({page_num * PAGE_SIZE,
+            std::vector<uint8_t>(data.data(), data.data() + PAGE_SIZE)});
     }
     // 2. Pages from the direct window (addresses < 4 GiB).
     //
@@ -1815,8 +2014,7 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
             const uint64_t page_addr = page_no * PAGE_SIZE;
             const uint8_t prot = flags & 7;
             if (!(prot & GUEST_PROT_READ))
-                (void)set_direct_prot(page_addr, page_addr + PAGE_SIZE,
-                                      PROT_READ | PROT_WRITE);
+                (void)set_direct_prot(page_addr, page_addr + PAGE_SIZE, PROT_READ);
             const uint8_t* page = direct_window_ + page_addr;
             out.push_back({page_addr, std::vector<uint8_t>(page, page + PAGE_SIZE)});
             if (!(prot & GUEST_PROT_READ))
@@ -1917,6 +2115,36 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
                 p = q;
             }
         }
+    }
+    // Private snapshots above copy bytes; shared file pages must retain
+    // their file identity across the emulated fork (including low aliases).
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    std::map<uint64_t, Page> aliases;
+    auto collect_shared = [&](const auto& pages) {
+        for (const auto& item : pages)
+            if (item.second.backing) aliases.emplace(item.first * PAGE_SIZE, item.second);
+    };
+    collect_shared(direct_shared_pages_);
+    collect_shared(pages_);
+    for (auto it = aliases.begin(); it != aliases.end();) {
+        const uint64_t addr = it->first;
+        const Page& page = it->second;
+        uint8_t prot = 0;
+        (void)mapping_prot_at_locked(addr, prot);
+        uint64_t length = PAGE_SIZE;
+        auto next = std::next(it);
+        while (next != aliases.end() && next->first == addr + length &&
+               next->second.backing == page.backing && next->second.offset == page.offset + length) {
+            uint8_t next_prot = 0;
+            (void)mapping_prot_at_locked(next->first, next_prot);
+            if (next_prot != prot) break;
+            length += PAGE_SIZE;
+            ++next;
+        }
+        if (child->map_shared_file(addr, length, page.backing->fd,
+                page.backing->file_offset + page.offset, prot))
+            throw std::bad_alloc();
+        it = next;
     }
     return child;
 }

@@ -172,6 +172,7 @@ struct DecodedInst {
     // ── Width / size ──
     uint8_t  size = 0;          // 0=8bit, 1=16bit, 2=32bit, 3=64bit
     bool     sf = false;        // 64-bit (vs 32-bit) for data processing
+    bool     pc_relative = false; // literal load: base is this instruction PC
     bool     is_load = false;   // true for LDR/LDP, false for STR/STP
     bool     is_vec = false;    // true for SIMD/FP, false for GP
     bool     set_flags = false; // true for ADDS/SUBS/ANDS

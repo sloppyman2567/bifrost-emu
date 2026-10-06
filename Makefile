@@ -379,6 +379,8 @@ setup: all
 # toolchain, *_musl variants use the musl toolchain without -static.
 # All dynamic tests need the rootfs (BIFROST_ROOT) to run.
 GLIBC_DYN_SRCS := \
+	ctest_real/test_dlopen.c \
+	ctest_real/test_dlopen_mt.c \
 	ctest_real/test_dladdr_glibc.c \
 	ctest_real/test_dyn_hello.c \
 	ctest_real/test_dyn_write.c \
@@ -440,14 +442,16 @@ setup-tests:
 	count=0; \
 	for src in $(GLIBC_DYN_SRCS); do \
 		elf="$${src%.c}.elf"; \
-		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
+		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && [ "$$elf" -nt Makefile ] && continue; \
 		if [ "$$src" = ctest_real/xwayland_wire.c ]; then \
 			if [ -f rootfs/usr/lib/libX11.so.6 ] && [ -f /usr/include/X11/Xlib.h ]; then \
 				$$CC -O2 -idirafter /usr/include "$$src" -Lrootfs/usr/lib -Wl,-rpath-link,rootfs/usr/lib -l:libX11.so.6 -o "$$elf" && count=$$((count + 1)); \
 			fi; \
 			continue; \
 		fi; \
-		if $$CC -O2 -o "$$elf" "$$src" 2>/dev/null; then \
+		extra=""; \
+		case "$$src" in ctest_real/test_dlopen.c|ctest_real/test_dlopen_mt.c) extra="-pthread -ldl -lm";; esac; \
+		if $$CC -O2 -o "$$elf" "$$src" $$extra 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \
 	done; \

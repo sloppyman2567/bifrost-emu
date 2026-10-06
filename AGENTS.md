@@ -26,6 +26,24 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (→ `dbg().thunk_trace`) / etc. still override. Add new diagnostic switches
   there, NOT as ad-hoc `getenv()` checks in hot syscall/interp paths.
 
+## Android framework correctness checkpoint
+
+- ART nterp invokes methods with `BLR X30`: capture the target BEFORE updating
+  LR in both engines. `ctest/jit_blr_lr.c` is the regression.
+- File `MAP_SHARED` mappings retain host file aliases, including high sparse
+  pages and low direct-window mappings. Never preload them into independent
+  vectors. Partial unmap/replacement must detach a low alias before zeroing
+  anonymous storage; preserve file identity through fork/remap. ART's own JIT
+  uses RW and R/RX views of the same memfd (`test_shared_alias`).
+- ART-generated code uses literal loads. Decoder `pc_relative` + `disp` is the
+  shared address contract; interpreter and IR use PC rather than a GPR base.
+- Native call guards must unwind a stopped CPU after `exit_group`, preserving
+  its successful status (`jit_call_exit`). Binder receive arenas must use a
+  free low-window hole after high ART reservations (`android_binder`).
+- Framework provisioning schema 3 includes mainline APEX native libraries and
+  exported namespaces. See `docs/ANDROID_RUNTIME.md` for the bounded framework
+  probe and its remaining service/Activity boundaries.
+
 ## Local Contracts
 
 - Build: `make` (optional `USE_SDL2=1 USE_THUNK_GL=1` for host GL/SDL)
@@ -1237,19 +1255,19 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **282 tests** across categories (unit/JIT/interp, syscalls,
+The suite covers tests across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three
 toolchain flavors, per binary:
 
 - **musl-static** (default): `aarch64-linux-musl-gcc -static -O2` — most
-  tests; self-contained, no rootfs needed. Includes the dl* tests that
-  call the internal syscall directly (`test_dlopen`, `test_dladdr`).
+  tests; self-contained, no rootfs needed. Includes `test_dladdr`, which
+  calls the internal syscall directly.
 - **glibc-dynamic** (`GLIBC_DYN_SRCS` in the Makefile):
   `aarch64-none-linux-gnu-gcc -O2` WITHOUT `-static`, so they exercise the
   ELF loader, glibc interpreter, and real `dl*`/pthread plumbing:
-  `test_dladdr_glibc`, `test_dyn_hello`, `test_dyn_write`, `test_dyn_malloc`,
+  `test_dlopen`, `test_dlopen_mt`, `test_dladdr_glibc`, `test_dyn_hello`, `test_dyn_write`, `test_dyn_malloc`,
   `test_dyn_printf`, `test_dyn_pthread_min`, `test_dyn_threads`,
   `test_dyn_pthread_stress`, `test_dyn_pthread_8thread`. Must run with
   `BIFROST_ROOT=rootfs`. DO NOT let setup-tests rebuild these as musl-static

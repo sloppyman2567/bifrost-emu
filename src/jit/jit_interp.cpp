@@ -19,6 +19,7 @@
 #include "frost/audio_thunk.hpp"
 #include "frost/display_thunk.hpp"
 #include "bifrost/types.hpp"
+#include "debug_flags.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -60,7 +61,8 @@ extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
         int si_code = e.segv_code();
         arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGSEGV,
                        si_code, e.addr);
-    } catch (arm64emu::DecodeError&) {
+    } catch (arm64emu::DecodeError& e) {
+        if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());
         // Same mapping as the interpreter run loop: an undefined
         // instruction is guest SIGILL (zero-page pc: SIGSEGV). Letting the
         // exception reach JIT frames (no unwind info) called

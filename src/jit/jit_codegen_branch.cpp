@@ -29,9 +29,16 @@ namespace arm64emu {
 // CPU state is authoritative. This exit is never a patchable chain slot.
 void FrostJIT::emit_call_stop_guard() {
     emit_load(RAX, CPU_REG, PC_OFF);
+    // Guest exit (or a stopped sibling) must unwind every native caller.
+    // Continuing after exit_group executes libc's deliberate BRK fallback
+    // and can overwrite the successful process status with SIGTRAP.
+    emit_load8(RCX, CPU_REG, offsetof(CPU, running));
+    emit_test_reg(RCX, RCX);
+    size_t stopped = emit_jcc_rel32_placeholder(0x4);
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_stop_pc));
     emit_cmp_reg(RAX, RCX);
     size_t resume = emit_jcc_rel32_placeholder(0x5);
+    patch_jcc_rel32(stopped, static_cast<int32_t>(code_buf_used_ - (stopped + 6)));
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp,rbp
     emit_pop(R15); emit_pop(R14); emit_pop(R13);
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
