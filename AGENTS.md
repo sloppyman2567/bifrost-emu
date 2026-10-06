@@ -44,8 +44,11 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   ART's implicit null checks need the SIGSEGV to become NullPointerException.
   Linux profiles keep the readable zero page; do not unify them.
 - `/proc/self/maps` lines must never overlap: Bionic takes the first line
-  containing the initial SP as the main stack. The `[interp]` line is the
-  linker's real extent (`interp_end_`), not a size guess. `madvise` returns
+  containing the initial SP as the main stack (glibc does the same with
+  `__libc_stack_end`). The main ELF line spans its PT_LOAD pages
+  (`exe_start_`..`end_addr_`) and the `[interp]` line is the linker's real
+  extent (`interp_end_`): never size guesses, and loading the interpreter
+  must not extend `end_addr_` (the ELF line once covered 0..0x4000000000). `madvise` returns
   EINVAL for wrapping ranges like Linux `do_madvise` (ART passes a negative
   length when stack bounds are wrong). Regressions: `test_mem_guard`, the
   maps/stack check in `ctest/android_bionic_bootstrap.c`.
@@ -53,8 +56,10 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `FLAG_COLLECT_NOTED_APP_OPS`; `BIFROST_BINDER_TRACE=1` traces transactions.
 - Framework provisioning schema 4 adds mainline APEX native libraries,
   exported namespaces, framework resources and fonts. See
-  `docs/ANDROID_RUNTIME.md` for the framework probe, the Activity creation
-  checkpoint and remaining service/window boundaries.
+  `docs/ANDROID_RUNTIME.md` for the framework probe and
+  `guest/android/ActivityProbe.java` (real Activity through `onCreate`;
+  runner `--services --main-class ActivityProbe`). Its service stubs are
+  strict: add an answer per new framework call, never a blanket default.
 
 ## Local Contracts
 
@@ -870,8 +875,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   via `resolve_thread_db_symbol_()`. `init_nptl_stack_lists_` uses the same
   lookup; its old `.dynsym`-only lookup always fell back to the glibc 2.36
   offsets, wrong for the 2.42 rootfs. Do not hardcode struct offsets.
-  `specific[0]`/`user_stack` have no descriptors and stay unset. Regression:
-  `ctest_real/test_dyn_main_locks.c`.
+  `specific[0]`/`user_stack` have no descriptors and stay unset. It also
+  sets `__libc_stack_end` to the initial SP (`set_libc_stack_end`, like
+  ld.so's `_dl_sysdep_start`) at EVERY binding: an executable that names it
+  gets a COPY, while libc's versioned import keeps ld.so's definition.
+  `pthread_getattr_np` returned ENOENT for the main thread without it.
+  Regression: `ctest_real/test_dyn_main_locks.c`.
 - **`chain_back_references` is O(k), never O(N) (2026-10-05).** Every
   chain slot is registered in `back_refs_` at translate time
   (`add_back_ref`), so a missing entry means nothing targets that pc. Do not
@@ -1257,7 +1266,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
   (interactive + real-world are the standard default) = **287 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 223),
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 282),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

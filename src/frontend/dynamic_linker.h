@@ -205,6 +205,10 @@ public:
     // after the initial stack (envp array) is built in guest memory.
     // No-op for musl (no __environ symbol) and static binaries.
     void set_guest_environ(uint64_t envp_addr);
+    // glibc ld.so's _dl_sysdep_start sets __libc_stack_end to the initial
+    // SP (argc); pthread_getattr_np finds the main stack's /proc/self/maps
+    // line with it. No-op without the symbol (musl, static).
+    void set_libc_stack_end(uint64_t initial_sp);
     // resolve_plt_entry was a stub for a future "lazy PLT binding"
     // feature that was never implemented (the linker uses eager
     // binding). Removed as dead code — the dynamic linker

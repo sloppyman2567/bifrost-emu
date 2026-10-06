@@ -221,7 +221,7 @@ def install(destination, art_root, archive=None):
         config.write_text(framework_linker_configuration(apexes, paths))
         files = android_art.inventory(root)
         metadata = {"schema_version": SCHEMA,
-                    "purpose": "Android framework on guest ART; services and Activity launch not implemented",
+                    "purpose": "Android framework on guest ART; system services and Activity display not implemented",
                     "image_sha256": IMAGE_SHA256,
                     "environment": environment(primary, mainline), "files": files,
                     "native_dependencies": graph, "public_preloads": preloads}

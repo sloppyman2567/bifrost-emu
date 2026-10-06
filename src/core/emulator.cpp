@@ -131,15 +131,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // dynamic linker range.
     vfs_.set_maps_provider([this]() {
         std::vector<yggdrasil::Yggdrasil::MapEntry> out;
-        // ELF image: from end_addr_ min down to lowest PT_LOAD start.
-        // We don't track the lowest PT_LOAD start, so use end_addr_ as
-        // the upper bound and the load bias (pie_base() for ET_DYN,
-        // preferred vaddr for ET_EXEC) as the
-        // lower bound heuristic. Conservative: covers all code/data.
-        if (end_addr_ > 0) {
+        // Main ELF image: its lowest to highest PT_LOAD page.
+        if (end_addr_ > exe_start_) {
             yggdrasil::Yggdrasil::MapEntry e;
-            e.start = exe_base_;
-            e.end   = end_addr_;
+            e.start = exe_start_;
+            e.end   = (end_addr_ + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
             std::snprintf(e.perms, sizeof(e.perms), "rwxp");
             out.push_back(e);
         }
@@ -284,7 +280,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     entry_ = info.entry;
     prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
-    exe_base_ = info.base_addr;
+    exe_start_ = info.start_addr;
     phdr_addr_ = info.phdr_addr;
     phnum_ = info.phnum;
     phent_ = info.phent;
@@ -874,7 +870,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         mem_.write(addr, idata.data() + p_offset, p_filesz);
                     }
                     uint64_t end = addr + p_memsz;
-                    if (end > end_addr_) end_addr_ = end;
                     if (end > interp_end_) interp_end_ = end;
                 }
                 // The entry point is the interpreter's entry (relative to interp_base).
@@ -952,7 +947,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // glibc's ld.so normally sets __environ during _dl_start_user; the
     // native dynlink path skips ld.so, so point __environ at the envp
     // array on the initial stack before the program's _start runs.
-    if (dyn_linker_) dyn_linker_->set_guest_environ(guest_envp_addr_);
+    if (dyn_linker_) {
+        dyn_linker_->set_guest_environ(guest_envp_addr_);
+        dyn_linker_->set_libc_stack_end(main_cpu_.sp);
+    }
     // Pre-allocate a TLS scratch area and set TPIDR_EL0 to point into
     // its center. Many libc startup routines read TPIDR_EL0 before
     // __libc_setup_tls has set the real TCB. Pointing it to valid

@@ -79,19 +79,39 @@ layout-dependent early SIGILL recorded in [test evidence](TESTS.md).
 
 ### Activity creation checkpoint
 
-A local Activity probe (kept outside the repository) passes in both engines
-with `--services`: 118.8 s JIT and 220.9 s interpreter. It calls
-`ActivityThread.systemMain()`, loads the preinstalled font map, then runs
-`Instrumentation.newActivity` and `callActivityOnCreate`. The Activity's
-`onCreate` runs and the decor view, including a title `TextView`, inflates.
+`guest/android/ActivityProbe.java` creates a real Activity through `onCreate`.
+It compiles against the checksum-pinned API-35 `android.jar` from
+`tools/fetch-android-package-tools.py`; hidden APIs use reflection.
+
+```bash
+python3 tools/fetch-android-package-tools.py
+mkdir -p build/activity-probe/classes
+javac --release 8 -cp tools/android-tools/android.jar \
+  -d build/activity-probe/classes guest/android/ActivityProbe.java
+java -cp tools/android-tools/d8.jar com.android.tools.r8.D8 --min-api 26 \
+  --lib tools/android-tools/android.jar --output build/activity-probe \
+  build/activity-probe/classes/*.class
+timeout -s KILL 310 python3 scripts/test_android_framework.py --services \
+  --probe build/activity-probe/classes.dex --main-class ActivityProbe \
+  --mode jit --timeout 300 --output build/android-activity-results
+```
+
+Both engines print `FRAMEWORK_OK` on a schema-4 root: 131.4 s JIT and
+226.1 s interpreter, run concurrently with the framework probe. The probe
+calls `ActivityThread.systemMain()` and loads the preinstalled font map. It
+then runs `Instrumentation.newActivity` and `callActivityOnCreate`.
+`FRAMEWORK_OK` requires that `onCreate` ran and the decor view exists,
+including the inflated title `TextView`.
 `Typeface.loadPreinstalledSystemFontMap()` stands in for
 `handleBindApplication`, which loads fonts when lazy Typeface initialization is
 enabled. Missing system services are in-process Java Binder stubs installed in
-`ServiceManager.sCache`. Display returns one 480×800 display; package reports
-no features; settings returns empty values. The `activity` and `activity_task`
-stubs return only the provider and Activity controller. Window reports no
-navigation bar and animator scale 1.0. Activity resume, window attachment,
-surfaces, drawing, input and real system services remain unimplemented.
+`ServiceManager.sCache`. Each answers only the calls Activity creation makes,
+logs them as `LOCAL_SERVICE`, and throws on anything else. Display returns one
+480×800 display; package reports no features; settings returns empty values.
+The `activity` and `activity_task` stubs return only the provider and Activity
+controller. Window reports no navigation bar and animator scale 1.0. Activity
+resume, window attachment, surfaces, drawing, input and real system services
+remain unimplemented.
 
 The image's boot artifacts still fail ART's read-barrier compatibility check;
 ART falls back to imageless execution. QEMU gets past the repaired mainline

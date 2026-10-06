@@ -69,7 +69,7 @@ class LogdReceiver:
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
-        libraries=()):
+        libraries=(), main_class="FrameworkProbe"):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
@@ -91,7 +91,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             build_prop.write_text("".join(p + "\n" for p in properties) + text)
         # ART logs to stderr: there is no logd socket for liblog here.
         program = ["-Xuse-stderr-logger", *art_options,
-                   "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", "FrameworkProbe"]
+                   "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", main_class]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
         guest_env = metadata["environment"]
@@ -162,7 +162,10 @@ if __name__ == "__main__":
                         help="System property override (repeatable)")
     parser.add_argument("--services", action="store_true", help="Enable Bifrost's Binder service registry")
     parser.add_argument("--library", type=Path, action="append", default=[], help="Copy a probe JNI library into /data/local/tmp")
+    parser.add_argument("--main-class", default="FrameworkProbe", help="Probe class to run (e.g. ActivityProbe)")
     args = parser.parse_args()
+    if not args.main_class.isidentifier():
+        parser.error("--main-class must be a Java class name in the default package")
     if not 1 <= args.timeout <= 300:
         parser.error("timeout must be between 1 and 300 seconds")
     if args.emu is None:
@@ -175,4 +178,4 @@ if __name__ == "__main__":
             args.emu = ROOT / "bifrost-emu"
     sys.exit(0 if run(args.emu.resolve(), args.runtime_root.resolve(), args.art_root.resolve(),
                       args.probe.resolve(), args.mode, args.output.resolve(), args.timeout,
-                      args.art_option, args.prop, args.services, args.library) else 1)
+                      args.art_option, args.prop, args.services, args.library, args.main_class) else 1)

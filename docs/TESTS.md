@@ -13,12 +13,12 @@ require SDL2, a display, or a configured guest rootfs.
 ### Android Activity creation (2026-10-06)
 
 The strict Linux suite passes **287/287 JIT** and **280/280 interpreter**,
-with seven expected JIT-only skips (168 s and 133 s). The committed framework
-probe passes on a schema-4 root in 54.9 s JIT and 136.5 s interpreter. The ART
-JNI fixture passes in both engines. The loader fixture passes, and the package
-tests pass 6/6. All six Bionic bootstrap variants pass. A local Activity probe
-reaches `FRAMEWORK_OK` after `onCreate` (118.8 s JIT, 220.9 s interpreter);
-see [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
+with seven expected JIT-only skips (152 s and 141 s). On the re-provisioned
+schema-4 default root, four concurrent runs pass. `ActivityProbe` takes
+131.4 s JIT and 226.1 s interpreter; the framework probe takes 63.5 s and
+119.0 s. Wall time is 227 s. The ART JNI fixture passes in both engines. The
+loader fixture passes, and the package tests pass 6/6. All six Bionic
+bootstrap variants pass. See [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
 
 Focused additions:
 
@@ -28,6 +28,10 @@ Focused additions:
 - `android_bionic_bootstrap`: `/proc/self/maps` lines must not overlap, and
   the main thread's `pthread_getattr_np` stack must contain the current frame.
   Restoring only the old 256 MiB `[interp]` line fails the overlap check.
+- `test_dyn_main_locks` (glibc dynamic): `/proc/self/maps` lines are disjoint,
+  `__libc_stack_end` is set even when the executable COPY-relocates it, and
+  main-thread `pthread_getattr_np` contains the current frame. The pre-change
+  binary fails all three in both engines; QEMU with real ld.so passes.
 - `android_service_manager`: Java-style `PING_TRANSACTION` with
   `FLAG_COLLECT_NOTED_APP_OPS | TF_ACCEPT_FDS` (55 checks, both engines).
 

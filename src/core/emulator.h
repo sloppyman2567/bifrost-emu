@@ -66,6 +66,7 @@ public:
         uint64_t phdr_addr;
         uint64_t phnum;
         uint64_t phent;
+        uint64_t start_addr; // lowest PT_LOAD page (0 if none)
         uint64_t end_addr;   // highest mapped addr (for brk baseline)
         uint64_t base_addr;  // load bias (0 for ET_EXEC, randomized pie_base() for ET_DYN)
         bool     has_lse;    // ELF declared AArch64 LSE atomic feature
@@ -368,7 +369,7 @@ private:
     CPU    main_cpu_;          // main thread's CPU state
     uint64_t entry_ = 0;
     uint64_t end_addr_ = 0;
-    uint64_t exe_base_ = 0;    // main ELF load bias (pie_base() for ET_DYN, 0 for ET_EXEC)
+    uint64_t exe_start_ = 0;   // main ELF's lowest PT_LOAD page, for /proc/self/maps
     uint64_t brk_ = 0;
     uint64_t brk_start_ = 0;   // initial brk (set at ELF load time)
     std::mutex brk_mu_;        // serializes concurrent brk() calls

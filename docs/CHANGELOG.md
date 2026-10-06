@@ -12,6 +12,14 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Activity probe and glibc main-stack bounds (2026-10-06)
+
+- Add `guest/android/ActivityProbe.java` and the runner's `--main-class`.
+  Re-provisioned default framework root: schema 4.
+- glibc dynamic programs: `/proc/self/maps` no longer reports one ELF line
+  from address 0 to the interpreter, and the native linker sets
+  `__libc_stack_end`; `pthread_getattr_np` on the main thread works.
+
 ### Android Activity creation (2026-10-06)
 
 - Leave guest page 0 unmapped in the Android profile so ART's implicit null

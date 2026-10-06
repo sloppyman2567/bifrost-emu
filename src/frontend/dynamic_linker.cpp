@@ -1032,6 +1032,25 @@ void DynamicLinker::set_guest_environ(uint64_t envp_addr) {
                 static_cast<unsigned long long>(addr));
     }
 }
+void DynamicLinker::set_libc_stack_end(uint64_t initial_sp) {
+    // An executable that references the variable gets a COPY of it, but
+    // libc's versioned import may still bind ld.so's definition. Store to
+    // every binding so both read the same value.
+    std::vector<uint64_t> addrs;
+    if (uint64_t addr = resolve_symbol("__libc_stack_end")) addrs.push_back(addr);
+    for (const auto& [key, entry] : versioned_symbols_)
+        if (key.rfind("__libc_stack_end@", 0) == 0 && entry.addr &&
+            std::find(addrs.begin(), addrs.end(), entry.addr) == addrs.end())
+            addrs.push_back(entry.addr);
+    for (uint64_t addr : addrs) {
+        mem_.store<uint64_t>(addr, initial_sp);
+        if (dynlink_trace_enabled()) {
+            fprintf(stderr, "[dynlink] __libc_stack_end = 0x%llx @ 0x%llx\n",
+                    static_cast<unsigned long long>(initial_sp),
+                    static_cast<unsigned long long>(addr));
+        }
+    }
+}
 // ── patch_rtld_global_ro_ ──────────────────────────────────────────────
 // Patch the resolved _rtld_global_ro to set dl_pagesize,
 // dl_tls_static_size, and dl_tls_static_align. These fields are

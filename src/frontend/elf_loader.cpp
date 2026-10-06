@@ -105,6 +105,7 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
     info.phent = e_phentsize;
     info.phnum = e_phnum;
     info.phdr_addr = 0;
+    info.start_addr = 0;
     info.end_addr  = 0;
     info.has_lse   = false;
     info.base_addr = 0;  // load bias (0 for ET_EXEC, non-zero for ET_DYN/PIE)
@@ -169,6 +170,7 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
             info.phdr_addr = h.p_vaddr + info.base_addr;
         }
     }
+    bool have_start = false;
     struct SegmentProtection { uint64_t addr, size; uint8_t prot; };
     std::vector<SegmentProtection> segment_protections;
     for (auto& h : phdrs) {
@@ -211,6 +213,9 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
         }
         uint64_t end = vaddr + h.p_memsz;
         if (end > info.end_addr) info.end_addr = end;
+        const uint64_t page_start = vaddr & ~Memory::PAGE_MASK;
+        if (!have_start || page_start < info.start_addr) info.start_addr = page_start;
+        have_start = true;
     }
     // Apply PT_LOAD permissions only after all file and BSS bytes have been
     // installed. Adjacent segments can share a page; later headers define
