@@ -126,20 +126,63 @@ static bool is_proc_exe_path(const std::string& p) {
 }
 // Return -2 for unrelated paths, -1 for malformed descriptor names, otherwise
 // the guest fd. Never pass a guest fd number directly to the host procfs.
-static int proc_link_fd(const std::string& path) {
+// With `rest`, a trailing "/component..." after the number is accepted and
+// returned there (opening through a directory descriptor's link).
+static int proc_link_fd(const std::string& path, std::string* rest = nullptr) {
     for (const char* prefix : {"/proc/self/fd/", "/proc/thread-self/fd/", "/proc/1/fd/"}) {
         size_t length = std::strlen(prefix);
         if (path.compare(0, length, prefix) != 0) continue;
         if (path.size() == length) return -1;
         int fd = 0;
-        for (size_t i = length; i < path.size(); ++i) {
+        size_t i = length;
+        for (; i < path.size() && path[i] != '/'; ++i) {
             char c = path[i];
             if (c < '0' || c > '9' || fd > (INT_MAX - (c - '0')) / 10) return -1;
             fd = fd * 10 + (c - '0');
         }
+        if (i == length || (i < path.size() && !rest)) return -1;
+        if (rest) *rest = path.substr(i);
         return fd;
     }
     return -2;
+}
+std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, uint64_t guest_dirfd,
+    const std::string& path, int guest_flags, mode_t guest_mode, int* err) {
+    auto& vfs = emu.vfs();
+    auto& fds = emu.fds();
+    const int host_flags = open_flags_to_host(guest_flags);
+    // Apply guest umask to the creation mode (kernel behavior).
+    const mode_t mode = guest_mode & ~emu.guest_umask();
+    if (!path.empty() && path[0] != '/') {
+        // Relative path: honor an explicit dirfd. AT_FDCWD keeps the
+        // legacy host-cwd behavior; anything else invalid is EBADF.
+        int hfd = resolve_dirfd(fds, guest_dirfd);
+        if (hfd == -100) return vfs.open(path, host_flags, mode, err);
+        if (hfd < 0) { *err = -EBADF; return nullptr; }
+        return vfs.open_at(hfd, path, host_flags, mode, err);
+    }
+    // Absolute path: dirfd is ignored per POSIX.
+    std::string rest;
+    const int proc_fd = proc_link_fd(path, &rest);
+    if (proc_fd == -2) return vfs.open(path, host_flags, mode, err);
+    // /proc/self/fd/N reopens the file behind GUEST fd N. Host procfs
+    // would name the emulator's own fd with that number instead.
+    auto target = proc_fd >= 0 ? fds.get(proc_fd) : nullptr;
+    if (!target) { *err = -ENOENT; return nullptr; }
+    // Sockets and anonymous inodes cannot be reopened (ENXIO on Linux).
+    if (target->host_fd() < 0) { *err = -ENXIO; return nullptr; }
+    if (rest.empty()) {
+        char link[48];
+        snprintf(link, sizeof(link), "/proc/self/fd/%d", target->host_fd());
+        int fd = ::open(link, host_flags, mode);
+        if (fd < 0) { *err = -errno; return nullptr; }
+        return std::make_unique<yggdrasil::HostNode>(fd, host_flags);
+    }
+    // Below a directory descriptor: confined like a relative openat().
+    const size_t start = rest.find_first_not_of('/');
+    return vfs.open_at(target->host_fd(),
+                       start == std::string::npos ? "." : rest.substr(start),
+                       host_flags, mode, err);
 }
 // Fill a synthetic struct stat for the guest ELF as seen through the
 // /proc/<pid>/exe symlink: lstat (AT_SYMLINK_NOFOLLOW) yields a symlink
@@ -179,30 +222,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         // host passthrough internally.
         case 56: { // openat
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
-            const int host_flags = open_flags_to_host(static_cast<int>(a2));
             int err = 0;
-            // Apply guest umask to the creation mode (kernel behavior).
-            mode_t mode = static_cast<mode_t>(a3) & ~emu.guest_umask();
-            std::unique_ptr<yggdrasil::Node> node;
-            if (!path.empty() && path[0] != '/') {
-                // Relative path: honor an explicit dirfd (previously
-                // ignored — the open silently resolved against the HOST
-                // cwd instead of the guest dirfd). AT_FDCWD keeps the
-                // legacy host-cwd behavior; anything else invalid is
-                // EBADF (Linux semantics).
-                int hfd = resolve_dirfd(fds_, a0);
-                if (hfd == -100) {
-                    node = vfs_.open(path, host_flags, mode, &err);
-                } else if (hfd < 0) {
-                    ret_err(EBADF); return 0;
-                } else {
-                    node = vfs_.open_at(hfd, path, host_flags,
-                                        mode, &err);
-                }
-            } else {
-                // Absolute path: dirfd is ignored per POSIX.
-                node = vfs_.open(path, host_flags, mode, &err);
-            }
+            auto node = open_guest_at(emu, a0, path, static_cast<int>(a2),
+                                      static_cast<mode_t>(a3), &err);
             if (!node) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(err != 0 ? err : -ENOENT));
                 return 0;

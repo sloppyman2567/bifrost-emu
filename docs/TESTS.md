@@ -22,6 +22,12 @@ bootstrap variants pass. See [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
 
 Focused additions:
 
+- `test_proc_fd_reopen`: `open("/proc/self/fd/N")` reopens the guest
+  descriptor's memfd or file with its own offset, including a guest-only fd
+  number (100) and `/proc/self/fd/<dirfd>/name`; a closed fd gives `ENOENT`
+  and a socket `ENXIO`. `openat2` resolves the same way and translates
+  `O_DIRECTORY`. Passes natively on the host kernel; the pre-change binary
+  fails 9 checks.
 - `test_madv_remove`: `MADV_REMOVE` punches a hole in writable shared memfd
   mappings below and above the direct window (page reads zero, file size
   kept), returns `EINVAL` for private anonymous memory without touching it,

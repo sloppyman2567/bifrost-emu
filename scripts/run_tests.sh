@@ -352,6 +352,9 @@ UNIT_TESTS=(
     # MADV_REMOVE: hole punch for writable shared files, EINVAL for private
     # anonymous (ART's CMC arena release depends on it), EACCES, ENOMEM.
     "test_madv_remove|ctest/test_madv_remove.elf||10|ALL PASS"
+    # /proc/self/fd/N[/name] reopens the GUEST descriptor's file (not the
+    # emulator's fd N); openat2 shares openat's flags and resolution.
+    "test_proc_fd_reopen|ctest/test_proc_fd_reopen.elf||10|ALL PASS"
     "test_memory_permissions|ctest/test_memory_permissions.elf||30|ALL PASS"
     # Fixed mapping contents, concurrent fd reads during mmap, mremap
     # relocation contracts, and active alternate-stack changes (47 checks).

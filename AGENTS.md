@@ -945,7 +945,10 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   openat honors explicit dirfds (bogus dirfd + relative path = EBADF; absolute
   paths ignore dirfd per POSIX). `/proc/<numeric-pid>/*` and `/proc/self/mem`
   are denied (ENOENT) under a root; other `/proc/self/*` keeps host
-  passthrough. clone namespace flags are rejected (EINVAL); read-only
+  passthrough, except `/proc/{self,thread-self,1}/fd/N[/name]`: openat and
+  openat2 (shared `open_guest_at`, fs.cpp) resolve it through GUEST fd N's
+  host fd (`name` confined like a relative openat). The host path names the
+  emulator's own fd N (`test_proc_fd_reopen`). clone namespace flags are rejected (EINVAL); read-only
   `*at` (fstatat/faccessat/readlinkat) are still unconfined (metadata only).
   No-openat2 kernels fall back to textual confinement (documented
   degradation). Regression: `ctest/test_sandbox.c` (44 checks, fixtures

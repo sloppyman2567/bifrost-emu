@@ -701,8 +701,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d openat2-ish path=%.60s\n", cpu.tid, path.c_str());
             int err = 0;
-            auto node = emu.vfs().open(path, static_cast<int>(flags),
-                                       static_cast<mode_t>(mode), &err);
+            // Same resolution as openat: guest flag translation, umask,
+            // dirfd and /proc/self/fd. struct open_how's resolve field is
+            // not modeled.
+            auto node = open_guest_at(emu, a0, path, static_cast<int>(flags),
+                                      static_cast<mode_t>(mode), &err);
             if (!node) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(err ? err : -ENOENT)));
                 return 0;

@@ -15,7 +15,11 @@
 #include "bifrost/types.hpp"
 #include <cstdint>
 #include <errno.h>
+#include <memory>
+#include <string>
+#include <sys/types.h>
 namespace arm64emu {
+namespace yggdrasil { class Node; }
 // Sentinel return value: this handler didn't recognize `num`.
 constexpr int64_t SYSCALL_NOT_HANDLED = INT64_MIN;
 // Increment the syscall histogram for `num` (relaxed atomic — hot path).
@@ -77,4 +81,10 @@ int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num);   // times/wai
 // pidfd_*, io_uring stubs, mount-API stubs, capget/capset, personality,
 // fanotify stubs, landlock stubs, seccomp stub, mseal, etc.
 int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num);
+// openat()/openat2() path resolution with GUEST flags and mode: flag
+// translation, umask, dirfd, and /proc/{self,thread-self,1}/fd/N[/rest]
+// through GUEST fd N; everything else goes through the VFS. Returns
+// nullptr with *err set to a negative errno on failure.
+std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, uint64_t guest_dirfd,
+    const std::string& path, int guest_flags, mode_t guest_mode, int* err);
 } // namespace arm64emu

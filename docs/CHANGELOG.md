@@ -12,6 +12,15 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### /proc/self/fd reopen and openat2 (2026-10-06)
+
+- `open("/proc/self/fd/N")` reopens the file behind guest descriptor N.
+  The path used to reach the host procfs, which named the emulator's own fd
+  N (a memfd reopen returned `ENXIO` from an emulator socket). Paths below a
+  directory descriptor resolve inside the sandbox like a relative openat.
+- `openat2` now translates guest open flags and honors `dirfd` like openat;
+  it passed AArch64 flag bits straight to the x86_64 host.
+
 ### MADV_REMOVE (2026-10-06)
 
 - `madvise(MADV_REMOVE)` now punches a hole in writable shared file mappings
