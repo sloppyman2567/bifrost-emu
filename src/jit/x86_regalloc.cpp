@@ -795,21 +795,28 @@ void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
 // ── force_two_vregs_to ─────────────────────────────────────────────────
 // Force two vregs into two specific host registers in one call.
 //
-// Handles the aliasing case where src1 == src2 (or src2 was originally
-// cached in host_reg1) by COPYING src2 to host_reg2 instead of moving,
-// so src1's mapping in host_reg1 is preserved.
-//
 // After this call:
 //   vreg_home_[src1] == host_reg1,  reg_vreg_[host_reg1] == src1
 //   vreg_home_[src2] == host_reg2,  reg_vreg_[host_reg2] == src2
 //
-// When src1 == src2, both host_reg1 and host_reg2 hold the same value;
-// reg_vreg_[host_reg1] stays as src1 (aliasing), and vreg_home_[src1]
-// is set to host_reg2 (the most recent force wins).
+// When src1 == src2 (FWD turns `cmp w23, w23` into SUBS v, v), the vreg
+// keeps its single home in host_reg1 and host_reg2 gets an UNMAPPED copy.
+// Callers compute in host_reg1, so their "save src1 before overwriting
+// host_reg1" logic and their dest == src1 in-place update both see the
+// real home. The old aliasing state mapped both registers to the vreg
+// with the home in host_reg2: SUBS then overwrote host_reg1 without
+// saving the vreg, set_vreg_reg dropped its only valid home, and a later
+// reader loaded a stack slot that was never written (ART's inlined
+// Arrays.copyOf passed garbage as the System.arraycopy length).
 void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
                                   int src2, int host_reg2) {
     // Force src1 into host_reg1 (MOVE semantics).
     force_vreg_to_reg(src1, host_reg1);
+    if (src1 == src2) {
+        if (reg_vreg_[host_reg2] >= 0) evict_vreg(reg_vreg_[host_reg2]);
+        emit_mov_reg(host_reg2, host_reg1);
+        return;
+    }
     // Force src2 into host_reg2. Evict host_reg2's current occupant
     // if it's not src2. (If src1 == src2 and src1 is now in host_reg1,
     // the eviction of host_reg2 won't touch host_reg1.)
@@ -821,12 +828,7 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
         return;  // already there
     }
     bool was_dirty2 = vreg_dirty_[src2];
-    if (home2 == host_reg1) {
-        // src2 is in host_reg1 (either because src1 == src2, or src2
-        // was independently cached there). COPY — don't clear
-        // host_reg1's mapping, because src1 needs to stay there.
-        emit_mov_reg(host_reg2, host_reg1);
-    } else if (home2 >= 0) {
+    if (home2 >= 0) {
         // src2 is in some other reg — move it (clear old mapping).
         emit_mov_reg(host_reg2, home2);
         reg_vreg_[home2] = -1;

@@ -154,6 +154,21 @@ STORE_REG. `ctest/jit_ccmp_forward.c` covers the FreeType rasterizer pattern
 that exposed this as missing glyph pixels in Neverball. See
 [the Neverball validation notes](neverball.md) for the application repro.
 
+## Same-operand two-register ops
+
+FWD forwards both reads of `cmp w23, w23` to one vreg, so ADDS/SUBS,
+ADCS/SBCS, TST and CCMP can reach `force_two_vregs_to(v, RAX, v, RCX)`.
+A vreg has exactly one home: it stays in RAX, and RCX receives an unmapped
+copy. Callers compute in RAX, so their "spill a live src1 before
+overwriting RAX" logic sees the real home. An allocation for a separate
+destination must not pick RCX (ADCS/SBCS pin it). Earlier code homed the
+vreg in RCX while RAX still claimed it; SUBS then overwrote RAX without a
+spill, and a later `mov w5, w23` read a never-written stack slot. ART's
+boot image inlines `Arrays.copyOf` that way, so `System.arraycopy` got an
+object address as its length (ArrayIndexOutOfBoundsException, seen only
+when ART used its AOT boot code). `ctest/jit_same_operand.c` covers each
+flag op and the ART sequence around an in-block call.
+
 ## Shift source preservation and operand width
 
 Variable shifts and rotates must preserve a live count vreg. The x86 CL forms

@@ -1277,12 +1277,11 @@ private:
     // need `v` to remain in its old location.
     void force_vreg_to_reg(int v, int host_reg);
     // Force two vregs into two specific host registers in one call.
-    // Handles the aliasing case where src1 == src2 (or src2 was
-    // originally cached in host_reg1) by COPYING src2 to host_reg2
-    // instead of moving (so src1's mapping in host_reg1 is preserved).
     // After this call:
     //   vreg_home_[src1] == host_reg1, reg_vreg_[host_reg1] == src1.
     //   vreg_home_[src2] == host_reg2, reg_vreg_[host_reg2] == src2.
+    // Exception: when src1 == src2 the vreg stays homed in host_reg1 and
+    // host_reg2 holds an unmapped copy (a vreg has exactly one home).
     // Use this for binary ops like SHL/ADDS that need src1 in one
     // fixed reg and src2 in another (e.g. RAX and RCX).
     void force_two_vregs_to(int src1, int host_reg1,

@@ -652,7 +652,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 dirty_host_regs_ |= (1u << s1);  // maintain dirty-bitmask invariant
                 vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             } else if (inst.dest != 0) {
+                // RCX holds src2 (an unmapped copy when src1 == src2), so
+                // it must not become the destination the mov overwrites.
+                const uint32_t saved_pins = pinned_host_regs_;
+                pinned_host_regs_ |= 1u << s2;
                 d = alloc_reg_for(inst.dest, s1);
+                pinned_host_regs_ = saved_pins;
                 if (d != s1) emit_mov_reg(d, s1);
             } else {
                 d = s1;

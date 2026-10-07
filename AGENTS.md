@@ -902,6 +902,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   as a host register and clobbered a live one (FWD-only; every OpenSSL
   SHA-256 digest was wrong under the JIT). Regression:
   `ctest/jit_two_operand_pressure.c` (the real SHA-256 round block).
+- **Same-operand flag ops keep one home (2026-10-06).** FWD turns
+  `cmp w23, w23` into SUBS v, v. `force_two_vregs_to` with src1 == src2
+  homes v in reg1 and puts an UNMAPPED copy in reg2; ADCS/SBCS pin reg2
+  while allocating a separate dest. Mapping both registers to v (home in
+  RCX) let SUBS overwrite RAX unspilled, so ART's inlined `Arrays.copyOf`
+  passed an object address as the arraycopy length (AIOOBE). See
+  `docs/JIT.md`; regression: `ctest/jit_same_operand.c`.
 - **Native dynlink stands in for glibc's `__tls_init_tp` (2026-10-05).**
   `init_main_thread_descriptor_()` stores the main thread's tid in its
   `struct pthread` (at `tp - _thread_db_sizeof_pthread`) and links
@@ -1304,15 +1311,19 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **288 pass /
-  0 fail / 0 skip**; `--no-jit` = 281 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **293 pass /
+  0 fail / 0 skip**; `--no-jit` = 286 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
-  benchmarks + dynamic + interactive). The only historical skip was
-  `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
-  stub skips with exit 77.
+  benchmarks + dynamic + interactive). Zero skips needs the optional
+  fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
+  binaries, `ctest_real/realworld/` coreutils + `iperf3-aarch64`, and rootfs
+  libraries `setup-rootfs.sh` does not copy (`libX11`/`libxcb` for
+  `xwayland_wire`; `libiperf`/`libsctp`/`libssl`/`libcrypto` — without them
+  `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
+  glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **288 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 283),
+  (interactive + real-world are the standard default) = **293 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 288),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

@@ -24,10 +24,11 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (287 selected test runs):
-#   Unit        108  — focused guest and host JIT regressions
+# Fully provisioned suite (293 selected test runs):
+#   Unit        113  — focused guest and host JIT regressions
 #   Integration  86  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
+#   Per-thread JIT 1 — cross-thread invalidation without the shared JIT
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   49  — static BusyBox/Toybox commands
 #   Real-world dynamic 7 — glibc binaries; rootfs required
@@ -311,6 +312,7 @@ UNIT_TESTS=(
     "memory_guard_address|ctest/jit_memory_guard_address.elf||15|ALL PASS"
     "bitfield_regalloc|ctest/jit_bitfield_regalloc.elf||10|ALL PASS"
     "ccmp_forward|ctest/jit_ccmp_forward.elf||10|ALL PASS"
+    "same_operand|ctest/jit_same_operand.elf||10|ALL PASS"
     "variable_shift_source|ctest/jit_variable_shift_source.elf||10|ALL PASS"
     "shifted_operand_width|ctest/jit_shifted_operand_width.elf||10|shifted_operand_width: PASS"
     "test_tls_static|ctest/test_tls_static.elf||10|ALL PASS"
