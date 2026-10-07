@@ -139,8 +139,9 @@ controller. Window reports no navigation bar and animator scale 1.0. Activity
 resume, window attachment, surfaces, drawing, input and real system services
 remain unimplemented.
 
-The image's boot artifacts still fail ART's read-barrier compatibility check;
-ART falls back to imageless execution. QEMU gets past the repaired mainline
+With CMC the boot image loads. Without userfaultfd ART falls back to CC,
+rejects the image (`ValidateOatFile found read barrier state mismatch`) and
+runs imageless. QEMU gets past the repaired mainline
 namespace/native loading and aborts when framework initialization requires
 `/dev/binder`, which this host reference does not provide. The probe proves a
 framework initialization/event-loop checkpoint, not Activity launch, Android
