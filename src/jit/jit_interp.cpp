@@ -59,7 +59,7 @@ extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
     } catch (arm64emu::UnmappedMemory& e) {
         // Deliver SIGSEGV with the fault address and proper si_code.
         int si_code = e.segv_code();
-        arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGSEGV,
+        arm64emu::deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                        si_code, e.addr);
     } catch (arm64emu::DecodeError& e) {
         if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());

@@ -60,6 +60,16 @@ public:
     static constexpr uint8_t GUEST_PROT_WRITE = 2;
     static constexpr uint8_t GUEST_PROT_EXEC = 4;
     static constexpr uint8_t GUEST_PAGE_MAPPED = 0x80;
+    // userfaultfd (SIGBUS mode) per-page state in direct_page_flags_.
+    // MISSING: no content since MADV_DONTNEED or an MREMAP_DONTUNMAP move
+    // (tracked once a userfaultfd exists); the JIT memory guard rejects it,
+    // so first touch reaches check_access. REGISTERED: covered by a
+    // UFFDIO_REGISTER_MODE_MISSING range. Touching MISSING|REGISTERED is
+    // SIGBUS BUS_ADRERR; touching an unregistered MISSING page populates it.
+    static constexpr uint8_t GUEST_PAGE_UFFD_MISSING = 0x10;
+    static constexpr uint8_t GUEST_PAGE_UFFD_REGISTERED = 0x20;
+    static constexpr uint8_t GUEST_PAGE_UFFD_BITS =
+        GUEST_PAGE_UFFD_MISSING | GUEST_PAGE_UFFD_REGISTERED;
     // Guest heap + stack live INSIDE the 4 GiB direct window so the JIT
     // fast path (direct window memcpy) covers them. The layout formerly
     // put the heap at 0x5000000000 and the stack at 0x8000000000 — both
@@ -97,6 +107,11 @@ public:
     // Configure once before starting any guest CPU. Android/Bionic uses
     // top-byte tags for internal allocator pointers even without MTE.
     void set_data_top_byte_ignore(bool enabled) { data_top_byte_ignore_ = enabled; }
+    // Android profile: unhinted mappings that do not fit below the main
+    // stack go above the direct window instead of filling the low 4 GiB.
+    // Linux places them top-down, high; ART and Bionic then expect low
+    // hints (the boot image near 0x70000000, low-4GB heap) to be free.
+    void set_low_hints_reserved(bool enabled) { low_hints_reserved_ = enabled; }
     uint64_t data_address(uint64_t addr) const {
         return data_top_byte_ignore_ ? addr & 0x00FFFFFFFFFFFFFFULL : addr;
     }
@@ -229,6 +244,28 @@ public:
     // private arenas: success makes it skip zeroing them, and stale bytes
     // become live DexCache entries.
     int madvise_remove(uint64_t addr, uint64_t len);
+    // ── userfaultfd (SIGBUS mode) ─────────────────────────────────────
+    // Missing-page tracking starts with the first userfaultfd and stays on.
+    // Window pages carry the state in direct_page_flags_. Above the window,
+    // registration is a range set and a page is missing while it has no
+    // pages_ entry (once tracking is on, DONTNEED and DONTUNMAP drop it).
+    void enable_uffd_tracking() { uffd_tracking_.store(true, std::memory_order_release); }
+    // UFFDIO_REGISTER/UNREGISTER of [addr, addr+len): the range is already
+    // validated by the caller. Only mapped private pages are covered;
+    // returns -EINVAL if none is, or if a shared page is included.
+    int uffd_register(uint64_t addr, uint64_t len, bool registered);
+    // A forked child inherits no registration (no UFFD_FEATURE_EVENT_FORK);
+    // its missing pages become ordinary zero pages.
+    void uffd_drop_registrations();
+    // UFFDIO_COPY (src != nullptr) / UFFDIO_ZEROPAGE (src == nullptr) of
+    // whole pages. Returns bytes filled, or -ENOENT when [dst, dst+len) is
+    // not one registered range, or -EEXIST at the first present page.
+    int64_t uffd_fill(uint64_t dst, const uint8_t* src, uint64_t len);
+    // MREMAP_DONTUNMAP: move [old_addr, +len) to fixed_addr (or a new
+    // range when 0). Either range may be above the window. The old range
+    // stays mapped with its permissions and registration, but empty.
+    // Returns the new address or -errno.
+    int64_t mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed_addr);
     // Isolated callback-stack allocation (2026-08-25): usable_size bytes
     // with a PROT_NONE guard page on BOTH sides, placed like a normal
     // mmap_alloc block. Host-thread guest callbacks (audio pump, GLFW /
@@ -338,6 +375,7 @@ public:
     }
 private:
     bool data_top_byte_ignore_ = false;
+    bool low_hints_reserved_ = false;
     static constexpr uint8_t PAGE_MAPPED = GUEST_PAGE_MAPPED;
     struct HighMapping {
         uint64_t end = 0;
@@ -355,6 +393,9 @@ private:
     void set_high_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                  bool combine);
     void erase_high_mapping_locked(uint64_t lo, uint64_t hi);
+    // userfaultfd registration above the window: [lo, hi) ranges, coalesced.
+    void uffd_set_high_locked(uint64_t lo, uint64_t hi, bool registered);
+    bool uffd_missing_high_locked(uint64_t addr) const;
     void set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                             bool combine);
     bool set_direct_prot(uint64_t lo, uint64_t hi, int prot) const;
@@ -405,6 +446,8 @@ private:
     // Bit 7 means mapped (PROT_NONE is still a mapped page); bits 0..2
     // mirror Linux PROT_READ/WRITE/EXEC. High mappings use coalesced ranges.
     std::unique_ptr<std::atomic<uint8_t>[]> direct_page_flags_;
+    std::atomic<bool> uffd_tracking_{false};
+    std::map<uint64_t, uint64_t> high_uffd_ranges_;
     std::map<uint64_t, HighMapping> high_mappings_;
     // 1.5.4-alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent

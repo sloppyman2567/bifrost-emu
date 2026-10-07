@@ -55,7 +55,10 @@ struct UnmappedMemory : EmuError {
     uint64_t addr;   // faulting guest virtual address
     bool     write;  // true = write fault, false = read fault
     bool     protection;  // mapped page rejected the requested access
-    int segv_code() const { return protection ? 2 : 1; } // ACCERR / MAPERR
+    bool     uffd = false;  // missing page in a userfaultfd SIGBUS-mode range
+    // SIGSEGV (MAPERR/ACCERR), or SIGBUS BUS_ADRERR for a userfaultfd page.
+    int signo() const { return uffd ? 7 : 11; }
+    int segv_code() const { return uffd || protection ? 2 : 1; }
     UnmappedMemory(uint64_t a, bool w, bool p = false)
         : EmuError(std::string("unmapped ") + (w ? "write" : "read") +
                    " at 0x" + [&]{

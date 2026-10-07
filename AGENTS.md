@@ -62,10 +62,26 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   so it is no reference here. Known gap: shared anonymous and private file
   mappings are plain private storage, so both get `EINVAL` (Linux: punch and
   `EACCES`). Regression: `ctest/test_madv_remove.c`.
+- **userfaultfd (SIGBUS mode) runs ART's CMC GC**, the collector the
+  image's boot image was built for (CMC needs it; schema 5 provisions the
+  product `build.prop` that sets `ro.dalvik.vm.enable_uffd_gc`). A missing
+  page in a registered range raises SIGBUS `BUS_ADRERR`
+  (`UnmappedMemory::uffd`). Window pages carry MISSING/REGISTERED bits in
+  `direct_page_flags_` (the JIT guard rejects MISSING). Above 4 GiB,
+  registration is `high_uffd_ranges_` and a page is missing while it has no
+  `pages_` entry: once tracking is on, DONTNEED and DONTUNMAP drop it.
+  Both sides are required: ART's compaction pause moves the window heap
+  with `MAYMOVE|FIXED|DONTUNMAP` into a from-space reserved anywhere, and its
+  1 GiB linear-alloc pool is registered above the window
+  (`KernelPrepareRangeForUffd`, `mark_compact.cc`). Unmap and `MAP_FIXED`
+  drop registration; `mprotect` keeps it. Android's `low_hints_reserved`
+  places big unhinted maps above the window. Regression:
+  `ctest/test_userfaultfd.c` (also runs natively as a kernel oracle).
 - The host Binder registry answers `PING_TRANSACTION` and accepts Java's
   `FLAG_COLLECT_NOTED_APP_OPS`; `BIFROST_BINDER_TRACE=1` traces transactions.
 - Framework provisioning schema 4 adds mainline APEX native libraries,
-  exported namespaces, framework resources and fonts. See
+  exported namespaces, framework resources and fonts; schema 5 adds the
+  `system_ext`/`product` `build.prop` files, loaded in init's order. See
   `docs/ANDROID_RUNTIME.md` for the framework probe and
   `guest/android/ActivityProbe.java` (real Activity through `onCreate`;
   runner `--services --main-class ActivityProbe`). Its service stubs are
@@ -957,7 +973,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
   `move_pages`; `ioprio_get/set`; `settimeofday`; `adjtimex`/`clock_adjtime`
   (clear `struct timex`, TIME_OK); `vhangup`; `swapoff`. Explicit
-  `-ENOSYS`: `quotactl`/`quotactl_fd`/`bpf`/`userfaultfd`/`memfd_secret`/
+  `-ENOSYS`: `quotactl`/`quotactl_fd`/`bpf`/`memfd_secret`/
   `mount_setattr`/`lookup_dcookie`/`restart_syscall`/mqueue 181-185/AIO
   0-4; `-EPERM`: modules 104-106. `fanotify_init/mark` are 262/263 (the old
   300/301 were x86_64 numbers, unreachable on AArch64). Regression:
@@ -1311,8 +1327,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **293 pass /
-  0 fail / 0 skip**; `--no-jit` = 286 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **294 pass /
+  0 fail / 0 skip**; `--no-jit` = 287 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1322,8 +1338,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **293 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 288),
+  (interactive + real-world are the standard default) = **294 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 289),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

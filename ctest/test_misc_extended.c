@@ -56,9 +56,6 @@
 #ifndef SYS_bpf
 #define SYS_bpf 280
 #endif
-#ifndef SYS_userfaultfd
-#define SYS_userfaultfd 282
-#endif
 #ifndef SYS_mq_unlink
 #define SYS_mq_unlink 181
 #endif
@@ -136,10 +133,6 @@ static void test_unsupported(void) {
     errno = 0;
     r = syscall(SYS_bpf, 0, (void*)0, 0);
     CHECK(r == -1 && errno == ENOSYS, "bpf -> ENOSYS");
-
-    errno = 0;
-    r = syscall(SYS_userfaultfd, 0);
-    CHECK(r == -1 && errno == ENOSYS, "userfaultfd -> ENOSYS");
 
     errno = 0;
     r = syscall(SYS_mq_unlink, "/nonexistent");

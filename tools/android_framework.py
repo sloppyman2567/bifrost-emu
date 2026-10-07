@@ -21,7 +21,7 @@ import android_art
 # boot_classpaths): the primary boot.oat records its jars in the
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
-SCHEMA = 4
+SCHEMA = 5
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -206,6 +206,14 @@ def install(destination, art_root, archive=None):
                        cwd=root / "system", capture_output=True, check=True, timeout=60)
         if not (root / "system/fonts").is_dir():
             raise ValueError("Framework font extraction failed")
+        # init loads these after /system/build.prop. product sets
+        # ro.dalvik.vm.enable_uffd_gc, which with userfaultfd selects ART's
+        # CMC collector: the collector the image's boot image was built for.
+        subprocess.run(["lpunpack", "-p", "system_ext", "-p", "product", str(work / "super.img"),
+                        str(work / "partitions")], capture_output=True, check=True, timeout=300)
+        for partition in ("system_ext", "product"):
+            dump(work / "partitions" / f"{partition}.img", "/etc/build.prop",
+                 root / partition / "etc/build.prop")
         dump(system, "/system/bin/app_process64", root / "system/bin/app_process64")
         (root / "system/bin/app_process64").chmod(0o755)
         graph, preloads = android_art.native_dependencies(root, system, limit=1024)

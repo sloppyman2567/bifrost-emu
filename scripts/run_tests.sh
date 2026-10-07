@@ -354,6 +354,9 @@ UNIT_TESTS=(
     # MADV_REMOVE: hole punch for writable shared files, EINVAL for private
     # anonymous (ART's CMC arena release depends on it), EACCES, ENOMEM.
     "test_madv_remove|ctest/test_madv_remove.elf||10|ALL PASS"
+    # userfaultfd SIGBUS mode as ART's CMC GC uses it, including
+    # MREMAP_DONTUNMAP and registered ranges on both sides of 4 GiB.
+    "test_userfaultfd|ctest/test_userfaultfd.elf||10|ALL PASS"
     # /proc/self/fd/N[/name] reopens the GUEST descriptor's file (not the
     # emulator's fd N); openat2 shares openat's flags and resolution.
     "test_proc_fd_reopen|ctest/test_proc_fd_reopen.elf||10|ALL PASS"

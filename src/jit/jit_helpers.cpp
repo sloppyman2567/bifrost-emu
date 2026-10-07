@@ -93,16 +93,19 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_shift_imm8(RCX, 5, 12);
     const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
     const uint8_t required = Memory::GUEST_PAGE_MAPPED | access;
+    // A userfaultfd-missing page fails the compare: the interpreter step
+    // either populates it or raises SIGBUS (Memory::check_access).
+    const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
     emit_mov_imm64(RDX, flags);
     emit_add_reg(RDX, RAX);
     emit_load8(RAX, RDX, 0);
-    emit_alu_imm(RAX, 4, required); // AND
+    emit_alu_imm(RAX, 4, mask); // AND
     emit_alu_imm(RAX, 7, required); // CMP
     cold.push_back(emit_jcc_rel32_placeholder(5)); // JNE
     emit_mov_imm64(RDX, flags);
     emit_add_reg(RDX, RCX);
     emit_load8(RAX, RDX, 0);
-    emit_alu_imm(RAX, 4, required);
+    emit_alu_imm(RAX, 4, mask);
     emit_alu_imm(RAX, 7, required);
     cold.push_back(emit_jcc_rel32_placeholder(5));
     size_t hot = emit_jmp_rel32_placeholder();

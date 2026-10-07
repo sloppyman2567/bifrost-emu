@@ -434,19 +434,28 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t new_size = a2;
             constexpr uint64_t MAYMOVE = 1;
             constexpr uint64_t FIXED = 2;
+            constexpr uint64_t DONTUNMAP = 4;
             const bool fixed = (a3 & FIXED) != 0;
-            if ((a3 & ~(MAYMOVE | FIXED)) || (old_addr & Memory::PAGE_MASK) ||
+            // mm/mremap.c vrm_implies_new_addr: DONTUNMAP also reads
+            // new_address (as a hint), so it is validated like FIXED's.
+            const bool new_addr = fixed || (a3 & DONTUNMAP);
+            // MREMAP_DONTUNMAP requires MAYMOVE and an unchanged size.
+            if ((a3 & DONTUNMAP) && (!(a3 & MAYMOVE) || old_size != new_size)) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
+            if ((a3 & ~(MAYMOVE | FIXED | DONTUNMAP)) || (old_addr & Memory::PAGE_MASK) ||
                 !old_size || !new_size ||
                 old_size > UINT64_MAX - Memory::PAGE_MASK ||
                 new_size > UINT64_MAX - Memory::PAGE_MASK ||
-                (fixed && (!(a3 & MAYMOVE) || (a4 & Memory::PAGE_MASK)))) {
+                (fixed && !(a3 & MAYMOVE)) || (new_addr && (a4 & Memory::PAGE_MASK))) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
             }
             const uint64_t old_len = (old_size + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
             const uint64_t new_len = (new_size + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
             if (old_addr > UINT64_MAX - old_len ||
-                (fixed && (a4 > UINT64_MAX - new_len ||
+                (new_addr && (a4 > UINT64_MAX - new_len ||
                  (old_addr < a4 + new_len && a4 < old_addr + old_len)))) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
@@ -460,6 +469,17 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             int device_error = emu.fds().protect_device_mappings(old_addr, old_len, 6);
             if (device_error) { ret_host(static_cast<uint64_t>(device_error)); return 0; }
             if (fixed) emu.fds().invalidate_device_mappings(a4, new_len);
+            if (a3 & DONTUNMAP) {
+                // Pages move; the old range stays mapped and becomes empty
+                // (zero, or userfaultfd-missing). Used by ART's CMC GC.
+                const int64_t moved = mem_.mremap_dontunmap(old_addr, old_len, fixed ? a4 : 0);
+                if (moved > 0) {
+                    emu.invalidate_jit_range(old_addr, old_len);
+                    emu.invalidate_jit_range(static_cast<uint64_t>(moved), old_len);
+                }
+                ret_host(static_cast<uint64_t>(moved));
+                return 0;
+            }
             uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size,
                 (a3 & MAYMOVE) != 0, fixed ? a4 : 0);
             if (result == 0) {

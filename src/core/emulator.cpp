@@ -1418,7 +1418,7 @@ int Emulator::run() {
             // signal with the fault address and si_code (MAPERR for an
             // unmapped page, ACCERR for permissions) and continue.
             int si_code = e.segv_code();
-            if (deliver_signal(*this, main_cpu_, signals_, BIFROST_SIGSEGV,
+            if (deliver_signal(*this, main_cpu_, signals_, e.signo(),
                                si_code, e.addr)) {
                 count++;
                 continue;

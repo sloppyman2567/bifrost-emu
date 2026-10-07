@@ -189,7 +189,16 @@ std::string build_property_area(const std::map<std::string, std::string>& props,
 
 std::map<std::string, std::string> load_android_properties(const std::string& root) {
     std::map<std::string, std::string> props;
-    parse_build_prop(read_root_file(root, "/system/build.prop"), props);
+    // init/property_service.cpp order: a later partition overrides an
+    // earlier one. Vendor and ODM props describe the image's emulator
+    // hardware, which Bifrost replaces, so they are not loaded. The debug
+    // ramdisk file (init/debug_ramdisk.h) carries test overrides.
+    for (const char* path : {"/system/build.prop", "/system_ext/etc/build.prop",
+                             "/product/etc/build.prop", "/debug_ramdisk/adb_debug.prop"}) {
+        std::map<std::string, std::string> file;
+        parse_build_prop(read_root_file(root, path), file);
+        for (auto& [key, value] : file) props.insert_or_assign(key, std::move(value));
+    }
     // Values device/vendor partitions normally supply; the image wins.
     static const std::pair<const char*, const char*> kDefaults[] = {
         {"ro.product.cpu.abi", "arm64-v8a"},

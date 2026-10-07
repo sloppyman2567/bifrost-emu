@@ -578,7 +578,7 @@ extern "C" {
             emu->mem().read(addr, &val, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return 0;  // cpu->running is now false (or handler installed)
         }
@@ -599,7 +599,7 @@ extern "C" {
             emu->mem().read(addr, buf, 16);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return;
         }
@@ -613,7 +613,7 @@ extern "C" {
             emu->mem().write(addr, buf, 16);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
         }
     }
@@ -628,7 +628,7 @@ extern "C" {
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
         }
     }
@@ -651,7 +651,7 @@ extern "C" {
             emu->mem().read(addr, &v, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return 0;
         }
@@ -679,7 +679,7 @@ extern "C" {
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
                 int si_code = e.segv_code();
-                deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+                deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                                si_code, e.addr);
                 return 1;
             }
@@ -711,7 +711,7 @@ extern "C" {
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return;
         }

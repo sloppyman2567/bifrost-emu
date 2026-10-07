@@ -21,13 +21,14 @@ missing `eglSurfaceAttrib` export; media services/decoding and managed
 ## Android 15 framework probe
 
 The same pinned API-35 image now supplies `app_process64`, framework boot jars,
-and the mainline APEX native libraries. Framework provisioning schema 4
-verifies 917 files and exports a linker namespace for every installed boot
+and the mainline APEX native libraries. Framework provisioning schema 5
+verifies 919 files and exports a linker namespace for every installed boot
 APEX, including `com_android_tethering`. Each delegates to the same canonical
 native-library scope so JNI loading does not instantiate a second ART VM.
 Schema 4 adds `framework-res.apk`, `fonts.xml`, `font_fallback.xml` and
 `/system/fonts`: `Resources.getSystem()` and text layout need them before an
-Activity draws. This bootstrap layout does not reproduce production Android
+Activity draws. Schema 5 adds the `system_ext` and `product` `build.prop`
+files (see the CMC note below). This bootstrap layout does not reproduce production Android
 namespace isolation. Older schema-2/3 framework roots must be re-provisioned
 in a fresh destination; preserve the old directory if it is still useful for
 comparison.
@@ -89,6 +90,18 @@ a class (SIGSEGV at `0x2e676c51`). `MADV_REMOVE` now follows the kernel's
 `madvise_remove`. QEMU 11.1 crashes the same way: it returns `EOPNOTSUPP`
 for every `MADV_REMOVE`, so it is no reference for this path.
 
+CMC needs userfaultfd in SIGBUS mode, and the boot image needs CMC: the
+image was built for it, so under the CC fallback ART rejects the image and
+starts from bytecode. Provisioning schema 5 extracts the `system_ext` and
+`product` `build.prop` files; `product` sets `ro.dalvik.vm.enable_uffd_gc`.
+Each compaction pause (`KernelPrepareRangeForUffd` in `mark_compact.cc`)
+moves the moving space with `mremap(MAYMOVE|FIXED|DONTUNMAP)` into a
+from-space reservation, registers the emptied range, and fills pages from
+its SIGBUS handler with `UFFDIO_COPY`. The heap is inside the 4 GiB window
+but the from-space and the 1 GiB linear-alloc pool are above it, so the
+move and the registration work on both sides. The short framework probe
+never compacts; the Activity probe does.
+
 ### Activity creation checkpoint
 
 `guest/android/ActivityProbe.java` creates a real Activity through `onCreate`.
@@ -108,8 +121,9 @@ timeout -s KILL 310 python3 scripts/test_android_framework.py --services \
   --mode jit --timeout 300 --output build/android-activity-results
 ```
 
-Both engines print `FRAMEWORK_OK` on a schema-4 root: 131.4 s JIT and
-226.1 s interpreter, run concurrently with the framework probe. The probe
+Both engines print `FRAMEWORK_OK` on a schema-5 root with CMC: 26.8 s JIT
+and 47.2 s interpreter (131.4 s and 226.1 s under CC), run concurrently
+with the test suite. The probe
 calls `ActivityThread.systemMain()` and loads the preinstalled font map. It
 then runs `Instrumentation.newActivity` and `callActivityOnCreate`.
 `FRAMEWORK_OK` requires that `onCreate` ran and the decor view exists,

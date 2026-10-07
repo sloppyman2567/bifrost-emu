@@ -41,6 +41,7 @@
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"
+#include "yggdrasil/uffd_node.hpp"
 #include <algorithm>
 #include <cstring>
 #include <sys/syscall.h>
@@ -250,7 +251,19 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         // vhangup (58)/swapoff (225): no controlling tty / no swap devices.
         case 58: case 225: { ret_host(0); return 0; }
-        // Quotas, module/kexec, BPF, userfaultfd, secretmem, mount_setattr,
+        // userfaultfd(flags): SIGBUS-mode subset, see yggdrasil/uffd_node.hpp.
+        case 282: {
+            constexpr uint64_t USER_MODE_ONLY = 1;
+            if (a0 & ~static_cast<uint64_t>(O_CLOEXEC | O_NONBLOCK | USER_MODE_ONLY)) {
+                ret_err(EINVAL); return 0;
+            }
+            mem_.enable_uffd_tracking();
+            const int flags = O_RDONLY | static_cast<int>(a0 & (O_CLOEXEC | O_NONBLOCK));
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(
+                emu.fds().allocate(std::make_shared<yggdrasil::UffdNode>(flags)))));
+            return 0;
+        }
+        // Quotas, module/kexec, BPF, secretmem, mount_setattr,
         // dcookie, restart_syscall: genuinely unsupported, report it so the
         // caller can pick a fallback. -EPERM where the operation is
         // privilege-gated, -ENOSYS where the facility is absent.
@@ -258,7 +271,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         case 104: case 105: case 106: { ret_err(EPERM); return 0; }  // modules
         case 294: { ret_err(ENOSYS); return 0; }  // kexec_file_load
         case 280: { ret_err(ENOSYS); return 0; }  // bpf
-        case 282: { ret_err(ENOSYS); return 0; }  // userfaultfd
         case 447: { ret_err(ENOSYS); return 0; }  // memfd_secret
         case 442: { ret_err(ENOSYS); return 0; }  // mount_setattr
         case 18:  { ret_err(ENOSYS); return 0; }  // lookup_dcookie (obsolete)

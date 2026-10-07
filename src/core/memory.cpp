@@ -249,6 +249,45 @@ void Memory::erase_high_mapping_locked(uint64_t lo, uint64_t hi) {
     while (it != high_mappings_.end() && it->first < hi)
         it = high_mappings_.erase(it);
 }
+void Memory::uffd_set_high_locked(uint64_t lo, uint64_t hi, bool registered) {
+    if (lo >= hi || (!registered && high_uffd_ranges_.empty())) return;
+    // Cut [lo, hi) out of the set, keeping the parts on either side.
+    auto it = high_uffd_ranges_.upper_bound(lo);
+    if (it != high_uffd_ranges_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->second > lo) {
+            const uint64_t end = prev->second;
+            if (prev->first == lo) high_uffd_ranges_.erase(prev);
+            else prev->second = lo;
+            if (end > hi) high_uffd_ranges_.emplace(hi, end);
+        }
+    }
+    while (it != high_uffd_ranges_.end() && it->first < hi) {
+        const uint64_t end = it->second;
+        it = high_uffd_ranges_.erase(it);
+        if (end > hi) high_uffd_ranges_.emplace(hi, end);
+    }
+    if (!registered) return;
+    it = high_uffd_ranges_.emplace(lo, hi).first;
+    if (it != high_uffd_ranges_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->second == lo) {
+            prev->second = hi;
+            high_uffd_ranges_.erase(it);
+            it = prev;
+        }
+    }
+    auto next = std::next(it);
+    if (next != high_uffd_ranges_.end() && next->first == it->second) {
+        it->second = next->second;
+        high_uffd_ranges_.erase(next);
+    }
+}
+bool Memory::uffd_missing_high_locked(uint64_t addr) const {
+    auto it = high_uffd_ranges_.upper_bound(addr);
+    if (it == high_uffd_ranges_.begin() || std::prev(it)->second <= addr) return false;
+    return pages_.find(addr / PAGE_SIZE) == pages_.end();
+}
 void Memory::set_high_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                      bool combine) {
     if (lo >= hi) return;
@@ -398,6 +437,18 @@ void Memory::check_access(uint64_t addr, size_t size, uint8_t access) const {
             if (access && (flags & access) != access)
                 throw UnmappedMemory(std::max(cur, p * PAGE_SIZE),
                                      (access & GUEST_PROT_WRITE) != 0, true);
+            if (__builtin_expect(flags & GUEST_PAGE_UFFD_MISSING, 0)) {
+                if (flags & GUEST_PAGE_UFFD_REGISTERED) {
+                    UnmappedMemory fault(std::max(cur, p * PAGE_SIZE),
+                                         (access & GUEST_PROT_WRITE) != 0);
+                    fault.uffd = true;
+                    throw fault;
+                }
+                // Unregistered: Linux supplies a zero page; ours is zeroed.
+                direct_page_flags_[p].fetch_and(
+                    static_cast<uint8_t>(~GUEST_PAGE_UFFD_MISSING),
+                    std::memory_order_acq_rel);
+            }
         }
         cur = low_end;
     }
@@ -412,7 +463,16 @@ void Memory::check_access(uint64_t addr, size_t size, uint8_t access) const {
                 throw UnmappedMemory(pos, (access & GUEST_PROT_WRITE) != 0);
             if (access && (it->second.prot & access) != access)
                 throw UnmappedMemory(pos, (access & GUEST_PROT_WRITE) != 0, true);
-            pos = std::min<uint64_t>(end, it->second.end);
+            const uint64_t chunk_end = std::min<uint64_t>(end, it->second.end);
+            if (__builtin_expect(!high_uffd_ranges_.empty(), 0)) {
+                for (uint64_t pg = pos & ~PAGE_MASK; pg < chunk_end; pg += PAGE_SIZE) {
+                    if (!uffd_missing_high_locked(pg)) continue;
+                    UnmappedMemory fault(std::max(pos, pg), (access & GUEST_PROT_WRITE) != 0);
+                    fault.uffd = true;
+                    throw fault;
+                }
+            }
+            pos = chunk_end;
             ++it;
         }
     }
@@ -552,9 +612,12 @@ bool Memory::mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot, int* err
     if (direct_window_ && addr < low_hi &&
         !set_direct_prot(addr, low_hi, prot)) return false;
     if (direct_window_ && addr < low_hi) {
-        for (uint64_t p = addr / PAGE_SIZE; p < low_hi / PAGE_SIZE; ++p)
-            direct_page_flags_[p].store(static_cast<uint8_t>(PAGE_MAPPED | prot),
+        for (uint64_t p = addr / PAGE_SIZE; p < low_hi / PAGE_SIZE; ++p) {
+            const uint8_t uffd = direct_page_flags_[p].load(std::memory_order_relaxed) &
+                                 GUEST_PAGE_UFFD_BITS;
+            direct_page_flags_[p].store(static_cast<uint8_t>(PAGE_MAPPED | uffd | prot),
                                         std::memory_order_release);
+        }
     }
     uint64_t high_lo = direct_window_ ? std::max<uint64_t>(addr, DIRECT_WINDOW_SIZE) : addr;
     if (high_lo < end) set_high_mapping_locked(high_lo, end, prot, false);
@@ -925,8 +988,14 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve,
             // allocation inside the 4 GiB direct window (JIT fast path).
             const uint64_t stack_bottom = stack_top_ - STACK_SIZE;
             if (base < stack_top_ && base + aligned_size > stack_bottom) {
-                base = stack_top_;
-                mmap_next_ = stack_top_ + aligned_size;
+                if (low_hints_reserved_) {
+                    // Leave the window above the stack to explicit hints.
+                    mmap_next_ = base;
+                    base = DIRECT_WINDOW_SIZE;
+                } else {
+                    base = stack_top_;
+                    mmap_next_ = stack_top_ + aligned_size;
+                }
             }
             // Above-window fallback: the 4 GiB window can be exhausted
             // by a guest with an enormous heap (vkQuake's lightmap atlas
@@ -1264,6 +1333,9 @@ uint64_t Memory::mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve
     }
     total_pages_.fetch_add(pages_added, std::memory_order_relaxed);
     allocations_[lo] = aligned_size;
+    // The replacement mapping is not userfaultfd-registered.
+    uffd_set_high_locked(std::max<uint64_t>(lo, direct_window_ ? DIRECT_WINDOW_SIZE : 0), hi,
+                         false);
     set_mapping_locked(lo, hi, prot, false);
     mmap_next_ = std::max(mmap_next_, hi);
     // Keep the above-window bump cursor ahead of fixed high mappings so a
@@ -1420,7 +1492,10 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
             }
             const uint64_t high_lo = direct_window_
                 ? std::max<uint64_t>(fstart, DIRECT_WINDOW_SIZE) : fstart;
-            if (high_lo < fend) erase_high_mapping_locked(high_lo, fend);
+            if (high_lo < fend) {
+                erase_high_mapping_locked(high_lo, fend);
+                uffd_set_high_locked(high_lo, fend, false);
+            }
             add_free_range(fstart, fend - fstart);
             page_epoch_.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1707,7 +1782,10 @@ std::unique_lock<std::shared_mutex> g(mu_);
     }
     const uint64_t high_lo = direct_window_
         ? std::max<uint64_t>(lo, DIRECT_WINDOW_SIZE) : lo;
-    if (high_lo < hi) erase_high_mapping_locked(high_lo, hi);
+    if (high_lo < hi) {
+        erase_high_mapping_locked(high_lo, hi);
+        uffd_set_high_locked(high_lo, hi, false);
+    }
     for (auto it = pages_.begin(); it != pages_.end();) {
         const uint64_t page_addr = it->first * PAGE_SIZE;
         if (page_addr >= high_lo && page_addr < hi) {
@@ -1753,36 +1831,49 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
                 std::memset(direct_window_ + s, 0, PAGE_SIZE);
                 if (!(prot & GUEST_PROT_WRITE))
                     (void)set_direct_prot(s, s + PAGE_SIZE, prot);
+                if (uffd_tracking_.load(std::memory_order_acquire))
+                    direct_page_flags_[s / PAGE_SIZE].fetch_or(GUEST_PAGE_UFFD_MISSING,
+                                                               std::memory_order_release);
             }
         }
         if (end <= DIRECT_WINDOW_SIZE) return;
         start = DIRECT_WINDOW_SIZE;
     }
-    // Sparse pages_: zero covered bytes in place. Never erase entries —
-    // a cached PageCache pointer into an erased vector would dangle
-    // (same reason untrack's page reclaim is munmap-only). Absent pages
-    // already read as zero (demand paging), so nothing to do for them.
+    // Sparse pages_: zero covered bytes in place. Absent pages already read
+    // as zero (demand paging), so nothing to do for them. Once userfaultfd
+    // tracking is on, private pages are dropped instead so they become
+    // missing; the epoch bump invalidates PageCache pointers into them.
     // Linux ignores unmapped holes inside the range; so do we.
     std::unique_lock<std::shared_mutex> g(mu_);
+    const bool track = uffd_tracking_.load(std::memory_order_acquire);
+    bool dropped = false;
     // Iterate the pages that EXIST rather than every page in [addr, end).
     // A guest can pass an enormous len; the direct-window path above is
     // bounded by the 4 GiB window, but this loop used to walk one page at
     // a time and could spin for ~2^52 iterations (host hang). Absent
     // pages already read as zero, so they need no work.
-    for (auto& kv : pages_) {
-        uint64_t pb = kv.first * PAGE_SIZE;
+    for (auto it = pages_.begin(); it != pages_.end();) {
+        uint64_t pb = it->first * PAGE_SIZE;
         uint64_t page_end = pb + PAGE_SIZE;
-        if (page_end <= pb) continue;                 // overflow guard
-        if (page_end <= start || pb >= end) continue;  // outside range
+        if (page_end <= pb || page_end <= start || pb >= end) {  // overflow / outside
+            ++it;
+            continue;
+        }
         uint64_t lo = (pb > start) ? pb : start;
         uint64_t hi = (page_end < end) ? page_end : end;
-        if (hi <= lo) continue;
-        if (kv.second.backing) {
-            (void)::madvise(kv.second.data(), PAGE_SIZE, MADV_DONTNEED);
+        if (it->second.backing) {
+            (void)::madvise(it->second.data(), PAGE_SIZE, MADV_DONTNEED);
+        } else if (track && lo == pb && hi == page_end) {
+            it = pages_.erase(it);
+            total_pages_.fetch_sub(1, std::memory_order_relaxed);
+            dropped = true;
+            continue;
         } else {
-            std::memset(kv.second.data() + (lo - pb), 0, hi - lo);
+            std::memset(it->second.data() + (lo - pb), 0, hi - lo);
         }
+        ++it;
     }
+    if (dropped) page_epoch_.fetch_add(1, std::memory_order_relaxed);
 }
 int Memory::madvise_remove(uint64_t addr, uint64_t len) {
     if (!len) return 0;
@@ -1854,6 +1945,195 @@ int Memory::madvise_remove(uint64_t addr, uint64_t len) {
     }
     if (int error = punch()) return error;
     return unmapped;
+}
+int Memory::uffd_register(uint64_t addr, uint64_t len, bool registered) {
+    uint64_t last;
+    if (__builtin_add_overflow(addr, len, &last)) return -EINVAL;
+    // [addr, split) is in the window, [split, last) above it.
+    const uint64_t split = in_direct_window(addr)
+        ? std::min<uint64_t>(last, DIRECT_WINDOW_SIZE) : addr;
+    std::unique_lock<std::shared_mutex> g(mu_);
+    bool any = false;
+    for (uint64_t p = addr / PAGE_SIZE; p < split / PAGE_SIZE; ++p) {
+        if (!(direct_page_flags_[p].load(std::memory_order_relaxed) & PAGE_MAPPED))
+            continue;  // Linux registers the VMAs present in the range
+        if (direct_shared_pages_.count(p)) return -EINVAL;  // shmem: unsupported
+        any = true;
+    }
+    std::vector<std::pair<uint64_t, uint64_t>> high;
+    auto it = high_mappings_.upper_bound(split);
+    if (it != high_mappings_.begin()) --it;
+    for (; it != high_mappings_.end() && it->first < last; ++it) {
+        const uint64_t lo = std::max(split, it->first);
+        const uint64_t hi = std::min(last, it->second.end);
+        if (lo >= hi) continue;
+        for (uint64_t at = lo; at < hi; at += PAGE_SIZE) {
+            const Page* storage = page_storage_locked(at);
+            if (storage && storage->backing) return -EINVAL;
+        }
+        high.emplace_back(lo, hi);
+    }
+    if (!any && high.empty()) return -EINVAL;
+    for (const auto& [lo, hi] : high) uffd_set_high_locked(lo, hi, registered);
+    for (uint64_t p = addr / PAGE_SIZE; p < split / PAGE_SIZE; ++p) {
+        if (!(direct_page_flags_[p].load(std::memory_order_relaxed) & PAGE_MAPPED))
+            continue;
+        if (registered)
+            direct_page_flags_[p].fetch_or(GUEST_PAGE_UFFD_REGISTERED,
+                                           std::memory_order_release);
+        else
+            direct_page_flags_[p].fetch_and(
+                static_cast<uint8_t>(~GUEST_PAGE_UFFD_REGISTERED),
+                std::memory_order_release);
+    }
+    return 0;
+}
+void Memory::uffd_drop_registrations() {
+    if (!uffd_tracking_.load(std::memory_order_acquire)) return;
+    {
+        std::unique_lock<std::shared_mutex> g(mu_);
+        high_uffd_ranges_.clear();
+    }
+    if (!direct_window_) return;
+    for (uint64_t p = 0; p < DIRECT_WINDOW_SIZE / PAGE_SIZE; ++p)
+        direct_page_flags_[p].fetch_and(static_cast<uint8_t>(~GUEST_PAGE_UFFD_REGISTERED),
+                                        std::memory_order_relaxed);
+}
+int64_t Memory::uffd_fill(uint64_t dst, const uint8_t* src, uint64_t len) {
+    if (!is_valid_guest_range(dst, len)) return -ENOENT;
+    std::unique_lock<std::shared_mutex> g(mu_);
+    // mm/userfaultfd.c validate_dst_vma: the whole destination must lie in
+    // registered memory before anything is filled.
+    for (uint64_t at = dst; at < dst + len; at += PAGE_SIZE) {
+        if (in_direct_window(at)) {
+            const uint8_t flags = direct_page_flags_[at / PAGE_SIZE].load(
+                std::memory_order_relaxed);
+            if (!(flags & PAGE_MAPPED) || !(flags & GUEST_PAGE_UFFD_REGISTERED))
+                return -ENOENT;
+        } else {
+            uint8_t prot;
+            auto range = high_uffd_ranges_.upper_bound(at);
+            if (!mapping_prot_at_locked(at, prot) || range == high_uffd_ranges_.begin() ||
+                std::prev(range)->second <= at)
+                return -ENOENT;
+        }
+    }
+    int64_t filled = 0;
+    for (uint64_t at = dst; at < dst + len; at += PAGE_SIZE) {
+        if (!in_direct_window(at)) {
+            if (pages_.count(at / PAGE_SIZE)) return filled ? filled : -EEXIST;
+            if (would_exceed_page_limit(1)) return filled ? filled : -ENOMEM;
+            auto& page = pages_.emplace(at / PAGE_SIZE,
+                                        std::vector<uint8_t>(PAGE_SIZE, 0)).first->second;
+            if (src) std::memcpy(page.data(), src + (at - dst), PAGE_SIZE);
+            total_pages_.fetch_add(1, std::memory_order_relaxed);
+            filled += PAGE_SIZE;
+            continue;
+        }
+        auto& slot = direct_page_flags_[at / PAGE_SIZE];
+        const uint8_t flags = slot.load(std::memory_order_relaxed);
+        if (!(flags & GUEST_PAGE_UFFD_MISSING))
+            return filled ? filled : -EEXIST;  // page already present
+        const uint8_t prot = flags & 7;
+        if (!(prot & GUEST_PROT_WRITE))
+            (void)set_direct_prot(at, at + PAGE_SIZE, PROT_READ | PROT_WRITE);
+        if (src) std::memcpy(direct_window_ + at, src + (at - dst), PAGE_SIZE);
+        else std::memset(direct_window_ + at, 0, PAGE_SIZE);
+        if (!(prot & GUEST_PROT_WRITE))
+            (void)set_direct_prot(at, at + PAGE_SIZE, prot);
+        // Release: a guard/check that sees the page present sees its bytes.
+        slot.fetch_and(static_cast<uint8_t>(~GUEST_PAGE_UFFD_MISSING),
+                       std::memory_order_release);
+        filled += PAGE_SIZE;
+    }
+    return filled;
+}
+int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed_addr) {
+    // Either range may lie above the window: ART's CMC moves its low heap
+    // into a from-space reservation placed anywhere. Window pages carry the
+    // userfaultfd state; sparse pages are never registered.
+    if (!len || !is_valid_guest_range(old_addr, len) ||
+        (fixed_addr && !is_valid_guest_range(fixed_addr, len)))
+        return -EINVAL;
+    const uint64_t pages = len / PAGE_SIZE;
+    std::vector<uint8_t> flags(pages);
+    {
+        std::shared_lock<std::shared_mutex> g(mu_);
+        for (uint64_t i = 0; i < pages; ++i) {
+            const uint64_t at = old_addr + i * PAGE_SIZE;
+            if (in_direct_window(at)) {
+                flags[i] = direct_page_flags_[at / PAGE_SIZE].load(std::memory_order_relaxed);
+                if (!(flags[i] & PAGE_MAPPED)) return -EFAULT;  // Linux: no VMA
+            } else {
+                uint8_t prot;
+                if (!mapping_prot_at_locked(at, prot)) return -EFAULT;
+                flags[i] = static_cast<uint8_t>(PAGE_MAPPED | prot);
+            }
+            const Page* storage = page_storage_locked(at);
+            if (storage && storage->backing) return -EINVAL;  // private only
+        }
+    }
+    const uint8_t first_prot = flags[0] & 7;
+    // noreserve: sparse destination pages stay absent (read as zero) unless
+    // the source page has content.
+    const uint64_t dst = fixed_addr
+        ? mmap_fixed_replace(fixed_addr, len, true, true, first_prot)
+        : mmap_alloc(len, 0, true, first_prot);
+    if (!dst) return -ENOMEM;
+    std::unique_lock<std::shared_mutex> g(mu_);
+    const bool track = uffd_tracking_.load(std::memory_order_acquire);
+    size_t added = 0;
+    for (uint64_t i = 0; i < pages; ++i) {
+        const uint64_t from = old_addr + i * PAGE_SIZE, to = dst + i * PAGE_SIZE;
+        const uint8_t prot = flags[i] & 7;
+        uint8_t* src = nullptr;
+        if (in_direct_window(from)) {
+            (void)set_direct_prot(from, from + PAGE_SIZE, PROT_READ | PROT_WRITE);
+            src = direct_window_ + from;
+        } else if (auto it = pages_.find(from / PAGE_SIZE); it != pages_.end()) {
+            src = it->second.data();
+        }
+        if (in_direct_window(to)) {
+            (void)set_direct_prot(to, to + PAGE_SIZE, PROT_READ | PROT_WRITE);
+            if (src) std::memcpy(direct_window_ + to, src, PAGE_SIZE);
+            // The moved pages keep their permissions; a missing page stays
+            // missing. The new VMA is not registered (no UFFD_FEATURE_EVENT_REMAP).
+            direct_page_flags_[to / PAGE_SIZE].store(
+                static_cast<uint8_t>(PAGE_MAPPED | prot |
+                                     (flags[i] & GUEST_PAGE_UFFD_MISSING)),
+                std::memory_order_release);
+            (void)set_direct_prot(to, to + PAGE_SIZE, prot);
+        } else if (src && std::any_of(src, src + PAGE_SIZE,
+                                      [](uint8_t b) { return b != 0; })) {
+            auto [it, inserted] = pages_.try_emplace(to / PAGE_SIZE,
+                                                     std::vector<uint8_t>(PAGE_SIZE));
+            std::memcpy(it->second.data(), src, PAGE_SIZE);
+            added += inserted;
+        }
+        // The old range keeps its permissions and registration, now empty.
+        // A tracked sparse page is dropped, which makes it missing; the
+        // epoch bump below invalidates PageCache pointers into it.
+        if (src && track && !in_direct_window(from)) {
+            pages_.erase(from / PAGE_SIZE);
+            total_pages_.fetch_sub(1, std::memory_order_relaxed);
+        } else if (src) {
+            std::memset(src, 0, PAGE_SIZE);
+        }
+        if (in_direct_window(from)) {
+            direct_page_flags_[from / PAGE_SIZE].store(
+                static_cast<uint8_t>(PAGE_MAPPED | prot |
+                                     (flags[i] & GUEST_PAGE_UFFD_REGISTERED) |
+                                     (track ? GUEST_PAGE_UFFD_MISSING : 0)),
+                std::memory_order_release);
+            (void)set_direct_prot(from, from + PAGE_SIZE, prot);
+        }
+        // Sparse destination pages keep their own permissions too.
+        if (!in_direct_window(to) && prot != first_prot)
+            set_high_mapping_locked(to, to + PAGE_SIZE, prot, false);
+    }
+    total_pages_.fetch_add(added, std::memory_order_relaxed);
+    page_epoch_.fetch_add(1, std::memory_order_relaxed);
+    return static_cast<int64_t>(dst);
 }
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;
@@ -2120,6 +2400,7 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
 std::unique_ptr<Memory> Memory::clone_for_fork() const {
     auto child = std::make_unique<Memory>(false);
     child->data_top_byte_ignore_ = data_top_byte_ignore_;
+    child->low_hints_reserved_ = low_hints_reserved_;
     // Snapshot bytes before restoring the original protection state.
     auto snapshots = snapshot_pages();
     constexpr size_t DIRECT_PAGES = DIRECT_WINDOW_SIZE / PAGE_SIZE;
@@ -2167,9 +2448,12 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
         child->free_ranges_ = std::move(free_ranges);
         child->high_mappings_ = std::move(high_mappings);
         child->total_pages_.store(child_total_pages, std::memory_order_relaxed);
+        // The child inherits no userfaultfd registration (Linux without
+        // UFFD_FEATURE_EVENT_FORK); its missing pages are plain zero pages.
         for (size_t p = 0; p < DIRECT_PAGES; ++p)
-            child->direct_page_flags_[p].store(low_flags[p],
-                                                std::memory_order_relaxed);
+            child->direct_page_flags_[p].store(
+                static_cast<uint8_t>(low_flags[p] & ~GUEST_PAGE_UFFD_BITS),
+                std::memory_order_relaxed);
         if (child->direct_window_) {
             size_t p = 0;
             while (p < DIRECT_PAGES) {

@@ -69,7 +69,7 @@ class LogdReceiver:
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
-        libraries=(), main_class="FrameworkProbe"):
+        libraries=(), main_class="FrameworkProbe", app=None, probe_args=()):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
@@ -82,16 +82,26 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             if not library.name.endswith(".so") or not library.is_file():
                 raise ValueError("Probe libraries must be regular .so files")
             shutil.copy2(library, root / "data/local/tmp" / library.name)
+        if app:
+            # An installed code directory (scripts/android_package.py install):
+            # /data/app/<package>-<id>, plus the per-user data directories
+            # Android creates at install time.
+            package = app.name.rsplit("-", 1)[0]
+            shutil.copytree(app, root / "data/app" / app.name)
+            for directory in (root / "data/app" / app.name).rglob("*"):
+                if directory.is_dir():
+                    directory.chmod(0o755)  # installed trees are read-only
+            (root / "data/app" / app.name).chmod(0o755)
+            for user in ("data/user/0", "data/user_de/0"):
+                (root / user / package).mkdir(parents=True)
+            (root / "data/data").symlink_to("user/0")
         if properties:
-            # The serializer keeps the first definition of a key, so
-            # prepended overrides beat the image's build.prop.
-            build_prop = root / "system/build.prop"
-            text = build_prop.read_text() if build_prop.exists() else ""
-            build_prop.unlink(missing_ok=True)  # may be a hard link into the source root
-            build_prop.write_text("".join(p + "\n" for p in properties) + text)
+            # Loaded last, as Android's init does with this debug file.
+            (root / "debug_ramdisk").mkdir(exist_ok=True)
+            (root / "debug_ramdisk/adb_debug.prop").write_text("".join(p + "\n" for p in properties))
         # ART logs to stderr: there is no logd socket for liblog here.
         program = ["-Xuse-stderr-logger", *art_options,
-                   "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", main_class]
+                   "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", main_class, *probe_args]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
         guest_env = metadata["environment"]
@@ -163,7 +173,11 @@ if __name__ == "__main__":
     parser.add_argument("--services", action="store_true", help="Enable Bifrost's Binder service registry")
     parser.add_argument("--library", type=Path, action="append", default=[], help="Copy a probe JNI library into /data/local/tmp")
     parser.add_argument("--main-class", default="FrameworkProbe", help="Probe class to run (e.g. ActivityProbe)")
+    parser.add_argument("--app", type=Path, help="Installed /data/app/<package>-<id> directory to copy into the root")
+    parser.add_argument("--probe-arg", action="append", default=[], help="Argument passed to the probe's main (repeatable)")
     args = parser.parse_args()
+    if args.app and not (args.app / "base.apk").is_file():
+        parser.error("--app must be an installed code directory containing base.apk")
     if not args.main_class.isidentifier():
         parser.error("--main-class must be a Java class name in the default package")
     if not 1 <= args.timeout <= 300:
@@ -178,4 +192,5 @@ if __name__ == "__main__":
             args.emu = ROOT / "bifrost-emu"
     sys.exit(0 if run(args.emu.resolve(), args.runtime_root.resolve(), args.art_root.resolve(),
                       args.probe.resolve(), args.mode, args.output.resolve(), args.timeout,
-                      args.art_option, args.prop, args.services, args.library, args.main_class) else 1)
+                      args.art_option, args.prop, args.services, args.library, args.main_class,
+                      args.app.resolve() if args.app else None, args.probe_arg) else 1)

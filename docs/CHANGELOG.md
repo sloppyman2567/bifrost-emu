@@ -12,6 +12,20 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### userfaultfd and ART's CMC collector (2026-10-06)
+
+- `userfaultfd` (SIGBUS mode) is implemented: `UFFDIO_API`/`REGISTER`/
+  `UNREGISTER`/`COPY`/`ZEROPAGE`/`WAKE`, with missing registered pages
+  raising SIGBUS `BUS_ADRERR`. `mremap` accepts `MREMAP_DONTUNMAP`.
+- Both work on either side of the 4 GiB window. ART's compaction pause
+  moves its window heap into a from-space reservation above the window,
+  and registers its 1 GiB linear-alloc pool there; the window-only first
+  version failed with `EINVAL` and aborted on the first compaction.
+- Framework provisioning schema 5 loads the `system_ext` and `product`
+  `build.prop` files, which select CMC. With it, ART keeps the boot image:
+  the Activity probe passes in 26.8 s JIT and 47.2 s interpreter (was
+  131.4 s and 226.1 s), the framework probe in 10.2 s JIT (was 63.5 s).
+
 ### Self-loop SMOV pinning (2026-10-06)
 
 - A self-loop block could pin a register that `smov` writes, so the next

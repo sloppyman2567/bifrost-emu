@@ -10,6 +10,15 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### userfaultfd and CMC (2026-10-06)
+
+The default suite passes **294/294** (179 s) and `--no-jit` **287/287**
+with seven expected JIT-only skips (144 s). `test_userfaultfd` passes 67
+checks under the JIT, the interpreter and natively on the host kernel. On the
+schema-5 root ART runs CMC: `ActivityProbe` passes in 26.8 s JIT and 47.2 s
+interpreter, including a full background mark-compact; the framework probe
+passes in 10.2 s JIT. The probes ran concurrently with the test suite.
+
 ### Android Activity creation (2026-10-06)
 
 The strict Linux suite passes **287/287 JIT** and **280/280 interpreter**,

@@ -50,7 +50,7 @@ uint64_t native_structure(Emulator* emu, CPU* cpu, uint64_t bits) {
         }
         cpu->pc+=4;
     } catch(UnmappedMemory& e) {
-        deliver_signal(*emu,*cpu,emu->signals(),BIFROST_SIGSEGV,e.segv_code(),e.addr);
+        deliver_signal(*emu,*cpu,emu->signals(),e.signo(),e.segv_code(),e.addr);
     }
     return cpu->pc;
 }
