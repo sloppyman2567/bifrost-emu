@@ -3558,6 +3558,14 @@ void GraphicThunk::register_known_symbols_() {
         } else if (fd.have) {
             host_fn = dlsym(RTLD_DEFAULT, spec.name);
         }
+        // libEGL exports only core symbols; extension entry points come
+        // from eglGetProcAddress (EGL 1.5 §3.10).
+        if (!host_fn && spec.lib == thunk::LibFamily::EGL && fd.have) {
+            using GetProc = void* (*)(const char*);
+            static const auto egl_get_proc = reinterpret_cast<GetProc>(
+                dlsym(RTLD_DEFAULT, "eglGetProcAddress"));
+            if (egl_get_proc) host_fn = egl_get_proc(spec.name);
+        }
         if (spec.policy == thunk::Policy::GET_PROC && !host_fn) {
             host_fn = reinterpret_cast<void*>(1);
         }

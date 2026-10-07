@@ -250,8 +250,9 @@ with automatically fetched official AOSP headers, Bionic variadic logging and
 real guest zlib; see the APK guide for dependency pins and verification limits.
 An optional real ARM64 Media NDK bundle (`tools/android_media.py`, APK installer
 `--media-root`) loads in an isolated Bionic namespace. Its metadata operations
-pass the signed APK gate in all modes. It resolves Unity's Media NDK dependency;
-the next loader blocker is `eglSurfaceAttrib`. Android media services and
+pass the signed APK gate in all modes. It resolves Unity's Media NDK dependency,
+and the EGL adapter now covers all of Unity's EGL imports; the next loader
+blocker is `libandroid.so`'s `AChoreographer`/`ASensor` API. Android media services and
 decoding remain unimplemented.
 The native-bridge adapter below is a separate integration interface, not a
 complete Android runtime.

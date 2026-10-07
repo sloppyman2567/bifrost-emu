@@ -464,6 +464,40 @@ eglWaitNative             EGL    i             -     -              -
 eglSwapInterval           EGL    ii            -     -              -
 eglQueryString            EGL    i             str   -              -
 eglGetProcAddress         EGL    p             -     GET_PROC       -
+# Rest of EGL 1.5 core, as exported by Android's libEGL.map.txt (EGLTime is
+# a 64-bit x-reg; EGLClientBuffer/EGLImage/EGLSync are opaque 'i').
+# Not here: platform display/surfaces and pixmaps take guest native
+# handles the host cannot use without translation.
+eglBindTexImage           EGL    iii           -     -              -
+eglReleaseTexImage        EGL    iii           -     -              -
+eglCreatePbufferFromClientBuffer EGL iiiip     -     -              -
+eglGetConfigs             EGL    ipip          -     -              -
+eglGetCurrentContext      EGL    -             -     -              -
+eglGetCurrentDisplay      EGL    -             -     -              -
+eglGetCurrentSurface      EGL    i             -     -              -
+eglQueryAPI               EGL    -             -     -              -
+eglQueryContext           EGL    iiip          -     -              -
+eglSurfaceAttrib          EGL    iiii          -     -              -
+eglWaitClient             EGL    -             -     -              -
+eglCreateSync             EGL    iip           -     -              -
+eglDestroySync            EGL    ii            -     -              -
+eglClientWaitSync         EGL    iiii          -     -              -
+eglGetSyncAttrib          EGL    iiip          -     -              -
+eglWaitSync               EGL    iii           -     -              -
+eglCreateImage            EGL    iiiip         -     -              -
+eglDestroyImage           EGL    ii            -     -              -
+# KHR extensions Android's libEGL exports directly. Host libEGL exports
+# only core symbols, so these resolve through host eglGetProcAddress.
+eglCreateImageKHR         EGL    iiiip         -     -              -
+eglDestroyImageKHR        EGL    ii            -     -              -
+eglCreateSyncKHR          EGL    iip           -     -              -
+eglDestroySyncKHR         EGL    ii            -     -              -
+eglClientWaitSyncKHR      EGL    iiii          -     -              -
+eglGetSyncAttribKHR       EGL    iiip          -     -              -
+eglSignalSyncKHR          EGL    iii           -     -              -
+eglWaitSyncKHR            EGL    iii           -     -              -
+eglSwapBuffersWithDamageKHR EGL  iipi          -     -              -
+eglSetDamageRegionKHR     EGL    iipi          -     -              -
 
 # ── libSDL2.so / libSDL2-2.0.so.0 ──────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE

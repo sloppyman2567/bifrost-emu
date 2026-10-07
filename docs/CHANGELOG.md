@@ -12,6 +12,16 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Android EGL exports (2026-10-06)
+
+- The EGL thunk and the Android `libEGL.so` adapter gain the rest of EGL 1.5
+  core (`eglSurfaceAttrib`, `eglGetConfigs`, current-state queries,
+  `eglQueryContext`, fence syncs, images, texture binding) and the KHR image,
+  fence/reusable sync and damage functions that Android's libEGL exports.
+  Extension functions resolve through host `eglGetProcAddress`. Unity
+  (SpongeBob) now finds all its EGL and GLES imports and stops at
+  `AChoreographer_getInstance` in `libandroid.so`.
+
 ### userfaultfd and ART's CMC collector (2026-10-06)
 
 - `userfaultfd` (SIGBUS mode) is implemented: `UFFDIO_API`/`REGISTER`/

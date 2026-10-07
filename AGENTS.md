@@ -1064,6 +1064,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   cookies (GLFWwindow*, SDL_Window/Surface/Texture, ...) stay verbatim
   `i`, data/OUT pointers must be `p`/`z`. Check it before adding rows —
   it catches the glfwGetVersion/GetWindowSize class mechanically.
+- EGL rows are also the Android adapter `libEGL.so` export list
+  (`tools/build-android-adapters.py`; rebuild it, then install into a fresh
+  app state). They cover Android's `libEGL.map.txt` wherever the host has an
+  equivalent. Host `libEGL` exports only core symbols, so KHR rows resolve
+  through host `eglGetProcAddress`. Platform display/surface and pixmap entry
+  points take guest native handles and stay out until they are translated;
+  `_ANDROID`/`_NV`/stream exports have no host equivalent. `make egl-check`
+  audits rows against Khronos `egl.xml`; `test_android_surface` covers them.
 - GL3.3+/DSA future-game coverage (2026-08): `glBufferStorage` (SIZE
   `arg1`), `glCreateBuffers`, `glTexStorage2D/3D`, `glTexImage3D` (10 args,
   arg9 pixels via `p` = 64 KiB default bounce — a `z` token needs a SIZE

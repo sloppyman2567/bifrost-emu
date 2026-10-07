@@ -210,8 +210,12 @@ located, never invoked. Media services, ART and framework startup remain require
 With the explicit App preload, the full 21-library JIT probe completes 20/21
 loads and clean exits in the earlier adapter-only checkpoint; Unity remains
 blocked on `libmediandk.so` there. With the optional real-media bundle, that
-dependency resolves. Unity's next failure is the missing `eglSurfaceAttrib`
-export in the guest EGL adapter, reproduced under JIT, interpreter and Tier 2.
+dependency resolves. The guest EGL adapter now exports every EGL function in
+Android's `libEGL.map.txt` that has a host equivalent, which covers all of
+Unity's EGL and GLES imports. Unity's next failure is
+`AChoreographer_getInstance`; it also imports `AChoreographer_postFrameCallback*`,
+`ALooper_forThread` and 15 `ASensor*` functions that `libandroid.so` lacks
+(observed with the default probe mode in a fresh `android-state/egl`).
 The local real-media installation uses `android-state/real-media`.
 
 The earlier header checkpoint uses `android-state/bionic-headers`. The updated

@@ -108,6 +108,36 @@ typedef unsigned    (*eglDestroySurface_t)(EGLDisplay, EGLSurface);
 typedef unsigned    (*eglDestroyContext_t)(EGLDisplay, EGLContext);
 typedef unsigned    (*eglTerminate_t)(EGLDisplay);
 typedef unsigned    (*eglGetError_t)(void);
+typedef const char* (*eglQueryString_t)(EGLDisplay, EGLint);
+typedef unsigned    (*eglGetConfigAttrib_t)(EGLDisplay, EGLConfig, EGLint, EGLint*);
+typedef unsigned    (*eglGetConfigs_t)(EGLDisplay, EGLConfig*, EGLint, EGLint*);
+typedef EGLContext  (*eglGetCurrentContext_t)(void);
+typedef EGLDisplay  (*eglGetCurrentDisplay_t)(void);
+typedef EGLSurface  (*eglGetCurrentSurface_t)(EGLint);
+typedef unsigned    (*eglQueryAPI_t)(void);
+typedef unsigned    (*eglQueryContext_t)(EGLDisplay, EGLContext, EGLint, EGLint*);
+typedef unsigned    (*eglSurfaceAttrib_t)(EGLDisplay, EGLSurface, EGLint, EGLint);
+typedef unsigned    (*eglWaitClient_t)(void);
+typedef void*       (*eglCreateSync_t)(EGLDisplay, unsigned, const intptr_t*);
+typedef EGLint      (*eglClientWaitSync_t)(EGLDisplay, void*, EGLint, uint64_t);
+typedef unsigned    (*eglGetSyncAttrib_t)(EGLDisplay, void*, EGLint, intptr_t*);
+typedef unsigned    (*eglDestroySync_t)(EGLDisplay, void*);
+typedef void*       (*eglCreateSyncKHR_t)(EGLDisplay, unsigned, const EGLint*);
+typedef EGLint      (*eglClientWaitSyncKHR_t)(EGLDisplay, void*, EGLint, uint64_t);
+typedef unsigned    (*eglGetSyncAttribKHR_t)(EGLDisplay, void*, EGLint, EGLint*);
+typedef unsigned    (*eglDestroySyncKHR_t)(EGLDisplay, void*);
+#define EGL_BAD_ATTRIBUTE         0x3004
+#define EGL_CONFIG_ID             0x3028
+#define EGL_DRAW                  0x3059
+#define EGL_EXTENSIONS            0x3055
+#define EGL_SWAP_BEHAVIOR         0x3093
+#define EGL_BUFFER_DESTROYED      0x3095
+#define EGL_SYNC_STATUS           0x30F1
+#define EGL_SIGNALED              0x30F2
+#define EGL_CONDITION_SATISFIED   0x30F6
+#define EGL_SYNC_FENCE            0x30F9
+#define EGL_SYNC_FLUSH_COMMANDS_BIT 0x0001
+#define EGL_FOREVER               0xFFFFFFFFFFFFFFFFull
 
 // ── GL fn types ───────────────────────────────────────────────────────
 typedef void (*glViewport_t)(int, int, int, int);
@@ -290,6 +320,79 @@ int main(int argc, char** argv) {
         "eglQuerySurface width == 640");
     chk(eglQuerySurface(dpy, surf, EGL_HEIGHT, &qh) && qh == 480,
         "eglQuerySurface height == 480");
+
+    // ── EGL exports beyond the original subset (Android libEGL.map.txt) ──
+    eglQueryString_t eglQueryString; eglGetConfigAttrib_t eglGetConfigAttrib;
+    eglGetConfigs_t eglGetConfigs; eglGetCurrentContext_t eglGetCurrentContext;
+    eglGetCurrentDisplay_t eglGetCurrentDisplay;
+    eglGetCurrentSurface_t eglGetCurrentSurface; eglQueryAPI_t eglQueryAPI;
+    eglQueryContext_t eglQueryContext; eglSurfaceAttrib_t eglSurfaceAttrib;
+    eglWaitClient_t eglWaitClient;
+    LOAD(hegl, eglQueryString_t, eglQueryString);
+    LOAD(hegl, eglGetConfigAttrib_t, eglGetConfigAttrib);
+    LOAD(hegl, eglGetConfigs_t, eglGetConfigs);
+    LOAD(hegl, eglGetCurrentContext_t, eglGetCurrentContext);
+    LOAD(hegl, eglGetCurrentDisplay_t, eglGetCurrentDisplay);
+    LOAD(hegl, eglGetCurrentSurface_t, eglGetCurrentSurface);
+    LOAD(hegl, eglQueryAPI_t, eglQueryAPI);
+    LOAD(hegl, eglQueryContext_t, eglQueryContext);
+    LOAD(hegl, eglSurfaceAttrib_t, eglSurfaceAttrib);
+    LOAD(hegl, eglWaitClient_t, eglWaitClient);
+    chk(eglGetCurrentContext() == ctx, "eglGetCurrentContext");
+    chk(eglGetCurrentDisplay() == dpy, "eglGetCurrentDisplay");
+    chk(eglGetCurrentSurface(EGL_DRAW) == surf, "eglGetCurrentSurface(EGL_DRAW)");
+    chk(eglQueryAPI() == (use_gl ? EGL_OPENGL_API : 0x30A0u), "eglQueryAPI");
+    EGLint ctx_cfg = 0, cfg_id = -1, nall = 0;
+    chk(eglQueryContext(dpy, ctx, EGL_CONFIG_ID, &ctx_cfg) &&
+        eglGetConfigAttrib(dpy, cfgs[0], EGL_CONFIG_ID, &cfg_id) && ctx_cfg == cfg_id,
+        "eglQueryContext config id matches the chosen config");
+    EGLConfig some[2] = {0, 0};
+    EGLint nsome = 0;
+    chk(eglGetConfigs(dpy, NULL, 0, &nall) && nall > 0 &&
+        eglGetConfigs(dpy, some, 2, &nsome) && nsome == (nall < 2 ? nall : 2) && some[0],
+        "eglGetConfigs count and fill");
+    // Unity sets this on its window surface before rendering.
+    EGLint behavior = 0;
+    chk(eglSurfaceAttrib(dpy, surf, EGL_SWAP_BEHAVIOR, EGL_BUFFER_DESTROYED) &&
+        eglQuerySurface(dpy, surf, EGL_SWAP_BEHAVIOR, &behavior) &&
+        behavior == EGL_BUFFER_DESTROYED, "eglSurfaceAttrib(EGL_SWAP_BEHAVIOR)");
+    chk(!eglSurfaceAttrib(dpy, surf, EGL_WIDTH, 1) && eglGetError() == EGL_BAD_ATTRIBUTE,
+        "eglSurfaceAttrib rejects a read-only attribute");
+    chk(eglWaitClient() != 0, "eglWaitClient");
+    // Fence syncs: core entry points need EGL 1.5, the KHR ones the extension.
+    const char* exts = eglQueryString(dpy, EGL_EXTENSIONS);
+    if (maj > 1 || mnr >= 5) {
+        eglCreateSync_t eglCreateSync; eglClientWaitSync_t eglClientWaitSync;
+        eglGetSyncAttrib_t eglGetSyncAttrib; eglDestroySync_t eglDestroySync;
+        LOAD(hegl, eglCreateSync_t, eglCreateSync);
+        LOAD(hegl, eglClientWaitSync_t, eglClientWaitSync);
+        LOAD(hegl, eglGetSyncAttrib_t, eglGetSyncAttrib);
+        LOAD(hegl, eglDestroySync_t, eglDestroySync);
+        void* sync = eglCreateSync(dpy, EGL_SYNC_FENCE, NULL);
+        intptr_t status = 0;
+        chk(sync && eglClientWaitSync(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER) ==
+                        EGL_CONDITION_SATISFIED &&
+            eglGetSyncAttrib(dpy, sync, EGL_SYNC_STATUS, &status) && status == EGL_SIGNALED &&
+            eglDestroySync(dpy, sync), "EGL 1.5 fence sync");
+    } else {
+        printf("  INFO EGL %d.%d: core sync checks skipped\n", maj, mnr);
+    }
+    if (exts && strstr(exts, "EGL_KHR_fence_sync")) {
+        eglCreateSyncKHR_t eglCreateSyncKHR; eglClientWaitSyncKHR_t eglClientWaitSyncKHR;
+        eglGetSyncAttribKHR_t eglGetSyncAttribKHR; eglDestroySyncKHR_t eglDestroySyncKHR;
+        LOAD(hegl, eglCreateSyncKHR_t, eglCreateSyncKHR);
+        LOAD(hegl, eglClientWaitSyncKHR_t, eglClientWaitSyncKHR);
+        LOAD(hegl, eglGetSyncAttribKHR_t, eglGetSyncAttribKHR);
+        LOAD(hegl, eglDestroySyncKHR_t, eglDestroySyncKHR);
+        void* sync = eglCreateSyncKHR(dpy, EGL_SYNC_FENCE, NULL);
+        EGLint status = 0;
+        chk(sync && eglClientWaitSyncKHR(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER) ==
+                        EGL_CONDITION_SATISFIED &&
+            eglGetSyncAttribKHR(dpy, sync, EGL_SYNC_STATUS, &status) && status == EGL_SIGNALED &&
+            eglDestroySyncKHR(dpy, sync), "EGL_KHR_fence_sync through the extension exports");
+    } else {
+        printf("  INFO EGL_KHR_fence_sync not offered: KHR sync checks skipped\n");
+    }
 
     // ── teardown ─────────────────────────────────────────────────────
     chk(eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) != 0,
