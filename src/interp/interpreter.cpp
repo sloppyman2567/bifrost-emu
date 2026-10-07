@@ -543,7 +543,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;
                 if (d.rd != 31) cpu.regs[d.rd] = res;
-                else if (opc == 1) cpu.sp = res;  // ORR to SP
+                else if (d.writes_sp) cpu.sp = res;
                 if (set_flags) {
                     cpu.set_flag_n((res >> (width - 1)) & 1);
                     cpu.set_flag_z(res == 0);
@@ -657,7 +657,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;
                 if (d.rd != 31) cpu.regs[d.rd] = res;
-                else if (opc == 1) cpu.sp = res;
                 if (set_flags) {
                     cpu.set_flag_n((res >> (width - 1)) & 1);
                     cpu.set_flag_z(res == 0);

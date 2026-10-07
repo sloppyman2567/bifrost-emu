@@ -281,7 +281,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rm         = (inst >> 16) & 0x1F;
         d.rn         = (inst >> 5) & 0x1F;
         d.rd         = inst & 0x1F;
-        d.writes_sp  = (d.rd == 31 && opc == 1);
+        // Logical shifted-register forms use XZR/WZR, never SP.
+        d.writes_sp  = false;
         switch (opc) {
             case 0: d.cls = InstClass::AND_REG;  break;
             case 1: d.cls = InstClass::ORR_REG;  break;
@@ -500,7 +501,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rn         = (inst >> 5) & 0x1F;
         d.rd         = inst & 0x1F;
         d.set_flags  = (opc == 3);
-        d.writes_sp  = (d.rd == 31 && opc == 1);
+        // AND/ORR/EOR immediate can write SP; ANDS writes XZR instead.
+        d.writes_sp  = (d.rd == 31 && !d.set_flags);
         // encoding is UNALLOCATED — return UNKNOWN instead of treating it
         // as a valid immediate of 0.
         if (!decode_bitmask_imm(d.N, d.immr, d.imms, d.sf, &d.imm_u)) {

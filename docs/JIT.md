@@ -146,6 +146,28 @@ address is: Android's ART relocates its boot image on every run, even with
 `BIFROST_NO_ASLR=1`. To compare two modes, diff their fault and block traces
 by method rather than by fixed address ranges.
 
+## Logical immediates and SP destinations
+
+Non-flag-setting AND/ORR/EOR immediate instructions write SP (or zero-extended
+WSP) when Rd is 31. Rn is still XZR/WZR when it is 31. ANDS immediate and all
+logical shifted-register forms instead discard an Rd=31 result. Keep the
+decoder's `writes_sp`, interpreter and IR `STORE_REG` behavior consistent;
+SP-writing instructions must also remain excluded from leaf inlining. See
+the [Arm AND immediate operation](https://www.scs.stanford.edu/~zyedidia/arm64/and_log_imm.html).
+
+Unity's `libunity.so+0x6ab608` uses `and sp,x9,#0xffffffffffffffc0`
+after reserving a 0x520-byte frame. Ignoring this write left SP at its old
+value, so the local zero store at `+0x6ab634` overwrote the caller's non-null
+descriptor. The later virtual call at `+0x6ab890` then dereferenced zero.
+The narrow block/debugger trace observed the descriptor before and after that
+store. `jit_android_semantics` includes this exact frame-overlap reproducer,
+all three logical immediate operations in both widths, zero-register sources,
+flag preservation and SP-preserving zero-register destinations. Its 72 checks
+pass QEMU, JIT and interpreter; the no-trap differential mode has 69 checks.
+The fixed game trace confirms the aligned SP and intact descriptor at the
+virtual call. The game still presents no frames and reaches a separate invalid
+pointer store at `libunity.so+0xca6e54`; this repair is not a gameplay pass.
+
 ## Conditional compares and register forwarding
 
 CCMP and CCMN only define NZCV flags. Their IR `dest=0` is a placeholder,

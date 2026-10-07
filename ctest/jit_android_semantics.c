@@ -72,6 +72,52 @@ static void integer_and_vector(void) {
     CHECK(v[0]==UINT64_MAX && v[1]==0);
 }
 
+static void logical_sp(void) {
+    const uint64_t src=0xfedcba98765432ffULL;
+    uint64_t value,flags;
+    // No stack access while SP holds an arithmetic result. Read it across
+    // a block boundary, then restore it before returning to compiler code.
+#define SP_RESULT(instruction, want) do { \
+    __asm__ volatile("mov x12,sp\n mov x9,%2\n mov x10,#0xa0000000\n msr nzcv,x10\n" \
+                     instruction "\n b 1f\n 1: mov %0,sp\n mov sp,x12\n mrs %1,nzcv" \
+                     : "=&r"(value),"=&r"(flags) : "r"(src) : "x9","x10","x12","cc"); \
+    CHECK(value==(want) && flags==0xa0000000ULL); \
+} while (0)
+    SP_RESULT("and sp,x9,#0xff", 0xff);
+    SP_RESULT("orr sp,x9,#0xff00", 0xfedcba987654ffffULL);
+    SP_RESULT("eor sp,x9,#0xff", 0xfedcba9876543200ULL);
+    SP_RESULT("and wsp,w9,#0xff", 0xff);
+    SP_RESULT("orr wsp,w9,#0xff00", 0x7654ffffULL);
+    SP_RESULT("eor wsp,w9,#0xff", 0x76543200ULL);
+    // Rn=31 still reads XZR/WZR, even when Rd=31 writes SP/WSP.
+    SP_RESULT("and sp,xzr,#0xff", 0);
+    SP_RESULT("orr sp,xzr,#0xff", 0xff);
+    SP_RESULT("eor wsp,wzr,#0xff", 0xff);
+#undef SP_RESULT
+    uint64_t before,after;
+    // Register logical destinations and the flag-setting immediate form
+    // use XZR, never SP. Restore SP so the pre-fix interpreter can report.
+#define ZR_DEST(instruction) do { \
+    __asm__ volatile("mov %0,sp\n mov x9,#0x1234\n" instruction \
+                     "\n mov %1,sp\n mov sp,%0" \
+                     : "=&r"(before),"=&r"(after) : : "x9","cc"); \
+    CHECK(before==after); \
+} while (0)
+    ZR_DEST("and xzr,x9,x9");
+    ZR_DEST("orr xzr,x9,x9");
+    ZR_DEST("eor wzr,w9,w9");
+    ZR_DEST("ands xzr,x9,#0xff");
+#undef ZR_DEST
+    // Unity's exact aligned-frame prologue. Ignoring AND SP causes the
+    // local zero store to overwrite the caller's descriptor at caller SP+32.
+    __asm__ volatile("mov x12,sp\n sub sp,sp,#0x600\n mov x11,sp\n"
+                     "mov x10,#0x1234\n str x10,[sp,#32]\n sub sp,sp,#96\n"
+                     "sub x9,sp,#0x520\n .inst 0x927ae53f\n str xzr,[sp,#128]\n"
+                     "mov sp,x11\n ldr %0,[sp,#32]\n mov sp,x12"
+                     : "=&r"(value) : : "x9","x10","x11","x12","memory");
+    CHECK(value==0x1234);
+}
+
 static void conversions(void) {
     static const double values[]={0.0,-1.0,4294967296.0,18446744073709551616.0};
     static const uint64_t xwant[]={0,0,4294967296ULL,UINT64_MAX};
@@ -115,7 +161,7 @@ static void illegal(void) {
 }
 
 int main(int argc, char** argv) {
-    loads(); integer_and_vector(); conversions(); byte_atomic();
+    loads(); integer_and_vector(); logical_sp(); conversions(); byte_atomic();
     // Differential replay does not deliver guest signals; normal JIT and
     // interpreter runs cover the intentional DecodeError-to-SIGILL path.
     if (argc < 2 || strcmp(argv[1], "no-trap")) illegal();

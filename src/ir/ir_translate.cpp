@@ -337,9 +337,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             uint16_t r = g_alloc.alloc();
             block.insts.push_back(IRInst::make(op, r, a, b));
-            if (d.rd != 31) {
+            if (d.rd != 31 || d.writes_sp) {
                 r = zext_if_32bit(block, r, d.sf);
-                store_arm_reg(block, d.rd, r);
+                store_arm_reg(block, d.rd, r, d.writes_sp);
             }
             return false;
         }
