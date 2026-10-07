@@ -14,10 +14,11 @@ cleanup in all three modes and QEMU. See [the APK checkpoint](ANDROID_APK.md)
 for the load-order evidence and official-header/zlib build.
 An optional checksum-pinned real Media NDK bundle now supplies the genuine
 library and its isolated native dependencies. Real metadata operations pass
-the signed APK gate in all modes. With this bundle and the full EGL adapter
-Unity progresses to missing `libandroid.so` exports (`AChoreographer_*`,
-`ALooper_forThread`, `ASensor*`); media services/decoding and managed
-(ART-backed) Activity startup are still unimplemented. See the APK guide for provisioning and namespace boundaries.
+the signed APK gate in all modes. With this bundle, the full EGL adapter and
+the per-thread looper, choreographer and sensor exports, every Unity import
+resolves; its load then stops on an unimplemented vector `FADDP`. Media
+services/decoding and managed (ART-backed) Activity startup are still
+unimplemented. See the APK guide for provisioning and namespace boundaries.
 
 ## Android 15 framework probe
 

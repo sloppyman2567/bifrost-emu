@@ -24,7 +24,10 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 
+#include <algorithm>
 #include <chrono>
+#include <climits>
+#include <ctime>
 #include <thread>
 #include <cstdio>
 #include <cstring>
@@ -226,99 +229,177 @@ uint64_t AndroidSurfaceManager::fire_activity_cb(CPU& cpu, ActivityCb cb,
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// v2: ALooper registry
+// ALooper registry: one looper per guest thread
 // ═══════════════════════════════════════════════════════════════════
+// Semantics follow AOSP android15-release: libutils Looper.cpp
+// (prepare/addFd/pollOnce/pollAll) behind frameworks/base
+// native/android/looper.cpp, which always polls the CALLING thread's
+// looper (Looper::getForThread).
 // ALooper ident/poll codes (android/looper.h).
 static constexpr int LOOPER_POLL_WAKE    = -1;
 static constexpr int LOOPER_POLL_CALLBACK = -2;
 static constexpr int LOOPER_POLL_TIMEOUT = -3;
 static constexpr int LOOPER_POLL_ERROR   = -4;
 static constexpr int LOOPER_EVENT_INPUT  = 1 << 0;
+static constexpr int LOOPER_PREPARE_ALLOW_NON_CALLBACKS = 1 << 0;
+
+static int64_t monotonic_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
+AndroidSurfaceManager::Looper*
+AndroidSurfaceManager::find_looper_(uint64_t handle) {
+    auto it = loopers_.find(handle);
+    return it == loopers_.end() ? nullptr : &it->second;
+}
+
+uint64_t AndroidSurfaceManager::looper_prepare(int tid, int opts) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = thread_loopers_.find(tid);
+    if (it != thread_loopers_.end()) return it->second;
+    // Looper::prepare keeps the first looper's ALLOW_NON_CALLBACKS value.
+    uint64_t handle = kLooperBase | (next_looper_id_++ & 0xFFFFFF);
+    Looper& looper = loopers_[handle];
+    looper.tid = tid;
+    looper.allow_non_callbacks =
+        (opts & LOOPER_PREPARE_ALLOW_NON_CALLBACKS) != 0;
+    thread_loopers_[tid] = handle;
+    return handle;
+}
+
+uint64_t AndroidSurfaceManager::looper_for_thread(int tid) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = thread_loopers_.find(tid);
+    return it == thread_loopers_.end() ? 0 : it->second;
+}
 
 int AndroidSurfaceManager::looper_add_fd(uint64_t looper, int fd, int ident,
                                          int events, uint64_t callback,
                                          void* data) {
-    if (!is_looper(looper)) return -1;
     if (fd < 0) return -1;
     std::lock_guard<std::mutex> lk(mu_);
-    for (auto& e : looper_fds_) {
+    Looper* l = find_looper_(looper);
+    if (!l) return -1;
+    if (!callback) {
+        if (!l->allow_non_callbacks || ident < 0) return -1;
+    } else {
+        ident = LOOPER_POLL_CALLBACK;
+    }
+    for (auto& e : l->fds) {
         if (e.fd == fd) {
-            // Replace the registration (matches re-add semantics close
-            // enough to the real looper's EBUSY-free common case).
-            e.ident = ident;
-            e.events = events;
-            e.callback = callback;
-            e.data = data;
+            // Looper::addFd replaces an existing registration for the fd.
+            e = FdEntry{fd, ident, events, callback, data};
             return 1;
         }
     }
-    looper_fds_.push_back(FdEntry{fd, ident, events, callback, data});
+    l->fds.push_back(FdEntry{fd, ident, events, callback, data});
     return 1;
 }
 
 int AndroidSurfaceManager::looper_remove_fd(uint64_t looper, int fd) {
-    if (!is_looper(looper)) return 0;
     std::lock_guard<std::mutex> lk(mu_);
-    for (size_t i = 0; i < looper_fds_.size(); i++) {
-        if (looper_fds_[i].fd == fd) {
-            looper_fds_.erase(looper_fds_.begin() + i);
+    Looper* l = find_looper_(looper);
+    if (!l) return 0;
+    for (size_t i = 0; i < l->fds.size(); i++) {
+        if (l->fds[i].fd == fd) {
+            l->fds.erase(l->fds.begin() + i);
             return 1;
         }
     }
     return 0;
 }
 
-void AndroidSurfaceManager::looper_wake(uint64_t /*looper*/) {
+void AndroidSurfaceManager::looper_wake(uint64_t looper) {
     std::lock_guard<std::mutex> lk(mu_);
-    wake_flag_ = true;
+    if (Looper* l = find_looper_(looper)) l->wake = true;
 }
 
 int AndroidSurfaceManager::looper_poll(CPU& cpu, int timeout_ms, int* out_fd,
                                        int* out_events, void** out_data,
-                                       bool dispatch_callbacks) {
-    using clock = std::chrono::steady_clock;
-    const clock::time_point deadline =
-        timeout_ms < 0 ? clock::time_point::max()
-                       : clock::now() + std::chrono::milliseconds(timeout_ms);
+                                       bool poll_all) {
+    const int64_t start = monotonic_ns();
+    const int64_t deadline =
+        timeout_ms < 0 ? INT64_MAX
+                       : start + static_cast<int64_t>(timeout_ms) * 1000000LL;
 
     GuestRunner runner_copy;
+    FdResolver resolver;
+    uint64_t handle = 0;
     {
         std::lock_guard<std::mutex> lk(mu_);
+        auto it = thread_loopers_.find(cpu.tid);
+        if (it == thread_loopers_.end()) return LOOPER_POLL_ERROR;
+        handle = it->second;
         runner_copy = runner_;
+        resolver = fd_resolver_;
     }
 
     for (;;) {
+        // Group exit stops this CPU; leave instead of sleeping forever.
+        if (!cpu.running) return LOOPER_POLL_ERROR;
+        bool callback_ran = false;
         bool wake = false;
         bool input_ready = false;
-        FdEntry ready{};
-        bool has_ready = false;
+        QueueAttachment att;
+        std::vector<FdEntry> regs;
+        std::vector<FrameCallback> due;
+        int64_t vsync_ns = 0;
+        int64_t next_frame_due = INT64_MAX;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (wake_flag_) {
-                wake_flag_ = false;
+            Looper* l = find_looper_(handle);
+            if (!l) return LOOPER_POLL_ERROR;
+            if (l->wake) {
+                l->wake = false;
                 wake = true;
             }
-            if (!pending_.empty() && queue_attach_.ident != 0) {
-                input_ready = true;
+            // Choreographer::dispatchVsync runs every callback whose due
+            // time precedes the vsync, passing the vsync timestamp.
+            // Callbacks posted from inside a callback wait for the next one.
+            if (!l->frames.empty()) {
+                const int64_t now = monotonic_ns();
+                vsync_ns = now - now % kVsyncPeriodNs;
+                for (size_t i = 0; i < l->frames.size();) {
+                    if (l->frames[i].due_ns < vsync_ns) {
+                        due.push_back(l->frames[i]);
+                        l->frames.erase(l->frames.begin() + i);
+                    } else {
+                        next_frame_due =
+                            std::min(next_frame_due, l->frames[i].due_ns);
+                        i++;
+                    }
+                }
             }
+            if (!pending_.empty() && queue_attach_.ident != 0 &&
+                queue_attach_.looper == handle) {
+                input_ready = true;
+                att = queue_attach_;
+            }
+            regs = l->fds;
         }
         if (wake) return LOOPER_POLL_WAKE;
 
-        // ── Input queue readiness first: games want input promptly ────
+        for (const auto& f : due) {
+            if (!runner_copy) break;
+            int64_t iargs[2] = {vsync_ns, static_cast<int64_t>(f.data)};
+            runner_copy(cpu, f.fn, iargs, 2);
+            callback_ran = true;
+        }
+
+        // ── Input queue readiness: games want input promptly ──────────
         if (input_ready) {
-            QueueAttachment att;
-            {
-                std::lock_guard<std::mutex> lk(mu_);
-                att = queue_attach_;
-            }
-            if (att.callback && dispatch_callbacks) {
-                // Callback-style attachment: fire and keep polling.
+            if (att.callback) {
                 int64_t iargs[3] = {-1, LOOPER_EVENT_INPUT,
                                     static_cast<int64_t>(
                                         reinterpret_cast<uintptr_t>(
                                             att.data))};
-                if (runner_copy) runner_copy(cpu, att.callback, iargs, 3);
-            } else {
+                if (runner_copy) {
+                    runner_copy(cpu, att.callback, iargs, 3);
+                    callback_ran = true;
+                }
+            } else if (!callback_ran) {
                 if (out_fd) *out_fd = -1;
                 if (out_events) *out_events = LOOPER_EVENT_INPUT;
                 if (out_data) *out_data = att.data;
@@ -327,15 +408,7 @@ int AndroidSurfaceManager::looper_poll(CPU& cpu, int timeout_ms, int* out_fd,
         }
 
         // ── Registered fds: real ::poll on resolved host fds ──────────
-        // Snapshot registrations, poll each briefly, act outside mu_
-        // (a callback may re-enter dispatch → recursive-lock hazard).
-        std::vector<FdEntry> regs;
-        FdResolver resolver;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            regs = looper_fds_;
-            resolver = fd_resolver_;
-        }
+        // Callbacks run outside mu_ (they may re-enter the looper thunks).
         for (const auto& e : regs) {
             int hfd = resolver ? resolver(e.fd) : -1;
             if (hfd < 0) continue;
@@ -350,32 +423,105 @@ int AndroidSurfaceManager::looper_poll(CPU& cpu, int timeout_ms, int* out_fd,
                                     static_cast<int64_t>(
                                         reinterpret_cast<uintptr_t>(
                                             e.data))};
-                runner_copy(cpu, e.callback, iargs, 3);
-                if (!dispatch_callbacks) {
-                    if (out_fd) *out_fd = e.fd;
-                    if (out_events) *out_events = got;
-                    if (out_data) *out_data = e.data;
-                    return LOOPER_POLL_CALLBACK;
+                uint64_t keep = runner_copy(cpu, e.callback, iargs, 3);
+                callback_ran = true;
+                if (static_cast<int32_t>(keep) == 0) {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (Looper* l = find_looper_(handle)) {
+                        for (size_t i = 0; i < l->fds.size(); i++) {
+                            if (l->fds[i].fd == e.fd &&
+                                l->fds[i].callback == e.callback) {
+                                l->fds.erase(l->fds.begin() + i);
+                                break;
+                            }
+                        }
+                    }
                 }
-                continue;  // pollAll keeps draining callbacks
+                continue;
             }
+            if (callback_ran) continue;  // report the ident on the next poll
             // Non-callback mode: report ident + source pointer (the glue
             // reads the command byte from the pipe itself).
-            ready = e;
-            has_ready = true;
-            break;
-        }
-        if (has_ready) {
-            if (out_fd) *out_fd = ready.fd;
-            if (out_events) *out_events = ready.events;
-            if (out_data) *out_data = ready.data;
-            return ready.ident;
+            if (out_fd) *out_fd = e.fd;
+            if (out_events) *out_events = got;
+            if (out_data) *out_data = e.data;
+            return e.ident;
         }
 
-        // Nothing dispatched — sleep a slice or time out.
-        if (clock::now() >= deadline) return LOOPER_POLL_TIMEOUT;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (callback_ran && !poll_all) {
+            if (out_fd) *out_fd = -1;
+            if (out_events) *out_events = 0;
+            if (out_data) *out_data = nullptr;
+            return LOOPER_POLL_CALLBACK;
+        }
+        const int64_t now = monotonic_ns();
+        if (now >= deadline) return LOOPER_POLL_TIMEOUT;
+        // Sleep a 2 ms slice for fd readiness, waking early for the next
+        // vsync that has a due callback or for the deadline.
+        int64_t wake_at = std::min<int64_t>(deadline, now + 2000000LL);
+        if (next_frame_due != INT64_MAX) {
+            int64_t tick = next_frame_due - next_frame_due % kVsyncPeriodNs +
+                           kVsyncPeriodNs;
+            wake_at = std::min(wake_at, tick);
+        }
+        if (wake_at > now)
+            std::this_thread::sleep_for(std::chrono::nanoseconds(wake_at - now));
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AChoreographer: frame callbacks on the owning thread's looper
+// ═══════════════════════════════════════════════════════════════════
+// AOSP Choreographer::getForThread (frameworks/native libs/gui) returns
+// NULL on a thread without a looper and otherwise one instance per thread.
+// Frame callbacks are one-shot and run inside that thread's looper poll.
+uint64_t AndroidSurfaceManager::choreographer_for_thread(int tid) {
+    uint64_t looper = looper_for_thread(tid);
+    return looper ? kChoreographerBase | (looper & 0xFFFFFF) : 0;
+}
+
+bool AndroidSurfaceManager::choreographer_post(uint64_t choreographer,
+                                               uint64_t fn, uint64_t data,
+                                               int64_t delay_ns) {
+    if ((choreographer & ~0xFFFFFFULL) != kChoreographerBase || !fn)
+        return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    Looper* l = find_looper_(kLooperBase | (choreographer & 0xFFFFFF));
+    if (!l) return false;
+    l->frames.push_back(
+        FrameCallback{fn, data, monotonic_ns() + std::max<int64_t>(delay_ns, 0)});
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ASensorManager: a device with no sensors
+// ═══════════════════════════════════════════════════════════════════
+uint64_t AndroidSurfaceManager::sensor_empty_list() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!sensor_list_addr_ && mem_) {
+        // A non-NULL list with zero entries (plus a NULL terminator), so a
+        // caller that dereferences the list pointer never faults.
+        sensor_list_addr_ = mem_->mmap_alloc(4096);
+    }
+    return sensor_list_addr_;
+}
+
+uint64_t AndroidSurfaceManager::sensor_create_queue(uint64_t looper) {
+    if (!looper) return 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    uint64_t queue = kSensorQueueBase | (next_sensor_queue_++ & 0xFFFFFF);
+    sensor_queues_[queue] = looper;
+    return queue;
+}
+
+bool AndroidSurfaceManager::sensor_destroy_queue(uint64_t queue) {
+    std::lock_guard<std::mutex> lk(mu_);
+    return sensor_queues_.erase(queue) != 0;
+}
+
+bool AndroidSurfaceManager::sensor_is_queue(uint64_t queue) {
+    std::lock_guard<std::mutex> lk(mu_);
+    return sensor_queues_.count(queue) != 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════

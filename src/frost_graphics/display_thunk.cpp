@@ -26,6 +26,8 @@ static_assert(arm64emu::wl::find(false, "wl_surface", 1u) != nullptr,
 #include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
 #include "core/memory.h"
+#include <climits>
+#include <limits>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <csignal>
@@ -863,15 +865,18 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // ── Framework plumbing: no host window required ───────────────
         if (n.rfind("ALooper_", 0) == 0) {
             if (n == "ALooper_prepare") {
-                cpu.regs[0] = mgr.looper_handle();
+                cpu.regs[0] = mgr.looper_prepare(
+                    cpu.tid, static_cast<int>(cpu.regs[0]));
+            } else if (n == "ALooper_forThread") {
+                cpu.regs[0] = mgr.looper_for_thread(cpu.tid);
             } else if (n == "ALooper_acquire" || n == "ALooper_release") {
                 cpu.regs[0] = 0;
             } else if (n == "ALooper_pollOnce" || n == "ALooper_pollAll") {
                 int timeout = static_cast<int>(static_cast<int32_t>(cpu.regs[0]));
                 int ofd = -1, oev = 0;
                 void* odata = nullptr;
-                // pollAll drains callback-mode registrations internally;
-                // pollOnce fires ONE callback and reports POLL_CALLBACK (-2).
+                // pollAll keeps waiting after callbacks; pollOnce reports
+                // POLL_CALLBACK (-2) once any callback ran.
                 int ident = mgr.looper_poll(cpu, timeout, &ofd, &oev, &odata,
                                             n == "ALooper_pollAll");
                 if (cpu.regs[1] && impl_->mem) {
@@ -903,6 +908,83 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             } else {
                 cpu.regs[0] = static_cast<uint64_t>(-22);
             }
+            return 0;
+        }
+        if (n.rfind("AChoreographer_", 0) == 0) {
+            // AOSP AChoreographer.cpp: the 32- and 64-bit frame callbacks
+            // share one queue; both receive (frameTimeNanos, data).
+            if (n == "AChoreographer_getInstance") {
+                cpu.regs[0] = mgr.choreographer_for_thread(cpu.tid);
+            } else {
+                int64_t delay_ns = 0;
+                if (n == "AChoreographer_postFrameCallbackDelayed")
+                    delay_ns = static_cast<int64_t>(cpu.regs[3]) * 1000000LL;
+                else if (n == "AChoreographer_postFrameCallbackDelayed64")
+                    delay_ns = static_cast<int64_t>(
+                        static_cast<uint32_t>(cpu.regs[3])) * 1000000LL;
+                mgr.choreographer_post(cpu.regs[0], cpu.regs[1], cpu.regs[2],
+                                       delay_ns);
+                cpu.regs[0] = 0;
+            }
+            return 0;
+        }
+        if (n.rfind("ASensor", 0) == 0) {
+            // A device with no sensors, following AOSP sensor.cpp: no
+            // ASensor exists, so every sensor argument takes the NULL-sensor
+            // path. BAD_VALUE is -EINVAL. An empty queue matches BitTube:
+            // getEvents reads nothing (0) and hasEvents' poll sees
+            // revents != POLLIN (-1).
+            constexpr int64_t kBadValue = -22;
+            const uint64_t a0 = cpu.regs[0];
+            int64_t r = 0;
+            if (n == "ASensorManager_getInstance" ||
+                n == "ASensorManager_getInstanceForPackage") {
+                r = static_cast<int64_t>(frost::AndroidSurfaceManager::kSensorManager);
+            } else if (n == "ASensorManager_getSensorList" ||
+                       n == "ASensorManager_getDynamicSensorList") {
+                if (a0 != frost::AndroidSurfaceManager::kSensorManager) {
+                    r = kBadValue;
+                } else {
+                    if (cpu.regs[1] && impl_->mem) {
+                        uint64_t list = mgr.sensor_empty_list();
+                        impl_->mem->write(cpu.regs[1], &list, sizeof(list));
+                    }
+                    r = 0;
+                }
+            } else if (n == "ASensorManager_getDefaultSensor" ||
+                       n == "ASensorManager_getDefaultSensorEx") {
+                r = 0;
+            } else if (n == "ASensorManager_createEventQueue") {
+                r = a0 == frost::AndroidSurfaceManager::kSensorManager
+                        ? static_cast<int64_t>(mgr.sensor_create_queue(cpu.regs[1]))
+                        : 0;
+            } else if (n == "ASensorManager_destroyEventQueue") {
+                r = a0 == frost::AndroidSurfaceManager::kSensorManager &&
+                            mgr.sensor_destroy_queue(cpu.regs[1])
+                        ? 0 : kBadValue;
+            } else if (n == "ASensorEventQueue_hasEvents") {
+                r = mgr.sensor_is_queue(a0) ? -1 : kBadValue;
+            } else if (n == "ASensorEventQueue_getEvents") {
+                r = mgr.sensor_is_queue(a0) && cpu.regs[1] ? 0 : kBadValue;
+            } else if (n == "ASensorEventQueue_requestAdditionalInfoEvents") {
+                r = mgr.sensor_is_queue(a0) ? 0 : kBadValue;
+            } else if (n.rfind("ASensorEventQueue_", 0) == 0) {
+                // enable/disable/setEventRate/registerSensor need a sensor.
+                r = kBadValue;
+            } else if (n == "ASensor_getResolution") {
+                set_f32(std::numeric_limits<float>::quiet_NaN());
+                return 0;
+            } else if (n == "ASensor_getMinDelay") {
+                r = INT32_MIN;
+            } else if (n == "ASensor_getName" || n == "ASensor_getVendor" ||
+                       n == "ASensor_getStringType" ||
+                       n == "ASensor_isWakeUpSensor") {
+                r = 0;
+            } else {
+                // getType/getFifo*/getReportingMode/getHandle: *_INVALID (-1).
+                r = -1;
+            }
+            cpu.regs[0] = static_cast<uint64_t>(r);
             return 0;
         }
         if (n.rfind("AInputQueue_", 0) == 0) {

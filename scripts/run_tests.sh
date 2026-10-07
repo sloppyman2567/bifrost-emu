@@ -549,6 +549,9 @@ INTEGRATION_TESTS=(
     # native_app_glue .so's. No display needed (AConfiguration + looper
     # fd readiness + queue empty path all headless).
     "android_activity|ctest_real/test_android_activity.elf||30|ALL PASS"
+    # Per-thread ALooper + AChoreographer frame callbacks + no-sensor
+    # ASensorManager (AOSP Looper/Choreographer/sensor.cpp semantics).
+    "android_looper|ctest_real/test_android_looper.elf||30|ALL PASS"
     # Audio thunk arms (2026-08-22): ALSA subset / SDL2 queue / Pulse
     # simple / OSS front doors → shared AudioEngine ring. Headless-safe
     # (WAV-dump backend counts bytes; no host device needed).

@@ -12,6 +12,22 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### libandroid loopers, choreographer and sensors (2026-10-06)
+
+- `ALooper` is per guest thread, following AOSP `Looper::getForThread`:
+  `ALooper_forThread` is new, `pollOnce`/`pollAll` use the calling thread's
+  looper (`ALOOPER_POLL_ERROR` without one), `addFd` rejects a NULL
+  callback unless the looper was prepared with `ALLOW_NON_CALLBACKS`, and a
+  callback returning 0 unregisters its fd. The old process-wide looper let
+  any polling thread run every thread's callbacks.
+- `AChoreographer_getInstance` and `postFrameCallback`/`64`/`Delayed`/
+  `Delayed64`: one-shot frame callbacks run inside the owning thread's poll
+  at the next 60 Hz `CLOCK_MONOTONIC` tick, with that tick as frame time.
+- `ASensorManager`/`ASensorEventQueue`/`ASensor` report a device with no
+  sensors (AOSP `sensor.cpp` NULL-sensor and empty-queue results).
+- Every SpongeBob `libunity.so` import now resolves; its load next stops on
+  vector `FADDP`. Regression: `ctest_real/test_android_looper.c`.
+
 ### Android EGL exports (2026-10-06)
 
 - The EGL thunk and the Android `libEGL.so` adapter gain the rest of EGL 1.5

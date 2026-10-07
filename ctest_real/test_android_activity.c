@@ -192,7 +192,9 @@ int main(void){
     chk(1, "AConfiguration_delete");
 
     // ── ALooper ──────────────────────────────────────────────────────
-    ALooper* looper = ALooper_prepare(0);
+    // ALLOW_NON_CALLBACKS (1): AOSP Looper::addFd rejects a NULL callback
+    // otherwise, and the ident-42 registration below has none.
+    ALooper* looper = ALooper_prepare(1);
     chk(looper!=0, "ALooper_prepare");
     ALooper_acquire(looper);
     ALooper_release(looper);

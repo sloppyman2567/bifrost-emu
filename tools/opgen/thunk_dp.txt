@@ -1097,6 +1097,7 @@ ANativeWindow_setBuffersGeometry ANDROID iiii   -     ANDROID_WINDOW -
 # through Memory directly (pollOnce/pollAll/getEvent). Float-returning
 # getters (AMotionEvent_getX/…) write BOTH x0 and v0 (guest s0).
 ALooper_prepare               ANDROID i      -     ANDROID_WINDOW -
+ALooper_forThread             ANDROID -      -     ANDROID_WINDOW -
 ALooper_acquire               ANDROID i      -     ANDROID_WINDOW -
 ALooper_release               ANDROID i      -     ANDROID_WINDOW -
 ALooper_pollOnce              ANDROID iiii   -     ANDROID_WINDOW -
@@ -1138,6 +1139,42 @@ AKeyEvent_getScanCode         ANDROID i      -     ANDROID_WINDOW -
 AKeyEvent_getFlags            ANDROID i      -     ANDROID_WINDOW -
 AKeyEvent_getDownTime         ANDROID i      -     ANDROID_WINDOW -
 AKeyEvent_getEventTime        ANDROID i      -     ANDROID_WINDOW -
+# AChoreographer (API 24/29 frame callbacks): one instance per looper
+# thread, NULL without a looper. Callbacks run inside that thread's
+# ALooper poll on a 60 Hz CLOCK_MONOTONIC tick.
+AChoreographer_getInstance                ANDROID -    -  ANDROID_WINDOW -
+AChoreographer_postFrameCallback          ANDROID iii  -  ANDROID_WINDOW -
+AChoreographer_postFrameCallbackDelayed   ANDROID iiii -  ANDROID_WINDOW -
+AChoreographer_postFrameCallback64        ANDROID iii  -  ANDROID_WINDOW -
+AChoreographer_postFrameCallbackDelayed64 ANDROID iiii -  ANDROID_WINDOW -
+# ASensorManager: a device with no sensors (empty list, NULL default
+# sensor, queues that never have events). Direct channels are left out.
+ASensorManager_getInstance                 ANDROID -     -  ANDROID_WINDOW -
+ASensorManager_getInstanceForPackage       ANDROID i     -  ANDROID_WINDOW -
+ASensorManager_getSensorList               ANDROID ii    -  ANDROID_WINDOW -
+ASensorManager_getDynamicSensorList        ANDROID ii    -  ANDROID_WINDOW -
+ASensorManager_getDefaultSensor            ANDROID ii    -  ANDROID_WINDOW -
+ASensorManager_getDefaultSensorEx          ANDROID iii   -  ANDROID_WINDOW -
+ASensorManager_createEventQueue            ANDROID iiiii -  ANDROID_WINDOW -
+ASensorManager_destroyEventQueue           ANDROID ii    -  ANDROID_WINDOW -
+ASensorEventQueue_enableSensor             ANDROID ii    -  ANDROID_WINDOW -
+ASensorEventQueue_disableSensor            ANDROID ii    -  ANDROID_WINDOW -
+ASensorEventQueue_setEventRate             ANDROID iii   -  ANDROID_WINDOW -
+ASensorEventQueue_registerSensor           ANDROID iiii  -  ANDROID_WINDOW -
+ASensorEventQueue_hasEvents                ANDROID i     -  ANDROID_WINDOW -
+ASensorEventQueue_getEvents                ANDROID iii   -  ANDROID_WINDOW -
+ASensorEventQueue_requestAdditionalInfoEvents ANDROID ii -  ANDROID_WINDOW -
+ASensor_getName                            ANDROID i     -  ANDROID_WINDOW -
+ASensor_getVendor                          ANDROID i     -  ANDROID_WINDOW -
+ASensor_getType                            ANDROID i     -  ANDROID_WINDOW -
+ASensor_getResolution                      ANDROID i     -  ANDROID_WINDOW -
+ASensor_getMinDelay                        ANDROID i     -  ANDROID_WINDOW -
+ASensor_getFifoMaxEventCount               ANDROID i     -  ANDROID_WINDOW -
+ASensor_getFifoReservedEventCount          ANDROID i     -  ANDROID_WINDOW -
+ASensor_getStringType                      ANDROID i     -  ANDROID_WINDOW -
+ASensor_getReportingMode                   ANDROID i     -  ANDROID_WINDOW -
+ASensor_isWakeUpSensor                     ANDROID i     -  ANDROID_WINDOW -
+ASensor_getHandle                          ANDROID i     -  ANDROID_WINDOW -
 # AConfiguration: enough for native_app_glue's print_cur_config + games
 # querying density/orientation. fromAssetManager is a stub (no APK
 # assets under the emulator); getters return sane defaults.

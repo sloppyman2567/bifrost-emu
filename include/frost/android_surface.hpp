@@ -20,6 +20,11 @@
 //   - glue threads block in our ALooper_pollAll thunk, which reports
 //     readiness of registered fds (real ::poll on the resolved HOST fd —
 //     guest pipes are real host pipes) and input-queue attachments;
+//   - loopers are per guest thread (AOSP `Looper::getForThread` is
+//     thread-local); each looper also carries that thread's
+//     AChoreographer frame callbacks, dispatched on a 60 Hz
+//     CLOCK_MONOTONIC tick from inside the owning thread's poll;
+//   - ASensorManager reports a device with no sensors.
 //   - SDL events are translated to AMotionEvent/AKeyEvent objects stored
 //     host-side; AInputQueue_getEvent hands out stable guest handles and
 //     the AMotionEvent_*/AKeyEvent_* getters read them back.
@@ -31,6 +36,7 @@
 #include <cstdlib>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -55,6 +61,12 @@ public:
     static constexpr uint64_t kLooperBase = 0xA90001000000ULL;
     static constexpr uint64_t kQueueBase  = 0xA90002000000ULL;
     static constexpr uint64_t kEventBase  = 0xA90003000000ULL;
+    // 0xA90004… is the fake AConfiguration handle (display_thunk.cpp).
+    static constexpr uint64_t kChoreographerBase = 0xA90005000000ULL;
+    static constexpr uint64_t kSensorManager     = 0xA90006000001ULL;
+    static constexpr uint64_t kSensorQueueBase   = 0xA90007000000ULL;
+    // Host frame clock for AChoreographer (no display refresh query yet).
+    static constexpr int64_t kVsyncPeriodNs = 16666667;
 
     // Borrow-CPU guest function runner (installed by the Emulator after
     // thunk init). Runs fn on `cpu` with x0..x7 = iargs and returns x0.
@@ -181,28 +193,56 @@ public:
     static bool is_queue(uint64_t h) {
         return h == (kQueueBase | 1);
     }
-    // Looper handles: singleton looper.
-    uint64_t looper_handle() const { return kLooperBase | 1; }
-    static bool is_looper(uint64_t h) { return h == (kLooperBase | 1); }
     static bool is_event(uint64_t h) {
         return h >= kEventBase && h < kEventBase + 1024 * 16;
     }
 
     // ── Looper registry (thunk API) ────────────────────────────────────
-    // ALooper_addFd semantics. Returns 1 on success.
+    // One looper per guest thread, keyed by CPU::tid (a monotonic counter,
+    // never reused within a process). Loopers live until process exit;
+    // ALooper_acquire/release are not reference-counted.
+    static bool is_looper_handle(uint64_t h) {
+        return (h & ~0xFFFFFFULL) == kLooperBase && (h & 0xFFFFFF) != 0;
+    }
+    // ALooper_prepare: the calling thread's looper, created on first use.
+    // opts bit 0 = ALOOPER_PREPARE_ALLOW_NON_CALLBACKS.
+    uint64_t looper_prepare(int tid, int opts);
+    // ALooper_forThread: the calling thread's looper, or 0.
+    uint64_t looper_for_thread(int tid);
+    // ALooper_addFd (AOSP Looper::addFd rules): returns 1, or -1 for a bad
+    // looper/fd, a NULL callback on a looper without ALLOW_NON_CALLBACKS,
+    // or a NULL callback with ident < 0.
     int looper_add_fd(uint64_t looper, int fd, int ident, int events,
                       uint64_t callback /*guest fn*/, void* data);
     int looper_remove_fd(uint64_t looper, int fd);
-    // ALooper_wake: unblock a poll in progress.
+    // ALooper_wake: unblock a poll in progress on that looper.
     void looper_wake(uint64_t looper);
-    // Shared implementation of pollOnce/pollAll. `dispatch_callbacks`
-    // false (pollOnce-with-callback semantics are handled by the caller):
-    // returns ident ≥ 0 and fills out_fd/out_events/out_data, or a
-    // negative ALOOPER_POLL_* code. Callback-mode registrations are
-    // dispatched internally (guest fn via runner) and reported as
-    // ALOOPER_POLL_CALLBACK (-2) by pollOnce / skipped by pollAll.
+    // ALooper_pollOnce/pollAll on the calling thread's looper
+    // (ALOOPER_POLL_ERROR when it has none). Returns ident >= 0 and fills
+    // out_fd/out_events/out_data, or a negative ALOOPER_POLL_* code.
+    // Callbacks (fd, input queue, choreographer) run via the runner;
+    // pollOnce then reports ALOOPER_POLL_CALLBACK (-2) and pollAll keeps
+    // waiting. A callback returning 0 unregisters its fd.
     int looper_poll(arm64emu::CPU& cpu, int timeout_ms, int* out_fd, int* out_events,
-                     void** out_data, bool dispatch_callbacks);
+                     void** out_data, bool poll_all);
+
+    // ── AChoreographer (thunk API) ─────────────────────────────────────
+    // getInstance: the calling thread's choreographer, 0 without a looper.
+    uint64_t choreographer_for_thread(int tid);
+    // postFrameCallback*: queue `fn(frameTimeNanos, data)` on the
+    // choreographer's looper, due after `delay_ns`. Returns false for an
+    // unknown handle or NULL fn.
+    bool choreographer_post(uint64_t choreographer, uint64_t fn,
+                            uint64_t data, int64_t delay_ns);
+
+    // ── ASensorManager (thunk API): a device with no sensors ───────────
+    // Guest address of an empty, NULL-terminated ASensorList.
+    uint64_t sensor_empty_list();
+    // createEventQueue: 0 when the looper is NULL. The queue never has
+    // events, so it registers nothing with the looper.
+    uint64_t sensor_create_queue(uint64_t looper);
+    bool sensor_destroy_queue(uint64_t queue);
+    bool sensor_is_queue(uint64_t queue);
 
     // ── Input queue (thunk API) ────────────────────────────────────────
     // AInputQueue_attachLooper/detachLooper.
@@ -322,8 +362,27 @@ public:
         uint64_t callback = 0;   // guest fn or 0
         void* data = nullptr;
     };
-    std::vector<FdEntry> looper_fds_;
-    bool wake_flag_ = false;
+    struct FrameCallback {
+        uint64_t fn = 0;
+        uint64_t data = 0;
+        int64_t due_ns = 0;      // CLOCK_MONOTONIC
+    };
+    struct Looper {
+        int tid = 0;
+        bool allow_non_callbacks = false;
+        bool wake = false;
+        std::vector<FdEntry> fds;
+        std::vector<FrameCallback> frames;
+    };
+    std::map<uint64_t, Looper> loopers_;     // handle → looper
+    std::map<int, uint64_t> thread_loopers_; // tid → handle
+    uint64_t next_looper_id_ = 1;
+    Looper* find_looper_(uint64_t handle);   // caller holds mu_
+
+    // ── Sensors ────────────────────────────────────────────────────────
+    uint64_t sensor_list_addr_ = 0;
+    std::map<uint64_t, uint64_t> sensor_queues_;  // queue → looper
+    uint64_t next_sensor_queue_ = 1;
 
     // ── Input queue ────────────────────────────────────────────────────
     struct QueueAttachment {

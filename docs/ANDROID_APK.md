@@ -170,6 +170,21 @@ The launcher invokes startup, window/input, redraw and teardown callbacks.
 It does not implement full Activity lifecycle transitions, resource-table
 resolution, Java class loading, DEX execution or Android property services.
 
+`ALooper` is per guest thread, as AOSP's `Looper::getForThread` is:
+`ALooper_forThread` returns NULL until the thread calls `ALooper_prepare`,
+`pollOnce`/`pollAll` use the calling thread's looper (`ALOOPER_POLL_ERROR`
+without one), `addFd` rejects a NULL callback unless the looper allows
+non-callback sources, and a callback returning 0 unregisters its fd.
+`AChoreographer_getInstance` returns the thread's choreographer, or NULL
+without a looper. `postFrameCallback`/`64`/`Delayed` callbacks are one-shot and
+run inside the owning thread's poll, at the first 60 Hz `CLOCK_MONOTONIC` tick
+after they fall due. They receive that tick as the frame time. Vsync callbacks
+with frame-timeline data, refresh-rate callbacks and real display timing are
+not implemented. The sensor manager reports a device with no sensors: an
+empty list, NULL default sensors, and event queues that never have events.
+Enabling a sensor fails with `BAD_VALUE`, and direct channels are not
+exported.
+
 Asset file open/read/seek/length/buffer/close work on extracted files, capped
 at 64 MiB per asset. Directory enumeration, asset file descriptors and OBB
 mounting are not implemented. Graphics and platform exports cover the existing
@@ -212,10 +227,12 @@ loads and clean exits in the earlier adapter-only checkpoint; Unity remains
 blocked on `libmediandk.so` there. With the optional real-media bundle, that
 dependency resolves. The guest EGL adapter now exports every EGL function in
 Android's `libEGL.map.txt` that has a host equivalent, which covers all of
-Unity's EGL and GLES imports. Unity's next failure is
-`AChoreographer_getInstance`; it also imports `AChoreographer_postFrameCallback*`,
-`ALooper_forThread` and 15 `ASensor*` functions that `libandroid.so` lacks
-(observed with the default probe mode in a fresh `android-state/egl`).
+Unity's EGL and GLES imports. `libandroid.so` now also exports
+`ALooper_forThread`, `AChoreographer_*` frame callbacks and the `ASensor*`
+API, so every Unity import resolves. Loading then stops in a constructor on
+`faddp v17.2s, v17.2s, v18.2s` (vector pairwise add, unimplemented in the
+interpreter → SIGILL; observed with the default probe mode in a fresh
+`android-state/choreo-sensor`).
 The local real-media installation uses `android-state/real-media`.
 
 The earlier header checkpoint uses `android-state/bionic-headers`. The updated

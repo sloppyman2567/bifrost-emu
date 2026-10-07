@@ -77,6 +77,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   drop registration; `mprotect` keeps it. Android's `low_hints_reserved`
   places big unhinted maps above the window. Regression:
   `ctest/test_userfaultfd.c` (also runs natively as a kernel oracle).
+- libandroid `ALooper` is per guest thread (keyed by the monotonic
+  `CPU::tid`), never a process singleton: `forThread`/`pollOnce`/`pollAll`
+  use the calling thread's looper, as AOSP `Looper::getForThread` does.
+  Unity's Swappy thread polls its own looper while sensor and input
+  callbacks belong to other threads. AChoreographer frame callbacks live on
+  the looper and run from the owner's poll on a 60 Hz `CLOCK_MONOTONIC`
+  tick. ASensorManager reports no sensors. Regression:
+  `ctest_real/test_android_looper.c`.
 - The host Binder registry answers `PING_TRANSACTION` and accepts Java's
   `FLAG_COLLECT_NOTED_APP_OPS`; `BIFROST_BINDER_TRACE=1` traces transactions.
 - Framework provisioning schema 4 adds mainline APEX native libraries,
@@ -1335,8 +1343,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **294 pass /
-  0 fail / 0 skip**; `--no-jit` = 287 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **295 pass /
+  0 fail / 0 skip**; `--no-jit` = 288 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1346,8 +1354,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **294 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 289),
+  (interactive + real-world are the standard default) = **295 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 290),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

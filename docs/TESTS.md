@@ -10,6 +10,18 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### libandroid loopers, choreographer and sensors (2026-10-06)
+
+The default suite passes **295/295** (128 s), `--quick` **290/290** and
+`--no-jit` **288/288** with seven expected JIT-only skips (149 s).
+`test_android_looper` (39 checks) passes 10/10 runs in each engine; its
+frame-timing checks allow for vsync alignment. It covers per-thread loopers,
+AOSP `addFd` rules, one-shot and reposted frame callbacks, delayed
+callbacks, thread isolation, cross-thread posts and the no-sensor manager.
+`test_android_activity` now prepares its looper with `ALLOW_NON_CALLBACKS`,
+which its NULL-callback fd registration requires. SpongeBob's `libunity.so`
+resolves every import in a fresh install; ART probes were not rerun.
+
 ### userfaultfd and CMC (2026-10-06)
 
 The default suite passes **294/294** (179 s) and `--no-jit` **287/287**
