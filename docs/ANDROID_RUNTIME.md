@@ -506,3 +506,25 @@ is included in the reciprocal patch. A subsequent GDB trace confirms guest
 thread 19 in `waitForSensorService` (`libsensor.so+0x11574`), called by
 `getInstanceForPackage` (`+0x11080`); both return PCs match the actual
 library's disassembly. This service wait blocks that Unity thread.
+
+### Native sensor-service profile (2026-10-07)
+
+ActivityProbe now publishes `sensorservice` through the native Binder registry
+when `--services` is selected. Its `android.gui.SensorServer` Binder implements
+Android 15's static, dynamic and per-device list queries with empty lists, and
+the three injection-mode queries with disabled results. The descriptor,
+transaction numbers, String16 inputs and raw count/bool replies were checked
+against AOSP
+[ISensorServer.cpp](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/sensor/ISensorServer.cpp).
+This manual C++ protocol has no AIDL exception prefix. Interface tokens and
+trailing data are checked; event/direct connections, operation parameters and
+other unsupported transactions return UNKNOWN_TRANSACTION. There is no sensor
+HAL, sensor sample generation, event queue or direct channel in this profile.
+
+The probe checks registry discovery, the six query replies, rejection of an
+unsupported connection, bad interface tokens and extra query arguments. It also
+constructs the framework's real SystemSensorManager and calls through JNI into
+libsensor to query static/dynamic lists and default accelerometer/gyroscope.
+`ACTIVITY_SENSOR_SERVICE_OK` is required by the framework runner with services
+enabled. This verifies that native clients discover the service, rather than
+only finding a Java service-cache entry. See [test evidence](TESTS.md#native-sensor-service-follow-up-2026-10-07).

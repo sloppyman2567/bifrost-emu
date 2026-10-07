@@ -210,7 +210,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                    "APP_APPLICATION_STARTED", "APP_ACTIVITY_CREATED", "FRAMEWORK_OK") \
             if app_mode else ("FRAMEWORK_OK",)
         if services and main_class == "ActivityProbe":
-            markers += ("ACTIVITY_SERVICE_REGISTRATION_OK",)
+            markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK")
         if play:
             markers += ("APP_WINDOW_OPEN", "APP_AUDIO_ROUTING_READY", "APP_RESUMED", "APP_SURFACE_READY")
         # A play session ends when its window closes (exit 0) or its time runs out.

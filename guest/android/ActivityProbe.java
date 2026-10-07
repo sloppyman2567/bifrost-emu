@@ -4,7 +4,8 @@
 // Run with the Binder registry: app_process64 /system/bin ActivityProbe
 // (scripts/test_android_framework.py --services --main-class ActivityProbe).
 // Bifrost runs no system_server, so the system services the framework calls
-// are in-process Java stubs placed in ServiceManager's cache. Each stub
+// are in-process Java stubs placed in ServiceManager's cache; native-facing
+// services are also published through the Binder registry. Each stub
 // answers only the calls Activity creation makes and prints them as
 // LOCAL_SERVICE lines; any other call throws, so new framework needs fail
 // loudly instead of receiving invented defaults. Prints "FRAMEWORK_OK" once
@@ -41,6 +42,8 @@ import android.content.pm.ProviderInfo;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.hardware.Sensor;
+import android.hardware.SensorManager;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -223,6 +226,90 @@ public final class ActivityProbe {
     }
     private static final Binder audioFlinger = new AudioFlinger();
 
+    // Native libsensor uses the hand-written ISensorServer protocol, not AIDL:
+    // replies start with the count/bool itself, with no exception header.
+    // This virtual device exposes no physical, dynamic or virtual-device sensors.
+    private static final class SensorService extends Binder {
+        private static final String DESCRIPTOR = "android.gui.SensorServer";
+        SensorService() { attachInterface(null, DESCRIPTOR); }
+        @Override protected boolean onTransact(int code, Parcel data,
+                Parcel reply, int flags) throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            switch (code) {
+                case 1: // GET_SENSOR_LIST
+                case 4: // GET_DYNAMIC_SENSOR_LIST
+                case 7: // GET_RUNTIME_SENSOR_LIST
+                case 3: // ENABLE_DATA_INJECTION (query, not a setter)
+                case 8: // ENABLE_REPLAY_DATA_INJECTION
+                case 9: // ENABLE_HAL_BYPASS_REPLAY_DATA_INJECTION
+                    break;
+                default: return super.onTransact(code, data, reply, flags);
+            }
+            data.enforceInterface(DESCRIPTOR);
+            if (code == 1 || code == 4 || code == 7) {
+                if (data.dataAvail() < 4 || data.readString() == null)
+                    throw new IllegalArgumentException("missing sensor package name");
+                if (code == 7) {
+                    if (data.dataAvail() < 4)
+                        throw new IllegalArgumentException("missing sensor device id");
+                    data.readInt();
+                }
+            }
+            data.enforceNoDataAvail();
+            System.out.println("SENSOR_SERVICE_TRANSACTION " + code);
+            reply.writeInt(0); // empty list, or injection disabled
+            return true;
+        }
+    }
+    private static final Binder sensorService = new SensorService();
+    private static boolean sensorServiceRegistered;
+
+    private static void checkSensorService(Context context) throws Exception {
+        if (!sensorServiceRegistered) return;
+        IBinder binder = (IBinder) Class.forName("android.os.ServiceManager")
+                .getMethod("checkService", String.class).invoke(null, "sensorservice");
+        if (binder == null || !SensorService.DESCRIPTOR.equals(binder.getInterfaceDescriptor()))
+            throw new AssertionError("native sensor service was not published");
+        // Check the raw native reply layout, including non-default device ids.
+        for (int code : new int[] {1, 4, 7, 3, 8, 9, 2}) {
+            Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(SensorService.DESCRIPTOR);
+                if (code == 1 || code == 4 || code == 7) data.writeString(context.getPackageName());
+                if (code == 7) data.writeInt(42);
+                boolean handled = binder.transact(code, data, reply, 0);
+                if (code == 2) {
+                    if (handled) throw new AssertionError("unsupported sensor connection accepted");
+                } else if (!handled || reply.dataSize() != 4 || reply.readInt() != 0) {
+                    throw new AssertionError("invalid native sensor reply: " + code);
+                }
+            } finally { data.recycle(); reply.recycle(); }
+        }
+        for (boolean badToken : new boolean[] {true, false}) {
+            Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(badToken ? "invalid.sensor.interface" : SensorService.DESCRIPTOR);
+                if (!badToken) data.writeInt(123); // injection queries have no arguments
+                try {
+                    binder.transact(3, data, reply, 0);
+                    reply.readException(); // remote Binder serializes the rejection
+                    throw new AssertionError("malformed sensor query accepted");
+                } catch (SecurityException | android.os.BadParcelableException expected) {
+                    // Local Binder throws directly; remote Binder writes an exception.
+                }
+            } finally { data.recycle(); reply.recycle(); }
+        }
+        // This goes through SystemSensorManager JNI and the real libsensor
+        // client, so a cache-only Java service cannot make this check pass.
+        SensorManager sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
+        if (sensors == null || !sensors.getSensorList(Sensor.TYPE_ALL).isEmpty()
+                || !sensors.getDynamicSensorList(Sensor.TYPE_ALL).isEmpty()
+                || sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null
+                || sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null)
+            throw new AssertionError("sensorless device reported sensors");
+        System.out.println("ACTIVITY_SENSOR_SERVICE_OK");
+    }
+
     private static final Map<ComponentName, Integer> componentStates = new ConcurrentHashMap<>();
 
     private static ComponentName ownComponent(Object argument) {
@@ -270,6 +357,7 @@ public final class ActivityProbe {
     }
 
     private static void checkRuntimeServices(Context context, boolean resumed) throws Exception {
+        checkSensorService(context);
         ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
         info.lastTrimLevel = 99;
         info.importanceReasonCode = 99;
@@ -406,6 +494,14 @@ public final class ActivityProbe {
         int[] volumes = (int[]) Class.forName("android.media.AudioSystem")
                 .getField("DEFAULT_STREAM_VOLUME").get(null);
         int[] maxVolumes = {5, 7, 7, 15, 7, 7, 15, 7, 15, 15, 15, 15};
+        if ((Boolean) Class.forName("android.os.SystemProperties")
+                .getMethod("getBoolean", String.class, boolean.class)
+                .invoke(null, "servicemanager.ready", false)) {
+            Class.forName("android.os.ServiceManager").getMethod(
+                    "addService", String.class, IBinder.class)
+                    .invoke(null, "sensorservice", sensorService);
+            sensorServiceRegistered = true;
+        }
         if (play) {
             Method add = Class.forName("android.os.ServiceManager").getMethod(
                     "addService", String.class, IBinder.class);

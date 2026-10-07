@@ -1046,3 +1046,57 @@ acceptance check uses synthetic register inputs, does not validate accepted
 operations' numerical semantics or JIT lowering, and excludes system/runtime
 libraries and non-FP/SIMD instruction classes. Helpers and disassembly stay
 in `/tmp`; no inventory program was added to the repository.
+
+### Native sensor-service follow-up (2026-10-07)
+
+ActivityProbe's native-registry sensor service reports the sensorless virtual
+device using Android 15's ISensorServer protocol. The source contract is linked
+in [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md#native-sensor-service-profile-2026-10-07).
+Observed checks cover all six supported transaction replies (exactly one raw
+32-bit zero), a non-default device id, unsupported event-connection rejection,
+bad-token/extra-argument rejection, and real framework JNI/libsensor queries
+for static/dynamic lists and default accelerometer/gyroscope. Both engines
+reach `ACTIVITY_SENSOR_SERVICE_OK` and `FRAMEWORK_OK`; the runner now requires
+the sensor checkpoint for ActivityProbe with `--services`.
+
+The final JIT framework run passes in **9.649 s**. The first interpreter run
+passes in **17.374 s**; the final interpreter run reaches all checkpoints and
+exits zero in **19.423 s**, but the strict runner rejects the already observed
+unmapped reads at zero in workers 6 and 8. Its sensor checks pass; the complete
+interpreter probe is not claimed clean. Four neighboring Binder/registry
+fixtures pass **4/4 in each engine**. Sensor event queues, direct channels,
+operation parameters and real sensor hardware remain unsupported and untested.
+Evidence: [final JIT](../build/android-sensor-service-final-jit/jit.log),
+[final interpreter](../build/android-sensor-service-final-interp/interp.log).
+
+The installed real-audio SpongeBob run passes sensor initialization before
+and after resume, and Unity thread 19 progresses into locale and later SDK
+initialization instead of the previous sensor-service retry. It submits
+**530 frames**, then frame submission stops at **5.59 s** of rendering. It
+remains alive without a reported fatal guest exception until the intentional
+**120-second timeout**. This clears the identified sensor wait but does not
+establish continued rendering or gameplay. Missing `connectivity`/`shortcut`
+services and SQLite I/O/locking errors are recorded; none is yet confirmed as
+the cause of the remaining rendering stall. The game run started before the
+runner's new mandatory sensor marker was added; both sensor markers are
+present in its log, while the final built-in probes use the updated gate.
+Evidence: [game log](../build/android-spongebob-sensor-fixed/jit.log),
+[bounded-run result](../build/android-spongebob-sensor-fixed/jit.json).
+
+The user reports a white screen, an 8–9 GB memory spike and a newly spawned
+thread disappearing. Two short framework-test emulator processes ran alongside
+the first game validation, so aggregate process-group memory is a possible
+confounder, not a confirmed explanation. A subsequent **isolated 150-second**
+game run under GDB and `/proc` sampling peaks at **3.456 GiB RSS** and remains
+near that level through the timeout; **2.625 GiB** is resident in the guest
+reservation at the peak. The JIT reports **381.35 MiB** emitted code at the end,
+with no budget overflow. That run does not reproduce the reported 8–9 GB peak.
+All **11 captured guest exit syscalls** have status zero, including IL2CPP
+thread-pool workers. UnityMain (guest tid 19) remains present in sleeping state
+with unchanged CPU ticks in the final samples. It submits 485 frames under the
+debugger, then stops. This distinguishes normal worker exits from the render
+thread's remaining wait; it does not identify that wait's cause or exclude
+memory growth in a longer/different run. Evidence:
+[thread/cache trace](../build/android-spongebob-sensor-memory-final/jit.log),
+[memory samples](../build/android-spongebob-sensor-memory-final/memory.jsonl),
+[result](../build/android-spongebob-sensor-memory-final/jit.json).
