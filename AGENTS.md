@@ -186,6 +186,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   then pairs of Vm, Q=0 zeroes v_hi, `.1d` is RESERVED, and inputs are read
   before Vd is written (Unity runs `faddp v17.2s, v17.2s, v18.2s`).
   Regression: `ctest/jit_simd_faddp.c`.
+  Vector fixed-point SCVTF/UCVTF/FCVTZS/FCVTZU (`0 Q U 011110 immh:immb
+  11100 1 / 11111 1`, QEMU `*_vf`) are interp-only too: immh 01xx = `.s`
+  (fbits 64 − immh:immb), 1xxx = `.d` (128 − immh:immb, Q=0 reserved),
+  001x = FP16 stays UNDEF while FEAT_FP16 is not advertised. Saturate via
+  `fp_to_signed_sat`/`fp_to_unsigned_sat`. Regression:
+  `ctest/jit_simd_fixconv.c`.
   TBL/TBX all four forms
   (TBL1 0x0E000000, TBL2 0x0E002000, TBX1 0x0E001000, TBX2 0x0E003000;
   op2=bit12, L=bit13) are in interp — GCC lowers `vextq_u8` to TBL2 +
@@ -981,6 +987,10 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   the later wake on uaddr2. ART and glibc tolerate this; real per-waiter
   requeue needs movable wait records across every futex path.
   Regression: `ctest/test_futex_requeue.c`.
+- **`/dev/random` and `/dev/urandom` are host passthrough (`devfs.cpp`).**
+  Never back them with a finite buffer: guests keep the fd open and treat
+  a short read as fatal (Teeworlds `secure_random_fill`; the old 256-byte
+  memfd hit EOF minutes in). Regression: `ctest/test_dev_urandom.c`.
 - **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
   Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
@@ -1348,8 +1358,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **296 pass /
-  0 fail / 0 skip**; `--no-jit` = 289 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **298 pass /
+  0 fail / 0 skip**; `--no-jit` = 291 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1359,8 +1369,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **296 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 291),
+  (interactive + real-world are the standard default) = **298 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 293),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

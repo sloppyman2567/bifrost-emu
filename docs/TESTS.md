@@ -10,6 +10,16 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Teeworlds fixes (2026-10-07)
+
+The default suite passes **298/298** (116 s), `--quick` **293/293** and
+`--no-jit` **291/291** with seven expected JIT-only skips (145 s).
+`test_dev_urandom` and `jit_simd_fixconv` pass under the JIT and the
+interpreter; `jit_simd_fixconv` also under `BIFROST_JIT_VERIFY=1`.
+Teeworlds was run twice: one run hit the `fcvtzs` SIGILL in the map editor
+at 43 s (now fixed), the other was closed after about 2 minutes, so the
+four-minute urandom exhaustion was not reproduced in the real game.
+
 ### Vector FP pairwise ops (2026-10-06)
 
 The default suite passes **296/296** (117 s), `--quick` **291/291** and
@@ -81,6 +91,17 @@ Focused additions:
   `EACCES` for a read-only shared file, and `ENOMEM` for holes. The same
   source passes natively on the host kernel; the pre-change binary fails 8
   of 18 checks. QEMU 11.1 is not a reference (it returns `EOPNOTSUPP`).
+- `jit_simd_fixconv`: vector `SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` with
+  `#fbits` on `.2s`/`.4s`/`.2d`: truncation, saturation, NaN → 0, Q=0
+  upper-half zeroing, an in-place form and Teeworlds' `fcvtzs v31.2s,
+  v30.2s, #10`. Expected values match qemu-aarch64 11.1; the pre-change
+  binary raises SIGILL on the first check.
+- `test_dev_urandom`: one `/dev/urandom` stdio stream serves 4096 16-byte
+  `fread`s (Teeworlds' `secure_random_fill` pattern), a 1 MiB `read` is
+  complete and not zero-filled, `lseek` returns 0, writes are accepted,
+  both devices `stat` as character devices 1:9/1:8, and `/dev/random`
+  reads. Passes natively on the host kernel; the pre-change binary fails 5
+  of 12 checks.
 - `test_mem_guard`: wrapping `madvise` ranges return `EINVAL` and keep a
   mapped page above the start intact; a huge valid range still returns
   promptly. The pre-change binary fails the wrap check. QEMU passes.

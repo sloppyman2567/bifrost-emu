@@ -2340,6 +2340,61 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
+            // SCVTF/UCVTF/FCVTZS/FCVTZU (vector, fixed-point) — QEMU
+            // a64.decode *_vf: 0 Q U 011110 immh immb 111001 / 111111 Rn Rd.
+            // immh 01xx = .s (fbits = 64 - immh:immb), 1xxx = .d (fbits =
+            // 128 - immh:immb, Q=0 reserved). 001x is half precision, which
+            // needs FEAT_FP16 (not advertised), so it stays UNDEF; immh 0000
+            // is the modified-immediate group above. Teeworlds' map editor
+            // runs `fcvtzs v31.2s, v30.2s, #10`.
+            if ((op & 0x9F80E400) == 0x0F00E400
+                && (((op >> 11) & 3) == 0 || ((op >> 11) & 3) == 3)
+                && ((op >> 19) & 0xC) != 0 && (((op >> 22) & 1) == 0 || Q)) {
+                bool is_unsigned = (op >> 29) & 1;
+                bool to_int = ((op >> 11) & 3) == 3;
+                bool is_double = (op >> 22) & 1;
+                int fbits = (is_double ? 128 : 64) - static_cast<int>((op >> 16) & 0x7F);
+                int esize = is_double ? 8 : 4;
+                int elems = (Q ? 16 : 8) / esize;
+                uint8_t buf[16];
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                for (int i = 0; i < elems; i++) {
+                    if (is_double) {
+                        uint64_t v; memcpy(&v, buf + i*8, 8);
+                        if (to_int) {
+                            double f; memcpy(&f, &v, 8);
+                            double scaled = std::ldexp(f, fbits);
+                            v = is_unsigned ? fp_to_unsigned_sat(scaled, true)
+                                            : static_cast<uint64_t>(fp_to_signed_sat(scaled, true));
+                        } else {
+                            double f = is_unsigned ? static_cast<double>(v)
+                                                   : static_cast<double>(static_cast<int64_t>(v));
+                            f = std::ldexp(f, -fbits);
+                            memcpy(&v, &f, 8);
+                        }
+                        memcpy(buf + i*8, &v, 8);
+                    } else {
+                        uint32_t v; memcpy(&v, buf + i*4, 4);
+                        if (to_int) {
+                            float f; memcpy(&f, &v, 4);
+                            double scaled = std::ldexp(static_cast<double>(f), fbits);
+                            v = is_unsigned ? static_cast<uint32_t>(fp_to_unsigned_sat(scaled, false))
+                                            : static_cast<uint32_t>(fp_to_signed_sat(scaled, false));
+                        } else {
+                            float f = is_unsigned ? static_cast<float>(v)
+                                                  : static_cast<float>(static_cast<int32_t>(v));
+                            f = std::ldexp(f, -fbits);
+                            memcpy(&v, &f, 4);
+                        }
+                        memcpy(buf + i*4, &v, 4);
+                    }
+                }
+                memcpy(&cpu.v_lo[rd], buf, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
             // SSHR (vector, immediate, signed) — mask 0xBF00FC00 excludes Q.
             // Encoding: Q 0 1 1 0 1 1 1 1 0 immh immb 0 1 0 0 0 0 Rn Rd
             // Shift = (2 * esize_bits) - immh:immb (same as USHR, but

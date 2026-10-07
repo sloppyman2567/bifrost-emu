@@ -296,6 +296,7 @@ UNIT_TESTS=(
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
     "simd_faddp|ctest/jit_simd_faddp.elf||5|14/14 checks passed"
+    "simd_fixconv|ctest/jit_simd_fixconv.elf||5|11/11 checks passed"
     "simd_addlv|ctest/jit_simd_addlv.elf||5|checks passed"
     "simd_pairlong|ctest/jit_simd_pairlong.elf||5|3072 checks passed"
     "simd_pmull|ctest/jit_simd_pmull.elf||15|6144 checks passed"
@@ -355,6 +356,9 @@ UNIT_TESTS=(
     # MADV_REMOVE: hole punch for writable shared files, EINVAL for private
     # anonymous (ART's CMC arena release depends on it), EACCES, ENOMEM.
     "test_madv_remove|ctest/test_madv_remove.elf||10|ALL PASS"
+    # /dev/urandom and /dev/random never run dry: one open stream reads
+    # far past 256 bytes (Teeworlds' secure_random_fill traps on a short read).
+    "test_dev_urandom|ctest/test_dev_urandom.elf||10|ALL PASS"
     # userfaultfd SIGBUS mode as ART's CMC GC uses it, including
     # MREMAP_DONTUNMAP and registered ranges on both sides of 4 GiB.
     "test_userfaultfd|ctest/test_userfaultfd.elf||10|ALL PASS"

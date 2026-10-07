@@ -12,6 +12,23 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Teeworlds: /dev/urandom no longer runs dry, vector fixed-point conversions (2026-10-07)
+
+- `/dev/random` and `/dev/urandom` pass through to the host character
+  devices, like `/dev/null` and `/dev/zero`. They were memfds holding 256
+  random bytes, so a guest that keeps the device open reached EOF: a
+  Teeworlds client draws an 8-byte token seed per network client every
+  16 s and hit its short-read trap in `secure_random_fill` after about four
+  minutes. Reads of any size now return fresh bytes, `fstat` reports the
+  1:8/1:9 character device, `lseek` returns 0 and writes are accepted.
+  Regression: `ctest/test_dev_urandom.c`.
+- The interpreter implements the vector fixed-point conversions
+  `SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` (`.2s`/`.4s`/`.2d`, `#fbits`), decoded
+  as QEMU's `*_vf` patterns. Dragging a quad point in the Teeworlds map
+  editor ran `fcvtzs v31.2s, v30.2s, #10` and raised SIGILL. Half precision
+  (FEAT_FP16, not advertised) and `.2d` with Q=0 stay UNDEF. The JIT
+  reaches it through CALL_INTERP. Regression: `ctest/jit_simd_fixconv.c`.
+
 ### libandroid loopers, choreographer and sensors (2026-10-06)
 
 - `ALooper` is per guest thread, following AOSP `Looper::getForThread`:
