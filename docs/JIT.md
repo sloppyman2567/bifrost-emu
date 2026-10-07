@@ -58,7 +58,7 @@ AArch64 word
 | Emit x86_64 for IR operations | `src/jit/frostjit.cpp`, `jit_codegen_*.cpp` |
 | Allocate host registers and spill vregs | `src/jit/x86_regalloc.cpp` |
 | Dispatch blocks and promote hot regions | `src/jit/jit_dispatch.cpp`, `jit_tier2.cpp` |
-| Define reference instruction semantics | `src/interp/interpreter.cpp`, `interp_fp.cpp`, `interp_branch.cpp` |
+| Define reference instruction semantics | `src/interp/interpreter.cpp`, `interp_branch.cpp`, `interp_fp.cpp` (dispatch) with `interp_simd_*.cpp` and `interp_fp_scalar.cpp` |
 
 Tier-2 compiles region IR through the normal IR code generator, with its own
 region liveness, loop, and exit handling. An IR operation that works in a
@@ -134,7 +134,9 @@ BIFROST_FWD_RANGES=0x400000-0x480000,0x500000-0x500100 ./bifrost-emu app.elf
   The matching `rt_sigreturn` prints the resume pc and every general
   register and SP that the handler or ucontext changed.
 - `BIFROST_BLOCK_TRACE=lo-hi[,...]` makes blocks starting in those ranges
-  log every cold and chained entry: pc, whether FWD ran, x0-x7, sp and lr.
+  log every cold and chained entry: pc, whether FWD ran, NZCV and the raw
+  pstate (bit 27 is the JIT's carry-convention bit), x0-x7, sp and lr. A
+  flag change between two consecutive entries points at the first block.
   Self-loop iterations re-enter past the prologue and are not logged.
 - `BIFROST_FWD_RANGES=lo-hi[,...]` restricts FWD to blocks starting in those
   ranges, including Tier-2 regions that otherwise force it on.

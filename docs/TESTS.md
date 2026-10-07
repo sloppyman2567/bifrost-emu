@@ -10,6 +10,17 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### FP/SIMD interpreter split, NaN rules, MSR NZCV (2026-10-07)
+
+The default suite passes **300/300** (159 s), `--quick` **295/295** and
+`--no-jit` **293/293** with seven expected JIT-only skips (145 s).
+A 300k random AdvSIMD/FP encoding differential (scratch harness, not in the
+suite) matches the pre-split interpreter on every QEMU-legal encoding except
+two-NaN payload choices, which now follow the ARM ARM; it also showed that
+some reserved encodings run instead of raising SIGILL, and two
+QEMU-legal encodings (0x4ED970E7, 0x4EC17117) leave host addresses in the
+destination (open, see AGENTS.md).
+
 ### Teeworlds fixes (2026-10-07)
 
 The default suite passes **298/298** (116 s), `--quick` **293/293** and
@@ -91,6 +102,14 @@ Focused additions:
   `EACCES` for a read-only shared file, and `ENOMEM` for holes. The same
   source passes natively on the host kernel; the pre-change binary fails 8
   of 18 checks. QEMU 11.1 is not a reference (it returns `EOPNOTSUPP`).
+- `jit_simd_fp_nan` (`INTERP` row, run with `--no-jit`): vector FP NaN
+  choice and SNaN priority, +qNaN for invalid operations, FMAX/FMIN signed
+  zero, FMAXNM/FMINNM with a quiet NaN, fused FMLA, FMLS negation, FMULX
+  inf*0, FABD NaN sign, FADDP pairs, two `.2d` cases. 14/14 under
+  qemu-aarch64 and the fixed interpreter; the old interpreter fails 11.
+- `jit_msr_nzcv`: `msr nzcv, xN` followed in the same block by a write to
+  xN, read back with `mrs` and with `cset` after a pending `cmp`; 64000
+  checks. The old JIT fails 30005; qemu-aarch64 and both engines pass.
 - `jit_simd_fixconv`: vector `SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` with
   `#fbits` on `.2s`/`.4s`/`.2d`: truncation, saturation, NaN → 0, Q=0
   upper-half zeroing, an in-place form and Teeworlds' `fcvtzs v31.2s,

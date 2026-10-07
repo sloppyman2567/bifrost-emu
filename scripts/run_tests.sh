@@ -297,6 +297,12 @@ UNIT_TESTS=(
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
     "simd_faddp|ctest/jit_simd_faddp.elf||5|14/14 checks passed"
     "simd_fixconv|ctest/jit_simd_fixconv.elf||5|11/11 checks passed"
+    # Vector FP NaN/zero rules (ARM FPProcessNaNs, fused FMLA). The JIT's
+    # native vector FP still follows x86 NaN rules, so interpreter only.
+    "simd_fp_nan|ctest/jit_simd_fp_nan.elf||5|14/14 checks passed|INTERP"
+    # msr nzcv reads its source vreg, not a cpu.regs slot the optimizer
+    # skipped storing because the block overwrites the register next.
+    "msr_nzcv|ctest/jit_msr_nzcv.elf||10|64000/64000 checks passed"
     "simd_addlv|ctest/jit_simd_addlv.elf||5|checks passed"
     "simd_pairlong|ctest/jit_simd_pairlong.elf||5|3072 checks passed"
     "simd_pmull|ctest/jit_simd_pmull.elf||15|6144 checks passed"
@@ -980,6 +986,11 @@ run_test() {
     # This fixture specifically checks region codegen, which is opt-in.
     [[ "$name" == tier2_smov ]] && test_env+=(BIFROST_TIER2=1)
     [[ "$name" == android_service_manager ]] && test_runner=("$EMU" "${EMU_FLAGS[@]}" --android-services "${test_command[@]}")
+    # INTERP rows check interpreter semantics the JIT does not have yet
+    # (see the row comment); they run under --no-jit in every mode.
+    if [ "$mode" = "INTERP" ] && [[ " ${EMU_FLAGS[*]} " != *" --no-jit "* ]]; then
+        test_runner=("$EMU" "${EMU_FLAGS[@]}" --no-jit "${test_command[@]}")
+    fi
     if [ "$mode" = "HOST_JIT" ]; then
         # Host harnesses invoke the requested emulator themselves. This
         # zstd harness checks both engines, so run it once in the JIT suite.

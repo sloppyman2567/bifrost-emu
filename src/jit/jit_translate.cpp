@@ -51,6 +51,8 @@ static bool instr_will_call_interp(const DecodedInst& d) {
     if ((d.cls == InstClass::SIMD_DP || d.cls == InstClass::FP_SCALAR) &&
         classify_native_simd(d.raw) != NativeSimdKind::None) return false;
     switch (d.cls) {
+        case InstClass::MSR: case InstClass::MSR_SYS:
+            return d.sys_crn == 7;  // DC/IC → CALL_INTERP (ir_translate.cpp)
         case InstClass::SIMD_DP: {
             // Native SIMD_DP ops are classified by the generated table
             // (arm64emu::simd::classify, from tools/opgen/simd_dp.txt).

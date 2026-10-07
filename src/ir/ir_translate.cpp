@@ -873,6 +873,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint16_t r = g_alloc.alloc();
                 emit_mrs(block, r, sys_idx, cur_pc);
                 store_arm_reg(block, d.rt, r);
+            } else if (d.sys_crn == 7) {
+                // Cache maintenance (DC/IC): the interpreter's hook reads the
+                // address from cpu.regs[rt]. CALL_INTERP is an optimize_ir
+                // barrier, so rt's STORE_REG stays even when a later
+                // instruction overwrites rt; an MSR op would let it go.
+                block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
             } else {
                 uint16_t v = load_arm_reg(block, d.rt);
                 emit_msr(block, v, sys_idx, cur_pc);

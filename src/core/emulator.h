@@ -82,6 +82,7 @@ class DynamicLinker;
 // shared crash path: one short [crash] line always, detail behind flags.
 void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst);
 // ── Emulator ──────────────────────────────────────────────────────────
+struct SimdDpFields;
 class Emulator {
 public:
     Emulator();
@@ -718,11 +719,20 @@ private:
     // The signature mirrors execute() (inst + next_pc + cpu + d) so the
     // dispatcher can call them with the same locals it already has.
     //   execute_fp     — FMOV_VD1, FMOV_RVD1, SIMD_LD1, SIMD_ST1,
-    //                    SIMD_DP, FP_SCALAR  (src/interp/interp_fp.cpp)
+    //                    SIMD_DP, FP_SCALAR  (src/interp/interp_fp.cpp
+    //                    dispatches to interp_simd_*.cpp / interp_fp_scalar.cpp)
     //   execute_branch — B, BL, Bcond, CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET,
     //                    SVC_IMM, BRK_IMM, HLT_IMM, CLREX_INST, HINT,
     //                    MRS_SYS, MSR_SYS    (src/interp/interp_branch.cpp)
     void execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
+    // execute_fp's groups (src/interp/interp_simd_*.cpp, interp_fp_scalar.cpp).
+    // SIMD_DP groups return true when they handled the instruction and
+    // run in a fixed order because their encodings overlap.
+    bool exec_simd_three(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_misc(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_imm(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_arith(const SimdDpFields& f, CPU& cpu);
+    void exec_fp_scalar(const DecodedInst& d, CPU& cpu);
     void execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);

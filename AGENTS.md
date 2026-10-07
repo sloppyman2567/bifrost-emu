@@ -155,7 +155,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   those blocks. Each trace line is ONE `fprintf` (threads interleave
   otherwise). ART relocates its boot image every run, so fixed ranges do not
   carry across Android runs.
-- Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
+- Unhandled SIMD_DP ops in the interpreter (`interp_fp.cpp` and its
+  `interp_simd_*.cpp` groups) throw `DecodeError` (→ SIGILL),
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP
   (0x2E20AC00) sub3_noq groups are covered. The pairwise max/min family
@@ -170,8 +171,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   size-0-only case label silently DecodeErrors (SIGILL in interp-only,
   SIGABRT via JIT CALL_INTERP). Q=0 pairwise SEMANTICS: BOTH sources
   always contribute — Vd low 8 bytes = {pairwise(Vn), pairwise(Vm)},
-  the Vm half is NOT zeroed (real-ARM; the sub3_noq UMINP handler at
-  interp_fp.cpp ~2649 always did this, and `test_simd_saddw_uminp` Q=0
+  the Vm half is NOT zeroed (real-ARM; the sub3_noq UMINP handler in
+  interp_simd_three.cpp always did this, and `test_simd_saddw_uminp` Q=0
   checks depend on it). The interp 0x20A400 handler originally gated the
   Vm half on Q (Q=0 → {Vn pairs, 0,0,0,0}) and the first JIT attempt
   copied that; a punpcklqdq merge for Q=0 ALSO breaks it (pushes Vm's
@@ -471,7 +472,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   The interpreter's FP-source fcvtzs also needs an explicit `std::isnan` →
   0 (C++ `static_cast<int32_t>(NaN)` is UB and yields INT32_MIN on x86).
   **FIXED (2026-08-18):** the interpreter's FP→int conversions were REWRITTEN
-  to route through two file-scope helpers in `interp_fp.cpp`,
+  to route through two helpers in `interp_fp_common.hpp`,
   `fp_to_signed_sat()`/`fp_to_unsigned_sat()` (is_64bit param), used by ALL
   five conversion sites: the rounding-mode scalar family (FCVTNS/PS/MS/AS/ZU,
   rmode bits[20:19], is_away bit18, U bit16 — the lambdas now return the
@@ -987,6 +988,36 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   the later wake on uaddr2. ART and glibc tolerate this; real per-waiter
   requeue needs movable wait records across every futex path.
   Regression: `ctest/test_futex_requeue.c`.
+- **Interpreter FP/SIMD layout (2026-10-07).** `interp_fp.cpp` dispatches;
+  SIMD_DP runs four groups in a fixed order (`interp_simd_three.cpp`,
+  `interp_simd_misc.cpp`, `interp_simd_imm.cpp`, `interp_simd_arith.cpp`)
+  because encodings overlap: the first group returning true wins, as the old
+  single if-chain did. FP_SCALAR is `interp_fp_scalar.cpp`; shared helpers
+  and `SimdDpFields` live in `interp_fp_common.hpp`. Add a handler to the
+  group that already matches its neighbours and keep it before any looser
+  mask it collides with.
+- **Vector FP lanes use ARM rules, not host arithmetic.** The vector
+  three-same FP group and FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP compute through
+  `arm_fp_binop`/`arm_fp_muladd` (`interp_fp_common.hpp`, ARM ARM
+  FPProcessNaNs/FPMulAdd/FPMax/FPMaxNum/FPMulX, FPCR.DN=0): first signalling
+  then first quiet NaN, +qNaN default, ±0 ordering, fused FMLA/FMLS with
+  FMLS negating its multiplicand. Plain `a + b` let GCC's operand order pick
+  the NaN payload, which changed when the file was split. Known gaps:
+  FP_SCALAR still uses host arithmetic, and the JIT's native vector FP uses
+  x86 NaN rules (about 14% of a NaN-heavy fuzz differs from QEMU), so
+  `jit_simd_fp_nan` is an `INTERP` row (`run_tests.sh` runs it with
+  `--no-jit`). The interpreter also executes some reserved encodings
+  (`size=11` three-different forms, `.1d` vector FP) instead of UNDEF, and a
+  few QEMU-legal ones (e.g. 0x4ED970E7, 0x4EC17117) leak host addresses into
+  the destination register; both are open.
+- **IR ops whose codegen runs the interpreter must be `CALL_INTERP`.**
+  `optimize_ir` drops an ARM register's STORE_REG when a later instruction
+  in the block overwrites it, unless something in between is a barrier. An
+  op that carries its operand as a vreg but whose codegen calls the
+  interpreter reads a stale `cpu.regs` slot. MSR NZCV did this (`msr nzcv,
+  x2; add x2, ...` set NZCV from the old x2); it now writes pstate bits
+  31:28 from `src1` natively. DC/IC (`sys`, CRn=7) emit `CALL_INTERP` from
+  the translator. Regression: `ctest/jit_msr_nzcv.c`.
 - **`/dev/random` and `/dev/urandom` are host passthrough (`devfs.cpp`).**
   Never back them with a finite buffer: guests keep the fd open and treat
   a short read as fatal (Teeworlds `secure_random_fill`; the old 256-byte
@@ -1066,7 +1097,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   77 = skip when SDL/GL/display unavailable)
 - SIMD_DP decode on the JIT side is table-generated. `tools/opgen/simd_dp.txt`
   is the single source of truth for which SIMD_DP op is native and its
-  sub-opcode; the interpreter (`interp_fp.cpp`) stays an independent,
+  sub-opcode; the interpreter (`interp_fp.cpp` + `interp_simd_*.cpp`) stays an independent,
   hand-written implementation so interp-vs-JIT divergence stays detectable.
   When adding/modifying a SIMD_DP op: edit the spec, run `make opgen`
   (regenerates `include/opgen_simd.hpp`), then `make opgen-check`
@@ -1358,8 +1389,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **298 pass /
-  0 fail / 0 skip**; `--no-jit` = 291 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **300 pass /
+  0 fail / 0 skip**; `--no-jit` = 293 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1369,8 +1400,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **298 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 293),
+  (interactive + real-world are the standard default) = **300 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 295),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

@@ -780,21 +780,30 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             uint8_t crn = (sys >> 12) & 0xF;
             uint8_t crm = (sys >> 8) & 0xF;
             uint8_t op2 = (sys >> 4) & 0x7;
-            int s = ensure_vreg(inst.src1, RAX);
-            int32_t off = -1;
-            if (crn == 7) {
-                // Cache maintenance (IC IVAU / DC et al): the interp
-                // MSR_SYS hook invalidates JIT translations for the
-                // published line. Route there instead of NOP-ing.
-                emit_call_interp(inst.arm_pc, false);
+            if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
+                // NZCV comes from src1. An interpreter fallback reads
+                // cpu.regs[rt] instead, which is stale once optimize_ir
+                // drops rt's STORE_REG because a later instruction in the
+                // block overwrites rt (`msr nzcv, x2; add x2, x1, #248`
+                // set NZCV from the old x2). Like the interpreter, only
+                // bits 31:28 change, so the carry-convention bit 27 stays.
+                clobber_flags();  // pending host flags land in pstate first
+                flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
+                load_vreg_to_reg(RAX, inst.src1);
+                emit_byte(0x25); emit_u32(0xF0000000u);       // and eax, 0xF0000000
+                emit_load32(RCX, CPU_REG, PSTATE_OFF);
+                emit_byte(0x81); emit_byte(modrm(3, 4, RCX));  // and ecx, 0x0FFFFFFF
+                emit_u32(0x0FFFFFFFu);
+                emit_or_reg(RCX, RAX);
+                emit_store32(CPU_REG, PSTATE_OFF, RCX);
                 return false;
             }
+            // Cache maintenance (crn 7) never reaches here: the translator
+            // emits CALL_INTERP so the interpreter hook sees rt in cpu.regs.
+            int s = ensure_vreg(inst.src1, RAX);
+            int32_t off = -1;
             if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
                 off = 808;  // TPIDR_EL0
-            } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
-                // NZCV — fall back to interpreter.
-                emit_call_interp(inst.arm_pc, false);
-                return false;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
                 off = FPCR_OFF;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {

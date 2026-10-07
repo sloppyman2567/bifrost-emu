@@ -12,6 +12,30 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### FP/SIMD interpreter split, ARM NaN rules, JIT MSR NZCV (2026-10-07)
+
+- `interp_fp.cpp` (4951 lines) is split into a dispatcher plus
+  `interp_simd_three.cpp`, `interp_simd_misc.cpp`, `interp_simd_imm.cpp`,
+  `interp_simd_arith.cpp` (SIMD_DP groups, run in the old order) and
+  `interp_fp_scalar.cpp`, with shared helpers in `interp_fp_common.hpp`.
+  A 300k random-encoding differential against the pre-split binary shows no
+  change on QEMU-legal encodings except NaN payloads (next item).
+- Vector FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FMULX/FABD/FMLA/FMLS and
+  the FP pairwise ops follow the ARM ARM in the interpreter: first
+  signalling, then first quiet NaN; +qNaN for invalid operations; +0 above
+  -0; FMAXNM/FMINNM prefer a number to a lone quiet NaN; FMLA/FMLS are
+  fused. Host arithmetic let GCC's operand order choose the NaN, which the
+  split changed. On a NaN-heavy fuzz of these ops the interpreter now
+  matches qemu-aarch64 on 106084/106084 samples (was 86819).
+  Regression: `ctest/jit_simd_fp_nan.c` (interpreter-only `INTERP` row;
+  the JIT's native vector FP still uses x86 NaN rules).
+- JIT `msr nzcv, xN` ran through the interpreter, which read `cpu.regs[N]`.
+  `optimize_ir` had dropped that store when the next instruction rewrote
+  xN, so NZCV took the old value. It is now native from the IR operand; DC
+  and IC become `CALL_INTERP` for the same reason. Regression:
+  `ctest/jit_msr_nzcv.c` (the old binary fails 30005/64000 checks).
+- `BIFROST_BLOCK_TRACE` lines include NZCV and the raw pstate.
+
 ### Teeworlds: /dev/urandom no longer runs dry, vector fixed-point conversions (2026-10-07)
 
 - `/dev/random` and `/dev/urandom` pass through to the host character
