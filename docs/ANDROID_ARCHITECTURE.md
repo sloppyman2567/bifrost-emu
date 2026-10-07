@@ -177,15 +177,15 @@ requirements remain to be established by dependency analysis and execution.
 ## Next bounded task
 
 The explicit bootstrap, signed native APK launcher, guest shim DSOs and native
-service registry now work. The next managed-runtime gate requires obtaining
-and auditing one matching ART/libcore artifact set, then executing a DEX-to-JNI
-fixture with GC and thread attachment. The separate `tools/android_art.py`
-provisioner now pins the API-35 ARM64 revision-2 image and its 309-file runtime
-inventory. The real-ART launcher loads ART but its VM-creation probe encounters
-unsupported UADALP; DEX/JNI execution has not passed. See
-[the reproducible ART checkpoint](ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
-The next gate is resolving this measured instruction failure and completing VM
-creation, followed by reference/GC/thread checks. Native lifecycle/resource coverage still
-needs expansion beyond the documented subset. The bootstrap APEX is a
+service registry now work. The same-image ART/libcore DEX/JNI fixture passes,
+and the framework probe uses the boot image's CMC collector. The installed
+SpongeBob probe now executes the real Application, launcher `onCreate` and
+IL2CPP JNI startup in both engines. See
+[the installed-app checkpoint](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
+The next bounded gate is Activity start/resume and a real drawable window,
+tracing the missing framework and native services on that path. Initialization
+alone does not establish content-provider, GC/thread or gameplay completeness.
+Native lifecycle/resource coverage still needs expansion beyond the documented
+subset. The bootstrap APEX is a
 native test dependency, not a complete API 35 platform installation. Do not
 modify the Tier-2 policy merely to make Android startup appear faster.

@@ -2,6 +2,8 @@
 // without accidentally using host glibc headers or its startup objects.
 typedef unsigned long pthread_t;
 extern char* getenv(const char*);
+extern int strcmp(const char*, const char*);
+extern int __system_property_get(const char*, char*);
 extern int open(const char*, int, ...);
 extern int close(int);
 extern int access(const char*, int);
@@ -68,6 +70,14 @@ static void* worker(void* unused) {
 int main(int argc, char** argv, char** envp) {
     (void)argv; (void)envp;
     if (argc != 1 || constructed != 41 || tls_value != 17) return 1;
+    char ready[92] = {0};
+    const char* expected_ready = getenv("BIFROST_ANDROID_SERVICES_TEST") ? "true" : "false";
+    if (__system_property_get("servicemanager.ready", ready) <= 0 ||
+        strcmp(ready, expected_ready)) {
+        printf("service-manager readiness: got '%s', expected '%s'\n", ready, expected_ready);
+        return 10;
+    }
+    printf("Bionic: service-manager readiness %s passed\n", ready);
     if (getauxval(6) != 4096 || getpagesize() != 4096 || !getauxval(7)) return 2;
     printf("Bionic: constructors and auxv passed (page=%d)\n", getpagesize());
     int stack = check_main_stack();

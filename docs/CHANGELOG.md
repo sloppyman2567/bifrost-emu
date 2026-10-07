@@ -12,6 +12,22 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Installed managed Activity creation (2026-10-07)
+
+- The existing Activity probe now loads installed managed APKs through the real
+  framework class loader, Application and launcher `onCreate`. SpongeBob's
+  CleverTap Activity and IL2CPP JNI startup pass in both engines; rendering,
+  input, provider installation and Activity resume are not covered.
+- The strict local Activity controller tracks manifest/requested orientation.
+  The native Binder registry publishes `servicemanager.ready` only when
+  selected, allowing native libbinder startup to proceed without a debug override.
+- `test_android_framework.py --installed-app` verifies installed content and
+  derives sorted split paths. App success requires app-specific checkpoints,
+  preventing an older built-in-only probe from reporting APK startup success.
+- The Bionic bootstrap tests services on/off across all execution modes and
+  ASLR layouts, explicitly forwards its test environment into the guest, and
+  requires the Binder/prctl checks to execute.
+
 ### JIT host-fault recovery (2026-10-07)
 
 - Scalar loads/stores, single-vector accesses and native LSE atomics use

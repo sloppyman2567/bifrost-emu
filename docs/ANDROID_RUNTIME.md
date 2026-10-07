@@ -5,7 +5,9 @@ linker and execute Bionic-linked programs. Signed APK installation and native-on
 NativeActivity launch now work through this runtime; see [ANDROID_APK.md](ANDROID_APK.md).
 A separate same-image ART/libcore provisioner and DEX/JNI bootstrap now create
 a real ART VM and pass their JNI fixture; see the bounded checkpoint below.
-SpongeBob's managed Activity remains unsupported.
+The separate installed-app Activity probe now reaches SpongeBob's real
+`CleverTapOverrideActivity.onCreate` and IL2CPP's JNI startup in both engines;
+the normal APK runner still supports only NativeActivity launchers.
 The APK native-load diagnostic now checks real packaged dependencies separately:
 19/21 SpongeBob libraries complete loading/cleanup in all three execution modes.
 Firebase Messaging's direct probe loads successfully, then double-destroys a
@@ -16,9 +18,10 @@ An optional checksum-pinned real Media NDK bundle now supplies the genuine
 library and its isolated native dependencies. Real metadata operations pass
 the signed APK gate in all modes. With this bundle, the full EGL adapter and
 the per-thread looper, choreographer and sensor exports, every Unity import
-resolves and all 21 libraries load in the native probe. JNI startup, media
-services/decoding and managed (ART-backed) Activity startup are still
-unimplemented. See the APK guide for provisioning and namespace boundaries.
+resolves and all 21 libraries load in the native probe. That diagnostic does
+not invoke JNI. The framework app probe below invokes the game's startup;
+media services/decoding and playable managed windows remain unsupported.
+See the APK guide for provisioning and namespace boundaries.
 
 ## Android 15 framework probe
 
@@ -141,6 +144,48 @@ The `activity` and `activity_task` stubs return only the provider and Activity
 controller. Window reports no navigation bar and animator scale 1.0. Activity
 resume, window attachment, surfaces, drawing, input and real system services
 remain unimplemented.
+
+### Installed-app creation checkpoint (2026-10-07)
+
+The same Activity probe can load a verified installed managed APK. It constructs
+`LoadedApk` from the manifest, selects the ARM64 and feature splits using the
+installer's actual filenames, creates the Application and calls its `onCreate`,
+then attaches and creates the real launcher Activity. The runner requires
+`APP_CLASSLOADER_OK`, `APP_APPLICATION_STARTED`, `APP_ACTIVITY_CREATED` and
+`FRAMEWORK_OK` plus exit zero. `--installed-app` checks the existing installer
+integrity gate; `--app` remains available for a manually prepared code directory.
+
+After compiling ActivityProbe as above:
+
+```bash
+python3 scripts/test_android_framework.py --services \
+  --probe build/activity-probe/classes.dex --main-class ActivityProbe \
+  --installed-app android-state/choreo-sensor/com.tiltingpoint.spongebob \
+  --mode jit --timeout 150 --output build/android-spongebob-results
+```
+
+SpongeBob 5.11.5 now reaches its real CleverTap Application and Activity,
+Unity's Java initialization and IL2CPP's `JNI_OnLoad` in JIT and interpreter
+modes. The first fatal framework call was `getRequestedOrientation`; the local
+Activity controller now tracks each token's manifest orientation and subsequent
+requests. Its get/set behavior follows Android 15's
+[ActivityClientController](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/wm/ActivityClientController.java).
+The built-in probe checks a requested-orientation round trip.
+
+Native libbinder then waited indefinitely for `servicemanager.ready`. Bifrost
+now publishes it as true only when its Binder registry is selected by
+`--android-services`, and false otherwise, matching libbinder's
+[readiness gate](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/binder/IServiceManager.cpp).
+The Bionic gate reads the property with services both on and off and verifies
+the Binder device and prctl path in all three execution modes and both ASLR
+layouts. Its test environment is explicitly forwarded into the guest.
+
+This probe exits immediately after Activity creation. It does not install
+manifest content providers, start/resume the Activity, attach a drawable window,
+or deliver input. Logs still contain missing user/clipboard services, SQLite
+locking errors and missing SurfaceFlingerAIDL transaction failures. Those are
+remaining compatibility gaps, not evidence of a playable game. Normal
+`android_package.py run` keeps its managed-launcher rejection.
 
 With CMC the boot image loads. Without userfaultfd ART falls back to CC,
 rejects the image (`ValidateOatFile found read barrier state mismatch`) and
@@ -293,9 +338,9 @@ report is not a compatibility verdict or signature verification.
 
 SpongeBob 5.11.5 requires a managed `CleverTapOverrideActivity` launcher and
 Android framework services despite using IL2CPP for its engine. All 21 packaged
-ARM64 libraries have 16 KiB alignment. The next major gate is guest ART/libcore
-with DEX-to-JNI calls, callbacks, reference lifetimes, GC and thread suspension;
-the native checkpoint does not establish those capabilities.
+ARM64 libraries have 16 KiB alignment. Its installed-app creation probe above
+now executes DEX and JNI startup; the native-load diagnostic alone does not
+establish those capabilities or gameplay compatibility.
 
 ## Additional verification
 

@@ -10,6 +10,36 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### SpongeBob managed Activity creation (2026-10-07)
+
+The installed SpongeBob 5.11.5 app probe reaches `APP_CLASSLOADER_OK`,
+`APP_APPLICATION_STARTED`, `APP_ACTIVITY_CREATED` and `FRAMEWORK_OK`, exiting
+zero in both engines (26.2 s JIT, 79.5 s interpreter in the reviewed runs).
+The real launcher is `com.clevertap.unity.CleverTapOverrideActivity`; logs also
+show native `libmain.so` loading and IL2CPP `JNI_OnLoad`. No readiness-property
+override is needed after the fix. See [the runnable command and bounds](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
+
+The original first fatal call was the strict local Activity controller's
+`getRequestedOrientation`. Its manifest initialization and request tracking
+were checked against AOSP Android 15, and the built-in Activity probe checks
+the get/set round trip in both engines (7.9 s JIT, 19.1 s interpreter).
+Native libbinder's subsequent wait for `servicemanager.ready` was reproduced
+as a 90 s timeout, isolated with a property override, and checked against AOSP's
+readiness gate. The runtime now reflects whether the registry is selected.
+All **12/12** Bionic variants pass: services off/on × fixed/random ASLR ×
+JIT/interpreter/Tier-2. Binder device/prctl checks are required, rather than
+being skipped when the host test environment is not forwarded into the guest.
+The neighboring Binder/syscall gate passes **5/5**.
+An older built-in-only ActivityProbe DEX still exits zero with `FRAMEWORK_OK`,
+but the installed-app runner correctly rejects it for missing app checkpoints.
+
+These are initialization and regression observations on this Linux host, not
+gameplay or cross-distribution validation. The probe exits after `onCreate`.
+Content providers, Activity start/resume, drawable window attachment and input
+are untested. Logs still report missing user/clipboard services, SQLite locking
+errors and SurfaceFlingerAIDL transaction failures. The normal APK runner still
+rejects managed launchers; only this diagnostic path executes them.
+
 ### JIT host-fault recovery (2026-10-07)
 
 The final full JIT suite passes **303/303**, zero failures/skips (116 s),

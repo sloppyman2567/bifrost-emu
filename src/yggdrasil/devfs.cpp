@@ -89,8 +89,12 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         if ((flags & O_ACCMODE) != O_RDONLY) { *err_out = -EACCES; return nullptr; }
         std::call_once(property_area_once_, [this] {
             size_t skipped = 0;
-            property_area_ = build_property_area(
-                load_android_properties(sandbox_root_path()), &skipped);
+            auto properties = load_android_properties(sandbox_root_path());
+            // Native libbinder waits for init's readiness property before
+            // contacting handle 0. Our selected registry is ready immediately;
+            // a root's build.prop must not advertise one when it is disabled.
+            properties["servicemanager.ready"] = android_services_ ? "true" : "false";
+            property_area_ = build_property_area(properties, &skipped);
             if (skipped)
                 fprintf(stderr, "[android] %zu system properties did not fit\n", skipped);
         });

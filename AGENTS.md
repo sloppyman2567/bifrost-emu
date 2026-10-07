@@ -94,6 +94,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `guest/android/ActivityProbe.java` (real Activity through `onCreate`;
   runner `--services --main-class ActivityProbe`). Its service stubs are
   strict: add an answer per new framework call, never a blanket default.
+- `test_android_framework.py --installed-app <package state>` verifies the
+  installer content and selects real split filenames for ActivityProbe app mode.
+  SpongeBob reaches its real launcher `onCreate` and IL2CPP JNI startup in both
+  engines; the probe exits there, without providers/resume/windows/input.
+  `servicemanager.ready` reflects `--android-services` so native libbinder does
+  not wait for a registry that is already ready. Orientation is per Activity
+  token and starts with the manifest value; do not replace it with a constant.
 
 ## Local Contracts
 

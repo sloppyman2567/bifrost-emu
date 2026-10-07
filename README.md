@@ -235,28 +235,22 @@ contracts, 256 SDL3 teardown cycles and a complete signed APK gate; these are
 not a new full-suite or gameplay-performance claim. See the
 [window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md) for coverage and limits.
 
-An experimental same-image ART/libcore root and DEX/JNI fixture can now be
-provisioned separately. ART loads, but VM creation reaches unsupported UADALP;
-managed execution has not passed. See [the ART checkpoint](docs/ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
-Full Bionic/platform compatibility and ART execution remain planned for v2.0;
-see the [roadmap](roadmap.md). Managed APK launchers fail explicitly before
-execution, including SpongeBob's CleverTap Activity.
-The separate native-load probe completes 19/21 SpongeBob library checks in all
-three execution modes, including IL2CPP. Unity requires the optional Media NDK
-bundle below, and the
-managed launcher still needs ART/framework startup. Firebase Messaging's
-shutdown abort is traced to shared-mutex cleanup when probed first; an explicit
-Firebase App preload gives a clean exit in all three modes and QEMU. The probe
-reports loading and shutdown separately and supports ordered `--preload` options.
-Guest adapters now build
-with automatically fetched official AOSP headers, Bionic variadic logging and
-real guest zlib; see the APK guide for dependency pins and verification limits.
-An optional real ARM64 Media NDK bundle (`tools/android_media.py`, APK installer
-`--media-root`) loads in an isolated Bionic namespace. Its metadata operations
-pass the signed APK gate in all modes. It resolves Unity's Media NDK dependency,
-and the EGL adapter now covers all of Unity's EGL imports; the next loader
-blocker is `libandroid.so`'s `AChoreographer`/`ASensor` API. Android media services and
-decoding remain unimplemented.
+The same-image ART/libcore fixture creates a real VM and passes DEX/JNI checks
+in both engines. A framework probe creates a real Activity, and the separate
+installed-app probe now reaches SpongeBob's CleverTap Activity `onCreate` and
+IL2CPP JNI startup in JIT and interpreter modes. See the
+[installed-app checkpoint](docs/ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
+It exits after creation; Activity resume, drawable window attachment and input
+remain unsupported. The normal APK runner still rejects managed launchers.
+
+The separate native-load probe loads all 21 SpongeBob libraries with the real
+Media NDK bundle and an explicit Firebase App preload. It reports loading and
+shutdown separately and does not invoke JNI entrypoints. Guest adapters use
+official AOSP headers, real guest zlib, and EGL/looper/choreographer/sensor
+exports covering Unity's imports. See the [APK guide](docs/ANDROID_APK.md) for
+dependency pins and verification limits. The optional ARM64 Media NDK bundle
+(`tools/android_media.py`, installer `--media-root`) supports metadata operations;
+Android media services and decoding remain unimplemented.
 The native-bridge adapter below is a separate integration interface, not a
 complete Android runtime.
 

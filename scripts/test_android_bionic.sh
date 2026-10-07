@@ -23,13 +23,22 @@ for aslr in fixed random; do
         [[ "$mode" != interp ]] || args=(--no-jit)
         tier=0
         [[ "$mode" != tier2 ]] || tier=1
-        log="$task_tmp/$aslr-$mode.log"
-        env -u BIFROST_ROOT -u BIFROST_NO_ASLR BIFROST_TIER2="$tier" \
-            BIFROST_ANDROID_DEVICE_TEST=1 BIFROST_TIER2_HITS=32 "${settings[@]}" timeout -s KILL 30 \
-            "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
-            /data/local/tmp/bootstrap > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
-        rg -q '^android_bionic_bootstrap: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
-        if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
-        echo "Bionic bootstrap: $aslr $mode passed"
+        for services in off on; do
+            service_args=()
+            service_env=(BIFROST_GUEST_ENV=BIFROST_ANDROID_DEVICE_TEST=1)
+            if [[ "$services" == on ]]; then
+                service_args=(--android-services)
+                service_env=('BIFROST_GUEST_ENV=BIFROST_ANDROID_DEVICE_TEST=1;BIFROST_ANDROID_SERVICES_TEST=1')
+            fi
+            log="$task_tmp/$aslr-$mode-$services.log"
+            env -u BIFROST_ROOT -u BIFROST_NO_ASLR -u BIFROST_ANDROID_SERVICES_TEST BIFROST_TIER2="$tier" \
+                BIFROST_ANDROID_DEVICE_TEST=1 BIFROST_TIER2_HITS=32 "${settings[@]}" "${service_env[@]}" timeout -s KILL 30 \
+                "$emu" "${args[@]}" "${service_args[@]}" --android-runtime --rootfs "$runtime" \
+                /data/local/tmp/bootstrap > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
+            rg -q '^android_bionic_bootstrap: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+            rg -q '^Bionic: Binder device and prctl passed$' "$log" || { cat "$log" >&2; exit 1; }
+            if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
+            echo "Bionic bootstrap: $aslr $mode services=$services passed"
+        done
     done
 done

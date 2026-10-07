@@ -149,9 +149,14 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                     child.wait()
                 logd.close()
         text = log_path.read_bytes().decode(errors="replace")
-        passed = child.returncode == 0 and not timed_out and "FRAMEWORK_OK" in text
+        app_mode = bool(probe_args and probe_args[0] == "--app")
+        markers = ("APP_CLASSLOADER_OK", "APP_APPLICATION_STARTED", "APP_ACTIVITY_CREATED", "FRAMEWORK_OK") \
+            if app_mode else ("FRAMEWORK_OK",)
+        passed = child.returncode == 0 and not timed_out and all(marker in text for marker in markers)
         result = {"mode": mode, "passed": passed, "returncode": child.returncode,
-                  "timed_out": timed_out, "elapsed_seconds": round(time.monotonic() - started, 3)}
+                  "timed_out": timed_out, "elapsed_seconds": round(time.monotonic() - started, 3),
+                  "checkpoint": "app_on_create" if app_mode else "framework",
+                  "reached_checkpoints": [marker for marker in markers if marker in text]}
         (output / (mode + ".json")).write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result))
         return passed
@@ -174,8 +179,34 @@ if __name__ == "__main__":
     parser.add_argument("--library", type=Path, action="append", default=[], help="Copy a probe JNI library into /data/local/tmp")
     parser.add_argument("--main-class", default="FrameworkProbe", help="Probe class to run (e.g. ActivityProbe)")
     parser.add_argument("--app", type=Path, help="Installed /data/app/<package>-<id> directory to copy into the root")
+    parser.add_argument("--installed-app", type=Path,
+                        help="Verified android_package.py package state for ActivityProbe app mode")
     parser.add_argument("--probe-arg", action="append", default=[], help="Argument passed to the probe's main (repeatable)")
     args = parser.parse_args()
+    if args.installed_app:
+        if args.app or args.probe_arg or args.main_class != "ActivityProbe":
+            parser.error("--installed-app requires --main-class ActivityProbe and cannot combine with --app/--probe-arg")
+        from android_package import PACKAGE, app_lock, verify_installed
+        state = args.installed_app.resolve()
+        try:
+            with app_lock(state):
+                package = json.loads((state / "package.json").read_text())
+                if not PACKAGE.fullmatch(package["package"]):
+                    raise ValueError("Invalid installed package name")
+                code, root = verify_installed(package["package"], state, package)
+                if package["launcher"]["kind"] != "managed_activity":
+                    raise ValueError("ActivityProbe app mode requires a managed Activity")
+                args.app = root / code.lstrip("/")
+                # The installer retains all splits as split-<index>.apk.
+                # LoadedApk expects split names sorted, paired with their paths.
+                splits = sorted((p["split"], f"split-{i}.apk")
+                                for i, p in enumerate(package["packages"])
+                                if p["split"] and (not p["abis"] or "arm64-v8a" in p["abis"]))
+                args.probe_arg = ["--app", package["package"], code,
+                                  package["launcher"]["class"],
+                                  *(name + "=" + path for name, path in splits)]
+        except (OSError, ValueError, KeyError) as error:
+            parser.error(str(error))
     if args.app and not (args.app / "base.apk").is_file():
         parser.error("--app must be an installed code directory containing base.apk")
     if not args.main_class.isidentifier():

@@ -54,8 +54,9 @@ an `EINVAL` extended error. Handle 0 is pinned while its manager endpoint is ope
 Each endpoint is limited to 1,024 objects/handles and each parcel to 64 objects.
 
 The opt-in service-manager subset below supports named native endpoints. Full
-Android servicemanager/framework compatibility and SpongeBob startup remain
-unverified.
+Android servicemanager/framework compatibility remains incomplete. The separate
+[SpongeBob Activity creation probe](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07)
+passes through `onCreate`; it does not exercise playable window attachment.
 
 ## Native service-manager subset
 
@@ -64,6 +65,8 @@ Without this flag, the existing guest context-manager contract is unchanged.
 `/dev/hwbinder` and `/dev/vndbinder` retain independent raw contexts. Select
 the mode before opening a Binder endpoint; an explicit guest context-manager
 registration is rejected while the host manager is selected.
+The Android property area reports `servicemanager.ready=true` in this mode and
+`false` without it, so native libbinder can contact the selected registry.
 
 The wire subset follows Android 15's kernel-Binder
 [IServiceManager AIDL](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/binder/aidl/android/os/IServiceManager.aidl)

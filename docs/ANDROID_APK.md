@@ -196,10 +196,14 @@ compatibility. Missing adapter exports fail explicitly.
 PackageManager or other framework service is supplied by this checkpoint.
 
 The user-provided SpongeBob 5.11.5 set installs successfully: nine signed APKs
-and 21 ARM64 libraries. Launch rejects
+and 21 ARM64 libraries. The normal APK runner rejects
 `com.clevertap.unity.CleverTapOverrideActivity` before executing the emulator
-because it requires ART/framework startup. Installation is not game-play
-compatibility evidence. The native probe now completes loading and process
+because that runner has no managed Activity lifecycle. A separate
+[installed-app framework probe](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07)
+now reaches the real launcher's `onCreate`, including IL2CPP JNI startup, in
+both engines. It exits after creation and does not draw or accept input.
+Installation is not game-play compatibility evidence. The earlier native probe
+completed loading and process
 cleanup for 19/21 libraries under JIT, interpreter and opt-in Tier 2, including
 `libmain`, `libil2cpp`, Firebase Analytics/App/AppCheck/Crashlytics and the native
 Crashlytics libraries. Unity reaches a missing `libmediandk.so` dependency.
