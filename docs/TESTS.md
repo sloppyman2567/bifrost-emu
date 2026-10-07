@@ -1005,3 +1005,44 @@ The real-audio installed SpongeBob rerun still reaches its resumed service
 checkpoint and renders 580 frames before the previously observed native SIGILL
 blocker. Evidence: `build/android-spongebob-sigtimedwait-fixed/jit.log` and
 `jit.json`. This follow-up fixes signal waiting, not that native instruction.
+
+### SpongeBob reciprocal-family follow-up (2026-10-07)
+
+`jit_simd_recip` passes **45/45** under QEMU cortex-a53, JIT and interpreter,
+also JIT differential replay with memory/IR validation and Tier-2 threshold 32.
+Its fixed QEMU hashes compare 61,440 instruction executions' full vector
+results and FPSR across 20 forms, three destination aliases and eight FPCR
+settings. Those settings cover all four rounding modes and selected FZ/DN
+combinations; they do not exhaust every FPCR combination. Explicit cases
+cover Unity's exact opcode, zero/infinity, estimate precision, fused
+cancellation, tiny odd inputs, final scaling without intermediate overflow,
+and 12 reserved/unsupported encodings. Enabled FP exception traps and newer
+AFP/RPRES behavior are excluded. The neighboring FP/SIMD/Android selection
+passes **37/37** in each engine.
+
+The real installed game no longer dies at FRECPS. It submits **540 frames**
+and stays alive until the intentional 120-second timeout, with no reported
+fatal exception or missing instruction. The user observes a white screen
+after the startup animation; frame submission stops after about 5.7 seconds
+of rendering. Consequently the runner's `passed: true` is only its bounded
+startup/rendering gate, not evidence of continued rendering or gameplay.
+GDB then confirms guest thread 19 sleeping in
+`libsensor.so+0x11574` (`waitForSensorService`), called from `+0x11080`
+(`getInstanceForPackage`). Both offsets match the actual image's disassembly.
+This is the confirmed service wait blocking that thread. The observed ~3.9 GiB RSS alone does not
+establish a leak.
+Evidence: [log](../build/android-spongebob-recip-fixed/jit.log),
+[result](../build/android-spongebob-recip-fixed/jit.json),
+[wait stack](../build/android-spongebob-sensor-wait-trace/jit.log).
+
+An isolated temporary host harness checked decoder/interpreter acceptance of
+**102,783 unique FP/SIMD words** disassembled from all **21 installed native
+libraries**. It rejects 19 encodings in Unity: AESD (two unique words), AESMC
+(one), FCVTN `.4h,.4s` (13), SQDMULH `.8h` (one), and immediate UQSHL
+`.4h`/`.8h` (two). These appear in real code sequences; they are candidates
+for further coverage, not proof the current scene executes them. Across the
+binary, the rejected forms occur 14/13/107/1/2 times respectively. This
+acceptance check uses synthetic register inputs, does not validate accepted
+operations' numerical semantics or JIT lowering, and excludes system/runtime
+libraries and non-FP/SIMD instruction classes. Helpers and disassembly stay
+in `/tmp`; no inventory program was added to the repository.

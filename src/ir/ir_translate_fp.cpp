@@ -71,6 +71,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // Falls back to CALL_INTERP for ops we don't handle natively.
         case InstClass::FP_SCALAR: {
             uint32_t op = d.raw;
+            if (fp_decode::is_reciprocal(op)) {
+                block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
+                return true;
+            }
             uint8_t ftype = (op >> 22) & 3;
             uint8_t rd = op & 0x1F;
             uint8_t rn = (op >> 5) & 0x1F;

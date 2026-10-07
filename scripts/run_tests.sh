@@ -295,6 +295,7 @@ UNIT_TESTS=(
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
+    "simd_recip|ctest/jit_simd_recip.elf||10|45/45 checks passed"
     "simd_faddp|ctest/jit_simd_faddp.elf||5|14/14 checks passed"
     "simd_fixconv|ctest/jit_simd_fixconv.elf||5|11/11 checks passed"
     # Vector FP NaN/zero rules (ARM FPProcessNaNs, fused FMLA). The JIT's

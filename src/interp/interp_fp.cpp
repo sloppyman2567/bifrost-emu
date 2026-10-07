@@ -275,6 +275,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // (bits[28:24]=0b01110) but have specific high-bit patterns
             // that aren't covered by the regular sub-dispatch.
             if (exec_crypto(op, cpu)) return;
+            if (exec_reciprocal(op, cpu)) return;
             if (exec_simd_three(f, cpu)) return;
             if (exec_simd_misc(f, cpu)) return;
             if (exec_simd_imm(f, cpu)) return;

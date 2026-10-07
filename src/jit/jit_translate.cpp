@@ -66,6 +66,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         }
         case InstClass::FP_SCALAR: {
             uint32_t op = d.raw;
+            if (fp_decode::is_reciprocal(op)) return true;
             uint8_t ftype = (op >> 22) & 3;
             // Mirror ir_translate_fp.cpp's FP_SCALAR handling: nearly all
             // scalar FP ops translate to native IR (FP_BINOP/FP_UNOP/FP_CMP/

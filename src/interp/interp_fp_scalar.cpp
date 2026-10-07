@@ -18,6 +18,7 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // this is safe. Without this, SHA1/SHA256 schedule-update
     // instructions would be silently NOP'd, producing wrong hashes.
     if (exec_crypto(op, cpu)) return;
+    if (exec_reciprocal(op, cpu)) return;
     // ── SHL (scalar, immediate): Dd, Dn, #imm ─────────────────
     // Encoding: 0x5F005400 (mask 0xFF00FC00).
     // silently NOP'd, breaking GCC -O2's vectorized TLS init

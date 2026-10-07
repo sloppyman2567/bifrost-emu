@@ -490,3 +490,19 @@ SIGILL. SQLite locking errors are another separate remaining gap. Neither
 animation nor passing service checks establishes interactive gameplay.
 The play runner now also recognizes Java `FATAL EXCEPTION` lines as guest
 failures, including the two earlier automatic-exit logs.
+
+The reciprocal-family follow-up clears the FRECPS native SIGILL (see
+[JIT.md](JIT.md#reciprocal-estimates-and-refinement-spongebob-2026-10-07)).
+The installed game now remains alive for the 120-second bounded run and
+submits 540 frames, but the user reports a white screen after animation and
+frame submission stops. `sensorservice` is absent from the native Binder
+registry, and Unity's native thread repeatedly waits for it. The existing
+libandroid ASensorManager thunk's empty sensor list does not satisfy calls
+through the framework's native SensorManager. An absent service differs
+from a present service reporting an empty list: AOSP
+[SensorManager](https://android.googlesource.com/platform/frameworks/native/+/master/libs/sensor/SensorManager.cpp)
+waits for the service during construction. No sensor-service implementation
+is included in the reciprocal patch. A subsequent GDB trace confirms guest
+thread 19 in `waitForSensorService` (`libsensor.so+0x11574`), called by
+`getInstanceForPackage` (`+0x11080`); both return PCs match the actual
+library's disassembly. This service wait blocks that Unity thread.

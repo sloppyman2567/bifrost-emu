@@ -37,6 +37,48 @@ atomics, and guest SIGILL for an illegal opcode. Use its `no-trap` argument
 for JIT differential replay, which does not deliver the fixture's guest
 signal handler.
 
+### Reciprocal estimates and refinement (SpongeBob, 2026-10-07)
+
+The installed Unity library's first missing reciprocal step was
+`libunity.so+0x4f6414`, `frecps v3.4s,v16.4s,v18.4s` (`0x4e32fe03`).
+Disassembly identifies the complete sequence: FRECPE, FRECPS, FMUL,
+FRECPS, FMUL. The RX mapping starts at ELF vaddr `0x4df000`, explaining
+the crash report's anonymous-mapping-relative offset `0x17414`.
+Unity contains 1,114 FRECPE, 3,607 FRECPS, 401 FRSQRTE and 1,125 FRSQRTS
+instructions, in `.2s` and `.4s` forms. Static presence is not execution proof.
+
+All four operations now share scalar S/D and vector `.2s`/`.4s`/`.2d`
+interpreter semantics. JIT and Tier-2 use CALL_INTERP for this family.
+The shared decoder predicate precedes scalar integer conversions: their
+old mask discarded bit16 and misclassified scalar FRECPE/FRSQRTE as
+SCVTF/UCVTF. Half-precision arithmetic and reserved Q=0,D forms trap;
+FEAT_FP16, AFP and RPRES are not advertised.
+
+FRECPS computes fused `2-a*b`; FRSQRTS computes fused `(3-a*b)/2`.
+FRSQRTS halves an exactly scalable operand before FMA, preventing
+intermediate overflow and a second rounding. Two tiny odd significands
+use the directed-rounding result around 1.5. Source registers are
+snapshotted before destination writes; scalar and Q=0 unused bits clear.
+Infinity times zero returns 2 or 1.5 without invalid. NaN processing
+negates the first operand's sign before selecting/quieting its payload.
+
+FRECPE/FRSQRTE use Arm's specified eight-bit estimate, replacing full host
+division/sqrt. FPCR rounding, default-NaN and flush-to-zero controls are
+honored, and cumulative exceptions update FPSR while preserving the host
+floating-point environment. Enabled synchronous FP exception traps remain
+outside the emulator's existing FP exception model.
+
+The contracts were checked against Arm's
+[FRECPS](https://www.scs.stanford.edu/~zyedidia/arm64/frecps_advsimd.html),
+[FRSQRTS](https://www.scs.stanford.edu/~zyedidia/arm64/frsqrts_advsimd.html),
+[FRECPE](https://www.scs.stanford.edu/~zyedidia/arm64/frecpe_advsimd.html),
+[FRSQRTE](https://www.scs.stanford.edu/~zyedidia/arm64/frsqrte_advsimd.html)
+and their linked shared pseudocode. QEMU's
+[fused-step helpers](https://github.com/qemu/qemu/blob/master/target/arm/tcg/helper-a64.c)
+and [estimate helpers](https://github.com/qemu/qemu/blob/master/target/arm/tcg/vfp_helper.c)
+provided an independent implementation comparison. `jit_simd_recip` checks
+45 assertions, including result/FPSR corpus hashes from QEMU cortex-a53.
+
 ## Translation path
 
 ```text

@@ -10,6 +10,8 @@
 #include "interp/interp_crypto.hpp"
 #include "opgen_fpfixed.hpp"
 #include <cmath>
+#include <cfenv>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -251,6 +253,171 @@ template <typename T> static inline T arm_fp_muladd(T addend, T a, T b) {
         return fp_is_qnan(addend) && inf_zero ? fp_default_nan<T>() : nan;
     if (inf_zero) return fp_default_nan<T>();
     return arm_fp_result(std::fma(a, b, addend));
+}
+// Reciprocal estimate/refinement instructions use FPCR, rather than the
+// ambient host rounding mode. Keep the host environment private to this
+// instruction and accumulate its exceptions in the guest FPSR.
+struct RecipFpEnv {
+    CPU& cpu;
+    fenv_t saved;
+    explicit RecipFpEnv(CPU& c) : cpu(c) {
+        feholdexcept(&saved);
+        const int modes[] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+        fesetround(modes[(cpu.fpcr >> 22) & 3]);
+    }
+    ~RecipFpEnv() {
+        int flags = fetestexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW |
+                                 FE_UNDERFLOW | FE_INEXACT);
+        if (flags & FE_INVALID) cpu.fpsr |= 1u;
+        if (flags & FE_DIVBYZERO) cpu.fpsr |= 2u;
+        if (flags & FE_OVERFLOW) cpu.fpsr |= 4u;
+        if (flags & FE_UNDERFLOW) cpu.fpsr |= 8u;
+        if (flags & FE_INEXACT) cpu.fpsr |= 16u;
+        fesetenv(&saved);
+    }
+};
+template <typename T> static inline T recip_input(CPU& cpu, T value) {
+    if ((cpu.fpcr & (1u << 24)) && std::fpclassify(value) == FP_SUBNORMAL) {
+        cpu.fpsr |= 1u << 7; // FPCR.FZ: input denormal cumulative exception
+        return fp_from<T>(fp_bits(value) & FpTraits<T>::kSign);
+    }
+    return value;
+}
+// FPRecipStepFused / FPRSqrtStepFused: negate the FIRST operand before
+// NaN processing (including its NaN sign), and special-case infinity*zero.
+template <typename T> static inline T arm_recip_step(CPU& cpu, T a, T b, bool sqrt) {
+    a = recip_input(cpu, fp_neg(a));
+    b = recip_input(cpu, b);
+    T nan;
+    if (arm_process_nans(a, b, nan)) {
+        if (fp_is_snan(a) || fp_is_snan(b)) cpu.fpsr |= 1u;
+        return cpu.fpcr & (1u << 25) ? fp_default_nan<T>() : nan;
+    }
+    if ((std::isinf(a) && b == 0) || (a == 0 && std::isinf(b)))
+        return sqrt ? T(1.5) : T(2);
+    if (!sqrt) return std::fma(a, b, T(2));
+    if (std::isinf(a) || std::isinf(b)) return a * b;
+    // Halve an operand EXACTLY before the fused add, not a rounded result:
+    // fma(a,b,3)/2 can overflow even when the final result is representable.
+    // A normal with exponent >= 2, or an even significand, halves exactly.
+    constexpr int fraction = sizeof(T) == 4 ? 23 : 52;
+    constexpr uint64_t exp_mask = sizeof(T) == 4 ? 255 : 2047;
+    auto halves_exactly = [](T v) {
+        auto bits = fp_bits(v);
+        return ((bits >> fraction) & exp_mask) >= 2 || !(bits & 1);
+    };
+    if (halves_exactly(a)) return std::fma(std::ldexp(a, -1), b, T(1.5));
+    if (halves_exactly(b)) return std::fma(a, std::ldexp(b, -1), T(1.5));
+    // Both operands are tiny odd significands: their nonzero product is
+    // much smaller than an ulp of 1.5, but still affects directed rounding.
+    cpu.fpsr |= 16u;
+    const bool negative = ((fp_bits(a) ^ fp_bits(b)) & FpTraits<T>::kSign) != 0;
+    const unsigned mode = (cpu.fpcr >> 22) & 3;
+    if (!negative && mode == 1)
+        return std::nextafter(T(1.5), std::numeric_limits<T>::infinity());
+    if (negative && (mode == 2 || mode == 3)) return std::nextafter(T(1.5), T(0));
+    return T(1.5);
+}
+// Arm RecipEstimate / RecipSqrtEstimate have a specified eight-bit
+// estimate. Full host division/sqrt is more precise, but is NOT this ISA.
+template <typename T> static inline T arm_recip_estimate(CPU& cpu, T input, bool sqrt) {
+    using U = typename FpTraits<T>::U;
+    constexpr int fraction = sizeof(T) == 4 ? 23 : 52;
+    constexpr int max_exp = sizeof(T) == 4 ? 255 : 2047;
+    constexpr int bias = max_exp / 2;
+    const T x = recip_input(cpu, input);
+    const U bits = fp_bits(x), sign = bits & FpTraits<T>::kSign;
+    const U abs = bits & ~FpTraits<T>::kSign;
+    const U infinity = U(max_exp) << fraction;
+    if (std::isnan(x)) {
+        if (fp_is_snan(x)) cpu.fpsr |= 1u;
+        return cpu.fpcr & (1u << 25) ? fp_default_nan<T>() : fp_quiet(x);
+    }
+    if (abs == 0) { cpu.fpsr |= 2u; return fp_from<T>(sign | infinity); }
+    if (sqrt && sign) { cpu.fpsr |= 1u; return fp_default_nan<T>(); }
+    if (abs == infinity) return fp_from<T>(sign);
+    int exponent = static_cast<int>(abs >> fraction);
+    uint64_t frac = uint64_t(abs & ((U(1) << fraction) - 1)) << (52 - fraction);
+    if (!sqrt) {
+        if (abs < (U(1) << (fraction - 2))) {
+            cpu.fpsr |= 4u | 16u;
+            unsigned mode = (cpu.fpcr >> 22) & 3;
+            bool to_inf = mode == 0 || (mode == 1 && !sign) || (mode == 2 && sign);
+            return fp_from<T>(sign | (to_inf ? infinity : infinity - 1));
+        }
+        if (exponent >= max_exp - 2 && (cpu.fpcr & (1u << 24))) {
+            cpu.fpsr |= 8u;
+            return fp_from<T>(sign);
+        }
+        if (exponent == 0) {
+            if (!(frac & (1ull << 51))) { exponent = -1; frac <<= 2; }
+            else frac <<= 1;
+        }
+        unsigned scaled = 256 | ((frac >> 44) & 255);
+        unsigned estimate = (((1u << 19) / (2 * scaled + 1)) + 1) >> 1;
+        exponent = max_exp - 2 - exponent;
+        frac = uint64_t(estimate & 255) << 44;
+        if (exponent == 0) frac = (frac >> 1) | (1ull << 51);
+        else if (exponent == -1) { frac = (frac >> 2) | (1ull << 50); exponent = 0; }
+    } else {
+        if (exponent == 0) {
+            while (!(frac & (1ull << 51))) { frac <<= 1; --exponent; }
+            frac = (frac & ((1ull << 51) - 1)) << 1;
+        }
+        unsigned scaled = (exponent & 1) ? 128 | ((frac >> 45) & 127)
+                                         : 256 | ((frac >> 44) & 255);
+        // The integer inequality is the exact midpoint rule from Arm's
+        // pseudocode. Build its small lookup table once, shared by lanes.
+        static const auto estimates = [] {
+            std::array<uint16_t, 384> table{};
+            for (unsigned i = 128; i < 512; ++i) {
+                unsigned a = i < 256 ? 2 * i + 1 : 2 * ((i & ~1u) + 1);
+                unsigned b = 512;
+                while (a * (b + 1) * (b + 1) < (1u << 28)) ++b;
+                table[i - 128] = (b + 1) / 2;
+            }
+            return table;
+        }();
+        exponent = (3 * bias - 1 - exponent) / 2;
+        frac = uint64_t(estimates[scaled - 128] & 255) << 44;
+    }
+    return fp_from<T>(sign | (U(exponent) << fraction) | U(frac >> (52 - fraction)));
+}
+// Shared dispatch for scalar/vector S/D forms. Half precision and Q=0,D
+// remain UNDEFINED; FEAT_FP16/AFP/RPRES are not advertised by this profile.
+static inline bool exec_reciprocal(uint32_t op, CPU& cpu) {
+    if (!fp_decode::is_reciprocal(op)) return false;
+    if (fp_decode::is_reciprocal_fp16(op)) throw DecodeError(cpu.pc, op);
+    const uint32_t step = op & 0xBFA0FC00;
+    const bool is_step = step == 0x0E20FC00 || step == 0x0EA0FC00 ||
+                         step == 0x1E20FC00 || step == 0x1EA0FC00;
+    const bool scalar = (op >> 28) & 1;
+    const bool q = (op >> 30) & 1;
+    const bool dbl = (op >> 22) & 1;
+    if (!scalar && dbl && !q) throw DecodeError(cpu.pc, op);
+    const bool sqrt = is_step ? ((op >> 23) & 1) : ((op >> 29) & 1);
+    const unsigned rd = op & 31, rn = (op >> 5) & 31, rm = (op >> 16) & 31;
+    const unsigned bytes = dbl ? 8 : 4;
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / bytes;
+    uint8_t a[16], b[16], result[16]{};
+    memcpy(a, &cpu.v_lo[rn], 8); memcpy(a + 8, &cpu.v_hi[rn], 8);
+    memcpy(b, &cpu.v_lo[rm], 8); memcpy(b + 8, &cpu.v_hi[rm], 8);
+    RecipFpEnv env(cpu);
+    for (unsigned i = 0; i < lanes; ++i) {
+        if (dbl) {
+            double x, y, r;
+            memcpy(&x, a + i * 8, 8); memcpy(&y, b + i * 8, 8);
+            r = is_step ? arm_recip_step(cpu, x, y, sqrt) : arm_recip_estimate(cpu, x, sqrt);
+            memcpy(result + i * 8, &r, 8);
+        } else {
+            float x, y, r;
+            memcpy(&x, a + i * 4, 4); memcpy(&y, b + i * 4, 4);
+            r = is_step ? arm_recip_step(cpu, x, y, sqrt) : arm_recip_estimate(cpu, x, sqrt);
+            memcpy(result + i * 4, &r, 4);
+        }
+    }
+    memcpy(&cpu.v_lo[rd], result, 8); memcpy(&cpu.v_hi[rd], result + 8, 8);
+    return true;
 }
 // ── Integer saturation helpers (SQADD/UQADD/SQSUB/UQSUB/SQSHL/SQABS/
 //    SQNEG/SUQADD/USQADD family, added 2026-08-22). Width-generic via

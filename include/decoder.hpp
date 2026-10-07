@@ -264,6 +264,25 @@ uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool sf);
 // historically caused FCMP/FABS/FSQRT/FMOV-imm bugs that were tedious
 // to track down.
 namespace fp_decode {
+// AdvSIMD reciprocal estimates/steps must be matched before scalar
+// integer conversions: FRECPE's bit16 otherwise disappears in that mask.
+constexpr bool is_reciprocal_fp16(uint32_t op) {
+    if ((op & (1u << 28)) && !(op & (1u << 30))) return false;
+    uint32_t step = op & 0xBFE0FC00;
+    uint32_t estimate = op & 0x9FFFFC00;
+    return step == 0x0E403C00 || step == 0x0EC03C00 ||
+           step == 0x1E403C00 || step == 0x1EC03C00 ||
+           estimate == 0x0EF9D800 || estimate == 0x1EF9D800;
+}
+constexpr bool is_reciprocal(uint32_t op) {
+    if ((op & (1u << 28)) && !(op & (1u << 30))) return false;
+    uint32_t step = op & 0xBFA0FC00;
+    uint32_t estimate = op & 0x9FBFFC00;
+    return step == 0x0E20FC00 || step == 0x0EA0FC00 ||
+           step == 0x1E20FC00 || step == 0x1EA0FC00 ||
+           estimate == 0x0EA1D800 || estimate == 0x1EA1D800 ||
+           is_reciprocal_fp16(op);
+}
 // True iff `op` is an FCMP/FCMPE encoding.
 //   bits[31:24]=0x1E, bits[23:22]=ftype, bit[21]=1, bits[15:10]=0b001000
 inline bool is_fcmp(uint32_t op) {

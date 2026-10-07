@@ -875,54 +875,6 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                 return true;
             }
         }
-        // ── FRECPE / FRSQRTE (FP reciprocal estimate, vector) ──
-        // FRECPE Vd.<T>, Vn.<T>: reciprocal estimate (1/x).
-        // FRSQRTE Vd.<T>, Vn.<T>: reciprocal sqrt estimate.
-        // Encoding (3-same, 2-operand): 0 Q U 0 1110 size 1 0 0000
-        // 1101 1 0 Rn Rd. Sub3_noq: FRECPE=0x0E20D800, FRSQRTE=0x2E20D800
-        // (stripped mask: 0x0E00D000 / 0x2E00D000). S (size=2) or D.
-        {
-            uint32_t re = (op & 0xFF00F400) & ~(1u << 30);
-            if ((re == 0x0E00D000 || re == 0x2E00D000) && size >= 2) {
-                bool is_sqrt = re == 0x2E00D000;
-                int esize = 1 << size;
-                int lanes = (Q ? 16 : 8) / esize;
-                uint8_t vn[16];
-                memcpy(vn, &cpu.v_lo[rn], 8);
-                if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
-                for (int i = 0; i < lanes; i++) {
-                    if (esize == 8) {
-                        double x;
-                        memcpy(&x, vn + i * 8, 8);
-                        double r;
-                        if (std::isnan(x)) r = x;
-                        else if (x == 0.0) r = std::copysign(INFINITY, x);
-                        else if (std::isinf(x)) r = std::copysign(0.0, x);
-                        else if (is_sqrt && x < 0.0) r = std::nan("");
-                        else r = is_sqrt ? (1.0 / std::sqrt(x)) : (1.0 / x);
-                        if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
-                        else memcpy(&cpu.v_hi[rd], &r, 8);
-                    } else {
-                        float x;
-                        memcpy(&x, vn + i * 4, 4);
-                        float r;
-                        if (std::isnan(x)) r = x;
-                        else if (x == 0.0f) r = std::copysign(INFINITY, x);
-                        else if (std::isinf(x)) r = std::copysign(0.0f, x);
-                        else if (is_sqrt && x < 0.0f) r = std::nan("");
-                        else r = is_sqrt ? (1.0f / std::sqrt(x)) : (1.0f / x);
-                        uint32_t rb;
-                        memcpy(&rb, &r, 4);
-                        uint32_t sh = (i & 1) * 32;
-                        uint64_t* chunkp = (i < 2) ? &cpu.v_lo[rd] : &cpu.v_hi[rd];
-                        *chunkp = (*chunkp & ~(0xFFFFFFFFULL << sh))
-                                | (static_cast<uint64_t>(rb) << sh);
-                    }
-                }
-                if (!Q) cpu.v_hi[rd] = 0;
-                return true;
-            }
-        }
         // FADD/FSUB/FMUL/FDIV (vector, float) — 0x0E20D400 (FADD 4S)
         // and 0x0E20DC00 (FMUL 4S).
         // These use the FP arithmetic encoding with Q form.
