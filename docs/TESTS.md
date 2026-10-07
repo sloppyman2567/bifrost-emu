@@ -10,6 +10,16 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Vector FP pairwise ops (2026-10-06)
+
+The default suite passes **296/296** (117 s), `--quick` **291/291** and
+`--no-jit` **289/289** with seven expected JIT-only skips (151 s).
+`jit_simd_faddp` passes 14/14 under the JIT, the interpreter,
+`BIFROST_JIT_VERIFY=1` and QEMU user mode; the pre-fix binary SIGILLs on its
+first check. SpongeBob's native probe loads `libunity.so` in both engines and
+all 21 libraries with the Firebase App preload (JIT, 21/21 clean exits).
+The Android package tests pass 6/6.
+
 ### libandroid loopers, choreographer and sensors (2026-10-06)
 
 The default suite passes **295/295** (128 s), `--quick` **290/290** and

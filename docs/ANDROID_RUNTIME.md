@@ -16,7 +16,7 @@ An optional checksum-pinned real Media NDK bundle now supplies the genuine
 library and its isolated native dependencies. Real metadata operations pass
 the signed APK gate in all modes. With this bundle, the full EGL adapter and
 the per-thread looper, choreographer and sensor exports, every Unity import
-resolves; its load then stops on an unimplemented vector `FADDP`. Media
+resolves and all 21 libraries load in the native probe. JNI startup, media
 services/decoding and managed (ART-backed) Activity startup are still
 unimplemented. See the APK guide for provisioning and namespace boundaries.
 

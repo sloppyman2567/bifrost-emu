@@ -295,6 +295,7 @@ UNIT_TESTS=(
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
+    "simd_faddp|ctest/jit_simd_faddp.elf||5|14/14 checks passed"
     "simd_addlv|ctest/jit_simd_addlv.elf||5|checks passed"
     "simd_pairlong|ctest/jit_simd_pairlong.elf||5|3072 checks passed"
     "simd_pmull|ctest/jit_simd_pmull.elf||15|6144 checks passed"

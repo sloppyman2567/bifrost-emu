@@ -229,10 +229,11 @@ dependency resolves. The guest EGL adapter now exports every EGL function in
 Android's `libEGL.map.txt` that has a host equivalent, which covers all of
 Unity's EGL and GLES imports. `libandroid.so` now also exports
 `ALooper_forThread`, `AChoreographer_*` frame callbacks and the `ASensor*`
-API, so every Unity import resolves. Loading then stops in a constructor on
-`faddp v17.2s, v17.2s, v18.2s` (vector pairwise add, unimplemented in the
-interpreter → SIGILL; observed with the default probe mode in a fresh
-`android-state/choreo-sensor`).
+API, so every Unity import resolves. With vector `FADDP` implemented (a
+Unity constructor runs `faddp v17.2s, v17.2s, v18.2s`), `libunity.so` loads
+and exits cleanly under the JIT and the interpreter, and the full probe with
+the Firebase App preload loads 21/21 libraries with 21/21 clean exits (JIT,
+fresh `android-state/choreo-sensor`). JNI entrypoints are still not invoked.
 The local real-media installation uses `android-state/real-media`.
 
 The earlier header checkpoint uses `android-state/bionic-headers`. The updated

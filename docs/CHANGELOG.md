@@ -25,8 +25,13 @@ are historical records, and v2.0 remains planned.
   at the next 60 Hz `CLOCK_MONOTONIC` tick, with that tick as frame time.
 - `ASensorManager`/`ASensorEventQueue`/`ASensor` report a device with no
   sensors (AOSP `sensor.cpp` NULL-sensor and empty-queue results).
-- Every SpongeBob `libunity.so` import now resolves; its load next stops on
-  vector `FADDP`. Regression: `ctest_real/test_android_looper.c`.
+- Every SpongeBob `libunity.so` import now resolves.
+  Regression: `ctest_real/test_android_looper.c`.
+- The interpreter implements the vector FP pairwise family (`FADDP`,
+  `FMAXP`, `FMINP`, `FMAXNMP`, `FMINNMP`; `.2s`/`.4s`/`.2d`). A Unity
+  constructor's `faddp v17.2s, v17.2s, v18.2s` raised SIGILL; the native
+  probe now loads all 21 SpongeBob libraries. The JIT reaches it through
+  CALL_INTERP. Regression: `ctest/jit_simd_faddp.c`.
 
 ### Android EGL exports (2026-10-06)
 

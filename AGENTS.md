@@ -181,6 +181,11 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   punpcklqdq. `ctest/jit_simd_pairmin.c` covers all 4 ops × esizes
   {1,2,4} × both Q, plus the teeworlds `uminp v0.16b,v0.16b,v0.16b`
   self form.
+  Vector FP pairwise FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP (U=1 three-same,
+  0x2E20D400 family) are interp-only (JIT CALL_INTERP): Vd = pairs of Vn
+  then pairs of Vm, Q=0 zeroes v_hi, `.1d` is RESERVED, and inputs are read
+  before Vd is written (Unity runs `faddp v17.2s, v17.2s, v18.2s`).
+  Regression: `ctest/jit_simd_faddp.c`.
   TBL/TBX all four forms
   (TBL1 0x0E000000, TBL2 0x0E002000, TBX1 0x0E001000, TBX2 0x0E003000;
   op2=bit12, L=bit13) are in interp — GCC lowers `vextq_u8` to TBL2 +
@@ -1343,8 +1348,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **295 pass /
-  0 fail / 0 skip**; `--no-jit` = 288 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **296 pass /
+  0 fail / 0 skip**; `--no-jit` = 289 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1354,8 +1359,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **295 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 290),
+  (interactive + real-world are the standard default) = **296 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 291),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

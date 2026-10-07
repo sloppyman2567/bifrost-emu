@@ -1159,6 +1159,72 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 return;
             }
+            // ── SIMD vector FP pairwise (FADDP/FMAXP/FMINP/FMAXNMP/
+            //     FMINNMP, three-same with U=1) ───────────────────────
+            // ARM ARM: the source is the concatenation Vm:Vn (Vn in the
+            // low elements) and element e = op(concat[2e], concat[2e+1]),
+            // so the low half of Vd comes from Vn's pairs and the high half
+            // from Vm's. sz:Q=10 (.1d) is RESERVED. All inputs are read
+            // before Vd is written: `faddp v17.2s, v17.2s, v18.2s` aliases.
+            case 0x2e20d400:  // FADDP v (single)
+            case 0x2e60d400:  // FADDP v (double)
+            case 0x2e20f400:  // FMAXP v (single)
+            case 0x2e60f400:  // FMAXP v (double)
+            case 0x2ea0f400:  // FMINP v (single)
+            case 0x2ee0f400:  // FMINP v (double)
+            case 0x2e20c400:  // FMAXNMP v (single)
+            case 0x2e60c400:  // FMAXNMP v (double)
+            case 0x2ea0c400:  // FMINNMP v (single)
+            case 0x2ee0c400: { // FMINNMP v (double)
+                const uint32_t key = sub_noq & ~(1u << 22);
+                const bool is_double = (op >> 22) & 1;
+                if (is_double && !Q) {
+                    dump_decode_error(cpu, mem_, op);
+                    throw DecodeError(cpu.pc, op);
+                }
+                auto pair = [key](auto a, auto b) {
+                    using T = decltype(a);
+                    const bool nan = std::isnan(a) || std::isnan(b);
+                    switch (key) {
+                        case 0x2e20d400: return a + b;                       // FADDP
+                        case 0x2e20f400: return nan ? std::numeric_limits<T>::quiet_NaN()
+                                                    : std::fmax(a, b);       // FMAXP
+                        case 0x2ea0f400: return nan ? std::numeric_limits<T>::quiet_NaN()
+                                                    : std::fmin(a, b);       // FMINP
+                        case 0x2e20c400: return std::fmax(a, b);             // FMAXNMP
+                        default:         return std::fmin(a, b);             // FMINNMP
+                    }
+                };
+                uint8_t src[32], out[16] = {};
+                memcpy(src, &cpu.v_lo[rn], 8);
+                memcpy(src + 8, &cpu.v_hi[rn], 8);
+                memcpy(src + 16, &cpu.v_lo[rm], 8);
+                memcpy(src + 24, &cpu.v_hi[rm], 8);
+                const size_t esize = is_double ? 8 : 4;
+                const size_t lanes = (Q ? 16 : 8) / esize;
+                for (size_t e = 0; e < lanes; e++) {
+                    // Pairs 0..lanes/2-1 come from Vn, the rest from Vm.
+                    const size_t half = lanes / 2;
+                    const uint8_t* base = src + (e < half ? 0 : 16);
+                    const size_t idx = 2 * (e < half ? e : e - half);
+                    if (is_double) {
+                        double a, b;
+                        memcpy(&a, base + idx * 8, 8);
+                        memcpy(&b, base + (idx + 1) * 8, 8);
+                        double r = pair(a, b);
+                        memcpy(out + e * 8, &r, 8);
+                    } else {
+                        float a, b;
+                        memcpy(&a, base + idx * 4, 4);
+                        memcpy(&b, base + (idx + 1) * 4, 4);
+                        float r = pair(a, b);
+                        memcpy(out + e * 4, &r, 4);
+                    }
+                }
+                memcpy(&cpu.v_lo[rd], out, 8);
+                memcpy(&cpu.v_hi[rd], out + 8, 8);  // zero for Q=0
+                return;
+            }
             // ── TBL/TBX (Table Lookup) ──
             // AArch64 TBL/TBX permute bytes from 1-4 source vectors
             // using indices from a third vector. Each byte
