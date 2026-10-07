@@ -97,7 +97,7 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 // folding them into sigpending keeps every pending signal
                 // in one place without reordering the producer's queue.
                 CPU::PendingSig queued;
-                while (cpu.pop_pending(queued)) {
+                while (cpu.pop_pending(queued, wait_set)) {
                     if (queued.signo >= 1 && queued.signo <= 64)
                         cpu.sigpending.fetch_or(1ULL << (queued.signo - 1));
                 }

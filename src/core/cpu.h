@@ -220,16 +220,18 @@ public:
         pending_tail.store(t + 1, std::memory_order_release);
         return true;
     }
-    // Consumer (this CPU's run loop) — pops one pending signal, or
-    // returns false if the queue is empty.
-    bool pop_pending(PendingSig& out) {
+    // Consumer (this CPU's run loop) — pops one deliverable signal.
+    // A synchronous sigwait consumer may also dequeue blocked members
+    // of its wait set, without making them eligible for handler delivery.
+    bool pop_pending(PendingSig& out, uint64_t wait_set = 0) {
         std::lock_guard<std::mutex> lock(pending_mu);
         const size_t h = pending_head.load(std::memory_order_relaxed);
         const size_t t = pending_tail.load(std::memory_order_acquire);
         if (h == t) return false;
+        const uint64_t blocked = sigmask.load() & ~wait_set;
         size_t selected = h;
         while (selected != t &&
-               (sigmask.load() & (1ULL << (pending_queue[selected % PENDING_QUEUE_CAP].signo - 1))))
+               (blocked & (1ULL << (pending_queue[selected % PENDING_QUEUE_CAP].signo - 1))))
             ++selected;
         if (selected == t) return false;
         out = pending_queue[selected % PENDING_QUEUE_CAP];

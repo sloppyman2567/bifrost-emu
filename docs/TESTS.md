@@ -982,3 +982,26 @@ The remaining stop is unhandled `frecps v3.4s,v16.4s,v18.4s` (0x4e32fe03),
 raising guest SIGILL. SQLite file-locking errors and broader GL mapping
 semantics remain separate gaps. See [runtime details](ANDROID_RUNTIME.md)
 and [instruction/graphics trace](JIT.md).
+
+
+### Synchronous signal-wait follow-up (2026-10-07)
+
+The milestone's 11-test selection did not include `test_sigtimedwait`. The
+subsequent user-reported failure was reproduced in JIT and interpreter: the
+cross-thread SIGUSR2 wait timed out, then restoring the mask delivered the
+unconsumed fatal signal and ended the test with status 140. Native Linux
+passed all 15 checks.
+
+The new asynchronous pending-queue mask filter had also been used by the
+synchronous waiter. `CPU::pop_pending` now accepts an explicit wait set, so
+`rt_sigtimedwait` can dequeue its blocked requested signals while normal handler
+delivery retains the mask filter. This follows the
+[Linux sigwait contract](https://man7.org/linux/man-pages/man2/sigwaitinfo.2.html).
+The existing regression passes 15/15 in both engines, including cross-thread
+wake, no handler delivery, timeout and mask restoration. Twenty repeats per
+engine pass, as do 14 neighboring signal/futex/group-exit tests per engine.
+No new fixture or signal-handler default was needed.
+The real-audio installed SpongeBob rerun still reaches its resumed service
+checkpoint and renders 580 frames before the previously observed native SIGILL
+blocker. Evidence: `build/android-spongebob-sigtimedwait-fixed/jit.log` and
+`jit.json`. This follow-up fixes signal waiting, not that native instruction.
