@@ -411,6 +411,9 @@ glDrawArrays               GLES   iii           -     -              -       SYN
 glDrawElements             GLES   iiii          -     EL_PTR         -       SYNC
 # hand-tuned GLES draw rows (see GL note above).
 glDebugMessageCallback     GLES   ip            -     GL_DEBUG_CB    -     
+# EXT_debug_label has its own object enums; forward the real EXT entry points.
+glLabelObjectEXT           GLES   iiip          -     -              -
+glGetObjectLabelEXT        GLES   iiipp         -     -              -
 glDrawArraysIndirect       GLES   ip            -     INDIRECT_PTR   -       SYNC
 glDrawElementsBaseVertex   GLES   iiiii         -     EL_PTR         -       SYNC
 glDrawElementsIndirect     GLES   iip           -     INDIRECT_PTR   -       SYNC
@@ -449,7 +452,7 @@ eglChooseConfig           EGL    ippip         -     -              -
 eglCreateContext          EGL    iiip          -     -              -
 eglDestroyContext         EGL    ii            -     -              -
 eglMakeCurrent            EGL    iiii          -     -              -
-eglSwapBuffers            EGL    ii            -     -              -
+eglSwapBuffers            EGL    ii            -     PRESENT        -
 eglDestroySurface         EGL    ii            -     -              -
 eglCreateWindowSurface    EGL    iiip          -     -              -
 eglCreatePbufferSurface   EGL    iip           -     -              -
@@ -1856,7 +1859,7 @@ glEnablei                  GLES   ii            -     -              -
 glEndQuery                 GLES   i             -     -              -     
 glEndTransformFeedback     GLES   -             -     -              -     
 glFenceSync                GLES   ii            -     -              -     
-glFlushMappedBufferRange   GLES   iii           -     -              -     
+glFlushMappedBufferRange   GLES   iii           -     FLUSH_BUFFER   -
 glFramebufferParameteri    GLES   iii           -     -              -     
 glFramebufferTexture       GLES   iiii          -     -              -     
 glFramebufferTextureLayer  GLES   iiiii         -     -              -     
@@ -1937,7 +1940,7 @@ glIsShader                 GLES   i             -     -              -
 glIsSync                   GLES   i             -     -              -     
 glIsTexture                GLES   i             -     -              -     
 glIsTransformFeedback      GLES   i             -     -              -     
-glMapBufferRange           GLES   iiii          -     -              -     
+glMapBufferRange           GLES   iiii          -     MAP_BUFFER     -
 glMemoryBarrier            GLES   i             -     -              -     
 glMemoryBarrierByRegion    GLES   i             -     -              -     
 glMinSampleShading         GLES   i             -     -              -     
@@ -2022,7 +2025,7 @@ glUniformMatrix3x2fv       GLES   iiip          -     -              -
 glUniformMatrix3x4fv       GLES   iiip          -     -              -     
 glUniformMatrix4x2fv       GLES   iiip          -     -              -     
 glUniformMatrix4x3fv       GLES   iiip          -     -              -     
-glUnmapBuffer              GLES   i             -     -              -     
+glUnmapBuffer              GLES   i             -     UNMAP_BUFFER   -
 glUseProgramStages         GLES   iii           -     -              -     
 glValidateProgram          GLES   i             -     -              -     
 glValidateProgramPipeline  GLES   i             -     -              -     

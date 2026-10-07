@@ -142,8 +142,9 @@ logs them as `LOCAL_SERVICE`, and throws on anything else. Display returns one
 480×800 display; package reports no features; settings returns empty values.
 The `activity` and `activity_task` stubs return only the provider and Activity
 controller. Window reports no navigation bar and animator scale 1.0. Activity
-resume, window attachment, surfaces, drawing, input and real system services
-remain unimplemented.
+creation alone does not resume or attach a drawable window. The optional
+`--play` path described below delivers additional lifecycle and surface events;
+real system services remain unimplemented.
 
 ### Installed-app creation checkpoint (2026-10-07)
 
@@ -187,6 +188,82 @@ locking errors and missing SurfaceFlingerAIDL transaction failures. Those are
 remaining compatibility gaps, not evidence of a playable game. Normal
 `android_package.py run` keeps its managed-launcher rejection.
 
+#### Managed play diagnostic (2026-10-07)
+
+Adding `--play` opens a host window, starts/resumes the Activity, reports
+SurfaceView holder callbacks and pumps host input. These callbacks use the
+managed graphics adapters; they are not a WindowManager attachment. The runner
+also provisions `/storage/emulated/0`. A strict local `mount` service answers
+`getVolumeList` with this single mounted, writable emulated volume for user 0
+(no removable storage or other users), using Android 15's
+[StorageVolume layout](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/os/storage/StorageVolume.java)
+and [VolumeInfo semantics](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/os/storage/VolumeInfo.java).
+Other storage service methods still throw. Installed-app mode checks the real
+`Application.getExternalFilesDir(null)` path and its writability, and requires
+the `APP_STORAGE_READY` checkpoint.
+
+The SpongeBob play crash first appeared in `strlen(nullptr)` during PlayerPrefs
+setup. A relocated Unity block trace and debugger read of its recorded Java
+exception localized the earlier failure to `IStorageManager.getVolumeList`
+on a null service. The Context global reference was valid; the pending exception
+made Unity skip `getPackageName` method lookup and cache a null method ID.
+Providing the volume makes that lookup return a nonzero method ID and clears
+this crash. The JIT run then reaches a later native call to address zero
+(Unity return offset `0xcd9234`). It also records the framework exception that
+SharedPreferences requires a UserManager; whether that exception causes the
+later native call failure remains unverified. This is not a gameplay pass.
+The interpreter passes the external-directory checkpoint but still reports
+unmapped worker reads. Play timeout alone is not success when a worker exception
+or Unity fatal signal is logged; the runner now rejects both cases.
+
+#### Binder registration ordering checkpoint (2026-10-07)
+
+Native service registration now preserves the Binder stability word appended
+by Android 15's `Parcel::finishFlattenBinder`, including null lookup replies.
+Initial `BR_INCREFS`/`BR_ACQUIRE` notifications for an exported local Binder
+are queued on the publishing thread before its completion/reply, following
+[Linux `binder_translate_binder`](https://github.com/torvalds/linux/blob/v6.6/drivers/android/binder.c).
+Previously the notifications went to the process looper queue while the
+publishing thread received its reply first. The real libbinder registration
+Parcel could then recycle its last strong reference while a pool thread
+acquired the same object, aborting with `RefBase: ... strong count 1 deleted`.
+
+`android_service_manager` checks ownership before reply, acknowledgements,
+and split reads during service replacement; `android_binder_objects` checks
+the same publishing-thread ownership path through a guest service manager.
+Both pass in JIT and interpreter modes. ActivityProbe also registers/replaces
+and looks up a real Java Binder eight times, checking its identity outside
+the Java service cache (`ACTIVITY_SERVICE_REGISTRATION_OK`). Recompile its
+DEX after updating the source; the runner requires that marker with services.
+The full JIT Activity probe passes. The interpreter reaches both this marker
+and `FRAMEWORK_OK`, but the runner rejects its existing null worker reads
+(threads 6 and 8); reaching the markers alone is not a full interpreter pass.
+
+#### Managed audio checkpoint (2026-10-07)
+
+With `--play`, ActivityProbe registers `media.audio_policy` and
+`media.audio_flinger` stand-ins. They answer only the Android 15 transactions
+native AudioSystem makes here (policy 44/49/51/52/53, flinger 23/45/46; codes
+checked against `IAudioPolicyService.aidl`/`IAudioFlingerService.aidl` at
+`android-15.0.0_r1`): no HAL ports or patches, and the primary output's rate
+and frames per buffer come from Bifrost's host Audio engine
+(`APP_AUDIO_ROUTING_READY`). Playback itself never uses AudioFlinger: the
+managed `libaaudio.so` adapter sends AAudio to the AudioThunk. Like real
+libaaudio, the adapter runs each data callback stream on a Bionic pthread of
+its own (`guest/android/aaudio.c`), created at open and joined at close; the
+host callback pump cannot make Bionic TLS. That thread asks the thunk when the
+host ring has room for one more callback (`bifrost_aaudio_wait_callback`),
+calls the app, and hands the buffer back. `test_android_bionic.sh` checks
+this in all three engine modes (`ctest/android_aaudio_thread.c`).
+
+SpongeBob's FMOD now opens its AAudio stream and the callback thread feeds
+the host engine. A 120-second JIT play run still presents zero frames: about
+43 seconds in, Unity's main thread makes a virtual call through a null object
+in `libunity.so` (address `0x6ab890`) and the process dies. The cause is not
+known; it is not the audio path. The interpreter stalls earlier, after
+PlayCore's `registerReceiverWithFeature`. These are diagnostic observations,
+not a rendering or gameplay pass.
+
 With CMC the boot image loads. Without userfaultfd ART falls back to CC,
 rejects the image (`ValidateOatFile found read barrier state mismatch`) and
 runs imageless. QEMU gets past the repaired mainline
@@ -205,6 +282,9 @@ make -j6
 python3 tools/fetch-android-runtime.py
 bash scripts/test_android_bionic.sh
 ```
+
+The script also rebuilds the Android adapters and runs the managed AAudio
+callback-thread test against them (`SDL_AUDIODRIVER=dummy`, no sound device).
 
 The fetcher pins the official AOSP `prebuilts/runtime` APEX at revision
 `8aeb37cca394ce39c1311744c60960cbd466aa77` (the `android-15.0.0_r1` repository
@@ -367,3 +447,46 @@ injected delayed waits in both engines, and four neighboring audio/thread tests
 per engine. This resolves a reproducible lost-notification race without raising
 the guest fixture's callback deadline. The older interpreter checkpoint's
 267/268 result remains recorded in [test evidence](TESTS.md).
+
+
+### First SpongeBob rendering milestone (2026-10-07)
+
+This supersedes the earlier managed-audio checkpoint's unknown null-object
+failure. Unity's aligned stack frame was broken by ignored AND-to-SP writes;
+logical immediates now honor SP/WSP in both engines. The next crash came from
+GLES returning a host mapped-buffer pointer to guest code; GLES now uses the
+existing guest-buffer map/unmap/flush policies. See [JIT.md](JIT.md).
+
+ActivityProbe now implements the newly observed calls explicitly:
+
+- `reportActivityFullyDrawn` records the first completion for a known Activity
+  token; unknown tokens are ignored, as in AOSP's ActivityRecord lookup.
+- `getMyMemoryState` fills PID/UID and documented process-state fields, using
+  the actual Activity `isResumed()` state for foreground importance. The
+  single-process profile has no trim callbacks or OOM-adjustment dependencies.
+- `handleApplicationCrash` records the supplied crash report. RuntimeInit still
+  terminates an uncaught-exception process; crash reporting does not hide it.
+- `power` answers the implemented window/interactivity and disabled power-saving
+  queries. `thermalservice` reports no samples, NONE status and unavailable
+  (NaN) thermal headroom; it retains listeners, delivers the initial status,
+  and supports removal. This describes the virtual device, not host sensors.
+- `mount.mkdirs` checks the installed package and canonical path, then really
+  creates directories below its external data/obb/media roots. Other package
+  paths and traversal outside those roots are rejected.
+
+Contracts were checked against AOSP `android-15.0.0_r1`:
+[ActivityClientController](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/wm/ActivityClientController.java),
+[ActivityManagerService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java),
+[StorageManagerService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/StorageManagerService.java),
+and the `IPowerManager`/`IThermalService` interfaces. Unimplemented methods still
+throw; this is a bounded launcher profile, not a complete system_server.
+
+Observed verification: the framework probe passes in JIT. Both engines pass
+its explicit process/power/thermal-listener and crash-report checks; the full
+interpreter probe still rejects the existing null reads in workers 6 and 8.
+The real-audio SpongeBob run renders animation (670 frames in the captured
+run), then hits unhandled `frecps v3.4s,v16.4s,v18.4s` (0x4e32fe03) and guest
+SIGILL. SQLite locking errors are another separate remaining gap. Neither
+animation nor passing service checks establishes interactive gameplay.
+The play runner now also recognizes Java `FATAL EXCEPTION` lines as guest
+failures, including the two earlier automatic-exit logs.

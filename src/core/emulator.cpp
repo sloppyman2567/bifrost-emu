@@ -120,7 +120,27 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         set_guest_comm(base);
     }
     vfs_.set_elf_path(path);
-    vfs_.set_argv(argv);
+    // /proc/self/cmdline follows Linux get_mm_cmdline (fs/proc/base.c):
+    // the argv block as it is now, or, when the guest overwrote its final
+    // NUL (setproctitle), the string at arg_start_ within one page.
+    vfs_.set_cmdline_provider([this]() -> std::string {
+        std::string block;
+        if (arg_start_ >= arg_end_) return block;
+        try {
+            uint8_t last = mem_.load<uint8_t>(arg_end_ - 1);
+            const uint64_t length = last ? std::min<uint64_t>(Memory::PAGE_SIZE, arg_end_ - arg_start_)
+                                         : arg_end_ - arg_start_;
+            block.resize(length);
+            mem_.read(arg_start_, block.data(), length);
+            if (last) {
+                size_t nul = block.find('\0');
+                if (nul != std::string::npos) block.resize(nul + 1);
+            }
+        } catch (const EmuError&) {
+            block.clear();
+        }
+        return block;
+    });
     vfs_.set_graphics(&graphics_);
     vfs_.set_audio(&audio_);
     // Wire up /proc/self/maps to query live memory state. The callback
@@ -330,8 +350,13 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         // The shared syscall dispatcher probes every thunk namespace.
         // An enabled but uninitialized audio thunk returns ENOSYS before
         // the dispatcher can reach an Android display symbol.
-        if (auto* thunk = graphics_.audio_thunk(); thunk && thunk->enabled())
+        // Wiring gives AAudio its host engine. Without dyn_linker_ the CPU
+        // factory makes no guest TLS, so the pump stays off and the libaaudio
+        // adapter's own Bionic thread runs data callbacks.
+        if (auto* thunk = graphics_.audio_thunk(); thunk && thunk->enabled()) {
             thunk->init(mem_);
+            wire_thunk_audio_runner_();
+        }
         wire_thunk_android_runner_();
         if (verbose_) fprintf(stderr, "[android-runtime] linker64 base=0x%llx entry=0x%llx page_size=%llu\n",
             static_cast<unsigned long long>(interp_base_),
@@ -1152,33 +1177,47 @@ uint64_t Emulator::load_vdso() {
     }
     return base;
 }
+// Strings ascend as Linux fs/exec.c copies them: argv[0] lowest, the argv
+// block, then the environment, ending at stack_top. Android's app_main
+// sizes argv as one contiguous block and Process.setArgV0 rewrites it;
+// /proc/self/cmdline reports [arg_start_, arg_end_) live.
+uint64_t Emulator::place_argument_strings(uint64_t stack_top,
+                                          const std::vector<std::string>& argv,
+                                          const std::vector<std::string>& env,
+                                          std::vector<uint64_t>& argv_addrs,
+                                          std::vector<uint64_t>& envp_addrs) {
+    uint64_t size = 0;
+    for (const auto& a : argv) size += a.size() + 1;
+    for (const auto& e : env) size += e.size() + 1;
+    uint64_t cursor = stack_top - size;
+    const uint64_t start = cursor;
+    auto place = [&](const std::string& value) {
+        mem_.write(cursor, value.c_str(), value.size() + 1);
+        cursor += value.size() + 1;
+        return cursor - value.size() - 1;
+    };
+    argv_addrs.clear();
+    envp_addrs.clear();
+    arg_start_ = cursor;
+    for (const auto& a : argv) argv_addrs.push_back(place(a));
+    arg_end_ = cursor;
+    for (const auto& e : env) envp_addrs.push_back(place(e));
+    return start;
+}
 // ── Initial stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ─────
 uint64_t Emulator::build_initial_stack(uint64_t stack_top,
                                        std::vector<std::string>& argv,
                                        ElfLoader::Loaded& info) {
     (void)info;  // reserved for future use (AT_PHDR, etc.)
-    uint64_t sp = stack_top;
-    // Push argv strings
-    std::vector<uint64_t> argv_addrs;
-    for (auto& a : argv) {
-        sp -= a.size() + 1;
-        mem_.write(sp, a.data(), a.size() + 1);
-        argv_addrs.push_back(sp);
-    }
-    // Push envp. If guest_env_ was set via set_guest_env(), use it.
-    // Otherwise, build a default environment that propagates locale/
-    // timezone-related host env vars (TZ, LANG, LC_*, etc.) so programs
-    // like `toybox uptime`, `date`, `ls` display correct local time and
-    // language conventions.
+    // If guest_env_ was not set via set_guest_env(), build a default
+    // environment that propagates locale/timezone-related host env vars
+    // (TZ, LANG, LC_*, etc.) so programs like `toybox uptime`, `date`,
+    // `ls` display correct local time and language conventions.
     if (guest_env_.empty()) {
         guest_env_ = build_default_guest_env();
     }
-    std::vector<uint64_t> envp_addrs;
-    for (const auto& e : guest_env_) {
-        sp -= e.size() + 1;
-        mem_.write(sp, e.data(), e.size() + 1);
-        envp_addrs.push_back(sp);
-    }
+    std::vector<uint64_t> argv_addrs, envp_addrs;
+    uint64_t sp = place_argument_strings(stack_top, argv, guest_env_, argv_addrs, envp_addrs);
     // AT_RANDOM — 16 random bytes used by glibc for stack canary init and
     // pointer guard. MUST be high-quality random; never fall back to rand()
     // (which is unseeded by default → predictable canary → stack-overflow

@@ -375,6 +375,9 @@ UNIT_TESTS=(
     # /proc/self/fd/N[/name] reopens the GUEST descriptor's file (not the
     # emulator's fd N); openat2 shares openat's flags and resolution.
     "test_proc_fd_reopen|ctest/test_proc_fd_reopen.elf||10|ALL PASS"
+    # Linux argv/env string layout, live /proc/self/cmdline (setArgV0 and
+    # setproctitle rewrites, also after execve), /proc/<getpid()> == self.
+    "test_proc_cmdline|ctest/test_proc_cmdline.elf||10|ALL PASS"
     # exit_group / fatal default signals from any thread end the process;
     # main pthread_exit does not; fork-child threads share getpid().
     "test_group_exit|ctest/test_group_exit.elf||60|ALL PASS"

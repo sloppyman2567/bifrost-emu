@@ -200,7 +200,7 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     event.transaction.buffer = 0; event.transaction.offsets = 0;
     event.payload.resize(tx.data_size);
     if (tx.data_size) mem.read(tx.buffer, event.payload.data(), tx.data_size);
-    int object_error = translate_objects(*target, event, mem, tx);
+    int object_error = translate_objects(*target, event, mem, tx, tid);
     if (object_error) { fail(tid, BF_BR_FAILED_REPLY, -object_error); return 0; }
     event.caller = weak_from_this(); event.caller_tid = tid;
     if (cmd == BF_BC_REPLY) calls_[tid].pop_back();

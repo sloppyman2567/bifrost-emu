@@ -5,7 +5,8 @@
 #include <limits>
 namespace arm64emu::yggdrasil {
 namespace { constexpr size_t MAX_OBJECTS = 1024, MAX_PARCEL_OBJECTS = 64; }
-void BinderNode::change_reference(const std::shared_ptr<Object>& object, int strong, int weak) {
+void BinderNode::change_reference(const std::shared_ptr<Object>& object, int strong, int weak,
+                                 int owner_tid) {
     bool had_weak = object->strong || object->weak, had_strong = object->strong != 0;
     object->strong += strong; object->weak += weak;
     auto owner_node = object->owner.lock();
@@ -13,7 +14,11 @@ void BinderNode::change_reference(const std::shared_ptr<Object>& object, int str
     auto owner = static_cast<BinderNode*>(owner_node.get());
     auto send = [&](uint32_t command) {
         Event event(command); event.object = {object->pointer, object->cookie};
-        owner->incoming_.push_back(std::move(event));
+        // Linux binder_translate_binder queues initial node work on the
+        // publishing thread's todo list. A pool thread must not race Parcel
+        // recycling after BR_REPLY/BR_TRANSACTION_COMPLETE on that thread.
+        auto& queue = owner_tid ? owner->replies_[owner_tid] : owner->incoming_;
+        queue.push_back(std::move(event));
     };
     bool has_weak = object->strong || object->weak, has_strong = object->strong != 0;
     if (!had_weak && has_weak) { ++object->pending_weak; send(BF_BR_INCREFS); }
@@ -82,13 +87,13 @@ void BinderNode::release_all_references() {
     handles_.clear(); buffer_references_.clear();
 }
 int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
-                                   const bf_binder_transaction& transaction) {
+                                   const bf_binder_transaction& transaction, int tid) {
     if (!transaction.offsets_size) return 0;
     if ((transaction.offsets_size & 7) || transaction.offsets_size / 8 > MAX_PARCEL_OBJECTS)
         return -EINVAL;
     std::vector<uint64_t> offsets(transaction.offsets_size / 8);
     mem.read(transaction.offsets, offsets.data(), transaction.offsets_size);
-    struct Plan { uint64_t offset; std::shared_ptr<Object> object; bool weak; uint32_t handle; };
+    struct Plan { uint64_t offset; std::shared_ptr<Object> object; bool weak; uint32_t handle; int owner_tid; };
     std::vector<Plan> plans;
     auto staged_owned = owned_objects_;
     auto staged_handles = target.handles_;
@@ -124,7 +129,10 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
         // Conservative queue reservation bounds lifecycle events before committing.
         auto owner_node = object->owner.lock();
         auto owner = static_cast<BinderNode*>(owner_node.get());
-        if (owner->incoming_.size() + 2 * offsets.size() + 1 > 256) return -ENOMEM;
+        int owner_tid = (flat.type == BF_BINDER_TYPE_BINDER ||
+                         flat.type == BF_BINDER_TYPE_WEAK_BINDER) ? tid : 0;
+        const auto& queue = owner_tid ? owner->replies_[owner_tid] : owner->incoming_;
+        if (queue.size() + 2 * offsets.size() + 2 > 256) return -ENOMEM;
         if (object->strong > 1000000 || object->weak > 1000000) return -EOVERFLOW;
         uint32_t id = 0;
         auto existing = std::find_if(staged_handles.begin(), staged_handles.end(),
@@ -134,7 +142,7 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
             if (staged_handles.size() >= MAX_OBJECTS || !next) return -ENOMEM;
             id = next++; Handle handle; handle.object = object; staged_handles[id] = handle;
         }
-        plans.push_back({offset, object, weak, id});
+        plans.push_back({offset, object, weak, id, owner_tid});
     }
     // All source data and objects are validated before any references change.
     owned_objects_ = std::move(staged_owned);
@@ -152,7 +160,7 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
         memcpy(event.payload.data() + plan.offset, &flat, sizeof(flat));
         auto& handle = target.handles_.at(plan.handle);
         if (plan.weak) ++handle.temporary_weak; else ++handle.temporary_strong;
-        change_reference(plan.object, plan.weak ? 0 : 1, plan.weak ? 1 : 0);
+        change_reference(plan.object, plan.weak ? 0 : 1, plan.weak ? 1 : 0, plan.owner_tid);
         event.references.push_back({plan.handle, plan.weak, plan.object});
     }
     uint64_t aligned = (transaction.data_size + 7) & ~uint64_t(7);

@@ -545,15 +545,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // Set up a new initial stack.
             const uint64_t STACK_TOP = mem_.stack_top();
             // The stack is already mapped from the parent; just reset SP.
-            uint64_t sp = STACK_TOP;
-            // Push argv strings.
-            std::vector<uint64_t> argv_addrs;
-            for (auto& a : new_argv) {
-                sp -= a.size() + 1;
-                mem_.write(sp, a.data(), a.size() + 1);
-                argv_addrs.push_back(sp);
-            }
-            // Push envp. Use the Emulator's guest_env_ (which was either
+            // Use the Emulator's guest_env_ (which was either
             // set via set_guest_env() or built by build_default_guest_env()
             // at startup). This propagates TZ, LANG, LC_*, etc. from the
             // host so locale-aware programs work correctly in the new
@@ -563,15 +555,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // TZ and all locale vars in execve'd processes. This meant
             // `toybox sh -c 'uptime'` showed UTC time even when the
             // parent shell had TZ set correctly.
-            std::vector<uint64_t> envp_addrs;
             const auto& envs = emu.guest_env().empty()
                 ? Emulator::build_default_guest_env()
                 : emu.guest_env();
-            for (const auto& e : envs) {
-                sp -= e.size() + 1;
-                mem_.write(sp, e.data(), e.size() + 1);
-                envp_addrs.push_back(sp);
-            }
+            std::vector<uint64_t> argv_addrs, envp_addrs;
+            uint64_t sp = emu.place_argument_strings(STACK_TOP, new_argv, envs,
+                                                     argv_addrs, envp_addrs);
             // AT_RANDOM.
             sp -= 16;
             uint8_t rnd[16] = {0};
@@ -716,6 +705,28 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_err(EAGAIN);
                         return 0;
                     }
+                    struct WaitAddress {
+                        CPU& cpu;
+                        WaitAddress(CPU& cpu, uint64_t address) : cpu(cpu) {
+                            cpu.futex_wait_address.store(address);
+                        }
+                        ~WaitAddress() { cpu.futex_wait_address.store(UINT64_MAX); }
+                    } wait_address(cpu, uaddr);
+                    // Publishing under the slot lock closes the enqueue/wait
+                    // race: kick_cpu_wait takes this lock before notifying.
+                    auto interrupted = [&] {
+                        return cpu.has_unblocked_pending_signals();
+                    };
+                    auto ret_wait = [&](int error) {
+                        const bool pending = interrupted();
+                        ret_err(pending ? EINTR : error);
+                        if (pending) {
+                            cpu.futex_wait_address.store(UINT64_MAX);
+                            lk.unlock();
+                            emu.handle_eintr(cpu);
+                        }
+                    };
+                    if (interrupted()) { ret_wait(EINTR); return 0; }
                     slot->waiters++;
                     if (dbg().futex_bt) {
                         fprintf(stderr, "[BT t%d] WAIT op=%u addr=%#llx val=%u cur=%u to=%#llx pc=%s lr=%s\n",
@@ -814,7 +825,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 auto now_sys = std::chrono::system_clock::now();
                                 if (abs_sys <= now_sys) {
                                     slot->waiters--;
-                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    ret_wait(ETIMEDOUT);
                                     return 0;
                                 }
                                 auto rel = std::chrono::duration_cast<
@@ -822,9 +833,9 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 auto st = slot->cv.wait_for(lk, rel);
                                 slot->waiters--;
                                 if (st == std::cv_status::timeout) {
-                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    ret_wait(ETIMEDOUT);
                                 } else {
-                                    ret_host(0);
+                                    ret_wait(0);
                                 }
                                 return 0;
                             } else {
@@ -841,13 +852,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 int64_t s_sec = static_cast<int64_t>(sec);
                                 if (s_sec < 0) {
                                     slot->waiters--;
-                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    ret_wait(ETIMEDOUT);
                                     return 0;
                                 }
                                 if ((uint64_t)s_sec >= 9223372036ULL) {
                                     slot->cv.wait(lk);
                                     slot->waiters--;
-                                    ret_host(0);
+                                    ret_wait(0);
                                     return 0;
                                 }
                                 int64_t now_ns = (int64_t)now_ts.tv_sec * 1000000000LL + now_ts.tv_nsec;
@@ -855,15 +866,15 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 int64_t rel_ns = end_ns - now_ns;
                                 if (rel_ns <= 0) {
                                     slot->waiters--;
-                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    ret_wait(ETIMEDOUT);
                                     return 0;
                                 }
                                 auto st = slot->cv.wait_for(lk, std::chrono::nanoseconds(rel_ns));
                                 slot->waiters--;
                                 if (st == std::cv_status::timeout) {
-                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    ret_wait(ETIMEDOUT);
                                 } else {
-                                    ret_host(0);
+                                    ret_wait(0);
                                 }
                                 return 0;
                             }
@@ -874,9 +885,9 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                             auto st = slot->cv.wait_for(lk, duration);
                             slot->waiters--;
                             if (st == std::cv_status::timeout) {
-                                ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                ret_wait(ETIMEDOUT);
                             } else {
-                                ret_host(0);
+                                ret_wait(0);
                             }
                             return 0;
                         }
@@ -892,7 +903,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // free-list and is deferred. The memory cost is
                     // ~88 bytes per distinct futex word ever waited on —
                     // acceptable for typical game workloads.
-                    ret_host(0);
+                    ret_wait(0);
                     return 0;
                 }
                 case 1:  // FUTEX_WAKE
@@ -1168,6 +1179,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         // recorded in sigpending but loses siginfo.)
                         target->sigpending.fetch_or(1ULL << (sig - 1));
                     }
+                    if (!(target->sigmask.load() & (1ULL << (sig - 1))))
+                        emu.kick_cpu_wait(*target);
                 } else {
                     // Target thread doesn't exist — ESRCH.
                     ret_err(ESRCH);
@@ -1193,6 +1206,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (!target->push_pending(sig, SI_USER_EMU, 0)) {
                         target->sigpending.fetch_or(1ULL << (sig - 1));
                     }
+                    if (!(target->sigmask.load() & (1ULL << (sig - 1))))
+                        emu.kick_cpu_wait(*target);
                 } else {
                     ret_err(ESRCH);
                     return 0;
@@ -1231,6 +1246,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         if (!main->push_pending(sig, SI_USER_EMU, 0)) {
                             main->sigpending.fetch_or(1ULL << (sig - 1));
                         }
+                        if (!(main->sigmask.load() & (1ULL << (sig - 1))))
+                            emu.kick_cpu_wait(*main);
                     }
                 }
             } else {

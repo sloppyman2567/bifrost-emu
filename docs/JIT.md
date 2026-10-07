@@ -165,8 +165,38 @@ all three logical immediate operations in both widths, zero-register sources,
 flag preservation and SP-preserving zero-register destinations. Its 72 checks
 pass QEMU, JIT and interpreter; the no-trap differential mode has 69 checks.
 The fixed game trace confirms the aligned SP and intact descriptor at the
-virtual call. The game still presents no frames and reaches a separate invalid
-pointer store at `libunity.so+0xca6e54`; this repair is not a gameplay pass.
+virtual call. It then exposed a separate invalid pointer store at
+`libunity.so+0xca6e54`, caused by the GLES mapping policy described below.
+
+## GLES mapped buffers and the SpongeBob renderer
+
+The GLES `glMapBufferRange`, `glUnmapBuffer` and `glFlushMappedBufferRange`
+entries must use the same guest-buffer policies as their GL counterparts.
+Forwarding the map call directly returned a host pointer, which Unity stored
+and later dereferenced from guest code at `libunity.so+0xca6e54`. The GLES
+regression reproduced this invalid guest load before the policy change.
+Afterward both GL and GLES modes of `ctest_real/test_sdl_gl_mapbuffer.elf`
+pass 21 checks; GLES also passes in the interpreter. The GLES test mode loads
+that namespace first, because thunk `dlsym` uses the first global definition.
+It tests GLES entries in a desktop GL context, not a native ES context.
+
+The real Android SpongeBob run now uploads buffers, draws, and calls
+`eglSwapBuffers`; the user observed the Nickelodeon logo. Mark that EGL entry
+`PRESENT` so the lightweight frame trace includes its swaps. This is rendering
+progress, not confirmation of interactive gameplay. The first rendered run
+ended with status 137 after four swaps because the strict Java launcher
+rejected `reportActivityFullyDrawn`. After that and the subsequent service
+calls were implemented, the game rendered 670 frames and reached an unhandled
+`frecps v3.4s,v16.4s,v18.4s` (0x4e32fe03), which raised guest SIGILL. See the
+current service checkpoint in [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md).
+
+These policies reuse the existing buffer emulation, whose broader GL semantics
+are not established by this regression. In particular the existing flush code
+treats offsets as absolute buffer offsets, while the
+[Khronos specification](https://wikis.khronos.org/opengl/GLAPI/glFlushMappedBufferRange)
+requires offsets relative to the mapping. The persistent/coherent cases are
+existing emulator behavior tests, not ES 3 conformance tests. Those separate
+compatibility gaps are not repaired by selecting the GLES policies.
 
 ## Conditional compares and register forwarding
 

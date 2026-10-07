@@ -738,7 +738,7 @@ void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
         }
         translate_window_event_(event);
     }
-    if (!cpu || !mem_ || surface_handle_ == 0) return;
+    if (!cpu || !mem_ || !activity_addr_ || surface_handle_ == 0) return;
     if (last_pump_w_ < 0) { last_pump_w_ = width_; last_pump_h_ = height_; return; }
     if (width_ != last_pump_w_ || height_ != last_pump_h_) {
         last_pump_w_ = width_;

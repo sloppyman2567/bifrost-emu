@@ -947,3 +947,38 @@ four CRCs are checked. The CoreMark source is not bundled with the repo.
    group if it hangs.
 5. Update this inventory only when category definitions or setup
    requirements change.
+
+
+## SpongeBob startup-animation milestone (2026-10-07)
+
+Real installed APK play mode now renders the Nickelodeon startup logo and
+animation, observed by the user. Captured JIT runs count up to 670 EGL frames;
+the final run counts 295 before the same native blocker. Real SDL audio is
+enabled in these play runs (`SDL_AUDIODRIVER` unset); audible output itself
+was not independently verified. This is a rendering milestone, not a claim
+that interactive gameplay works.
+
+The fixed path covers AND-to-SP stack alignment, GLES mapped-buffer pointers,
+and strict Java launcher replies for completion, process state, power/thermal
+queries and app cache creation. Both pre-resume and resumed service checks pass,
+including thermal callback registration/removal and rejection of path traversal.
+The standalone JIT Activity probe passes; its service/crash-report checks also
+pass in interpreter mode, whose existing worker-6/8 null reads still fail the
+full framework probe.
+
+Fresh focused Linux fixtures pass 11/11 in JIT and interpreter: Binder exit,
+Binder device/objects/service manager, signal semantics, process cmdline, group
+exit, sandbox, Linux/Android audio, and Android instruction semantics. The latter
+passes 72 checks in QEMU/JIT/interpreter, with 69 in differential no-trap mode.
+GL and GLES mapped-buffer modes each pass 21 checks, GLES also in interpreter;
+the GL debug/EXT-label fixture passes. Generated thunk-table consistency and
+`git diff --check` pass. The earlier real-Bionic callback-thread regression
+passed in JIT, interpreter and Tier-2 during restoration of the audio path.
+
+Local final game evidence:
+[log](../build/android-spongebob-stubs-final/jit.log),
+[result](../build/android-spongebob-stubs-final/jit.json).
+The remaining stop is unhandled `frecps v3.4s,v16.4s,v18.4s` (0x4e32fe03),
+raising guest SIGILL. SQLite file-locking errors and broader GL mapping
+semantics remain separate gaps. See [runtime details](ANDROID_RUNTIME.md)
+and [instruction/graphics trace](JIT.md).

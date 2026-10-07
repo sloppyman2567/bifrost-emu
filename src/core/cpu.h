@@ -161,7 +161,9 @@ public:
     // deliver_signal). Bit numbering is 1-based: bit `signo-1` is set
     // when `signo` is blocked/pending — this matches the Linux kernel
     // sigset_t layout that rt_sigprocmask/rt_sigpending read/write.
-    uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo-1` set = blocked)
+    std::atomic<uint64_t> sigmask{0}; // read by cross-thread signal senders
+    // Published under the futex slot lock; UINT64_MAX means no active wait.
+    std::atomic<uint64_t> futex_wait_address{UINT64_MAX};
     // Pending-signal bitmask (bit `signo-1` set = pending). ATOMIC: the
     // owning thread manipulates it (deliver_signal/deliver_pending_signals/
     // rt_sigprocmask), but a cross-thread tgkill/tkill/kill queue-overflow
@@ -209,6 +211,7 @@ public:
     // false if the queue is full (caller should fall back to setting the
     // bit in sigpending so the signal isn't completely lost).
     bool push_pending(int signo, int si_code, uint64_t fault_addr) {
+        std::lock_guard<std::mutex> lock(pending_mu);
         const size_t t = pending_tail.load(std::memory_order_relaxed);
         const size_t h = pending_head.load(std::memory_order_acquire);
         const size_t used = t - h;  // wraparound-safe
@@ -220,12 +223,29 @@ public:
     // Consumer (this CPU's run loop) — pops one pending signal, or
     // returns false if the queue is empty.
     bool pop_pending(PendingSig& out) {
+        std::lock_guard<std::mutex> lock(pending_mu);
         const size_t h = pending_head.load(std::memory_order_relaxed);
         const size_t t = pending_tail.load(std::memory_order_acquire);
         if (h == t) return false;
-        out = pending_queue[h % PENDING_QUEUE_CAP];
+        size_t selected = h;
+        while (selected != t &&
+               (sigmask.load() & (1ULL << (pending_queue[selected % PENDING_QUEUE_CAP].signo - 1))))
+            ++selected;
+        if (selected == t) return false;
+        out = pending_queue[selected % PENDING_QUEUE_CAP];
+        // Leave blocked entries pending without hiding later unblocked ones.
+        for (size_t i = selected; i != h; --i)
+            pending_queue[i % PENDING_QUEUE_CAP] = pending_queue[(i - 1) % PENDING_QUEUE_CAP];
         pending_head.store(h + 1, std::memory_order_release);
         return true;
+    }
+    bool has_unblocked_pending_signals() {
+        std::lock_guard<std::mutex> lock(pending_mu);
+        const uint64_t mask = sigmask.load();
+        const size_t end = pending_tail.load();
+        for (size_t i = pending_head.load(); i != end; ++i)
+            if (!(mask & (1ULL << (pending_queue[i % PENDING_QUEUE_CAP].signo - 1)))) return true;
+        return (sigpending.load() & ~mask) != 0;
     }
     bool has_pending_signals() const {
         return pending_head.load(std::memory_order_acquire) !=
@@ -354,7 +374,7 @@ public:
         rseq_registered = false;
         rseq_addr = 0;
         rseq_sig = 0;
-        sigmask = src.sigmask;
+        sigmask = src.sigmask.load();
         // A cloned thread does not inherit an in-progress sigsuspend.
         sigsuspend_saved_mask = 0;
         sigsuspend_active = false;

@@ -24,6 +24,11 @@
 namespace arm64emu {
 // ── Constructor / Destructor ───────────────────────────────────────────
 Audio::Audio() = default;
+void Audio::output_config(uint32_t& rate, uint32_t& frames) {
+    std::lock_guard<std::mutex> lock(mu_);
+    rate = sample_rate_;
+    frames = output_frames_;
+}
 Audio::~Audio() {
     close();
 }
@@ -462,7 +467,7 @@ bool Audio::open_sdl2_() {
     SDL_AudioSpec want{};
     want.freq = static_cast<int>(sample_rate_);
     want.channels = channels_;
-    want.samples = 1024;  // ~23 ms at 44100 Hz — low latency
+    want.samples = output_frames_;  // ~23 ms at 44100 Hz — low latency
     want.callback = mixer_callback_;
     want.userdata = this;
     if (sample_size_ == 1)       want.format = AUDIO_U8;
@@ -485,6 +490,7 @@ bool Audio::open_sdl2_() {
         return false;
     }
     sample_rate_ = static_cast<uint32_t>(got.freq);
+    output_frames_ = got.samples;
     channels_ = static_cast<uint8_t>(got.channels);
     if (got.format == AUDIO_U8) sample_size_ = 1;
     else if (got.format == AUDIO_S16SYS) sample_size_ = 2;

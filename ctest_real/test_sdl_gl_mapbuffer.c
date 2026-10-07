@@ -14,6 +14,9 @@
  * Run (needs host SDL2 + GL, and a display):
  *   make USE_SDL2=1 USE_THUNK_GL=1
  *   ./bifrost-emu ctest_real/test_sdl_gl_mapbuffer.elf
+ *   ./bifrost-emu ctest_real/test_sdl_gl_mapbuffer.elf gles
+ * The GLES mode selects GLES policy entries in the same host GL context;
+ * it does not create an OpenGL ES context.
  *
  * Headless / no GL: exits 77 (skip) instead of failing CI.
  */
@@ -84,8 +87,14 @@ static void chk(int ok, const char* what) {
     if (!ok) exit(1);
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     printf("test_sdl_gl_mapbuffer: start\n");
+    int gles = argc > 1 && strcmp(argv[1], "gles") == 0;
+    /* Thunk dlsym uses the first global definition. Load GLES first in
+     * this mode so overlapping names exercise its own policy entries. */
+    if (gles && !bifrost_dlopen("libGLESv2.so", 1)) {
+        printf("test_sdl_gl_mapbuffer: SKIP (libGLESv2)\n"); return 77;
+    }
 
     uint64_t hsdl = bifrost_dlopen("libSDL2-2.0.so.0", 1);
     if (!hsdl) hsdl = bifrost_dlopen("libSDL2.so.0", 1);
@@ -168,8 +177,11 @@ int main(void) {
 
     /* Whole-buffer map, read+write. The bounce should be seeded with the
      * host buffer contents (READ bit) and written back on unmap (WRITE). */
-    unsigned char* p = (unsigned char*)glMapBuffer(GL_ARRAY_BUFFER,
-                                                   GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
+    unsigned char* p = gles
+        ? (unsigned char*)glMapBufferRange(GL_ARRAY_BUFFER, 0, 64,
+                                          GL_MAP_READ_BIT | GL_MAP_WRITE_BIT)
+        : (unsigned char*)glMapBuffer(GL_ARRAY_BUFFER,
+                                     GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
     chk(p != NULL && p != (unsigned char*)1, "glMapBuffer returns a real ptr");
     chk(memcmp(p, init, 64) == 0, "bounce seeded from host buffer (READ bit)");
 

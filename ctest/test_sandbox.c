@@ -114,13 +114,19 @@ int main(void) {
             CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42, "child exit status");
         }
     }
-    // 7. /proc/<other-pid>/* denied under root (host proc-table leak).
+    // 7. /proc/<other-pid>/* denied under root (host proc-table leak);
+    // the guest's own pid is /proc/self, as on Linux.
     {
         errno = 0;
-        int f = open("/proc/1/maps", O_RDONLY);
+        int f = open("/proc/2/maps", O_RDONLY);
         int e = errno;
-        CHECK(f < 0, "/proc/1/maps denied under root");
+        CHECK(f < 0, "/proc/2/maps denied under root");
         CHECK(e == ENOENT, "/proc denial is ENOENT");
+        if (f >= 0) close(f);
+        char own[64];
+        snprintf(own, sizeof(own), "/proc/%d/maps", getpid());
+        f = open(own, O_RDONLY);
+        CHECK(f >= 0, "/proc/<getpid()>/maps is the guest's own");
         if (f >= 0) close(f);
         char exe[4096];
         ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe));

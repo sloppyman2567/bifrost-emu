@@ -17,9 +17,20 @@
 // parse the base APK, build the LoadedApk (class loader and resources over
 // the base and split APKs), create and start the Application, then create
 // the launcher Activity and run its onCreate. APP_* markers record each step.
+//
+// Play mode (leading --play) keeps the app running in a Bifrost host window:
+// /data/local/tmp/libbifrost-activity.so opens the window before onCreate
+// (Unity looks up the UI thread's ALooper while loading), the Activity is
+// started and resumed, its decor view is laid out at the window size and each
+// SurfaceView receives its holder callbacks, as ViewRootImpl would deliver
+// them. The main Looper then pumps host input into the Activity until the
+// window closes. There is still no WindowManager attachment or real Surface:
+// the managed adapters map any ANativeWindow_fromSurface to the host window.
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.Application;
 import android.app.Instrumentation;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -28,26 +39,74 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.content.res.Configuration;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Looper;
 import android.os.Process;
+import android.os.PowerManager;
+import android.os.Parcel;
+import android.os.RemoteException;
+import android.os.UserHandle;
+import android.os.storage.StorageVolume;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.View;
+import android.view.ViewGroup;
+import java.io.File;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 public final class ActivityProbe {
     private static boolean created;
+    private static volatile Activity activeActivity;
+    private static volatile boolean windowOpen;
+    private static final Map<IBinder, Long> fullyDrawn = new ConcurrentHashMap<>();
     // The package installed by app mode; the only package that exists here.
     private static volatile PackageInfo installed;
     // ActivityRecord's requested orientation is initialized from its manifest.
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
+    private static Object display;  // the single DisplayInfo the display stub reports
+    private static boolean play;
+
+    // guest/android/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
+    private static native int openWindow(int width, int height);
+    private static native int pollWindow(long[] event);
+    private static native int audioConfig(long[] config);
+
+    private static void checkServiceRegistration() throws Exception {
+        if (!(Boolean) Class.forName("android.os.SystemProperties")
+                .getMethod("getBoolean", String.class, boolean.class)
+                .invoke(null, "servicemanager.ready", false))
+            return;
+        Class<?> manager = Class.forName("android.os.ServiceManager");
+        Method add = manager.getMethod("addService", String.class, IBinder.class);
+        Method check = manager.getMethod("checkService", String.class);
+        // Exercise real libbinder Parcel recycling and local Binder unflattening,
+        // independently of the Java service cache used by the framework stubs.
+        for (int i = 0; i < 8; ++i) {
+            Binder binder = new Binder();
+            add.invoke(null, "bifrost.registration_probe", binder);
+            if (check.invoke(null, "bifrost.registration_probe") != binder)
+                throw new AssertionError("registered Binder identity changed");
+        }
+        System.out.println("ACTIVITY_SERVICE_REGISTRATION_OK");
+    }
 
     public static final class ProbeActivity extends Activity {
         @Override
@@ -82,22 +141,183 @@ public final class ActivityProbe {
         return proxy;
     }
 
+    // Native AudioSystem clients use Binder, not ServiceManager's Java cache.
+    // This profile has no Android HAL ports/patches; host audio is a separate backend.
+    private static final class AudioPolicy extends Binder {
+        private static final String DESCRIPTOR = "android.media.IAudioPolicyService";
+        private final List<IBinder> clients = new ArrayList<>();
+        private boolean portCallbacks, volumeCallbacks;
+        private void readCount(Parcel data) {
+            if (data.readInt() != 1) throw new IllegalArgumentException("null port count");
+            int start = data.dataPosition(), size = data.readInt();
+            if (size < 8 || size > data.dataSize() - start || data.readInt() < 0)
+                throw new IllegalArgumentException("invalid port count");
+            data.setDataPosition(start + size);
+        }
+        @Override protected synchronized boolean onTransact(int code, Parcel data,
+                Parcel reply, int flags) throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code != 44 && code != 49 && code != 51 && code != 52 && code != 53)
+                return super.onTransact(code, data, reply, flags);
+            data.enforceInterface(DESCRIPTOR);
+            System.out.println("AUDIO_POLICY_TRANSACTION " + code);
+            if (code == 51) {
+                IBinder client = data.readStrongBinder();
+                if (client == null) throw new IllegalArgumentException("null audio client");
+                if (!clients.contains(client)) clients.add(client);
+            } else if (code == 52 || code == 53) {
+                boolean enabled = data.readBoolean();
+                if (code == 52) portCallbacks = enabled; else volumeCallbacks = enabled;
+            } else {
+                if (code == 44) {
+                    int role = data.readInt(), type = data.readInt();
+                    if (role < 0 || role > 2 || type < 0 || type > 3)
+                        throw new IllegalArgumentException("invalid audio port filter");
+                }
+                readCount(data);
+                // C++ AIDL sends the capacity of an out array after inout count.
+                int capacity = data.readInt();
+                if (capacity < 0 || capacity > 4096)
+                    throw new IllegalArgumentException("invalid audio array capacity");
+            }
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            if (code == 44 || code == 49) {
+                reply.writeInt(1); // stable generation for the empty topology
+                reply.writeInt(1); // nonnull android.media.audio.common.Int
+                reply.writeInt(8); // parcelable size, including size field
+                reply.writeInt(0); // count.value
+                reply.writeInt(0); // empty ports/patches vector
+            }
+            return true;
+        }
+    }
+    private static final Binder audioPolicy = new AudioPolicy();
+
+    // Android 15 IAudioFlingerService: only the queries used by this profile.
+    // Playback uses the managed AAudio adapter and Bifrost's host Audio engine.
+    private static final class AudioFlinger extends Binder {
+        private static final String DESCRIPTOR = "android.media.IAudioFlingerService";
+        private IBinder client;
+        @Override protected synchronized boolean onTransact(int code, Parcel data,
+                Parcel reply, int flags) throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code != 23 && code != 45 && code != 46)
+                return super.onTransact(code, data, reply, flags);
+            data.enforceInterface(DESCRIPTOR);
+            System.out.println("AUDIO_FLINGER_TRANSACTION " + code);
+            if (code == 23) {
+                IBinder incoming = data.readStrongBinder();
+                if (incoming == null) throw new IllegalArgumentException("null audio client");
+                if (client == null) client = incoming; // AudioFlinger keeps the first per process.
+            }
+            data.enforceNoDataAvail();
+            long[] config = new long[3];
+            if (code != 23 && audioConfig(config) != 0)
+                throw new IllegalStateException("host audio configuration unavailable");
+            reply.writeNoException();
+            if (code == 45) reply.writeInt((int) config[0]);
+            if (code == 46) reply.writeLong(config[1]);
+            return true;
+        }
+    }
+    private static final Binder audioFlinger = new AudioFlinger();
+
+    private static final Map<ComponentName, Integer> componentStates = new ConcurrentHashMap<>();
+
+    private static ComponentName ownComponent(Object argument) {
+        ComponentName component = (ComponentName) argument;
+        if (installed == null || !installed.packageName.equals(component.getPackageName()))
+            throw new IllegalArgumentException("Unknown component: " + component);
+        return component;
+    }
+
     private static UnsupportedOperationException unsupported(String service, String method) {
         return new UnsupportedOperationException(service + "." + method);
     }
 
-    // One 480x800, 160 dpi, 60 Hz display with id 0.
-    private static Object displayInfo() throws Exception {
+    private static boolean activityResumed() throws Exception {
+        Activity activity = activeActivity;
+        return activity != null && (Boolean) call(activity, "isResumed", new Class<?>[0]);
+    }
+
+    private static void memoryState(ActivityManager.RunningAppProcessInfo info) throws Exception {
+        if (info == null) throw new IllegalArgumentException("outState is null");
+        boolean resumed = activityResumed();
+        info.pid = Process.myPid();
+        info.uid = Process.myUid();
+        info.importance = resumed ? ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                : ActivityManager.RunningAppProcessInfo.IMPORTANCE_CACHED;
+        // One app process, no trim callbacks or OOM adjustment dependencies.
+        info.lastTrimLevel = 0;
+        info.lru = 0;
+        info.importanceReasonCode = ActivityManager.RunningAppProcessInfo.REASON_UNKNOWN;
+    }
+
+    private static void appDirectories(String packageName, String path) throws Exception {
+        if (installed == null || !installed.packageName.equals(packageName))
+            throw new SecurityException("Unknown mkdirs package: " + packageName);
+        File directory = new File(path).getCanonicalFile();
+        String canonical = directory.getPath();
+        boolean allowed = false;
+        for (String type : new String[] {"data", "obb", "media"}) {
+            String root = "/storage/emulated/0/Android/" + type + "/" + packageName;
+            allowed |= canonical.equals(root) || canonical.startsWith(root + "/");
+        }
+        if (!allowed) throw new SecurityException("Invalid mkdirs path: " + path);
+        if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory())
+            throw new IllegalStateException("Failed to prepare " + path);
+    }
+
+    private static void checkRuntimeServices(Context context, boolean resumed) throws Exception {
+        ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
+        info.lastTrimLevel = 99;
+        info.importanceReasonCode = 99;
+        ActivityManager.getMyMemoryState(info);
+        int importance = resumed ? ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                : ActivityManager.RunningAppProcessInfo.IMPORTANCE_CACHED;
+        if (info.pid != Process.myPid() || info.uid != Process.myUid()
+                || info.importance != importance || info.lastTrimLevel != 0
+                || info.lru != 0 || info.importanceReasonCode != 0)
+            throw new AssertionError("process memory state differs from launcher state");
+        PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        if (power == null || power.isInteractive() != windowOpen || power.isPowerSaveMode()
+                || power.isDeviceIdleMode() || power.getCurrentThermalStatus() != 0
+                || !Float.isNaN(power.getThermalHeadroom(0)))
+            throw new AssertionError("virtual-device power state differs from window state");
+        int[] status = {-1};
+        PowerManager.OnThermalStatusChangedListener listener = value -> status[0] = value;
+        power.addThermalStatusListener(Runnable::run, listener);
+        if (status[0] != 0) throw new AssertionError("thermal listener missed initial status");
+        power.removeThermalStatusListener(listener);
+        if (installed != null) {
+            File cache = context.getExternalCacheDir();
+            if (cache == null || !cache.isDirectory())
+                throw new AssertionError("external app cache was not created");
+            try {
+                appDirectories(installed.packageName, "/storage/emulated/0/Android/data/"
+                        + installed.packageName + "/../other-package/cache");
+                throw new AssertionError("mkdirs allowed a path outside the app directory");
+            } catch (SecurityException expected) {
+                // Canonicalization must reject traversal before filesystem mutation.
+            }
+        }
+        System.out.println("APP_RUNTIME_SERVICES_OK resumed=" + resumed);
+    }
+
+    // One 160 dpi, 60 Hz display with id 0: 480x800 unless play mode sizes
+    // it to the host window before the app first queries it.
+    private static Object displayInfo(int width, int height) throws Exception {
         Class<?> type = Class.forName("android.view.DisplayInfo");
         Object info = type.getConstructor().newInstance();
         type.getField("name").set(info, "Bifrost");
         type.getField("uniqueId").set(info, "bifrost:0");
-        for (String field : new String[] {"appWidth", "logicalWidth",
-                "smallestNominalAppWidth", "largestNominalAppWidth"})
-            type.getField(field).setInt(info, 480);
-        for (String field : new String[] {"appHeight", "logicalHeight",
-                "smallestNominalAppHeight", "largestNominalAppHeight"})
-            type.getField(field).setInt(info, 800);
+        for (String field : new String[] {"appWidth", "logicalWidth", "largestNominalAppWidth"})
+            type.getField(field).setInt(info, width);
+        for (String field : new String[] {"appHeight", "logicalHeight", "largestNominalAppHeight"})
+            type.getField(field).setInt(info, height);
+        type.getField("smallestNominalAppWidth").setInt(info, Math.min(width, height));
+        type.getField("smallestNominalAppHeight").setInt(info, Math.min(width, height));
         type.getField("logicalDensityDpi").setInt(info, 160);
         type.getField("physicalXDpi").setFloat(info, 160);
         type.getField("physicalYDpi").setFloat(info, 160);
@@ -105,7 +325,7 @@ public final class ActivityProbe {
         type.getField("type").setInt(info, 1);   // Display.TYPE_INTERNAL
         Class<?> modeType = Class.forName("android.view.Display$Mode");
         Object mode = modeType.getConstructor(int.class, int.class, int.class, float.class)
-                .newInstance(1, 480, 800, 60f);
+                .newInstance(1, width, height, 60f);
         Object modes = Array.newInstance(modeType, 1);
         Array.set(modes, 0, mode);
         type.getField("supportedModes").set(info, modes);
@@ -116,7 +336,37 @@ public final class ActivityProbe {
     }
 
     private static void installServices() throws Exception {
-        Object display = displayInfo();
+        // The runner exposes both credential and device protected storage
+        // for user 0, so this single user is running and unlocked.
+        service("user", "android.os.IUserManager", (method, a) -> {
+            switch (method) {
+                case "isUserUnlockingOrUnlocked":
+                case "isUserUnlocked": return ((Integer) a[0]) == 0;
+                default: throw unsupported("user", method);
+            }
+        });
+        // The runner provisions one writable emulated volume for user 0.
+        // Android 15's VolumeInfo.buildStorageVolume uses the same path for
+        // both app and internal access to an emulated volume.
+        File storage = new File("/storage/emulated/0");
+        StorageVolume volume = StorageVolume.class.getConstructor(String.class, File.class,
+                File.class, String.class, boolean.class, boolean.class, boolean.class,
+                boolean.class, boolean.class, long.class, UserHandle.class, UUID.class,
+                String.class, String.class).newInstance("emulated;0", storage, storage,
+                        "Internal shared storage", true, false, true, false, false, 0L,
+                        UserHandle.class.getConstructor(int.class).newInstance(0),
+                        Class.forName("android.os.storage.StorageManager")
+                                .getField("UUID_DEFAULT").get(null), null, "mounted");
+        service("mount", "android.os.storage.IStorageManager", (method, a) -> {
+            if (method.equals("getVolumeList"))
+                return ((Integer) a[0]) == 0 ? new StorageVolume[] {volume} : new StorageVolume[0];
+            if (method.equals("mkdirs")) {
+                appDirectories((String) a[0], (String) a[1]);
+                return null;
+            }
+            throw unsupported("mount", method);
+        });
+        display = displayInfo(480, 800);
         service("display", "android.hardware.display.IDisplayManager", (method, a) -> {
             switch (method) {
                 case "getDisplayInfo": return ((Integer) a[0]) == 0 ? display : null;
@@ -140,7 +390,41 @@ public final class ActivityProbe {
                 case "getApplicationInfo":
                     return installed != null && installed.packageName.equals(a[0])
                             ? installed.applicationInfo : null;
+                // An app may change its own components (PackageManagerService
+                // rejects components of packages that are not installed).
+                case "getComponentEnabledSetting":
+                    return componentStates.getOrDefault(ownComponent(a[0]),
+                            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+                case "setComponentEnabledSetting":
+                    componentStates.put(ownComponent(a[0]), (Integer) a[1]);
+                    return null;
                 default: throw unsupported("package", method);
+            }
+        });
+        // A fresh device's volumes: AudioSystem.DEFAULT_STREAM_VOLUME (client
+        // side, read from this image) and AudioService.MAX_STREAM_VOLUME.
+        int[] volumes = (int[]) Class.forName("android.media.AudioSystem")
+                .getField("DEFAULT_STREAM_VOLUME").get(null);
+        int[] maxVolumes = {5, 7, 7, 15, 7, 7, 15, 7, 15, 15, 15, 15};
+        if (play) {
+            Method add = Class.forName("android.os.ServiceManager").getMethod(
+                    "addService", String.class, IBinder.class);
+            add.invoke(null, "media.audio_policy", audioPolicy);
+            add.invoke(null, "media.audio_flinger", audioFlinger);
+        }
+        service("audio", "android.media.IAudioService", (method, a) -> {
+            switch (method) {
+                case "getStreamVolume": return volumes[(Integer) a[0]];
+                case "getStreamMaxVolume": return maxVolumes[(Integer) a[0]];
+                default: throw unsupported("audio", method);
+            }
+        });
+        // Observers are kept nowhere: no settings provider ever changes here.
+        service("content", "android.content.IContentService", (method, a) -> {
+            switch (method) {
+                case "registerContentObserver":
+                case "unregisterContentObserver": return null;
+                default: throw unsupported("content", method);
             }
         });
         service("window", "android.view.IWindowManager", (method, a) -> {
@@ -150,10 +434,69 @@ public final class ActivityProbe {
                 default: throw unsupported("window", method);
             }
         });
+        // The virtual device stays awake while its host window is open. It
+        // has no battery saver, idle controller, or low-power standby policy.
+        service("power", "android.os.IPowerManager", (method, a) -> {
+            switch (method) {
+                case "isInteractive": return windowOpen;
+                case "isDisplayInteractive": return (Integer) a[0] == 0 && windowOpen;
+                case "isPowerSaveMode":
+                case "areAutoPowerSaveModesEnabled":
+                case "isDeviceIdleMode":
+                case "isLightDeviceIdleMode":
+                case "isLowPowerStandbySupported":
+                case "isLowPowerStandbyEnabled": return false;
+                default: throw unsupported("power", method);
+            }
+        });
+        Map<IBinder, Object> thermalEvents = new ConcurrentHashMap<>();
+        Map<IBinder, Object> thermalStatuses = new ConcurrentHashMap<>();
+        // No virtual thermal HAL: no temperature/cooling samples and no
+        // forecast. NONE is the initial status, not a host-temperature claim.
+        service("thermalservice", "android.os.IThermalService", (method, a) -> {
+            switch (method) {
+                case "getCurrentThermalStatus": return 0;
+                case "getThermalHeadroom": return Float.NaN;
+                case "getThermalHeadroomThresholds": return new float[0];
+                case "getCurrentTemperatures":
+                case "getCurrentTemperaturesWithType":
+                    return Array.newInstance(Class.forName("android.os.Temperature"), 0);
+                case "getCurrentCoolingDevices":
+                case "getCurrentCoolingDevicesWithType":
+                    return Array.newInstance(Class.forName("android.os.CoolingDevice"), 0);
+                case "registerThermalEventListener":
+                case "registerThermalEventListenerWithType":
+                    return thermalEvents.putIfAbsent(((IInterface) a[0]).asBinder(), a[0]) == null;
+                case "unregisterThermalEventListener":
+                    return thermalEvents.remove(((IInterface) a[0]).asBinder()) != null;
+                case "registerThermalStatusListener": {
+                    IBinder token = ((IInterface) a[0]).asBinder();
+                    if (thermalStatuses.putIfAbsent(token, a[0]) != null) return false;
+                    try {
+                        call(a[0], "onStatusChange", new Class<?>[] {int.class}, 0);
+                    } catch (Exception error) {
+                        thermalStatuses.remove(token);
+                        throw error;
+                    }
+                    return true;
+                }
+                case "unregisterThermalStatusListener":
+                    return thermalStatuses.remove(((IInterface) a[0]).asBinder()) != null;
+                default: throw unsupported("thermalservice", method);
+            }
+        });
         Object client = service("bifrost.activity_client",
                 "android.app.IActivityClientController", (method, a) -> {
                     switch (method) {
                         case "setTaskDescription": return null;
+                        // Record the first completion for a known Activity;
+                        // unknown tokens are ignored, like ActivityRecord lookup.
+                        case "reportActivityFullyDrawn":
+                            if (orientations.containsKey((IBinder) a[0]))
+                                fullyDrawn.putIfAbsent((IBinder) a[0], System.nanoTime());
+                            return null;
+                        // The launcher Activity was not started for a result.
+                        case "getCallingPackage": return null;
                         case "getRequestedOrientation":
                             return orientations.getOrDefault((IBinder) a[0],
                                     ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
@@ -194,6 +537,22 @@ public final class ActivityProbe {
                 return holder;
             // Log.wtf report; false means "do not kill this process".
             if (method.equals("handleApplicationWtf")) return false;
+            if (method.equals("handleApplicationCrash")) {
+                // Record the supplied report, then let RuntimeInit perform
+                // its normal fatal-process termination.
+                Object crash = a[1];
+                for (String field : new String[] {"exceptionClassName", "exceptionMessage", "stackTrace"})
+                    System.err.println("APP_CRASH " + field + "="
+                            + crash.getClass().getField(field).get(crash));
+                return null;
+            }
+            if (method.equals("getMyMemoryState")) {
+                memoryState((ActivityManager.RunningAppProcessInfo) a[0]);
+                return null;
+            }
+            // Nothing broadcasts here: no sticky Intent matches a new receiver.
+            if (method.equals("registerReceiverWithFeature")) return null;
+            if (method.equals("unregisterReceiver")) return null;
             throw unsupported("activity", method);
         });
     }
@@ -243,6 +602,10 @@ public final class ActivityProbe {
         app.sourceDir = app.publicSourceDir = code + "/base.apk";
         app.splitNames = splitNames;
         app.splitSourceDirs = app.splitPublicSourceDirs = splitPaths;
+        // The installed PackageInfo lists the same sorted splits; Play Asset
+        // Delivery finds install-time asset packs through it.
+        packageInfo.splitNames = splitNames;
+        packageInfo.splitRevisionCodes = new int[splitNames.length];
         app.nativeLibraryDir = code + "/lib/arm64";
         setField(app, "nativeLibraryRootDir", code + "/lib");
         setField(app, "primaryCpuAbi", "arm64-v8a");
@@ -256,6 +619,22 @@ public final class ActivityProbe {
         app.flags |= ApplicationInfo.FLAG_HAS_CODE;
         installed = packageInfo;
         System.out.println("APP_PARSED " + app.className + " " + activity.name);
+        int width = 0, height = 0;
+        if (play) {
+            boolean landscape = Arrays.asList(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
+                    ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
+                    ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE)
+                    .contains(activity.screenOrientation);
+            width = landscape ? 1280 : 720;
+            height = landscape ? 720 : 1280;
+            display = displayInfo(width, height);
+            System.load("/data/local/tmp/libbifrost-activity.so");
+            int error = openWindow(width, height);
+            if (error != 0) throw new IllegalStateException("host window: " + error);
+            windowOpen = true;
+            System.out.println("APP_WINDOW_OPEN " + width + "x" + height);
+        }
 
         Class<?> compatibility = Class.forName("android.content.res.CompatibilityInfo");
         Object loaded = call(thread, "getPackageInfoNoCheck",
@@ -265,12 +644,43 @@ public final class ActivityProbe {
         Class<?> launcherClass = loader.loadClass(launcher);
         System.out.println("APP_CLASSLOADER_OK " + launcherClass.getName());
 
+        // handleBindApplication names the process before creating the
+        // Application; native code (Unity) reads it from /proc/<pid>/cmdline.
+        call(Process.class, "setArgV0", new Class<?>[] {String.class},
+                app.processName != null ? app.processName : packageName);
         Instrumentation instrumentation =
                 (Instrumentation) call(thread, "getInstrumentation", new Class<?>[0]);
         Application application = (Application) call(loaded, "makeApplicationInner",
                 new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
         setField(thread, "mInitialApplication", application);
         System.out.println("APP_APPLICATION_CREATED " + application.getClass().getName());
+        // Exercise the framework path Unity uses, including volume lookup
+        // and creation of the installed package's external files directory.
+        File external = application.getExternalFilesDir(null);
+        File expected = new File("/storage/emulated/0/Android/data/" + packageName + "/files");
+        if (!expected.equals(external) || !external.isDirectory() || !external.canWrite())
+            throw new IllegalStateException("external files directory unavailable: " + external);
+        System.out.println("APP_STORAGE_READY " + external);
+        // SharedPreferences goes through UserManager's credential-storage
+        // check on Android 15. Verify the real framework persistence path.
+        android.content.SharedPreferences preferences = application.getSharedPreferences(
+                "bifrost_probe", Context.MODE_PRIVATE);
+        if (!preferences.edit().putString("storage", "ready").commit() ||
+                !"ready".equals(preferences.getString("storage", null)))
+            throw new IllegalStateException("SharedPreferences storage unavailable");
+        System.out.println("APP_PREFERENCES_READY");
+        if (play) {
+            android.media.AudioManager audio = (android.media.AudioManager)
+                    application.getSystemService(Context.AUDIO_SERVICE);
+            if (audio.getDevices(android.media.AudioManager.GET_DEVICES_ALL).length != 0)
+                throw new AssertionError("unexpected Android HAL audio ports");
+            long[] config = new long[3];
+            if (audioConfig(config) != 0 ||
+                    Integer.parseInt(audio.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)) != config[0] ||
+                    Integer.parseInt(audio.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)) != config[1])
+                throw new AssertionError("AudioFlinger output differs from host backend");
+            System.out.println("APP_AUDIO_ROUTING_READY " + config[0] + " " + config[1]);
+        }
         instrumentation.callApplicationOnCreate(application);
         System.out.println("APP_APPLICATION_STARTED");
 
@@ -285,6 +695,7 @@ public final class ActivityProbe {
         Activity instance = instrumentation.newActivity(launcherClass, activityContext, token,
                 application, intent, activity, activity.loadLabel(system.getPackageManager()),
                 null, null, null);
+        activeActivity = instance;
         call(activityContext, "setOuterContext", new Class<?>[] {Context.class}, instance);
         if (activity.getThemeResource() != 0) instance.setTheme(activity.getThemeResource());
         if (instance.getRequestedOrientation() != activity.screenOrientation)
@@ -293,17 +704,130 @@ public final class ActivityProbe {
         instrumentation.callActivityOnCreate(instance, null);
         System.out.println("APP_ACTIVITY_CREATED");
         System.out.println("FRAMEWORK_OK");
+        if (play) {
+            play(instrumentation, instance, width, height);
+            return;
+        }
         System.exit(0);
     }
 
+    private static void findSurfaceViews(View view, List<SurfaceView> out) {
+        if (view instanceof SurfaceView) out.add((SurfaceView) view);
+        if (view instanceof ViewGroup)
+            for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++)
+                findSurfaceViews(((ViewGroup) view).getChildAt(i), out);
+    }
+
+    // What ViewRootImpl.performTraversals and SurfaceView.updateSurface do
+    // for a new or resized window: lay out the decor, then report each
+    // SurfaceView's surface through its registered holder callbacks.
+    @SuppressWarnings("unchecked")
+    private static void layoutAndReportSurfaces(Activity activity, int width, int height,
+            boolean created) throws Exception {
+        View decor = activity.getWindow().getDecorView();
+        decor.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+        decor.layout(0, 0, width, height);
+        List<SurfaceView> views = new ArrayList<>();
+        findSurfaceViews(decor, views);
+        for (SurfaceView view : views) {
+            Field frame = SurfaceView.class.getDeclaredField("mSurfaceFrame");
+            frame.setAccessible(true);
+            ((Rect) frame.get(view)).set(0, 0, view.getWidth(), view.getHeight());
+            Field field = SurfaceView.class.getDeclaredField("mCallbacks");
+            field.setAccessible(true);
+            SurfaceHolder holder = view.getHolder();
+            for (SurfaceHolder.Callback callback :
+                    new ArrayList<>((List<SurfaceHolder.Callback>) field.get(view))) {
+                if (created) callback.surfaceCreated(holder);
+                callback.surfaceChanged(holder, PixelFormat.RGBA_8888,
+                        view.getWidth(), view.getHeight());
+            }
+            System.out.println("APP_SURFACE " + view.getClass().getName() + " "
+                    + view.getWidth() + "x" + view.getHeight());
+        }
+        if (views.isEmpty()) throw new IllegalStateException("Activity has no SurfaceView");
+    }
+
+    // Converts one op-3 event record (activity_window.c) into a framework
+    // input event and dispatches it like ViewRootImpl's input stages.
+    private static void dispatch(Activity activity, long[] e) {
+        final long ms = 1000000;
+        if (e[0] == 1) {  // AINPUT_EVENT_TYPE_KEY
+            activity.dispatchKeyEvent(new KeyEvent(e[11] / ms, e[12] / ms, (int) e[4],
+                    (int) e[8], (int) e[10], (int) e[7], (int) e[6], (int) e[9],
+                    (int) e[19], (int) e[5]));
+        } else if (e[0] == 2) {  // AINPUT_EVENT_TYPE_MOTION, first pointer only
+            MotionEvent event = MotionEvent.obtain(e[11] / ms, e[12] / ms, (int) e[4],
+                    Float.intBitsToFloat((int) e[14]), Float.intBitsToFloat((int) e[15]),
+                    Float.intBitsToFloat((int) e[16]), Float.intBitsToFloat((int) e[17]),
+                    0, 1f, 1f, (int) e[6], 0);
+            event.setSource((int) e[5]);
+            if ((e[5] & InputDevice.SOURCE_CLASS_POINTER) != 0) activity.dispatchTouchEvent(event);
+            else activity.dispatchGenericMotionEvent(event);
+            event.recycle();
+        }
+    }
+
+    private static void play(Instrumentation instrumentation, Activity activity, int width,
+            int height) throws Exception {
+        // ActivityThread.handleStartActivity, then handleResumeActivity.
+        call(activity, "performStart", new Class<?>[] {String.class}, "bifrost");
+        instrumentation.callActivityOnPostCreate(activity, null);
+        call(activity, "performResume", new Class<?>[] {boolean.class, String.class},
+                false, "bifrost");
+        checkRuntimeServices(activity, true);
+        System.out.println("APP_RESUMED");
+        layoutAndReportSurfaces(activity, width, height, true);
+        activity.onWindowFocusChanged(true);
+        System.out.println("APP_SURFACE_READY");
+        Handler handler = new Handler(Looper.getMainLooper());
+        long[] event = new long[20];
+        int[] size = {width, height};
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    for (int i = 0; i < 64; i++) {
+                        int error = pollWindow(event);
+                        if (error != 0) throw new IllegalStateException("window poll: " + error);
+                        if (event[1] != 0) {
+                            windowOpen = false;
+                            System.out.println("APP_WINDOW_CLOSED");
+                            System.exit(0);
+                        }
+                        if (event[2] != size[0] || event[3] != size[1]) {
+                            size[0] = (int) event[2];
+                            size[1] = (int) event[3];
+                            layoutAndReportSurfaces(activity, size[0], size[1], false);
+                        }
+                        if (event[0] == 0) break;
+                        dispatch(activity, event);
+                    }
+                } catch (Exception error) {
+                    error.printStackTrace();
+                    System.exit(1);
+                }
+                handler.postDelayed(this, 4);
+            }
+        });
+        Looper.loop();
+    }
+
     private static void run(String[] args) throws Exception {
+        if (args.length > 0 && args[0].equals("--play")) {
+            play = true;
+            args = Arrays.copyOfRange(args, 1, args.length);
+        }
         Looper.prepareMainLooper();
+        checkServiceRegistration();
         installServices();
         System.out.println("ACTIVITY_BOOTSTRAP_BEGIN");
         Class<?> threadType = Class.forName("android.app.ActivityThread");
         Object thread = threadType.getMethod("systemMain").invoke(null);
         Context context = (Context) threadType.getMethod("getSystemContext").invoke(thread);
         System.out.println("ACTIVITY_CONTEXT_OK " + context);
+        checkRuntimeServices(context, false);
         // ActivityThread.handleBindApplication's fallback when no serialized
         // font map arrives (lazy Typeface initialization). This probe has
         // no bindApplication, and a TextView needs the default typefaces.
@@ -327,6 +851,7 @@ public final class ActivityProbe {
         Activity activity = instrumentation.newActivity(ProbeActivity.class, context,
                 token, new Application(), intent, info, "Bifrost Activity",
                 null, null, null);
+        activeActivity = activity;
         if (activity.getRequestedOrientation() != info.screenOrientation)
             throw new IllegalStateException("initial Activity orientation differs from its manifest");
         activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
@@ -338,6 +863,14 @@ public final class ActivityProbe {
                 activity.getWindow().peekDecorView() == null)
             throw new IllegalStateException("onCreate did not complete with a decor view");
         System.out.println("FRAMEWORK_OK");
+        // Exercise the report transport without invoking RuntimeInit's
+        // uncaught-exception handler (which would correctly kill the process).
+        Object manager = call(ActivityManager.class, "getService", new Class<?>[0]);
+        Class<?> crashType = Class.forName("android.app.ApplicationErrorReport$ParcelableCrashInfo");
+        Object crash = crashType.getConstructor(Throwable.class)
+                .newInstance(new IllegalStateException("intentional service-report check"));
+        call(manager, "handleApplicationCrash", new Class<?>[] {IBinder.class, crashType}, null, crash);
+        System.out.println("ACTIVITY_CRASH_REPORTING_OK");
         System.exit(0);
     }
 

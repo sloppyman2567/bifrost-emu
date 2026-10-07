@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -20,6 +21,55 @@ from android_framework import install
 
 
 PRIORITIES = "??VDIWEFS"
+
+
+def set_soname(path, soname):
+    """Rewrite DT_SONAME in place; the new name must not be longer."""
+    data = bytearray(path.read_bytes())
+    if data[:5] != b"\x7fELF\x02":
+        raise ValueError(f"{path}: not ELF64")
+    phoff, = struct.unpack_from("<Q", data, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    loads, dynamic = [], None
+    for index in range(phnum):
+        kind, _, offset, vaddr, _, filesz, _, _ = struct.unpack_from(
+            "<IIQQQQQQ", data, phoff + index * phentsize)
+        if kind == 1:
+            loads.append((vaddr, offset, filesz))
+        elif kind == 2:
+            dynamic = (offset, filesz)
+    tags = {}
+    for entry in range(dynamic[0], dynamic[0] + dynamic[1], 16):
+        tag, value = struct.unpack_from("<qQ", data, entry)
+        if tag == 0:
+            break
+        tags[tag] = value
+    strtab = next(offset + tags[5] - vaddr for vaddr, offset, size in loads
+                  if vaddr <= tags[5] < vaddr + size)
+    start = strtab + tags[14]
+    end = data.index(0, start)
+    if len(soname) > end - start:
+        raise ValueError(f"{path}: soname {soname} longer than {data[start:end].decode()}")
+    data[start:end] = soname.encode().ljust(end - start, b"\0")
+    path.write_bytes(data)
+
+
+def install_managed_graphics(root, adapters):
+    """Put Bifrost's thunk adapters in front of the image's real libraries.
+
+    Unity resolves libandroid/libEGL/libGLES through the default namespace,
+    where the framework already loaded them, so they are replaced there. The
+    real library moves to re_<name> (same soname length) and each adapter
+    depends on it for every export it does not thunk.
+    """
+    lib64 = root / "system/lib64"
+    for adapter in sorted(adapters.glob("*.so")):
+        real = lib64 / adapter.name
+        moved = lib64 / ("re_" + adapter.name[3:])
+        shutil.copyfile(real, moved)  # new inode; provisioned files are hardlinked
+        set_soname(moved, moved.name)
+        real.unlink()
+        shutil.copyfile(adapter, real)
 
 
 class LogdReceiver:
@@ -69,7 +119,7 @@ class LogdReceiver:
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
-        libraries=(), main_class="FrameworkProbe", app=None, probe_args=()):
+        libraries=(), main_class="FrameworkProbe", app=None, probe_args=(), managed_graphics=None):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
@@ -77,6 +127,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         shutil.copytree(runtime, root, symlinks=True)
         (root / "data/local/tmp").mkdir(parents=True)
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
+        (root / "storage/emulated/0").mkdir(parents=True, exist_ok=True)
         shutil.copy2(probe, root / "data/local/tmp/probe.dex")
         for library in libraries:
             if not library.name.endswith(".so") or not library.is_file():
@@ -95,6 +146,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             for user in ("data/user/0", "data/user_de/0"):
                 (root / user / package).mkdir(parents=True)
             (root / "data/data").symlink_to("user/0")
+        if managed_graphics:
+            install_managed_graphics(root, managed_graphics)
         if properties:
             # Loaded last, as Android's init does with this debug file.
             (root / "debug_ramdisk").mkdir(exist_ok=True)
@@ -125,6 +178,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         else:
             environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())
             environment["BIFROST_TIER2"] = "0"
+            if "--play" in probe_args:
+                environment["BIFROST_FRAME_TRACE"] = "1"
             arguments = [str(emu)] + (["--no-jit"] if mode == "interp" else [])
             if services:
                 arguments += ["--android-services"]
@@ -137,7 +192,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             child = subprocess.Popen(arguments, stdout=log, stderr=subprocess.STDOUT,
                                      env=environment, start_new_session=True)
             try:
-                child.wait(timeout=timeout)
+                child.wait(timeout=timeout or None)
             except subprocess.TimeoutExpired:
                 timed_out = True
             finally:
@@ -149,13 +204,32 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                     child.wait()
                 logd.close()
         text = log_path.read_bytes().decode(errors="replace")
-        app_mode = bool(probe_args and probe_args[0] == "--app")
-        markers = ("APP_CLASSLOADER_OK", "APP_APPLICATION_STARTED", "APP_ACTIVITY_CREATED", "FRAMEWORK_OK") \
+        app_mode = "--app" in probe_args
+        play = "--play" in probe_args
+        markers = ("APP_CLASSLOADER_OK", "APP_STORAGE_READY", "APP_PREFERENCES_READY",
+                   "APP_APPLICATION_STARTED", "APP_ACTIVITY_CREATED", "FRAMEWORK_OK") \
             if app_mode else ("FRAMEWORK_OK",)
-        passed = child.returncode == 0 and not timed_out and all(marker in text for marker in markers)
+        if services and main_class == "ActivityProbe":
+            markers += ("ACTIVITY_SERVICE_REGISTRATION_OK",)
+        if play:
+            markers += ("APP_WINDOW_OPEN", "APP_AUDIO_ROUTING_READY", "APP_RESUMED", "APP_SURFACE_READY")
+        # A play session ends when its window closes (exit 0) or its time runs out.
+        # A worker can die while the UI thread keeps pumping until the timeout.
+        # Also catch Unity's fatal signal forwarding when an outer debugger
+        # exits successfully after the guest crashes.
+        guest_failure = bool(re.search(r"\[bifrost-emu\] thread \d+: exception:|"
+                                       r"E CRASH\s*: Forwarding signal \d+|"
+                                       r"E AndroidRuntime: .*FATAL EXCEPTION", text))
+        frames = max((int(n) for n in re.findall(r"\[frame\] eglSwapBuffers: (\d+) frames", text)),
+                     default=0)
+        finished = child.returncode == 0 or (play and timed_out)
+        passed = finished and not guest_failure and (play or not timed_out) \
+            and all(marker in text for marker in markers) and (not play or frames >= 5)
         result = {"mode": mode, "passed": passed, "returncode": child.returncode,
+                  "guest_failure": guest_failure,
+                  "frames_presented": frames,
                   "timed_out": timed_out, "elapsed_seconds": round(time.monotonic() - started, 3),
-                  "checkpoint": "app_on_create" if app_mode else "framework",
+                  "checkpoint": "app_play" if play else "app_on_create" if app_mode else "framework",
                   "reached_checkpoints": [marker for marker in markers if marker in text]}
         (output / (mode + ".json")).write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result))
@@ -182,6 +256,11 @@ if __name__ == "__main__":
     parser.add_argument("--installed-app", type=Path,
                         help="Verified android_package.py package state for ActivityProbe app mode")
     parser.add_argument("--probe-arg", action="append", default=[], help="Argument passed to the probe's main (repeatable)")
+    parser.add_argument("--play", action="store_true",
+                        help="Keep the installed app running in a host window (implies --managed-graphics); "
+                             "--timeout 0 runs until the window closes")
+    parser.add_argument("--managed-graphics", type=Path, nargs="?", const=ROOT / "build/android-adapters/managed",
+                        help="Install managed libandroid/EGL/GLES adapters (tools/build-android-adapters.py)")
     args = parser.parse_args()
     if args.installed_app:
         if args.app or args.probe_arg or args.main_class != "ActivityProbe":
@@ -202,7 +281,7 @@ if __name__ == "__main__":
                 splits = sorted((p["split"], f"split-{i}.apk")
                                 for i, p in enumerate(package["packages"])
                                 if p["split"] and (not p["abis"] or "arm64-v8a" in p["abis"]))
-                args.probe_arg = ["--app", package["package"], code,
+                args.probe_arg = (["--play"] if args.play else []) + ["--app", package["package"], code,
                                   package["launcher"]["class"],
                                   *(name + "=" + path for name, path in splits)]
         except (OSError, ValueError, KeyError) as error:
@@ -211,8 +290,14 @@ if __name__ == "__main__":
         parser.error("--app must be an installed code directory containing base.apk")
     if not args.main_class.isidentifier():
         parser.error("--main-class must be a Java class name in the default package")
-    if not 1 <= args.timeout <= 300:
-        parser.error("timeout must be between 1 and 300 seconds")
+    if args.play:
+        if not args.installed_app:
+            parser.error("--play requires --installed-app")
+        adapters = ROOT / "build/android-adapters"
+        args.managed_graphics = args.managed_graphics or adapters / "managed"
+        args.library.append(adapters / "libbifrost-activity.so")
+    if not (1 <= args.timeout <= 300 or (args.play and args.timeout == 0)):
+        parser.error("timeout must be between 1 and 300 seconds (0 = unlimited with --play)")
     if args.emu is None:
         if args.mode == "qemu":
             qemu = shutil.which("qemu-aarch64")
@@ -224,4 +309,5 @@ if __name__ == "__main__":
     sys.exit(0 if run(args.emu.resolve(), args.runtime_root.resolve(), args.art_root.resolve(),
                       args.probe.resolve(), args.mode, args.output.resolve(), args.timeout,
                       args.art_option, args.prop, args.services, args.library, args.main_class,
-                      args.app.resolve() if args.app else None, args.probe_arg) else 1)
+                      args.app.resolve() if args.app else None, args.probe_arg,
+                      args.managed_graphics.resolve() if args.managed_graphics else None) else 1)

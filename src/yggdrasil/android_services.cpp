@@ -87,13 +87,18 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                 if (tx.code == 3) { // addService(name, binder, allowIsolated, dumpPriority)
                     uint64_t offset = input.position();
                     auto flat = input.read<bf_flat_binder>();
+                    // Parcel::finishFlattenBinder appends an int32 stability
+                    // representation even for a null Binder. It is not part
+                    // of flat_binder_object or the kernel's offsets array.
+                    int32_t stability = input.read<int32_t>();
                     int32_t isolated = input.read<int32_t>();
                     uint32_t priority = input.read<uint32_t>();
                     input.finish();
                     if (tx.offsets_size != 8 || mem.load<uint64_t>(tx.offsets) != offset ||
                         (flat.type != BF_BINDER_TYPE_BINDER &&
                          flat.type != BF_BINDER_TYPE_HANDLE) ||
-                        !flat.binder || (isolated != 0 && isolated != 1) || (priority & ~31u))
+                        !flat.binder || (isolated != 0 && isolated != 1) || (priority & ~31u) ||
+                        (stability != 0 && stability != 3 && stability != 12 && stability != 63))
                         throw std::invalid_argument("invalid service registration");
                     auto existing = domain_->services.find(name);
                     if (existing == domain_->services.end() && domain_->services.size() >= 256)
@@ -109,7 +114,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     }
                     Event incoming;
                     incoming.payload = std::move(data);
-                    int error = translate_objects(*this, incoming, mem, tx);
+                    int error = translate_objects(*this, incoming, mem, tx, tid);
                     if (error) {
                         result.write<int32_t>(error);
                         reply.transaction.flags = STATUS_CODE;
@@ -118,7 +123,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                         change_reference(object, 1, 0); // Registry owns a strong reference.
                         if (existing != domain_->services.end())
                             change_reference(existing->second.object, -1, 0);
-                        domain_->services[name] = {object, priority};
+                        domain_->services[name] = {object, priority, stability};
                         for (const auto &ref : incoming.references) {
                             --handles_.at(ref.handle).temporary_strong;
                             change_reference(ref.object, -1, 0);
@@ -132,9 +137,11 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     result.write<int32_t>(0);
                     auto found = domain_->services.find(name);
                     bf_flat_binder flat{BF_BINDER_TYPE_BINDER, 0, 0, 0};
+                    int32_t stability = 0;
                     if (found != domain_->services.end() && found->second.object->alive &&
                         !found->second.object->owner.expired()) {
                         auto object = found->second.object;
+                        stability = found->second.stability;
                         auto handle =
                             std::find_if(handles_.begin(), handles_.end(), [&](const auto &entry) {
                                 return entry.second.object == object;
@@ -164,6 +171,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     }
                     uint64_t offset = result.bytes.size();
                     result.write(flat);
+                    result.write(stability);
                     reply.transaction.data_size = result.bytes.size();
                     if (flat.binder) {
                         reply.transaction.offsets_size = 8;
@@ -174,7 +182,10 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                 }
             }
         }
-    } catch (const std::invalid_argument &) {
+    } catch (const std::invalid_argument &error) {
+        if (dbg().binder_trace)
+            fprintf(stderr, "[binder] registry tid=%d code=%#x rejected: %s\n",
+                    tid, tx.code, error.what());
         result.bytes.clear();
         result.write<int32_t>(-EINVAL);
         reply.transaction.flags = STATUS_CODE;

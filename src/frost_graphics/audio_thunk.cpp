@@ -75,6 +75,12 @@ struct AudioThunkImpl {
         uint32_t frames_per_cb = 1024;
         int64_t stream_arg = 0;              // AAudio: first cb arg (stream)
         bool aaudio = false;                 // AAudio cb signature vs SDL2
+        int32_t aa_state = 2;                // AAUDIO_STREAM_STATE_OPEN
+        int32_t aa_session = -1;
+        uint32_t aa_buffer_frames = 0;
+        // AAudio: a guest thread made by the Android libaaudio adapter runs
+        // the data callback, so the pump and inline firing skip the stream.
+        bool guest_thread = false;
         std::atomic<bool> stop{false};
         std::atomic<bool> paused{false};
         // ── SDL2 queue-mode backlog (real-SDL semantics) ──────────────
@@ -146,6 +152,8 @@ struct AudioThunkImpl {
     struct AaBuilder {
         int32_t fmt = 0;                   // AAUDIO_FORMAT_UNSPECIFIED=0/I16=1/FLOAT=2
         int32_t ch = 0, rate = 0, frames_per_cb = 0;
+        int32_t device = 0, direction = 0, sharing = 1, performance = 10;
+        int32_t session = -1, capacity = 0;
         uint64_t cb_fn = 0, cb_ud = 0, err_fn = 0, err_ud = 0;
     };
     std::map<uint64_t, AaBuilder> aa_builders_;
@@ -342,7 +350,8 @@ void AudioThunk::start_pump() {
                 std::lock_guard<std::mutex> lock(I.pump_mu);
                 auto scan = [&](auto& devices) {
                     for (auto& [handle, s] : devices) {
-                        if (!s.cb_fn || !s.bounce || !s.cb_scheduled) continue;
+                        if (!s.cb_fn || !s.bounce || !s.cb_scheduled || s.guest_thread)
+                            continue;
                         if (s.callback_active || s.paused || s.callback_lock_depth)
                             continue;
                         if (now < s.next_cb_us) {
@@ -431,6 +440,7 @@ void AudioThunk::start_pump() {
                 auto it = I.aa_streams_.find(h);
                 if (it != I.aa_streams_.end()) {
                     it->second.paused = true;
+                    it->second.aa_state = 10;  // AAUDIO_CALLBACK_RESULT_STOP stops
                     it->second.callback_active = false;
                 }
                 if (stream && I.engine) I.engine->stream_pause(stream, true);
@@ -698,7 +708,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     if (dit == devs.end()) return;
                     AudioThunkImpl::PumpStream& s = dit->second;
                     if (!s.cb_fn || !s.bounce || !s.cb_scheduled ||
-                        s.callback_active) return;
+                        s.guest_thread || s.callback_active) return;
                     if (s.callback_lock_depth) return;
                     if (s.paused.load(std::memory_order_relaxed)) {
                         s.next_cb_us = now_us;   // resume on unpause, no burst
@@ -1531,9 +1541,11 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         name == "alDistanceModel") { tr(0); return 0; }
 
     // ══ AAudio (Android) ════════════════════════════════════════════
-    if (name == "AAudioStreamBuilder_new") {
+    if (name == "AAudioStreamBuilder_new" || name == "AAudio_createStreamBuilder") {
         std::lock_guard<std::recursive_mutex> g(I.mu);
         uint64_t out = R(0);
+        if (!out) { tr(-886); return -886; } // AAUDIO_ERROR_NULL
+        I.mem->check_access(out, 8, Memory::GUEST_PROT_WRITE);
         const uint64_t h = 0xAA000000ull + ++I.next_aa_builder_;
         I.aa_builders_[h] = AudioThunkImpl::AaBuilder{};
         if (out) wr64(I, out, h);
@@ -1562,6 +1574,26 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (it != I.aa_builders_.end()) it->second.rate = (int32_t)R(1);
         tr(0); return 0;
     }
+    if (name == "AAudioStreamBuilder_setDeviceId" ||
+        name == "AAudioStreamBuilder_setDirection" ||
+        name == "AAudioStreamBuilder_setSharingMode" ||
+        name == "AAudioStreamBuilder_setPerformanceMode" ||
+        name == "AAudioStreamBuilder_setSessionId" ||
+        name == "AAudioStreamBuilder_setBufferCapacityInFrames") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
+        auto it = I.aa_builders_.find(R(0));
+        if (it != I.aa_builders_.end()) {
+            auto& b = it->second;
+            int32_t value = static_cast<int32_t>(R(1));
+            if (name == "AAudioStreamBuilder_setDeviceId") b.device = value;
+            else if (name == "AAudioStreamBuilder_setDirection") b.direction = value;
+            else if (name == "AAudioStreamBuilder_setSharingMode") b.sharing = value;
+            else if (name == "AAudioStreamBuilder_setPerformanceMode") b.performance = value;
+            else if (name == "AAudioStreamBuilder_setSessionId") b.session = value;
+            else b.capacity = value;
+        }
+        tr(0); return 0;
+    }
     if (name == "AAudioStreamBuilder_setFramesPerDataCallback") {
         std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
@@ -1587,9 +1619,18 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         {
             std::lock_guard<std::recursive_mutex> g(I.mu);
             auto bit = I.aa_builders_.find(R(0));
-            if (bit == I.aa_builders_.end() || !out) { tr(-22); return -22; }
+            if (bit == I.aa_builders_.end()) { tr(-892); return -892; }
+            if (!out) { tr(-886); return -886; }
             b = bit->second;   // copy: another thread may delete the builder
         }
+        wr64(I, out, 0);
+        if (b.direction == 1) { tr(-890); return -890; } // Input not implemented.
+        if (b.direction != 0 || b.ch < 0 || b.ch > 8 || b.rate < 0 ||
+            b.rate > 384000 || b.frames_per_cb < 0 || b.frames_per_cb > 65536 ||
+            b.capacity < 0 || b.sharing < 0 || b.sharing > 1 || b.session < -1 ||
+            b.performance < 10 || b.performance > 12) { tr(-898); return -898; }
+        if (b.device != 0) { tr(-889); return -889; } // Only the default host device.
+        if (b.fmt < 0 || b.fmt > 2) { tr(-883); return -883; } // I16/FLOAT only.
         // Hold pump_mu for the whole arm (same shape as SDL_OpenAudioDevice).
         std::unique_lock<std::mutex> pmu(I.pump_mu);
         const uint64_t h = 0xAA100000ull + ++I.next_aa_stream_;
@@ -1600,6 +1641,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         s.rate = b.rate > 0 ? (uint32_t)b.rate : 48000;
         s.frames_per_cb = b.frames_per_cb > 0
             ? (uint32_t)b.frames_per_cb : 1024;
+        s.aa_session = b.session == 0 ? static_cast<int32_t>(I.next_aa_stream_) : b.session;
         s.cb_fn = b.cb_fn; s.cb_ud = b.cb_ud;
         s.stream_arg = (int64_t)h;
         s.aaudio = true;
@@ -1616,6 +1658,18 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         s.engine_stream = I.engine
             ? I.engine->stream_open(s.fmt, s.rate, s.ch) : 0;
+        if (!s.engine_stream) {
+            if (s.bounce) I.mem->untrack_allocation(s.bounce, s.bounce_bytes);
+            I.aa_streams_.erase(h); wr64(I, out, 0); tr(-889); return -889;
+        }
+        size_t queued = 0, capacity = 0;
+        I.engine->stream_buffer_info(s.engine_stream, s.rate, queued, capacity);
+        s.aa_buffer_frames = static_cast<uint32_t>(capacity);
+        if (b.capacity > 0 && static_cast<size_t>(b.capacity) > capacity) {
+            I.engine->stream_close(s.engine_stream);
+            if (s.bounce) I.mem->untrack_allocation(s.bounce, s.bounce_bytes);
+            I.aa_streams_.erase(h); wr64(I, out, 0); tr(-889); return -889;
+        }
         if (s.engine_stream) I.engine->stream_pause(s.engine_stream, true);
         const bool has_callback = s.cb_fn && s.bounce && s.cb_scheduled;
         pmu.unlock();
@@ -1628,10 +1682,12 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         auto it = I.aa_streams_.find(R(0));
         if (it != I.aa_streams_.end()) {
             it->second.paused = false;
+            it->second.aa_state = 4;
             if (it->second.engine_stream && I.engine)
                 I.engine->stream_pause(it->second.engine_stream, false);
         }
         I.wake_pump();
+        I.callback_cv.notify_all();
         tr(0); return 0;
     }
     if (name == "AAudioStream_requestPause" || name == "AAudioStream_requestStop") {
@@ -1639,10 +1695,12 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         auto it = I.aa_streams_.find(R(0));
         if (it != I.aa_streams_.end()) {
             it->second.paused = true;
+            it->second.aa_state = name == "AAudioStream_requestPause" ? 6 : 10;
             if (it->second.engine_stream && I.engine)
                 I.engine->stream_pause(it->second.engine_stream, true);
         }
         I.wake_pump();
+        I.callback_cv.notify_all();
         tr(0); return 0;
     }
     if (name == "AAudioStream_close") {
@@ -1669,7 +1727,100 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             I.aa_streams_.erase(it);
         }
         I.wake_pump();
+        I.callback_cv.notify_all();  // a guest callback thread sees the close
         tr(0); return 0;
+    }
+    // ── AAudio guest callback thread (Android libaaudio adapter) ────────
+    // Real libaaudio runs the data callback on a pthread of its own. Under
+    // Bionic the pump has no guest TLS, so the adapter (guest/android/
+    // aaudio.c) creates that thread and drives it through these calls.
+    if (name == "bifrost_aaudio_claim_callback") {  // (stream, uint64_t info[2])
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        auto& s = it->second;
+        if (!s.cb_fn || !s.bounce) { tr(0); return 0; }  // write()-mode stream
+        wr64(I, R(1), s.cb_fn);
+        wr64(I, R(1) + 8, s.cb_ud);
+        s.guest_thread = true;
+        tr(1); return 1;
+    }
+    if (name == "bifrost_aaudio_wait_callback") {  // (stream, int32_t* frames)
+        // Returns the bounce once the host ring has room for one callback,
+        // 0 after at most 20 ms (the guest loops back through guest code,
+        // so a group exit never waits on a host condition variable), or
+        // AAUDIO_ERROR_INVALID_HANDLE once the stream is closed. Pacing
+        // follows the ring fill, not a timer, so it cannot drift from the
+        // host device. Not traced: it runs every period.
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(20);
+        std::unique_lock<std::mutex> lock(I.pump_mu);
+        for (;;) {
+            auto it = I.aa_streams_.find(R(0));
+            if (it == I.aa_streams_.end() || !it->second.guest_thread ||
+                it->second.stop.load()) return -892;
+            auto& s = it->second;
+            auto sleep = std::chrono::steady_clock::duration::max();
+            size_t queued = 0, capacity = 0;
+            if (!s.paused && !s.callback_active && s.engine_stream && I.engine &&
+                I.engine->stream_buffer_info(s.engine_stream, s.rate, queued, capacity)) {
+                // Keep about three callbacks, and at least two host device
+                // periods, queued; the 370 ms ring would add its whole length
+                // as latency if filled.
+                uint32_t host_rate = 0, host_frames = 0;
+                I.engine->output_config(host_rate, host_frames);
+                const uint64_t host_period = host_rate
+                    ? (uint64_t)host_frames * s.rate / host_rate : 0;
+                const uint64_t target = std::min<uint64_t>(capacity,
+                    std::max<uint64_t>(3ull * s.frames_per_cb,
+                                       2 * host_period + s.frames_per_cb));
+                if (queued == 0 || queued + s.frames_per_cb <= target) {
+                    const size_t bytes = (size_t)s.frames_per_cb * s.ch * s.size;
+                    I.mem->store<int32_t>(R(1), static_cast<int32_t>(s.frames_per_cb));
+                    std::vector<uint8_t> silence(bytes, 0);
+                    I.mem->write(s.bounce, silence.data(), bytes);
+                    s.callback_active = true;
+                    s.callback_host = std::this_thread::get_id();
+                    return static_cast<int64_t>(s.bounce);
+                }
+                sleep = std::chrono::microseconds(std::max<uint64_t>(1000,
+                    (queued + s.frames_per_cb - target) * 1000000ull / s.rate));
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) return 0;
+            I.callback_cv.wait_for(lock, std::min(sleep, deadline - now));
+        }
+    }
+    if (name == "bifrost_aaudio_finish_callback") {  // (stream, callback result)
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) return -892;
+        auto& s = it->second;
+        if (!s.callback_active || s.callback_host != std::this_thread::get_id())
+            return -895;  // AAUDIO_ERROR_INVALID_STATE
+        s.callback_active = false;
+        I.callback_cv.notify_all();
+        if (s.close_deferred) {  // AAudioStream_close from inside the callback
+            if (s.engine_stream && I.engine) I.engine->stream_close(s.engine_stream);
+            if (s.bounce) I.mem->untrack_allocation(s.bounce, s.bounce_bytes);
+            I.aa_streams_.erase(it);
+            I.wake_pump();
+            return -892;
+        }
+        if (static_cast<int32_t>(R(1)) != 0) {  // AAUDIO_CALLBACK_RESULT_STOP
+            s.paused = true;
+            s.aa_state = 10;
+            if (s.engine_stream && I.engine) I.engine->stream_pause(s.engine_stream, true);
+            return 0;
+        }
+        if (s.engine_stream && I.engine) {
+            const size_t bytes = (size_t)s.frames_per_cb * s.ch * s.size;
+            std::vector<uint8_t> data(bytes);
+            I.mem->read(s.bounce, data.data(), bytes);
+            I.engine->stream_write(s.engine_stream, s.fmt, s.rate, s.ch,
+                                   data.data(), bytes);
+        }
+        return 0;
     }
     if (name == "AAudioStream_write") {
         std::lock_guard<std::mutex> pmu(I.pump_mu);
@@ -1696,11 +1847,54 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (name == "AAudioStream_getState") {
         std::lock_guard<std::mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
-        int64_t st = (it != I.aa_streams_.end() && !it->second.paused &&
-                      !it->second.stop.load()) ? 4 /*Started*/ : 10 /*Stopped*/;
+        int64_t st = it == I.aa_streams_.end() ? 12 :
+            it->second.stop.load() ? 10 : it->second.aa_state;
         tr(st); return st;
     }
-    if (name == "AAudioStream_waitForStateChange") { tr(0); return 0; }
+    if (name == "AAudioStream_waitForStateChange") {
+        I.mem->check_access(R(2), 4, Memory::GUEST_PROT_WRITE);
+        std::unique_lock<std::mutex> lock(I.pump_mu);
+        auto state = [&] {
+            auto it = I.aa_streams_.find(R(0));
+            return it == I.aa_streams_.end() ? 12 :
+                it->second.stop.load() ? 10 : it->second.aa_state;
+        };
+        bool changed = state() != static_cast<int32_t>(R(1));
+        if (!changed && static_cast<int64_t>(R(3)) > 0)
+            changed = I.callback_cv.wait_for(lock, std::chrono::nanoseconds(R(3)), [&] {
+                return state() != static_cast<int32_t>(R(1));
+            });
+        I.mem->store<int32_t>(R(2), state());
+        int64_t result = changed ? 0 : -885; // AAUDIO_ERROR_TIMEOUT
+        tr(result); return result;
+    }
+    if (name == "AAudioStream_getDeviceId" || name == "AAudioStream_getSessionId" ||
+        name == "AAudioStream_getXRunCount" || name == "AAudioStream_isMMapUsed" ||
+        name == "AAudioStream_getSharingMode" || name == "AAudioStream_getPerformanceMode" ||
+        name == "AAudioStream_getDirection" || name == "AAudioStream_getBufferCapacityInFrames") {
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        int64_t result = 0;
+        if (name == "AAudioStream_getSessionId") result = it->second.aa_session;
+        else if (name == "AAudioStream_getSharingMode") result = 1; // Host mixer is shared.
+        else if (name == "AAudioStream_getPerformanceMode") result = 10; // No low-latency HAL.
+        else if (name == "AAudioStream_getBufferCapacityInFrames") {
+            size_t queued, capacity;
+            if (I.engine->stream_buffer_info(it->second.engine_stream, it->second.rate, queued, capacity))
+                result = capacity;
+        }
+        tr(result); return result;
+    }
+    if (name == "AAudioStream_setBufferSizeInFrames") {
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        if (static_cast<int32_t>(R(1)) < 0) { tr(-898); return -898; }
+        // The host ring has a fixed capacity. AAudio permits returning a
+        // different actual size; report that ring, rather than a fictitious limit.
+        tr(it->second.aa_buffer_frames); return it->second.aa_buffer_frames;
+    }
     if (name == "AAudioStream_getFormat") {
         std::lock_guard<std::mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
@@ -1724,7 +1918,9 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         name == "AAudioStream_getFramesPerDataCallback") {
         std::lock_guard<std::mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
-        int64_t r = it != I.aa_streams_.end() ? it->second.frames_per_cb : 1024;
+        int64_t r = it == I.aa_streams_.end() ? -892 :
+            name == "AAudioStream_getBufferSizeInFrames" ? it->second.aa_buffer_frames :
+            it->second.frames_per_cb;
         tr(r); return r;
     }
     if (name == "AAudioStream_getFramesRead" || name == "AAudioStream_getFramesWritten") {
@@ -2002,6 +2198,26 @@ void AudioThunk::register_known_symbols_() {
     // ── libaaudio.so (Android) ────────────────────────────────────
     const char* aa_libs[] = {"libaaudio.so"};
     REG(aa_libs, AAudioStreamBuilder_new);
+    REG(aa_libs, AAudio_createStreamBuilder);
+    REG(aa_libs, AAudioStreamBuilder_setDeviceId);
+    REG(aa_libs, AAudioStreamBuilder_setDirection);
+    REG(aa_libs, AAudioStreamBuilder_setSharingMode);
+    REG(aa_libs, AAudioStreamBuilder_setPerformanceMode);
+    REG(aa_libs, AAudioStreamBuilder_setSessionId);
+    REG(aa_libs, AAudioStreamBuilder_setBufferCapacityInFrames);
+    REG(aa_libs, AAudioStream_getBufferCapacityInFrames);
+    REG(aa_libs, AAudioStream_setBufferSizeInFrames);
+    REG(aa_libs, AAudioStream_getDeviceId);
+    REG(aa_libs, AAudioStream_getSessionId);
+    REG(aa_libs, AAudioStream_getXRunCount);
+    REG(aa_libs, AAudioStream_isMMapUsed);
+    REG(aa_libs, AAudioStream_getSharingMode);
+    REG(aa_libs, AAudioStream_getPerformanceMode);
+    REG(aa_libs, AAudioStream_getDirection);
+    // Private: the Android adapter's guest callback thread (aaudio.c).
+    REG(aa_libs, bifrost_aaudio_claim_callback);
+    REG(aa_libs, bifrost_aaudio_wait_callback);
+    REG(aa_libs, bifrost_aaudio_finish_callback);
     REG(aa_libs, AAudioStreamBuilder_delete);
     REG(aa_libs, AAudioStreamBuilder_setFormat);
     REG(aa_libs, AAudioStreamBuilder_setChannelCount);

@@ -165,6 +165,10 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 if ((guest_mask >> (signo - 1)) & 1)
                     sigaddset(&host_mask, signo);
             }
+            // The host kick is an emulator wakeup, not the guest's signal
+            // with the same number. A collector's all-but-restart mask must
+            // not prevent queued restart signals or shutdown from waking us.
+            Emulator::unblock_host_wakeup(host_mask);
             ::sigsuspend(&host_mask);
             const bool delivered = emu.handle_eintr(cpu);
             if (!delivered) {

@@ -326,6 +326,11 @@ public:
     // kill_other_threads()/reap cannot free it while the caller uses it.
     // For the main thread the pointer aliases main_cpu_ (no-op deleter).
     std::shared_ptr<CPU> find_cpu_by_tid(int tid);
+    // Interrupt a target's host I/O and its published futex wait after
+    // queuing an unblocked guest signal. Delivery remains on the target CPU.
+    void kick_cpu_wait(CPU& target);
+    // Guest masks must not block the emulator's private host wakeup.
+    static void unblock_host_wakeup(sigset_t& mask);
     // Public accessor for JIT fast LL/SC helpers.
     struct ExclMonitorShardAccess {
         std::mutex mu;
@@ -403,6 +408,8 @@ private:
     // build_initial_stack and used to point glibc's __environ at it (the
     // native dynlink path never runs ld.so to do this itself).
     uint64_t guest_envp_addr_ = 0;
+    // Guest argv string block, [arg_start_, arg_end_), for /proc/self/cmdline.
+    uint64_t arg_start_ = 0, arg_end_ = 0;
     // Guest-side current working directory. Decoupled from the host cwd
     // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
     // chdir/fchdir; returned by getcwd. Defaults to "/".
@@ -707,6 +714,13 @@ private:
     // also called from the syscall dispatcher and the JIT trampoline.
     friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
     // ── Internal helpers ──────────────────────────────────────────────
+    // Lays out argv then env strings below stack_top (Linux order) and
+    // records the argv block for /proc/self/cmdline; returns the lowest byte.
+    uint64_t place_argument_strings(uint64_t stack_top,
+                                    const std::vector<std::string>& argv,
+                                    const std::vector<std::string>& env,
+                                    std::vector<uint64_t>& argv_addrs,
+                                    std::vector<uint64_t>& envp_addrs);
     uint64_t build_initial_stack(uint64_t stack_top,
                                  std::vector<std::string>& argv,
                                  ElfLoader::Loaded& info);

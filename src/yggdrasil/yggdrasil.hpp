@@ -140,9 +140,14 @@ public:
     }
     const std::string& elf_path() const { return elf_path_; }
     void set_initial_stack(uint64_t address) { initial_stack_ = address; }
-    // Set the argv vector (used by /proc/self/cmdline). Called once
-    // from Emulator::load_elf_file().
-    void set_argv(const std::vector<std::string>& argv) { argv_ = argv; }
+    // Live /proc/self/cmdline contents, read from the guest's argv block.
+    void set_cmdline_provider(std::function<std::string()> cb) {
+        cmdline_provider_ = std::move(cb);
+    }
+    // The guest's own pid as getpid() reports it: 1, or the host pid in a
+    // fork child. /proc/<that pid> names the same process as /proc/self.
+    void set_self_pid(int pid) { self_pid_ = pid; }
+    std::string canonical_proc_path(const std::string& path) const;
     // Wire up the graphics backend (for /dev/fb0). May be null if the
     // emulator was built without SDL2 and the guest never opens /dev/fb0.
     void set_graphics(::arm64emu::FrostGraphics* gfx) { gfx_ = gfx; }
@@ -206,7 +211,8 @@ private:
     // Exact host file selected by the ELF loader, independent of guest cwd.
     std::string elf_backing_path_;
     uint64_t initial_stack_ = 0;
-    std::vector<std::string> argv_;
+    std::function<std::string()> cmdline_provider_;
+    int self_pid_ = 1;
     ::arm64emu::FrostGraphics* gfx_ = nullptr;
     ::arm64emu::Audio* audio_ = nullptr;
     std::function<std::vector<MapEntry>()> maps_provider_;

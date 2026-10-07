@@ -42,3 +42,29 @@ for aslr in fixed random; do
         done
     done
 done
+# Managed libaaudio adapter: data callbacks on the adapter's own Bionic thread.
+python3 tools/build-android-adapters.py --runtime-root "$runtime" >/dev/null
+mkdir -p "$runtime/data/local/tmp/aaudio"
+cp build/android-adapters/managed/libaaudio.so "$runtime/data/local/tmp/aaudio/"
+clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -fPIE -pie -O2 \
+    -Wl,-z,max-page-size=16384 -Wl,--dynamic-linker=/system/bin/linker64 \
+    -Wl,-rpath,/data/local/tmp/aaudio:/apex/com.android.runtime/lib64/bionic \
+    -Wl,--allow-shlib-undefined \
+    -mno-outline-atomics ctest/android_bionic_start.S ctest/android_aaudio_thread.c \
+    "$runtime/data/local/tmp/aaudio/libaaudio.so" \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libc.so" \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libdl.so" \
+    -o "$runtime/data/local/tmp/aaudio_thread"
+for mode in jit interp tier2; do
+    args=()
+    [[ "$mode" != interp ]] || args=(--no-jit)
+    tier=0
+    [[ "$mode" != tier2 ]] || tier=1
+    log="$task_tmp/aaudio-$mode.log"
+    env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy BIFROST_TIER2="$tier" BIFROST_TIER2_HITS=32 \
+        timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
+        /data/local/tmp/aaudio_thread > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
+    rg -q '^android_aaudio_thread: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+    if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
+    echo "Bionic AAudio callback thread: $mode passed"
+done

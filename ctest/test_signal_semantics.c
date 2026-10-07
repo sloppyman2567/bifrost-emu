@@ -20,6 +20,8 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdatomic.h>
+#include <linux/futex.h>
 
 static volatile sig_atomic_t g_got = 0;
 static void h_simple(int sig) { g_got = sig; }
@@ -144,7 +146,78 @@ static int test_cross_thread(void) {
     return 0;
 }
 
+// Blocked signals must remain pending without hiding an unblocked signal
+// that interrupts a futex, host read, or all-but-one sigsuspend mask.
+static atomic_int wait_tid, wait_done;
+static volatile sig_atomic_t wait_usr1, wait_usr2;
+static int wait_kind, wait_word, wait_pipe[2], wait_result, wait_errno;
+static void h_wait(int sig) {
+    if (sig == SIGUSR1) ++wait_usr1;
+    if (sig == SIGUSR2) ++wait_usr2;
+}
+static void* blocked_wait(void* unused) {
+    (void)unused;
+    sigset_t blocked, original;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &blocked, &original);
+    atomic_store(&wait_tid, (int)syscall(SYS_gettid));
+    errno = 0;
+    if (wait_kind == 0) {
+        struct timespec timeout = {2, 0};
+        wait_result = syscall(SYS_futex, &wait_word, FUTEX_WAIT_PRIVATE,
+                              0, &timeout, NULL, 0);
+    } else if (wait_kind == 1) {
+        char byte;
+        wait_result = read(wait_pipe[0], &byte, 1);
+    } else {
+        sigset_t mask;
+        sigfillset(&mask);
+        sigdelset(&mask, SIGUSR2);
+        wait_result = sigsuspend(&mask);
+    }
+    wait_errno = errno;
+    // The earlier blocked signal has not run inside the interrupted wait.
+    if (wait_usr1 != 0) wait_result = -2;
+    pthread_sigmask(SIG_SETMASK, &original, NULL);
+    for (int i = 0; i < 10000 && !wait_usr1; ++i) syscall(SYS_getpid);
+    atomic_store(&wait_done, 1);
+    return NULL;
+}
+static int test_blocked_wait(int kind) {
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = h_wait;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGUSR1, &action, NULL);
+    sigaction(SIGUSR2, &action, NULL);
+    wait_kind = kind;
+    wait_word = wait_usr1 = wait_usr2 = 0;
+    atomic_store(&wait_tid, 0);
+    atomic_store(&wait_done, 0);
+    if (pipe(wait_pipe) != 0) return -1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, blocked_wait, NULL) != 0) return -2;
+    while (!atomic_load(&wait_tid)) usleep(1000);
+    usleep(30000);
+    syscall(SYS_tgkill, getpid(), atomic_load(&wait_tid), SIGUSR1);
+    usleep(10000);
+    syscall(SYS_tgkill, getpid(), atomic_load(&wait_tid), SIGUSR2);
+    // An outer alarm bounds the sigsuspend case even on a broken emulator.
+    for (int i = 0; i < 300 && !atomic_load(&wait_done); ++i) usleep(1000);
+    if (!atomic_load(&wait_done) && kind == 1) write(wait_pipe[1], "x", 1);
+    pthread_join(thread, NULL);
+    close(wait_pipe[0]);
+    close(wait_pipe[1]);
+    if (wait_result != -1 || wait_errno != EINTR || wait_usr1 != 1 || wait_usr2 != 1)
+        printf("wait kind=%d result=%d errno=%d usr1=%d usr2=%d\n",
+               kind, wait_result, wait_errno, (int)wait_usr1, (int)wait_usr2);
+    return wait_result == -1 && wait_errno == EINTR &&
+           wait_usr1 == 1 && wait_usr2 == 1 ? 0 : -3;
+}
+
 int main(void) {
+    alarm(15);
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even if we hang
     printf("=== signal semantics test ===\n");
     int r1 = test_sigaction_alias();
@@ -154,8 +227,12 @@ int main(void) {
     int r3 = test_cross_thread();
     printf("cross-thread delivery: %s (%d/%d)\n",
            r3 == 0 ? "ok" : "bad", (int)g_recv, XT_N);
-    if (r1 || r2 || r3) {
-        printf("FAIL (r1=%d r2=%d r3=%d)\n", r1, r2, r3);
+    int r4 = test_blocked_wait(0);
+    int r5 = test_blocked_wait(1);
+    int r6 = test_blocked_wait(2);
+    printf("cross-thread blocked waits: futex=%d read=%d sigsuspend=%d\n", r4, r5, r6);
+    if (r1 || r2 || r3 || r4 || r5 || r6) {
+        printf("FAIL (r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d)\n", r1, r2, r3, r4, r5, r6);
         return 1;
     }
     printf("signal semantics: ALL PASS\n");

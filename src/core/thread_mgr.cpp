@@ -625,6 +625,28 @@ void Emulator::reap_retired_sdl_threads() {
         if (st->handle_addr) mem_.untrack_allocation(st->handle_addr, 32);
     }
 }
+void Emulator::kick_cpu_wait(CPU& target) {
+    {
+        std::lock_guard<std::mutex> lock(threads_mu_);
+        if (&target == &main_cpu_) {
+            if (main_host_thread_set_.load()) ::pthread_kill(main_host_thread_, KICK_SIGNAL);
+        } else {
+            for (auto& thread : threads_) {
+                if (&thread->cpu == &target && target.running && thread->host_thread.joinable()) {
+                    ::pthread_kill(thread->host_thread.native_handle(), KICK_SIGNAL);
+                    break;
+                }
+            }
+        }
+    }
+    uint64_t address = target.futex_wait_address.load();
+    if (address != UINT64_MAX) {
+        auto* slot = get_futex(address);
+        std::lock_guard<std::mutex> lock(slot->mu);
+        slot->cv.notify_all();
+    }
+}
+
 std::shared_ptr<CPU> Emulator::find_cpu_by_tid(int tid) {
     if (tid == 1) return std::shared_ptr<CPU>(&main_cpu_, [](CPU*){});
     std::lock_guard<std::mutex> g(threads_mu_);
@@ -683,6 +705,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         int child_tid = static_cast<int>(getpid());
         parent_cpu.tid = child_tid;
         parent_cpu.is_fork_process = true;  // getpid() returns host PID, not 1
+        vfs_.set_self_pid(child_tid);
         mem_.uffd_drop_registrations();
         if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
             mem_.store<uint32_t>(ctid_ptr, child_tid);

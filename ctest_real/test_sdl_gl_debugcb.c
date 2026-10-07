@@ -5,6 +5,9 @@
  * policy) instead of handing the guest address over (host SIGSEGV on
  * the first driver message).
  *
+ * Also exercises EXT_debug_label through eglGetProcAddress, the lookup
+ * path Unity uses before reading object labels. EXT object enums differ
+ * from KHR_debug's, so suffix stripping is not a valid implementation.
  * Pass: register + unregister both return with glGetError() == 0 and
  * the process survives (the pre-fix path risked a host crash).
  *
@@ -34,6 +37,12 @@ typedef int          (*SDL_GL_MakeCurrent_t)(void*, void*);
 typedef const char*  (*SDL_GetError_t)(void);
 typedef void         (*GLDebugCb_t)(void (*cb)(void), const void*);
 typedef unsigned int (*glGetError_t)(void);
+typedef const unsigned char* (*glGetString_t)(unsigned int);
+typedef void* (*eglGetProcAddress_t)(const char*);
+typedef void (*glGenBuffers_t)(int, unsigned int*);
+typedef void (*glBindBuffer_t)(unsigned int, unsigned int);
+typedef void (*glLabelObjectEXT_t)(unsigned int, unsigned int, int, const char*);
+typedef void (*glGetObjectLabelEXT_t)(unsigned int, unsigned int, int, int*, char*);
 
 static uint64_t bifrost_dlopen(const char* name, uint64_t flags) {
     register uint64_t x0 __asm__("x0") = (uint64_t)(uintptr_t)name;
@@ -137,6 +146,52 @@ int main(void) {
     /* Unregister: same. */
     glDebugMessageCallback(0, 0);
     unsigned int e2 = glGetError();
+
+    /* Check host support before testing this optional extension. */
+    glGetString_t glGetString;
+    LOAD(hgl, glGetString_t, glGetString);
+    const char* extensions = (const char*)glGetString(0x1f03); /* GL_EXTENSIONS */
+    if (extensions && strstr(extensions, "GL_EXT_debug_label")) {
+        uint64_t hegl = bifrost_dlopen("libEGL.so.1", 1);
+        if (!hegl) hegl = bifrost_dlopen("libEGL.so", 1);
+        eglGetProcAddress_t eglGetProcAddress;
+        glGenBuffers_t glGenBuffers;
+        glBindBuffer_t glBindBuffer;
+        LOAD(hegl, eglGetProcAddress_t, eglGetProcAddress);
+        LOAD(hgl, glGenBuffers_t, glGenBuffers);
+        LOAD(hgl, glBindBuffer_t, glBindBuffer);
+        glLabelObjectEXT_t label = (glLabelObjectEXT_t)eglGetProcAddress("glLabelObjectEXT");
+        glGetObjectLabelEXT_t get_label =
+                (glGetObjectLabelEXT_t)eglGetProcAddress("glGetObjectLabelEXT");
+        if (!label || !get_label) {
+            printf("FAIL: advertised EXT_debug_label has missing entry points\n");
+            return 1;
+        }
+        unsigned int buffer = 0;
+        glGenBuffers(1, &buffer);
+        glBindBuffer(0x8892, buffer); /* GL_ARRAY_BUFFER: instantiate the name */
+        label(0x9151, buffer, 0, "buffer-ext"); /* GL_BUFFER_OBJECT_EXT */
+        char text[32] = {0};
+        int length = -1;
+        get_label(0x9151, buffer, sizeof(text), &length, text);
+        if (length != 10 || strcmp(text, "buffer-ext")) {
+            printf("FAIL: EXT buffer label: length=%d text=%s\n", length, text);
+            return 1;
+        }
+        get_label(0x9151, buffer, 4, &length, text);
+        if (length != 3 || strcmp(text, "buf")) {
+            printf("FAIL: truncated EXT label: length=%d text=%s\n", length, text);
+            return 1;
+        }
+        get_label(0x9151, buffer, sizeof(text), 0, text);
+        if (strcmp(text, "buffer-ext") || glGetError()) {
+            printf("FAIL: EXT label with null length\n");
+            return 1;
+        }
+        printf("test_sdl_gl_debugcb: EXT labels passed\n");
+    } else {
+        printf("test_sdl_gl_debugcb: EXT labels skipped (host extension unavailable)\n");
+    }
 
     SDL_DestroyWindow(win);
     SDL_Quit();

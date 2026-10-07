@@ -19,6 +19,7 @@ struct BinderObject {
 struct BinderService {
     std::shared_ptr<BinderObject> object;
     uint32_t dump_priority;
+    int32_t stability;
 };
 // One domain per device per emulator. Never connects to host Binder services.
 struct BinderDomain {
@@ -90,9 +91,9 @@ private:
     uint64_t allocate_buffer(Memory&, const std::vector<uint8_t>&);
     int free_buffer(Memory&, uint64_t);
     void fail(int tid, uint32_t command, int error);
-    int translate_objects(BinderNode&, Event&, Memory&, const bf_binder_transaction&);
+    int translate_objects(BinderNode&, Event&, Memory&, const bf_binder_transaction&, int tid);
     int reference_command(uint32_t, const uint8_t*);
-    void change_reference(const std::shared_ptr<Object>&, int strong, int weak);
+    void change_reference(const std::shared_ptr<Object>&, int strong, int weak, int owner_tid = 0);
     void drop_buffer_references(uint64_t);
     void release_all_references();
     int service_transaction(const bf_binder_transaction&, Memory&, int tid);

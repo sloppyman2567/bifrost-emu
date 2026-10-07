@@ -30,8 +30,15 @@ std::string Yggdrasil::read_path(Memory& mem, uint64_t addr) {
     return s;
 }
 Yggdrasil::Yggdrasil() = default;
-std::unique_ptr<Node> Yggdrasil::open(const std::string& guest_path,
+std::string Yggdrasil::canonical_proc_path(const std::string& path) const {
+    const std::string own = "/proc/" + std::to_string(self_pid_);
+    if (path.compare(0, own.size(), own) != 0) return path;
+    if (path.size() != own.size() && path[own.size()] != '/') return path;
+    return "/proc/self" + path.substr(own.size());
+}
+std::unique_ptr<Node> Yggdrasil::open(const std::string& requested_path,
                                       int flags, mode_t mode, int* err_out) {
+    const std::string guest_path = canonical_proc_path(requested_path);
     // 1. ProcFS
     auto node = open_procfs(guest_path, flags, mode, err_out);
     if (node || *err_out != 0) return node;

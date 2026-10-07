@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 static int checks;
@@ -43,6 +44,12 @@ int main(void) {
     uint64_t offset=0;
     struct bf_binder_transaction publish={0};publish.code=1;publish.data_size=sizeof(object);publish.buffer=(uintptr_t)&object;publish.offsets_size=8;publish.offsets=(uintptr_t)&offset;
     CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_TRANSACTION_COMPLETE,0));
+    // Initial ownership is delivered on the publishing thread, before it
+    // can drop the outgoing Parcel, without requiring ENTER_LOOPER.
+    struct bf_binder_ptr_cookie lifecycle;
+    CHECK(contains(BF_BR_INCREFS,&lifecycle) && lifecycle.ptr==object.binder && lifecycle.cookie==object.cookie);
+    CHECK(write_command(service,BF_BC_INCREFS_DONE,&lifecycle)==0);
+    CHECK(contains(BF_BR_ACQUIRE,&lifecycle) && write_command(service,BF_BC_ACQUIRE_DONE,&lifecycle)==0);
     struct bf_binder_transaction tx;
     CHECK(exchange(manager,0,0)==0 && contains(BF_BR_TRANSACTION,&tx));
     struct bf_flat_binder transferred;memcpy(&transferred,(void*)(uintptr_t)tx.buffer,sizeof(transferred));
@@ -54,10 +61,6 @@ int main(void) {
     CHECK(write_command(service,BF_BC_ENTER_LOOPER,0)==0);
     CHECK(exchange(service,0,0)==0 && contains(BF_BR_REPLY,&tx));
     CHECK(free_buffer(service,tx.buffer)==0);
-    struct bf_binder_ptr_cookie lifecycle;
-    CHECK(contains(BF_BR_INCREFS,&lifecycle) && lifecycle.ptr==object.binder && lifecycle.cookie==object.cookie);
-    CHECK(write_command(service,BF_BC_INCREFS_DONE,&lifecycle)==0);
-    CHECK(contains(BF_BR_ACQUIRE,&lifecycle) && write_command(service,BF_BC_ACQUIRE_DONE,&lifecycle)==0);
     struct bf_binder_transaction query={0};query.code=2;
     CHECK(exchange(client,BF_BC_TRANSACTION,&query)==0);
     CHECK(exchange(manager,0,0)==0 && contains(BF_BR_TRANSACTION,&tx));CHECK(free_buffer(manager,tx.buffer)==0);

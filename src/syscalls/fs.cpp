@@ -129,7 +129,7 @@ static bool is_proc_exe_path(const std::string& p) {
 // With `rest`, a trailing "/component..." after the number is accepted and
 // returned there (opening through a directory descriptor's link).
 static int proc_link_fd(const std::string& path, std::string* rest = nullptr) {
-    for (const char* prefix : {"/proc/self/fd/", "/proc/thread-self/fd/", "/proc/1/fd/"}) {
+    for (const char* prefix : {"/proc/self/fd/", "/proc/thread-self/fd/"}) {
         size_t length = std::strlen(prefix);
         if (path.compare(0, length, prefix) != 0) continue;
         if (path.size() == length) return -1;
@@ -161,9 +161,9 @@ std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, uint64_t guest_dir
         if (hfd < 0) { *err = -EBADF; return nullptr; }
         return vfs.open_at(hfd, path, host_flags, mode, err);
     }
-    // Absolute path: dirfd is ignored per POSIX.
+    // Absolute path: dirfd is ignored per POSIX. /proc/<own pid> is /proc/self.
     std::string rest;
-    const int proc_fd = proc_link_fd(path, &rest);
+    const int proc_fd = proc_link_fd(vfs.canonical_proc_path(path), &rest);
     if (proc_fd == -2) return vfs.open(path, host_flags, mode, err);
     // /proc/self/fd/N reopens the file behind GUEST fd N. Host procfs
     // would name the emulator's own fd with that number instead.
@@ -1048,7 +1048,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 } else if (!path_str.empty() && path_str[0] != '/') {
                     proc_path = vfs_.get_cwd() + "/" + path_str;
                 }
-                int proc_fd = proc_link_fd(proc_path);
+                int proc_fd = proc_link_fd(vfs_.canonical_proc_path(proc_path));
                 if (proc_fd != -2) {
                     auto node = proc_fd >= 0 ? fds_.get(proc_fd) : nullptr;
                     if (!node || node->host_fd() < 0) { ret_err(ENOENT); return 0; }

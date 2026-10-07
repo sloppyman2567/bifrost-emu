@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Build ARM64 guest adapter DSOs and a Bionic NativeActivity launcher."""
+"""Build ARM64 guest adapter DSOs, a Bionic NativeActivity launcher, and the
+managed-app adapters plus ActivityProbe JNI bridge."""
 
 import argparse
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -13,15 +15,19 @@ from android_guest_dependencies import build_zlib, prepare_headers
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def shim(library, names):
+def shim(library, names, hidden=()):
+    """Assembly for lazy thunk exports; `library` names the thunk table.
+    Names in `hidden` get the local-only label thunk_<name>, for C wrappers."""
     lines = [".text"]
     for name in sorted(set(names)):
+        label = "thunk_" + name if name in hidden else name
         # Lazy atomic cache per export. Preserve every AAPCS64 argument, including
         # SIMD and variadic arguments, before resolving the existing shared thunk.
         lines += [
-            f".global {name}",
-            f".type {name},%function",
-            f"{name}:",
+            f".global {label}",
+            *([f".hidden {label}"] if name in hidden else []),
+            f".type {label},%function",
+            f"{label}:",
             f"adrp x16,.Lptr_{name}",
             f"add x16,x16,:lo12:.Lptr_{name}",
             "ldar x17,[x16]",
@@ -71,7 +77,7 @@ def shim(library, names):
             "mov x8,#94",
             "svc #0",
             "brk #1",
-            f".size {name},.-{name}",
+            f".size {label},.-{label}",
         ]
     lines += [".section .rodata", f'.Llibrary: .asciz "{library}"']
     for name in sorted(set(names)):
@@ -174,7 +180,54 @@ def build(runtime, output):
             ],
             check=True,
         )
-        names = list(groups) + ["bifrost-native", "libz.so", "libz.so.LICENSE"]
+        # ActivityProbe's play-mode JNI bridge (scripts/test_android_framework.py --play).
+        subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
+                                 str(ROOT / "guest/android/activity_window.c"), str(bionic / "libc.so"),
+                                 "-o", str(staging / "libbifrost-activity.so")], check=True)
+        names = list(groups) + ["bifrost-native", "libbifrost-activity.so", "libz.so",
+                                "libz.so.LICENSE"]
+        # Managed apps run inside the image's real framework, whose libraries
+        # import Android-private EGL/GLES/libandroid symbols. Each managed
+        # adapter keeps its thunked exports first in Bionic's breadth-first
+        # lookup and depends on the real library, which the runner installs
+        # under the same-length soname re_<name> (lib -> re_).
+        managed = staging / "managed"
+        managed.mkdir()
+        thunked_android = [n for n in groups["libandroid.so"]
+                           if not n.startswith("AConfiguration_")]  # real AAssetManager
+        # Share the AudioThunk export registry. Managed AAudio streams must
+        # stay on the host backend, rather than fall back to Android AudioTrack.
+        aa_exports = re.findall(r"REG\(aa_libs,\s*(\w+)\)",
+                               (ROOT / "src/frost_graphics/audio_thunk.cpp").read_text())
+        # aaudio.c runs data callbacks on its own Bionic thread, like libaaudio;
+        # it wraps open/close and drives the private bifrost_aaudio_* calls.
+        aa_hidden = {"AAudioStreamBuilder_openStream", "AAudioStream_close"}
+        aa_hidden.update(n for n in aa_exports if n.startswith("bifrost_"))
+        assembly = staging / "managed-libaaudio.so.S"
+        assembly.write_text(shim("libaaudio.so", aa_exports, aa_hidden))
+        subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libaaudio.so",
+                                 str(assembly), str(ROOT / "guest/android/aaudio.c"),
+                                 str(bionic / "libc.so"), "-o", str(managed / "libaaudio.so")],
+                       check=True)
+        names.append("managed/libaaudio.so")
+        for soname, table, exports in (
+            ("libandroid.so", "libandroid.so", thunked_android),
+            ("libEGL.so", "libEGL.so", groups["libEGL.so"]),
+            ("libGLESv2.so", "libGLESv2.so", groups["libGLESv2.so"]),
+            ("libGLESv3.so", "libGLESv2.so", groups["libGLESv2.so"]),
+        ):
+            real = "re_" + soname[3:]
+            stub = staging / real
+            subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + real,
+                                     "-Wno-unused-command-line-argument",
+                                     "-x", "assembler", "/dev/null", "-o", str(stub)],
+                           check=True)
+            assembly = staging / ("managed-" + soname + ".S")
+            assembly.write_text(shim(table, exports))
+            subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + soname,
+                                     "-Wl,--no-as-needed", str(assembly), str(stub),
+                                     "-o", str(managed / soname)], check=True)
+            names.append("managed/" + soname)
         metadata = {
             "schema_version": 1,
             "runtime_archive_sha256": module.SHA256,
@@ -184,6 +237,7 @@ def build(runtime, output):
                 for name in names
             },
         }
+        (output / "managed").mkdir(exist_ok=True)
         for name in names:
             (staging / name).replace(output / name)
         manifest = staging / "adapters.json"

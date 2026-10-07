@@ -34,7 +34,7 @@
 //   signal-pending flag (e.g., toybox sh's `sig_process_pending()`).
 #include "core/signal.h"
 #include "arm64_emu.hpp"
-#include "core/crash_report.h"  // TEMP-NEVERBALL-DEBUG
+#include "core/crash_report.h"
 #include "debug_flags.h"
 #include <atomic>
 #include <cerrno>
@@ -521,6 +521,10 @@ void fault_trace_sigreturn(const CPU& restored, const SignalFrame& frame) {
             static_cast<unsigned long long>(restored.sp));
     fprintf(stderr, "%s\n", line);
 }
+void Emulator::unblock_host_wakeup(sigset_t& mask) {
+    sigdelset(&mask, KICK_SIGNAL);
+}
+
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {
     if (dbg().fault_trace && is_fault_signal(signo)) {
@@ -657,7 +661,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     // BEFORE the call, not the temporary mask the guest passed.
     const uint64_t saved_mask = cpu.sigsuspend_active
                                     ? cpu.sigsuspend_saved_mask
-                                    : cpu.sigmask;
+                                    : cpu.sigmask.load();
     // Build the guest-visible siginfo_t and ucontext_t.
     build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr);
     try {
@@ -1002,7 +1006,7 @@ bool Emulator::drain_host_signals(CPU& cpu) {
 // make the guest never see -EINTR, breaking shells that rely on -EINTR
 // from read()/nanosleep() to detect "user wants to interrupt".
 bool Emulator::handle_eintr(CPU& cpu) {
-    return drain_host_signals(cpu);
+    return drain_host_signals(cpu) || drain_pending_signals(cpu);
 }
 // ── drain_pending_signals ─────────────────────────────────────────────
 // Drains per-CPU pending signals queued by cross-thread tgkill/tkill/kill.

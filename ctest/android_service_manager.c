@@ -17,6 +17,7 @@ static int checks;
     } while (0)
 static unsigned char output[512], parcel[512];
 static size_t length;
+static size_t read_capacity = sizeof(output);
 static struct bf_binder_write_read wr;
 static void u32(uint32_t x) {
     memcpy(parcel + length, &x, 4);
@@ -47,7 +48,7 @@ static int write_command(int fd, uint32_t cmd, const void *data, int readback) {
     if (n > 4)
         memcpy(input + 4, data, n - 4);
     wr = (struct bf_binder_write_read){
-        n, 0, (uintptr_t)input, readback ? sizeof(output) : 0, 0, (uintptr_t)output};
+        n, 0, (uintptr_t)input, readback ? read_capacity : 0, 0, (uintptr_t)output};
     return ioctl(fd, BF_BINDER_WRITE_READ, &wr);
 }
 static int find(uint32_t wanted, void *value) {
@@ -106,6 +107,7 @@ int main(void) {
     struct bf_flat_binder flat;
     memcpy(&flat, (void *)(uintptr_t)(reply.buffer + 4), sizeof(flat));
     CHECK(flat.type == BF_BINDER_TYPE_BINDER && !flat.binder);
+    CHECK(reply.data_size == 32 && *(int32_t *)(uintptr_t)(reply.buffer + 28) == 0);
     CHECK(!release_reply(client, &reply));
     token();
     string16("bifrost.echo");
@@ -113,10 +115,38 @@ int main(void) {
     flat = (struct bf_flat_binder){BF_BINDER_TYPE_BINDER, 0, 0x11110000, 0x1234};
     memcpy(parcel + length, &flat, sizeof(flat));
     length += sizeof(flat);
+    u32(12); // Parcel::finishFlattenBinder: SYSTEM stability
     u32(0);
     u32(8);
+    // Reject malformed/missing representations without registering a service.
+    uint32_t bad_stability = 42, system_stability = 12;
+    memcpy(parcel + offset + sizeof(flat), &bad_stability, 4);
+    CHECK(transact(server, 3, &offset, 1, &reply));
+    CHECK(reply.flags == 8 && *(int32_t *)(uintptr_t)reply.buffer == -22);
+    CHECK(!release_reply(server, &reply));
+    memcpy(parcel + offset + sizeof(flat), &system_stability, 4);
+    length -= 4;
+    CHECK(transact(server, 3, &offset, 1, &reply));
+    CHECK(reply.flags == 8 && *(int32_t *)(uintptr_t)reply.buffer == -22);
+    CHECK(!release_reply(server, &reply));
+    length += 4;
     CHECK(transact(server, 3, &offset, 1, &reply));
     CHECK(!reply.flags && !*(int32_t *)(uintptr_t)reply.buffer);
+    // The publishing thread must acquire its Binder before the reply permits
+    // libbinder to recycle the registration Parcel. It need not be a looper.
+    uint32_t command;
+    memcpy(&command, output + 4, 4);
+    CHECK(command == BF_BR_INCREFS);
+    struct bf_binder_ptr_cookie ack;
+    memcpy(&ack, output + 8, sizeof(ack));
+    CHECK(ack.ptr == flat.binder && ack.cookie == flat.cookie);
+    memcpy(&command, output + 8 + sizeof(ack), 4);
+    CHECK(command == BF_BR_ACQUIRE);
+    struct bf_binder_ptr_cookie acquired;
+    memcpy(&acquired, output + 12 + sizeof(ack), sizeof(acquired));
+    CHECK(acquired.ptr == ack.ptr && acquired.cookie == ack.cookie);
+    CHECK(!write_command(server, BF_BC_INCREFS_DONE, &ack, 0));
+    CHECK(!write_command(server, BF_BC_ACQUIRE_DONE, &acquired, 0));
     CHECK(!release_reply(server, &reply));
     token();
     string16("bifrost.echo");
@@ -124,6 +154,7 @@ int main(void) {
     CHECK(!reply.flags && reply.offsets_size == 8 && *(uint64_t *)(uintptr_t)reply.offsets == 4);
     memcpy(&flat, (void *)(uintptr_t)(reply.buffer + 4), sizeof(flat));
     CHECK(flat.type == BF_BINDER_TYPE_HANDLE && flat.binder);
+    CHECK(reply.data_size == 32 && *(int32_t *)(uintptr_t)(reply.buffer + 28) == 12);
     uint32_t handle = flat.binder;
     CHECK(!write_command(client, BF_BC_ACQUIRE, &handle, 0));
     CHECK(!release_reply(client, &reply));
@@ -138,7 +169,6 @@ int main(void) {
     CHECK(find(BF_BR_TRANSACTION_COMPLETE, 0));
     CHECK(!write_command(server, BF_BC_ENTER_LOOPER, 0, 1));
     size_t received = wr.read_consumed;
-    struct bf_binder_ptr_cookie ack;
     if (find(BF_BR_INCREFS, &ack))
         CHECK(!write_command(server, BF_BC_INCREFS_DONE, &ack, 0));
     wr.read_consumed = received;
@@ -186,6 +216,31 @@ int main(void) {
     CHECK(transact(client, 2, 0, 0, &reply));
     CHECK(reply.flags == 8);
     CHECK(!release_reply(client, &reply));
+    // Split initial ownership and the reply across reads. Even a registered
+    // looper must receive its thread's ownership work before the reply.
+    token();
+    string16("bifrost.echo");
+    offset = length;
+    flat = (struct bf_flat_binder){BF_BINDER_TYPE_BINDER, 0, 0x22220000, 0x5678};
+    memcpy(parcel + length, &flat, sizeof(flat));
+    length += sizeof(flat);
+    u32(12);
+    u32(0);
+    u32(8);
+    read_capacity = 24; // BR_NOOP + BR_INCREFS only
+    CHECK(!transact(server, 3, &offset, 1, &reply));
+    CHECK(wr.read_consumed == 24 && find(BF_BR_INCREFS, &ack));
+    CHECK(ack.ptr == flat.binder && ack.cookie == flat.cookie);
+    CHECK(!find(BF_BR_ACQUIRE, 0) && !find(BF_BR_REPLY, 0));
+    CHECK(!write_command(server, BF_BC_INCREFS_DONE, &ack, 0));
+    read_capacity = sizeof(output);
+    CHECK(!write_command(server, 0, 0, 1));
+    memcpy(&command, output + 4, 4);
+    CHECK(command == BF_BR_ACQUIRE && find(BF_BR_ACQUIRE, &acquired));
+    CHECK(acquired.ptr == flat.binder && acquired.cookie == flat.cookie);
+    CHECK(find(BF_BR_REPLY, &reply) && !reply.flags);
+    CHECK(!write_command(server, BF_BC_ACQUIRE_DONE, &acquired, 0));
+    CHECK(!release_reply(server, &reply));
     // The registry must not keep a dead owner callable or advertise its service.
     CHECK(!close(server));
     token();

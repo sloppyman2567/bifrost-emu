@@ -118,12 +118,11 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
     }
-    // ── /proc/self/cmdline → argv[0]\0argv[1]\0... ──────────────────
+    // ── /proc/self/cmdline → the guest's live argv block ────────────
     if (path == "/proc/self/cmdline") {
-        std::string cmdline;
-        for (auto& a : argv_) { cmdline += a; cmdline.push_back('\0'); }
-        if (cmdline.empty()) cmdline = elf_path_ + '\0';
-        return serve_static(cmdline, flags);
+        return serve_lazy([this]() -> std::string {
+            return cmdline_provider_ ? cmdline_provider_() : elf_path_ + '\0';
+        }, flags);
     }
     // ── /proc/self/comm → process name (set by prctl PR_SET_NAME) ────
     // The kernel returns the basename of the executable by default,
@@ -224,12 +223,8 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
     // Status includes VmSize/VmRSS which depend on live memory layout.
     if (path == "/proc/self/status") {
         return serve_lazy([this]() -> std::string {
-            std::string name = "bifrost-emu";
-            if (!argv_.empty()) {
-                auto pos = argv_[0].rfind('/');
-                name = (pos == std::string::npos) ? argv_[0] : argv_[0].substr(pos + 1);
-                if (name.size() > 15) name.resize(15);
-            }
+            // Linux reports the task comm (prctl PR_SET_NAME) here.
+            std::string name = comm_provider_ ? comm_provider_() : "bifrost-emu";
             uint64_t vm_total = 0;
             if (maps_provider_) {
                 for (const auto& e : maps_provider_()) {

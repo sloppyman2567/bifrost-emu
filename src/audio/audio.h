@@ -74,6 +74,8 @@ public:
     // Total PCM bytes accepted through any push path since construction
     // (test/diagnostic counter — headless tests key off this).
     uint64_t bytes_pushed() const { return bytes_pushed_.load(std::memory_order_relaxed); }
+    // Snapshot for Android's primary-output queries; valid before first open.
+    void output_config(uint32_t& rate, uint32_t& frames);
     // ── Legacy single-device API (/dev/dsp VFS node + old callers) ────
     // Routes onto an implicit legacy stream (id 1) with this format.
     bool open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size);
@@ -107,6 +109,7 @@ private:
     uint32_t sample_rate_ = 44100;
     uint8_t channels_ = 2;
     uint8_t sample_size_ = 2;           // device bytes/sample
+    uint32_t output_frames_ = 1024;
     int fd_ = -1;                       // raw OSS PCM output fd (-1 if none)
     int next_stream_id_ = 0;            // monotonic; 0 = invalid
     std::map<int, Stream> streams_;     // under mu_
