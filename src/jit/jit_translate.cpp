@@ -947,8 +947,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             patch_jcc_rel32(mt_counter_disabled_patch, static_cast<int32_t>(code_buf_used_ - (mt_counter_disabled_patch + 6)));
         tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
     }
-    // 1.5.4-alpha: load the direct-window base into R10 ONLY if the
-    // block actually touches guest memory through the direct window.
+    // 1.5.4-alpha: load the reservation base into R10 ONLY if the
+    // block actually touches guest memory inline.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
     // prologue — pure overhead for the many tiny ALU/FP/vector blocks
     // that never load or store guest memory (avg 3.5 guest instrs/block,
@@ -957,7 +957,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     //   ATOMIC                          (direct-window lock fast path)
     //   SIMD_LD16 / SIMD_ST16           (16-byte vector memory access)
     // Everything else either never reads guest memory or calls a C
-    // helper (which uses the pages_ table, not R10).
+    // helper (which goes through Memory, not R10).
     {
         bool uses_window = false;
         for (const auto& inst : ir_block.insts) {

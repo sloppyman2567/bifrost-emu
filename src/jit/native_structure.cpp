@@ -16,7 +16,7 @@ uint64_t native_structure(Emulator* emu, CPU* cpu, uint64_t bits) {
     }
     try {
         emu->mem().check_access(base,total,p.load?Memory::GUEST_PROT_READ:Memory::GUEST_PROT_WRITE);
-        if(p.load) emu->mem().read(base,memory,total,&cpu->page_cache);
+        if(p.load) emu->mem().read(base,memory,total);
         if(p.single) {
             for(unsigned i=0;i<p.count;i++) {
                 if(p.replicate) {
@@ -41,7 +41,7 @@ uint64_t native_structure(Emulator* emu, CPU* cpu, uint64_t bits) {
             std::memcpy(&cpu->v_lo[r],regs[i],8); std::memcpy(&cpu->v_hi[r],regs[i]+8,8);
         } else {
             Memory::note_interp_pc(cpu->pc);
-            emu->mem().write(base,memory,total,&cpu->page_cache);
+            emu->mem().write(base,memory,total);
         }
         if(p.post) {
             // Read the writeback operand before changing an aliased base.

@@ -85,10 +85,6 @@ public:
     uint64_t timer_slack_default_ns = 50000;
     int tid = 1;
     bool is_fork_process = false;  // true for fork() children (no CLONE_VM)
-    // Per-CPU memory page cache for the hot path. Avoids mutex+hash on
-    // every memory access to the same page. Each CPU (thread) has its
-    // own cache, so no locking needed.
-    Memory::PageCache page_cache;
     // ── Per-CPU decode cache ───────────────────────────────────────
     // Lives in CPU (not Emulator) so each vCPU has its own cache with
     // no locking. 2-way set-associative: 8192 sets × 2 ways = 16384
@@ -348,7 +344,7 @@ public:
         timer_slack_ns = src.timer_slack_ns;
         timer_slack_default_ns = src.timer_slack_ns;
         is_fork_process = src.is_fork_process;
-        // page_cache, decode_cache: NOT copied (per-thread, fresh in child)
+        // decode_cache: NOT copied (per-thread, fresh in child)
         set_tid_address_ptr = 0;   // child starts with no clear_child_tid
         robust_list_head = 0;
         robust_list_len = 0;

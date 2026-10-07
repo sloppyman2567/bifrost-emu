@@ -811,7 +811,7 @@ static void guard_fault_handler(int signo, siginfo_t* info, void* ctx) {
     uint8_t* win = emu ? emu->mem().direct_window() : nullptr;
     uintptr_t a = reinterpret_cast<uintptr_t>(info->si_addr);
     if (win && a >= reinterpret_cast<uintptr_t>(win) &&
-        a < reinterpret_cast<uintptr_t>(win) + Memory::DIRECT_WINDOW_SIZE) {
+        a < reinterpret_cast<uintptr_t>(win) + emu->mem().window_size()) {
         const CPU& cpu = emu->main_cpu();
         // x86-64 error code bit 1 = write access (host-only tool).
         bool is_write = false;

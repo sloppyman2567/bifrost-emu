@@ -23,7 +23,6 @@ namespace arm64emu {
 // The signature mirrors execute() (inst + next_pc + cpu + d) for
 // consistency, even though FP/SIMD cases don't write next_pc.
 void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d) {
-    auto* pcache = &cpu.page_cache;
     (void)next_pc;  // FP/SIMD cases never write next_pc
     (void)inst;     // == d.raw; the groups read it as op
     switch (d.cls) {
@@ -78,7 +77,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     if (d.is_load) {
                         for (int i = 0; i < d.simd_count; i++) {
                             int r = (d.rt + i) & 31;
-                            mem_.read(base + (uint64_t)i * esize, buf, esize, pcache);
+                            mem_.read(base + (uint64_t)i * esize, buf, esize);
                             for (int off = 0; off < 8; off += esize)
                                 memcpy(reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + off, buf, esize);
                             if (Q) {
@@ -148,7 +147,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 if (d.is_load) {
                     // Load one element from memory into lane `idx`.
                     uint8_t buf[8];
-                    mem_.read(addr, buf, esize, pcache);
+                    mem_.read(addr, buf, esize);
                     if (esize == 1) {
                         // Write into byte `idx` of the V register.
                         uint8_t* vp = (idx < 8)
@@ -191,7 +190,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         const uint64_t* vp = (idx == 0) ? &cpu.v_lo[r] : &cpu.v_hi[r];
                         memcpy(buf, vp, 8);
                     }
-                    mem_.write(addr, buf, esize, pcache);
+                    mem_.write(addr, buf, esize);
                 }
                 }
                 // Post-index writeback for the single-structure form:
@@ -227,7 +226,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 if (d.is_load) {
                     uint8_t tmp[8];
                     for (int e = 0; e < elems; e++) {
-                        mem_.read(base + reg_off(i, e), tmp, esize, pcache);
+                        mem_.read(base + reg_off(i, e), tmp, esize);
                         memcpy(regbuf + e * esize, tmp, esize);
                     }
                     if (ld_dbg_ && d.simd_count == 2 && d.simd_struct == 2) {
@@ -243,7 +242,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     memcpy(regbuf, &cpu.v_lo[r], 8);
                     if (total_bytes == 16) memcpy(regbuf + 8, &cpu.v_hi[r], 8);
                     for (int e = 0; e < elems; e++)
-                        mem_.write(base + reg_off(i, e), regbuf + e * esize, esize, pcache);
+                        mem_.write(base + reg_off(i, e), regbuf + e * esize, esize);
                 }
             }
             // Post-index writeback for the multi-structure form: immediate

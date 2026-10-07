@@ -1,25 +1,28 @@
-// core/memory.h — sparse paged 64-bit memory model (thread-safe).
+// core/memory.h — guest memory as one host reservation (thread-safe).
 //
-// Slow-path methods take mu_ internally (shared for lookup, exclusive
-// for mutate) so they can be called concurrently from multiple guest
-// threads (vCPUs). The <4 GiB direct-window fast path takes no lock.
-// Per-page data is not locked because guest code is responsible for
-// its own atomicity via LDXR/STXR or LSE atomics.
+// The guest address space is a single host mapping reserved at startup:
+// guest VA x lives at host address window + x (the QEMU guest_base / FEX
+// layout). Host mmap(MAP_FIXED), mprotect, madvise and munmap on that
+// reservation do the real work: anonymous memory, MAP_SHARED file aliases,
+// page permissions and freeing. The JIT and interpreter access guest memory
+// as `[window + addr]`.
 //
-// The Memory model has two storage tiers:
-//   1. A 4 GiB "direct window" (mmap'd) covering the low 4 GiB of the
-//      guest address space. The window IS the storage — pages in this
-//      range are not duplicated in pages_. The JIT can address the
-//      window directly: `mov rax, [window_base + guest_addr]`.
-//   2. A sparse `pages_` map for addresses ≥ 4 GiB (sigreturn
-//      trampoline, dynamic-linker interpreter, and any explicit high
-//      MAP_FIXED allocations). Backed by owned page bytes or coherent
-//      host MAP_SHARED aliases.
+// The reservation is as large as the host allows, from 64 TiB down to
+// 512 GiB (the emulator's own fixed guest addresses reach 448 GiB). Guest
+// addresses beyond it cannot be mapped: MAP_FIXED fails with ENOMEM and
+// hints fall back to normal placement.
 //
-// The guest heap (mmap_alloc base) and the main thread's stack live
-// INSIDE the direct window (see MMAP_BASE_MIN / STACK_TOP below) so the
-// JIT fast path covers them — every heap/stack access is a direct
-// window memcpy instead of the pages_ + rwlock slow path.
+// Bookkeeping (taken under mu_): `vmas_` is the coalesced mapping index
+// (start → end + prot), `allocations_` the mmap'd regions for munmap/
+// mremap and /proc/self/maps, `free_ranges_` the reusable address ranges.
+// `direct_page_flags_` mirrors the mapping state per page, lock-free, for
+// the interpreter's access check and the JIT memory guard; it is a lazily
+// committed host mapping, so only pages near guest mappings use memory.
+//
+// The guest heap and the main stack stay in the low 4 GiB (MMAP_BASE_MIN,
+// STACK_TOP). Above LOW_REGION_SIZE, freed memory is returned to the host;
+// in the low region it stays resident and is zeroed on reuse, which is
+// faster for guests that churn large buffers every frame.
 #pragma once
 #include "bifrost/types.hpp"
 #include <atomic>
@@ -37,23 +40,11 @@ class Memory {
 public:
     static constexpr uint64_t PAGE_SIZE = 4096;
     static constexpr uint64_t PAGE_MASK = PAGE_SIZE - 1;
-    // 1.5.4-alpha: Address space limits for robustness and security.
-    // These prevent a malicious/buggy guest from exhausting host memory
-    // or corrupting emulator-internal state.
-    //
-    // MAX_TOTAL_PAGES: hard cap on total allocated pages (default: 1M
-    //   pages = 4 GiB). Beyond this, mmap_alloc returns -ENOMEM. This
-    //   matches typical RLIMIT_AS settings on production Linux systems.
-    //   Real game engines rarely exceed 2 GiB of mapped memory.
-    //
-    // MAX_MMAP_LENGTH: per-allocation cap (default: 4 GiB). A single
-    //   mmap larger than this is rejected with -ENOMEM. Prevents a
-    //   malicious guest from requesting SIZE_MAX and OOMing the host.
-    //
-    // NULL_PAGE_LIMIT: addresses below this are treated as invalid
-    //   (NULL dereference region). Matches Linux's
-    //   /proc/sys/vm/mmap_min_addr (default 4096 = PAGE_SIZE).
-    static constexpr size_t MAX_TOTAL_PAGES = 1ULL * 1024 * 1024; // 4 GiB
+    // MAX_MMAP_LENGTH: per-allocation cap for reserving mappings (4 GiB).
+    // MAP_NORESERVE reservations are exempt, as on Linux they cost nothing
+    // until touched.
+    // NULL_PAGE_LIMIT: addresses below this are never mapped (Linux
+    // /proc/sys/vm/mmap_min_addr).
     static constexpr uint64_t MAX_MMAP_LENGTH = 4ULL * 1024 * 1024 * 1024;
     static constexpr uint64_t NULL_PAGE_LIMIT = PAGE_SIZE;
     static constexpr uint8_t GUEST_PROT_READ = 1;
@@ -70,26 +61,21 @@ public:
     static constexpr uint8_t GUEST_PAGE_UFFD_REGISTERED = 0x20;
     static constexpr uint8_t GUEST_PAGE_UFFD_BITS =
         GUEST_PAGE_UFFD_MISSING | GUEST_PAGE_UFFD_REGISTERED;
-    // Guest heap + stack live INSIDE the 4 GiB direct window so the JIT
-    // fast path (direct window memcpy) covers them. The layout formerly
-    // put the heap at 0x5000000000 and the stack at 0x8000000000 — both
-    // ABOVE the window — so every heap/stack access went through the
-    // pages_ + rwlock slow path, which dominated the profile (the voxel
-    // game ran ~2 MIPS with the JIT). The ELF image + brk stay in the
-    // low region (they always were). Heap range 256..768 MiB, stack ends
-    // at 1008 MiB (spans 944..1008 MiB) — no overlap, ~176 MiB headroom
-    // below the stack if the heap outgrows MMAP_BASE_MAX.
+    // The low 4 GiB holds the ELF image, brk, the mmap heap (256..768 MiB)
+    // and the main stack (944..1008 MiB). Allocations that do not fit there
+    // continue above LOW_REGION_SIZE. Android (set_low_hints_reserved)
+    // sends large unhinted maps above it, keeping low hints free for ART.
+    static constexpr uint64_t LOW_REGION_SIZE = 4ULL * 1024 * 1024 * 1024;
     static constexpr uint64_t MMAP_BASE_MIN = 0x10000000ULL;     // 256 MiB
     static constexpr uint64_t MMAP_BASE_MAX = 0x30000000ULL;     // 768 MiB
     static constexpr uint64_t STACK_TOP = 0x3F000000ULL;         // 1008 MiB
     static constexpr uint64_t STACK_SIZE = 64 * 1024 * 1024;   // 64 MiB
-    // ASLR (1.5.4-alpha heap; exe+stack since 2026-08): per-process
-    // randomized load bias for ET_DYN executables and jittered stack top.
-    // The PIE band ends well below MMAP_BASE_MIN so the brk arena keeps
-    // ≥124 MiB of headroom before the mmap floor at any bias we pick.
-    // Entropy is window-constrained by design (the JIT fast path needs
-    // everything inside the 4 GiB window): ~15 bits for the exe base,
-    // ~12 bits for the stack top. ET_EXEC still loads at its preferred
+    // Reservation sizes tried at startup, largest first.
+    static constexpr uint64_t WINDOW_SIZE_MAX = 1ULL << 46;  // 64 TiB
+    static constexpr uint64_t WINDOW_SIZE_MIN = 1ULL << 39;  // 512 GiB
+    // ASLR: per-process randomized load bias for ET_DYN executables and
+    // jittered stack top. The PIE band ends well below MMAP_BASE_MIN so the
+    // brk arena keeps ≥124 MiB of headroom. ET_EXEC loads at its preferred
     // vaddr (bias 0), matching kernel behavior.
     static constexpr uint64_t PIE_BASE_MIN = 0x400000ULL;
     static constexpr uint64_t PIE_JITTER = 128ull * 1024 * 1024;
@@ -108,52 +94,31 @@ public:
     // top-byte tags for internal allocator pointers even without MTE.
     void set_data_top_byte_ignore(bool enabled) { data_top_byte_ignore_ = enabled; }
     // Android profile: unhinted mappings that do not fit below the main
-    // stack go above the direct window instead of filling the low 4 GiB.
+    // stack go above LOW_REGION_SIZE instead of filling the low 4 GiB.
     // Linux places them top-down, high; ART and Bionic then expect low
     // hints (the boot image near 0x70000000, low-4GB heap) to be free.
     void set_low_hints_reserved(bool enabled) { low_hints_reserved_ = enabled; }
     uint64_t data_address(uint64_t addr) const {
         return data_top_byte_ignore_ ? addr & 0x00FFFFFFFFFFFFFFULL : addr;
     }
-    // ── Page cache (per-thread, lock-free) ────────────────────────────
-    // Each CPU keeps its own PageCache so the hot path avoids the page
-    // map mutex. The cache stores a raw pointer into the vector's data;
-    // this is stable across map rehash (nodes don't move) but NOT across
-    // erase (munmap). Each cached entry carries the page_epoch_ value
-    // from when it was cached; untrack_allocation bumps the epoch so
-    // stale pointers miss instead of uaf.
-    struct PageCache {
-        // UINT64_MAX = sentinel "no cached page" — can never collide with
-        // a real page number because that would require a guest address
-        // near 2^64 * 4096 (overflow).
-        uint64_t       read_page  = UINT64_MAX;
-        const uint8_t* read_ptr   = nullptr;
-        uint64_t       read_epoch = 0;
-        uint64_t       write_page = UINT64_MAX;
-        uint8_t*       write_ptr  = nullptr;
-        uint64_t       write_epoch = 0;
-    };
-    uint64_t page_epoch() const {
-        return page_epoch_.load(std::memory_order_relaxed);
-    }
     // ── Mapping ───────────────────────────────────────────────────────
-    // Map (materialize zeroed pages for) [addr, addr+size). Returns false
-    // if it would exceed the page cap (nothing is mapped in that case).
+    // Map [addr, addr+size) read/write (ELF segments, brk, stacks).
+    // Overlapping pages receive the union of their permissions.
     bool map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
     bool mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot,
                         int* error = nullptr);
-    // Install a read-only shared device backing into an existing direct-window VMA.
+    // Install a read-only shared device backing over an existing mapping.
     bool map_device_readonly(uint64_t addr, uint64_t size, int host_fd);
     // Replace existing storage with coherent file aliases. Returns a host errno.
     int map_shared_file(uint64_t addr, uint64_t size, int fd, uint64_t offset,
                         uint8_t prot);
     int sync_shared(uint64_t addr, uint64_t size, int flags);
     // ── Bulk read/write ───────────────────────────────────────────────
-    void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
+    void write(uint64_t addr, const void* src, size_t n);
     // Validate a whole thunk output range before a host call has side effects.
     void check_access(uint64_t addr, size_t size, uint8_t access) const;
-    void read(uint64_t addr, void* dst, size_t n, PageCache* pc = nullptr) const;
+    void read(uint64_t addr, void* dst, size_t n) const;
     // BIFROST_WATCH support: interpreter snapshots its pc here so the
     // watch check in write() can attribute host+guest stores.
     static void note_interp_pc(uint64_t pc);
@@ -161,28 +126,18 @@ public:
     template<typename T> T load(uint64_t addr) const {
         T v; read(addr, &v, sizeof(T)); return v;
     }
-    template<typename T> T load(uint64_t addr, PageCache* pc) const {
-        T v; read(addr, &v, sizeof(T), pc); return v;
-    }
     template<typename T> void store(uint64_t addr, T v) {
         write(addr, &v, sizeof(T));
     }
-    template<typename T> void store(uint64_t addr, T v, PageCache* pc) {
-        write(addr, &v, sizeof(T), pc);
-    }
     uint32_t fetch_inst(uint64_t addr) const {
-        uint32_t v; read_access(addr, &v, sizeof(v), nullptr, GUEST_PROT_EXEC); return v;
+        uint32_t v; read_access(addr, &v, sizeof(v), GUEST_PROT_EXEC); return v;
     }
-    uint32_t fetch_inst(uint64_t addr, PageCache* pc) const {
-        uint32_t v; read_access(addr, &v, sizeof(v), pc, GUEST_PROT_EXEC); return v;
-    }
-    // ── Allocators (bump + grow) ──────────────────────────────────────
-    // Allocate a chunk of fresh memory; returns starting address.
-    // When `hint` is non-zero, the allocation is placed at exactly `hint`
-    // (MAP_FIXED semantic). Existing pages at that address are REPLACED
-    // with fresh zeroed pages — matches Linux kernel behavior.
-    // direct_only selects an unmapped heap hole inside the direct window
-    // under mu_, ignoring hints; for device aliases, not MAP_FIXED callers.
+    // ── Allocators ────────────────────────────────────────────────────
+    // Allocate fresh zeroed memory; returns its address, or 0 on failure.
+    // A non-zero `hint` places it at exactly `hint` (MAP_FIXED), replacing
+    // existing pages with zeroed ones, as Linux does.
+    // direct_only selects an unmapped heap hole in the low region under
+    // mu_, ignoring hints (Binder receive arenas).
     uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0,
                         bool noreserve = false,
                         uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE |
@@ -194,7 +149,7 @@ public:
     uint64_t mmap_fixed_noreplace(uint64_t addr, uint64_t size,
                                   bool noreserve = false,
                                   uint8_t prot = GUEST_PROT_READ | GUEST_PROT_WRITE);
-    // Ordinary hint: try this address, then the next free low-window gap.
+    // Ordinary hint: try this address, then the next free low-region gap.
     // Never replaces mappings; returns 0 if the caller should use its
     // default allocator. Check and reservation share the same lock.
     uint64_t mmap_hint(uint64_t addr, uint64_t size, bool noreserve,
@@ -202,8 +157,8 @@ public:
     // Atomic MAP_FIXED replace: evict overlapping allocations, restore host
     // prot on reclaimed guard pages, reclaim free ranges, and track the new
     // mapping under one mu_ hold (no untrack/alloc gap for racing mmaps).
-    // zero_contents=false preserves window bytes (PROT_NONE guard / musl
-    // brk metadata); true gives fresh-zero anonymous semantics. Returns the
+    // zero_contents=false preserves bytes (PROT_NONE guard / musl brk
+    // metadata); true gives fresh-zero anonymous semantics. Returns the
     // address on success, 0 on failure (caller maps to -ENOMEM).
     uint64_t mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve,
                                 bool zero_contents,
@@ -212,27 +167,20 @@ public:
     // Relocation requires may_move; fixed_addr requests an exact destination.
     uint64_t mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size,
                          bool may_move = true, uint64_t fixed_addr = 0);
-    // Remove an allocation from tracking AND reclaim its pages + address
-    // range so a future mmap_alloc can reuse it (Linux munmap semantics).
+    // munmap: unmap [addr, addr+size), split partially covered allocations
+    // and return the freed ranges to free_ranges_ for reuse.
     void untrack_allocation(uint64_t addr, uint64_t size);
-    // Reset the bump cursors after execve: the old image's heap is gone
-    // (its ranges were untracked into free_ranges_, which stays valid),
-    // so new mmaps start from a fresh-process layout instead of after
-    // the previous image's high-water mark.
+    // Reset the allocation cursors after execve: the old image's heap is
+    // gone (its ranges are in free_ranges_), so new mmaps start from a
+    // fresh-process layout instead of the previous high-water mark.
     void reset_allocator_cursors() {
         std::unique_lock<std::shared_mutex> g(mu_);
         mmap_next_ = MMAP_BASE_MIN;
-        above_window_next_ = DIRECT_WINDOW_SIZE;
+        high_next_ = LOW_REGION_SIZE;
     }
-    // Linux MADV_DONTNEED semantics (2026-09-03, vkQuake AllocBlock hunt):
-    // discard covered pages WITHOUT unmapping (address space stays).
-    // Anonymous pages become zero; shared file pages refault from the file.
-    // vkQuake's bundled mimalloc decommits freed segments with DONTNEED
-    // and reuses them as "initially zero" pages; our old no-op kept stale
-    // data, so reused-as-zero metadata/pages held garbage and the heap
-    // shredded itself (bulk-corrupted msurface_t array → extents=-14592
-    // → AllocBlock: full). Zero in place (never erase pages_ entries —
-    // erasing would dangle cached PageCache pointers).
+    // MADV_DONTNEED: discard covered pages without unmapping them.
+    // Anonymous pages read back as zero; shared file pages refault from
+    // the file. mimalloc reuses decommitted segments as "initially zero".
     void madvise_dontneed(uint64_t addr, uint64_t len);
     // MADV_REMOVE (mm/madvise.c madvise_remove): punch a hole in the file
     // behind a writable shared mapping, so the pages read back as zero.
@@ -246,9 +194,7 @@ public:
     int madvise_remove(uint64_t addr, uint64_t len);
     // ── userfaultfd (SIGBUS mode) ─────────────────────────────────────
     // Missing-page tracking starts with the first userfaultfd and stays on.
-    // Window pages carry the state in direct_page_flags_. Above the window,
-    // registration is a range set and a page is missing while it has no
-    // pages_ entry (once tracking is on, DONTNEED and DONTUNMAP drop it).
+    // The state lives in direct_page_flags_ for every guest page.
     void enable_uffd_tracking() { uffd_tracking_.store(true, std::memory_order_release); }
     // UFFDIO_REGISTER/UNREGISTER of [addr, addr+len): the range is already
     // validated by the caller. Only mapped private pages are covered;
@@ -262,24 +208,19 @@ public:
     // not one registered range, or -EEXIST at the first present page.
     int64_t uffd_fill(uint64_t dst, const uint8_t* src, uint64_t len);
     // MREMAP_DONTUNMAP: move [old_addr, +len) to fixed_addr (or a new
-    // range when 0). Either range may be above the window. The old range
-    // stays mapped with its permissions and registration, but empty.
-    // Returns the new address or -errno.
+    // range when 0). The old range stays mapped with its permissions and
+    // registration, but empty. Returns the new address or -errno.
     int64_t mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed_addr);
-    // Isolated callback-stack allocation (2026-08-25): usable_size bytes
-    // with a PROT_NONE guard page on BOTH sides, placed like a normal
-    // mmap_alloc block. Host-thread guest callbacks (audio pump, GLFW /
-    // SDL / Android runners) execute on these stacks; any overflow hits
-    // the guard and faults loudly instead of silently shredding the
-    // neighboring malloc chunks (neverball "malloc(): invalid size",
-    // vkQuake AllocBlock shredding). Returns the usable base; the caller
-    // sets sp = base + usable_size_rounded.
+    // Isolated callback-stack allocation: usable_size bytes with a
+    // PROT_NONE guard page on BOTH sides, placed like a normal mmap_alloc
+    // block. Host-thread guest callbacks (audio pump, GLFW / SDL / Android
+    // runners) execute on these stacks; an overflow hits the guard and
+    // faults loudly instead of shredding neighboring malloc chunks.
+    // Returns the usable base; the caller sets sp = base + usable_size.
     uint64_t mmap_alloc_callback_stack(uint64_t usable_size);
     // Exact-address lookup in the allocation map (start → page-aligned
     // size). Returns {false, 0} when `addr` is not a tracked allocation
-    // start. Use this instead of allocations_snapshot() for point
-    // lookups (SDL_free/realloc bounce bookkeeping) — the snapshot
-    // copies the whole map under the lock.
+    // start.
     std::pair<bool, uint64_t> find_allocation(uint64_t addr) const {
         std::shared_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(addr);
@@ -296,15 +237,10 @@ public:
     void store_32(uint64_t addr, uint32_t v) { store<uint32_t>(addr, v); }
     void store_64(uint64_t addr, uint64_t v) { store<uint64_t>(addr, v); }
     // ── Diagnostics ───────────────────────────────────────────────────
+    // Number of mapped guest pages.
     size_t page_count() const;
-    // NOTE: no pages_map_public() accessor — returning the pages_ map by
-    // value deep-copies every 4 KiB page (allocations + memcpy under lock);
-    // returning a const& races with mutators. Callers should use
-    // allocations_snapshot()/snapshot_pages() instead.
-    // Snapshot of currently-tracked allocations (start → page-aligned size).
-    // Used by /proc/self/maps to produce a real memory layout instead of
-    // a hardcoded one. Returns a copy under the lock so callers can iterate
-    // without holding the mutex.
+    // Snapshot of currently-tracked allocations (start → page-aligned size),
+    // copied under the lock (/proc/self/maps).
     std::vector<std::pair<uint64_t, uint64_t>> allocations_snapshot() const {
         std::shared_lock<std::shared_mutex> g(mu_);
         std::vector<std::pair<uint64_t, uint64_t>> out;
@@ -314,60 +250,23 @@ public:
         }
         return out;
     }
-    // ── Fork support ──────────────────────────────────────────────────
-    // Create a deep copy of this Memory object for fork(). The new
-    // Memory has its own direct window and pages_ map, with all
-    // mapped pages copied. This is O(total_mapped_size) — for typical
-    // guests (~64 MB), it takes a few milliseconds.
-    //
-    // The returned Memory is independent: writes in the child do not
-    // affect the parent, and vice versa. This is "copy-on-write" done
-    // eagerly — simpler than true CoW but correct.
-    std::unique_ptr<Memory> clone_for_fork() const;
-    // Snapshot all mapped pages into a flat list of (addr, data) pairs.
-    // Used by clone_for_fork() and for debugging. Addresses < 4 GiB
-    // come from the direct window; addresses >= 4 GiB come from pages_.
-    struct PageSnapshot {
-        uint64_t addr;
-        std::vector<uint8_t> data;
-    };
-    std::vector<PageSnapshot> snapshot_pages() const;
-    // ── Direct-access window for JIT ──────────────────────────────────
-    // A large mmap'd region that mirrors guest pages at their native
-    // addresses. The JIT can do `mov rax, [window_base + guest_addr]`
-    // directly — no function call, no push/pop, no stack alloc.
-    //
-    // The window covers the low 4 GiB of the guest address space. Guest
-    // pages in this range are stored DIRECTLY in the window (not in
-    // pages_). The interpreter's read()/write() also use the window for
-    // addresses < 4 GiB, so there's no sync issue — the window IS the
-    // storage. pages_ is only used for addresses ≥ 4 GiB (trampoline,
-    // interpreter, explicit high MAP_FIXED / above-window overflow);
-    // heap + main stack live in the window.
-    static constexpr uint64_t DIRECT_WINDOW_SIZE = 4ULL * 1024 * 1024 * 1024;  // 4 GiB
-    uint8_t* direct_window_ = nullptr;
+    // ── The reservation ───────────────────────────────────────────────
+    // The JIT addresses guest memory as `[window_base + guest_addr]` after
+    // checking guest_addr + width <= window_size().
     uint8_t* direct_window() const { return direct_window_; }
+    uint64_t window_size() const { return window_size_; }
     const std::atomic<uint8_t>* direct_page_flags() const {
-        return direct_page_flags_.get();
+        return direct_page_flags_;
     }
-    bool in_direct_window(uint64_t addr) const {
-        return direct_window_ && addr < DIRECT_WINDOW_SIZE;
-    }
-    // 1.5.4-alpha: translate a guest address to a host pointer.
-    // Used by the graphic/audio/display thunks to pass pointer arguments
-    // to host GL/EGL/SDL2/ALSA functions. Returns nullptr if the address
-    // is not in the direct window (addresses ≥ 4 GiB can't be directly
-    // accessed — the thunk should copy the data to a buffer in the low
-    // 4 GiB region first).
-    //
-    // For addresses in the direct window, this is a simple pointer
-    // arithmetic: host_ptr = direct_window_ + guest_addr.
+    bool in_direct_window(uint64_t addr) const { return addr < window_size_; }
+    // Translate a guest range to a host pointer, or nullptr when any byte
+    // of it is not accessible with `access` (thunk pointer arguments).
     uint8_t* guest_to_host_ptr(uint64_t guest_addr,
                                uint8_t access = GUEST_PROT_READ,
                                size_t size = 1) const {
         if (!(access & GUEST_PROT_EXEC)) guest_addr = data_address(guest_addr);
-        if (size && in_direct_window(guest_addr) &&
-            size <= DIRECT_WINDOW_SIZE - guest_addr &&
+        if (size && guest_addr < window_size_ &&
+            size <= window_size_ - guest_addr &&
             range_accessible(guest_addr, size, access)) {
             return direct_window_ + guest_addr;
         }
@@ -377,7 +276,10 @@ private:
     bool data_top_byte_ignore_ = false;
     bool low_hints_reserved_ = false;
     static constexpr uint8_t PAGE_MAPPED = GUEST_PAGE_MAPPED;
-    struct HighMapping {
+    uint8_t* direct_window_ = nullptr;
+    uint64_t window_size_ = 0;
+    std::atomic<uint8_t>* direct_page_flags_ = nullptr;
+    struct Vma {
         uint64_t end = 0;
         uint8_t prot = 0;
     };
@@ -387,79 +289,56 @@ private:
                             uint8_t prot, bool ordinary_hint);
     bool mapping_prot_at_locked(uint64_t addr, uint8_t& prot) const;
     bool range_accessible(uint64_t addr, size_t size, uint8_t access) const;
-    bool high_range_mapped_locked(uint64_t lo, uint64_t hi,
-                                  uint8_t access) const;
-    void split_high_mapping_locked(uint64_t at);
-    void set_high_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
-                                 bool combine);
-    void erase_high_mapping_locked(uint64_t lo, uint64_t hi);
-    // userfaultfd registration above the window: [lo, hi) ranges, coalesced.
-    void uffd_set_high_locked(uint64_t lo, uint64_t hi, bool registered);
-    bool uffd_missing_high_locked(uint64_t addr) const;
+    void split_vma_locked(uint64_t at);
+    void erase_vma_locked(uint64_t lo, uint64_t hi);
+    // First page-aligned address >= from where `size` bytes are unmapped
+    // and end at or below `limit`; 0 if there is none.
+    uint64_t find_gap_locked(uint64_t from, uint64_t limit, uint64_t size) const;
+    // Record [lo, hi) as mapped with `prot` (or OR it into existing pages
+    // when `combine`), update the page flags and the host protection.
+    // Page flags carry PAGE_MAPPED only for pages with some access, so a
+    // huge PROT_NONE reservation costs no flag writes; vmas_ still records
+    // it. keep_uffd preserves the userfaultfd bits (mprotect).
     void set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
-                            bool combine);
+                            bool combine, bool keep_uffd = false);
+    // Unmap [lo, hi): flags cleared, host PROT_NONE, memory released above
+    // the low region.
+    void clear_mapping_locked(uint64_t lo, uint64_t hi);
+    // Fresh-zero anonymous contents for [lo, hi), which must be private.
+    void zero_range_locked(uint64_t lo, uint64_t hi, bool noreserve);
     bool set_direct_prot(uint64_t lo, uint64_t hi, int prot) const;
-    void read_access(uint64_t addr, void* dst, size_t n, PageCache* pc,
-                     uint8_t access) const;
+    void read_access(uint64_t addr, void* dst, size_t n, uint8_t access) const;
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;
-    // A shared backing owns its host mapping and fd independently of guest fds.
-    // Individual pages retain it across partial munmap and VMA splits.
+    // A MAP_SHARED file alias: the host maps the file straight into the
+    // reservation; this keeps its fd for fallocate, msync and mremap.
     struct SharedBacking {
-        uint8_t* base = nullptr;
-        uint64_t size = 0, file_offset = 0;
+        uint64_t file_offset = 0;
         int fd = -1;
         bool writable = false;
         ~SharedBacking();
     };
-    struct Page {
-        std::vector<uint8_t> bytes;
+    struct SharedPage {
         std::shared_ptr<SharedBacking> backing;
-        uint64_t offset = 0;
-        Page(std::vector<uint8_t> value) : bytes(std::move(value)) {}
-        Page(std::shared_ptr<SharedBacking> owner, uint64_t at)
-            : backing(std::move(owner)), offset(at) {}
-        uint8_t* data() { return backing ? backing->base + offset : bytes.data(); }
-        const uint8_t* data() const { return backing ? backing->base + offset : bytes.data(); }
-        uint8_t* begin() { return data(); }
-        uint8_t* end() { return data() + PAGE_SIZE; }
-        uint8_t& operator[](size_t i) { return data()[i]; }
-        const uint8_t& operator[](size_t i) const { return data()[i]; }
+        uint64_t offset = 0;  // from the start of the original mapping
     };
-    mutable std::unordered_map<uint64_t, Page> pages_;
-    // Direct-window aliases use kernel mappings; metadata is only for lifecycle.
-    std::map<uint64_t, Page> direct_shared_pages_;
-    // Caller holds mu_; regular sparse pages can have no shared backing.
-    const Page* page_storage_locked(uint64_t addr) const;
-    void detach_direct_shared_locked(uint64_t lo, uint64_t hi);
+    std::map<uint64_t, SharedPage> shared_pages_;  // keyed by page number
+    const SharedPage* shared_page_locked(uint64_t addr) const;
+    // Restore private anonymous storage over shared aliases in [lo, hi).
+    void detach_shared_locked(uint64_t lo, uint64_t hi);
+    std::map<uint64_t, Vma> vmas_;
     std::unordered_map<uint64_t, uint64_t> allocations_;
     // Reclaimed (munmap'd) address ranges available for reuse, keyed by
-    // start address → size. Kept coalesced/merged so mmap_alloc can do a
-    // first-fit scan and hand back the same guest addresses the guest
-    // freed (critical: a bump-only allocator marches the guest heap past
-    // the 4 GiB direct window and exhausts MAX_TOTAL_PAGES after enough
-    // malloc/free churn, then mmap starts failing and musl mallocng
-    // silently builds its arena at address 0 — BRK #1000 in get_meta).
+    // start address → size. Kept coalesced so mmap_alloc can first-fit
+    // and hand back the addresses the guest freed (a bump-only allocator
+    // marched musl's heap until mmap failed and mallocng built its arena
+    // at address 0).
     std::map<uint64_t, uint64_t> free_ranges_;
-    // Low-window mapping state is an atomic byte per guest page so the
-    // common interpreter path can check permissions without taking mu_.
-    // Bit 7 means mapped (PROT_NONE is still a mapped page); bits 0..2
-    // mirror Linux PROT_READ/WRITE/EXEC. High mappings use coalesced ranges.
-    std::unique_ptr<std::atomic<uint8_t>[]> direct_page_flags_;
     std::atomic<bool> uffd_tracking_{false};
-    std::map<uint64_t, uint64_t> high_uffd_ranges_;
-    std::map<uint64_t, HighMapping> high_mappings_;
-    // 1.5.4-alpha: ASLR for mmap base. Randomized at construction time
-    // using /dev/urandom (not rand — must be unpredictable to prevent
-    // guest-side info leaks). The base is page-aligned and within the
-    // low heap region (MMAP_BASE_MIN - MMAP_BASE_MAX, inside the window).
+    // Allocation cursors: the low heap from MMAP_BASE_MIN (randomized), and
+    // above the low region once it is full or for Android's large maps.
     uint64_t mmap_next_ = 0;
-    // Above-window allocation cursor: when the 4 GiB direct window is
-    // exhausted (guests with enormous heaps), mmap_alloc hands out
-    // addresses here instead of failing. Storage comes from the sparse
-    // pages_ map (slow path — the JIT's window fast path doesn't cover
-    // these, its bounds checks fall back automatically).
-    uint64_t above_window_next_ = DIRECT_WINDOW_SIZE;
+    uint64_t high_next_ = LOW_REGION_SIZE;
     // Per-process randomized ET_DYN load bias and main-stack top
     // (see pie_base()/stack_top() above).
     uint64_t pie_base_ = PIE_BASE_MIN;
@@ -469,35 +348,13 @@ private:
     static uint64_t random_offset(uint64_t range);
     // BIFROST_MEMSTATS=N: background leak reporter (see memory.cpp).
     void memstats_reporter(uint64_t period_secs);
-    // 1.5.4-alpha: Total page count for OOM protection. Tracked
-    // incrementally (incremented on page allocation, decremented on
-    // munmap) to avoid O(pages_.size()) scans on the hot path.
-    // Mutable because read() (a const method) auto-allocates pages.
-    mutable std::atomic<size_t> total_pages_{0};
-    // Page-cache epoch: bumped whenever pages_ entries are erased
-    // (munmap). Cached raw pointers carry the epoch value; a mismatch
-    // means the vector may have been freed -> treat as miss.
-    mutable std::atomic<uint64_t> page_epoch_{0};
-    // 1.5.4-alpha: Validate that an address range doesn't overlap
-    // kernel space or the NULL page region. Returns true if the range
-    // is valid for guest allocation.
+    // Validate that a range lies inside the reservation and above the
+    // NULL page, without wrapping.
     bool is_valid_guest_range(uint64_t addr, uint64_t size) const;
-    // 1.5.4-alpha: Check page count against MAX_TOTAL_PAGES.
-    // Returns true if the allocation would exceed the limit.
-    bool would_exceed_page_limit(size_t num_pages) const;
-    // Guard pages for callback scratch stacks (PROT_NONE inside the
-    // window). Host must never touch them via memset/memcpy (snapshot,
-    // madvise, reuse zeroing) — track page numbers to skip.
-    bool is_guard_page(uint64_t page_no) const {
-        std::shared_lock<std::shared_mutex> g(mu_);
-        return guard_pages_.count(page_no) != 0;
-    }
+    // Guard pages for callback scratch stacks (PROT_NONE). Host code must
+    // never touch them via memset/memcpy (madvise, reuse zeroing).
     std::unordered_set<uint64_t> guard_pages_;
-    // 1.5.4-alpha: Add an address range to the free list, merging it with
-    // any adjacent free ranges (kept sorted by start address).
     void add_free_range(uint64_t addr, uint64_t size);
-    // 1.5.4-alpha: Remove an address range from the free list (used when
-    // a MAP_FIXED allocation lands on top of reclaimed space).
     void remove_free_range(uint64_t addr, uint64_t size);
 };
 } // namespace arm64emu

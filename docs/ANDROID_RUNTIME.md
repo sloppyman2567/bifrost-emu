@@ -64,7 +64,7 @@ method pointer as a boolean. ART's JIT then exposed independent copies of its
 shared RW/RX file aliases and missing PC-relative literal loads. Shared file
 backings now retain kernel aliases across unmap, replacement, remap and fork;
 `msync` writes back, and `MADV_DONTNEED` refaults file data. Binder arenas stay
-inside the direct window even after high ART reservations. Native Bifrost
+in the low 4 GiB even after high ART reservations. Native Bifrost
 callers unwind after guest process exit instead of reaching libc's fallback trap.
 
 The Android profile leaves guest page 0 unmapped, as Linux does
@@ -99,9 +99,9 @@ starts from bytecode. Provisioning schema 5 extracts the `system_ext` and
 Each compaction pause (`KernelPrepareRangeForUffd` in `mark_compact.cc`)
 moves the moving space with `mremap(MAYMOVE|FIXED|DONTUNMAP)` into a
 from-space reservation, registers the emptied range, and fills pages from
-its SIGBUS handler with `UFFDIO_COPY`. The heap is inside the 4 GiB window
-but the from-space and the 1 GiB linear-alloc pool are above it, so the
-move and the registration work on both sides. The short framework probe
+its SIGBUS handler with `UFFDIO_COPY`. The heap is in the low 4 GiB, the
+from-space and the 1 GiB linear-alloc pool above it; since guest memory became
+one host reservation (2026-10-07) both sides use the same per-page state. The short framework probe
 never compacts; the Activity probe does.
 
 ### Activity creation checkpoint
@@ -123,9 +123,10 @@ timeout -s KILL 310 python3 scripts/test_android_framework.py --services \
   --mode jit --timeout 300 --output build/android-activity-results
 ```
 
-Both engines print `FRAMEWORK_OK` on a schema-5 root with CMC: 26.8 s JIT
-and 47.2 s interpreter (131.4 s and 226.1 s under CC), run concurrently
-with the test suite. The probe
+Both engines print `FRAMEWORK_OK` on a schema-5 root with CMC: 8.4 s JIT
+and 18.0 s interpreter on an idle host (2026-10-07; 22.6 s and 45.0 s before
+guest memory became one host reservation, when ART's heaps above 4 GiB used a
+locked sparse map). The probe
 calls `ActivityThread.systemMain()` and loads the preinstalled font map. It
 then runs `Instrumentation.newActivity` and `callActivityOnCreate`.
 `FRAMEWORK_OK` requires that `onCreate` ran and the decor view exists,
@@ -249,7 +250,7 @@ consistent with [Android's JNI guidance](https://developer.android.com/ndk/guide
 
 The experiment exposed and repaired ordinary mmap hint handling, ARM64 open
 flag translation, executable procfs opens and main-stack metadata. Low hints
-try a free range at or above the requested address inside the direct window,
+try a free range at or above the requested address below 4 GiB,
 then use the ordinary allocator when none fits. They never replace occupied
 mappings; fixed mapping behavior remains separate. Virtual hinted reservations
 discard old contents lazily. `/proc/self/stat` reports the actual initial guest

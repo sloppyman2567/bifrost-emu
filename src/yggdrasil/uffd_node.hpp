@@ -10,9 +10,8 @@
 //
 // Not implemented: fault events read() from the descriptor (a context
 // without UFFD_FEATURE_SIGBUS cannot register), write-protect and minor
-// modes, UFFDIO_MOVE/CONTINUE/POISON, fork/remap/remove events, shmem
-// ranges and ranges above the 4 GiB direct window. Registration is per
-// process, not per descriptor.
+// modes, UFFDIO_MOVE/CONTINUE/POISON, fork/remap/remove events and shmem
+// ranges. Registration is per process, not per descriptor.
 #pragma once
 #include "yggdrasil/node.hpp"
 #include <atomic>

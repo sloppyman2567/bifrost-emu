@@ -82,8 +82,8 @@ Host event threads receive isolated guest CPU/TLS state.
 
 The regression covers signed mouse deltas, relative output canaries,
 registration/getter/removal, accepted/rejected motion, and nested pushes.
-It also exercises callback stacks above the direct window; those now protect
-sparse guest pages without indexing the direct page table. Small SDL event
+It also exercises callback stacks above 4 GiB; their guard pages go through
+the normal mapping path. Small SDL event
 and integer-output bounces use their exact ABI sizes to avoid crossing stack
 guards. `scripts/run_thunk_compat.sh` passes SDL/GL/Vulkan in both engines.
 

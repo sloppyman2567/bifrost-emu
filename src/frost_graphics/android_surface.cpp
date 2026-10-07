@@ -8,8 +8,7 @@
 // and the AInputQueue event store. This class plays the Android
 // framework role for `bifrost-emu --android libapp.so` runs:
 //   - create_activity() synthesizes an ANativeActivity struct + callback
-//     table in guest memory (mmap_alloc → inside the 4 GiB direct window,
-//     so the guest JIT derefs them at full speed);
+//     table in guest memory (mmap_alloc, read inline by the guest JIT);
 //   - lifecycle callbacks are GUEST function pointers read live from the
 //     callback table and invoked through the borrow-CPU runner wired by
 //     the Emulator (same mechanism as GLFW callback delivery);

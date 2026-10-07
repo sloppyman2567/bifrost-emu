@@ -359,6 +359,10 @@ UNIT_TESTS=(
     # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
     # and above-window MAP_FIXED r/w cycles run sequentially.
     "test_mem_guard|ctest/test_mem_guard.elf||20|ALL PASS"
+    # Guest memory is one host reservation: fixed mappings at 1 TiB, faults
+    # after munmap/mprotect, a 1 TiB PROT_NONE reservation, high+low MAP_SHARED
+    # views, MADV_DONTNEED and mremap above 4 GiB.
+    "test_mem_reservation|ctest/test_mem_reservation.elf||30|ALL PASS"
     # MADV_REMOVE: hole punch for writable shared files, EINVAL for private
     # anonymous (ART's CMC arena release depends on it), EACCES, ENOMEM.
     "test_madv_remove|ctest/test_madv_remove.elf||10|ALL PASS"

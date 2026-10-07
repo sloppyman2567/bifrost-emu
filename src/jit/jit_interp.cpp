@@ -39,9 +39,6 @@ extern "C" {
 // through it. The interpreter's step() may throw UnmappedMemory; we
 // catch it here and translate to SIGSEGV delivery.
 extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
-    // Invalidate the CPU's page cache before stepping.
-    cpu->page_cache.read_page = UINT64_MAX;
-    cpu->page_cache.write_page = UINT64_MAX;
     // Cache the env lookup — this runs on every CALL_INTERP fallback.
     static const bool step_trace_ = (getenv("BIFROST_STEP_TRACE") != nullptr);
     if (step_trace_) {

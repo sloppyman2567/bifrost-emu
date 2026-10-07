@@ -3211,8 +3211,8 @@ uint64_t DynamicLinker::load_shared_library(CPU& cpu,
         return 0;
     }
     // Allocate a fresh base address via the Memory's mmap_alloc().
-    // (1.5.3: mmap_alloc's base is MMAP_BASE_MIN inside the 4 GiB
-    // direct window — the SAME region where the thunk trampolines and
+    // (mmap_alloc's base is MMAP_BASE_MIN in the low region — the SAME
+    // region where the thunk trampolines and
     // string caches are allocated. The allocator tracks ALL allocations
     // so library bases can't collide with the trampolines; that was the
     // bug this comment documents: the old code used a separate counter

@@ -72,9 +72,9 @@ struct DisplayThunkImpl {
     uint32_t string_cache_off = 0;
     std::mutex mu;
     // ── vkMapMemory guest-window bounce bookkeeping (2026-08-21) ──────
-    // The host mapping address is meaningless in the guest (48-bit host
-    // heap, outside the 4 GiB direct window), so vkMapMemory allocates a
-    // bounce inside the window and returns ITS guest address; the guest
+    // The host mapping address is meaningless in the guest (a host heap
+    // address, outside the guest reservation), so vkMapMemory allocates a
+    // bounce in the guest and returns ITS guest address; the guest
     // reads/writes it at full JIT speed. Publish changed guest bytes before
     // GPU-consuming calls, and merge readback after completion waits without
     // erasing unsubmitted guest writes. Explicit flush/invalidate refresh
@@ -2150,7 +2150,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // Write bounced pointer args back into guest memory. Only the byte
     // range the host actually modified is written back — writing the full
     // bounce (64 KiB by default) over a small guest object (e.g. a stack
-    // XEvent or XColor above the 4 GiB direct window) clobbered adjacent
+    // XEvent or XColor) clobbered adjacent
     // guest memory. Diffing against the pre-call snapshot also makes
     // input-only pointers (host never writes them) a no-op writeback.
     // A wrong pointer mask (e.g. an XID marked as a pointer) can bounce an
@@ -2617,8 +2617,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // ── vkMapMemory ──────────────────────────────────────────────────────
     // (device, memory, offset, size, flags, ppData) — the host driver writes
     // a HOST pointer into ppData, useless in the guest. Instead: map on the
-    // host with a scratch pointer, allocate a bounce inside the 4 GiB direct
-    // window, seed it from the host mapping, and write the BOUNCE's guest
+    // host with a scratch pointer, allocate a bounce in the guest
+    // reservation, seed it from the host mapping, and write the BOUNCE's guest
     // address into ppData. Guest reads/writes then hit the window at full
     // JIT speed; coherence comes from the submit/present push + wait pull
     // (and explicit flush/invalidate ranges).
@@ -2716,9 +2716,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         }
         uint8_t* dst = mem->guest_to_host_ptr(bounce);
         if (!dst) {
-            // Window alloc succeeded above the direct window (exhausted
-            // 4 GiB): no guest-derefable address — release and fail like
-            // a failed alloc instead of memcpy through null.
+            // The bounce is not writable as one host range: release it
+            // and fail like a failed alloc instead of memcpy through null.
             mem->untrack_allocation(bounce, (size + 0xFFFu) & ~0xFFFull);
             if (impl_->vk_unmap_host_)
                 reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(

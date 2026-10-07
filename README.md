@@ -452,8 +452,8 @@ headers/libs are linked.
 Marshalling supports AAPCS64 stack args (e.g. `glTexImage2D` data),
 FP args in `v0..` (`glClearColor`, `glVertex3f`), host→guest string
 returns (`glGetString`, `SDL_GetError`), nested `glShaderSource`
-pointers, and bounce buffers for stack pointers outside the 4 GiB
-direct window (`SDL_PollEvent`). Trampolines end with `ret` after `svc`.
+pointers, and bounce buffers for pointers whose range is not one accessible
+host range (`SDL_PollEvent`). Trampolines end with `ret` after `svc`.
 dlopen of libGL/libSDL2 uses the thunk when the on-disk `.so` is not
 AArch64 (so host x86_64 libs are never executed as guest code).
 

@@ -47,13 +47,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             constexpr uint64_t BIFROST_MAP_ANONYMOUS = 0x20;
             if (length == 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-22)); return 0; } // EINVAL
             // Sanity-check the length: real Linux rejects absurdly large
-            // mmaps based on RLIMIT_AS and available address space. Without
-            // this, a buggy/malicious guest passing length = SIZE_MAX could
-            // OOM the host. We use a generous 64 GiB sanity cap here — the
-            // strict per-allocation cap (Memory::MAX_MMAP_LENGTH = 4 GiB,
-            // virtual reserves exempt) is enforced inside mmap_alloc below.
+            // mmaps based on RLIMIT_AS and available address space. A 64 GiB
+            // cap applies to mappings that can commit memory (the strict
+            // per-allocation cap, Memory::MAX_MMAP_LENGTH = 4 GiB, is
+            // enforced inside mmap_alloc below). Virtual reservations
+            // (MAP_NORESERVE or PROT_NONE) cost nothing until committed, so
+            // only the guest address space limits them, as on Linux: V8 and
+            // other runtimes reserve TiB-scale regions.
             constexpr uint64_t MAX_MMAP_SANITY = 64ULL * 1024 * 1024 * 1024;
-            if (length > MAX_MMAP_SANITY) {
+            const bool virtual_only = (flags & 0x4000) || prot == 0;
+            if (length > MAX_MMAP_SANITY && !virtual_only) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM));
                 return 0;
             }
@@ -242,9 +245,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // MAP_NORESERVE (0x4000 on AArch64 asm-generic — NOT 0x40!)
             // / PROT_NONE mappings are VIRTUAL reservations on real
             // Linux — they cost no memory until touched. Route them
-            // through the lazy path: no eager page materialization, no
-            // charge against MAX_TOTAL_PAGES at reserve time (per-fault
-            // OOM checks still apply). vkQuake's mimalloc reserves
+            // through the lazy path: no eager zeroing and no
+            // MAX_MMAP_LENGTH cap. vkQuake's mimalloc reserves
             // GiB-scale arenas this way.
             uint64_t mapped;
             if (flags & BIFROST_MAP_FIXED) {
@@ -351,13 +353,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: the old code only removed the allocation from the
             // tracking map ("no-op OK"). That made mmap_alloc a pure bump
             // allocator: guest malloc/free churn (the game's 18 MB chunk
-            // meshes every frame) marched the heap pointer up to ~8.5 GB,
-            // exhausted MAX_TOTAL_PAGES (1M pages = 4 GiB), and mmap
+            // meshes every frame) marched the heap pointer until mmap
             // started returning 0 — which the guest treated as a valid
             // mapping at address 0, so musl mallocng built its arena
             // there and free() crashed with BRK #1000 (get_meta). Now
-            // munmap frees the pages (page-cap reflects live memory) and
-            // returns the address range to the free list for reuse.
+            // munmap unmaps the pages and returns the address range to
+            // the free list for reuse.
             if (dbg().trace_mmap) {
                 fprintf(stderr, "[munmap(0x%llx, %lu)]\n",
                         (unsigned long long)a0,

@@ -93,7 +93,6 @@ void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst) {
     report_crash(cpu, mem, "decode error", cpu.pc, &inst);
 }
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
-    auto* pcache = &cpu.page_cache;
     // BIFROST_WATCH / BIFROST_WRITE_TRACE support: snapshot pc so
     // Memory::write can attribute stores (one cached branch when unset).
     if (dbg().need_store_pc()) Memory::note_interp_pc(cpu.pc);
@@ -1022,8 +1021,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (esize <= 8) {
                             // S/D-form: read esize bytes into v_lo, zero v_hi.
                             uint64_t lo1 = 0, lo2 = 0;
-                            mem_.read(addr, &lo1, esize, pcache);
-                            mem_.read(addr + esize, &lo2, esize, pcache);
+                            mem_.read(addr, &lo1, esize);
+                            mem_.read(addr + esize, &lo2, esize);
                             cpu.v_lo[d.rt] = lo1;
                             cpu.v_hi[d.rt] = 0;
                             cpu.v_lo[d.rt2] = lo2;
@@ -1031,10 +1030,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         } else {
                             // Q-form (esize=16): read 16 bytes = lo + hi.
                             uint64_t lo1, hi1, lo2, hi2;
-                            mem_.read(addr, &lo1, 8, pcache);
-                            mem_.read(addr + 8, &hi1, 8, pcache);
-                            mem_.read(addr + 16, &lo2, 8, pcache);
-                            mem_.read(addr + 24, &hi2, 8, pcache);
+                            mem_.read(addr, &lo1, 8);
+                            mem_.read(addr + 8, &hi1, 8);
+                            mem_.read(addr + 16, &lo2, 8);
+                            mem_.read(addr + 24, &hi2, 8);
                             cpu.v_lo[d.rt] = lo1;
                             cpu.v_hi[d.rt] = hi1;
                             cpu.v_lo[d.rt2] = lo2;
@@ -1043,22 +1042,22 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     } else {
                         if (esize <= 8) {
                             // S/D-form: write esize bytes from v_lo.
-                            mem_.write(addr, &cpu.v_lo[d.rt], esize, pcache);
-                            mem_.write(addr + esize, &cpu.v_lo[d.rt2], esize, pcache);
+                            mem_.write(addr, &cpu.v_lo[d.rt], esize);
+                            mem_.write(addr + esize, &cpu.v_lo[d.rt2], esize);
                         } else {
                             // Q-form (esize=16): write v_lo (8 bytes) then
                             // v_hi (8 bytes) for each register.
-                            mem_.write(addr, &cpu.v_lo[d.rt], 8, pcache);
-                            mem_.write(addr + 8, &cpu.v_hi[d.rt], 8, pcache);
-                            mem_.write(addr + 16, &cpu.v_lo[d.rt2], 8, pcache);
-                            mem_.write(addr + 24, &cpu.v_hi[d.rt2], 8, pcache);
+                            mem_.write(addr, &cpu.v_lo[d.rt], 8);
+                            mem_.write(addr + 8, &cpu.v_hi[d.rt], 8);
+                            mem_.write(addr + 16, &cpu.v_lo[d.rt2], 8);
+                            mem_.write(addr + 24, &cpu.v_hi[d.rt2], 8);
                         }
                     }
                 } else {
                     if (d.is_load) {
                         uint64_t v1 = 0, v2 = 0;
-                        mem_.read(addr, &v1, esize, pcache);
-                        mem_.read(addr + esize, &v2, esize, pcache);
+                        mem_.read(addr, &v1, esize);
+                        mem_.read(addr + esize, &v2, esize);
                         if (opc == 1) {  // LDPSW: sign-extend both words to 64
                             v1 = sign_extend(v1, 32);
                             v2 = sign_extend(v2, 32);
@@ -1066,8 +1065,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (d.rt  != 31) cpu.regs[d.rt]  = v1;
                         if (d.rt2 != 31) cpu.regs[d.rt2] = v2;
                     } else {
-                        mem_.write(addr, &s1, esize, pcache);
-                        mem_.write(addr + esize, &s2, esize, pcache);
+                        mem_.write(addr, &s1, esize);
+                        mem_.write(addr + esize, &s2, esize);
                     }
                 }
                 return;
@@ -1103,12 +1102,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // Wt (rt) is the desired value (unchanged).
                 if (d.atom_op >= 0xC) {
                     uint64_t old = 0;
-                    mem_.read(base, &old, width_bytes, pcache);
+                    mem_.read(base, &old, width_bytes);
                     uint64_t cmp = cpu.regs[d.rs] & mask;
                     old &= mask;
                     if (old == cmp) {
                         uint64_t newv = cpu.regs[d.rt] & mask;
-                        mem_.write(base, &newv, width_bytes, pcache);
+                        mem_.write(base, &newv, width_bytes);
                     }
                     // OLD value goes to Ws (rs), NOT Wt (rt). Guard XZR.
                     if (d.rs != 31) cpu.regs[d.rs] = old;
@@ -1117,16 +1116,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // SWP (atom_op == 0x8): atomic swap.
                 if (d.atom_op == 0x8) {
                     uint64_t old = 0;
-                    mem_.read(base, &old, width_bytes, pcache);
+                    mem_.read(base, &old, width_bytes);
                     old &= mask;
                     uint64_t newv = cpu.regs[d.rs] & mask;
-                    mem_.write(base, &newv, width_bytes, pcache);
+                    mem_.write(base, &newv, width_bytes);
                     if (returns_old) cpu.regs[d.rt] = old;
                     return;
                 }
                 // Other LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN).
                 uint64_t a = 0, b = cpu.regs[d.rs];
-                mem_.read(base, &a, width_bytes, pcache);
+                mem_.read(base, &a, width_bytes);
                 a &= mask;
                 b &= mask;
                 uint64_t newv = 0;
@@ -1149,7 +1148,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     case 0x7: newv = (a < b ? a : b) & mask; break;    // UMIN
                     default:  newv = a & mask; break;
                 }
-                mem_.write(base, &newv, width_bytes, pcache);
+                mem_.write(base, &newv, width_bytes);
                 if (returns_old) cpu.regs[d.rt] = a;
                 return;
             }
@@ -1166,8 +1165,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t addr = base + d.disp;
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
-                        mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
+                        mem_.read(addr, &lo, std::min(nbytes, 8));
+                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
@@ -1184,8 +1183,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             }
                             fprintf(stderr, "\n");
                         }
-                        mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.write(addr + 8, &hi, nbytes - 8, pcache);
+                        mem_.write(addr, &lo, std::min(nbytes, 8));
+                        if (nbytes > 8) mem_.write(addr + 8, &hi, nbytes - 8);
                     }
                     return;
                 }
@@ -1193,7 +1192,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int width_bytes = 1 << size;
                 if (d.is_load) {
                     uint64_t v = 0;
-                    mem_.read(addr, &v, width_bytes, pcache);
+                    mem_.read(addr, &v, width_bytes);
                     if (d.rt != 31) {
                         v = extend_loaded(v, opc, width_bytes);
                         cpu.regs[d.rt] = v;
@@ -1203,7 +1202,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
-                    mem_.write(addr, &v, width_bytes, pcache);
+                    mem_.write(addr, &v, width_bytes);
                 }
                 return;
             }
@@ -1232,16 +1231,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     int nbytes = is_q ? 16 : (1 << size);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
-                        mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
+                        mem_.read(addr, &lo, std::min(nbytes, 8));
+                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
-                        mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
+                        mem_.write(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) {
                             uint64_t hi = cpu.v_hi[d.rt];
-                            mem_.write(addr + 8, &hi, nbytes - 8, pcache);
+                            mem_.write(addr + 8, &hi, nbytes - 8);
                         }
                     }
                     return;
@@ -1249,7 +1248,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int width_bytes = 1 << size;
                 if (d.is_load) {
                     uint64_t v = 0;
-                    mem_.read(addr, &v, width_bytes, pcache);
+                    mem_.read(addr, &v, width_bytes);
                     if (d.rt != 31) {
                         v = extend_loaded(v, opc, width_bytes);
                         cpu.regs[d.rt] = v;
@@ -1259,7 +1258,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
-                    mem_.write(addr, &v, width_bytes, pcache);
+                    mem_.write(addr, &v, width_bytes);
                 }
                 return;
             }
@@ -1282,16 +1281,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     int nbytes = is_q ? 16 : (1 << size);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
-                        mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
+                        mem_.read(addr, &lo, std::min(nbytes, 8));
+                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
-                        mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
+                        mem_.write(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) {
                             uint64_t hi = cpu.v_hi[d.rt];
-                            mem_.write(addr + 8, &hi, nbytes - 8, pcache);
+                            mem_.write(addr + 8, &hi, nbytes - 8);
                         }
                     }
                     return;
@@ -1303,7 +1302,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (!d.is_load && d.rt != 31) sv = cpu.regs[d.rt];
                 if (d.is_load) {
                     uint64_t v = 0;
-                    mem_.read(addr, &v, width_bytes, pcache);
+                    mem_.read(addr, &v, width_bytes);
                     if (d.rt != 31) {
                         v = extend_loaded(v, opc, width_bytes);
                         cpu.regs[d.rt] = v;
@@ -1313,7 +1312,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
-                    mem_.write(addr, &v, width_bytes, pcache);
+                    mem_.write(addr, &v, width_bytes);
                 }
                 return;
             }
@@ -1354,7 +1353,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             uint64_t mask = (width_bytes == 8) ? ~0ULL
                                           : ((1ULL << (width_bytes * 8)) - 1);
                             v &= mask;
-                            mem_.write(base, &v, width_bytes, pcache);
+                            mem_.write(base, &v, width_bytes);
                             // Invalidate OTHER CPUs' reservations at this
                             // address (inline, since we hold the shard lock).
                             auto it = shard.reservations.find(base);
@@ -1384,7 +1383,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         v &= mask;
                         auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
                         std::lock_guard<std::mutex> gmon(shard.mu);
-                        mem_.write(base, &v, width_bytes, pcache);
+                        mem_.write(base, &v, width_bytes);
                         // Invalidate OTHER CPUs' reservations at this address.
                         auto it = shard.reservations.find(base);
                         if (it != shard.reservations.end()) {
@@ -1405,7 +1404,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
                     std::lock_guard<std::mutex> gmon(shard.mu);
                     uint64_t v = 0;
-                    mem_.read(base, &v, width_bytes, pcache);
+                    mem_.read(base, &v, width_bytes);
                     // Guard XZR: writes to regs[31] must be dropped (XZR
                     // always reads as 0). Other load handlers (LDR_IMM,
                     // LDR_UNS, LDR_REG) do this; LDXR was missing the guard.

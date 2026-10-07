@@ -10,6 +10,15 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Guest memory as one host reservation (2026-10-07)
+
+The default suite passes **301/301** (114 s), `--quick` **296/296** and
+`--no-jit` **294/294** with seven expected JIT-only skips (155 s). The
+Android framework probe passes in both engines (JIT ~5 s, was ~11 s) and the
+Activity probe in 8.4 s JIT / 18.0 s interpreter (22.6 s / 45.0 s with the
+previous binary, same host). bench_mips/memcpy/sort/matrix/fib are within
+noise of the previous binary (their memory stays below 4 GiB).
+
 ### FP/SIMD interpreter split, NaN rules, MSR NZCV (2026-10-07)
 
 The default suite passes **300/300** (159 s), `--quick` **295/295** and
@@ -97,11 +106,17 @@ Focused additions:
   `O_DIRECTORY`. Passes natively on the host kernel; the pre-change binary
   fails 9 checks.
 - `test_madv_remove`: `MADV_REMOVE` punches a hole in writable shared memfd
-  mappings below and above the direct window (page reads zero, file size
+  mappings below and above 4 GiB (page reads zero, file size
   kept), returns `EINVAL` for private anonymous memory without touching it,
   `EACCES` for a read-only shared file, and `ENOMEM` for holes. The same
   source passes natively on the host kernel; the pre-change binary fails 8
   of 18 checks. QEMU 11.1 is not a reference (it returns `EOPNOTSUPP`).
+- `test_mem_reservation`: guest memory above 4 GiB on the single host
+  reservation: MAP_FIXED_NOREPLACE at 1 TiB with a JIT-hot loop, ACCERR after
+  a read-only mprotect, MAPERR after munmap, a 1 TiB PROT_NONE reservation
+  with a committed piece (under 2 s), a memfd seen through a 2 TiB and a low
+  MAP_SHARED view, MADV_DONTNEED and mremap growth above 4 GiB. Passes
+  natively; the previous binary fails the 1 TiB reservation (64 GiB cap).
 - `jit_simd_fp_nan` (`INTERP` row, run with `--no-jit`): vector FP NaN
   choice and SNaN priority, +qNaN for invalid operations, FMAX/FMIN signed
   zero, FMAXNM/FMINNM with a quiet NaN, fused FMLA, FMLS negation, FMULX

@@ -84,7 +84,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
         emit_add_reg(RAX, RDX);
     }
     std::vector<size_t> cold;
-    emit_mov_imm32_zext(RCX, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - size));
+    emit_window_limit(RCX, size);
     emit_cmp_reg(RAX, RCX);
     cold.push_back(emit_jcc_rel32_placeholder(7)); // JA (also catches wrap/negative addresses)
     emit_mov_reg(RCX, RAX);

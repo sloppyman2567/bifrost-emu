@@ -1259,9 +1259,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // rax = addr + imm
             load_vreg_to_reg(RAX, inst.src1);
             if (lp.offset != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(lp.offset));
-            // Limit check: addr + 16*nregs <= DIRECT_WINDOW_SIZE.
+            // Limit check: addr + 16*nregs <= window size.
             int tmp = (RAX != RDX) ? RDX : RCX;
-            emit_mov_imm32_zext(tmp, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - static_cast<uint64_t>(16 * nregs)));
+            emit_window_limit(tmp, 16ull * nregs);
             emit_cmp_reg(RAX, tmp);
             size_t jbe_patch = emit_jcc_rel32_placeholder(6);  // JBE
             // Slow path: N calls to jit_load_mem16_slow(emu, cpu, addr, dst).
@@ -1357,7 +1357,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (sp.offset != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(sp.offset));
             // Limit check.
             int tmp = (RAX != RDX) ? RDX : RCX;
-            emit_mov_imm32_zext(tmp, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - static_cast<uint64_t>(16 * nregs)));
+            emit_window_limit(tmp, 16ull * nregs);
             emit_cmp_reg(RAX, tmp);
             size_t jbe_patch = emit_jcc_rel32_placeholder(6);  // JBE
             // Slow path: N calls to jit_store_mem16_slow(emu, cpu, addr, src).

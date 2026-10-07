@@ -12,6 +12,31 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Guest memory as one host reservation (2026-10-07)
+
+- The guest address space is a single host reservation (64 TiB, halving to
+  512 GiB when the host refuses): guest VA x is at `base + x`, and host
+  mmap(MAP_FIXED)/mprotect/madvise/munmap implement guest mappings. The
+  sparse tier that held everything above 4 GiB (`pages_`, high mapping and
+  userfaultfd range lists, separate shared backings) is gone; `memory.cpp`
+  shrinks from 2506 to about 1100 lines. A coalesced `vmas_` index answers
+  range queries, and the per-page flag mirror is committed lazily, so
+  TiB-scale PROT_NONE reservations cost no per-page work.
+- Memory above 4 GiB is now as fast as below: `ld.so`, thunk libraries and
+  ART's heaps no longer go through a locked map. The Android Activity probe
+  runs in 8.4 s JIT / 18.0 s interpreter (22.6 s / 45.0 s before), the
+  framework probe in about 5 s JIT (about 11 s). Programs that stay below
+  4 GiB (the benchmarks, static musl games) are unchanged.
+- MAP_SHARED files are mapped straight into the reservation at every
+  address, MADV_DONTNEED uses the host call, and munmap above 4 GiB returns
+  memory to the host. Virtual reservations (MAP_NORESERVE or PROT_NONE) are
+  no longer capped at 64 GiB.
+- Guest addresses beyond the reservation cannot be mapped (MAP_FIXED fails,
+  hints fall back); Linux allows up to 256 TiB on 48-bit AArch64.
+- `mremap` of a shared file only extends in place when the tail mapping
+  lands right after it; it used to accept a hint placed elsewhere.
+- Regression: `ctest/test_mem_reservation.c`.
+
 ### FP/SIMD interpreter split, ARM NaN rules, JIT MSR NZCV (2026-10-07)
 
 - `interp_fp.cpp` (4951 lines) is split into a dispatcher plus

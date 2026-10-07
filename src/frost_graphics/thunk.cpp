@@ -348,8 +348,8 @@ struct GraphicThunkImpl {
     // 2026-08: glMapBuffer/glMapBufferRange/glUnmapBuffer bounce support.
     // The host glMapBuffer returns a HOST pointer the guest cannot deref,
     // so dispatch() instead allocates a guest-window bounce buffer (via
-    // Memory::mmap_alloc, inside the 4 GiB direct window so the guest JIT
-    // can read/write it fast), seeds it from the host buffer on map
+    // Memory::mmap_alloc, in the guest reservation so the guest JIT can
+    // read/write it inline), seeds it from the host buffer on map
     // (GL_MAP_READ_BIT), and copies it back on unmap (GL_MAP_WRITE_BIT).
     // Raw host GL fns resolved at init (not the registered entries, whose
     // host_fn may be trampolines on some paths).
@@ -1695,8 +1695,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // ── glMapBuffer / glMapBufferRange / glUnmapBuffer / glFlushMappedBufferRange ──
     // 2026-08: the host glMapBuffer returns a HOST pointer the guest cannot
     // deref (address-space mismatch). Instead, bounce through a guest-window
-    // allocation: mmap_alloc() hands out guest addresses inside the 4 GiB
-    // direct window, so the guest JIT can read/write the bounce fast. On
+    // allocation: mmap_alloc() hands out guest addresses the guest JIT
+    // reads and writes inline. On
     // map, seed the bounce from the host buffer when GL_MAP_READ_BIT is
     // set (contents undefined otherwise / under GL_MAP_INVALIDATE_*); on
     // unmap, copy the bounce back into the host buffer when GL_MAP_WRITE_BIT
@@ -2694,11 +2694,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         continue;
                     }
                     uint8_t* hp = nullptr;
-                    // Alias only if the WHOLE buffer sits in the window —
-                    // guest_to_host_ptr checks the start address only.
-                    if (guest_ptrs[i] < Memory::DIRECT_WINDOW_SIZE &&
-                        bytes <= Memory::DIRECT_WINDOW_SIZE - guest_ptrs[i])
-                        hp = impl_->mem->guest_to_host_ptr(guest_ptrs[i]);
+                    // Alias only if the WHOLE index buffer is readable.
+                    hp = impl_->mem->guest_to_host_ptr(
+                        guest_ptrs[i], Memory::GUEST_PROT_READ, bytes);
                     if (hp) {
                         // Direct-window alias: host reads guest memory
                         // directly, no bounce size cap needed.
@@ -2785,7 +2783,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (gp == 0) { host_strs[i] = ""; continue; }
             uint8_t* hp = impl_->mem ? impl_->mem->guest_to_host_ptr(gp) : nullptr;
             if (hp) { host_strs[i] = reinterpret_cast<const char*>(hp); continue; }
-            // Heap/stack string above the 4 GiB direct window: bounce it.
+            // Not readable as one host range (e.g. ends on a guard page): bounce it.
             size_t n = (lens && lens[i] > 0)
                            ? static_cast<size_t>(lens[i])
                            : (lens ? 0 : 65536);
@@ -2903,11 +2901,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // Each bounced pointer arg is written back only up to the end of the
     // enclosing tracked guest allocation, and never at all when no live
     // allocation encloses it (untracked space must not be written).
-    // Bounce targets are almost always ABOVE the 4 GiB direct window —
-    // that is exactly when guests whose allocator outgrows the window
-    // (vkQuake/mimalloc arenas) have live data there, and the old
-    // unconditional full-bounce writeback sprayed up to 64 KiB of stale
-    // bytes over adjacent live allocations per thunk call.
+    // A pointer only bounces when its default-size range is not one
+    // accessible host range; the old unconditional full-bounce writeback
+    // sprayed up to 64 KiB of stale bytes over adjacent live allocations
+    // per thunk call (vkQuake/mimalloc arenas).
     auto safe_writeback_all = [&]() {
         if (!impl_->mem) return;
         static int wb_skip_diag = 4, wb_clamp_diag = 4;

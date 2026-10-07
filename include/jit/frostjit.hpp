@@ -911,6 +911,11 @@ private:
     void emit_mov_imm64(int dst, uint64_t imm);
     void emit_mov_imm32(int dst, uint32_t imm);
     void emit_mov_imm32_zext(int dst, uint32_t imm);
+    // dst = the highest guest address an access of `width` bytes may start
+    // at (window_size - width). An access is inline when addr <= dst; the
+    // reservation can exceed 4 GiB, so this may be a 64-bit immediate (and
+    // the compare must then stay register-register: imm32 sign-extends).
+    void emit_window_limit(int dst, uint64_t width);
     void emit_mov_reg(int dst, int src);
     void emit_load(int dst, int base, int32_t off);
     void emit_store(int base, int32_t off, int src);

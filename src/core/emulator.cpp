@@ -844,7 +844,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
             fclose(ifile);
             // Load the interpreter at a high address to avoid conflicts.
-            // Use 0x4000000000 (above the 16GB direct window).
+            // 0x4000000000 (256 GiB) is above the low region and the heap.
             interp_base = 0x4000000000ULL;
             interp_base_ = interp_base;  // Save for AT_BASE in auxv.
             if (idata.size() >= 64 && idata[0] == 0x7f && idata[1] == 'E') {
@@ -932,9 +932,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
     brk_start_ = brk_;
-    // Set up the initial stack image. 1.5.3: the stack is inside the
-    // 4 GiB direct window so stack accesses hit the JIT fast path;
-    // since 2026-08 its top carries per-process ASLR jitter.
+    // Set up the initial stack image (low region, below 1008 MiB); its
+    // top carries per-process ASLR jitter.
     const uint64_t STACK_TOP = mem_.stack_top();
     const uint64_t STACK_SIZE = Memory::STACK_SIZE;
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
@@ -1700,7 +1699,7 @@ void Emulator::step(CPU& cpu) {
             static_cast<unsigned long long>(cpu.v_lo[1]), static_cast<unsigned long long>(cpu.v_hi[1]),
             static_cast<unsigned long long>(cpu.v_lo[2]), static_cast<unsigned long long>(cpu.v_hi[2]));
     }
-    uint32_t inst = mem_.fetch_inst(cpu.pc, &cpu.page_cache);
+    uint32_t inst = mem_.fetch_inst(cpu.pc);
     uint64_t next_pc = cpu.pc + 4;
     execute(inst, next_pc, cpu);
     cpu.pc = next_pc;

@@ -114,6 +114,9 @@ static_assert(offsetof(CPU, v_lo)   == FrostJIT::V_LO_OFF,   "CPU v_lo offset mi
 static_assert(offsetof(CPU, v_hi)   == FrostJIT::V_HI_OFF,   "CPU v_hi offset mismatch");
 static_assert(offsetof(CPU, fpcr)   == FrostJIT::FPCR_OFF,   "CPU fpcr offset mismatch");
 static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mismatch");
+// MRS/MSR TPIDR_EL0 / TPIDRRO_EL0 use these offsets as literals.
+static_assert(offsetof(CPU, tpidr_el0)   == 808, "CPU tpidr_el0 offset mismatch");
+static_assert(offsetof(CPU, tpidrro_el0) == 816, "CPU tpidrro_el0 offset mismatch");
 // Additional layout checks: the JIT hardcodes element counts (regs[31],
 // v_lo[32], v_hi[32]) and element sizes (8 bytes each). If the CPU struct
 // ever changes — e.g. v_lo becomes uint32_t[32] — the JIT's
@@ -178,8 +181,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         case IROp::ATOMIC: {
             // Native LSE atomics via x86 lock-prefixed instructions.
-            // Fast path: address < 4 GiB (direct window) → lock op on
-            // (window_base + addr). Slow path: addr ≥ 4 GiB → CALL_INTERP.
+            // Fast path: access inside the reservation → lock op on
+            // (window_base + addr). Slow path: outside it → CALL_INTERP,
+            // which raises the fault.
             //
             // Operations (atom_op in inst.cond):
             //   CAS (≥0xC): lock cmpxchg       (32/64-bit only)
@@ -228,8 +232,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flush_invalidate_host_regs(MEM_CLOBBER);
             // Load base address → RAX.
             load_vreg_to_reg(RAX, inst.src1);
-            // Check if addr + w <= 4GB (direct window fast path).
-            emit_mov_imm32_zext(RDX, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - w));
+            // Check addr + w <= window size (inline fast path).
+            emit_window_limit(RDX, w);
             emit_cmp_reg(RAX, RDX);
             size_t jae_patch = emit_jcc_rel32_placeholder(7);  // JA → slow
             // ── Fast path: direct window ──
@@ -373,7 +377,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             // Jump past slow path.
             size_t jmp_past = emit_jmp_rel32_placeholder();
-            // ── Slow path: addr ≥ 4 GiB → CALL_INTERP ──
+            // ── Slow path: outside the reservation → CALL_INTERP ──
             size_t slow_path = code_buf_used_;
             patch_jcc_rel32(jae_patch, static_cast<int32_t>(slow_path - (jae_patch + 6)));
             emit_call_interp(inst.arm_pc, false);

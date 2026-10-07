@@ -335,7 +335,6 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // but the LRU state should start fresh).
     std::fill(gt->cpu.decode_cache.begin(), gt->cpu.decode_cache.end(),
               CPU::CacheEntry{});
-    gt->cpu.page_cache = Memory::PageCache{};
     // Named clone flag constants (per include/uapi/linux/sched.h).
     // Use a BIFROST_ prefix to avoid collision with system headers
     // that may #define CLONE_SETTLS etc.

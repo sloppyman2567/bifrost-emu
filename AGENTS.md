@@ -30,11 +30,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - ART nterp invokes methods with `BLR X30`: capture the target BEFORE updating
   LR in both engines. `ctest/jit_blr_lr.c` is the regression.
-- File `MAP_SHARED` mappings retain host file aliases, including high sparse
-  pages and low direct-window mappings. Never preload them into independent
-  vectors. Partial unmap/replacement must detach a low alias before zeroing
-  anonymous storage; preserve file identity through fork/remap. ART's own JIT
-  uses RW and R/RX views of the same memfd (`test_shared_alias`).
+- File `MAP_SHARED` mappings are host `MAP_SHARED|MAP_FIXED` aliases of the
+  file inside the guest reservation (`shared_pages_` keeps the fd for
+  fallocate/mremap). Never copy them into private storage. Partial
+  unmap/replacement must detach an alias (`detach_shared_locked`) before
+  zeroing anonymous storage; preserve file identity through fork/remap. ART's
+  own JIT uses RW and R/RX views of the same memfd (`test_shared_alias`).
 - ART-generated code uses literal loads. Decoder `pc_relative` + `disp` is the
   shared address contract; interpreter and IR use PC rather than a GPR base.
 - Native call guards must unwind a stopped CPU after `exit_group`, preserving
@@ -66,16 +67,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   image's boot image was built for (CMC needs it; schema 5 provisions the
   product `build.prop` that sets `ro.dalvik.vm.enable_uffd_gc`). A missing
   page in a registered range raises SIGBUS `BUS_ADRERR`
-  (`UnmappedMemory::uffd`). Window pages carry MISSING/REGISTERED bits in
-  `direct_page_flags_` (the JIT guard rejects MISSING). Above 4 GiB,
-  registration is `high_uffd_ranges_` and a page is missing while it has no
-  `pages_` entry: once tracking is on, DONTNEED and DONTUNMAP drop it.
-  Both sides are required: ART's compaction pause moves the window heap
-  with `MAYMOVE|FIXED|DONTUNMAP` into a from-space reserved anywhere, and its
-  1 GiB linear-alloc pool is registered above the window
-  (`KernelPrepareRangeForUffd`, `mark_compact.cc`). Unmap and `MAP_FIXED`
-  drop registration; `mprotect` keeps it. Android's `low_hints_reserved`
-  places big unhinted maps above the window. Regression:
+  (`UnmappedMemory::uffd`). Every guest page carries MISSING/REGISTERED bits
+  in `direct_page_flags_` (the JIT guard rejects MISSING); once tracking is
+  on, DONTNEED and DONTUNMAP mark discarded private pages MISSING. ART's
+  compaction pause moves its low heap with `MAYMOVE|FIXED|DONTUNMAP` into a
+  from-space reserved anywhere, and registers its 1 GiB linear-alloc pool
+  above 4 GiB (`KernelPrepareRangeForUffd`, `mark_compact.cc`). Unmap and
+  `MAP_FIXED` drop registration; `mprotect` keeps it. Android's
+  `low_hints_reserved` places big unhinted maps above `LOW_REGION_SIZE`.
+  Regression:
   `ctest/test_userfaultfd.c` (also runs natively as a kernel oracle).
 - libandroid `ALooper` is per guest thread (keyed by the monotonic
   `CPU::tid`), never a process singleton: `forThread`/`pollOnce`/`pollAll`
@@ -99,8 +99,9 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - Build: `make` (optional `USE_SDL2=1 USE_THUNK_GL=1` for host GL/SDL)
 - Cross tests: `make cross SRC=… OUT=…` via musl toolchain in `tools/`
-- Thunk trampolines end with `ret` after `svc`; pointer args outside
-  the 4 GiB direct window bounce through a host buffer with writeback
+- Thunk trampolines end with `ret` after `svc`; a pointer arg whose range is
+  not accessible as one host range bounces through a host buffer with
+  writeback
 - Thunk trampolines MUST load the symbol id into x9 (the dispatcher reads
   `cpu.regs[9]` in `src/syscalls/misc.cpp`). Always emit trampolines via the
   shared `write_thunk_trampoline()` helper in `thunk_common.hpp` (which uses
@@ -520,35 +521,44 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   corrupted `cmp x1, x0` in `test_simd_arith`'s Test 1 (JIT-only, interp
   passed). Loads use a `load_imm(block, 0)` zero vreg; stores use a fresh
   `g_alloc.alloc()` scratch for the unused v_hi half.
-- The guest heap and stack MUST stay inside the 4 GiB direct window or
-  every heap/stack access falls through to the `pages_` + rwlock slow
-  path (~9× JIT regression; the voxel game dropped from ~18 MIPS to
-  ~2 MIPS). `src/core/memory.h` was long described in comments as
-  "v1.5.2: heap/stack inside the window" while the constants still put
-  them ABOVE it (`MMAP_BASE_MIN=0x5000000000`, `STACK_TOP=0x8000000000`).
-  Current layout: ELF+brk low, heap 256..768 MiB (`MMAP_BASE_MIN/MAX`),
-  stack spans 944..1008 MiB (`STACK_TOP=0x3F000000`, 64 MiB). If you ever
-  bump these, keep the comment AND `threads.cpp`'s backtrace heap-range
-  check (which uses `Memory::MMAP_BASE_MIN/MAX`) in sync; `TRAMPOLINE_ADDR`
-  (0x7000000000) deliberately stays above the window.
-- `mmap_alloc` is NOT a pure bump allocator anymore: `munmap`
-  (`untrack_allocation(addr, size)`) now frees the `pages_` entries,
-  decrements `total_pages_`, and hands the address range back to
-  `free_ranges_` (`std::map`, coalesced); `mmap_alloc` first-fits a
-  reclaimed range before bumping `mmap_next_`, and zeroes reused pages
-  (MAP_ANONYMOUS semantics). The old bump-only behavior was the
-  minecraft game's crash: each frame's 18 MB DATA + 2.3 MB INDICES mesh
-  buffers were mmap'd then munmap'd, marching the heap to ~8.5 GB
-  (above the 4 GiB window → `pages_` slow path → 1M-page cap hit → mmap
-  returned 0), and musl only treats -1/MAP_FAILED as failure, so mallocng
-  built its arena at guest address 0 and the next `free()` BRK #1000'd in
-  `get_meta` (misdiagnosed for weeks as "normal rc=133"). The mmap syscall
-  also now returns `-ENOMEM` when `mmap_alloc` fails (was returning 0).
-  Keep the OOM check counting ONLY pages that would actually be added
-  (non-window pages absent from `pages_`) — a naive `aligned_size/PAGE`
-  count spuriously trips the cap on reused window ranges. Keep
-  `free_ranges_` under `mu_` (it's mutated by untrack/mmap_alloc/mremap)
-  and copy it in `clone_for_fork`.
+- **Guest memory is one host reservation (2026-10-07).** Guest VA x lives
+  at `direct_window() + x`; `Memory` reserves 64 TiB `PROT_NONE|NORESERVE`
+  and halves down to 512 GiB (`WINDOW_SIZE_MIN`: the emulator's own fixed
+  addresses reach `TRAMPOLINE_ADDR` 0x7000000000) if the host refuses.
+  Host mmap(MAP_FIXED)/mprotect/madvise/munmap on it do the real work;
+  there is no second storage tier. `vmas_` (coalesced start → end+prot) is
+  the mapping index and answers overlap/mapped/hole queries in O(log n);
+  `direct_page_flags_` is a lazily committed byte-per-page mirror for the
+  lock-free check_access and the JIT guard. Only pages with some access
+  carry `PAGE_MAPPED`, so TiB-scale PROT_NONE reservations cost no flag
+  writes; a flagless page asks `vmas_` (MAPERR vs ACCERR). Never loop page
+  by page over a guest-supplied range: walk `vmas_` (a guest may madvise
+  or munmap terabytes). Addresses beyond the reservation cannot be
+  mapped: MAP_FIXED fails, hints fall back. Before this, everything above
+  4 GiB used a locked sparse map: `ld.so` (256 GiB), thunk libraries
+  (384 GiB) and ART's heaps ran there, and the Activity probe took 22.6 s
+  JIT / 45.0 s interpreter (now 8.4 s / 18.0 s). Regression:
+  `ctest/test_mem_reservation.c`.
+- Layout: ELF+brk low, heap 256..768 MiB (`MMAP_BASE_MIN/MAX`), stack spans
+  944..1008 MiB (`STACK_TOP=0x3F000000`, 64 MiB); allocations that do not
+  fit below `LOW_REGION_SIZE` (4 GiB) continue from `high_next_`. If you
+  bump these, keep `threads.cpp`'s backtrace heap-range check (which uses
+  `Memory::MMAP_BASE_MIN/MAX`) in sync.
+- `mmap_alloc` is NOT a pure bump allocator: `munmap`
+  (`untrack_allocation(addr, size)`) hands the tracked intersection back
+  to `free_ranges_` (`std::map`, coalesced) and `mmap_alloc` first-fits a
+  reclaimed range before bumping `mmap_next_`, zeroing reused pages
+  (MAP_ANONYMOUS semantics). The old bump-only behavior was the minecraft
+  game's crash: each frame's 18 MB DATA + 2.3 MB INDICES mesh buffers
+  marched the heap until mmap returned 0, musl only treats -1/MAP_FAILED as
+  failure, so mallocng built its arena at guest address 0 and the next
+  `free()` BRK #1000'd in `get_meta`. The mmap syscall returns `-ENOMEM`
+  when `mmap_alloc` fails. Keep `free_ranges_` under `mu_`. Freed pages
+  below `LOW_REGION_SIZE` stay resident and are memset on reuse (eager
+  zeroing measured ~20x faster than refaulting for per-frame buffers);
+  above it `munmap` returns memory with `MADV_DONTNEED`. The mmap syscall's
+  64 GiB length cap applies only to committing mappings; MAP_NORESERVE /
+  PROT_NONE reservations are limited by the guest address space only.
 - `brk` must round the request up to page granularity (Linux semantics)
   and refuse growth into the stack region
   (`new_brk >= Memory::STACK_TOP - Memory::STACK_SIZE`). musl's variadic
@@ -807,14 +817,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   BIFROST_STATS_PERIOD keeps attributing thunk volume. If the game ever
   shows stale signals, re-add drain_host_signals to jit_thunk_svc — do
   NOT route 0x1000 back through Emulator::syscall.
-- Direct-window limit constants are emitted as `mov r32d, imm32`
-  (`emit_mov_imm32_zext`, zero-extends) in all five bounds-check sites
-  (emit_load_mem, emit_store_mem, ATOMIC in frostjit.cpp, SIMD_LD16, SIMD_ST16)
-  — the limit `DIRECT_WINDOW_SIZE − w` is always < 2^32, so a 10-byte movabs
-  is dead weight (5-6 bytes saved per memory access). Do NOT "shorten" the
-  compare itself to `cmp r64, imm32`: imm32 SIGN-EXTENDS, so 0xFFFFFFF8
-  compares against 0xFFFFFFFFFFFFFFF8 and every window hit falls to the slow
-  path. 32-bit mov + 64-bit cmp is exact (both operands < 2^32).
+- Window limit constants come from `emit_window_limit` (window_size − w)
+  in all six bounds-check sites (emit_load_mem, emit_store_mem, ATOMIC in
+  frostjit.cpp, SIMD_LD16, SIMD_ST16, the memory guard). With a reservation
+  above 4 GiB the limit is a 64-bit immediate (movabs); it is a zero-extending
+  `mov r32d` only when it fits. Do NOT "shorten" the compare itself to
+  `cmp r64, imm32`: imm32 SIGN-EXTENDS, so 0xFFFFFFF8 compares against
+  0xFFFFFFFFFFFFFFF8 and every inline access falls to the slow path.
 - Constant-src2 folding in the JIT: `jit_consts_` (per-block
   `unordered_map<uint16_t,uint64_t>`) records the value of each scratch vreg
   whose defining op is `IROp::IMM` (populated in compile_ir_alu's IMM case,
@@ -1139,8 +1148,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (2026-08) are NATIVE via a guest-window bounce**: the host glMapBuffer
   returns a HOST pointer the guest cannot deref (address-space mismatch),
   so the `MAP_BUFFER` dispatch arm allocates a bounce with
-  `Memory::mmap_alloc` (inside the 4 GiB direct window → guest JIT reads/
-  writes it fast), seeds it from the host buffer when `GL_MAP_READ_BIT`
+  `Memory::mmap_alloc` (guest memory the JIT reads/writes inline), seeds it from the host buffer when `GL_MAP_READ_BIT`
   (0x1) is set (skipped under `GL_MAP_INVALIDATE_*`), and returns the
   bounce's GUEST address; `UNMAP_BUFFER` copies the bounce back into the
   host buffer via host `glBufferSubData` when `GL_MAP_WRITE_BIT` (0x2) is
@@ -1359,7 +1367,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `make cross` now takes `CROSS_EXTRA=` for extra include paths.
 - **vkMapMemory guest-window bounce (2026-08-21, the Vulkan PCWFC)**:
   `VK_MAP_MEMORY` maps on the host with a scratch pointer, allocates a
-  bounce via `Memory::mmap_alloc` INSIDE the direct window, seeds it
+  bounce via `Memory::mmap_alloc` in guest memory, seeds it
   from the host mapping, and writes the BOUNCE's guest address into
   ppData — the guest derefs it at full JIT speed (the host mapping
   address is 48-bit host heap, useless in the guest). Bookkeeping in
@@ -1389,8 +1397,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **300 pass /
-  0 fail / 0 skip**; `--no-jit` = 293 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **301 pass /
+  0 fail / 0 skip**; `--no-jit` = 294 pass + 7 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1400,8 +1408,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **300 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 295),
+  (interactive + real-world are the standard default) = **301 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 296),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

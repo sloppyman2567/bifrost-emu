@@ -14,7 +14,7 @@
 //   - ARM64 register load/store (offsets into CPU struct)
 //   - Flag materialization (x86 RFLAGS ↔ ARM NZCV in pstate)
 //   - ARM→x86 condition code mapping
-//   - Memory load/store via the direct window + slow-path C helper fallback
+//   - Memory load/store via the guest reservation + slow-path C helper fallback
 //
 // These emitters have NO knowledge of the IR or the register allocator —
 // they are pure code generators that take x86 register numbers and
@@ -745,9 +745,9 @@ extern "C" {
 // constexpr int FrostJIT::ALLOC_REGS[] = {RAX,RCX,RDX,R8,R9,R11,R12,R13,R15,R14};
 // (defined in frostjit.hpp; vregs cached in R12-R15 survive CALL_INTERP)
 // ── emit_load_mem / emit_store_mem ─────────────────────────────────────
-// Memory access through the direct window (R10) when the address is in
-// the low 4 GiB; falls back to the C helper (jit_load_mem_slow /
-// jit_store_mem_slow, defined above) for high addresses.
+// Memory access through the guest reservation (R10 = its base) when the
+// access lies inside it; falls back to the C helper (jit_load_mem_slow /
+// jit_store_mem_slow, defined above) otherwise, which raises the fault.
 // Move a 64-bit immediate into RAX. Uses the shorter mov imm32 + zext
 // form when the value fits in 32 bits, otherwise the 10-byte mov imm64.
 void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
@@ -756,6 +756,12 @@ void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
     } else {
         emit_mov_imm64(RAX, val);
     }
+}
+void FrostJIT::emit_window_limit(int dst, uint64_t width) {
+    const uint64_t size = guest_memory_ ? guest_memory_->window_size() : 0;
+    const uint64_t limit = size > width ? size - width : 0;
+    if (limit <= 0xFFFFFFFFULL) emit_mov_imm32_zext(dst, static_cast<uint32_t>(limit));
+    else emit_mov_imm64(dst, limit);
 }
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
                              bool sign_ext) {
@@ -770,7 +776,6 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     // destroyed — dst may even equal it, the load reads the index first).
     // Slow path: jit_load_mem_slow(emu, cpu, addr, width) with the
     // materialized sum in RDX.
-    uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
     // idx = off ? lea-scratch : addr_reg; must differ from dst (the load
     // writes dst). lim = the limit constant register; must differ from idx.
     int idx = addr_reg;
@@ -781,7 +786,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
         emit_modrm_disp(idx, addr_reg, off);
     }
     int lim = (idx != R9) ? R9 : ((idx != R8) ? R8 : RCX);
-    emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
+    emit_window_limit(lim, w);
     emit_cmp_reg(idx, lim);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
     // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
@@ -844,10 +849,9 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     static const bool slow_stores_ = getenv("BIFROST_JIT_SLOW_STORES") != nullptr;
     size_t jbe_patch = 0;
     if (!slow_stores_) {
-        // Limit check: lim = limit. Limit is < 2^32 → 32-bit zero-extending mov.
+        // Limit check: lim = window_size - w.
         int lim = (idx != R9) ? R9 : R8;
-        uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-        emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
+        emit_window_limit(lim, w);
         emit_cmp_reg(idx, lim);
         jbe_patch = emit_jcc_rel32_placeholder(6);
     }
