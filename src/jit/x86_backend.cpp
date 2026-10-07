@@ -785,30 +785,34 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
         emit_byte(0x8D);
         emit_modrm_disp(idx, addr_reg, off);
     }
-    int lim = (idx != R9) ? R9 : ((idx != R8) ? R8 : RCX);
-    emit_window_limit(lim, w);
-    emit_cmp_reg(idx, lim);
-    size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
-    // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
-    // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
-    // add rsp,8 dance automatically.
-    //
-    // Args: RDI = emu, RSI = cpu, RDX = addr, RCX = width
-    emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
-    emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
-    emit_mov_reg(RSI, CPU_REG);          // rsi = cpu (for SIGSEGV delivery)
-    if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (+off already in idx)
-    emit_mov_imm32(RCX, w);              // rcx = width
-    emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
-    emit_pop(WIN_REG);                   // restore R10
-    // RAX now has the return value (the loaded data).
-    if (dst != RAX) emit_mov_reg(dst, RAX);
-    size_t jmp_past = emit_jmp_rel32_placeholder();
-    // Fast path: load [WIN_REG + idx + off?0] through the SIB index.
-    // For off != 0 the sum already includes it — index with NO disp.
-    // REX: W for 64-bit forms, R=dst, X=idx, B=WIN_REG (R10, always).
-    int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
-    patch_jcc_rel32(jbe_patch, fast_rel);
+    size_t jmp_past = 0;
+    if (!memory_fault_stub_) {
+        int lim = (idx != R9) ? R9 : ((idx != R8) ? R8 : RCX);
+        emit_window_limit(lim, w);
+        emit_cmp_reg(idx, lim);
+        size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
+        // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
+        // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
+        // add rsp,8 dance automatically.
+        //
+        // Args: RDI = emu, RSI = cpu, RDX = addr, RCX = width
+        emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
+        emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
+        emit_mov_reg(RSI, CPU_REG);          // rsi = cpu (for SIGSEGV delivery)
+        if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (+off already in idx)
+        emit_mov_imm32(RCX, w);              // rcx = width
+        emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
+        emit_pop(WIN_REG);                   // restore R10
+        // RAX now has the return value (the loaded data).
+        if (dst != RAX) emit_mov_reg(dst, RAX);
+        jmp_past = emit_jmp_rel32_placeholder();
+        // Fast path: load [WIN_REG + idx + off?0] through the SIB index.
+        // For off != 0 the sum already includes it — index with NO disp.
+        // REX: W for 64-bit forms, R=dst, X=idx, B=WIN_REG (R10, always).
+        int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
+        patch_jcc_rel32(jbe_patch, fast_rel);
+    }
+    register_memory_fault_site();
     if (w == 8) {
         emit_byte(rex(true,dst>=8,idx>=8,true)); emit_byte(0x8B);
     } else if (w == 4) {
@@ -824,8 +828,10 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
         else          { emit_byte(0x0F); emit_byte(0xB6); }
     }
     emit_modrm_sib_win(dst, idx, 0);
-    int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
-    patch_jmp_rel32(jmp_past, end_rel);
+    if (jmp_past) {
+        int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
+        patch_jmp_rel32(jmp_past, end_rel);
+    }
 }
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     // Indexed window addressing (2026-08-21): the address (or its LEA sum
@@ -848,32 +854,36 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     // stores with a pc (diagnostic; very slow).
     static const bool slow_stores_ = getenv("BIFROST_JIT_SLOW_STORES") != nullptr;
     size_t jbe_patch = 0;
-    if (!slow_stores_) {
+    if (!slow_stores_ && !memory_fault_stub_) {
         // Limit check: lim = window_size - w.
         int lim = (idx != R9) ? R9 : R8;
         emit_window_limit(lim, w);
         emit_cmp_reg(idx, lim);
         jbe_patch = emit_jcc_rel32_placeholder(6);
     }
-    // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
-    // 2 pushes (src, R10) — EVEN, so emit_call_aligned needs no sub/add.
-    //
-    // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
-    emit_push(src_reg);            // save val — 1 push
-    emit_push(WIN_REG);            // save R10      — 2 pushes (EVEN)
-    emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
-    emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
-    if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (sum in idx)
-    if (src_reg != RCX) emit_mov_reg(RCX, src_reg);  // rcx = val
-    emit_mov_imm32(R8, w);         // r8 = width (after idx → RDX)
-    emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/2);
-    emit_pop(WIN_REG);             // restore R10
-    emit_pop(src_reg);             // restore val
-    if (slow_stores_) return;      // forced-slow: no fast path
-    size_t jmp_past = emit_jmp_rel32_placeholder();
-    // Fast path: direct window store, indexed by the address (sum).
-    int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
-    patch_jcc_rel32(jbe_patch, fast_rel);
+    size_t jmp_past = 0;
+    if (!memory_fault_stub_ || slow_stores_) {
+        // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
+        // 2 pushes (src, R10) — EVEN, so emit_call_aligned needs no sub/add.
+        //
+        // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
+        emit_push(src_reg);            // save val — 1 push
+        emit_push(WIN_REG);            // save R10      — 2 pushes (EVEN)
+        emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
+        emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
+        if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (sum in idx)
+        if (src_reg != RCX) emit_mov_reg(RCX, src_reg);  // rcx = val
+        emit_mov_imm32(R8, w);         // r8 = width (after idx → RDX)
+        emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/2);
+        emit_pop(WIN_REG);             // restore R10
+        emit_pop(src_reg);             // restore val
+        if (slow_stores_) return;      // forced-slow: no fast path
+        jmp_past = emit_jmp_rel32_placeholder();
+        // Fast path: direct window store, indexed by the address (sum).
+        int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
+        patch_jcc_rel32(jbe_patch, fast_rel);
+    }
+    register_memory_fault_site();
     if (w == 8) {
         emit_byte(rex(true,src_reg>=8,idx>=8,true)); emit_byte(0x89);
     } else if (w == 4) {
@@ -885,7 +895,9 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
         emit_byte(rex(false,src_reg>=8,idx>=8,true)); emit_byte(0x88);
     }
     emit_modrm_sib_win(src_reg, idx, 0);
-    int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
-    patch_jmp_rel32(jmp_past, end_rel);
+    if (jmp_past) {
+        int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
+        patch_jmp_rel32(jmp_past, end_rel);
+    }
 }
 } // namespace arm64emu

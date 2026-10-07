@@ -33,6 +33,7 @@ struct ProfRunGuard {
     ~ProfRunGuard() { if (active_) prof_in_run_block = saved_; }
 };
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
+    FaultScope fault_scope(this);
     cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
     cpu.jit_chain_budget = 256;
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled

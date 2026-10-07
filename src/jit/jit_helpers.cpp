@@ -17,6 +17,7 @@ namespace arm64emu {
 // guest instruction (including signal delivery), then returns immediately.
 // It never rejoins the block or enters a patched chain with handler state.
 void FrostJIT::emit_memory_guard(const IRInst& inst) {
+    memory_fault_stub_ = 0;
     if (!guest_memory_) return;
     uint16_t address;
     uint64_t offset = 0;
@@ -59,10 +60,12 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     }
     // Check a pair's entire footprint before its first load/store changes
     // any architectural register. In particular LDP may alias rt with rn.
+    bool whole_instruction = size > 16;
     if (inst.arm_pc) {
         DecodedInst d;
         if (decode(d, guest_memory_->fetch_inst(inst.arm_pc)) &&
             (d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
+            whole_instruction = true;
             uint64_t first_offset = d.mode == 1 ? 0 : static_cast<uint64_t>(d.disp);
             if (offset == first_offset) {
                 unsigned opc = (d.raw >> 30) & 3;
@@ -71,14 +74,18 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
             }
         }
     }
+    const bool recoverable = fault_sites_ && inst.arm_pc && !whole_instruction &&
+        (inst.op == IROp::LOAD_MEM || inst.op == IROp::STORE_MEM ||
+         inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16 || inst.op == IROp::ATOMIC);
     clobber_flags();
-    constexpr uint16_t scratch = (1u << RAX) | (1u << RCX) | (1u << RDX);
+    const uint16_t scratch = (1u << RAX) | (1u << RCX) | (1u << RDX) |
+        (recoverable ? ((1u << R8) | (1u << R9) | (1u << R11)) : 0);
     flush_invalidate_host_regs(scratch);
     load_vreg_to_reg(RAX, address);
-    // The guard's arithmetic must not leak into the memory emitter. Keep
-    // the entry values on both exits: an address may still be reused by
-    // the emitter, while the guard changes it into a page index below.
-    emit_push(RAX); emit_push(RCX); emit_push(RDX);
+    // The software-only path preserves the scratch registers for its emitter.
+    // Recovery sites instead spill/invalidate every caller-saved vreg above:
+    // their stubs can only depend on untouched architectural pins and storage.
+    if (!recoverable) { emit_push(RAX); emit_push(RCX); emit_push(RDX); }
     if (offset) {
         emit_mov_imm64(RDX, offset);
         emit_add_reg(RAX, RDX);
@@ -87,6 +94,16 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_window_limit(RCX, size);
     emit_cmp_reg(RAX, RCX);
     cold.push_back(emit_jcc_rel32_placeholder(7)); // JA (also catches wrap/negative addresses)
+    size_t bypass_pages = 0;
+    if (recoverable) {
+        // The bound remains mandatory: base+an arbitrary 64-bit guest address
+        // could wrap into unrelated host storage without taking a host fault.
+        // Cached code observes fallback activation without recompilation.
+        emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(guest_memory_->jit_software_checks()));
+        emit_load8(RDX, RDX, 0);
+        emit_alu_imm(RDX, 7, 0);
+        bypass_pages = emit_jcc_rel32_placeholder(4); // JE: ordinary host-MMU permissions
+    }
     emit_mov_reg(RCX, RAX);
     if (size > 1) emit_add_reg_imm(RCX, size - 1);
     emit_shift_imm8(RAX, 5, 12);
@@ -112,7 +129,8 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     const size_t cold_offset = code_buf_used_;
     for (size_t p : cold)
         patch_jcc_rel32(p, static_cast<int32_t>(cold_offset - (p + 6)));
-    emit_pop(RDX); emit_pop(RCX); emit_pop(RAX);
+    if (!recoverable) { emit_pop(RDX); emit_pop(RCX); emit_pop(RAX); }
+    if (recoverable) memory_fault_stub_ = code_buf_used_;
     flush_all_vregs_keep();
     // A self-loop/region may carry a dirty architectural pin from a write
     // later in the previous iteration, even when it is statically clean
@@ -126,7 +144,10 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_load(RDI, RBP, emu_slot_off());
     emit_mov_reg(RSI, CPU_REG);
-    if (dbg().fault_trace) {
+    if (recoverable) {
+        emit_mov_imm64(RDX, current_start_pc_);
+        emit_call_aligned(&jit_fault_step, 0);
+    } else if (dbg().fault_trace) {
         emit_mov_imm64(RDX, current_start_pc_);
         emit_call_aligned(&jit_guard_step, 0);
     } else {
@@ -138,7 +159,9 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
     emit_ret();
     patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
-    emit_pop(RDX); emit_pop(RCX); emit_pop(RAX);
+    if (bypass_pages)
+        patch_jcc_rel32(bypass_pages, static_cast<int32_t>(code_buf_used_ - (bypass_pages + 6)));
+    if (!recoverable) { emit_pop(RDX); emit_pop(RCX); emit_pop(RAX); }
 }
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,

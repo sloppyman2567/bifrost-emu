@@ -279,6 +279,8 @@ bool Memory::mapping_prot_at_locked(uint64_t addr, uint8_t& prot) const {
 void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                 bool combine, bool keep_uffd) {
     if (lo >= hi) return;
+    if (prot && !(prot & GUEST_PROT_READ))
+        jit_software_checks_.store(true, std::memory_order_release);
     auto flags_for = [&](uint8_t old, uint8_t page_prot) {
         const uint8_t uffd = keep_uffd ? (old & GUEST_PAGE_UFFD_BITS) : 0;
         return static_cast<uint8_t>(page_prot ? (PAGE_MAPPED | uffd | page_prot) : uffd);

@@ -89,6 +89,7 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
 // BIFROST_FAULT_TRACE memory-guard exit: jit_interp_step with the block's
 // start pc recorded for the [fault] line (jit_interp.cpp).
 extern "C" void jit_guard_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
+extern "C" void jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
 // BIFROST_BLOCK_TRACE prologue hook: logs one block entry (jit_interp.cpp).
 extern "C" void jit_trace_block_entry(CPU* cpu, uint64_t block_pc, uint64_t fwd);
 extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
@@ -117,6 +118,17 @@ public:
         guest_memory_ = mem;
     }
     uint64_t run_block(CPU& cpu, Emulator& emu);
+    // Native entry scope, also usable by embedders calling a compiled fn directly.
+    // Nested native calls/chains share the current scope; host faults elsewhere
+    // are never recovered merely because a scope is active.
+    class FaultScope {
+    public:
+        explicit FaultScope(FrostJIT* jit);
+        ~FaultScope();
+    private:
+        FrostJIT* saved_;
+    };
+    static bool redirect_memory_fault(int signo, void* info, void* context);
     // Returns the block's fn pointer, translating if needed.
     // If the block is interp_only, returns nullptr (caller falls back to interpreter).
     uint64_t (*lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*);
@@ -665,6 +677,17 @@ private:
     bool     code_budget_exhausted_ = false;
     uint8_t* window_base_ = nullptr;
     const Memory* guest_memory_ = nullptr;
+    // Address-sorted fault sites, packed as {code offset, recovery offset}.
+    // mmap reserves a worst-case bound; only appended records acquire backing.
+    std::atomic<uint64_t>* fault_sites_ = nullptr;
+    std::atomic<size_t> fault_site_count_{0};
+    size_t fault_site_constructed_ = 0;
+    size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
+    static thread_local std::atomic<FrostJIT*> fault_jit_;
+    void init_fault_recovery();
+    void destroy_fault_recovery();
+    void register_memory_fault_site();
+    void rewind_codegen(size_t offset);
     // ── CPU features (FMV) ──────────────────────────────────────────
     // Detected once at construction via CPUID + XGETBV. Cached for the
     // JIT's lifetime. Polled by compile_ir_inst() when emitting code

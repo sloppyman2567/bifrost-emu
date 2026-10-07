@@ -1448,7 +1448,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             cur_op_index_ = PREHEADER_BASE + k;  // real-chain liveness, fold-ahead off
             const IRInst& inst = preheader[k];
             if (compile_ir_inst(inst)) {
-                code_buf_used_ = block_start;
+                rewind_codegen(block_start);
                 make_executable();
                 return nullptr;
             }
@@ -1690,7 +1690,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     continue;
                 }
                 default:
-                    code_buf_used_ = block_start;
+                    rewind_codegen(block_start);
                     make_executable();
                     return nullptr;
             }
@@ -1741,7 +1741,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             // happens (CALL_INTERP / SVC / BR abort the trace; BL/BLR fuse as
             // BL_CALL/BLR_CALL which return false and do not end the block),
             // so this is defensive only.
-            code_buf_used_ = block_start;
+            rewind_codegen(block_start);
             make_executable();
             return nullptr;
         }

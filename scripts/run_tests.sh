@@ -24,13 +24,13 @@
 #   ./scripts/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./scripts/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (293 selected test runs):
-#   Unit        113  — focused guest and host JIT regressions
-#   Integration  86  — ctest_real/*.elf + test/*.elf
+# Fully provisioned suite (303 selected test runs):
+#   Unit        122  — focused guest and host JIT regressions
+#   Integration  87  — ctest_real/*.elf + test/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Per-thread JIT 1 — cross-thread invalidation without the shared JIT
 #   Toybox        9  — ctest_real/toybox subcommands
-#   Real-world   49  — static BusyBox/Toybox commands
+#   Real-world   56  — static BusyBox/Toybox commands
 #   Real-world dynamic 7 — glibc binaries; rootfs required
 #   Dynamic      17  — musl/glibc and XWayland tests; rootfs required
 #   Benchmarks    5  — omitted with --quick
@@ -382,6 +382,8 @@ UNIT_TESTS=(
     # with per-thread JITs in the "Per-thread JIT" category below).
     "test_jit_thread_invalidate|ctest/test_jit_thread_invalidate.elf||60|ALL PASS"
     "test_memory_permissions|ctest/test_memory_permissions.elf||30|ALL PASS"
+    "jit_host_fault|ctest/jit_host_fault.elf||15|ALL PASS|JIT"
+    "interp_host_fault|ctest/jit_host_fault.elf single||15|ALL PASS|INTERP"
     # Fixed mapping contents, concurrent fd reads during mmap, mremap
     # relocation contracts, and active alternate-stack changes (47 checks).
     "test_vm_signal_contracts|ctest/test_vm_signal_contracts.elf||30|ALL PASS"

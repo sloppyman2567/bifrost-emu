@@ -1397,8 +1397,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **301 pass /
-  0 fail / 0 skip**; `--no-jit` = 294 pass + 7 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **303 pass /
+  0 fail / 0 skip**; `--no-jit` = 295 pass + 8 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1408,8 +1408,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **301 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 296),
+  (interactive + real-world are the standard default) = **303 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 298),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

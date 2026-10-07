@@ -12,6 +12,22 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### JIT host-fault recovery (2026-10-07)
+
+- Scalar loads/stores, single-vector accesses and native LSE atomics use
+  registered host-fault sites instead of always reading guest page flags.
+  Bounds checks remain. Recovery commits pre-instruction state and leaves
+  the block after precise guest signal delivery, including file EOF SIGBUS.
+- Pair/multi-register accesses and exclusive helpers retain software checks.
+  A sticky fallback preserves userfaultfd and W/X-only guest permissions;
+  `BIFROST_JIT_SOFTWARE_GUARD=1` forces the previous path for comparison.
+- Stable atomic fault metadata supports concurrent compilation, codegen
+  rollback and cache exhaustion. Unregistered host faults retain the prior
+  host handler or default disposition.
+- `ctest/jit_host_fault.c` checks four-CPU fault recovery, saved registers,
+  NZCV and vectors, with a main-CPU interpreter mode and optional native-JIT
+  file SIGBUS probes. QEMU independently passes those fixture modes.
+
 ### Guest memory as one host reservation (2026-10-07)
 
 - The guest address space is a single host reservation (64 TiB, halving to

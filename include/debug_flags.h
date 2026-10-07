@@ -49,6 +49,7 @@ struct DebugFlags {
     Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
     Ranges block_trace;  // BIFROST_BLOCK_TRACE=lo-hi,... — log every entry of blocks starting here
     bool fault_trace = false;  // BIFROST_FAULT_TRACE — one line per fault signal + its sigreturn
+    bool jit_software_guard = false; // BIFROST_JIT_SOFTWARE_GUARD — compare with checked memory accesses
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     std::vector<uint64_t> input_watch; // BIFROST_INPUT_WATCH — comma-separated guest u32 addresses
@@ -158,6 +159,7 @@ struct DebugFlags {
         f.fwd_ranges = parse_ranges(std::getenv("BIFROST_FWD_RANGES"));
         f.block_trace = parse_ranges(std::getenv("BIFROST_BLOCK_TRACE"));
         f.fault_trace = all || env("BIFROST_FAULT_TRACE");
+        f.jit_software_guard = env("BIFROST_JIT_SOFTWARE_GUARD") || env("BIFROST_GUARD_ALLOCS") || env("BIFROST_JIT_SLOW_STORES");
         f.no_chain = env("BIFROST_NO_CHAIN");
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");

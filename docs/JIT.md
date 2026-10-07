@@ -239,6 +239,52 @@ bits selecting the lane; testing bit 3 before bit 2 misdecodes S lane 1.
 same-register aliasing. Both expected results are independently checked
 under QEMU.
 
+## Registered native memory faults
+
+Ordinary scalar loads/stores, single 16-byte vector accesses and native LSE
+atomics use host page protection instead of consulting two guest page flags on
+every access. The reservation bounds check remains: adding an arbitrary guest
+address to a host base must never wrap into unrelated host storage. A single
+sticky `Memory::jit_software_checks_` byte selects the software permission path
+after userfaultfd tracking starts or a W/X-only guest mapping is created. x86
+cannot represent those guest read restrictions, and the emulated userfaultfd
+missing bits do not change host page protection. Already compiled code observes
+the flag without invalidation. Pair and multi-register accesses, exclusive
+helpers and IR without a guest PC retain the original checks.
+
+`jit_fault.cpp` installs SIGSEGV/SIGBUS handlers once. A fault is eligible only
+inside a native `FaultScope`, at an exactly registered native instruction PC,
+with the expected R10 window base and a fault address inside the reservation.
+The handler performs lock-free metadata lookup and changes the saved host RIP
+to the generated recovery stub. It does not lock, allocate, interpret or deliver
+a guest signal. The stub commits the state preceding the guest instruction,
+including loop-carried GPR/vector pins, then returns to dispatch after stepping
+the instruction. SIGSEGV replay determines guest MAPERR versus ACCERR; a host
+file-backed SIGBUS is delivered directly because replay through a host memcpy
+would fault again. Unregistered host faults retain the prior handler or default
+host signal disposition. See Linux's [sigaction context contract](https://man7.org/linux/man-pages/man2/sigaction.2.html)
+and [async-signal-safe operations](https://man7.org/linux/man-pages/man7/signal-safety.7.html).
+
+Each JIT owns a stable, address-sorted table of eight-byte atomic records. A
+`MAP_NORESERVE` allocation reserves the worst case (four times the code-cache
+budget in virtual address space), while only appended records consume physical
+pages. Release publication precedes execution. Codegen rollback removes only
+unpublished tail records; published code and records remain alive until the
+owner has joined its CPUs. Metadata/handler installation failure leaves the
+software guard enabled. Native entry through `run_block` scopes recovery;
+embedders invoking a compiled function directly must use `FrostJIT::FaultScope`.
+
+`BIFROST_JIT_SOFTWARE_GUARD=1` selects the old checked path for comparison.
+Allocation guards and forced slow-store tracing also select it. Fault tracing
+adds a `[jit-fault]` line outside the host handler for each redirected access.
+`jit_host_fault` checks repeated scalar/vector/LSE faults on four CPUs, including
+saved NZCV and register state; `interp_host_fault` runs its main-CPU mode.
+Its optional `bus` argument checks scalar/vector accesses past a shared file's
+EOF under native JIT. File EOF faults in software-only, interpreter and paired
+access paths are outside this regression's coverage. The interpreter's worker
+loop currently reports memory faults as uncaught exceptions; the four-CPU row
+is therefore JIT-only. QEMU passes both fixture modes and the optional bus probe.
+
 ## Code-cache pressure and shared dispatch
 
 The JIT reserves a stable virtual code range of at most 1 GiB and grows its

@@ -232,10 +232,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flush_invalidate_host_regs(MEM_CLOBBER);
             // Load base address → RAX.
             load_vreg_to_reg(RAX, inst.src1);
-            // Check addr + w <= window size (inline fast path).
-            emit_window_limit(RDX, w);
-            emit_cmp_reg(RAX, RDX);
-            size_t jae_patch = emit_jcc_rel32_placeholder(7);  // JA → slow
+            size_t jae_patch = 0;
+            if (!memory_fault_stub_) {
+                emit_window_limit(RDX, w);
+                emit_cmp_reg(RAX, RDX);
+                jae_patch = emit_jcc_rel32_placeholder(7); // JA → slow
+            }
             // ── Fast path: direct window ──
             emit_add_reg(RAX, WIN_REG);  // RAX = window_base + addr
             // Load operand → RCX. For CAS, src2 = desired (rt). For others,
@@ -244,6 +246,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Helper: emit REX + opcode + modrm for a lock instruction.
             // reg = the register operand, base = RAX (host address).
             auto emit_lock_op = [&](uint8_t opcode, int reg) {
+                register_memory_fault_site();
                 emit_byte(0xF0);  // LOCK
                 if (is_64) emit_byte(0x48);
                 else if (is_16) emit_byte(0x66);
@@ -258,6 +261,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_mov_reg(R9, RAX);              // R9 = host addr
                 emit_load_arm(RAX, static_cast<int>(ap.reg_idx));  // RAX = expected
                 // lock cmpxchg [R9], RCX
+                register_memory_fault_site();
                 emit_byte(0xF0);                    // LOCK
                 emit_byte(is_64 ? 0x49 : 0x41);     // REX.WB(64) or REX.B(32) for R9
                 if (is_16) emit_byte(0x66);         // operand-size prefix
@@ -275,6 +279,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 if (is_load) {
                     // LDADD: lock xadd [RAX], RCX (RCX gets old value)
                     // XADD is a 2-byte opcode (0F C1) — can't use emit_lock_op.
+                    register_memory_fault_site();
                     emit_byte(0xF0);  // LOCK
                     if (is_64) emit_byte(0x48);
                     else if (is_16) emit_byte(0x66);
@@ -334,6 +339,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // CAS loop start: reload old value from memory.
                 size_t loop_start = code_buf_used_;
                 // RAX = [R9] (mov rax, [r9])
+                register_memory_fault_site();
                 if (is_64)      { emit_byte(0x49); emit_byte(0x8B); emit_byte(0x01); }
                 else if (is_16) { emit_byte(0x66); emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
                 else            { emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
@@ -363,6 +369,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 }
                 // lock cmpxchg [R9], R8
                 // REX.WRB (0x4D) = W=1, R=1(reg→r8), B=1(rm→r9).
+                register_memory_fault_site();
                 emit_byte(0xF0);                    // LOCK
                 emit_byte(is_64 ? 0x4D : 0x45);     // REX.WRB(64) or REX.RB(32)
                 if (is_16) emit_byte(0x66);
@@ -375,20 +382,22 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     store_reg_to_vreg(inst.dest, RAX);
                 }
             }
-            // Jump past slow path.
-            size_t jmp_past = emit_jmp_rel32_placeholder();
-            // ── Slow path: outside the reservation → CALL_INTERP ──
-            size_t slow_path = code_buf_used_;
-            patch_jcc_rel32(jae_patch, static_cast<int32_t>(slow_path - (jae_patch + 6)));
-            emit_call_interp(inst.arm_pc, false);
-            // Reload result: inst.imm = ARM reg index (rt for non-CAS,
-            // rs for CAS). The interpreter wrote the old value there.
-            if (is_load && inst.dest != 0) {
-                emit_load_arm(RAX, static_cast<int>(ap.reg_idx));
-                store_reg_to_vreg(inst.dest, RAX);
+            if (!memory_fault_stub_) {
+                // Jump past slow path.
+                size_t jmp_past = emit_jmp_rel32_placeholder();
+                // ── Slow path: outside the reservation → CALL_INTERP ──
+                size_t slow_path = code_buf_used_;
+                patch_jcc_rel32(jae_patch, static_cast<int32_t>(slow_path - (jae_patch + 6)));
+                emit_call_interp(inst.arm_pc, false);
+                // Reload result: inst.imm = ARM reg index (rt for non-CAS,
+                // rs for CAS). The interpreter wrote the old value there.
+                if (is_load && inst.dest != 0) {
+                    emit_load_arm(RAX, static_cast<int>(ap.reg_idx));
+                    store_reg_to_vreg(inst.dest, RAX);
+                }
+                int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
+                patch_jmp_rel32(jmp_past, end_rel);
             }
-            int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
-            patch_jmp_rel32(jmp_past, end_rel);
             invalidate_host_regs(MEM_CLOBBER);
             return false;
         }

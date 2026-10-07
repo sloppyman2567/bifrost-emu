@@ -926,13 +926,10 @@ void Emulator::install_host_signal_handlers() {
     ka.sa_flags = 0;
     sigfillset(&ka.sa_mask);
     ::sigaction(KICK_SIGNAL, &ka, nullptr);
-    // SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGABRT/SIGSYS are NOT
-    // forwarded via host handlers — they're delivered synchronously by
-    // the emulator when it detects the corresponding guest fault.
-    // EXCEPTION: in BIFROST_GUARD_ALLOCS mode a host SIGSEGV/SIGBUS can
-    // only come from a direct-window PROT_NONE guard page (the allocator
-    // guards); install the reporter so the offending guest store is named
-    // instead of a bare crash.
+    // Synchronous faults do not enter the forwarding queue. FrostJIT installs
+    // its SIGSEGV/SIGBUS handler for registered native access sites; generated
+    // recovery code delivers those faults synchronously. Guard-allocation mode
+    // keeps software checks and uses this reporter for unchecked host accesses.
     if (getenv("BIFROST_GUARD_ALLOCS")) {
         struct sigaction ga;
         memset(&ga, 0, sizeof(ga));

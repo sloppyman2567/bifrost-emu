@@ -1399,7 +1399,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         patch_jcc_rel32(off, rel);
     }
     if (code_buf_overflow_) {
-        code_buf_used_ = block_start;
+        rewind_codegen(block_start);
         // The budget is fixed for this JIT. Cache the failure so every
         // subsequent call does not repeat decode/IR/codegen before stepping.
         BlockEntry fallback;

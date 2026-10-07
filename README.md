@@ -35,6 +35,9 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   ifuncs, and DT_INIT_ARRAY constructors
 - JIT-compile ARM64 to x86_64 native code, with interpreter fallback and
   focused correctness regressions
+- Recover eligible native memory faults through host page protection;
+  paired accesses and userfaultfd retain software checks. See the
+  [JIT memory contracts](docs/JIT.md#registered-native-memory-faults).
 - Emulate 200+ Linux syscalls (threads, signals, filesystem, memory)
 - Provide a virtual filesystem (/proc, /dev, /sys, framebuffer, audio)
 - Forward GL/EGL/Vulkan/SDL2/ALSA calls to host libraries (thunking)

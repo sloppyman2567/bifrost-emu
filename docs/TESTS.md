@@ -10,6 +10,52 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### JIT host-fault recovery (2026-10-07)
+
+The final full JIT suite passes **303/303**, zero failures/skips (116 s),
+including the added main-CPU interpreter row. The final focused memory/cache
+gate passes **8/8** after review. The full interpreter suite passes **295/295**,
+zero failures and eight expected JIT-only skips (156 s). A final read-only
+CAS-loop case was added afterward and both affected rows pass again.
+
+The four-CPU `jit_host_fault` regression completes 3,588 recoveries with LSE,
+including scalar/vector faults, crossing a page boundary, saved registers,
+NZCV and vector state. `BIFROST_FAULT_TRACE=1` confirms all 3,588 went through
+registered host sites. It also passes with Tier-2 at threshold 32, chain-skip
+and IR validation, and with the software guard forced. Its `single` mode passes
+under the interpreter; both modes and the optional `bus` probe pass QEMU.
+The four scalar/vector file EOF SIGBUS probes pass native JIT. They do not cover
+paired file EOF faults or software-only/interpreter EOF fault handling.
+
+The interpreter's worker-thread loop reports faulting accesses as uncaught
+exceptions. This was reproduced with the previous binary as well, so the
+four-CPU regression is JIT-only and the main-CPU row checks the interpreter.
+Temporary host checks confirm an unregistered C++ access into the reservation
+still raises host SIGSEGV and a previously installed host handler is called.
+Those helpers live in `/tmp`, not the repository.
+
+The real Android Activity probe passes in 8.6 s. A Teeworlds client initialized
+graphics/audio, logged editor activity and exited cleanly after about 54 s;
+the intended five-minute timeout was not reached, so this is bounded application
+validation rather than five-minute stability evidence.
+
+Five alternating executions per mode on the same host give these median wall
+times, including startup and translation, using the same binary with/without
+`BIFROST_JIT_SOFTWARE_GUARD=1`:
+
+| Fixture | Software guard | Host recovery |
+|---|---:|---:|
+| bench_mips | 0.334 s | 0.332 s |
+| bench_memcpy | 1.594 s | 1.473 s |
+| bench_sort | 0.629 s | 0.585 s |
+| bench_matrix | 0.277 s | 0.251 s |
+| bench_fib | 0.765 s | 0.716 s |
+
+These synthetic observations show about 0–9% shorter execution in this sample;
+they do not establish game FPS gains or results on another Linux host. The
+signal API/context and async-signal-safety design were checked against Linux
+man-pages linked from [JIT.md](JIT.md#registered-native-memory-faults).
+
 ### Guest memory as one host reservation (2026-10-07)
 
 The default suite passes **301/301** (114 s), `--quick` **296/296** and
