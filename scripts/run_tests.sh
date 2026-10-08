@@ -376,6 +376,8 @@ UNIT_TESTS=(
     # /proc/self/fd/N[/name] reopens the GUEST descriptor's file (not the
     # emulator's fd N); openat2 shares openat's flags and resolution.
     "test_proc_fd_reopen|ctest/test_proc_fd_reopen.elf||10|ALL PASS"
+    # Rewind static and lazy synthetic files, including after EOF.
+    "test_proc_rewind|ctest/test_proc_rewind.elf||10|ALL PASS"
     # Linux argv/env string layout, live /proc/self/cmdline (setArgV0 and
     # setproctitle rewrites, also after execve), /proc/<getpid()> == self.
     "test_proc_cmdline|ctest/test_proc_cmdline.elf||10|ALL PASS"

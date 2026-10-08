@@ -175,6 +175,11 @@ Focused additions:
   10 s; a fork child's new thread reports the child's pid; main's
   `pthread_exit` keeps the process until a worker's `exit(5)`. Passes
   natively on the host kernel; the pre-change binary fails all 6.
+- `test_proc_rewind`: rewinds static `/proc/cpuinfo` and CPU `online`
+  files and lazy `/proc/self/maps`, checking the actual offset and the
+  reread content both before and after EOF. Passes on native Linux and
+  under JIT/interpreter; the pre-change binary fails 6 checks because
+  static memfd nodes reported a successful rewind without seeking.
 - `test_proc_fd_reopen`: `open("/proc/self/fd/N")` reopens the guest
   descriptor's memfd or file with its own offset, including a guest-only fd
   number (100) and `/proc/self/fd/<dirfd>/name`; a closed fd gives `ENOENT`

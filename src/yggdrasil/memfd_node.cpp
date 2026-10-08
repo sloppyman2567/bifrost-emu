@@ -76,7 +76,9 @@ ssize_t MemfdNode::lseek(int64_t off, int whence) {
     // the caller needing to close and re-open the fd. (Previously the
     // memfd's content was write-once at open time; re-reading returned
     // stale data for any file that should reflect live state.)
-    if (off == 0 && whence == SEEK_SET) {
+    // Static nodes still need the host seek: regenerate_() is a no-op for
+    // them and does not reset the underlying file position.
+    if (regenerator_ && off == 0 && whence == SEEK_SET) {
         if (regenerate_() == 0) return 0;
         // Fall through to host lseek on failure.
     }
