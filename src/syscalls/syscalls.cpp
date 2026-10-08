@@ -166,7 +166,14 @@ void Emulator::syscall(CPU& cpu) try {
     // trampoline) and pc (the handler) — the CPU no longer holds syscall
     // arguments, and dispatching would both run the wrong syscall and
     // clobber x0, so the handler would observe a garbage first argument.
-    // The interpreter/JIT propagate the handler pc and run it.
+    // The interpreter/JIT enter here with PC at SVC+4. Since this syscall
+    // has not executed yet, the handler must save the SVC address and its
+    // original arguments. Otherwise sigreturn skips the call and exposes
+    // its first argument as the result (mmap(NULL, ...) "returns" NULL).
+    // This is delivery before SVC, independent of SA_RESTART; blocking
+    // syscalls interrupted after entry still save SVC+4 and -EINTR.
+    const uint64_t return_pc = cpu.pc;
+    cpu.pc = return_pc - 4;
     if (drain_host_signals(cpu)) return;
     // Cross-thread (tgkill/tkill/kill) signals land in this CPU's pending
     // queue and are normally drained at the run loop's 4K-instruction
@@ -176,6 +183,7 @@ void Emulator::syscall(CPU& cpu) try {
     // Drain here too (mirroring host signals) and skip the syscall when a
     // handler frame was set up.
     if (drain_pending_signals(cpu)) return;
+    cpu.pc = return_pc;
     // If a signal with no handler killed the thread (SIGTERM/SIGKILL
     // default disposition) deliver_signal set cpu.running=false. We must
     // NOT execute the syscall — the guest has been killed. Continuing

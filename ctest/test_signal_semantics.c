@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include <linux/futex.h>
+#include <sys/mman.h>
 
 static volatile sig_atomic_t g_got = 0;
 static void h_simple(int sig) { g_got = sig; }
@@ -216,6 +217,56 @@ static int test_blocked_wait(int kind) {
            wait_usr1 == 1 && wait_usr2 == 1 ? 0 : -3;
 }
 
+// A signal at SVC entry must not drop an unstarted syscall. In particular,
+// returning mmap's NULL hint as a successful result corrupts the linker.
+static atomic_int boundary_stop;
+static int boundary_pid, boundary_tid;
+static volatile sig_atomic_t boundary_hits;
+static void h_boundary(int sig) { (void)sig; ++boundary_hits; }
+static void* boundary_sender(void* arg) {
+    (void)arg;
+    while (!atomic_load(&boundary_stop)) {
+        syscall(SYS_tgkill, boundary_pid, boundary_tid, SIGUSR1);
+        usleep(50);
+    }
+    return NULL;
+}
+static int test_syscall_entry(void) {
+    struct sigaction action, old;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = h_boundary;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGUSR1, &action, &old) != 0) return -1;
+    boundary_pid = getpid();
+    boundary_tid = syscall(SYS_gettid);
+    boundary_hits = 0;
+    atomic_store(&boundary_stop, 0);
+    pthread_t sender;
+    if (pthread_create(&sender, NULL, boundary_sender, NULL) != 0) {
+        sigaction(SIGUSR1, &old, NULL);
+        return -2;
+    }
+    int bad_pid = 0, bad_map = 0, bad_unmap = 0;
+    for (int i = 0; i < 10000; ++i) {
+        // getpid ignores its arguments; a leaked first argument is visible.
+        if (syscall(SYS_getpid, 0x12345678) != boundary_pid) ++bad_pid;
+        void* map = (void*)syscall(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (map == NULL || map == MAP_FAILED) {
+            ++bad_map;
+        } else {
+            *(volatile int*)map = i;
+            if (syscall(SYS_munmap, map, 4096) != 0) ++bad_unmap;
+        }
+    }
+    atomic_store(&boundary_stop, 1);
+    pthread_join(sender, NULL);
+    sigaction(SIGUSR1, &old, NULL);
+    printf("syscall entry signals: hits=%d bad_pid=%d bad_map=%d bad_unmap=%d\n",
+           (int)boundary_hits, bad_pid, bad_map, bad_unmap);
+    return boundary_hits && !bad_pid && !bad_map && !bad_unmap ? 0 : -3;
+}
+
 int main(void) {
     alarm(15);
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even if we hang
@@ -231,8 +282,9 @@ int main(void) {
     int r5 = test_blocked_wait(1);
     int r6 = test_blocked_wait(2);
     printf("cross-thread blocked waits: futex=%d read=%d sigsuspend=%d\n", r4, r5, r6);
-    if (r1 || r2 || r3 || r4 || r5 || r6) {
-        printf("FAIL (r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d)\n", r1, r2, r3, r4, r5, r6);
+    int r7 = test_syscall_entry();
+    if (r1 || r2 || r3 || r4 || r5 || r6 || r7) {
+        printf("FAIL (r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d)\n", r1, r2, r3, r4, r5, r6, r7);
         return 1;
     }
     printf("signal semantics: ALL PASS\n");

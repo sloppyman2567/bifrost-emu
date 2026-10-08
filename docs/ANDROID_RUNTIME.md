@@ -269,6 +269,32 @@ The interpreter passes the external-directory checkpoint but still reports
 unmapped worker reads. Play timeout alone is not success when a worker exception
 or Unity fatal signal is logged; the runner now rejects both cases.
 
+#### Signals at syscall entry (2026-10-07)
+
+A white-screen investigation caught a linker write to `0x10` at
+`ld-android.so+0xd88d4`, in `LinkerBlockAllocator::alloc` after `mmap(NULL, ...)`.
+A later fault in IL2CPP's conservative collector (`libil2cpp.so+0x2b5eb08`)
+read a protected page while other game threads waited in its suspend handler.
+These observations do not establish that every white screen has the same cause.
+
+Both engines advance PC past SVC before entering the syscall dispatcher. Its
+pending-signal drain used to save that return PC even when it skipped the
+unstarted syscall. After sigreturn, the caller saw its original X0 argument as
+the result: NULL for mmap, a positive address for munmap, or an arbitrary ignored
+argument for getpid. A signal-storm reproduction observed all three failures in
+the interpreter; the JIT also aborted in libc's futex error path. The extended
+`ctest/test_signal_semantics.c` fails against the old dispatcher in both engines
+and passes with the fix and natively on Linux.
+
+The dispatcher now delivers these signals before SVC, saving the instruction PC
+and unchanged arguments so sigreturn executes the call. It restores SVC+4 if no
+handler runs. This is distinct from interrupting a blocking syscall already in
+progress, whose existing -EINTR and return-PC behavior is retained. Linux arm64's
+[signal restart path](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kernel/signal.c#L1308)
+likewise preserves original arguments and rewinds PC when restarting a call.
+This is a syscall correctness fix; interactive SpongeBob gameplay remains an
+independent acceptance check.
+
 #### Binder registration ordering checkpoint (2026-10-07)
 
 Native service registration now preserves the Binder stability word appended
