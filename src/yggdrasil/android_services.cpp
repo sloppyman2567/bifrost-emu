@@ -17,7 +17,7 @@ bool service_name(const std::string &name) {
     });
 }
 } // namespace
-int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem, int tid) {
+int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem, int tid, FdTable& fds) {
     // Reserve the local response before changing registry/object ownership.
     uint64_t reservation = 64;
     if (tx.code == 4) {
@@ -114,7 +114,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     }
                     Event incoming;
                     incoming.payload = std::move(data);
-                    int error = translate_objects(*this, incoming, mem, tx, tid);
+                    int error = translate_objects(*this, incoming, mem, tx, tid, fds);
                     if (error) {
                         result.write<int32_t>(error);
                         reply.transaction.flags = STATUS_CODE;

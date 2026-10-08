@@ -47,12 +47,15 @@ import android.hardware.SensorManager;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Looper;
 import android.os.Process;
 import android.os.PowerManager;
 import android.os.Parcel;
+import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.storage.StorageVolume;
@@ -64,6 +67,14 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import java.io.File;
+import java.io.FileDescriptor;
+import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.ErrnoException;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -72,6 +83,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.Map;
 import java.util.UUID;
 
@@ -263,6 +277,337 @@ public final class ActivityProbe {
     }
     private static final Binder sensorService = new SensorService();
     private static boolean sensorServiceRegistered;
+
+    // Android 15 ISurfaceComposer / IDisplayEventConnection and BitTube wire
+    // formats. This virtual display uses a monotonic 60 Hz clock, as does the
+    // NDK adapter. Real libgui/libandroid_runtime own the receiver and deliver
+    // callbacks on the client's MessageQueue; no Java Choreographer override.
+    private static final long DISPLAY_PERIOD_NS = 1000000000L / 60;
+    private static final long PHYSICAL_DISPLAY_ID = 1;
+    private static final class DisplayClock implements Runnable {
+        private final Handler handler;
+        private static final class ConnectionRef extends WeakReference<DisplayEventConnection> {
+            // Keep the resources alive until this clock observes client disposal,
+            // then close explicitly rather than leaving them to PFD finalizers.
+            private final ParcelFileDescriptor receive, send;
+            ConnectionRef(DisplayEventConnection connection) {
+                super(connection);
+                receive = connection.receive;
+                send = connection.send;
+            }
+            void close() {
+                for (ParcelFileDescriptor fd : new ParcelFileDescriptor[] {receive, send})
+                    try { fd.close(); } catch (IOException ignored) { }
+            }
+        }
+        private final List<ConnectionRef> connections = new ArrayList<>();
+        DisplayClock() {
+            HandlerThread thread = new HandlerThread("BifrostDisplayEvents");
+            thread.setDaemon(true);
+            thread.start();
+            handler = new Handler(thread.getLooper());
+            handler.post(this);
+        }
+        synchronized void add(DisplayEventConnection connection) {
+            connections.removeIf(ref -> {
+                if (ref.get() != null) return false;
+                ref.close();
+                return true;
+            });
+            if (connections.size() >= 256) throw new IllegalStateException("display connection limit");
+            connections.add(new ConnectionRef(connection));
+        }
+        @Override public synchronized void run() {
+            long now = System.nanoTime();
+            long tick = now / DISPLAY_PERIOD_NS;
+            for (int i = connections.size() - 1; i >= 0; i--) {
+                DisplayEventConnection connection = connections.get(i).get();
+                if (connection == null || !connection.tick(tick)) {
+                    connections.remove(i).close();
+                }
+            }
+            long delay = ((tick + 1) * DISPLAY_PERIOD_NS - System.nanoTime() + 999999) / 1000000;
+            handler.postAtTime(this, SystemClock.uptimeMillis() + Math.max(1, delay));
+        }
+    }
+    private static final class DisplayEventConnection extends Binder {
+        private static final String DESCRIPTOR = "android.gui.IDisplayEventConnection";
+        private ParcelFileDescriptor receive, send;
+        private boolean requested, closed;
+        private int rate;
+        private long lastTick = -1;
+        DisplayEventConnection() throws Exception {
+            attachInterface(null, DESCRIPTOR);
+            FileDescriptor read = new FileDescriptor(), write = new FileDescriptor();
+            Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0, read, write);
+            try {
+                Os.fcntlInt(read, OsConstants.F_SETFL, OsConstants.O_NONBLOCK);
+                Os.fcntlInt(write, OsConstants.F_SETFL, OsConstants.O_NONBLOCK);
+                receive = ParcelFileDescriptor.dup(read);
+                send = ParcelFileDescriptor.dup(write);
+            } catch (Exception error) {
+                close();
+                throw error;
+            } finally {
+                Os.close(read);
+                Os.close(write);
+            }
+        }
+        private synchronized void close() {
+            closed = true;
+            for (ParcelFileDescriptor fd : new ParcelFileDescriptor[] {receive, send}) {
+                if (fd != null) try { fd.close(); } catch (IOException ignored) { }
+            }
+            receive = send = null;
+        }
+        private boolean sendEvent(byte[] packet) {
+            try {
+                int size = Os.sendto(send.getFileDescriptor(), packet, 0, packet.length,
+                        0x40 | 0x4000, null, 0); // Linux MSG_DONTWAIT | MSG_NOSIGNAL (hidden SDK)
+                if (size != packet.length) throw new IllegalStateException("partial display event");
+                return true;
+            } catch (ErrnoException error) {
+                if (error.errno == OsConstants.EAGAIN || error.errno == OsConstants.EINTR) return false;
+                close(); // Peer gone: stop ticking and release the service's endpoint.
+                return false;
+            } catch (java.net.SocketException error) {
+                close();
+                return false;
+            }
+        }
+        private ByteBuffer event(int type, long timestamp) {
+            // DisplayEventReceiver::Event is 216 bytes on both Android ABIs;
+            // Header's displayId/timestamp and VSync::vsyncData are 8-aligned.
+            ByteBuffer packet = ByteBuffer.allocate(216).order(ByteOrder.LITTLE_ENDIAN);
+            packet.putInt(0, type);
+            packet.putLong(8, PHYSICAL_DISPLAY_ID);
+            packet.putLong(16, timestamp);
+            return packet;
+        }
+        synchronized boolean tick(long tick) {
+            if (closed) return false;
+            if (receive != null || tick == lastTick) return true;
+            lastTick = tick;
+            if (rate == 0 ? !requested : tick % rate != 0) return true;
+            long timestamp = tick * DISPLAY_PERIOD_NS;
+            ByteBuffer packet = event(0x7673796e, timestamp); // fourcc('v','s','y','n')
+            packet.putInt(24, (int) tick);
+            packet.putLong(32, DISPLAY_PERIOD_NS);
+            packet.putInt(40, 0); // preferred timeline
+            packet.putInt(44, 1); // one valid timeline, capacity seven
+            packet.putLong(48, tick);
+            packet.putLong(56, timestamp + DISPLAY_PERIOD_NS - 2000000);
+            packet.putLong(64, timestamp + DISPLAY_PERIOD_NS);
+            if (sendEvent(packet.array())) requested = false;
+            return !closed;
+        }
+        @Override protected synchronized boolean onTransact(int code, Parcel data,
+                Parcel reply, int flags) throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code < 1 || code > 4) return super.onTransact(code, data, reply, flags);
+            data.enforceInterface(DESCRIPTOR);
+            int count = code == 2 ? data.readInt() : 0;
+            data.enforceNoDataAvail();
+            if (closed) throw new IllegalStateException("display event connection closed");
+            if (code == 1) {
+                if (receive == null) throw new IllegalStateException("channel already stolen");
+                ByteBuffer hotplug = event(0x706c7567, System.nanoTime());
+                hotplug.put(24, (byte) 1);
+                if (!sendEvent(hotplug.array())) throw new IllegalStateException("initial hotplug failed");
+                reply.writeNoException();
+                reply.writeInt(1); // nonnull native BitTube parcelable
+                reply.writeFileDescriptor(receive.getFileDescriptor());
+                reply.writeFileDescriptor(send.getFileDescriptor());
+                try { receive.close(); } catch (IOException error) { throw new IllegalStateException(error); }
+                receive = null;
+            } else if (code == 2) {
+                if (count < 0) throw new IllegalArgumentException("negative vsync rate");
+                rate = count;
+                requested = false;
+                reply.writeNoException();
+            } else if (code == 3) {
+                if (rate == 0) requested = true; // oneway, repeated requests coalesce
+            } else {
+                long tick = System.nanoTime() / DISPLAY_PERIOD_NS;
+                long presentation = (tick + 1) * DISPLAY_PERIOD_NS;
+                reply.writeNoException();
+                reply.writeInt(1); // nonnull native ParcelableVsyncEventData
+                reply.writeLong(DISPLAY_PERIOD_NS);
+                reply.writeInt(0);
+                reply.writeInt(1);
+                reply.writeLong(tick);
+                reply.writeLong(presentation - 2000000);
+                reply.writeLong(presentation);
+            }
+            return true;
+        }
+    }
+    private static final class SurfaceComposer extends Binder {
+        private static final String DESCRIPTOR = "android.gui.ISurfaceComposer";
+        private DisplayClock clock;
+        SurfaceComposer() { attachInterface(null, DESCRIPTOR); }
+        @Override protected synchronized boolean onTransact(int code, Parcel data,
+                Parcel reply, int flags) throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code != 2) return super.onTransact(code, data, reply, flags);
+            data.enforceInterface(DESCRIPTOR);
+            int source = data.readInt(), registration = data.readInt();
+            IBinder layer = data.readStrongBinder();
+            data.enforceNoDataAvail();
+            if (source < 0 || source > 1 || (registration & ~3) != 0 || layer != null)
+                throw new IllegalArgumentException("unsupported display connection options");
+            DisplayEventConnection connection = null;
+            try {
+                connection = new DisplayEventConnection();
+                if (clock == null) clock = new DisplayClock();
+                clock.add(connection);
+            } catch (Exception error) {
+                if (connection != null) connection.close();
+                throw new IllegalStateException("display channel creation failed", error);
+            }
+            reply.writeNoException();
+            reply.writeStrongBinder(connection);
+            return true;
+        }
+    }
+    private static final Binder surfaceComposer = new SurfaceComposer();
+
+    private static ByteBuffer readDisplayEvent(ParcelFileDescriptor channel, boolean wait) throws Exception {
+        long until = System.nanoTime() + 2000000000L;
+        byte[] packet = new byte[216];
+        do {
+            try {
+                if (Os.read(channel.getFileDescriptor(), packet, 0, packet.length) != packet.length)
+                    throw new AssertionError("wrong display event size");
+                return ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN);
+            } catch (ErrnoException error) {
+                if (error.errno != OsConstants.EAGAIN) throw error;
+                if (!wait) return null;
+            }
+            Thread.sleep(2);
+        } while (System.nanoTime() < until);
+        throw new AssertionError("display channel timed out");
+    }
+
+    private static void checkDisplayConnection() throws Exception {
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        DisplayEventConnection connection = null;
+        ParcelFileDescriptor receive = null, send = null;
+        try {
+            data.writeInterfaceToken(SurfaceComposer.DESCRIPTOR);
+            data.writeInt(0); data.writeInt(0); data.writeStrongBinder(null);
+            if (!surfaceComposer.transact(2, data, reply, 0)) throw new AssertionError("no display connection");
+            reply.readException();
+            connection = (DisplayEventConnection) reply.readStrongBinder();
+            data.setDataSize(0); reply.setDataSize(0);
+            data.setDataPosition(0); reply.setDataPosition(0);
+            data.writeInterfaceToken(DisplayEventConnection.DESCRIPTOR);
+            connection.transact(1, data, reply, 0);
+            reply.readException();
+            if (reply.readInt() != 1) throw new AssertionError("null BitTube");
+            receive = reply.readFileDescriptor(); send = reply.readFileDescriptor();
+            ByteBuffer hotplug = readDisplayEvent(receive, true);
+            if (hotplug.getInt(0) != 0x706c7567 || hotplug.getLong(8) != PHYSICAL_DISPLAY_ID || hotplug.get(24) != 1)
+                throw new AssertionError("missing initial hotplug");
+            for (int step = 0; step < 4; step++) {
+                data.setDataSize(0); reply.setDataSize(0);
+                data.setDataPosition(0); reply.setDataPosition(0);
+                data.writeInterfaceToken(DisplayEventConnection.DESCRIPTOR);
+                if (step == 0) { // query future frame timeline
+                    connection.transact(4, data, reply, 0);
+                    reply.readException();
+                    if (reply.readInt() != 1 || reply.readLong() != DISPLAY_PERIOD_NS ||
+                            reply.readInt() != 0 || reply.readInt() != 1)
+                        throw new AssertionError("invalid vsync timeline");
+                    long id = reply.readLong(), deadline = reply.readLong(), presentation = reply.readLong();
+                    if (id <= 0 || deadline >= presentation || presentation - deadline != 2000000)
+                        throw new AssertionError("invalid frame deadline");
+                    Thread.sleep(40);
+                    if (readDisplayEvent(receive, false) != null) throw new AssertionError("unsolicited vsync");
+                } else if (step == 1) {
+                    connection.transact(3, data, null, IBinder.FLAG_ONEWAY);
+                    ByteBuffer frame = readDisplayEvent(receive, true);
+                    if (frame.getInt(0) != 0x7673796e || frame.getLong(32) != DISPLAY_PERIOD_NS || frame.getInt(44) != 1)
+                        throw new AssertionError("invalid one-shot vsync");
+                    Thread.sleep(40);
+                    if (readDisplayEvent(receive, false) != null) throw new AssertionError("one-shot repeated");
+                } else {
+                    data.writeInt(step == 2 ? 2 : 0);
+                    connection.transact(2, data, reply, 0);
+                    reply.readException();
+                    if (step == 2) {
+                        ByteBuffer first = readDisplayEvent(receive, true), second = readDisplayEvent(receive, true);
+                        if ((first.getInt(24) & 1) != 0 || (second.getInt(24) & 1) != 0 ||
+                                second.getLong(16) <= first.getLong(16))
+                            throw new AssertionError("invalid periodic vsync rate");
+                    } else {
+                        while (readDisplayEvent(receive, false) != null) { }
+                        Thread.sleep(40);
+                        if (readDisplayEvent(receive, false) != null) throw new AssertionError("vsync rate zero still active");
+                    }
+                }
+            }
+        } finally {
+            if (connection != null) connection.close();
+            if (receive != null) receive.close();
+            if (send != null) send.close();
+            data.recycle(); reply.recycle();
+        }
+    }
+
+    private static void checkFrameworkVsync() throws Exception {
+        if (!sensorServiceRegistered) return;
+        checkDisplayConnection();
+        CountDownLatch done = new CountDownLatch(2);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        HandlerThread[] threads = new HandlerThread[2];
+        for (int i = 0; i < threads.length; i++) {
+            HandlerThread owner = new HandlerThread("FrameworkVsyncProbe" + i);
+            threads[i] = owner;
+            owner.start();
+            new Handler(owner.getLooper()).post(() -> {
+                try {
+                    android.view.Choreographer choreographer = android.view.Choreographer.getInstance();
+                    android.view.Choreographer.FrameCallback cancelled = time -> {
+                        failure.compareAndSet(null, new AssertionError("cancelled frame callback ran"));
+                    };
+                    choreographer.postFrameCallback(cancelled);
+                    choreographer.removeFrameCallback(cancelled);
+                    choreographer.postFrameCallback(new android.view.Choreographer.FrameCallback() {
+                        private int count;
+                        private long previous;
+                        @Override public void doFrame(long time) {
+                            try {
+                                if (Thread.currentThread() != owner || time <= previous || time > System.nanoTime())
+                                    throw new AssertionError("wrong frame owner or timestamp");
+                                previous = time;
+                                if (++count < 4) choreographer.postFrameCallback(this);
+                                else new Handler(owner.getLooper()).post(() -> {
+                                    try {
+                                        android.view.Choreographer.class.getDeclaredMethod("releaseInstance")
+                                                .invoke(null);
+                                    } catch (Throwable error) { failure.compareAndSet(null, error); }
+                                    done.countDown();
+                                });
+                            } catch (Throwable error) {
+                                failure.compareAndSet(null, error);
+                                done.countDown();
+                            }
+                        }
+                    });
+                } catch (Throwable error) {
+                    failure.compareAndSet(null, error);
+                    done.countDown();
+                }
+            });
+        }
+        boolean completed;
+        try { completed = done.await(20, TimeUnit.SECONDS); }
+        finally { for (HandlerThread thread : threads) thread.quitSafely(); }
+        if (!completed) throw new AssertionError("framework vsync timed out");
+        if (failure.get() != null) throw new AssertionError("framework vsync failed", failure.get());
+        System.out.println("ACTIVITY_FRAMEWORK_VSYNC_OK");
+    }
 
     private static void checkSensorService(Context context) throws Exception {
         if (!sensorServiceRegistered) return;
@@ -501,6 +846,9 @@ public final class ActivityProbe {
                     "addService", String.class, IBinder.class)
                     .invoke(null, "sensorservice", sensorService);
             sensorServiceRegistered = true;
+            Class.forName("android.os.ServiceManager").getMethod(
+                    "addService", String.class, IBinder.class)
+                    .invoke(null, "SurfaceFlingerAIDL", surfaceComposer);
         }
         if (play) {
             Method add = Class.forName("android.os.ServiceManager").getMethod(
@@ -918,6 +1266,7 @@ public final class ActivityProbe {
         Looper.prepareMainLooper();
         checkServiceRegistration();
         installServices();
+        if (!play) checkFrameworkVsync();
         System.out.println("ACTIVITY_BOOTSTRAP_BEGIN");
         Class<?> threadType = Class.forName("android.app.ActivityThread");
         Object thread = threadType.getMethod("systemMain").invoke(null);

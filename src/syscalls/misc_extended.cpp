@@ -687,13 +687,16 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                 } catch (...) { /* use -1 */ }
             }
-            int n = ::epoll_wait(static_cast<int>(a0), evs, maxev, timeout_ms);
+            auto epoll_node = emu.fds().get(static_cast<int>(a0));
+            int epoll_fd = epoll_node ? epoll_node->host_fd() : -1;
+            int n = ::epoll_wait(epoll_fd, evs, maxev, timeout_ms);
+            if (n < 0) { ret_errno(); return 0; }
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
-                    uint64_t p = a1 + static_cast<uint64_t>(i) * 12;
+                    uint64_t p = a1 + static_cast<uint64_t>(i) * 16;
                     try {
                         mem_.store<uint32_t>(p, evs[i].events);
-                        mem_.store<uint64_t>(p + 4, evs[i].data.u64);
+                        mem_.store<uint64_t>(p + 8, evs[i].data.u64);
                     } catch (...) { ret_err(EFAULT); return 0; }
                 }
             }

@@ -103,10 +103,17 @@ std::shared_ptr<Node> FdTable::get(int fd) const {
     return it->second;
 }
 int FdTable::close(int fd) {
-    std::lock_guard<std::mutex> g(mu_);
-    auto it = table_.find(fd);
-    if (it == table_.end()) return -EBADF;
-    table_.erase(it);
+    // Device destructors may acquire their domain locks. Binder transfer
+    // takes a domain lock before consulting this table: never destroy a
+    // device while holding mu_, or concurrent close/transfer can deadlock.
+    std::shared_ptr<Node> closing;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        auto it = table_.find(fd);
+        if (it == table_.end()) return -EBADF;
+        closing = std::move(it->second);
+        table_.erase(it);
+    }
     return 0;
 }
 int FdTable::dup(int fd, int min_fd) {
@@ -124,19 +131,23 @@ int FdTable::dup(int fd, int min_fd) {
 }
 int FdTable::dup2(int fd, int new_fd) {
     if (new_fd < 0) return -EBADF;
-    std::lock_guard<std::mutex> g(mu_);
-    auto it = table_.find(fd);
-    if (it == table_.end()) return -EBADF;
-    if (fd == new_fd) return new_fd;
-    // Close new_fd if open
-    auto existing = table_.find(new_fd);
-    if (existing != table_.end()) table_.erase(existing);
-    table_[new_fd] = it->second;
+    std::shared_ptr<Node> closing;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        auto it = table_.find(fd);
+        if (it == table_.end()) return -EBADF;
+        if (fd == new_fd) return new_fd;
+        auto source = it->second;
+        auto& slot = table_[new_fd];
+        closing = std::move(slot);
+        slot = std::move(source);
+    }
     return new_fd;
 }
 void FdTable::close_range(int first, int last) {
     if (first > last) return;
-    std::lock_guard<std::mutex> g(mu_);
+    std::vector<std::shared_ptr<Node>> closing;
+    std::unique_lock<std::mutex> g(mu_);
     // Iterate only over the open fds in the range, not every integer.
     // This makes close_range(0, INT_MAX) O(open_fds), not O(2^31).
     // std::unordered_map has no lower_bound, so we collect-then-erase.
@@ -148,8 +159,10 @@ void FdTable::close_range(int first, int last) {
         }
     }
     for (int fd : to_close) {
+        closing.push_back(std::move(table_.at(fd)));
         table_.erase(fd);
     }
+    g.unlock();
 }
 bool FdTable::is_open(int fd) const {
     std::lock_guard<std::mutex> g(mu_);

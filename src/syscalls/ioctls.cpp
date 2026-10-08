@@ -42,7 +42,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // ioctl() for the requests it understands; everything else
             // returns Node::IOCTL_NOT_HANDLED, which we translate to
             // -ENOTTY (the POSIX "Inappropriate ioctl for device" error).
-            int r = node->ioctl_thread(static_cast<uint32_t>(a1), a2, mem_, cpu);
+            int r = node->ioctl_thread(static_cast<uint32_t>(a1), a2, mem_, cpu, fds_);
             if (r == yggdrasil::Node::IOCTL_NOT_HANDLED) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOTTY));
             } else if (r < 0) {

@@ -4,9 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <time.h>
 
 static int failures;
 
@@ -56,6 +60,51 @@ int main(void) {
         check(fcntl((int)inotify_fd, F_GETFD) == -1 && errno == EBADF,
               "closed inotify guest fd is no longer open");
     }
+
+    // Android DisplayEventReceiver depends on full 64-bit epoll cookies and
+    // multiple naturally aligned AArch64 events, and removes fds with NULL.
+#ifdef __aarch64__
+    check(sizeof(struct epoll_event) == 16, "AArch64 epoll event is 16 bytes");
+#endif
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    int ready[2] = {eventfd(0, EFD_NONBLOCK), eventfd(0, EFD_NONBLOCK)};
+    check(ep >= 0 && ready[0] >= 0 && ready[1] >= 0, "create epoll inputs");
+    uint64_t cookies[2] = {UINT64_C(0x123456789abcdef0), UINT64_C(0xfedcba9876543210)};
+    for (int i = 0; i < 2; i++) {
+        struct epoll_event ev;
+        memset(&ev, 0xa5, sizeof(ev));
+        ev.events = EPOLLIN;
+        ev.data.u64 = cookies[i];
+        check(epoll_ctl(ep, EPOLL_CTL_ADD, ready[i], &ev) == 0, "epoll add aligned cookie");
+    }
+    for (int variant = 0; variant < 2; variant++) {
+#ifndef SYS_epoll_pwait2
+        if (variant) break;
+#endif
+        uint64_t one = 1;
+        for (int i = 0; i < 2; i++) check(write(ready[i], &one, sizeof(one)) == sizeof(one), "ready epoll input");
+        struct epoll_event events[2];
+        memset(events, 0, sizeof(events));
+        int count;
+        if (!variant) count = epoll_pwait(ep, events, 2, 0, NULL);
+#ifdef SYS_epoll_pwait2
+        else {
+            struct timespec zero = {0, 0};
+            count = syscall(SYS_epoll_pwait2, ep, events, 2, &zero, NULL, 8);
+            if (count == -1 && errno == ENOSYS) {
+                printf("SKIP host kernel has no epoll_pwait2\n");
+                break;
+            }
+        }
+#endif
+        check(count == 2 && (events[0].events & EPOLLIN) && (events[1].events & EPOLLIN), "epoll returns two aligned events");
+        check((events[0].data.u64 == cookies[0] && events[1].data.u64 == cookies[1]) ||
+              (events[0].data.u64 == cookies[1] && events[1].data.u64 == cookies[0]), "epoll preserves both 64-bit cookies");
+        for (int i = 0; i < 2; i++) check(read(ready[i], &one, sizeof(one)) == sizeof(one), "drain epoll input");
+    }
+    check(epoll_ctl(ep, EPOLL_CTL_DEL, ready[0], NULL) == 0, "epoll DEL ignores NULL event");
+    check(syscall(SYS_epoll_ctl, ep, EPOLL_CTL_DEL, ready[1], (void *)-1) == 0, "epoll DEL ignores inaccessible event");
+    close(ready[0]); close(ready[1]); close(ep);
 
     printf("%d checks failed\n", failures);
     return failures ? 1 : 0;

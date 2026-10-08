@@ -211,6 +211,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             if app_mode else ("FRAMEWORK_OK",)
         if services and main_class == "ActivityProbe":
             markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK")
+            if not play:
+                markers += ("ACTIVITY_FRAMEWORK_VSYNC_OK",)
         if play:
             markers += ("APP_WINDOW_OPEN", "APP_AUDIO_ROUTING_READY", "APP_RESUMED", "APP_SURFACE_READY")
         # A play session ends when its window closes (exit 0) or its time runs out.
@@ -231,6 +233,9 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                   "timed_out": timed_out, "elapsed_seconds": round(time.monotonic() - started, 3),
                   "checkpoint": "app_play" if play else "app_on_create" if app_mode else "framework",
                   "reached_checkpoints": [marker for marker in markers if marker in text]}
+        for tombstone in root.glob("tombstone_*"):
+            if tombstone.is_file():
+                shutil.copyfile(tombstone, output / (mode + "-" + tombstone.name))
         (output / (mode + ".json")).write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result))
         return passed

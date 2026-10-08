@@ -1,5 +1,6 @@
 #include "yggdrasil/binder_node.hpp"
 #include "core/memory.h"
+#include "yggdrasil/yggdrasil.hpp"
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -87,7 +88,8 @@ void BinderNode::release_all_references() {
     handles_.clear(); buffer_references_.clear();
 }
 int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
-                                   const bf_binder_transaction& transaction, int tid) {
+                                   const bf_binder_transaction& transaction, int tid,
+                                   FdTable& fds, bool accepts_fds) {
     if (!transaction.offsets_size) return 0;
     if ((transaction.offsets_size & 7) || transaction.offsets_size / 8 > MAX_PARCEL_OBJECTS)
         return -EINVAL;
@@ -95,6 +97,7 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
     mem.read(transaction.offsets, offsets.data(), transaction.offsets_size);
     struct Plan { uint64_t offset; std::shared_ptr<Object> object; bool weak; uint32_t handle; int owner_tid; };
     std::vector<Plan> plans;
+    std::vector<Descriptor> descriptors;
     auto staged_owned = owned_objects_;
     auto staged_handles = target.handles_;
     uint32_t next = target.next_handle_;
@@ -104,6 +107,16 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
             sizeof(bf_flat_binder) > transaction.data_size - offset) return -EINVAL;
         previous_end = offset + sizeof(bf_flat_binder);
         bf_flat_binder flat; memcpy(&flat, event.payload.data() + offset, sizeof(flat));
+        if (flat.type == BF_BINDER_TYPE_FD) {
+            if (!accepts_fds) return -EPERM;
+            auto node = fds.get(static_cast<int32_t>(flat.binder));
+            if (!node) return -EBADF;
+            // A reference to the sending Binder device would create a queue
+            // ownership cycle. Device-fd transfer is not supported here.
+            if (std::dynamic_pointer_cast<BinderNode>(node)) return -EINVAL;
+            descriptors.push_back({offset, std::move(node)});
+            continue;
+        }
         bool weak = flat.type == BF_BINDER_TYPE_WEAK_BINDER || flat.type == BF_BINDER_TYPE_WEAK_HANDLE;
         std::shared_ptr<Object> object;
         if (flat.type == BF_BINDER_TYPE_BINDER || flat.type == BF_BINDER_TYPE_WEAK_BINDER) {
@@ -116,6 +129,7 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
                 if (found == staged_owned.end() && staged_owned.size() >= MAX_OBJECTS) return -ENOMEM;
                 object = std::make_shared<Object>();
                 object->owner = weak_from_this(); object->pointer = flat.binder; object->cookie = flat.cookie;
+                object->accepts_fds = flat.flags & BF_FLAT_BINDER_FLAG_ACCEPTS_FDS;
                 staged_owned[flat.binder] = object;
             }
         } else if (flat.type == BF_BINDER_TYPE_HANDLE || flat.type == BF_BINDER_TYPE_WEAK_HANDLE) {
@@ -124,7 +138,7 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
             const auto& handle = found->second;
             if (!(handle.strong || handle.weak || handle.temporary_strong || handle.temporary_weak)) return -EINVAL;
             object = handle.object;
-        } else return -ENOTSUP; // FD/PTR/FDA need separate descriptor/fixup support.
+        } else return -ENOTSUP; // PTR/FDA need separate scatter/gather fixups.
         if (!object->alive || object->owner.expired()) return -ENOENT;
         // Conservative queue reservation bounds lifecycle events before committing.
         auto owner_node = object->owner.lock();
@@ -146,6 +160,7 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
     }
     // All source data and objects are validated before any references change.
     owned_objects_ = std::move(staged_owned);
+    event.descriptors = std::move(descriptors);
     target.handles_ = std::move(staged_handles); target.next_handle_ = next;
     for (const auto& plan : plans) {
         bf_flat_binder flat; memcpy(&flat, event.payload.data() + plan.offset, sizeof(flat));

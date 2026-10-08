@@ -91,9 +91,49 @@ int main(void) {
     offset=4;publish.offsets=(uintptr_t)&offset;
     CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_FAILED_REPLY,0));
     struct bf_binder_error error;CHECK(ioctl(service,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-EINVAL);
-    offset=0;object.type=0x66642a85; // BINDER_TYPE_FD is still unsupported.
+    offset=0;object.type=0x70742a85; // Scatter/gather BINDER_TYPE_PTR remains unsupported.
     CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_FAILED_REPLY,0));
     CHECK(ioctl(service,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-ENOTSUP);
+    // A queued descriptor holds the open file, not the sender's fd number.
+    int pipefd[2];CHECK(pipe(pipefd)==0);
+    struct bf_flat_binder descriptor={BF_BINDER_TYPE_FD,0,(uint32_t)pipefd[0],0};
+    publish.buffer=(uintptr_t)&descriptor;publish.flags=0;
+    CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_TRANSACTION_COMPLETE,0));
+    CHECK(close(pipefd[0])==0);
+    int reused=open("/dev/null",O_RDONLY);CHECK(reused==pipefd[0]);
+    CHECK(write(pipefd[1],"fd",2)==2);
+    CHECK(exchange(manager,0,0)==0 && contains(BF_BR_TRANSACTION,&tx));
+    memcpy(&restored,(void*)(uintptr_t)tx.buffer,sizeof(restored));
+    int received_fd=(int)restored.binder;char bytes[2];
+    CHECK(restored.type==BF_BINDER_TYPE_FD && received_fd!=reused && read(received_fd,bytes,2)==2 && !memcmp(bytes,"fd",2));
+    CHECK(free_buffer(manager,tx.buffer)==0 && fcntl(received_fd,F_GETFD)>=0);
+    // Replies require the caller's TF_ACCEPT_FDS; rejection keeps the call
+    // alive so the server can still send a valid non-FD reply.
+    descriptor.binder=(uint32_t)received_fd;
+    reply=(struct bf_binder_transaction){0};reply.buffer=(uintptr_t)&descriptor;reply.data_size=sizeof(descriptor);
+    reply.offsets_size=8;reply.offsets=(uintptr_t)&offset;
+    CHECK(exchange(manager,BF_BC_REPLY,&reply)==0 && contains(BF_BR_FAILED_REPLY,0));
+    CHECK(ioctl(manager,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-EPERM);
+    reply=(struct bf_binder_transaction){0};CHECK(exchange(manager,BF_BC_REPLY,&reply)==0);
+    CHECK(exchange(service,0,0)==0 && contains(BF_BR_REPLY,&tx) && free_buffer(service,tx.buffer)==0);
+    // With TF_ACCEPT_FDS the response installs an independent guest fd.
+    publish.flags=BF_TF_ACCEPT_FDS;publish.data_size=publish.offsets_size=0;
+    CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0);
+    CHECK(exchange(manager,0,0)==0 && contains(BF_BR_TRANSACTION,&tx) && free_buffer(manager,tx.buffer)==0);
+    reply.buffer=(uintptr_t)&descriptor;reply.data_size=sizeof(descriptor);reply.offsets_size=8;reply.offsets=(uintptr_t)&offset;
+    CHECK(exchange(manager,BF_BC_REPLY,&reply)==0 && contains(BF_BR_TRANSACTION_COMPLETE,0));
+    CHECK(close(received_fd)==0);
+    CHECK(exchange(service,0,0)==0 && contains(BF_BR_REPLY,&tx));
+    memcpy(&restored,(void*)(uintptr_t)tx.buffer,sizeof(restored));received_fd=(int)restored.binder;
+    CHECK(write(pipefd[1],"ok",2)==2 && read(received_fd,bytes,2)==2 && !memcmp(bytes,"ok",2));
+    CHECK(free_buffer(service,tx.buffer)==0 && close(received_fd)==0 && close(pipefd[1])==0 && close(reused)==0);
+    // Transactions also honor the receiving object's ACCEPTS_FDS flag.
+    descriptor.binder=0;query.buffer=(uintptr_t)&descriptor;
+    CHECK(exchange(client,BF_BC_TRANSACTION,&query)==0 && contains(BF_BR_FAILED_REPLY,0));
+    CHECK(ioctl(client,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-EPERM);
+    publish.flags=0;publish.data_size=sizeof(descriptor);publish.offsets_size=8;descriptor.binder=0x7fffffff;
+    CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_FAILED_REPLY,0));
+    CHECK(ioctl(service,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-EBADF);
     CHECK(write_command(manager,BF_BC_RELEASE,&manager_handle)==0);
     CHECK(write_command(manager,BF_BC_RELEASE,&manager_handle)==-1 && errno==EINVAL);
     CHECK(write_command(client,BF_BC_RELEASE,&client_handle)==0);

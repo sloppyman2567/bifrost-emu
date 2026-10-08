@@ -32,6 +32,7 @@ namespace arm64emu {
     class Memory;
 }
 namespace arm64emu::yggdrasil {
+class FdTable;
 // ── Node: abstract file handle ────────────────────────────────────────
 class Node : public std::enable_shared_from_this<Node> {
 public:
@@ -65,7 +66,7 @@ public:
     static constexpr int IOCTL_NOT_HANDLED = -0x7fffffff;
     virtual int ioctl(uint32_t /*request*/, uint64_t /*argp*/,
                       Memory& /*mem*/) { return IOCTL_NOT_HANDLED; }
-    virtual int ioctl_thread(uint32_t request, uint64_t argp, Memory& mem, CPU&) {
+    virtual int ioctl_thread(uint32_t request, uint64_t argp, Memory& mem, CPU&, FdTable&) {
         return ioctl(request, argp, mem);
     }
     // Virtual devices may own their guest mmap; default uses the file path.

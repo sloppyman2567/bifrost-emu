@@ -1,6 +1,7 @@
 #include "yggdrasil/binder_node.hpp"
 #include "core/memory.h"
 #include "core/cpu.h"
+#include "yggdrasil/yggdrasil.hpp"
 #include "debug_flags.h"
 #include <cstdio>
 #include <algorithm>
@@ -131,7 +132,7 @@ void BinderNode::fail(int tid, uint32_t command, int error) {
     replies_[tid].push_back(Event{command});
     domain_->ready.notify_all();
 }
-int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid) {
+int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid, FdTable& fds) {
     if (replies_[tid].size() >= MAX_EVENTS) return -EAGAIN;
     if (cmd == BF_BC_ENTER_LOOPER || cmd == BF_BC_REGISTER_LOOPER) {
         loopers_.insert(tid); return 0;
@@ -160,9 +161,10 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     std::shared_ptr<Object> destination;
     std::shared_ptr<Node> destination_owner;
     int reply_tid = 0;
+    bool accepts_fds = false;
     if (cmd == BF_BC_TRANSACTION) {
         if (tx.target == 0 && domain_->service_manager)
-            return service_transaction(tx, mem, tid);
+            return service_transaction(tx, mem, tid, fds);
         if (tx.target == 0) target = domain_->manager;
         else if (tx.target <= UINT32_MAX) {
             auto handle = handles_.find(static_cast<uint32_t>(tx.target));
@@ -173,12 +175,14 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
             }
         }
         if (!target) { fail(tid, BF_BR_DEAD_REPLY, ENOENT); return 0; }
+        accepts_fds = destination ? destination->accepts_fds : domain_->manager_accepts_fds;
     } else {
         auto& stack = calls_[tid];
         if (stack.empty()) { fail(tid, BF_BR_FAILED_REPLY, EPROTO); return 0; }
         caller = stack.back().caller.lock(); reply_tid = stack.back().tid;
         if (!caller) { stack.pop_back(); fail(tid, BF_BR_DEAD_REPLY, ESRCH); return 0; }
         target = static_cast<BinderNode*>(caller.get());
+        accepts_fds = stack.back().accepts_fds;
     }
     auto& queue = cmd == BF_BC_REPLY ? target->replies_[reply_tid] : target->incoming_;
     if (!target->mapping_ || target->memory_ != &mem || queue.size() >= MAX_EVENTS ||
@@ -200,7 +204,7 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     event.transaction.buffer = 0; event.transaction.offsets = 0;
     event.payload.resize(tx.data_size);
     if (tx.data_size) mem.read(tx.buffer, event.payload.data(), tx.data_size);
-    int object_error = translate_objects(*target, event, mem, tx, tid);
+    int object_error = translate_objects(*target, event, mem, tx, tid, fds, accepts_fds);
     if (object_error) { fail(tid, BF_BR_FAILED_REPLY, -object_error); return 0; }
     event.caller = weak_from_this(); event.caller_tid = tid;
     if (cmd == BF_BC_REPLY) calls_[tid].pop_back();
@@ -210,7 +214,7 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     domain_->ready.notify_all();
     return 0;
 }
-int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu,
+int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds,
                             std::unique_lock<std::recursive_mutex>& lock) {
     auto wr = mem.load<bf_binder_write_read>(arg);
     if (wr.write_size > LIMIT || wr.read_size > LIMIT ||
@@ -226,7 +230,7 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu,
         uint32_t cmd; memcpy(&cmd, input.data() + pos, 4);
         size_t n = _IOC_SIZE(cmd);
         if (n > wr.write_size - pos - 4) { result = -EINVAL; break; }
-        try { result = command(cmd, input.data() + pos + 4, mem, cpu.tid); }
+        try { result = command(cmd, input.data() + pos + 4, mem, cpu.tid, fds); }
         catch (const EmuError&) { result = -EFAULT; }
         if (result) break;
         wr.write_consumed += 4 + n;
@@ -256,12 +260,30 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu,
                 size_t n = 4 + (tx ? sizeof(bf_binder_transaction) : _IOC_SIZE(event.command));
                 if (n > wr.read_size - wr.read_consumed) break;
                 uint64_t buffer = 0;
+                std::vector<int> installed_fds;
                 bool synchronous = event.command == BF_BR_TRANSACTION &&
                                     !(event.transaction.flags & BF_TF_ONE_WAY);
                 if (synchronous && calls_[cpu.tid].size() >= 64) { result = -EOVERFLOW; break; }
                 if (tx) {
-                    buffer = allocate_buffer(mem, event.payload);
-                    if (!buffer) { result = -ENOMEM; break; }
+                    std::vector<uint8_t> patched_payload;
+                    if (!event.descriptors.empty()) patched_payload = event.payload;
+                    for (const auto& descriptor : event.descriptors) {
+                        int fd = fds.allocate(descriptor.node);
+                        if (fd < 0) { result = fd; break; }
+                        installed_fds.push_back(fd);
+                        bf_flat_binder flat;
+                        memcpy(&flat, patched_payload.data() + descriptor.offset, sizeof(flat));
+                        flat.binder = static_cast<uint32_t>(fd);
+                        flat.cookie = 0;
+                        memcpy(patched_payload.data() + descriptor.offset, &flat, sizeof(flat));
+                    }
+                    if (!result) buffer = allocate_buffer(mem,
+                            event.descriptors.empty() ? event.payload : patched_payload);
+                    if (!buffer) {
+                        for (int fd : installed_fds) fds.close(fd);
+                        if (!result) result = -ENOMEM;
+                        break;
+                    }
                     event.transaction.buffer = buffer;
                     event.transaction.offsets = event.transaction.offsets_size ? buffer + ((event.transaction.data_size + 7) & ~uint64_t(7)) : 0;
                 }
@@ -272,11 +294,13 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu,
                 try { mem.write(wr.read_buffer + wr.read_consumed, output, n); }
                 catch (const EmuError&) {
                     if (buffer) (void)free_buffer(mem, buffer);
+                    for (int fd : installed_fds) fds.close(fd);
                     result = -EFAULT; break;
                 }
                 if (tx && !event.references.empty()) buffer_references_[buffer] = std::move(event.references);
                 if (tx) queued_bytes_ -= std::max<uint64_t>(8, (event.payload.size() + 7) & ~uint64_t(7));
-                if (synchronous) calls_[cpu.tid].push_back({event.caller, event.caller_tid});
+                if (synchronous) calls_[cpu.tid].push_back({event.caller, event.caller_tid,
+                        !!(event.transaction.flags & BF_TF_ACCEPT_FDS)});
                 wr.read_consumed += n; queue.pop_front();
             }
         }
@@ -284,7 +308,7 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu,
     mem.store(arg, wr);
     return result;
 }
-int BinderNode::ioctl_thread(uint32_t request, uint64_t arg, Memory& mem, CPU& cpu) {
+int BinderNode::ioctl_thread(uint32_t request, uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds) {
     std::unique_lock<std::recursive_mutex> lock(domain_->mutex);
     if (domain_->stopped) return -ECONNREFUSED;
     try {
@@ -308,9 +332,11 @@ int BinderNode::ioctl_thread(uint32_t request, uint64_t arg, Memory& mem, CPU& c
             } // Legacy BINDER_SET_CONTEXT_MGR ignores its argument.
             if (domain_->manager || domain_->service_manager) return -EBUSY;
             domain_->manager = this; domain_->manager_ptr = obj.binder;
+            domain_->manager_accepts_fds = request == BF_BINDER_SET_CONTEXT_MGR ||
+                                          (obj.flags & BF_FLAT_BINDER_FLAG_ACCEPTS_FDS);
             domain_->manager_cookie = obj.cookie; return 0;
         }
-        case BF_BINDER_WRITE_READ: return write_read(arg, mem, cpu, lock);
+        case BF_BINDER_WRITE_READ: return write_read(arg, mem, cpu, fds, lock);
         default: return -ENOTTY;
         }
     } catch (const EmuError&) {

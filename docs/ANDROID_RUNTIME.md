@@ -146,6 +146,59 @@ creation alone does not resume or attach a drawable window. The optional
 `--play` path described below delivers additional lifecycle and surface events;
 real system services remain unimplemented.
 
+### Framework display events (2026-10-07)
+
+The Activity launcher profile publishes `SurfaceFlingerAIDL` with the Android 15
+`ISurfaceComposer.createDisplayEventConnection` and `IDisplayEventConnection`
+protocols. Each connection transfers the two native BitTube descriptors for a
+nonblocking `SOCK_SEQPACKET` channel. Real `libgui` and `libandroid_runtime`
+initialize `DisplayEventReceiver`, register it with the client's native Looper,
+and dispatch Java Choreographer callbacks on that Looper's thread.
+
+The single virtual display has a synthetic 60 Hz `CLOCK_MONOTONIC` cadence,
+matching the existing NDK adapter's nominal rate. It sends initial hotplug,
+coalesced one-shot vsync, and periodic vsync at the requested divisor; rate zero
+disables periodic delivery. Events use Android 15's 216-byte layout with one
+valid frame timeline, a presentation timestamp, and a deadline two milliseconds
+earlier. These are virtual-display estimates, not host-compositor timing.
+Backpressure never blocks the clock. Closed peers and collected connections
+release their server descriptors. This is display-event support, not a complete
+SurfaceFlinger: layer-bound connections, compositor transactions, display-mode
+changes, and scheduling-policy queries remain unsupported.
+
+Binder now transfers `BINDER_TYPE_FD` objects when the destination accepts FDs
+(or the original caller sets `TF_ACCEPT_FDS` for a reply). Queued messages retain
+the open Node; receiver descriptor numbers are installed on delivery, so closing
+and reusing a sender FD cannot redirect the transfer. Rejected messages do not
+install descriptors. Binder-device FD transfer and scatter/gather FD arrays
+remain unsupported, as does the FdTable's pre-existing per-descriptor CLOEXEC
+tracking gap. Device destruction happens outside the FdTable lock to avoid
+inverting the Binder-domain/table lock order during concurrent close/transfer.
+
+Native Looper disposal also exposed incorrect epoll marshalling: AArch64 events
+are 16 bytes with data at offset 8; x86-64 events are packed to 12 bytes. Both
+epoll wait paths now marshal the guest layout, and `EPOLL_CTL_DEL` ignores its
+event pointer, including NULL, as Linux does.
+
+The wire contracts were checked against AOSP Android 15:
+[display receiver](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/gui/DisplayEventReceiver.cpp),
+[connection AIDL](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/gui/aidl/android/gui/IDisplayEventConnection.aidl),
+[BitTube](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/gui/BitTube.cpp),
+[vsync data](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/gui/VsyncEventData.cpp),
+and Linux's [epoll UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/eventpoll.h).
+
+Observed verification: the JIT framework probe checks hotplug, one-shot and
+periodic delivery, rate zero, timeline data, callback cancellation, and two
+independent Java Choreographer owners (`ACTIVITY_FRAMEWORK_VSYNC_OK`). These
+self-checks do not run in `--play` mode. Four focused Binder/syscall fixtures
+pass in both engines; the syscall fixture also passes natively as a kernel
+oracle. The interpreter framework run remains failing: a worker reports an
+unmapped NULL read and the callback check times out. SpongeBob still fails in
+live JIT runs with guest `SEGV_ACCERR`, including with the new self-checks
+disabled. The runner preserves Unity tombstones in its output directory.
+Neither these checks nor this bounded Activity/service harness establish a
+complete Android launcher or playable SpongeBob.
+
 ### Installed-app creation checkpoint (2026-10-07)
 
 The same Activity probe can load a verified installed managed APK. It constructs

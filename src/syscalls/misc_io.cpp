@@ -125,13 +125,18 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         case 21: { // epoll_ctl(epfd, op, fd, event) — aarch64 syscall 21
             // struct epoll_event: { uint32_t events; epoll_data_t data; }
             // epoll_data_t is a union with uint64_t as the largest member.
-            // On aarch64 Linux this is packed to 12 bytes total.
+            // AArch64 aligns data to 8 bytes (size 16); only x86 packs it.
             int epfd = resolve_sock_fd(emu, a0);
             int fd   = resolve_sock_fd(emu, a2);
-            struct epoll_event ev;
-            ev.events = mem_.load<uint32_t>(a3);
-            ev.data.u64 = mem_.load<uint64_t>(a3 + 4);
-            int r = ::epoll_ctl(epfd, static_cast<int>(a1), fd, &ev);
+            struct epoll_event ev{};
+            // Linux ignores the event pointer for DEL, including NULL and
+            // inaccessible addresses. Android Looper uses NULL on disposal.
+            if (a1 != EPOLL_CTL_DEL) {
+                ev.events = mem_.load<uint32_t>(a3);
+                ev.data.u64 = mem_.load<uint64_t>(a3 + 8);
+            }
+            int r = ::epoll_ctl(epfd, static_cast<int>(a1), fd,
+                                a1 == EPOLL_CTL_DEL ? nullptr : &ev);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
@@ -166,10 +171,10 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             if (n < 0) { ret_errno(); return 0; }
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
-                    uint64_t p = a1 + static_cast<uint64_t>(i) * 12;
+                    uint64_t p = a1 + static_cast<uint64_t>(i) * 16;
                     try {
                         mem_.store<uint32_t>(p, evs[i].events);
-                        mem_.store<uint64_t>(p + 4, evs[i].data.u64);
+                        mem_.store<uint64_t>(p + 8, evs[i].data.u64);
                     } catch (...) { ret_err(EFAULT); return 0; }
                 }
             }
