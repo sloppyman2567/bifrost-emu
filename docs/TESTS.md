@@ -175,6 +175,11 @@ Focused additions:
   10 s; a fork child's new thread reports the child's pid; main's
   `pthread_exit` keeps the process until a worker's `exit(5)`. Passes
   natively on the host kernel; the pre-change binary fails all 6.
+- `test_fcntl_lock`: POSIX `F_SETLK`/`F_SETLKW` input marshalling and
+  `F_GETLK` writeback, unmapped/read-only buffers, forked lock contention,
+  blocking unlock, signed offsets and ranges above 4 GiB. Passes on native
+  Linux and under JIT/interpreter; the pre-change binary fails 9 checks
+  because it passed guest flock pointers directly to host `fcntl`.
 - `test_proc_rewind`: rewinds static `/proc/cpuinfo` and CPU `online`
   files and lazy `/proc/self/maps`, checking the actual offset and the
   reread content both before and after EOF. Passes on native Linux and

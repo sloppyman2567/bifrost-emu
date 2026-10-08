@@ -1184,8 +1184,35 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 case F_SETLKW: { // 7
                     // POSIX file locks — forward to host for real fds.
                     if (hfd >= 0) {
-                        int r = ::fcntl(hfd, cmd, reinterpret_cast<void*>(a2));
+                        // asm-generic's 64-bit flock ABI (AArch64): shorts
+                        // at 0/2, signed off_t at 8/16, pid_t at 24.
+                        struct GuestFlock {
+                            int16_t type, whence;
+                            uint32_t pad;
+                            int64_t start, len;
+                            int32_t pid;
+                            uint32_t tail_pad;
+                        } guest{};
+                        static_assert(sizeof(GuestFlock) == 32, "AArch64 flock ABI");
+                        try { mem_.read(a2, &guest, sizeof(guest)); }
+                        catch (...) { ret_err(EFAULT); return 0; }
+                        struct flock lock{};
+                        lock.l_type = guest.type;
+                        lock.l_whence = guest.whence;
+                        lock.l_start = guest.start;
+                        lock.l_len = guest.len;
+                        lock.l_pid = guest.pid;
+                        int r = ::fcntl(hfd, cmd, &lock);
                         if (r < 0) { ret_errno(); return 0; }
+                        if (cmd == F_GETLK) {
+                            guest.type = lock.l_type;
+                            guest.whence = lock.l_whence;
+                            guest.start = lock.l_start;
+                            guest.len = lock.l_len;
+                            guest.pid = lock.l_pid;
+                            try { mem_.write(a2, &guest, sizeof(guest)); }
+                            catch (...) { ret_err(EFAULT); return 0; }
+                        }
                         ret_host(r);
                     } else {
                         ret_host(0);
