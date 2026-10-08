@@ -243,6 +243,21 @@ remaining compatibility gaps, not evidence of a playable game. Normal
 
 #### Managed play diagnostic (2026-10-07)
 
+For a white window after the splash, including loss of content after minimizing
+and restoring, use `BIFROST_FRAME_TRACE=1 BIFROST_INPUT_TRACE=1` on the play
+runner. `[present]` lines bracket host EGL swap/create/destroy/make-current,
+terminate and guest-issued error queries with monotonic timestamps, guest thread
+IDs, return values and call durations. An unmatched begin can locate a blocked
+host call; a zero swap result is failure. The existing `[frame]` summary counts
+calls, including failed swaps, and does not establish visible rendering.
+`[android-window]` records SDL window events before filtering and a two-second
+event-pump heartbeat. Event timestamps use SDL's clock; pump and EGL timestamps
+use the host monotonic clock. These diagnostics observe restore/expose events;
+they do not implement lifecycle recovery. Error state is not consumed by the
+logger. Add `BIFROST_THUNK_TRACE=1` for the GL call stream. Avoid blanket
+`BIFROST_TRACE=1` here: it also enables instruction logging and diagnostic modes
+that change unsupported-instruction behavior.
+
 Adding `--play` opens a host window, starts/resumes the Activity, reports
 SurfaceView holder callbacks and pumps host input. These callbacks use the
 managed graphics adapters; they are not a WindowManager attachment. The runner

@@ -2968,6 +2968,24 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
+    // Bracket EGL calls to distinguish blocked calls from failed swaps.
+    // Never query eglGetError here: that would consume the guest's error.
+    const bool trace_present = dbg().frame_trace &&
+        (entry.name == "eglSwapBuffers" || entry.name == "eglCreateWindowSurface" ||
+         entry.name == "eglDestroySurface" || entry.name == "eglMakeCurrent" ||
+         entry.name == "eglGetError" || entry.name == "eglTerminate");
+    auto present_now_us = []() -> int64_t {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const int64_t present_started = trace_present ? present_now_us() : 0;
+    if (trace_present)
+        fprintf(stderr, "[present] begin mono_us=%lld tid=%u pc=0x%llx lr=0x%llx %s a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx\n",
+                static_cast<long long>(present_started), static_cast<unsigned>(cpu.tid),
+                static_cast<unsigned long long>(cpu.pc),
+                static_cast<unsigned long long>(cpu.regs[30]), entry.name.c_str(),
+                static_cast<unsigned long long>(args[0]), static_cast<unsigned long long>(args[1]),
+                static_cast<unsigned long long>(args[2]), static_cast<unsigned long long>(args[3]));
     uint64_t ret = 0;
     // PCWFC: before any call that consumes buffer data (draw/copy/get/
     // texbuffer), push every live persistent+coherent bounce back to the
@@ -3066,6 +3084,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = reinterpret_cast<Fn8>(entry.host_fn)(
             args[0], args[1], args[2], args[3],
             args[4], args[5], args[6], args[7]);
+    }
+
+    if (trace_present) {
+        const int64_t finished = present_now_us();
+        fprintf(stderr, "[present] end mono_us=%lld tid=%u %s ret=0x%llx duration_us=%lld\n",
+                static_cast<long long>(finished), static_cast<unsigned>(cpu.tid),
+                entry.name.c_str(), static_cast<unsigned long long>(ret),
+                static_cast<long long>(finished - present_started));
     }
 
     // Write bounced pointer args back into guest memory (clamped to the

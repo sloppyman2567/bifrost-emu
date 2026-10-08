@@ -1,5 +1,7 @@
 #include "frost/android_window_backend.hpp"
+#include "debug_flags.h"
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -178,10 +180,38 @@ public:
     if (!window_) return 0;
     SDL_Event e;
     const auto id = sdl_.GetWindowID(window_);
+    if (dbg().input_trace) {
+      const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (now - last_pump_log_ms_ >= 2000) {
+        std::fprintf(stderr, "[android-window] pump mono_ms=%lld window=%u size=%dx%d\n",
+                     static_cast<long long>(now), id, width_, height_);
+        last_pump_log_ms_ = now;
+      }
+    }
     // Bound discarded events as well as delivered ones.
     for (unsigned i = 0; i < 256 && sdl_.PollEvent(&e); ++i) {
       out = {};
       out.time_ms = static_cast<int64_t>(e.common.timestamp / 1000000);
+      if (dbg().input_trace && e.type >= SDL_EVENT_WINDOW_FIRST &&
+          e.type <= SDL_EVENT_WINDOW_LAST && e.window.windowID == id) {
+        const char *name = "other";
+        switch (e.type) {
+        case SDL_EVENT_WINDOW_SHOWN: name = "shown"; break;
+        case SDL_EVENT_WINDOW_HIDDEN: name = "hidden"; break;
+        case SDL_EVENT_WINDOW_EXPOSED: name = "exposed"; break;
+        case SDL_EVENT_WINDOW_MINIMIZED: name = "minimized"; break;
+        case SDL_EVENT_WINDOW_RESTORED: name = "restored"; break;
+        case SDL_EVENT_WINDOW_OCCLUDED: name = "occluded"; break;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED: name = "focus-gained"; break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST: name = "focus-lost"; break;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: name = "pixel-size-changed"; break;
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED: name = "close-requested"; break;
+        }
+        std::fprintf(stderr, "[android-window] event sdl_ms=%lld window=%u name=%s type=0x%x data=%d,%d\n",
+                     static_cast<long long>(out.time_ms), id, name,
+                     static_cast<unsigned>(e.type), e.window.data1, e.window.data2);
+      }
       if (e.type == SDL_EVENT_QUIT) { out.type = BIFROST_WINDOW_CLOSE; return 1; }
       if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == id) {
         out.type = BIFROST_WINDOW_CLOSE; return 1;
@@ -257,6 +287,7 @@ private:
   void *wl_window_ = nullptr;
   AndroidWindowBinding binding_;
   int32_t width_ = 800, height_ = 600;
+  int64_t last_pump_log_ms_ = 0;
 #endif
 };
 } // namespace
