@@ -200,7 +200,8 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
             // all lane widths; U(bit29) picks signed/unsigned.
             uint32_t opc6 = (sub3_noq >> 10) & 0x3F;
             bool is_u = (sub3_noq >> 29) & 1;
-            if (opc6 == 0x1C || opc6 == 0x14) {
+            if ((sub3_noq & 0x9F200C00) == 0x0E200000 && size < 3 &&
+                (opc6 == 0x1C || opc6 == 0x14)) {
                 int esize_src = 1 << size;        // 1/2/4
                 int esize_dst = esize_src * 2;
                 int lanes = 16 / esize_dst;
@@ -715,13 +716,13 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // Encoding: 0 Q 0 11111 size L M Rm 1 opc[2:0] H Rn Rd
         // sub3_noq (mask 0xFF00F400, strips L/M/H index bits) =
         //   FMLA 0x0F001000  FMLS 0x0F005000
-        //   FMUL 0x0F009000  FMULX 0x0F00D000
+        //   FMUL 0x0F009000  FMULX 0x2F009000 (U=1)
         // size: 1=H(16b), 2=S(32b), 3=D(64b). The element index is
         // formed from H:L:M: D→{H}, S→{H:L}, H→{H:L:M}.
         {
             uint32_t be = (op & 0xFF00F400) & ~(1u << 30);
             if ((be == 0x0F001000 || be == 0x0F005000 ||
-                 be == 0x0F009000 || be == 0x0F00D000) && size >= 2) {
+                 be == 0x0F009000 || be == 0x2F009000) && size >= 2) {
                 int esize = 1 << size;   // 2, 4, or 8
                 int lanes = (Q ? 16 : 8) / esize;
                 uint32_t H = (op >> 11) & 1;
@@ -731,7 +732,7 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                 if (size == 3) idx = H;
                 else if (size == 2) idx = (H << 1) | L;
                 else idx = (H << 2) | (L << 1) | M;
-                int opc = (op >> 12) & 0xF;   // 1=FMLA 5=FMLS 9=FMUL 13=FMULX
+                int opc = be == 0x2F009000 ? 13 : (op >> 12) & 0xF; // FMLA/FMLS/FMUL/FMULX
                 uint8_t vn[16], vm[16];
                 memcpy(vn, &cpu.v_lo[rn], 8);
                 if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
@@ -748,9 +749,9 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                         double d;
                         memcpy(&d, (i == 0) ? &dlo0 : &dhi0, 8);
                         if (opc == 9 || opc == 13) {
-                            r = a * sc;                 // FMUL / FMULX
+                            r = arm_fp_binop(opc == 13 ? ArmFpOp::MulX : ArmFpOp::Mul, a, sc);
                         } else {
-                            r = std::fma(opc == 1 ? a : -a, sc, d); // fused FMLA / FMLS
+                            r = arm_fp_muladd(d, opc == 1 ? a : fp_neg(a), sc);
                         }
                         if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
                         else memcpy(&cpu.v_hi[rd], &r, 8);
@@ -769,9 +770,9 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                         uint32_t db = (chunk >> sh) & 0xFFFFFFFF;
                         memcpy(&d, &db, 4);
                         if (opc == 9 || opc == 13) {
-                            r = a * sc;                 // FMUL / FMULX
+                            r = arm_fp_binop(opc == 13 ? ArmFpOp::MulX : ArmFpOp::Mul, a, sc);
                         } else {
-                            r = std::fma(opc == 1 ? a : -a, sc, d); // fused FMLA / FMLS
+                            r = arm_fp_muladd(d, opc == 1 ? a : fp_neg(a), sc);
                         }
                         uint32_t rb;
                         memcpy(&rb, &r, 4);

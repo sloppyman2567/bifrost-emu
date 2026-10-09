@@ -10,6 +10,33 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Native vector FP NaNs and exceptional arithmetic (2026-10-09)
+
+The fixed JIT passes **308/308** strict tests with IR validation. The interpreter
+passes **300/300**, with eight JIT-only skips. These counts describe the local
+working tree, including its separate CPU-topology changes. Differential replay
+passes **74 fixtures**, with **six threaded oracle runs**; the runner selects
+`no-trap` for the Android semantics fixture and uses the concurrent host-fault
+fixture's own oracle, since shared-memory replay is unsupported.
+
+`jit_simd_fp_nan` passes **33/33** against QEMU, JIT, interpreter, cache opt-out,
+no-FMA, Tier-2/threaded mode, and register/memory verification with allocation
+checks. A temporary build forcing JIT CPU detection to SSE2 also passes all 33
+with verification. This tests the MOVMSK fallback without requiring old host
+libraries; the installed host libraries fault before startup under a Core 2
+QEMU CPU model. All five MT gate modes pass, and the captured Doom instruction
+harness passes **20,000** comparisons with no mismatches or IR fallbacks.
+
+The installed SpongeBob app reaches all nine framework/app checkpoints and
+`onCreate` in **17.5 s**, without a guest failure. This headless probe presents
+zero frames and does not validate gameplay or the long loading screen.
+
+The finite indexed-FMUL/FNEG benchmark retains correct output. Seven alternating
+before/after runs give median **9.163 → 9.837 ms** in single-threaded mode and
+**49.944 → 57.310 ms** after entering sticky MT mode: about **7%/15% more time**
+for the semantic guards. These are isolated throughput costs, not gameplay FPS.
+Finite arithmetic remains native, but this correctness fix has a measured cost.
+
 ### JIT invalidation and cached vector code generation (2026-10-09)
 
 The JIT unit suite with IR validation passes **128/128**, including the
@@ -226,11 +253,13 @@ Focused additions:
   with a committed piece (under 2 s), a memfd seen through a 2 TiB and a low
   MAP_SHARED view, MADV_DONTNEED and mremap growth above 4 GiB. Passes
   natively; the previous binary fails the 1 TiB reservation (64 GiB cap).
-- `jit_simd_fp_nan` (`INTERP` row, run with `--no-jit`): vector FP NaN
-  choice and SNaN priority, +qNaN for invalid operations, FMAX/FMIN signed
-  zero, FMAXNM/FMINNM with a quiet NaN, fused FMLA, FMLS negation, FMULX
-  inf*0, FABD NaN sign, FADDP pairs, two `.2d` cases. 14/14 under
-  qemu-aarch64 and the fixed interpreter; the old interpreter fails 11.
+- `jit_simd_fp_nan`: vector FP NaN choice and SNaN priority, +qNaN for
+  invalid operations, signed zeros, fused FMLA/FMLS, FMULX inf*0, FABD and
+  FADDP, plus cached high-register aliases, indexed operations, Q=0 inactive
+  NaNs and a loop-carried source/NZCV check. All 33 expected results are
+  checked against QEMU. The fixture is selected in both engine modes;
+  `--mt` enters sticky multithreaded JIT mode. The old JIT fails 9 of the
+  original 14 checks. Coverage excludes complete FPCR/FPSR and trap semantics.
 - `jit_msr_nzcv`: `msr nzcv, xN` followed in the same block by a write to
   xN, read back with `mrs` and with `cset` after a pending `cmp`; 64000
   checks. The old JIT fails 30005; qemu-aarch64 and both engines pass.

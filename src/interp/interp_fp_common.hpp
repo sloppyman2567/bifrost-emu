@@ -1,7 +1,8 @@
 // interp/interp_fp_common.hpp — helpers shared by the FP/SIMD interpreter
 // files (interp_fp.cpp, interp_simd_*.cpp, interp_fp_scalar.cpp).
 //
-// Private to src/interp/. Everything here is static inline so each
+// Also used by JIT native SIMD helpers for matching ARM FP special cases.
+// Everything here is static inline so each
 // translation unit gets its own copy, as when they lived in interp_fp.cpp.
 #pragma once
 #include "core/emulator.h"

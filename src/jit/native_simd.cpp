@@ -1,5 +1,6 @@
 #include "jit/native_simd.hpp"
 #include "core/cpu.h"
+#include "interp/interp_fp_common.hpp"
 #include <cmath>
 #include <cstring>
 namespace arm64emu {
@@ -151,7 +152,7 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
         for(unsigned i=0;i<bytes/size;i++) put(out,i,size,get(d,i,size)+get(n,i,size)*get(m,i,size));
     } else if constexpr(K==NativeSimdKind::IndexedFma) {
         unsigned lane=((w>>21)&1)|(((w>>11)&1)<<1); float value=fp<float>(m,lane);
-        for(unsigned i=0;i<bytes/4;i++) put_fp(out,i,std::fma(fp<float>(n,i),value,fp<float>(d,i)));
+        for(unsigned i=0;i<bytes/4;i++) put_fp(out,i,arm_fp_muladd(fp<float>(d,i),fp<float>(n,i),value));
     }
     write(cpu,rd,out);
 }

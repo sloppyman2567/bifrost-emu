@@ -223,8 +223,10 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
-                // Self-loop: keep the original dead epilogue (store PC,
-                // restore regs, ret) — harmless, never executed.
+                // Verification disables the loop jump and reaches this exit.
+                // Commit the iteration without consuming fall-through dirtiness.
+                flush_all_vregs_keep();
+                vec_cache_writeback_all(false);
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
                 emit_load(RSI, RBP, emu_slot_off());
@@ -296,8 +298,10 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
-                // Self-loop: keep the original dead epilogue — harmless,
-                // never executed (self-loop jmp goes straight to the body).
+                // Verification disables the loop jump and reaches this exit.
+                // Commit the iteration without consuming fall-through dirtiness.
+                flush_all_vregs_keep();
+                vec_cache_writeback_all(false);
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
                 emit_load(RSI, RBP, emu_slot_off());
@@ -430,8 +434,10 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
-                // Self-loop: keep the original dead epilogue (store PC,
-                // restore regs, ret) — harmless, never executed.
+                // Verification disables the loop jump and reaches this exit.
+                // Commit the iteration without consuming fall-through dirtiness.
+                flush_all_vregs_keep();
+                vec_cache_writeback_all(false);
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
                 emit_load(RSI, RBP, emu_slot_off());

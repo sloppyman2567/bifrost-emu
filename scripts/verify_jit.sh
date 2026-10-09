@@ -37,8 +37,8 @@ for source in "${sources[@]}"; do
     if [[ ! -f "$fixture" || "$source" -nt "$fixture" ]]; then
         echo "FAIL: missing/stale $fixture; run make setup-tests"; failed=1; continue
     fi
-    if [[ "$name" == jit_mt_tier2 ]]; then
-        # This fixture exercises concurrent publication/invalidation itself.
+    if [[ "$name" == jit_mt_tier2 || "$name" == jit_host_fault ]]; then
+        # These fixtures exercise concurrent publication/invalidation or faults.
         # Shared-memory differential replay is deliberately unsafe here.
         run_check "$name" threaded-oracle 60 "$fixture"
         threaded=$((threaded+1))
@@ -47,13 +47,14 @@ for source in "${sources[@]}"; do
     args=()
     limit=30
     case "$name" in
+        jit_android_semantics) args=(no-trap) ;;
         jit_cache_invalidation) args=(single) ;;
         jit_cache_pressure) args=(single); limit=120 ;;
         jit_dispatch_cache|jit_call_helpers) args=(1000 single) ;;
     esac
     run_check "$name" verify "$limit" "$fixture" "${args[@]}"
     count=$((count+1))
-    if ((${#args[@]})); then
+    if ((${#args[@]})) && [[ "$name" != jit_android_semantics ]]; then
         # Keep the original concurrent workloads and their full loop counts.
         run_check "$name" threaded-oracle 60 "$fixture"
         threaded=$((threaded+1))

@@ -7,21 +7,21 @@
 //
 // The interpreter used host C++ arithmetic, so the NaN it returned depended
 // on how GCC ordered the operands. Expected values match qemu-aarch64.
-// The JIT's native vector FP still uses x86 NaN rules, so the suite runs
-// this test in the interpreter only (INTERP row).
+// Native JIT exceptional paths must preserve operands, aliases and loop state.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 
 static int failures, checks;
 
 #define OP_S(insn, d, a, b)                                                   \
-    __asm__ volatile("ldr q0, [%1]\n ldr q1, [%2]\n ldr q2, [%0]\n" insn       \
-                     " v2.4s, v0.4s, v1.4s\n str q2, [%0]\n"                   \
+    __asm__ volatile("b 1f\n 1: ldr q0, [%1]\n ldr q1, [%2]\n ldr q2, [%0]\n" insn       \
+                     " v2.4s, v0.4s, v1.4s\n str q2, [%0]\n b 2f\n 2:"                   \
                      :: "r"(d), "r"(a), "r"(b) : "v0", "v1", "v2", "memory")
 #define OP_D(insn, d, a, b)                                                   \
-    __asm__ volatile("ldr q0, [%1]\n ldr q1, [%2]\n ldr q2, [%0]\n" insn       \
-                     " v2.2d, v0.2d, v1.2d\n str q2, [%0]\n"                   \
+    __asm__ volatile("b 1f\n 1: ldr q0, [%1]\n ldr q1, [%2]\n ldr q2, [%0]\n" insn       \
+                     " v2.2d, v0.2d, v1.2d\n str q2, [%0]\n b 2f\n 2:"                   \
                      :: "r"(d), "r"(a), "r"(b) : "v0", "v1", "v2", "memory")
 
 static void expect_s(const char* what, const uint32_t* got, const uint32_t* want) {
@@ -51,7 +51,12 @@ static void expect_d(const char* what, const uint64_t* got, const uint64_t* want
 #define NZ  0x80000000u
 #define DN  0x7FC00000u   // ARM default NaN
 
-int main(void) {
+static void *worker(void *arg) { return arg; }
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--mt")) {
+        pthread_t thread;
+        if (pthread_create(&thread, 0, worker, 0) || pthread_join(thread, 0)) return 2;
+    }
     uint32_t a[4], b[4], d[4];
     #define S4(x0, x1, x2, x3, arr) do { arr[0] = x0; arr[1] = x1; arr[2] = x2; arr[3] = x3; } while (0)
 
@@ -114,6 +119,61 @@ int main(void) {
     uint64_t eb[2] = {0x7FF8000000000004ull, 0x0000000000000000ull};
     OP_D("fmax", dd, ea, eb);
     { uint64_t w[2] = {0x7FF8000000000003ull, 0}; expect_d("fmax.2d", dd, w); }
+
+    // Pin high guest registers, force cached blocks, and hit the cold path
+    // with Vd == Vn / Vd == Vm. Q=0 must discard high NaNs and clear v_hi.
+    #define ALIAS(insn, rd, rn, rm, form, suffix, w0, w1, w2, w3) do { \
+        uint32_t x[4] = {QN1, SN3, INF, NZ}, y[4] = {QN2, ONE, 0, 0}; \
+        uint32_t acc[4] = {SN3, QN2, INF, NZ}, out[4] = {0}; \
+        uint32_t want[4] = {w0, w1, w2, w3}; \
+        __asm__ volatile("b 1f\n 1: ldr q26,[%0]\n ldr q31,[%1]\n ldr q27,[%2]\n" \
+                         insn " v" #rd "." form ",v" #rn "." form ",v" #rm suffix \
+                         "\n str q" #rd ",[%3]\n b 2f\n 2:" \
+                         :: "r"(x), "r"(y), "r"(acc), "r"(out) \
+                         : "v26", "v27", "v31", "memory"); \
+        expect_s(insn " alias " #rd " " form suffix, out, want); \
+    } while (0)
+    ALIAS("fadd",26,26,31,"4s",".4s", QN1,0x7FC00003u,INF,0);
+    ALIAS("fadd",31,26,31,"4s",".4s", QN1,0x7FC00003u,INF,0);
+    ALIAS("fadd",31,31,31,"2s",".2s", QN2,0x40000000u,0,0);
+    ALIAS("fmul",31,26,31,"4s",".4s", QN1,0x7FC00003u,DN,NZ);
+    ALIAS("fmla",26,26,31,"4s",".4s", QN1,0x7FC00003u,DN,NZ);
+    ALIAS("fmls",31,26,31,"4s",".4s", QN2,0xFFC00003u,DN,0);
+    ALIAS("fmul",31,26,31,"4s",".s[1]", QN1,0x7FC00003u,INF,NZ);
+    ALIAS("fmulx",31,26,31,"4s",".s[2]", QN1,0x7FC00003u,0x40000000u,NZ);
+    ALIAS("fmla",27,26,31,"4s",".s[2]", 0x7FC00003u,0x7FC00003u,DN,NZ);
+    ALIAS("fmls",27,26,31,"4s",".s[1]", 0x7FC00003u,0xFFC00003u,DN,0);
+    #undef ALIAS
+
+    // Both numeric zero orders, and inactive high NaNs, on the native path.
+    S4(0,NZ,QN1,SN3,a); S4(NZ,0,SN3,QN2,b);
+    OP_S("fmaxnm",d,a,b);
+    { uint32_t w[4]={0,0,0x7FC00003u,0x7FC00003u}; expect_s("maxnm zeros",d,w); }
+    OP_S("fminnm",d,a,b);
+    { uint32_t w[4]={NZ,NZ,0x7FC00003u,0x7FC00003u}; expect_s("minnm zeros",d,w); }
+    S4(ONE,ONE,QN1,SN3,a); S4(ONE,ONE,SN3,QN2,b);
+    __asm__ volatile("b 1f\n 1: ldr q26,[%0]\n ldr q31,[%1]\n fadd v26.2s,v26.2s,v31.2s\n str q26,[%2]\n b 2f\n 2:"
+                     ::"r"(a),"r"(b),"r"(d):"v26","v31","memory");
+    { uint32_t w[4]={0x40000000u,0x40000000u,0,0}; expect_s("Q0 inactive NaNs",d,w); }
+
+    // A source written AFTER the guard is dirty on the next self-loop trip.
+    // The slow path must commit that carried value and live GPR/NZCV state.
+    S4(QN1,SN3,INF,0,a); S4(ONE,ONE,ONE,ONE,b);
+    uint64_t flags = 0;
+    #define LOOP(backedge) do { \
+        __asm__ volatile("ldr q0,[%0]\n ldr q1,[%1]\n mov v2.16b,v1.16b\n mov x9,#2\n b 1f\n" \
+                         "1: cmp x9,#1\n fadd v3.4s,v2.4s,v1.4s\n cset x10,eq\n mov v2.16b,v0.16b\n" \
+                         "sub x9,x9,#1\n" backedge "\n str q3,[%2]\n str x10,[%3]" \
+                         ::"r"(a),"r"(b),"r"(d),"r"(&flags) \
+                         :"v0","v1","v2","v3","x9","x10","cc","memory"); \
+        uint32_t w[4]={QN1,0x7FC00003u,INF,ONE}; \
+        expect_s("loop carried " backedge,d,w); \
+        ++checks; if (flags != 1) { ++failures; puts("FAIL cold-path NZCV"); } \
+    } while (0)
+    LOOP("cbnz x9,1b");
+    LOOP("tbnz x9,#0,1b");
+    LOOP("b.ne 1b");
+    #undef LOOP
 
     if (failures) {
         printf("%d/%d checks failed\n", failures, checks);

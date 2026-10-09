@@ -114,6 +114,27 @@ static void build_pair_masks(int esize, bool q,
 // The case bodies below are verbatim from jit_codegen_fp.cpp ()
 // — no logic changes, just moved to a separate file/method.
 bool FrostJIT::compile_ir_simd(const IRInst& inst) {
+    // Scratch vectors are assembled completely before a tentative FP result
+    // is committed. A NaN exit must see the original instruction's inputs.
+    auto load_fp_vector = [&](int xmm, int v, bool q) {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+        emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
+        if (q) {
+            emit_byte(0x0F); emit_byte(0x16);
+            emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
+        }
+    };
+    auto store_fp_vector = [&](int v, bool q) {
+        emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+        emit_modrm_disp(0, CPU_REG, V_LO_OFF + v * 8);
+        if (q) {
+            emit_byte(0x0F); emit_byte(0x17);
+            emit_modrm_disp(0, CPU_REG, V_HI_OFF + v * 8);
+        } else {
+            emit_push(RAX); emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, V_HI_OFF + v * 8, RAX); emit_pop(RAX);
+        }
+    };
     // ── Local emit helpers for the memory-path SIMD ops (1.5.4-alpha) ──
     // The ops below (SIMD_2REG/CVTF/ADDP/XTN/TBL/INS) are NOT in
     // vec_cache_compatible_op, so the vec cache is never active in their
@@ -536,250 +557,119 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         }
         case IROp::SIMD_FP_ARITH: {
             const SimdFpArithParams fp = inst.fp_arith_params();
-            uint8_t opc = fp.subop;
-            int esize = static_cast<int>(fp.esize);
-            bool Q = fp.q;
-            bool is_double = (esize == 8);
+            const int esize = fp.esize;
+            const bool Q = fp.q, is_double = esize == 8;
             if (esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
+            }
+            const bool minmax = fp.subop >= 4 && fp.subop <= 7;
+            const bool abd = fp.subop == 0xD;
+            uint8_t opcode;
+            switch (fp.subop) {
+                case 0: opcode = 0x58; break;
+                case 1: case 0xD: opcode = 0x5C; break;
+                case 2: case 0xB: opcode = 0x59; break;
+                case 3: opcode = 0x5E; break;
+                case 4: case 6: opcode = 0x5F; break;
+                case 5: case 7: opcode = 0x5D; break;
+                default: emit_call_interp(inst.arm_pc, false); return true;
+            }
+            clobber_flags();
+            const int xd = vec_xmm(inst.dest), xn = vec_xmm(inst.src1), xm = vec_xmm(inst.src2);
+            const bool cached = xd >= 0 && xn >= 0 && xm >= 0;
+            int a = xn, b = xm;
+            if (!cached) {
+                load_fp_vector(0, inst.src1, Q);
+                load_fp_vector(2, inst.src2, fp.lane >= 0 || Q);
+                a = 0; b = 2;
             }
             if (fp.lane >= 0) {
-                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
-                    xs2 = vec_xmm(inst.src2);
-                if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
-                    // Snapshot the selected lane before writing Vd: Vd may
-                    // alias either source, including the scalar source.
-                    if (is_double) {
-                        emit_vex3(1, false, xs2, 1, 0, xs2, true,
-                                  fp.lane == 0 ? 0x14 : 0x15); // vunpckl/hpd
+                // Broadcast BEFORE touching any destination (including aliases).
+                if (cached) {
+                    emit_vex3(1, false, is_double ? b : 0, 1, 2, b, true,
+                              is_double ? (fp.lane ? 0x15 : 0x14) : 0x70);
+                } else {
+                    if (!is_double) {
+                        emit_byte(0x66); emit_byte(0x0F); emit_byte(0x70); emit_byte(0xD2);
                     } else {
-                        emit_vex3(1, false, 0, 1, 0, xs2, true, 0x70); // vpshufd
-                        emit_byte(fp.lane * 0x55);
+                        emit_byte(0x66); emit_byte(0x0F); emit_byte(fp.lane ? 0x15 : 0x14); emit_byte(0xD2);
                     }
-                    emit_vex_fp_binop(xd, xs1, 0, 0x59, is_double);
-                    if (!Q) emit_vec_zero_upper(xd);
-                    vec_cache_mark_dirty(inst.dest);
-                    return true;
                 }
-                clobber_flags(); flush_invalidate_host_regs(1u << RAX);
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.src1*8);
-                if (Q) {
-                    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                    emit_modrm_disp(1,CPU_REG,V_HI_OFF + inst.src1*8);
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC1);
-                }
-                int offset = fp.lane * esize;
-                int base = offset < 8 ? V_LO_OFF : V_HI_OFF;
-                emit_byte(is_double ? 0xF2 : 0xF3); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1,CPU_REG,base + inst.src2*8 + offset%8);
-                if (is_double) { emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC9); }
-                else { emit_byte(0x66); emit_byte(0x0F); emit_byte(0x70); emit_byte(0xC9); emit_byte(0); }
-                if (is_double) emit_byte(0x66);
-                emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1); // mulps/pd
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-                emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.dest*8);
-                if (Q) {
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73); emit_byte(0xD8); emit_byte(8);
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-                    emit_modrm_disp(0,CPU_REG,V_HI_OFF + inst.dest*8);
-                } else { emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,V_HI_OFF + inst.dest*8,RAX); }
-                return true;
+                if (!is_double) emit_byte(fp.lane * 0x55);
+                b = 2;
             }
-            // Map opcode to SSE op byte.
-            //   single: 0F 58 addps, 5C subps, 59 mulps, 5E divps, 5D minps, 5F maxps
-            //   double: 66 0F 58 addpd, 5C subpd, 59 mulpd, 5E divpd, 5D minpd, 5F maxpd
-            uint8_t op_byte = 0;
-            bool is_sub_for_fabd = false;
-            switch (opc) {
-                case 0: op_byte = 0x58; break;  // add
-                case 1: op_byte = 0x5C; break;  // sub
-                case 2: case 0xB: op_byte = 0x59; break;  // mul / fmulx
-                case 3: op_byte = 0x5E; break;  // div
-                // FMAX/FMIN propagate nan but maxps/minps suppress it
-                // (numnum = FMAXNM). Route via interp like scalar.
-                case 4: case 5:
-                    emit_call_interp(inst.arm_pc, false);
-                    return true;
-                case 6: op_byte = 0x5F; break;  // maxnm
-                case 7: op_byte = 0x5D; break;  // minnm
-                case 0xD: op_byte = 0x5C; is_sub_for_fabd = true; break;  // fabd
-                default:
-                    emit_call_interp(inst.arm_pc, false);
-                    return true;
-            }
-            // ── Vector cache fast path (1.5.4-alpha) ──────────────
-            // Same single-VEX-instruction trick as SIMD_FP_FMA: when all
-            // three operands are pinned in host XMM regs, the whole
-            // 128-bit vector op is one vaddps/pd-family instruction.
-            {
-                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
-                    xs2 = vec_xmm(inst.src2);
-                if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
-                    clobber_flags();
-                    if (is_sub_for_fabd) {
-                        // vsubps/pd then clear sign bits (vandps with mask).
-                        emit_vex_fp_binop(xd, xs1, xs2, 0x5C, is_double);
-                        emit_vec_sign_mask(esize, true);
-                        emit_vex_fp_binop(xd, xd, 0, 0x54, is_double);
-                    } else {
-                        emit_vex_fp_binop(xd, xs1, xs2, op_byte, is_double);
-                    }
-                    if (!Q) emit_vec_zero_upper(xd);
-                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
-                    return true;
-                }
-            }
-            clobber_flags();
-            flush_invalidate_host_regs((1u << RAX));
-            auto emit_fp_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
-                // movq xmm0, [rbx+off1] — load the 8-byte chunk (2 floats
-                // or 1 double) into the low 64 bits of xmm0, zero upper.
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                emit_modrm_disp(0, CPU_REG, off1);
-                // load src2 chunk into xmm1
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                emit_modrm_disp(1, CPU_REG, off2);
-                // op: xmm0 = xmm0 OP xmm1 (packed; upper 64 are zero and
-                // only the low 64 are stored back, so unused lanes are OK)
-                if (is_double) emit_byte(0x66);
-                emit_byte(0x0F); emit_byte(op_byte);
-                emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
-                if (is_sub_for_fabd) {
-                    // FABD: clear the sign bit of each lane. Single clears
-                    // bit 31 of each 32-bit lane (mask 0x7FFF...7FFF);
-                    // double clears bit 63. Load mask into xmm1 via RAX.
-                    uint64_t mask = is_double ? 0x7FFFFFFFFFFFFFFFULL
-                                              : 0x7FFFFFFF7FFFFFFFULL;
-                    emit_mov_imm64(RAX, mask);
-                    // movq xmm1, rax
-                    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E);
-                    emit_byte(0xC8);
-                    // andps (0F 54) / andpd (66 0F 54)
+            if (minmax) {
+                // x86 MIN/MAX can hide a NaN by selecting its second input.
+                // Test both inputs, rather than just the tentative result.
+                if (cached) emit_vex_fp_binop(1, a, b, 0xC2, is_double);
+                else {
+                    emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC8);
                     if (is_double) emit_byte(0x66);
-                    emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC1);
+                    emit_byte(0x0F); emit_byte(0xC2); emit_byte(0xCA);
                 }
-                // movq [rbx+offd], xmm0 — store the low 8 bytes.
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-                emit_modrm_disp(0, CPU_REG, offd);
-            };
-            int32_t o1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t o1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t o2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t o2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t odlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t odhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_fp_chunk(o1lo, o2lo, odlo);
-            if (Q) {
-                emit_fp_chunk(o1hi, o2hi, odhi);
-            } else {
-                // Zero v_hi[dest] for Q=0 (64-bit result).
-                emit_mov_imm32_zext(RAX, 0);
-                emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+                emit_byte(3); // unordered
             }
+            if (cached) emit_vex_fp_binop(0, a, b, opcode, is_double);
+            else {
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(opcode); emit_byte(0xC2);
+            }
+            if (minmax) {
+                // Equal signed zeros also differ between ARM and x86. A zero
+                // result takes the same cold path; other finite results stay native.
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF); emit_byte(0xD2);
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0xC2); emit_byte(0xD0); emit_byte(0);
+                emit_byte(0x0F); emit_byte(0x56); emit_byte(0xCA); // orps xmm1,xmm2
+            }
+            const size_t special_done = emit_simd_fp_nan_guard(inst, esize, Q, minmax);
+            if (abd) {
+                // The guard sees the subtraction's NaN before clearing its sign.
+                // XMM0 must retain the result while XMM2 holds the packed mask.
+                emit_push(RAX);
+                emit_mov_imm64(RAX, is_double ? 0x7FFFFFFFFFFFFFFFULL : 0x7FFFFFFF7FFFFFFFULL);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xD0);
+                emit_pop(RAX);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xD2);
+                emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC2);
+            }
+            if (cached) {
+                emit_vex3(1, false, 0, 0, xd, 0, true, 0x28); // vmovaps
+                if (!Q) emit_vec_zero_upper(xd);
+                vec_cache_mark_dirty(inst.dest);
+            } else store_fp_vector(inst.dest, Q);
+            patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
             return true;
         }
-        // ── SIMD FP fused 3-source (FMLA/FMLS) ───────────────────────
-        // dest = dest ± src1*src2 per lane. Packed SSE: for each 8-byte
-        // chunk, dest += src1*src2 (mul then add/sub). width = element
-        // size (4=float via *ps, 8=double via *pd); flags_op = Q.
-        // imm: 0=FMLA (+), 1=FMLS (-).
         case IROp::SIMD_FP_FMA: {
             const SimdSubopParams fp = inst.fp_fma_params();
-            int esize = static_cast<int>(fp.esize);
-            bool Q = fp.q;
-            bool is_double = (esize == 8);
-            bool is_sub = (fp.subop == 1);
-            if (esize != 4 && esize != 8) {
+            const int esize = fp.esize;
+            const bool Q = fp.q, is_double = esize == 8;
+            if ((esize != 4 && esize != 8) || !has_fma3()) {
+                // Multiplication followed by addition is not a fused operation.
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            // ── Vector cache fast path (1.5.4-alpha) ──────────────
-            // When v_lo/v_hi of dest/src1/src2 are all pinned in host XMM
-            // regs (vec_cache_active_ from the block pre-scan), the whole
-            // 128-bit vector is processed in ONE fused VEX instruction —
-            // a single vfmadd231ps/pd replaces the old 8 memory ops
-            // (2 loads + fma + store per 64-bit half). The accumulator
-            // stays in XMM across self-loop iterations (prologue skipped).
-            {
-                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
-                    xs2 = vec_xmm(inst.src2);
-                if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
-                    clobber_flags();
-                    emit_vex_fma(xd, xs1, xs2, is_double, is_sub);
-                    if (!Q) emit_vec_zero_upper(xd);
-                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
-                    return true;
-                }
-            }
             clobber_flags();
-            // SIMD_FP_FMA uses only RAX (the Q=0 v_hi zero below); the FMA3
-            // and non-FMA3 chunks are XMM-only. Narrow the flush to RAX.
-            flush_invalidate_host_regs(1u << RAX);
-            auto emit_fma_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
-                if (has_fma3()) {
-                    // ── FMA3 native (single-rounded, IEEE 754-correct) ──
-                    // Load the destination accumulator (Vd) into XMM0 and the
-                    // first source (Vn) into XMM1; Vm is a memory operand.
-                    //   FMLA: vfmadd231ps/pd xmm0, xmm1, [off2]
-                    //           xmm0 = xmm0 + xmm1*Vm   (fused, 1 round)
-                    //   FMLS: vfnmadd231ps/pd xmm0, xmm1, [off2]
-                    //           xmm0 = xmm0 - xmm1*Vm   (fused, 1 round)
-                    // VEX.NDS.128.66.0F38: byte1=0xE2 (R~=X~=B~=1, map 0F38),
-                    //   byte2 = W<<7 | (~vvvv)<<3 | L<<2 | pp where vvvv~ =
-                    //   ~1 = 1110 (NDS=xmm1), L=0, pp=01 (66). Opcode 0xB8
-                    //   (vfmadd231ps/pd) / 0xBC (vfnmadd231ps/pd). W picks
-                    //   single (0) vs double (1). The m128 memory operand
-                    //   reads 16 bytes but only the low 8 are used (upper
-                    //   lanes of the packed op are discarded on the 8-byte
-                    //   store back); the read stays inside the CPU struct.
-                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                    emit_modrm_disp(0, CPU_REG, offd);  // movsd xmm0, [rbx+offd]
-                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                    emit_modrm_disp(1, CPU_REG, off1);  // movsd xmm1, [rbx+off1]
-                    emit_byte(0xC4); emit_byte(0xE2);
-                    emit_byte(is_double ? 0xF1 : 0x71);  // W | 0x70 | 0x01
-                    emit_byte(is_sub ? 0xBC : 0xB8);
-                    emit_modrm_disp(0, CPU_REG, off2);   // vf[n]madd231ps/pd xmm0, xmm1, [rbx+off2]
-                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
-                    emit_modrm_disp(0, CPU_REG, offd);  // movsd [rbx+offd], xmm0
-                    return;
-                }
-                // movsd xmm0, [rbx+offd]  (dest accumulator)
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, offd);
-                // movsd xmm1, [rbx+off1]
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1, CPU_REG, off1);
-                // movsd xmm2, [rbx+off2]
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(2, CPU_REG, off2);
-                // mulps/mulpd xmm1, xmm2
-                if (is_double) emit_byte(0x66);
-                emit_byte(0x0F); emit_byte(0x59); emit_byte(0xCA);  // modrm(3, xmm1, xmm2)
-                // addps/addpd (or subps/subpd) xmm0, xmm1
-                if (is_double) emit_byte(0x66);
-                emit_byte(0x0F);
-                emit_byte(is_sub ? 0x5C : 0x58);
-                emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
-                // movsd [rbx+offd], xmm0
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
-                emit_modrm_disp(0, CPU_REG, offd);
-            };
-            int32_t o1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t o1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t o2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t o2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t odlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t odhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_fma_chunk(o1lo, o2lo, odlo);
-            if (Q) {
-                emit_fma_chunk(o1hi, o2hi, odhi);
+            const int xd = vec_xmm(inst.dest), xn = vec_xmm(inst.src1), xm = vec_xmm(inst.src2);
+            const bool cached = xd >= 0 && xn >= 0 && xm >= 0;
+            if (cached) {
+                emit_vex3(1, false, 0, 0, 0, xd, true, 0x28);
+                emit_vex_fma(0, xn, xm, is_double, fp.subop == 1);
             } else {
-                emit_mov_imm32_zext(RAX, 0);
-                emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+                load_fp_vector(0, inst.dest, Q);
+                load_fp_vector(1, inst.src1, Q);
+                load_fp_vector(2, inst.src2, Q);
+                emit_vex_fma(0, 1, 2, is_double, fp.subop == 1);
             }
+            const size_t special_done = emit_simd_fp_nan_guard(inst, esize, Q);
+            if (cached) {
+                emit_vex3(1, false, 0, 0, xd, 0, true, 0x28);
+                if (!Q) emit_vec_zero_upper(xd);
+                vec_cache_mark_dirty(inst.dest);
+            } else store_fp_vector(inst.dest, Q);
+            patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
             return true;
         }
         // ── SIMD CMP (integer lane-wise compare) ─────────────────────

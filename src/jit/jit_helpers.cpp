@@ -163,6 +163,67 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
         patch_jcc_rel32(bypass_pages, static_cast<int32_t>(code_buf_used_ - (bypass_pages + 6)));
     if (!recoverable) { emit_pop(RDX); emit_pop(RCX); emit_pop(RAX); }
 }
+// XMM0 holds a tentative packed FP result; architectural inputs are intact.
+// A rare ARM-semantic step preserves all live GPRs and reloads pinned vectors.
+// Return its jump patch: the caller must skip the native result's commit on
+// this path. Neither path changes compile-time mappings or dirty flags.
+size_t FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready) {
+    if (!mask_ready) {
+        if (has_fma3()) {
+            emit_vex_fp_binop(1, 0, 0, 0xC2, esize == 8);
+            emit_byte(3); // vcmpunordps/pd xmm1,xmm0,xmm0
+        } else {
+            emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC8); // movaps xmm1,xmm0
+            if (esize == 8) emit_byte(0x66);
+            emit_byte(0x0F); emit_byte(0xC2); emit_byte(0xC8); emit_byte(3); // cmpunordps/pd
+        }
+    }
+    if (has_sse41()) {
+        if (!q) {
+            // Inactive lanes may contain NaNs/zeros; only test the low half.
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC9); // movq xmm1,xmm1
+        }
+        emit_byte(0x66); emit_byte(0x0F); emit_byte(0x38); emit_byte(0x17); emit_byte(0xC9); // ptest xmm1,xmm1
+    } else {
+        emit_push(RAX);
+        if (esize == 8) emit_byte(0x66);
+        emit_byte(0x0F); emit_byte(0x50); emit_byte(0xC1); // movmskps/pd eax,xmm1
+        emit_byte(0xA9); emit_u32(q ? (esize == 8 ? 3 : 15) : (esize == 8 ? 1 : 3));
+        emit_pop(RAX); // POP leaves the TEST flags intact.
+    }
+    const size_t hot = emit_jcc_rel32_placeholder(4); // JE: no exceptional lanes
+    flush_all_vregs_keep();
+    for (int v = 0; v < 32; ++v)
+        if (vreg_home_[v] >= 0) emit_store_arm(v, vreg_home_[v]);
+    // Include dirtiness carried from later writes on a previous loop trip.
+    vec_cache_writeback_all_pinned(false);
+    const int saved[] = {RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11};
+    for (int r : saved) emit_push(r);
+    emit_mov_imm64(RAX, inst.arm_pc);
+    emit_store(CPU_REG, PC_OFF, RAX);
+    emit_load(RDI, RBP, emu_slot_off());
+    emit_mov_reg(RSI, CPU_REG);
+    emit_call_aligned(&jit_interp_step, 9);
+    emit_load(RAX, CPU_REG, PC_OFF);
+    emit_mov_imm64(RCX, inst.arm_pc + 4);
+    emit_cmp_reg(RAX, RCX);
+    const size_t resume = emit_jcc_rel32_placeholder(4);
+    // An unexpected decode/fetch fault must leave with the handler's state.
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp,rbp
+    emit_pop(R15); emit_pop(R14); emit_pop(R13);
+    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+    emit_ret();
+    patch_jcc_rel32(resume, static_cast<int32_t>(code_buf_used_ - (resume + 6)));
+    if (vec_cache_active_)
+        for (int i = 0; i < vec_pinned_count_; ++i) {
+            const int v = vec_pinned_[i];
+            vec_emit_load_lo_hi(vec_cache_[v], v);
+        }
+    for (int i = 8; i >= 0; --i) emit_pop(saved[i]);
+    const size_t done = emit_jmp_rel32_placeholder();
+    patch_jcc_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 6)));
+    return done;
+}
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                                 uint16_t src1, uint16_t dest) {

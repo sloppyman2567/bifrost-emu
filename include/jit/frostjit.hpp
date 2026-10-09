@@ -1647,6 +1647,7 @@ private:
     void vec_emit_load_lo_hi(int xmm, int vreg);
     void emit_vec_sign_mask(int esize, bool clear_sign);
     void emit_vec_zero_upper(int xmm);
+    size_t emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready = false);
     // FP-cache-aware operand load/store helpers. When the fp cache is
     // active and the FP reg is pinned, they use reg-reg moves (no memory);
     // otherwise they load/store cpu.v_lo[vreg] exactly as the non-cached

@@ -4,6 +4,39 @@ This guide maps the AArch64-to-x86_64 JIT and records the steps for changing
 instruction support without letting decode, translation, optimization, and
 code generation drift apart.
 
+## Native vector FP special cases
+
+Packed arithmetic computes a tentative result in scratch XMM0 before writing
+Vd. A NaN lane takes a cold ARM-semantic step, retaining the original operands
+and accumulator even when Vd aliases a source. The cold call saves live GPRs,
+commits pinned vectors (including values written later on a previous loop
+iteration), reloads those vectors, and rejoins after the native result's commit.
+Compile-time mappings and dirty flags are preserved on both paths. Q=0 tests
+only active lanes. This permits differential replay of the complete block.
+The hot mask test uses SSE4.1 PTEST when available, with an SSE2 MOVMSK
+fallback. Neither path changes a live GPR. The verifier's one-iteration
+self-loop exits also commit cached state when the normal back-edge is disabled.
+
+MIN/MAX also guard their inputs: x86 can hide a NaN by selecting a numeric
+second operand. Zero results take the cold path to preserve ARM's signed-zero
+ordering. Other finite results remain native. FMLA/FMLS use a single FMA3
+operation; hosts without FMA3 use the fused interpreter operation, rather than
+separate multiply and add. These changes cover NaN priority/payload/sign,
+default NaNs for invalid arithmetic, and FMULX infinity-times-zero results.
+FPCR controls, cumulative FPSR flags and enabled synchronous FP traps remain
+outside this native arithmetic contract.
+
+Indexed interpreter operations use the same ARM helpers; the native indexed
+FMLA helper shares them too. Indexed FMULX has U=1 and the same opcode nibble
+as FMUL. The widening integer absolute-difference handler must match its
+three-different encoding space, not opcode bits alone: indexed FMLS previously
+fell into SABAL and did integer arithmetic on floating-point bit patterns.
+
+References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsimd_vec.html),
+[FMAXNM](https://www.scs.stanford.edu/~zyedidia/arm64/fmaxnm_advsimd.html),
+[FMLA](https://www.scs.stanford.edu/~zyedidia/arm64/fmla_advsimd_vec.html) and
+[FMLS](https://www.scs.stanford.edu/~zyedidia/arm64/fmls_advsimd_vec.html).
+
 ## Android interpreter and generated-code contracts
 
 `BLR` must capture its target before updating X30. ART's nterp uses
@@ -527,7 +560,8 @@ the uncached path passed. `jit_simd_unary_fp` now checks 541 assertions,
 including destination aliases and XMM8-15 encodings; the indexed fixture checks
 all single/double lanes, aliases and Q=0 clearing. Both accept `--mt` to exercise
 the sticky multithreaded JIT mode. These tests do not establish complete Arm
-NaN-selection, FPCR/FPSR or enabled floating-point trap equivalence for native FP.
+FPCR/FPSR or enabled floating-point trap equivalence for native FP. See the
+vector FP special-case contract above for NaN handling.
 
 Encoding and zeroing rules were checked against Intel SDM Volume 2B, MOVQ,
 PSHUFD, UNPCKLPD/UNPCKHPD and SQRTPS/SQRTPD in the

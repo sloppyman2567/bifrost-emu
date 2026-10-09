@@ -80,8 +80,13 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     if (no_vec_cache_) return false;
     if (!has_fma3()) return false;
     bool  vec_used[32] = {};
+    bool  vec_written[32] = {};
     int   used_count = 0;
     for (const IRInst& inst : block.insts) {
+        if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
+            inst.op == IROp::SIMD_FP_UNARY || inst.op == IROp::SIMD_LOGICAL ||
+            inst.op == IROp::SIMD_DUP || inst.op == IROp::SIMD_MOVI || inst.op == IROp::SIMD_ORRIMM)
+            vec_written[inst.dest & 31] = true;
         if (!vec_cache_compatible_op(inst.op)) return false;
         if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
             inst.op == IROp::SIMD_LOGICAL) {
@@ -131,6 +136,7 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
             uint32_t n = lp.count ? lp.count : 1;
             for (uint32_t i = 0; i < n; i++) {
                 int v = (inst.dest + i) & 31;
+                vec_written[v] = true;
                 if (!vec_used[v]) { vec_used[v] = true; used_count++; }
             }
         }
@@ -142,6 +148,7 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     for (int v = 0; v < 32; v++) {
         if (vec_used[v]) {
             vec_cache_[v] = xmm;
+            vec_written_this_block_[v] = vec_written[v];
             vec_xmm_owner_[xmm] = v;
             vec_pinned_[vec_pinned_count_++] = v;
             xmm++;
