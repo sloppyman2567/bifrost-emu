@@ -40,6 +40,36 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(inventory, original)
 
 
+class FrameworkPackageContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from android_managed import build_launcher
+        cls.runtime = ROOT / "build/android-framework/rootfs"
+        cls.art = ROOT / "build/android-art/rootfs"
+        if not (cls.runtime / "system/framework/framework-res.apk").is_file():
+            raise RuntimeError("Package contract tests require tools/android_framework.py provisioning")
+        if not ARGS.emu.is_file():
+            raise RuntimeError("Package contract tests require --emu pointing to a built Bifrost")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="bifrost-package-contract-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        cls.probe = Path(cls.temporary.name) / "probe"
+        build_launcher(cls.probe, [ROOT / "ctest/host/FrameworkPackagesProbe.java"])
+
+    def check_mode(self, mode):
+        from test_android_framework import run
+        output = ROOT / "build/android-framework-package-contract" / mode
+        passed = run(ARGS.emu.resolve(), self.runtime, self.art, self.probe / "classes.dex",
+                     mode, output, 90, services=True, main_class="FrameworkPackagesProbe")
+        self.assertTrue(passed, f"{mode} package contract failed; see {output}")
+        self.assertIn("FRAMEWORK_PACKAGE_CONTRACT_OK", (output / (mode + ".log")).read_text())
+
+    def test_jit(self):
+        self.check_mode("jit")
+
+    def test_interpreter(self):
+        self.check_mode("interp")
+
+
 class HostNetworkTests(unittest.TestCase):
     def test_default_routes_and_offline_profiles(self):
         from android_managed import host_network_available

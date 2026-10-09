@@ -21,6 +21,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import android_framework
 
 PRIORITIES = "??VDIWEFS"
+LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "FrameworkServices.java",
+                    "FrameworkPackages.java", "FrameworkConnectivity.java")
 
 
 def settings_user_key(state, user=0):
@@ -331,12 +333,12 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def build_launcher(output=ROOT / "build/android-managed-launcher"):
+def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources=()):
     """Explicit build step; ordinary app launches never invoke a compiler."""
     output.mkdir(parents=True, exist_ok=True)
     jar = ROOT / "tools/android-tools/android.jar"
     sources = [ROOT / "guest/android" / name for name in
-               ("ManagedLauncher.java", "ActivityProbe.java")]
+               LAUNCHER_SOURCES] + list(extra_sources)
     with tempfile.TemporaryDirectory(prefix=".launcher-", dir=output) as temporary:
         work = Path(temporary)
         classes = work / "classes"
@@ -354,7 +356,7 @@ def build_launcher(output=ROOT / "build/android-managed-launcher"):
 def launcher_dex(directory):
     dex = directory / "classes.dex"
     sources = {name: file_hash(ROOT / "guest/android" / name)
-               for name in ("ManagedLauncher.java", "ActivityProbe.java")}
+               for name in LAUNCHER_SOURCES}
     manifest = directory / "sources.json"
     saved = json.loads(manifest.read_text()) if manifest.is_file() else {}
     if not dex.is_file() or saved.get("sources") != sources or saved.get("dex") != file_hash(dex):

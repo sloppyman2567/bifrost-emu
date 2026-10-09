@@ -175,6 +175,73 @@ References: Android 15
 and Firebase's
 [ComponentDiscovery](https://github.com/firebase/firebase-android-sdk/blob/master/firebase-components/src/main/java/com/google/firebase/components/ComponentDiscovery.java).
 
+### Managed framework service modules (2026-10-09)
+
+The managed launcher separates the local Binder registration into
+[`FrameworkServices.java`](../guest/android/FrameworkServices.java), manifest-backed
+package state into [`FrameworkPackages.java`](../guest/android/FrameworkPackages.java),
+and host-network state and callbacks into
+[`FrameworkConnectivity.java`](../guest/android/FrameworkConnectivity.java).
+`ManagedLauncher` retains Activity lifecycle, windows, input and native wire services.
+The explicit launcher build and freshness check hash every module; after changing
+any of them, run `make android-managed-launcher` before launching an installed app.
+
+The package service now supports receiver/provider component lookup, installed
+package/application enumeration, package-to-UID and UID-to-package queries. This
+profile exposes its one installed APK, including its parsed receivers and splits;
+unknown packages and UIDs remain absent. Queries enforce the installed user and
+`MATCH_SYSTEM_ONLY`. Component replies and package component arrays also honor
+manifest/default/overridden enabled state and explicit direct-boot filters.
+Component state updates reject nonexistent classes, invalid states and foreign
+users; returning to DEFAULT restores the manifest state. Overrides last for this
+launcher process; persistent package settings and package-change broadcasts are
+not implemented.
+
+`getPackageInfo` omits component arrays, signatures, permissions, instrumentation,
+configuration data and GIDs unless their query flags request them. Application
+and component metadata, shared-library information and provider URI patterns
+follow their separate flags. No matching components yields null arrays, as AOSP's
+`ArrayUtils.trimToSize` does. The installed record and query replies cross a
+Parcel copy boundary, so modifying returned arrays, metadata or ApplicationInfo
+cannot change later queries or the launcher's installed snapshot. The local Binder
+proxy implements identity equality/hash codes without sending Object methods to a
+service handler. Unknown service operations still throw explicitly.
+
+Focused regression gate (requires the provisioned Android framework and JDK):
+
+```bash
+make android-managed-launcher
+python3 scripts/test_android_package.py --emu ./bifrost-emu FrameworkPackageContractTests
+```
+
+This compiles `ctest/host/FrameworkPackagesProbe.java` alongside the production
+modules into a separate temporary DEX, then runs the real Android PackageManager
+client in both engines. Results and logs are saved under
+`build/android-framework-package-contract/`. The suite exercises query flags,
+copy isolation including nested arrays, missing entries, receiver/provider and UID
+lookups, installed lists, disabled/default component transitions, direct-boot
+filters and user isolation. It does not start or bind manifest Android Services,
+resolve intent filters, test multiple installed packages/users, or implement a
+system_server. Those remain separate framework work; package metadata support is
+not service execution support.
+
+Observed verification: 51 package contract checks pass in each engine, and the
+related launcher/network/settings/DNS test selection passes 11 tests. The managed
+APK fixture completes three launches with persistent preferences and the expected
+resume/surface/pause/stop/destroy order. SpongeBob's real launcher still reaches
+`onCreate` in JIT mode with 23 services, 19 metadata entries and 13 provider
+authorities checked. Full interpreter ActivityProbe runs still fail in the
+previously documented `FrameworkVsyncProbe0` null-read/vsync path before app
+creation; the focused package gate avoids that unrelated path. These results do
+not establish full framework completion or gameplay.
+
+Reference contracts were checked against Android 15's
+[IPackageManager](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/content/pm/IPackageManager.aidl),
+[PackageInfoUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/parsing/PackageInfoUtils.java),
+[PackageManagerService](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/PackageManagerService.java),
+[PackageUserStateUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/pkg/PackageUserStateUtils.java),
+and [ArrayUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/com/android/internal/util/ArrayUtils.java).
+
 ### Framework display events (2026-10-07)
 
 The Activity launcher profile publishes `SurfaceFlingerAIDL` with the Android 15

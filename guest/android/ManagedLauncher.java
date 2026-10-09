@@ -8,19 +8,14 @@ import android.app.ActivityManager;
 import android.app.Application;
 import android.app.GameManager;
 import android.app.Instrumentation;
-import android.content.ComponentName;
 import android.content.AttributionSource;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.ComponentInfo;
-import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
-import android.content.pm.ServiceInfo;
 import android.content.pm.Signature;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
@@ -28,12 +23,6 @@ import android.graphics.Rect;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.hardware.input.InputManager;
-import android.net.ConnectivityManager;
-import android.net.LinkProperties;
-import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.net.NetworkInfo;
-import android.net.NetworkRequest;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -41,8 +30,6 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Looper;
-import android.os.Message;
-import android.os.Messenger;
 import android.os.Process;
 import android.os.PowerManager;
 import android.os.Parcel;
@@ -74,7 +61,6 @@ import android.system.ErrnoException;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -82,17 +68,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Map;
 import java.util.UUID;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 public final class ManagedLauncher {
+    private static final FrameworkServices services = new FrameworkServices();
+    private static final FrameworkPackages packages = new FrameworkPackages();
+    private static final FrameworkConnectivity connectivity = new FrameworkConnectivity();
     private static boolean diagnostic;
     private static boolean created;
     private static volatile Activity activeActivity;
-    private static final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
     private static volatile boolean windowOpen;
     private static final Map<IBinder, Long> fullyDrawn = new ConcurrentHashMap<>();
     // The package installed by app mode; the only package that exists here.
@@ -102,90 +89,6 @@ public final class ManagedLauncher {
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
     private static Object display;  // the single DisplayInfo the display stub reports
     private static boolean play;
-    // The host launcher snapshots its default route. This virtual Ethernet
-    // network uses host sockets/DNS; it is not a simulated Wi-Fi or modem.
-    private static final boolean hostNetwork = "1".equals(System.getenv("BIFROST_ANDROID_HOST_NETWORK"));
-    private static final AtomicInteger networkRequestId = new AtomicInteger(1);
-    private static final Map<NetworkRequest, Messenger> networkRequests = new ConcurrentHashMap<>();
-    private static Network defaultNetwork;
-    private static NetworkCapabilities hostCapabilities;
-    private static Handler networkHandler;
-
-    private static void prepareNetwork() throws Exception {
-        System.out.println("APP_NETWORK " + (hostNetwork ? "host-default-route" : "offline"));
-        if (!hostNetwork) return;
-        defaultNetwork = Network.class.getConstructor(int.class).newInstance(100);
-        hostCapabilities = new NetworkCapabilities();
-        NetworkCapabilities.class.getMethod("addTransportType", int.class)
-                .invoke(hostCapabilities, NetworkCapabilities.TRANSPORT_ETHERNET);
-        NetworkCapabilities.class.getMethod("addCapability", int.class)
-                .invoke(hostCapabilities, NetworkCapabilities.NET_CAPABILITY_INTERNET);
-        NetworkCapabilities.class.getMethod("addCapability", int.class)
-                .invoke(hostCapabilities, NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED);
-        // Android adds this to ordinary app requests. The host bridge is not
-        // an Android carrier Virtual Carrier Network, so it satisfies it.
-        NetworkCapabilities.class.getMethod("addCapability", int.class).invoke(hostCapabilities,
-                NetworkCapabilities.class.getField("NET_CAPABILITY_NOT_VCN_MANAGED").getInt(null));
-        // Route availability does not establish validation, metering or bandwidth.
-    }
-
-    private static NetworkInfo hostNetworkInfo() throws Exception {
-        if (!hostNetwork) return null;
-        NetworkInfo info = new NetworkInfo(ConnectivityManager.TYPE_ETHERNET, 0, "ETHERNET", "");
-        info.setDetailedState(NetworkInfo.DetailedState.CONNECTED, null, "host default network");
-        NetworkInfo.class.getMethod("setIsAvailable", boolean.class).invoke(info, true);
-        return info;
-    }
-
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private static NetworkRequest networkRequest(Object[] arguments, boolean listen) throws Exception {
-        synchronized (networkRequests) {
-            if (networkHandler == null) {
-                HandlerThread thread = new HandlerThread("BifrostConnectivity");
-                thread.start();
-                networkHandler = new Handler(thread.getLooper());
-            }
-        }
-        NetworkCapabilities need = (NetworkCapabilities) arguments[listen ? 0 : 1];
-        Messenger messenger = (Messenger) arguments[listen ? 1 : 3];
-        Class<? extends Enum> type = (Class<? extends Enum>) Class.forName("android.net.NetworkRequest$Type");
-        Object requestType = listen ? Enum.valueOf(type, "LISTEN") : type.getEnumConstants()[(Integer) arguments[2]];
-        NetworkCapabilities requested = need == null ? new NetworkCapabilities() : new NetworkCapabilities(need);
-        NetworkRequest request = NetworkRequest.class.getConstructor(NetworkCapabilities.class,
-                int.class, int.class, type).newInstance(requested, listen ? -1 : (Integer) arguments[6],
-                networkRequestId.getAndIncrement(), requestType);
-        networkRequests.put(request, messenger);
-        boolean matches = hostNetwork && request.canBeSatisfiedBy(hostCapabilities);
-        if (matches) {
-            // AOSP's AVAILABLE message carries all three values; the real
-            // ConnectivityManager dispatches available/capabilities/link callbacks.
-            networkMessage(request, messenger, "CALLBACK_AVAILABLE");
-        } else if (!listen && (Integer) arguments[4] > 0) {
-            networkHandler.postDelayed(() -> {
-                if (networkRequests.remove(request, messenger)) {
-                    try { networkMessage(request, messenger, "CALLBACK_UNAVAIL"); }
-                    catch (Exception error) { throw new IllegalStateException(error); }
-                }
-            }, (Integer) arguments[4]);
-        }
-        return request;
-    }
-
-    private static void networkMessage(NetworkRequest request, Messenger messenger, String event) throws Exception {
-        if (!event.equals("CALLBACK_UNAVAIL") && !networkRequests.containsKey(request)) return;
-        Message message = Message.obtain();
-        message.what = ConnectivityManager.class.getField(event).getInt(null);
-        Bundle data = new Bundle();
-        data.putParcelable("NetworkRequest", request);
-        if (defaultNetwork != null) {
-            data.putParcelable("Network", defaultNetwork);
-            data.putParcelable("NetworkCapabilities", new NetworkCapabilities(hostCapabilities));
-            data.putParcelable("LinkProperties", new LinkProperties());
-        }
-        message.setData(data);
-        messenger.send(message);
-    }
-
     // guest/android/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
@@ -221,30 +124,6 @@ public final class ManagedLauncher {
             created = true;
             System.out.println("ACTIVITY_CREATED");
         }
-    }
-
-    interface Call {
-        Object invoke(String method, Object[] arguments) throws Exception;
-    }
-
-    // Registers a local implementation of `iface` under `name`.
-    // ServiceManager.getService consults sCache before any Binder lookup.
-    @SuppressWarnings("unchecked")
-    private static Object service(String name, String iface, Call call) throws Exception {
-        Class<?> type = Class.forName(iface);
-        Binder binder = new Binder();
-        Object proxy = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
-                (self, method, arguments) -> {
-                    if (method.getName().equals("asBinder")) return binder;
-                    if (method.getName().equals("toString")) return "Bifrost:" + name;
-                    if (diagnostic) System.out.println("LOCAL_SERVICE " + name + "." + method.getName());
-                    return call.invoke(method.getName(), arguments);
-                });
-        binder.attachInterface((IInterface) proxy, iface);
-        Field cache = Class.forName("android.os.ServiceManager").getDeclaredField("sCache");
-        cache.setAccessible(true);
-        ((Map<String, IBinder>) cache.get(null)).put(name, binder);
-        return proxy;
     }
 
     private static InputDevice virtualKeyboard;
@@ -792,337 +671,8 @@ public final class ManagedLauncher {
         GameManager games = (GameManager) context.getSystemService(Context.GAME_SERVICE);
         if (games == null || games.getGameMode() != GameManager.GAME_MODE_STANDARD)
             throw new AssertionError("game service did not report standard mode");
-        ConnectivityManager connectivity = (ConnectivityManager)
-                context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (connectivity == null) throw new AssertionError("connectivity service unavailable");
-        Network active = connectivity.getActiveNetwork();
-        NetworkInfo info = connectivity.getActiveNetworkInfo();
-        if (hostNetwork != (active != null) || hostNetwork != (info != null && info.isConnected()))
-            throw new AssertionError("active network differs from host route snapshot");
-        if (active != null) {
-            NetworkCapabilities caps = connectivity.getNetworkCapabilities(active);
-            if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
-                throw new AssertionError("host network capabilities incorrect");
-        }
-        CountDownLatch available = new CountDownLatch(1);
-        CountDownLatch unavailable = new CountDownLatch(1);
-        AtomicReference<Network> observed = new AtomicReference<>();
-        ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
-            @Override public void onAvailable(Network network) { observed.set(network); }
-            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) available.countDown();
-            }
-            @Override public void onUnavailable() { unavailable.countDown(); }
-        };
-        connectivity.registerDefaultNetworkCallback(callback);
-        if (hostNetwork && (!available.await(5, TimeUnit.SECONDS) || !active.equals(observed.get())))
-            throw new AssertionError("default network callback missing");
-        CountDownLatch listening = new CountDownLatch(1);
-        ConnectivityManager.NetworkCallback listener = new ConnectivityManager.NetworkCallback() {
-            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) listening.countDown();
-            }
-        };
-        NetworkRequest ethernet = new NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build();
-        if (hostNetwork && !ethernet.canBeSatisfiedBy(hostCapabilities))
-            throw new AssertionError("host capabilities do not satisfy Ethernet: " + ethernet + " vs " + hostCapabilities);
-        connectivity.registerNetworkCallback(ethernet, listener);
-        if (hostNetwork && !listening.await(5, TimeUnit.SECONDS))
-            throw new AssertionError("matching network listener missing");
-        if (!hostNetwork && listening.await(100, TimeUnit.MILLISECONDS))
-            throw new AssertionError("offline network listener was satisfied");
-        if (networkRequests.size() != 2) throw new AssertionError("network request IDs collided");
-        connectivity.unregisterNetworkCallback(callback);
-        if (networkRequests.size() != 1) throw new AssertionError("release removed another network listener");
-        connectivity.unregisterNetworkCallback(listener);
-        if (!networkRequests.isEmpty()) throw new AssertionError("released network request leaked");
-        // This profile has no cellular transport, so do not satisfy that request
-        // with the host network. Its explicit timeout must invoke unavailable.
-        connectivity.requestNetwork(new NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR).build(), callback, 100);
-        if (!unavailable.await(5, TimeUnit.SECONDS) || !networkRequests.isEmpty())
-            throw new AssertionError("unsatisfied network request did not time out");
-        System.out.println("ACTIVITY_CONNECTIVITY_OK " + (hostNetwork ? "host" : "offline"));
+        connectivity.check(context);
         System.out.println("ACTIVITY_GAME_SERVICES_OK");
-    }
-
-    private static final Map<ComponentName, Integer> componentStates = new ConcurrentHashMap<>();
-
-    private static ComponentName ownComponent(Object argument) {
-        ComponentName component = (ComponentName) argument;
-        if (installed == null || !installed.packageName.equals(component.getPackageName()))
-            throw new IllegalArgumentException("Unknown component: " + component);
-        return component;
-    }
-
-    // PackageManagerService returns a manifest ServiceInfo, not a running
-    // service. Firebase discovers its registrars through this metadata.
-    private static boolean componentMatches(ComponentInfo info, long flags, int userId) {
-        PackageInfo pkg = installed;
-        if (pkg == null || userId != pkg.applicationInfo.uid / 100000
-                || !pkg.packageName.equals(info.packageName)) return false;
-        if ((flags & PackageManager.MATCH_SYSTEM_ONLY) != 0
-                && (pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0) return false;
-        int state = componentStates.getOrDefault(new ComponentName(info.packageName, info.name),
-                PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
-        boolean enabled = state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                || (state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && info.enabled);
-        if ((flags & PackageManager.MATCH_DISABLED_COMPONENTS) == 0
-                && (!pkg.applicationInfo.enabled || !enabled)) return false;
-        long bootFlags = flags & (PackageManager.MATCH_DIRECT_BOOT_AWARE
-                | PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
-        // ComputerEngine.updateFlags supplies the defaults server-side.
-        // This profile's user is unlocked, so implicit queries see both.
-        if (bootFlags == 0) bootFlags = PackageManager.MATCH_DIRECT_BOOT_AWARE
-                | PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
-        return (bootFlags & (info.directBootAware ? PackageManager.MATCH_DIRECT_BOOT_AWARE
-                : PackageManager.MATCH_DIRECT_BOOT_UNAWARE)) != 0;
-    }
-
-    private static void installedComponentInfo(ComponentInfo result, long flags) {
-        result.applicationInfo = new ApplicationInfo(installed.applicationInfo);
-        boolean metadata = (flags & PackageManager.GET_META_DATA) != 0;
-        result.metaData = metadata && result.metaData != null ? new Bundle(result.metaData) : null;
-        result.applicationInfo.metaData = metadata && installed.applicationInfo.metaData != null
-                ? new Bundle(installed.applicationInfo.metaData) : null;
-    }
-
-    private static PackageInfo packageInfo(String name, long flags, int userId) {
-        if (installed == null || !installed.packageName.equals(name)
-                || userId != installed.applicationInfo.uid / 100000) return null;
-        // PackageInfo has no copy constructor. Parcel it as the framework's
-        // Binder service does, so callers cannot change the installed record.
-        Parcel parcel = Parcel.obtain();
-        try {
-            installed.writeToParcel(parcel, 0);
-            parcel.setDataPosition(0);
-            PackageInfo result = PackageInfo.CREATOR.createFromParcel(parcel);
-            if ((flags & PackageManager.GET_SIGNATURES) == 0) result.signatures = null;
-            if ((flags & PackageManager.GET_SIGNING_CERTIFICATES) == 0) result.signingInfo = null;
-            if ((flags & PackageManager.GET_PERMISSIONS) == 0) {
-                result.permissions = null;
-                result.requestedPermissions = null;
-                result.requestedPermissionsFlags = null;
-            }
-            return result;
-        } finally {
-            parcel.recycle();
-        }
-    }
-
-    private static ActivityInfo activityInfo(ComponentName component, long flags, int userId) {
-        if (installed == null || !installed.packageName.equals(component.getPackageName())
-                || installed.activities == null) return null;
-        for (ActivityInfo activity : installed.activities) {
-            if (!activity.name.equals(component.getClassName())) continue;
-            if (!componentMatches(activity, flags, userId)) return null;
-            ActivityInfo result = new ActivityInfo(activity);
-            installedComponentInfo(result, flags);
-            return result;
-        }
-        return null;
-    }
-
-    private static void installPermissions(Context system, PackageInfo pkg) {
-        // The single-app profile grants manifest-requested normal permissions
-        // at install time. Runtime and signature grants require services this
-        // profile does not provide; unknown permission names stay denied.
-        PackageInfo platform = system.getPackageManager().getPackageArchiveInfo(
-                "/system/framework/framework-res.apk", PackageManager.GET_PERMISSIONS);
-        if (platform == null || platform.permissions == null)
-            throw new IllegalStateException("platform permission definitions unavailable");
-        Map<String, PermissionInfo> definitions = new java.util.HashMap<>();
-        for (PermissionInfo permission : platform.permissions) definitions.put(permission.name, permission);
-        if (pkg.permissions != null)
-            for (PermissionInfo permission : pkg.permissions) definitions.putIfAbsent(permission.name, permission);
-        grantedPermissions.clear();
-        if (pkg.requestedPermissions == null) return;
-        for (int i = 0; i < pkg.requestedPermissions.length; i++) {
-            String name = pkg.requestedPermissions[i];
-            PermissionInfo definition = definitions.get(name);
-            if (definition != null && (definition.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE)
-                    == PermissionInfo.PROTECTION_NORMAL) {
-                grantedPermissions.add(name);
-                pkg.requestedPermissionsFlags[i] |= PackageInfo.REQUESTED_PERMISSION_GRANTED;
-            }
-        }
-    }
-
-    private static int checkPermission(String permission, int uid, int deviceId) {
-        return permission != null && installed != null && uid == installed.applicationInfo.uid
-                && deviceId == Context.DEVICE_ID_DEFAULT
-                && grantedPermissions.contains(permission)
-                ? PackageManager.PERMISSION_GRANTED : PackageManager.PERMISSION_DENIED;
-    }
-
-    private static ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
-        PackageInfo pkg = installed;
-        if (pkg == null || !pkg.packageName.equals(component.getPackageName()) || pkg.services == null)
-            return null;
-        for (ServiceInfo service : pkg.services) {
-            if (!service.name.equals(component.getClassName())) continue;
-            if (!componentMatches(service, flags, userId)) return null;
-            ServiceInfo result = new ServiceInfo(service);
-            installedComponentInfo(result, flags);
-            return result;
-        }
-        return null;
-    }
-
-    private static ProviderInfo resolveProvider(String authority, long flags, int userId) {
-        if (installed == null || installed.providers == null || authority == null) return null;
-        for (ProviderInfo provider : installed.providers) {
-            if (provider.authority == null
-                    || !Arrays.asList(provider.authority.split(";")).contains(authority)) continue;
-            if (!componentMatches(provider, flags, userId)) return null;
-            ProviderInfo result = new ProviderInfo(provider);
-            installedComponentInfo(result, flags);
-            return result;
-        }
-        return null;
-    }
-
-    private static void checkPackageServices(Context context) throws Exception {
-        PackageManager manager = context.getPackageManager();
-        if (context.checkCallingOrSelfPermission("bifrost.missing.permission") != PackageManager.PERMISSION_DENIED
-                || context.checkPermission("android.permission.INTERNET", Process.myPid(), Process.myUid() + 1)
-                        != PackageManager.PERMISSION_DENIED)
-            throw new AssertionError("permission check granted an unknown permission or foreign UID");
-        for (String permission : grantedPermissions)
-            if (context.checkCallingOrSelfPermission(permission) != PackageManager.PERMISSION_GRANTED)
-                throw new AssertionError("normal install permission missing: " + permission);
-        PackageInfo signing = manager.getPackageInfo(installed.packageName,
-                PackageManager.GET_SIGNATURES | PackageManager.GET_SIGNING_CERTIFICATES);
-        if (signing.signatures == null || signing.signatures.length == 0 || signing.signingInfo == null
-                || !Arrays.equals(signing.signatures, installed.signatures)
-                || !Arrays.equals(signing.signingInfo.getApkContentsSigners(),
-                        installed.signingInfo.getApkContentsSigners()))
-            throw new AssertionError("installed package signing certificates missing");
-        PackageInfo plain = manager.getPackageInfo(installed.packageName, 0);
-        if (plain.signatures != null || plain.signingInfo != null)
-            throw new AssertionError("signing certificates returned without query flags");
-        if (manager.getPackageInfo(installed.packageName, PackageManager.GET_SIGNATURES).signingInfo != null
-                || manager.getPackageInfo(installed.packageName,
-                        PackageManager.GET_SIGNING_CERTIFICATES).signatures != null)
-            throw new AssertionError("legacy and current signing query flags conflated");
-        signing.signatures[0] = null;
-        if (manager.getPackageInfo(installed.packageName, PackageManager.GET_SIGNATURES).signatures[0] == null)
-            throw new AssertionError("signing certificate array aliases package state");
-        int flags = PackageManager.MATCH_DISABLED_COMPONENTS | PackageManager.MATCH_DIRECT_BOOT_AWARE
-                | PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
-        if (installed.activities != null) for (ActivityInfo parsed : installed.activities) {
-            ComponentName component = new ComponentName(installed.packageName, parsed.name);
-            ActivityInfo result = manager.getActivityInfo(component, flags | PackageManager.GET_META_DATA);
-            if (!parsed.name.equals(result.name) || result.applicationInfo.uid != installed.applicationInfo.uid
-                    || !java.util.Objects.equals(parsed.targetActivity, result.targetActivity)
-                    || result.screenOrientation != parsed.screenOrientation
-                    || (parsed.metaData != null && (result.metaData == null
-                    || !parsed.metaData.keySet().equals(result.metaData.keySet()))))
-                throw new AssertionError("activity differs from installed manifest: " + component);
-            result = manager.getActivityInfo(component, flags);
-            if (result.metaData != null || result.applicationInfo.metaData != null)
-                throw new AssertionError("activity metadata returned without GET_META_DATA");
-        }
-        try {
-            manager.getActivityInfo(new ComponentName(installed.packageName, "bifrost.missing.Activity"), flags);
-            throw new AssertionError("unknown activity found");
-        } catch (PackageManager.NameNotFoundException expected) {
-            // The real framework translates a null activity reply.
-        }
-        int services = 0, metadata = 0;
-        if (installed.services != null) for (ServiceInfo parsed : installed.services) {
-            ComponentName component = new ComponentName(installed.packageName, parsed.name);
-            ServiceInfo result = manager.getServiceInfo(component, flags | PackageManager.GET_META_DATA);
-            if (!parsed.name.equals(result.name) || !installed.packageName.equals(result.packageName)
-                    || !installed.applicationInfo.sourceDir.equals(result.applicationInfo.sourceDir)
-                    || result.applicationInfo.uid != installed.applicationInfo.uid)
-                throw new AssertionError("service identity differs from installed manifest: " + component);
-            if (parsed.enabled && installed.applicationInfo.enabled) {
-                // SDKs such as Firebase use GET_META_DATA without boot flags.
-                ServiceInfo implicit = manager.getServiceInfo(component, PackageManager.GET_META_DATA);
-                if (!parsed.name.equals(implicit.name)
-                        || (parsed.metaData != null && (implicit.metaData == null
-                        || !parsed.metaData.keySet().equals(implicit.metaData.keySet()))))
-                    throw new AssertionError("implicit service query lost metadata: " + component);
-            }
-            if (parsed.metaData != null) {
-                if (result.metaData == null || !parsed.metaData.keySet().equals(result.metaData.keySet()))
-                    throw new AssertionError("missing service metadata: " + component);
-                for (String key : parsed.metaData.keySet())
-                    if (!java.util.Objects.equals(parsed.metaData.get(key), result.metaData.get(key)))
-                        throw new AssertionError("changed service metadata: " + component + " " + key);
-                metadata += parsed.metaData.size();
-                result.metaData.clear();
-                if (manager.getServiceInfo(component, flags | PackageManager.GET_META_DATA)
-                        .metaData.size() != parsed.metaData.size())
-                    throw new AssertionError("service metadata aliases package state");
-            }
-            result = manager.getServiceInfo(component, flags);
-            if (result.metaData != null || result.applicationInfo.metaData != null)
-                throw new AssertionError("service metadata returned without GET_META_DATA");
-            services++;
-        }
-        for (ComponentName missing : new ComponentName[] {
-                new ComponentName(installed.packageName, "bifrost.missing.Service"),
-                new ComponentName("bifrost.missing.package", "bifrost.missing.Service")}) {
-            try {
-                manager.getServiceInfo(missing, flags | PackageManager.GET_META_DATA);
-                throw new AssertionError("unknown service found: " + missing);
-            } catch (PackageManager.NameNotFoundException expected) {
-                // The real framework translates a null service reply.
-            }
-        }
-        int providers = 0;
-        if (installed.providers != null) for (ProviderInfo parsed : installed.providers) {
-            if (parsed.authority == null) continue;
-            for (String authority : parsed.authority.split(";")) {
-                ProviderInfo result = manager.resolveContentProvider(authority,
-                        flags | PackageManager.GET_META_DATA);
-                if (result == null || !parsed.name.equals(result.name)
-                        || result.applicationInfo.uid != installed.applicationInfo.uid
-                        || !installed.applicationInfo.sourceDir.equals(result.applicationInfo.sourceDir))
-                    throw new AssertionError("provider differs from installed manifest: " + authority);
-                if (parsed.metaData != null && (result.metaData == null
-                        || !parsed.metaData.keySet().equals(result.metaData.keySet())))
-                    throw new AssertionError("provider metadata missing: " + authority);
-                if (result.metaData != null) {
-                    result.metaData.clear();
-                    if (manager.resolveContentProvider(authority, flags | PackageManager.GET_META_DATA)
-                            .metaData.size() != parsed.metaData.size())
-                        throw new AssertionError("provider metadata aliases package state");
-                }
-                if (parsed.enabled && installed.applicationInfo.enabled) {
-                    result = manager.resolveContentProvider(authority, 0);
-                    if (result == null || result.metaData != null || result.applicationInfo.metaData != null)
-                        throw new AssertionError("implicit provider query lost identity or leaked metadata");
-                }
-                int otherBoot = parsed.directBootAware ? PackageManager.MATCH_DIRECT_BOOT_UNAWARE
-                        : PackageManager.MATCH_DIRECT_BOOT_AWARE;
-                if (manager.resolveContentProvider(authority,
-                        otherBoot | PackageManager.MATCH_DISABLED_COMPONENTS) != null)
-                    throw new AssertionError("provider ignored explicit direct-boot filter");
-                providers++;
-            }
-        }
-        if (manager.resolveContentProvider("bifrost.missing.authority", 0) != null)
-            throw new AssertionError("unknown content provider found");
-        InstallSourceInfo source = manager.getInstallSourceInfo(installed.packageName);
-        if (manager.getInstallerPackageName(installed.packageName) != null
-                || source.getInstallingPackageName() != null || source.getInitiatingPackageName() != null
-                || source.getOriginatingPackageName() != null || source.getUpdateOwnerPackageName() != null
-                || source.getPackageSource() != android.content.pm.PackageInstaller.PACKAGE_SOURCE_UNSPECIFIED)
-            throw new AssertionError("host-installed APK reported an Android installer");
-        try {
-            manager.getInstallSourceInfo("bifrost.missing.package");
-            throw new AssertionError("unknown install source found");
-        } catch (PackageManager.NameNotFoundException expected) {
-            // The framework translates the absent package's null reply.
-        }
-        System.out.println("APP_PACKAGE_SERVICES_OK services=" + services + " metadata=" + metadata
-                + " providers=" + providers);
     }
 
     private static UnsupportedOperationException unsupported(String service, String method) {
@@ -1275,10 +825,11 @@ public final class ManagedLauncher {
     }
 
     private static void installServices() throws Exception {
-        prepareNetwork();
+        services.diagnostic = diagnostic;
+        connectivity.install(services);
         // The runner exposes both credential and device protected storage
         // for user 0, so this single user is running and unlocked.
-        service("user", "android.os.IUserManager", (method, a) -> {
+        services.register("user", "android.os.IUserManager", (method, a) -> {
             switch (method) {
                 case "isUserUnlockingOrUnlocked":
                 case "isUserUnlocked": return ((Integer) a[0]) == 0;
@@ -1297,7 +848,7 @@ public final class ManagedLauncher {
                         UserHandle.class.getConstructor(int.class).newInstance(0),
                         Class.forName("android.os.storage.StorageManager")
                                 .getField("UUID_DEFAULT").get(null), null, "mounted");
-        service("mount", "android.os.storage.IStorageManager", (method, a) -> {
+        services.register("mount", "android.os.storage.IStorageManager", (method, a) -> {
             if (method.equals("getVolumeList"))
                 return ((Integer) a[0]) == 0 ? new StorageVolume[] {volume} : new StorageVolume[0];
             if (method.equals("mkdirs")) {
@@ -1307,7 +858,7 @@ public final class ManagedLauncher {
             throw unsupported("mount", method);
         });
         display = displayInfo(480, 800);
-        service("display", "android.hardware.display.IDisplayManager", (method, a) -> {
+        services.register("display", "android.hardware.display.IDisplayManager", (method, a) -> {
             switch (method) {
                 case "getDisplayInfo": return ((Integer) a[0]) == 0 ? display : null;
                 case "getPreferredWideGamutColorSpaceId": return 0;
@@ -1323,7 +874,7 @@ public final class ManagedLauncher {
         // this service: the play loop pumps them from the window backend and
         // dispatches them to the Activity directly, bypassing ViewRootImpl's
         // input stages (which are not attached here).
-        service("input", "android.hardware.input.IInputManager", (method, a) -> {
+        services.register("input", "android.hardware.input.IInputManager", (method, a) -> {
             switch (method) {
                 // DeviceConfig holds no velocity-tracker override, as on a
                 // fresh device; the client falls back to its default strategy.
@@ -1341,72 +892,14 @@ public final class ManagedLauncher {
         // The installed package is marked as a game with no mode override;
         // the platform default is standard mode. Game-state listeners are
         // kept nowhere: nothing observes here.
-        service("game", "android.app.IGameManagerService", (method, a) -> {
+        services.register("game", "android.app.IGameManagerService", (method, a) -> {
             switch (method) {
                 case "getGameMode": return GameManager.GAME_MODE_STANDARD;
                 case "setGameState": return null;
                 default: throw unsupported("game", method);
             }
         });
-        // One virtual default network backed by the host's sockets/resolver.
-        // Unsupported operations remain explicit rather than returning success.
-        service("connectivity", "android.net.IConnectivityManager", (method, a) -> {
-            switch (method) {
-                case "getActiveNetwork": return defaultNetwork;
-                case "getActiveNetworkInfo":
-                case "getActiveNetworkInfoForUid": return hostNetworkInfo();
-                case "getNetworkCapabilities": return defaultNetwork != null && defaultNetwork.equals(a[0])
-                        ? new NetworkCapabilities(hostCapabilities) : null;
-                case "getLinkProperties": return defaultNetwork != null && defaultNetwork.equals(a[0])
-                        ? new LinkProperties() : null;
-                case "getAllNetworks": return defaultNetwork == null ? new Network[0] : new Network[] {defaultNetwork};
-                case "isActiveNetworkMetered": return true; // host billing policy is unknown
-                case "requestNetwork": return networkRequest(a, false);
-                case "listenForNetwork": return networkRequest(a, true);
-                case "releaseNetworkRequest": networkRequests.remove((NetworkRequest) a[0]); return null;
-                default: throw unsupported("connectivity", method);
-            }
-        });
-        service("package", "android.content.pm.IPackageManager", (method, a) -> {
-            switch (method) {
-                case "hasSystemFeature": return false;
-                case "isInstantApp": return false;  // This profile installs full APKs only.
-                case "notifyPackageUse": return null;  // one-way usage report
-                // (name, flags, user): null means "not installed", which the
-                // client turns into NameNotFoundException.
-                case "getPackageInfo":
-                    return packageInfo((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
-                case "getApplicationInfo":
-                    return installed != null && installed.packageName.equals(a[0])
-                            ? installed.applicationInfo : null;
-                case "getActivityInfo":
-                    return activityInfo((ComponentName) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
-                case "getServiceInfo":
-                    return serviceInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
-                            (Integer) a[2]);
-                case "resolveContentProvider":
-                    return resolveProvider((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
-                case "getInstallerPackageName":
-                    if (installed == null || !installed.packageName.equals(a[0]))
-                        throw new IllegalArgumentException("Unknown package: " + a[0]);
-                    return null;  // Host-installed APK, no Android installer package.
-                case "getInstallSourceInfo":
-                    if (installed == null || !installed.packageName.equals(a[0])
-                            || (Integer) a[1] != installed.applicationInfo.uid / 100000) return null;
-                    return InstallSourceInfo.class.getConstructor(String.class,
-                            android.content.pm.SigningInfo.class, String.class, String.class)
-                            .newInstance(null, null, null, null);
-                // An app may change its own components (PackageManagerService
-                // rejects components of packages that are not installed).
-                case "getComponentEnabledSetting":
-                    return componentStates.getOrDefault(ownComponent(a[0]),
-                            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
-                case "setComponentEnabledSetting":
-                    componentStates.put(ownComponent(a[0]), (Integer) a[1]);
-                    return null;
-                default: throw unsupported("package", method);
-            }
-        });
+        packages.register(services);
         // A fresh device's volumes: AudioSystem.DEFAULT_STREAM_VOLUME (client
         // side, read from this image) and AudioService.MAX_STREAM_VOLUME.
         int[] volumes = (int[]) Class.forName("android.media.AudioSystem")
@@ -1429,7 +922,7 @@ public final class ManagedLauncher {
             add.invoke(null, "media.audio_policy", audioPolicy);
             add.invoke(null, "media.audio_flinger", audioFlinger);
         }
-        service("audio", "android.media.IAudioService", (method, a) -> {
+        services.register("audio", "android.media.IAudioService", (method, a) -> {
             switch (method) {
                 case "getStreamVolume": return volumes[(Integer) a[0]];
                 case "getStreamMaxVolume": return maxVolumes[(Integer) a[0]];
@@ -1437,14 +930,14 @@ public final class ManagedLauncher {
             }
         });
         // Observers are kept nowhere: no settings provider ever changes here.
-        service("content", "android.content.IContentService", (method, a) -> {
+        services.register("content", "android.content.IContentService", (method, a) -> {
             switch (method) {
                 case "registerContentObserver":
                 case "unregisterContentObserver": return null;
                 default: throw unsupported("content", method);
             }
         });
-        service("window", "android.view.IWindowManager", (method, a) -> {
+        services.register("window", "android.view.IWindowManager", (method, a) -> {
             switch (method) {
                 case "hasNavigationBar": return false;
                 case "getCurrentAnimatorScale": return 1f;
@@ -1453,7 +946,7 @@ public final class ManagedLauncher {
         });
         // The virtual device stays awake while its host window is open. It
         // has no battery saver, idle controller, or low-power standby policy.
-        service("power", "android.os.IPowerManager", (method, a) -> {
+        services.register("power", "android.os.IPowerManager", (method, a) -> {
             switch (method) {
                 case "isInteractive": return windowOpen;
                 case "isDisplayInteractive": return (Integer) a[0] == 0 && windowOpen;
@@ -1470,7 +963,7 @@ public final class ManagedLauncher {
         Map<IBinder, Object> thermalStatuses = new ConcurrentHashMap<>();
         // No virtual thermal HAL: no temperature/cooling samples and no
         // forecast. NONE is the initial status, not a host-temperature claim.
-        service("thermalservice", "android.os.IThermalService", (method, a) -> {
+        services.register("thermalservice", "android.os.IThermalService", (method, a) -> {
             switch (method) {
                 case "getCurrentThermalStatus": return 0;
                 case "getThermalHeadroom": return Float.NaN;
@@ -1502,7 +995,7 @@ public final class ManagedLauncher {
                 default: throw unsupported("thermalservice", method);
             }
         });
-        Object client = service("bifrost.activity_client",
+        Object client = services.register("bifrost.activity_client",
                 "android.app.IActivityClientController", (method, a) -> {
                     switch (method) {
                         case "setTaskDescription": return null;
@@ -1530,11 +1023,11 @@ public final class ManagedLauncher {
                         default: throw unsupported("activity_client", method);
                     }
                 });
-        service("activity_task", "android.app.IActivityTaskManager", (method, a) -> {
+        services.register("activity_task", "android.app.IActivityTaskManager", (method, a) -> {
             if (method.equals("getActivityClientController")) return client;
             throw unsupported("activity_task", method);
         });
-        Object provider = service("bifrost.settings", "android.content.IContentProvider",
+        Object provider = services.register("bifrost.settings", "android.content.IContentProvider",
                 (method, a) -> {
                     if (method.equals("call") && "settings".equals(a[1])) {
                         AttributionSource caller = (AttributionSource) a[0];
@@ -1556,11 +1049,11 @@ public final class ManagedLauncher {
         Object holder = holderType.getConstructor(ProviderInfo.class).newInstance(providerInfo);
         holderType.getField("provider").set(holder, provider);
         holderType.getField("noReleaseNeeded").setBoolean(holder, true);
-        service("activity", "android.app.IActivityManager", (method, a) -> {
+        services.register("activity", "android.app.IActivityManager", (method, a) -> {
             if (method.equals("checkPermissionForDevice"))
-                return checkPermission((String) a[0], (Integer) a[2], (Integer) a[3]);
+                return packages.checkPermission((String) a[0], (Integer) a[2], (Integer) a[3]);
             if (method.equals("checkPermission"))
-                return checkPermission((String) a[0], (Integer) a[2], Context.DEVICE_ID_DEFAULT);
+                return packages.checkPermission((String) a[0], (Integer) a[2], Context.DEVICE_ID_DEFAULT);
             if (method.equals("getContentProvider") && Arrays.asList(a).contains("settings"))
                 return holder;
             // Log.wtf report; false means "do not kill this process".
@@ -1717,8 +1210,10 @@ public final class ManagedLauncher {
     private static void runApp(Object thread, Context system, String[] args) throws Exception {
         String packageName = args[1], code = args[2], launcher = args[3];
         PackageInfo packageInfo = system.getPackageManager().getPackageArchiveInfo(
-                code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_SERVICES
-                        | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
+                code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_RECEIVERS
+                        | PackageManager.GET_SERVICES | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
+                        | PackageManager.GET_CONFIGURATIONS | PackageManager.GET_INSTRUMENTATION
+                        | PackageManager.GET_URI_PERMISSION_PATTERNS
                         | PackageManager.GET_PERMISSIONS
                         | PackageManager.GET_SIGNATURES | PackageManager.GET_SIGNING_CERTIFICATES
                         | PackageManager.MATCH_DISABLED_COMPONENTS
@@ -1756,11 +1251,11 @@ public final class ManagedLauncher {
         // code; the archive-parsed one here does not, and LoadedApk then builds
         // a class loader without the APK's dex files.
         app.flags |= ApplicationInfo.FLAG_HAS_CODE;
-        installPermissions(system, packageInfo);
+        packages.install(system, packageInfo);
         installed = packageInfo;
         androidId = scopedAndroidId(settingsKey(app.uid / 100000), packageInfo.signatures);
         if (diagnostic) {
-            checkPackageServices(system);
+            packages.checkPackageServices(system);
             checkSettings(system);
         }
         System.out.println("APP_PARSED " + app.className + " " + activity.name);
