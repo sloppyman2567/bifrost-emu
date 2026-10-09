@@ -305,7 +305,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) blocks_[start_pc] = fallback;
+        if (!private_entry) publish_block(start_pc, fallback);
         code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
@@ -592,7 +592,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                 entry.chained = false;
                 entry.instr_count = instr_count;
                 entry.verified_once = true;  // interp-only: no verify
-                if (!private_entry) blocks_[start_pc] = entry;
+                if (!private_entry) publish_block(start_pc, entry);
                 blocks_translated++;
                 block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
@@ -685,7 +685,7 @@ if (demote_interp) {
         entry.chained = false;
         entry.instr_count = instr_count;
         entry.verified_once = true;  // skip verify for interp-only
-        if (!private_entry) blocks_[start_pc] = entry;
+        if (!private_entry) publish_block(start_pc, entry);
         blocks_translated++;
         block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
@@ -1408,7 +1408,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fallback.interp_only_count = 1;
         fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) blocks_[start_pc] = fallback;
+        if (!private_entry) publish_block(start_pc, fallback);
         code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
         code_budget_exhausted_ = true;
         // W^X: make the buffer executable again before returning (we may
@@ -1670,7 +1670,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
         }
     }
-    if (!private_entry) blocks_[start_pc] = entry;
+    if (!private_entry) publish_block(start_pc, entry);
     blocks_translated++;
     // Maintain the back-reference index: this block's fall-through and
     // taken slots target T, so chain_back_references(T) finds it in O(k)

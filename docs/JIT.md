@@ -464,6 +464,19 @@ checks a three-thread guest with a forced 1 MiB budget and a growth run,
 including repeated interpreter-only calls, exact results, one bounded
 overflow and no repeated translation of cached fallback targets.
 
+Range invalidation first queries an ordered, conservative index of guest pages
+covered by published blocks and their inlined/Tier-2 dependencies. Data-only
+ranges with no indexed page skip the full block-table scan. Publication and the
+query share the compiler lock; individual retirement deliberately leaves stale
+positive pages, and whole-cache clears reset the index. A possible hit still
+uses the existing exact victim scan and retirement machinery. The index does
+not suppress required code invalidation or reclaim live code.
+`BIFROST_NO_CODE_PAGE_FILTER=1` restores the scan for A/B measurement.
+`jit_cache_invalidation.elf churn` warms 32,768 executable functions, times
+4,096 data-page protection changes, then checks a rewritten executable function.
+Two same-binary runs measured approximately 0.49 s without the filter and
+0.0066 s with it. This is mapping-churn throughput, not an application speedup.
+
 ## Vector unary FP decode distinction
 
 AdvSIMD vector `FSQRT` (`0x2EA1F800`, excluding Q and the S/D bit) differs
@@ -498,8 +511,35 @@ distinguishes single-precision L/H lane bits from the double-precision H bit.
 `SimdFpArithParams::lane` is -1 for a vector operand and otherwise selects
 the scalar lane. Both sources are loaded before destination writes, including
 high-half scalar lanes when the destination aliases Rm. Q=0 clears v_hi.
-These indexed and unary operations use the memory path and disable vector
-pinning for their blocks, keeping CPU vector storage current.
+Indexed FMUL and vector FABS/FNEG/FSQRT participate in the vector cache.
+Indexed sources are broadcast into scratch XMM0 before writing the destination,
+preserving source/destination aliases and high lanes. Unary operations use
+register operands; sign masks are constructed across all lanes without
+clobbering GPRs. Unsupported block operations and hosts without FMA3 retain the
+existing memory path. Cached Q=0 logical/arithmetic/FMA/unary results use one
+VEX VMOVQ to clear bits 127:64.
+
+The old cached FABD path loaded its absolute-value mask with MOVQ, which zeros
+the upper half of the XMM register. Its subsequent full-vector AND erased
+upper-lane results. The shared packed-mask emitter fixes both .4s and .2d.
+The isolated regression failed six cases before the repair, while QEMU and
+the uncached path passed. `jit_simd_unary_fp` now checks 541 assertions,
+including destination aliases and XMM8-15 encodings; the indexed fixture checks
+all single/double lanes, aliases and Q=0 clearing. Both accept `--mt` to exercise
+the sticky multithreaded JIT mode. These tests do not establish complete Arm
+NaN-selection, FPCR/FPSR or enabled floating-point trap equivalence for native FP.
+
+Encoding and zeroing rules were checked against Intel SDM Volume 2B, MOVQ,
+PSHUFD, UNPCKLPD/UNPCKHPD and SQRTPS/SQRTPD in the
+[instruction reference](https://cdrdv2-public.intel.com/789581/325383-sdm-vol-2abcd.pdf).
+The full-lane absolute-difference contract follows
+[Arm FABD pseudocode](https://www.scs.stanford.edu/~zyedidia/arm64/fabd_advsimd.html).
+
+Three interleaved runs of `bench_doom_vector_fp` measured median loop time
+0.0692 s before versus 0.00935 s after in single-thread mode (7.4x throughput).
+With `--mt`, the medians were 0.0703 s and 0.0499 s (1.41x throughput), since
+MT mode still reloads register state between loop iterations. This existing
+probe reproduces Doom's instruction mix; these measurements are not game FPS.
 
 `jit_simd_fp_indexed` covers all scalar lanes, high Rm registers, source and
 destination aliasing, and Q=0 clearing against fixed expected results.

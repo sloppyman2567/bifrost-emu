@@ -10,6 +10,29 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### JIT invalidation and cached vector code generation (2026-10-09)
+
+The JIT unit suite with IR validation passes **128/128**, including the
+per-thread invalidation row (82 s). All five `test_jit_mt.sh` modes pass their
+arithmetic/invalidation oracles and require the expected edge/region
+publication. The captured Doom harness passes **20,000** comparisons with zero
+mismatches and zero IR fallbacks. On this checkout its standalone link needs
+`-lX11 -lwayland-client` in addition to the script's SDL/GL libraries.
+
+The unary/FABD fixture passes 541 assertions and the indexed-FMUL fixture
+passes 28 under normal JIT, vector-cache opt-out, register/memory verification,
+Tier-2 opt-in, QEMU and the non-FMA fallback. Their `--mt` modes pass QEMU,
+JIT and interpreter. The six pre-fix cached FABD failures erased the upper
+lanes; QEMU and the uncached JIT agreed with the expected results.
+
+The installed SpongeBob launcher initialization passes all app/framework
+checkpoints in 17.5 s on the new build, exiting zero without a guest failure.
+This is the headless `onCreate` checkpoint, with zero presented frames; it
+does not establish gameplay performance or rendering correctness. Existing
+interactive sessions were left running on their original binaries.
+The scoped vector-throughput and data-mapping benchmarks, their results,
+and the remaining native-FP semantic gaps are documented in [JIT.md](JIT.md).
+
 ### SpongeBob managed Activity creation (2026-10-07)
 
 The installed SpongeBob 5.11.5 app probe reaches `APP_CLASSLOADER_OK`,

@@ -43,6 +43,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -893,6 +894,12 @@ private:
     };
     std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;
     std::unordered_map<uint64_t, BlockEntry> blocks_;
+    // Conservative page-presence index, protected by blocks_mutex_. Individual
+    // retirement leaves pages present; only whole-cache clears reset it. False
+    // positives use the exact victim scan, but data-only ranges skip that scan.
+    std::set<uint64_t> code_pages_;
+    void remember_code_pages(uint64_t pc, const BlockEntry& entry);
+    void publish_block(uint64_t pc, const BlockEntry& entry);
     // Back-reference index: maps target_pc → list of source_pcs whose
     // chain_target_pc equals target_pc. Maintained incrementally at
     // translate-time (each block adds itself to its target's back-ref
@@ -1638,6 +1645,8 @@ private:
     void vec_cache_writeback_all_pinned(bool clear_flags = true);
     void vec_cache_mark_dirty(int vreg);
     void vec_emit_load_lo_hi(int xmm, int vreg);
+    void emit_vec_sign_mask(int esize, bool clear_sign);
+    void emit_vec_zero_upper(int xmm);
     // FP-cache-aware operand load/store helpers. When the fp cache is
     // active and the FP reg is pinned, they use reg-reg moves (no memory);
     // otherwise they load/store cpu.v_lo[vreg] exactly as the non-cached
@@ -1659,7 +1668,8 @@ private:
     void emit_vmovq_gpr_to_xmm(int xmm, int gpr);
     void emit_vmovq_xmm_to_gpr(int gpr, int xmm);
     // VEX 3-byte emission for the cached SIMD paths (map: 1=0F, 2=0F38,
-    // 3=0F3A; vvvv = NDS source reg; pp: 0=ps, 1=pd/66; W = 64-bit op).
+    // 3=0F3A; vvvv = NDS source reg (0 for reserved); pp: 0=none, 1=66,
+    // 2=F3, 3=F2; W selects the instruction's 64-bit form where applicable).
     void emit_vex3(int map, bool w, int vvvv, int pp, int reg_field,
                    int rm_field, bool rm_is_reg, uint8_t opcode);
     void emit_vex_fma(int dest, int src1, int src2, bool is_double, bool is_sub);

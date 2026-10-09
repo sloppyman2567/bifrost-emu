@@ -2310,6 +2310,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             tier2_compile_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - wrapper_start_clock).count(), std::memory_order_relaxed);
             region_entry.emitted_bytes += wrapper_bytes;
+            remember_code_pages(pc, region_entry);
             it->second = std::move(region_entry);
             for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)
                 refresh_mt_edges(mt_edges_[k]->target_pc);

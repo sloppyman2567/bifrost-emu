@@ -30,7 +30,7 @@ namespace arm64emu {
 
 // ── Cache enablement pre-scan ──────────────────────────────────────────
 // Ops that either have a cached fast path for pinned XMM operands
-// (SIMD_FP_FMA / SIMD_FP_ARITH / SIMD_LOGICAL / SIMD_DUP) or are GPR-only
+// (including unary and indexed FP) or are GPR-only
 // ops that neither read cpu.v_lo/v_hi nor clobber XMM3-15. Everything
 // else (any other FP/SIMD op, CALL_INTERP, SVC, BL_CALL, atomic helpers,
 // ...) disqualifies the block — the cache is all-or-nothing per block.
@@ -41,6 +41,7 @@ static bool vec_cache_compatible_op(IROp op) {
     switch (op) {
         case IROp::SIMD_FP_FMA:
         case IROp::SIMD_FP_ARITH:
+        case IROp::SIMD_FP_UNARY:
         case IROp::SIMD_LOGICAL:
         case IROp::SIMD_DUP:
         case IROp::SIMD_MOVI:     // constant broadcast — cached fast path
@@ -81,7 +82,6 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     bool  vec_used[32] = {};
     int   used_count = 0;
     for (const IRInst& inst : block.insts) {
-        if (inst.op == IROp::SIMD_FP_ARITH && inst.fp_arith_params().lane >= 0) return false;
         if (!vec_cache_compatible_op(inst.op)) return false;
         if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
             inst.op == IROp::SIMD_LOGICAL) {
@@ -93,6 +93,10 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
             }
             if (inst.src2 < 32 && !vec_used[inst.src2]) {
                 vec_used[inst.src2] = true; used_count++;
+            }
+        } else if (inst.op == IROp::SIMD_FP_UNARY) {
+            for (int v : {int(inst.dest), int(inst.src1)}) {
+                if (v < 32 && !vec_used[v]) { vec_used[v] = true; used_count++; }
             }
         } else if (inst.op == IROp::SIMD_DUP) {
             // src1 is a GPR vreg (>= 32); only the vector dest is pinned.
@@ -418,7 +422,7 @@ void FrostJIT::vec_cache_mark_dirty(int vreg) {
 // VEX.NDS.128.XX.0F{38}: C4 [R~ X~ B~ mmmmm] [W vvvv~ L pp] opcode modrm.
 // `reg_field`/`rm_field` are the (possibly ≥8) x86 register numbers used in
 // the ModRM reg/rm fields; R~/B~ extend them exactly like REX.R/REX.B.
-// L=0 (128-bit) always; pp: 0=ps/no-prefix, 1=pd/66.
+// L=0 (128-bit) always; pp: 0=no prefix, 1=66, 2=F3, 3=F2.
 void FrostJIT::emit_vex3(int map, bool w, int vvvv, int pp, int reg_field,
                          int rm_field, bool rm_is_reg, uint8_t opcode) {
     uint8_t b1 = 0;
@@ -450,6 +454,20 @@ void FrostJIT::emit_vex_fma(int dest, int src1, int src2,
 void FrostJIT::emit_vex_fp_binop(int dest, int src1, int src2,
                                  uint8_t op_byte, bool is_double) {
     emit_vex3(1, false, src1, is_double ? 1 : 0, dest, src2, true, op_byte);
+}
+
+// XMM0 is scratch in cached blocks. Build the sign/absolute-value mask in
+// every lane, without borrowing a GPR or loading a constant from memory.
+void FrostJIT::emit_vec_sign_mask(int esize, bool clear_sign) {
+    emit_vex3(1, false, 0, 1, 0, 0, true, 0x76); // vpcmpeqd xmm0,xmm0,xmm0
+    emit_byte(0x66); emit_byte(0x0F); emit_byte(esize == 8 ? 0x73 : 0x72);
+    emit_byte(clear_sign ? 0xD0 : 0xF0); // psrl[d/q] /2 or psll[d/q] /6
+    emit_byte(clear_sign ? 1 : esize * 8 - 1);
+}
+
+void FrostJIT::emit_vec_zero_upper(int xmm) {
+    // VEX.128.F3.0F 7E: VMOVQ zeroes bits 127:64; vvvv is reserved.
+    emit_vex3(1, false, 0, 2, xmm, xmm, true, 0x7E);
 }
 
 // ── Scalar-FP-cache helpers ────────────────────────────────────────────

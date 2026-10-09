@@ -25,6 +25,7 @@
 #include "debug_flags.h"
 #include "bifrost/version.hpp"  // CODENAME
 #include <sys/mman.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <atomic>
@@ -338,6 +339,27 @@ void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
     }
     back_refs_[target_pc].push_back(src_pc);
 }
+void FrostJIT::remember_code_pages(uint64_t pc, const BlockEntry& entry) {
+    // Called under the compiler lock before publishing any public entry.
+    auto remember = [&](uint64_t start, int count) {
+        const uint64_t bytes = static_cast<uint64_t>(std::max(count, 1)) * 4;
+        uint64_t last;
+        if (__builtin_add_overflow(start, bytes - 1, &last)) last = UINT64_MAX;
+        last &= ~Memory::PAGE_MASK;
+        for (uint64_t page = start & ~Memory::PAGE_MASK;; page += Memory::PAGE_SIZE) {
+            code_pages_.insert(page);
+            if (page == last) break;
+        }
+    };
+    remember(pc, entry.instr_count);
+    for (const auto& range : entry.inlined_ranges_) remember(range.first, range.second);
+}
+
+void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
+    remember_code_pages(pc, entry);
+    blocks_[pc] = entry;
+}
+
 void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;
     const uint64_t lo = addr & ~Memory::PAGE_MASK;
@@ -350,6 +372,13 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         hi &= ~Memory::PAGE_MASK;
     if (hi <= lo) { invalidate_all(); return; }
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
+    // mmap/munmap/mprotect and ART GC change data mappings much more often
+    // than code mappings. A range with no published code cannot have victims.
+    // lower_bound also handles enormous ranges without walking every page.
+    if (!dbg().no_code_page_filter) {
+        const auto page = code_pages_.lower_bound(lo);
+        if (page == code_pages_.end() || *page >= hi) return;
+    }
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) overlaps [lo, hi).
     std::vector<uint64_t> victims;
     victims.reserve(4);
@@ -441,6 +470,7 @@ void FrostJIT::invalidate_all() {
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
+    code_pages_.clear();
     clear_tier2_profiles();
     tier2_retrains_.clear(); // a full code epoch can reuse addresses for different loops
     for (auto& monitor : tier2_region_monitors_)
@@ -531,5 +561,6 @@ void FrostJIT::enter_multithreaded() {
     }
     invalidate_dispatch_cache();
     blocks_.clear(); back_refs_.clear();
+    code_pages_.clear();
 }
 } // namespace arm64emu

@@ -61,6 +61,7 @@ struct DebugFlags {
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     bool cpu_profile = false;  // BIFROST_PROF — sampling on every guest thread
     bool jit_dispatch_stats = false; // BIFROST_JIT_DISPATCH_STATS — TLS cache telemetry
+    bool no_code_page_filter = false; // BIFROST_NO_CODE_PAGE_FILTER — invalidation A/B control
     // ── crash / decode diagnostics ───────────────────────────────────
     bool crash_dump = false;  // BIFROST_CRASH_DUMP  — detailed crash report
     bool dbg_guard  = false;  // BIFROST_DBG_GUARD   — decode-error backtraces
@@ -184,6 +185,7 @@ struct DebugFlags {
         f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         f.cpu_profile = env("BIFROST_PROF");
+        f.no_code_page_filter = env("BIFROST_NO_CODE_PAGE_FILTER");
         f.jit_dispatch_stats = env("BIFROST_JIT_DISPATCH_STATS");
         f.crash_dump = all || env("BIFROST_CRASH_DUMP");
         f.dbg_guard  = all || env("BIFROST_DBG_GUARD");

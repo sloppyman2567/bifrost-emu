@@ -294,15 +294,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                         emit_vex3(1, false, 0, 1, 0, 0, true, 0x76);       // vpcmpeqd xmm0,xmm0
                         emit_vex3(1, false, xd, 1, xd, 0, true, 0xEF);     // vpxor xd,xd,xmm0 → ~
                     }
-                    if (!logic.q) {
-                        // SSE2 byte shifts preserve low 64 bits, clear high.
-                        for (uint8_t group : {uint8_t(7), uint8_t(3)}) {
-                            emit_byte(0x66);
-                            if (xd >= 8) emit_byte(0x41);
-                            emit_byte(0x0F); emit_byte(0x73);
-                            emit_byte(0xC0 | (group << 3) | (xd & 7)); emit_byte(8);
-                        }
-                    }
+                    if (!logic.q) emit_vec_zero_upper(xd);
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
                 }
@@ -495,10 +487,24 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         }
         case IROp::SIMD_FP_UNARY: {
             const SimdSubopParams p = inst.fp_unary_params();
+            int xd = vec_xmm(inst.dest), xs = vec_xmm(inst.src1);
+            if (xd >= 0 && xs >= 0) {
+                if (p.subop == 2) {
+                    emit_vex3(1, false, 0, p.esize == 8 ? 1 : 0,
+                              xd, xs, true, 0x51); // vsqrtps/pd (reserved vvvv)
+                } else {
+                    emit_vec_sign_mask(p.esize, p.subop == 0);
+                    emit_vex_fp_binop(xd, xs, 0, p.subop == 0 ? 0x54 : 0x57,
+                                      p.esize == 8);
+                }
+                if (!p.q) emit_vec_zero_upper(xd);
+                vec_cache_mark_dirty(inst.dest);
+                return true;
+            }
             clobber_flags();
             flush_invalidate_host_regs(1u << RAX);
-            // This op is intentionally not cache-pinned. Load both halves
-            // before writing either, preserving same-register aliasing.
+            // Uncached fallback: load both halves before writing either,
+            // preserving same-register aliasing.
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
             emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.src1*8);
             if (p.q) {
@@ -539,6 +545,23 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 return true;
             }
             if (fp.lane >= 0) {
+                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
+                    xs2 = vec_xmm(inst.src2);
+                if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
+                    // Snapshot the selected lane before writing Vd: Vd may
+                    // alias either source, including the scalar source.
+                    if (is_double) {
+                        emit_vex3(1, false, xs2, 1, 0, xs2, true,
+                                  fp.lane == 0 ? 0x14 : 0x15); // vunpckl/hpd
+                    } else {
+                        emit_vex3(1, false, 0, 1, 0, xs2, true, 0x70); // vpshufd
+                        emit_byte(fp.lane * 0x55);
+                    }
+                    emit_vex_fp_binop(xd, xs1, 0, 0x59, is_double);
+                    if (!Q) emit_vec_zero_upper(xd);
+                    vec_cache_mark_dirty(inst.dest);
+                    return true;
+                }
                 clobber_flags(); flush_invalidate_host_regs(1u << RAX);
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
                 emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.src1*8);
@@ -597,27 +620,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     clobber_flags();
                     if (is_sub_for_fabd) {
                         // vsubps/pd then clear sign bits (vandps with mask).
-                        flush_invalidate_host_regs(1u << RAX);
                         emit_vex_fp_binop(xd, xs1, xs2, 0x5C, is_double);
-                        uint64_t mask = is_double ? 0x7FFFFFFFFFFFFFFFULL
-                                                  : 0x7FFFFFFF7FFFFFFFULL;
-                        emit_mov_imm64(RAX, mask);
-                        emit_byte(0x66); emit_byte(0x48);
-                        emit_byte(0x0F); emit_byte(0x6E);
-                        emit_byte(0xC0);  // movq xmm0, rax
+                        emit_vec_sign_mask(esize, true);
                         emit_vex_fp_binop(xd, xd, 0, 0x54, is_double);
                     } else {
                         emit_vex_fp_binop(xd, xs1, xs2, op_byte, is_double);
                     }
-                    if (!Q) {
-                        // Zero upper 64 bits (guest 64-bit result).
-                        bool r = (xd >= 8);
-                        emit_byte(0xF3);
-                        emit_byte(rex(false, r, false, r));
-                        emit_byte(0x0F); emit_byte(0x7E);
-                        emit_byte(static_cast<uint8_t>(0xC0 |
-                                        ((xd & 7) << 3) | (xd & 7)));
-                    }
+                    if (!Q) emit_vec_zero_upper(xd);
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
                 }
@@ -699,16 +708,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
                     clobber_flags();
                     emit_vex_fma(xd, xs1, xs2, is_double, is_sub);
-                    if (!Q) {
-                        // Zero upper 64 bits (guest 64-bit result): VMOVQ
-                        // xmm, xmm — F3 0F 7E /r (zero-extending move).
-                        bool r = (xd >= 8);
-                        emit_byte(0xF3);
-                        emit_byte(rex(false, r, false, r));
-                        emit_byte(0x0F); emit_byte(0x7E);
-                        emit_byte(static_cast<uint8_t>(0xC0 |
-                                        ((xd & 7) << 3) | (xd & 7)));
-                    }
+                    if (!Q) emit_vec_zero_upper(xd);
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
                 }

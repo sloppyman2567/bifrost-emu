@@ -5,8 +5,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
+#include <string.h>
 
-int main(void) {
+static void *worker(void *arg) { return arg; }
+int main(int argc, char **argv) {
+    // Enter the same sticky multithreaded JIT mode used by real games.
+    if (argc > 1 && strcmp(argv[1], "--mt") == 0) {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, worker, NULL) || pthread_join(thread, NULL)) return 2;
+    }
     float input[4] = {2, 4, 8, 16}, scalar[4] = {1, 1, 1, 1}, output[4];
     uint64_t iterations = 5000000;
     struct timespec start, end;
