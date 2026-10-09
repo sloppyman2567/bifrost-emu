@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Managed Activity launcher build, persistent runtime and host supervision."""
 import argparse
+from contextlib import ExitStack, closing
 import hashlib
 import json
 import os
@@ -117,6 +118,142 @@ class LogdReceiver:
         self.running = False
         self.thread.join(timeout=1)
         self.sock.close()
+
+
+class DnsProxy:
+    """Bionic getaddrinfo's netd wire protocol, resolved by the host.
+
+    Android flags/error numbers differ from glibc. Integer framing is big
+    endian, but sockaddr and error payloads use the guest's little endian ABI.
+    This supplies the default host network, not Android per-network routing.
+    """
+
+    FLAGS = {0x1: socket.AI_PASSIVE, 0x2: socket.AI_CANONNAME,
+             0x4: socket.AI_NUMERICHOST, 0x8: socket.AI_NUMERICSERV,
+             0x400: socket.AI_ADDRCONFIG}
+    ERRORS = {getattr(socket, "EAI_" + name): number for name, number in (
+        ("ADDRFAMILY", 1), ("AGAIN", 2), ("BADFLAGS", 3), ("FAIL", 4),
+        ("FAMILY", 5), ("MEMORY", 6), ("NODATA", 7), ("NONAME", 8),
+        ("SERVICE", 9), ("SOCKTYPE", 10), ("SYSTEM", 11), ("OVERFLOW", 14))
+        if hasattr(socket, "EAI_" + name)}
+
+    def __init__(self, root):
+        self.path = root / "dev/socket/dnsproxyd"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.sock.bind(str(self.path))
+            self.path.chmod(0o666)
+            self.sock.listen(16)
+            self.sock.settimeout(0.2)
+        except BaseException:
+            self.sock.close()
+            raise
+        self.stopped = threading.Event()
+        self.slots = threading.BoundedSemaphore(16)
+        self.lock = threading.Lock()
+        self.clients = set()
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def failure(code):
+        return b"401\0" + struct.pack("<i", code)
+
+    @classmethod
+    def resolve(cls, request):
+        args = request.decode("ascii").split()
+        if len(args) != 8 or args[0] != "getaddrinfo":
+            return cls.failure(4)
+        _, host, service, flags, family, kind, protocol, netid = args
+        flags, family, kind, protocol, netid = map(int, (flags, family, kind, protocol, netid))
+        if not 0 <= netid <= 0xffffffff:
+            return cls.failure(4)
+        if (flags, family, kind, protocol) == (-1, -1, -1, -1):
+            flags = family = kind = protocol = 0
+        if flags < 0 or flags & ~sum(cls.FLAGS):
+            return cls.failure(3)
+        if family not in (socket.AF_UNSPEC, socket.AF_INET, socket.AF_INET6):
+            return cls.failure(5)
+        host_flags = 0
+        for android, native in cls.FLAGS.items():
+            if flags & android:
+                host_flags |= native
+        try:
+            results = socket.getaddrinfo(None if host == "^" else host,
+                                         None if service == "^" else service,
+                                         family, kind, protocol, host_flags)
+        except socket.gaierror as error:
+            return cls.failure(cls.ERRORS.get(error.errno, 4))
+        output = bytearray(b"222\0")
+        for family, kind, protocol, canon, address in results:
+            if family == socket.AF_INET:
+                raw = (struct.pack("<H", family) + struct.pack("!H", address[1]) +
+                       socket.inet_pton(family, address[0]) + bytes(8))
+            elif family == socket.AF_INET6:
+                raw = (struct.pack("<H", family) + struct.pack("!HI", address[1], address[2]) +
+                       socket.inet_pton(family, address[0]) + struct.pack("<I", address[3]))
+            else:
+                continue
+            name = canon.encode("utf-8") + b"\0" if canon else b""
+            output += struct.pack("!6i", 1, flags, family, kind, protocol, len(raw))
+            output += raw + struct.pack("!i", len(name)) + name
+        if len(output) == 4:
+            return cls.failure(7)
+        return bytes(output) + struct.pack("!i", 0)
+
+    def serve(self, client):
+        try:
+            client.settimeout(5)
+            request = bytearray()
+            while b"\0" not in request:
+                data = client.recv(4096 - len(request))
+                if not data:
+                    return
+                request += data
+                if len(request) == 4096 and b"\0" not in request:
+                    client.sendall(self.failure(4))
+                    return
+            try:
+                response = self.resolve(bytes(request).split(b"\0", 1)[0])
+            except (ValueError, OverflowError, OSError):
+                response = self.failure(4)
+            client.sendall(response)
+        except OSError:
+            pass  # client closed, timed out, or launcher is shutting down
+        finally:
+            with self.lock:
+                self.clients.discard(client)
+            client.close()
+            self.slots.release()
+
+    def loop(self):
+        while not self.stopped.is_set():
+            try:
+                client, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not self.slots.acquire(blocking=False):
+                client.close()
+                continue
+            with self.lock:
+                self.clients.add(client)
+            threading.Thread(target=self.serve, args=(client,), daemon=True).start()
+
+    def close(self):
+        self.stopped.set()
+        self.sock.close()
+        self.thread.join(timeout=1)
+        with self.lock:
+            for client in self.clients:
+                try:
+                    client.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                client.close()
+        self.path.unlink(missing_ok=True)
 
 
 def file_hash(path):
@@ -288,9 +425,11 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         print(f"Launching {metadata['package']} (log: {log_path})", flush=True)
         # A socket pathname can remain after a killed host process. No other
         # session for this package is live while the caller holds its lock.
-        (root / "dev/socket/logdw").unlink(missing_ok=True)
-        with log_path.open("wb") as log, (app / "managed/last-logd.log").open("wb") as sink:
-            receiver = LogdReceiver(guest_root, sink)
+        for name in ("logdw", "dnsproxyd"):
+            (root / "dev/socket" / name).unlink(missing_ok=True)
+        with log_path.open("wb") as log, (app / "managed/last-logd.log").open("wb") as sink, ExitStack() as services:
+            services.enter_context(closing(LogdReceiver(guest_root, sink)))
+            services.enter_context(closing(DnsProxy(guest_root)))
             child = None
             old_term = signal.getsignal(signal.SIGTERM)
             def interrupted(signum, frame):
@@ -318,7 +457,6 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     try: os.killpg(child.pid, signal.SIGKILL)
                     except ProcessLookupError: pass
                     child.wait()
-                receiver.close()
                 (root / "dev/socket/logdw").unlink(missing_ok=True)
         if status:
             print(f"Managed app exited with status {status}; see {log_path}", file=sys.stderr)

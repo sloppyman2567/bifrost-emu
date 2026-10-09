@@ -5,6 +5,9 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
+import shutil
+import socket
+import struct
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -32,6 +35,123 @@ class LauncherArgumentTests(unittest.TestCase):
             original = list(inventory)
             self.assertEqual(installed_arguments(metadata, "/data/app/fixture"), expected)
             self.assertEqual(inventory, original)
+
+
+class DnsProxyTests(unittest.TestCase):
+    def test_android_flags_and_ipv6_wire_layout(self):
+        from android_managed import DnsProxy
+        answer = [(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                   "fixture.invalid", ("fe80::1234", 443, 5, 7))]
+        with patch("android_managed.socket.getaddrinfo", return_value=answer) as resolver:
+            data = DnsProxy.resolve(b"getaddrinfo fixture.invalid 443 1034 10 1 6 0")
+        resolver.assert_called_once_with("fixture.invalid", "443", 10, 1, 6,
+                                         socket.AI_CANONNAME | socket.AI_NUMERICSERV | socket.AI_ADDRCONFIG)
+        raw = (struct.pack("<H", 10) + struct.pack("!HI", 443, 5) +
+               socket.inet_pton(socket.AF_INET6, "fe80::1234") + struct.pack("<I", 7))
+        canon = b"fixture.invalid\0"
+        self.assertEqual(data, b"222\0" + struct.pack("!6i", 1, 1034, 10, 1, 6, 28) +
+                         raw + struct.pack("!i", len(canon)) + canon + struct.pack("!i", 0))
+
+    def test_errors_are_android_numbers_and_bad_flags_do_not_resolve(self):
+        from android_managed import DnsProxy
+        with patch("android_managed.socket.getaddrinfo", side_effect=socket.gaierror(socket.EAI_NONAME, "missing")) as resolver:
+            self.assertEqual(DnsProxy.resolve(b"getaddrinfo missing.invalid ^ 0 0 1 0 0"),
+                             b"401\0" + struct.pack("<i", 8))
+            resolver.reset_mock()
+            self.assertEqual(DnsProxy.resolve(b"getaddrinfo missing.invalid ^ 16 0 1 0 0"),
+                             b"401\0" + struct.pack("<i", 3))
+            resolver.assert_not_called()
+
+    def test_fragmented_request_and_cleanup(self):
+        from android_managed import DnsProxy
+        with tempfile.TemporaryDirectory(prefix="bifrost-dns-") as directory:
+            root = Path(directory)
+            proxy = DnsProxy(root)
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(5)
+                    client.connect(str(proxy.path))
+                    client.sendall(b"getaddrinfo 127.0.0.1 ")
+                    client.sendall(b"443 12 2 1 6 0\0")
+                    data = b""
+                    while chunk := client.recv(4096):
+                        data += chunk
+                raw = struct.pack("<H", 2) + struct.pack("!H", 443) + b"\x7f\0\0\x01" + bytes(8)
+                self.assertEqual(data, b"222\0" + struct.pack("!6i", 1, 12, 2, 1, 6, 16) +
+                                 raw + struct.pack("!2i", 0, 0))
+            finally:
+                proxy.close()
+            self.assertFalse(proxy.path.exists())
+            self.assertFalse(proxy.thread.is_alive())
+
+    def test_real_bionic_consumes_ipv4_and_ipv6_answers(self):
+        from android_managed import DnsProxy
+        runtime = ROOT / "build/android-framework/rootfs"
+        if not (runtime / "system/lib64/libnetd_client.so").is_file() or not shutil.which("clang") or not ARGS.emu.is_file():
+            self.skipTest("requires provisioned Android framework, clang and emulator")
+        with tempfile.TemporaryDirectory(prefix="bifrost-dns-") as directory:
+            root = Path(directory)
+            for name in ("apex/com.android.runtime/bin/linker64",
+                         "apex/com.android.runtime/lib64/bionic/libc.so",
+                         "apex/com.android.runtime/lib64/bionic/libdl.so",
+                         "apex/com.android.runtime/lib64/bionic/libm.so",
+                         "system/lib64/libnetd_client.so"):
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(runtime / name, target)
+            shutil.copyfile(runtime / "apex/com.android.art/lib64/libc++.so",
+                            root / "system/lib64/libc++.so")
+            (root / "system/bin").mkdir(parents=True)
+            (root / "system/bin/linker64").symlink_to("../../apex/com.android.runtime/bin/linker64")
+            source = root / "dns.c"
+            source.write_text('''// Freestanding declarations for the pinned AArch64 Bionic ABI.
+struct addrinfo { int flags, family, type, protocol; unsigned len;
+                 char *canon; unsigned char *addr; struct addrinfo *next; };
+extern int getaddrinfo(const char*, const char*, const struct addrinfo*, struct addrinfo**);
+extern void freeaddrinfo(struct addrinfo*);
+extern int printf(const char*, ...);
+int main(void) {
+    for (int family = 2; family <= 10; family += 8) {
+        struct addrinfo hints = { .family = family, .type = 1 }, *result = 0;
+        int error = getaddrinfo("bifrost-dns.invalid", "443", &hints, &result);
+        if (error || !result) { printf("DNS error %d\\n", error); return 1; }
+        unsigned char *a = result->addr;
+        if (result->family != family || result->len != (family == 2 ? 16u : 28u) ||
+            a[0] != family || a[1] || a[2] != 1 || a[3] != 187 ||
+            (family == 2 ? a[4] != 127 || a[7] != 1 : a[23] != 1)) return 2;
+        freeaddrinfo(result);
+    }
+    printf("BIONIC_DNS_OK\\n"); return 0;
+}
+''')
+            binary = root / "dns"
+            bionic = root / "apex/com.android.runtime/lib64/bionic"
+            subprocess.run(["clang", "--target=aarch64-linux-android35", "-fuse-ld=lld",
+                            "-nostdlib", "-fPIE", "-pie", "-O2", "-Wl,-z,max-page-size=16384",
+                            "-Wl,--dynamic-linker=/system/bin/linker64",
+                            "-Wl,-rpath,/system/lib64:/apex/com.android.runtime/lib64/bionic",
+                            "-Wl,--allow-shlib-undefined", str(ROOT / "ctest/android_bionic_start.S"),
+                            str(source), str(bionic / "libc.so"), "-o", str(binary)],
+                           check=True, capture_output=True)
+            def answer(host, service, family, kind, protocol, flags):
+                self.assertEqual(host, "bifrost-dns.invalid")
+                address = ("127.0.0.1", 443) if family == 2 else ("::1", 443, 0, 0)
+                return [(family, 1, 6, "", address)]
+            proxy = DnsProxy(root)
+            try:
+                with patch("android_managed.socket.getaddrinfo", side_effect=answer) as resolver:
+                    environment = dict(os.environ)
+                    environment.pop("BIFROST_ROOT", None)
+                    environment["BIFROST_GUEST_ENV"] = "LD_LIBRARY_PATH=/system/lib64:/apex/com.android.runtime/lib64/bionic"
+                    for mode in ([], ["--no-jit"]):
+                        result = subprocess.run([str(ARGS.emu.resolve()), *mode, "--android-runtime",
+                                                 "--rootfs", str(root), "/dns"], env=environment,
+                                                timeout=30, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn("BIONIC_DNS_OK", result.stdout)
+                    self.assertEqual(resolver.call_count, 4)
+            finally:
+                proxy.close()
 
 
 class PackageTests(unittest.TestCase):

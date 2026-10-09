@@ -700,6 +700,28 @@ session. The supervisor forwards interruption, terminates owned descendants,
 removes its log socket, and propagates guest failure; a requested timeout returns
 124 and interruption returns 130. Normal runs have no time limit.
 
+Managed sessions also supervise `/dev/socket/dnsproxyd` for Bionic's
+`getaddrinfo` requests. The service uses the host resolver and translates Android
+flags/error numbers and IPv4/IPv6 socket addresses using the
+[AOSP Bionic protocol](https://android.googlesource.com/platform/bionic/+/refs/tags/android-15.0.0_r1/libc/dns/net/getaddrinfo.c)
+and [DnsResolver serialization](https://android.googlesource.com/platform/packages/modules/DnsResolver/+/refs/tags/android-15.0.0_r1/DnsProxyListener.cpp).
+Requests and concurrent clients are bounded; sockets close with the session.
+This supplies the host's default network. Android per-network routing, legacy
+hostent commands and raw `resnsend` queries are not implemented. No DNS server
+address or application hostname is hardcoded.
+
+Previously, SpongeBob's TiltingPoint registration request failed with
+`Cannot resolve destination host`. With the resolver, the actual game obtains
+its SDK device ID; the user observed loading pass its former 73% plateau to 74%.
+This does not establish completed loading or gameplay. `DnsProxyTests` covers
+wire framing, Android flag/error translation, fragmented requests and cleanup,
+and real Bionic IPv4/IPv6 lookups under both JIT and interpreter, without an
+external network dependency:
+
+```bash
+python3 scripts/test_android_package.py DnsProxyTests LauncherArgumentTests
+```
+
 The managed launcher collects the APK's real signing certificates through
 Android's archive parser. Its package service returns legacy `signatures` only
 for `GET_SIGNATURES` and `signingInfo` only for `GET_SIGNING_CERTIFICATES`, with
