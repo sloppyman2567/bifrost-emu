@@ -30,7 +30,15 @@ final class FrameworkServices {
                         }
                     }
                     if (diagnostic) System.out.println("LOCAL_SERVICE " + name + "." + method.getName());
-                    return call.invoke(method.getName(), arguments);
+                    long trace = FrameworkTrace.begin(name, method.getName(), arguments);
+                    try {
+                        Object result = call.invoke(method.getName(), arguments);
+                        FrameworkTrace.end(trace, result, null);
+                        return result;
+                    } catch (Throwable error) {
+                        FrameworkTrace.end(trace, null, error);
+                        throw error;
+                    }
                 });
         binder.attachInterface((IInterface) proxy, iface);
         Field cache = Class.forName("android.os.ServiceManager").getDeclaredField("sCache");

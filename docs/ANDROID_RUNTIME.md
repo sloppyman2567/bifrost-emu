@@ -325,6 +325,63 @@ and [IApplicationThread](https://github.com/aosp-mirror/platform_frameworks_base
 Passing the APK gate is observed emulator behavior for the covered cases; it
 does not establish all of Android's service policy or application gameplay.
 
+### APK call and stall tracing (2026-10-09)
+
+`FrameworkTrace.java` adds opt-in tracing to the managed launcher. Normal app
+launches leave it disabled. After `make android-managed-launcher`, capture an
+installed app with:
+
+```bash
+python3 scripts/android_package.py --state-root android-state/choreo-sensor run com.tiltingpoint.spongebob --timeout 240 --trace-apk
+```
+
+Each session gets a separate directory under the installed package's
+`managed/traces/apk-trace-*`. `calls.jsonl` contains paired call/return/throw
+records for local framework Binder interfaces and ApplicationThread service
+scheduling. Records include monotonic nanoseconds, guest PID/TID, thread name,
+call ID, operation, bounded argument/result descriptions, duration and caller or
+exception stacks. Object descriptions avoid arbitrary app `toString`, Bundle
+unparceling and Binder invocation. Missing returns remain in `summary.json` as
+unfinished calls, alongside exception counts, slow calls and the last thread
+stacks. Arrays are described by type/length; arbitrary object contents are not
+serialized.
+
+A daemon records pending calls, Java heap usage and Java thread states/stacks
+every ten seconds, with separate markers before/after stack collection. Mapped
+library names are recorded when the guest maps expose them; this profile omits
+most library labels, so ART's existing `nativeloader` output in `last-run.log`
+remains the library-load evidence. Native Binder, fault and frame tracing are
+enabled for the traced session through their existing centralized flags. The
+JSONL file stops at 64 MiB and emits a truncation marker. Completed JSONL writes
+survive a process abort/kill, and supervision preserves the files on timeout.
+The ordinary runtime/logd logs have their existing size behavior.
+
+For a bounded Java/JNI method capture, use `--trace-apk methods --trace-after 45
+--trace-duration 15`; `sample` instead of `methods` samples at 10 ms intervals.
+ART writes `methods.trace` with a 16 MiB buffer. The host also writes
+`methods-summary.json` with entry counts, overflow status and the last events
+per ART trace thread. Trace thread IDs differ from guest OS TIDs; correlate by
+thread name. An interrupted/unfinalized capture is reported as incomplete.
+Method tracing covers Java and JNI method boundaries, not arbitrary internal
+IL2CPP/native C calls, native arguments or every system call. Sampling can miss
+short methods; a full buffer does not prove complete call coverage.
+
+Both method tracing and global thread-stack collection alter scheduling. The
+signed service APK passes all 38 lifecycle assertions with tracing enabled and
+with tracing disabled; the trace verifies 140 paired framework calls, error
+records, thread stacks and a finalized 48,419-record ART method capture without
+buffer overflow. A SpongeBob sampling capture saved its framework calls and
+thread stacks, but aborted on ART thread suspension before finalizing its
+method file. This is diagnostic evidence, not proof that instrumentation or an
+unsupported call caused the game's loading stall. Prefer ordinary `--trace-apk`
+for the first stall capture, then narrow the method window as needed.
+
+The method APIs and v2/v3 file reader were checked against Android 15
+[Debug.java](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/os/Debug.java)
+and [ART trace.cc](https://android.googlesource.com/platform/art/+/refs/tags/android-15.0.0_r1/runtime/trace.cc).
+The focused APK gate is `PackageTests.test_managed_service_trace` in
+`scripts/test_android_package.py`.
+
 ### Framework display events (2026-10-07)
 
 The Activity launcher profile publishes `SurfaceFlingerAIDL` with the Android 15

@@ -84,7 +84,14 @@ final class FrameworkServiceRuntime {
     }
 
     private void schedule(String method, Class<?>[] types, Object... args) throws Exception {
-        Class.forName("android.app.IApplicationThread").getMethod(method, types).invoke(applicationThread, args);
+        long trace = FrameworkTrace.begin("applicationThread", method, args);
+        try {
+            Class.forName("android.app.IApplicationThread").getMethod(method, types).invoke(applicationThread, args);
+            FrameworkTrace.end(trace, null, null);
+        } catch (Exception error) {
+            FrameworkTrace.end(trace, null, error);
+            throw error;
+        }
     }
 
     private ServiceInfo resolve(Object caller, Intent intent, String callingPackage, int user) {

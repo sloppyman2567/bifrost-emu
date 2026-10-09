@@ -456,7 +456,7 @@ def verify_installed(package, app, metadata):
 
 
 def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
-           emu_args=(), timeout=0):
+           emu_args=(), timeout=0, trace_apk=None, trace_after=0, trace_duration=15):
     if not PACKAGE.fullmatch(package):
         raise ValueError("Invalid package name")
     app = state / package
@@ -469,7 +469,9 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
             code, root = verify_installed(package, app, metadata)
             from android_managed import launch_managed
             return launch_managed(app, metadata, code, root, emu, no_jit,
-                                  window_plugin, emu_args, timeout)
+                                  window_plugin, emu_args, timeout, trace_apk, trace_after, trace_duration)
+        if trace_apk is not None or trace_after or trace_duration != 15:
+            raise ValueError("APK framework/method tracing requires a managed Activity")
         if launcher["kind"] != "native_activity":
             raise ValueError("Installed package has no supported launcher Activity")
         if timeout:
@@ -601,6 +603,8 @@ def main():
     installer.add_argument("--media-root", type=Path,
                            help="verified real Media NDK bundle from tools/android_media.py")
     runner = commands.add_parser("run")
+    from android_managed import add_trace_arguments
+    add_trace_arguments(runner)
     runner.add_argument("package")
     runner.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
     runner.add_argument("--no-jit", action="store_true")
@@ -661,6 +665,9 @@ def main():
             args.frames,
             emu_args,
             args.timeout,
+            args.trace_apk,
+            args.trace_after,
+            args.trace_duration,
         )
     except (
         OSError,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Managed Activity launcher build, persistent runtime and host supervision."""
 import argparse
+from collections import Counter
 from contextlib import ExitStack, closing
 import hashlib
 import json
@@ -22,7 +23,124 @@ import android_framework
 
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "FrameworkServices.java",
-                    "FrameworkPackages.java", "FrameworkConnectivity.java", "FrameworkServiceRuntime.java")
+                    "FrameworkPackages.java", "FrameworkConnectivity.java", "FrameworkServiceRuntime.java",
+                    "FrameworkTrace.java")
+
+
+def add_trace_arguments(parser):
+    parser.add_argument("--trace-apk", nargs="?", const="calls", choices=("calls", "methods", "sample"),
+                        help="APK framework calls, pending calls, thread stacks and library mappings; "
+                             "methods/sample also records a bounded ART Java/JNI trace")
+    parser.add_argument("--trace-after", type=int, default=0, help="seconds before ART method capture, 0..3600")
+    parser.add_argument("--trace-duration", type=int, default=15, help="ART capture seconds, 1..300 (16 MiB buffer)")
+
+
+def trace_options(root, mode=None, after=0, duration=15):
+    if mode not in (None, "calls", "methods", "sample") or not 0 <= after <= 3600 or not 1 <= duration <= 300:
+        raise ValueError("Invalid APK trace mode or capture window")
+    if mode is None:
+        if after or duration != 15: raise ValueError("Trace window requires --trace-apk")
+        return [], None
+    directory = Path(tempfile.mkdtemp(prefix="apk-trace-", dir=root / "data/local/tmp"))
+    guest_path = "/" + directory.relative_to(root).as_posix()
+    return [f"-Dbifrost.apk.trace.dir={guest_path}", f"-Dbifrost.apk.trace.mode={mode}",
+            f"-Dbifrost.apk.trace.after={after}", f"-Dbifrost.apk.trace.duration={duration}"], directory
+
+
+def method_trace_summary(path):
+    """Read ART's non-streaming v2/v3 trace (runtime/trace.cc format V1)."""
+    data = path.read_bytes()
+    marker = data.find(b"*end\n")
+    if marker < 0: raise ValueError("Method trace has no finalized header (capture interrupted)")
+    metadata, threads, methods = {}, {}, {}
+    section = None
+    for line in data[:marker].decode("utf-8", errors="replace").splitlines():
+        if line.startswith("*"): section = line
+        elif section == "*threads" and "\t" in line:
+            key, name = line.split("\t", 1)
+            threads[int(key)] = name
+        elif section == "*methods" and "\t" in line:
+            fields = line.split("\t")
+            methods[int(fields[0], 16)] = ".".join(fields[1:3]) + (fields[3] if len(fields) > 3 else "")
+        elif section == "*version" and "=" in line:
+            key, value = line.split("=", 1)
+            metadata[key] = value
+    binary = marker + len(b"*end\n")
+    if len(data) - binary < 18: raise ValueError("Truncated ART binary header")
+    magic, version, offset = struct.unpack_from("<4sHH", data, binary)
+    if magic != b"SLOW" or version not in (2, 3):
+        raise ValueError(f"Unsupported ART method trace version {version}")
+    size = struct.unpack_from("<H", data, binary + 16)[0] if version == 3 else 10
+    if offset < 18 or size < (14 if version == 3 else 10) or binary + offset > len(data):
+        raise ValueError("Invalid ART method trace record/header size")
+    start = binary + offset
+    count = (len(data) - start) // size
+    entries, recent = Counter(), {}
+    for position in range(start, start + count * size, size):
+        thread, encoded, clock = struct.unpack_from("<HII", data, position)
+        action, method = encoded & 3, encoded & ~3
+        if action == 0: entries[method] += 1
+        wall = struct.unpack_from("<I", data, position + 10)[0] if version == 3 else clock
+        events = recent.setdefault(thread, [])
+        events.append({"action": ("enter", "exit", "unwind", "reserved")[action],
+                       "method": methods.get(method, hex(method)), "clock_us": wall})
+        if len(events) > 12: del events[0]
+    return {"version": version, "metadata": metadata, "records": count,
+            "overflow": metadata.get("data-file-overflow") == "true",
+            "partial_record": (len(data) - start) % size != 0,
+            "most_entered": [{"method": methods.get(method, hex(method)), "entries": number}
+                             for method, number in entries.most_common(40)],
+            "last_events_by_thread": [{"trace_thread_id": thread, "name": threads.get(thread), "events": events}
+                                      for thread, events in recent.items()]}
+
+
+def collect_trace(directory, destination):
+    """Preserve guest trace files before a temporary root disappears, even on timeout."""
+    if directory is None: return None
+    target = destination / directory.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(directory, target)
+    calls, errors, pending, threads, slowest = Counter(), Counter(), {}, {}, []
+    truncated = False
+    method_started = method_stopped = False
+    diagnostics = []
+    log = target / "calls.jsonl"
+    if log.exists():
+        with log.open() as source:
+            for line in source:
+                try: event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    truncated = True
+                    continue
+                kind = event.get("event")
+                if kind == "call":
+                    calls[event["operation"]] += 1
+                    pending[event["id"]] = event
+                elif kind in ("return", "throw"):
+                    pending.pop(event["id"], None)
+                    slowest.append({key: event[key] for key in ("operation", "duration_ns", "tid")})
+                    slowest = sorted(slowest, key=lambda item: item["duration_ns"], reverse=True)[:20]
+                    if kind == "throw": errors[event["operation"] + ": " + event["exception"]] += 1
+                elif kind == "thread.stack": threads[event["java_thread_id"]] = event
+                elif kind == "trace.truncated": truncated = True
+                elif kind == "methods.start": method_started = True
+                elif kind == "methods.stop": method_stopped = True
+                elif kind == "trace.error": diagnostics.append(event)
+    summary = {"scope": "local framework boundaries; Java stacks; mapped libraries",
+               "calls": dict(calls.most_common()), "errors": dict(errors.most_common()),
+               "unfinished_calls": list(pending.values()), "slowest_calls": slowest,
+               "last_thread_stacks": list(threads.values()), "truncated": truncated,
+               "diagnostic_errors": diagnostics, "method_capture_started": method_started,
+               "method_capture_completed": method_stopped,
+               "methods_trace_bytes": (target / "methods.trace").stat().st_size
+               if (target / "methods.trace").exists() else None}
+    (target / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    if (target / "methods.trace").exists():
+        try: method_summary = method_trace_summary(target / "methods.trace")
+        except (ValueError, struct.error) as error: method_summary = {"incomplete": True, "error": str(error)}
+        (target / "methods-summary.json").write_text(json.dumps(method_summary, indent=2) + "\n")
+    print(f"APK trace saved: {target}", flush=True)
+    return target
 
 
 def settings_user_key(state, user=0):
@@ -474,13 +592,14 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
 
 
 def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
-                   window_plugin=None, emu_args=(), timeout=0):
+                   window_plugin=None, emu_args=(), timeout=0, trace_apk=None, trace_after=0, trace_duration=15):
     dex = launcher_dex(ROOT / "build/android-managed-launcher")
     root, guest_env = prepare_root(app, metadata, code, installed_root,
                                   ROOT / "build/android-framework/rootfs",
                                   ROOT / "build/android-art/rootfs",
                                   ROOT / "build/android-adapters", dex)
     guest_env = dict(guest_env, BIFROST_ANDROID_HOST_NETWORK=host_network_mode())
+    trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;
     # only this alias is temporary, every app write targets persistent rootfs.
@@ -491,11 +610,14 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         if no_jit: command.append("--no-jit")
         if window_plugin: command += ["--android-window-plugin", str(window_plugin)]
         command += ["--android-runtime", "--android-services", "--rootfs", str(guest_root),
-                    "/system/bin/app_process64", "-Xuse-stderr-logger",
+                    "/system/bin/app_process64", "-Xuse-stderr-logger", *trace_args,
                     "-Djava.class.path=/data/local/tmp/launcher.dex", "/system/bin",
                     "ManagedLauncher", *installed_arguments(metadata, code)]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
+        if trace_apk:
+            for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
+                environment[flag] = "1"
         environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())
         log_path = app / "managed/last-run.log"
         print(f"Launching {metadata['package']} (log: {log_path})", flush=True)
@@ -534,6 +656,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     except ProcessLookupError: pass
                     child.wait()
                 (root / "dev/socket/logdw").unlink(missing_ok=True)
+                collect_trace(trace_directory, app / "managed/traces")
+                if trace_directory is not None: shutil.rmtree(trace_directory)
         if status:
             print(f"Managed app exited with status {status}; see {log_path}", file=sys.stderr)
         return status if status >= 0 else 128 - status

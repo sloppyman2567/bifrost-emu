@@ -1605,6 +1605,7 @@ public final class ManagedLauncher {
 
     private static void execute(String[] args) {
         try {
+            FrameworkTrace.start();
             run(args);
         } catch (Throwable error) {
             error.printStackTrace();

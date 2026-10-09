@@ -691,9 +691,16 @@ class PackageTests(unittest.TestCase):
                 package.regular_archive(archive)
 
     def test_managed_service_execution(self):
-        state = self.work / "service-state"
-        base = self.apk("managed-services", managed="ManagedServices")
-        bundle = self.work / "managed-services.apkm"
+        self.managed_service_execution()
+
+    def test_managed_service_trace(self):
+        self.managed_service_execution("methods")
+
+    def managed_service_execution(self, trace=None):
+        tag = "managed-services-trace" if trace else "managed-services"
+        state = self.work / (tag + "-state")
+        base = self.apk(tag, managed="ManagedServices")
+        bundle = self.work / (tag + ".apkm")
         with zipfile.ZipFile(bundle, "w") as archive:
             archive.write(base, "base.apk")
             archive.write(self.split, "split.apk")
@@ -702,9 +709,10 @@ class PackageTests(unittest.TestCase):
         output = ROOT / "build/android-service-results"
         output.mkdir(parents=True, exist_ok=True)
         # Full interpreter APK startup still has pre-existing font-worker null reads.
-        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90,
+                                trace_apk=trace, trace_duration=1 if trace else 15)
         log = app / "managed/last-run.log"
-        shutil.copyfile(log, output / "jit.log")
+        shutil.copyfile(log, output / ("jit-trace.log" if trace else "jit.log"))
         text = log.read_text()
         self.assertEqual(status, 0, text[-30000:])
         self.assertIn("SERVICE_EXECUTION_OK", text)
@@ -713,6 +721,35 @@ class PackageTests(unittest.TestCase):
                    "SERVICE_FIXTURE alive after Activity destruction", "SERVICE_FIXTURE destroy after-activity")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions))
+        if trace:
+            import json
+            directory, = (app / "managed/traces").iterdir()
+            shutil.copytree(directory, output / directory.name)
+            records = [json.loads(line) for line in (directory / "calls.jsonl").read_text().splitlines()]
+            starts = {record["id"]: record for record in records if record["event"] == "call"}
+            ends = {record["id"]: record for record in records if record["event"] in ("return", "throw")}
+            self.assertEqual(starts.keys(), ends.keys(), "trace lost call/return pairs")
+            for key, event in starts.items():
+                self.assertEqual(event["tid"], ends[key]["tid"])
+                self.assertEqual(event["operation"], ends[key]["operation"])
+                self.assertGreaterEqual(ends[key]["duration_ns"], 0)
+            self.assertTrue(any(event["event"] == "throw" and event["operation"] == "activity.startService"
+                                for event in records), "unsupported calls not traced")
+            native = text + (app / "managed/last-logd.log").read_text()
+            self.assertTrue("nativeloader" in native and "libbifrost-activity.so" in native,
+                            "native library-load log missing")
+            self.assertTrue(any(event["event"] == "thread.stack" for event in records))
+            summary = json.loads((directory / "summary.json").read_text())
+            self.assertIn("applicationThread.scheduleCreateService", summary["calls"])
+            self.assertFalse(summary["unfinished_calls"])
+            self.assertFalse(summary["truncated"])
+            method_trace = (directory / "methods.trace").read_bytes()
+            self.assertTrue(method_trace.startswith(b"*version\n"), "ART did not flush its method trace")
+            self.assertGreater(len(method_trace), 100)
+            method_summary = json.loads((directory / "methods-summary.json").read_text())
+            self.assertGreater(method_summary["records"], 0)
+            self.assertFalse(method_summary["partial_record"])
+            self.assertFalse(method_summary["overflow"])
 
     def test_managed_launcher_persists_data_and_finishes_activity(self):
         state = self.work / "managed-state"

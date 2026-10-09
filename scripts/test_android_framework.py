@@ -21,11 +21,13 @@ from android_framework import install
 
 
 from android_managed import (LogdReceiver, install_managed_graphics, installed_arguments,
-                             host_network_mode, install_settings_key)
+                             host_network_mode, install_settings_key, add_trace_arguments,
+                             trace_options, collect_trace)
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
-        libraries=(), main_class="FrameworkProbe", app=None, probe_args=(), managed_graphics=None):
+        libraries=(), main_class="FrameworkProbe", app=None, probe_args=(), managed_graphics=None,
+        trace_apk=None, trace_after=0, trace_duration=15):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
@@ -60,10 +62,14 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             (root / "debug_ramdisk").mkdir(exist_ok=True)
             (root / "debug_ramdisk/adb_debug.prop").write_text("".join(p + "\n" for p in properties))
         # ART logs to stderr: there is no logd socket for liblog here.
-        program = ["-Xuse-stderr-logger", *art_options,
+        trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
+        program = ["-Xuse-stderr-logger", *art_options, *trace_args,
                    "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", main_class, *probe_args]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
+        if trace_apk:
+            for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
+                environment[flag] = "1"
         guest_env = dict(metadata["environment"], BIFROST_ANDROID_HOST_NETWORK=host_network_mode())
         if mode == "qemu":
             # QEMU's AT_EXECFN carries the host-prefixed path; map it to the
@@ -128,7 +134,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         # exits successfully after the guest crashes.
         guest_failure = bool(re.search(r"\[bifrost-emu\] thread \d+: exception:|"
                                        r"E CRASH\s*: Forwarding signal \d+|"
-                                       r"E AndroidRuntime: .*FATAL EXCEPTION", text))
+                                       r"E AndroidRuntime: .*FATAL EXCEPTION|"
+                                       r"F app_process64: .*?(?:Runtime aborting|Failed to abort)", text))
         frames = max((int(n) for n in re.findall(r"\[frame\] eglSwapBuffers: (\d+) frames", text)),
                      default=0)
         finished = child.returncode == 0 or (play and timed_out)
@@ -140,6 +147,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                   "timed_out": timed_out, "elapsed_seconds": round(time.monotonic() - started, 3),
                   "checkpoint": "app_play" if play else "app_on_create" if app_mode else "framework",
                   "reached_checkpoints": [marker for marker in markers if marker in text]}
+        saved_trace = collect_trace(trace_directory, output / "traces")
+        if saved_trace is not None: result["apk_trace"] = str(saved_trace)
         for tombstone in root.glob("tombstone_*"):
             if tombstone.is_file():
                 shutil.copyfile(tombstone, output / (mode + "-" + tombstone.name))
@@ -150,6 +159,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    add_trace_arguments(parser)
     parser.add_argument("--emu", type=Path, help="Emulator; defaults to Bifrost or qemu-aarch64 for qemu mode")
     parser.add_argument("--runtime-root", type=Path, default=ROOT / "build/android-framework/rootfs")
     parser.add_argument("--art-root", type=Path, default=ROOT / "build/android-art/rootfs")
@@ -215,4 +225,5 @@ if __name__ == "__main__":
                       args.probe.resolve(), args.mode, args.output.resolve(), args.timeout,
                       args.art_option, args.prop, args.services, args.library, args.main_class,
                       args.app.resolve() if args.app else None, args.probe_arg,
-                      args.managed_graphics.resolve() if args.managed_graphics else None) else 1)
+                      args.managed_graphics.resolve() if args.managed_graphics else None,
+                      args.trace_apk, args.trace_after, args.trace_duration) else 1)
