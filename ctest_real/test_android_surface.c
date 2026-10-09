@@ -166,9 +166,13 @@ int main(int argc, char** argv) {
     LOAD(hand, ANativeWindow_getFormat_t, ANativeWindow_getFormat);
     LOAD(hand, ANativeWindow_setBuffersGeometry_t, ANativeWindow_setBuffersGeometry);
 
-    // v1: JNIEnv/jobject are opaque — the shim ignores them.
+    // Raw thunk mode accepts explicit identities; managed apps use the JNI wrapper.
     ANativeWindow* win = ANativeWindow_fromSurface((void*)0x1234, (void*)0x5678);
     chk(win != 0, "ANativeWindow_fromSurface returns a window");
+    ANativeWindow* same = ANativeWindow_fromSurface((void*)0x1234, (void*)0x5678);
+    chk(same == win, "same surface identity returns same window");
+    ANativeWindow_release(same);
+    chk(ANativeWindow_fromSurface((void*)0x1234, NULL) == NULL, "null surface rejected");
     chk(ANativeWindow_getWidth(win) > 0, "getWidth positive");
     chk(ANativeWindow_getHeight(win) > 0, "getHeight positive");
     chk(ANativeWindow_getFormat(win) == 1 /* WINDOW_FORMAT_RGBA_8888 */,
@@ -393,6 +397,27 @@ int main(int argc, char** argv) {
     } else {
         printf("  INFO EGL_KHR_fence_sync not offered: KHR sync checks skipped\n");
     }
+
+    // A second Android surface has independent backing and buffer geometry.
+    ANativeWindow* layer = ANativeWindow_fromSurface((void*)0x1234, (void*)0x6789);
+    chk(layer && layer != win, "second surface has distinct identity");
+    chk(ANativeWindow_setBuffersGeometry(layer, 128, 96, 1) == 0, "layer geometry");
+    chk(ANativeWindow_getWidth(win) == 640 && ANativeWindow_getWidth(layer) == 128,
+        "layer resize does not resize primary");
+    EGLSurface layer_surface = eglCreateWindowSurface(dpy, cfgs[0], (void*)layer, NULL);
+    chk(layer_surface != EGL_NO_SURFACE, "second EGL window surface");
+    chk(eglMakeCurrent(dpy, layer_surface, layer_surface, ctx), "make layer current");
+    glViewport(0, 0, 128, 96);
+    glClearColor(0.75f, 0.15f, 0.35f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glReadPixels(64, 48, 1, 1, 0x1908, 0x1401, pixel);
+    chk(pixel[0] >= 189 && pixel[0] <= 193 && pixel[1] >= 36 && pixel[1] <= 40,
+        "layer has independently rendered pixels");
+    ANativeWindow_release(layer);
+    chk(eglSwapBuffers(dpy, layer_surface), "EGL keeps released native window alive");
+    chk(eglMakeCurrent(dpy, surf, surf, ctx), "restore primary current");
+    chk(eglDestroySurface(dpy, layer_surface), "destroy layer EGL surface");
+    chk(ANativeWindow_getWidth(layer) == -22, "retired layer handle rejected");
 
     // ── teardown ─────────────────────────────────────────────────────
     chk(eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) != 0,

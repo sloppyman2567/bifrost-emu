@@ -6,6 +6,20 @@ The separate stats window and overlay remain opt-in. The emulator name and
 version come from `bifrost/version.hpp`.
 The display includes the presentation backend, FPS, logical window dimensions
 and total presented frames. The original game title is retained.
+Experimental hardware fields show the host CPU and current GL renderer, emulator
+resident RAM / total system RAM, and total dedicated GPU VRAM when available.
+RAM is displayed in decimal MB; VRAM uses binary MiB and GiB to match GPU
+capacity conventions. The value is the driver-reported device-local heap
+capacity, which can be smaller than the physical memory fitted to the card. Resident RAM includes the emulator and guest
+resident allocations; it is not the guest's reserved virtual address space.
+System RAM comes from Linux MemTotal, so it may be lower than installed capacity.
+VRAM is capacity, not per-app GPU usage. EGL's actual DRM render node is matched
+to a Vulkan physical device before summing its device-local heaps; a Mesa GLX
+renderer query is a fallback. Shared integrated-GPU memory and unsupported
+queries display unavailable/shared. These values are discovered at runtime,
+without assumptions about CPU/GPU vendor or installed capacity. GPU names and
+VRAM currently require a presenting GL context; Vulkan-only paths retain the
+presentation counters but may show hardware as unavailable.
 
 Each display has its own enable and disable switch:
 
@@ -52,7 +66,11 @@ framebuffer dumps do not include the HUD.
 
 Presentation hooks cover SDL OpenGL, SDL renderers/surfaces, GLFW OpenGL, the
 SDL-backed EGL window, framebuffer/display-proxy windows, and Vulkan swapchains
-associated with `SDL_Vulkan_CreateSurface`. Vulkan counts only successful or
+associated with `SDL_Vulkan_CreateSurface`, plus Android EGL surfaces.
+Android counts successful swaps on the rendering thread and refreshes native
+window metadata/title on the SDL3 window thread. Destruction resets the frame
+clock. SDL3 handles never enter the SDL2 stats APIs. Android window plugins
+without metadata operations cannot supply title/placement information. Vulkan counts only successful or
 suboptimal presentations, including per-swapchain results. Native guest graphics
 paths that bypass these host thunks are not counted.
 
@@ -67,5 +85,14 @@ EMU=build/release-sdl1-gl1/bifrost-emu ./scripts/test_window_stats.sh
 ```
 
 The regression checks the presentation clock, default first-frame logging,
-default titles, title renaming, idle detection, recreation and explicit disable
+default titles, title renaming, idle detection, native-window recreation, hardware
+field formatting and explicit disable
 switches. Optional UI placement and click-through require a real X11 desktop.
+
+
+Hardware discovery follows [EGL_EXT_device_query](https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_device_query.txt)
+and Vulkan's [physical-device DRM properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceDrmPropertiesEXT.html).
+The host-driver check reported a device-local heap of 8,573,157,376 bytes:
+8176 MiB (7.98 GiB). The previous 8573 MB label represented the same bytes in
+decimal units; it was not an allocation or usage measurement. These exact
+numbers are verification evidence, not constants used by the implementation.

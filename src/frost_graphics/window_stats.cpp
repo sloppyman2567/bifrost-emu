@@ -6,15 +6,19 @@
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <spawn.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include "../../tools/vulkan-headers/include/vulkan/vulkan_core.h"
 #if defined(BIFROST_USE_SDL2)
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -48,10 +52,137 @@ double Clock::active_fps(uint64_t now) const {
 }
 struct Packet {
   uint64_t frames{}, last_ns{}, xwindow{};
+  uint64_t ram{}, total_ram{}, vram{};
   double fps{};
   int x{}, y{}, w{}, h{}, visible{}, separate{}, overlay{};
   char backend[32]{};
+  char cpu[128]{}, gpu[192]{};
 };
+
+// These are host measurements, never guest /proc emulation. RSS includes the
+// emulator and guest's resident pages, not the reserved virtual address window.
+static uint64_t proc_kb(const char *path, const char *field) {
+  std::ifstream file(path);
+  std::string key, line;
+  while (file >> key) {
+    if (key == field) {
+      uint64_t kb = 0;
+      if (file >> kb) return kb * 1024;
+      return 0;
+    }
+    std::getline(file, line);
+  }
+  return 0;
+}
+static std::string cpu_name() {
+  std::ifstream file("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(file, line)) {
+    auto colon = line.find(':');
+    if (colon != std::string::npos && line.substr(0, colon).find("model name") == 0) {
+      auto start = line.find_first_not_of(" \t", colon + 1);
+      if (start != std::string::npos) return line.substr(start);
+    }
+  }
+  return "unavailable";
+}
+
+// Match an EGL renderer's DRM render node to Vulkan's physical device. Never
+// report the first GPU's memory on a multi-GPU machine. Device-local heaps on
+// integrated GPUs are shared system RAM, so they are not reported as VRAM.
+static uint64_t egl_vram(void *egl) {
+  using Current = void *(*)();
+  using Query = unsigned (*)(void *, int, intptr_t *);
+  using String = const char *(*)(void *, int);
+  auto current = reinterpret_cast<Current>(dlsym(egl, "eglGetCurrentDisplay"));
+  using Proc = void *(*)(const char *);
+  auto proc = reinterpret_cast<Proc>(dlsym(egl, "eglGetProcAddress"));
+  auto query = reinterpret_cast<Query>(proc ? proc("eglQueryDisplayAttribEXT") : nullptr);
+  auto string = reinterpret_cast<String>(proc ? proc("eglQueryDeviceStringEXT") : nullptr);
+  intptr_t device = 0;
+  void *display = current ? current() : nullptr;
+  if (!display || !query || !string) return 0;
+  using DisplayString = const char *(*)(void *, int);
+  auto display_string = reinterpret_cast<DisplayString>(dlsym(egl, "eglQueryString"));
+  const char *client_extensions = display_string ? display_string(nullptr, 0x3055) : nullptr;
+  if (!client_extensions || (!strstr(client_extensions, "EGL_EXT_device_query") &&
+                             !strstr(client_extensions, "EGL_EXT_device_base"))) return 0;
+  if (!query(display, 0x322c, &device)) return 0;
+  const char *device_extensions = string(reinterpret_cast<void *>(device), 0x3055);
+  if (!device_extensions || !strstr(device_extensions, "EGL_EXT_device_drm_render_node")) return 0;
+  const char *node = string(reinterpret_cast<void *>(device), 0x3377);
+  struct stat st{};
+  if (!node || stat(node, &st) || !S_ISCHR(st.st_mode)) return 0;
+  void *vk = dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL);
+  if (!vk) return 0;
+  auto create = reinterpret_cast<PFN_vkCreateInstance>(dlsym(vk, "vkCreateInstance"));
+  auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(dlsym(vk, "vkDestroyInstance"));
+  auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(dlsym(vk, "vkEnumeratePhysicalDevices"));
+  auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(dlsym(vk, "vkGetPhysicalDeviceProperties2"));
+  auto memory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(dlsym(vk, "vkGetPhysicalDeviceMemoryProperties"));
+  auto extensions = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(dlsym(vk, "vkEnumerateDeviceExtensionProperties"));
+  uint64_t bytes = 0;
+  VkInstance instance{};
+  VkApplicationInfo app{};
+  app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO; app.apiVersion = VK_API_VERSION_1_1;
+  VkInstanceCreateInfo info{};
+  info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO; info.pApplicationInfo = &app;
+  if (create && destroy && enumerate && properties && memory && extensions &&
+      create(&info, nullptr, &instance) == VK_SUCCESS) {
+    uint32_t count = 0;
+    if (enumerate(instance, &count, nullptr) == VK_SUCCESS && count && count <= 64) {
+      std::vector<VkPhysicalDevice> devices(count);
+      if (enumerate(instance, &count, devices.data()) == VK_SUCCESS) for (auto gpu : devices) {
+        uint32_t n = 0;
+        if (extensions(gpu, nullptr, &n, nullptr) != VK_SUCCESS || n > 4096) continue;
+        std::vector<VkExtensionProperties> names(n);
+        if (extensions(gpu, nullptr, &n, names.data()) != VK_SUCCESS) continue;
+        bool drm = false;
+        for (const auto &name : names) drm |= !strcmp(name.extensionName, VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME);
+        if (!drm) continue;
+        VkPhysicalDeviceDrmPropertiesEXT node_info{};
+        node_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 props{};
+        props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; props.pNext = &node_info;
+        properties(gpu, &props);
+        if (!node_info.hasRender || node_info.renderMajor != major(st.st_rdev) ||
+            node_info.renderMinor != minor(st.st_rdev) ||
+            props.properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) continue;
+        VkPhysicalDeviceMemoryProperties heaps{};
+        memory(gpu, &heaps);
+        for (unsigned i = 0; i < heaps.memoryHeapCount; ++i)
+          if (heaps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            bytes += heaps.memoryHeaps[i].size;
+        break;
+      }
+    }
+    destroy(instance, nullptr);
+  }
+  dlclose(vk);
+  return bytes;
+}
+
+static void gpu_info(std::string &name, uint64_t &vram) {
+  // This runs on a presenting thread with its GL context current. Every entry
+  // is resolved from the host DSO, never from guest thunks or SDL2/SDL3 globals.
+  static void *gl = dlopen("libGL.so.1", RTLD_LAZY | RTLD_LOCAL);
+  static void *egl = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_LOCAL);
+  using Current = void *(*)();
+  auto egl_current = egl ? reinterpret_cast<Current>(dlsym(egl, "eglGetCurrentContext")) : nullptr;
+  auto glx_current = gl ? reinterpret_cast<Current>(dlsym(gl, "glXGetCurrentContext")) : nullptr;
+  if (!(egl_current && egl_current()) && !(glx_current && glx_current())) return;
+  using GetString = const unsigned char *(*)(unsigned);
+  auto string = gl ? reinterpret_cast<GetString>(dlsym(gl, "glGetString")) : nullptr;
+  const auto *renderer = string ? string(0x1f01) : nullptr; // GL_RENDERER
+  if (!renderer) return;
+  name = reinterpret_cast<const char *>(renderer);
+  if (egl) vram = egl_vram(egl);
+  using MesaQuery = int (*)(int, unsigned *);
+  auto query = gl ? reinterpret_cast<MesaQuery>(dlsym(gl, "glXQueryCurrentRendererIntegerMESA")) : nullptr;
+  unsigned mb = 0, unified = 1;
+  if (!vram && query && query(0x8188, &unified) && !unified && query(0x8187, &mb))
+    vram = uint64_t(mb) * 1024 * 1024;
+}
 struct State {
   Clock clock;
   std::string title, decorated;
@@ -60,8 +191,12 @@ struct State {
   pid_t child = -1;
   bool helper_attempted = false;
   bool sdl = true;
+  bool native = false;
   std::thread::id owner;
   std::string backend;
+  std::string gpu;
+  uint64_t vram = 0;
+  unsigned gpu_attempts = 0;
   ~State() {
     if (socket >= 0)
       close(socket);
@@ -110,30 +245,101 @@ static void start_helper(State &state) {
     }).detach();
   }
 }
+static void record_present(State &state, const char *backend, uint64_t now) {
+  state.backend = backend;
+  if (!state.clock.frames && dbg().render_log)
+    fprintf(stderr, "[render] bifrost-emu %s: rendering started (%s)\n",
+            VERSION, backend);
+  state.clock.present(now);
+  if (enabled() && (state.gpu.empty() || !state.vram) && state.gpu_attempts < 4) {
+    ++state.gpu_attempts; gpu_info(state.gpu, state.vram);
+  }
+}
+
+static std::string update(State &state, const WindowInfo &info, uint64_t now) {
+  if (!enabled() || !state.clock.frames ||
+      (state.update_ns && now - state.update_ns < 250000000ULL))
+    return {};
+  state.update_ns = now;
+  Packet packet;
+  static const auto cpu = cpu_name();
+  static const uint64_t total = proc_kb("/proc/meminfo", "MemTotal:");
+  static uint64_t ram = 0, ram_sample = 0;
+  if (!ram_sample || now - ram_sample >= 1000000000ULL) {
+    ram = proc_kb("/proc/self/status", "VmRSS:"); ram_sample = now;
+  }
+  packet.ram = ram; packet.total_ram = total; packet.vram = state.vram;
+  snprintf(packet.cpu, sizeof(packet.cpu), "%s", cpu.c_str());
+  snprintf(packet.gpu, sizeof(packet.gpu), "%s", state.gpu.empty() ? "unavailable" : state.gpu.c_str());
+  packet.frames = state.clock.frames;
+  packet.last_ns = state.clock.last_ns;
+  packet.fps = state.clock.active_fps(now);
+  packet.x = info.x; packet.y = info.y;
+  packet.w = info.w; packet.h = info.h;
+  packet.visible = info.visible;
+  packet.xwindow = info.xwindow;
+  snprintf(packet.backend, sizeof(packet.backend), "%s", state.backend.c_str());
+  if (info.title != state.decorated)
+    state.title = info.title;
+  std::string title;
+  if (dbg().window_stats_title) {
+    char suffix[768];
+    char vram[48];
+    if (packet.vram) snprintf(vram, sizeof(vram), "%.0f MiB (%.2f GiB)",
+                              packet.vram / 1048576.0, packet.vram / 1073741824.0);
+    else snprintf(vram, sizeof(vram), "unavailable/shared");
+    snprintf(suffix, sizeof(suffix),
+             " | bifrost-emu %s | %s %.1f FPS | %dx%d | frame %llu | RAM %.0f/%.0f MB | CPU %.64s | GPU %.80s | VRAM %s", VERSION,
+             now - state.clock.last_ns > 2000000000ULL ? "idle" : state.backend.c_str(),
+             packet.fps, packet.w, packet.h, (unsigned long long)packet.frames,
+             packet.ram / 1e6, packet.total_ram / 1e6, packet.cpu, packet.gpu, vram);
+    title = state.decorated = state.title + suffix;
+  }
+  packet.separate = dbg().window_stats_window;
+  packet.overlay = dbg().window_stats_overlay;
+  if (packet.separate || packet.overlay) {
+    start_helper(state);
+    if (state.socket >= 0 &&
+        send(state.socket, &packet, sizeof(packet), MSG_NOSIGNAL) < 0 &&
+        errno != EAGAIN && errno != EWOULDBLOCK) {
+      close(state.socket);
+      state.socket = -1;
+    }
+  }
+  return title;
+}
+
+void note_present(void *key, const char *backend) {
+  if (!key) return;
+  std::lock_guard<std::mutex> lock(mu);
+  auto &state = windows[key];
+  state.native = true;
+  record_present(state, backend, now_ns());
+}
+
+std::string update_native(void *key, const WindowInfo &info) {
+  if (!key) return {};
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = windows.find(key);
+  if (it == windows.end()) return {};
+  it->second.native = true;
+  return update(it->second, info, now_ns());
+}
+
 #if defined(BIFROST_USE_SDL2)
 static void publish(void *key, const char *backend, bool sdl,
                     bool presented = true) {
   std::lock_guard<std::mutex> lock(mu);
   auto &state = windows[key];
   const uint64_t now = now_ns();
-  if (presented)
-    state.backend = backend;
-  backend = state.backend.c_str();
   state.sdl = sdl;
   state.owner = std::this_thread::get_id();
-  if (presented && !state.clock.frames && dbg().render_log)
-    fprintf(stderr, "[render] bifrost-emu %s: rendering started (%s)\n",
-            VERSION, backend);
   if (presented)
-    state.clock.present(now);
+    record_present(state, backend, now);
   if (!enabled() || (state.update_ns && now - state.update_ns < 250000000ULL))
     return;
-  state.update_ns = now;
-  Packet packet;
-  packet.frames = state.clock.frames;
-  packet.last_ns = state.clock.last_ns;
-  packet.fps = state.clock.active_fps(now);
-  snprintf(packet.backend, sizeof(packet.backend), "%s", backend);
+  WindowInfo packet;
+  packet.title = state.title;
   auto *window = static_cast<SDL_Window *>(key);
   using SetTitle = void (*)(void *, const char *);
   using GetTitle = const char *(*)(void *);
@@ -178,31 +384,9 @@ static void publish(void *key, const char *backend, bool sdl,
     get_pos(key, &packet.x, &packet.y);
   if (get_size)
     get_size(key, &packet.w, &packet.h);
-  if (get_title) {
-    std::string current = get_title(key);
-    if (current != state.decorated)
-      state.title = current;
-  }
-  if (dbg().window_stats_title && set_title) {
-    char suffix[192];
-    snprintf(suffix, sizeof(suffix),
-             " | bifrost-emu %s | %s %.1f FPS | %dx%d | frame %llu", VERSION,
-             now - state.clock.last_ns > 2000000000ULL ? "idle" : backend,
-             packet.fps, packet.w, packet.h, (unsigned long long)packet.frames);
-    state.decorated = state.title + suffix;
-    set_title(key, state.decorated.c_str());
-  }
-  packet.separate = dbg().window_stats_window;
-  packet.overlay = dbg().window_stats_overlay;
-  if (packet.separate || packet.overlay) {
-    start_helper(state);
-    if (state.socket >= 0 &&
-        send(state.socket, &packet, sizeof(packet), MSG_NOSIGNAL) < 0 &&
-        errno != EAGAIN && errno != EWOULDBLOCK) {
-      close(state.socket);
-      state.socket = -1;
-    }
-  }
+  if (get_title) packet.title = get_title(key);
+  std::string title = update(state, packet, now);
+  if (!title.empty() && set_title) set_title(key, title.c_str());
 }
 #endif
 void sdl_present(void *window, const char *backend) {
@@ -244,7 +428,7 @@ void api(const std::string &name, const uint64_t *a, uint64_t result) {
     {
       std::lock_guard<std::mutex> lock(mu);
       for (auto &[key, state] : windows)
-        if (state.clock.frames && state.owner == std::this_thread::get_id())
+        if (!state.native && state.clock.frames && state.owner == std::this_thread::get_id())
           live.emplace_back(key, state.sdl);
     }
     for (auto [key, sdl] : live)
@@ -254,7 +438,7 @@ void api(const std::string &name, const uint64_t *a, uint64_t result) {
   if (name == "SDL_Quit" || name == "glfwTerminate") {
     std::lock_guard<std::mutex> lock(mu);
     for (auto it = windows.begin(); it != windows.end();) {
-      if (it->second.sdl == (name == "SDL_Quit"))
+      if (!it->second.native && it->second.sdl == (name == "SDL_Quit"))
         it = windows.erase(it);
       else
         ++it;
@@ -350,7 +534,7 @@ static void text(SDL_Renderer *r, const char *s, int y) {
       {63, 64, 64, 64, 63},  {31, 32, 64, 32, 31},   {63, 64, 56, 64, 63},
       {99, 20, 8, 20, 99},   {7, 8, 112, 8, 7},      {97, 81, 73, 69, 67}};
   int x = 12;
-  for (; *s && x < 540; ++s, x += 12) {
+  for (; *s && x < 880; ++s, x += 12) {
     unsigned char c = *s;
     if (c >= 'a' && c <= 'z')
       c -= 32;
@@ -471,7 +655,7 @@ int ui_main(int fd) {
         snprintf(title, sizeof(title), "bifrost-emu %s - window stats",
                  VERSION);
         windows[i] = SDL_CreateWindow(
-            title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 560, 120,
+            title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 900, 240,
             i ? SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP |
                     SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_TOOLTIP |
                     SDL_WINDOW_HIDDEN
@@ -553,6 +737,17 @@ int ui_main(int fd) {
       snprintf(line, sizeof(line), "SIZE %d X %d - LAST FRAME %.1f S", p.w, p.h,
                (now_ns() - p.last_ns) / 1e9);
       text(renderers[i], line, 84);
+      snprintf(line, sizeof(line), "CPU %.70s", p.cpu);
+      text(renderers[i], line, 108);
+      snprintf(line, sizeof(line), "GPU %.70s", p.gpu);
+      text(renderers[i], line, 132);
+      if (strlen(p.gpu) > 70) text(renderers[i], p.gpu + 70, 156);
+      snprintf(line, sizeof(line), "EMULATOR RAM %.0f / %.0f MB SYSTEM TOTAL", p.ram / 1e6, p.total_ram / 1e6);
+      text(renderers[i], line, 180);
+      if (p.vram) snprintf(line, sizeof(line), "GPU VRAM TOTAL %.0f MiB (%.2f GiB) - EXPERIMENTAL",
+                           p.vram / 1048576.0, p.vram / 1073741824.0);
+      else snprintf(line, sizeof(line), "GPU VRAM UNAVAILABLE OR SHARED - EXPERIMENTAL");
+      text(renderers[i], line, 204);
       SDL_RenderPresent(renderers[i]);
     }
     SDL_Delay(100);

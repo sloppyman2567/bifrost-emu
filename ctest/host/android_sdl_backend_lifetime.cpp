@@ -25,6 +25,11 @@ int main() {
   std::ofstream(log, std::ios::trunc).close();
   CHECK(first->open("first", 800, 600) == 0);
   CHECK(second->open("second", 800, 600) == 0);
+  arm64emu::window_stats::WindowInfo info;
+  first->set_title("APK name");
+  CHECK(first->window_info(info) && info.title == "APK name" && info.w == 400 && info.h == 300);
+  unsigned char icon[128 * 128 * 4]{};
+  CHECK(first->set_icon(icon, 128, 128));
   setenv("BIFROST_TEST_SDL_BINDING_FAIL", "1", 1);
   CHECK(first->binding().window == 0);
   unsetenv("BIFROST_TEST_SDL_BINDING_FAIL");
@@ -44,7 +49,7 @@ int main() {
   CHECK(first->poll(event) == 0 && event.type == 0);
   unsetenv("BIFROST_TEST_SDL_EVENT");
   first->close(); first.reset();
-  CHECK(contents(log) == "video-init\nwindow-create\nhost-resize\nvideo-init\nwindow-create\nhost-resize\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
+  CHECK(contents(log) == "video-init\nwindow-create\nhost-resize\nvideo-init\nwindow-create\nhost-resize\nwindow-icon\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
   CHECK(second->resize(320, 240, false) == 0);
   second.reset();
   CHECK(contents(log).find("resize\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);

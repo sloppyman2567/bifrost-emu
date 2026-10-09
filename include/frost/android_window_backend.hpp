@@ -1,5 +1,6 @@
 #pragma once
 #include "bifrost/android_window_plugin.h"
+#include "frost/window_stats.hpp"
 #include <memory>
 #include <string>
 namespace frost {
@@ -16,6 +17,13 @@ public:
   virtual int resize(int32_t width, int32_t height, bool resize_host) = 0;
   virtual AndroidWindowBinding binding() = 0;
   virtual int poll(AndroidWindowEvent &event) = 0;
+  // Additional independently backed layers on the same native display.
+  // Unsupported backends fail closed rather than aliasing the primary window.
+  virtual std::unique_ptr<AndroidWindowBackend> create_surface(int32_t, int32_t) { return {}; }
+  virtual void set_visible(bool) {}
+  virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
+  virtual void set_title(const char *) {}
+  virtual bool set_icon(const uint8_t *, int32_t, int32_t) { return false; }
 };
 std::unique_ptr<AndroidWindowBackend> make_sdl_android_window_backend();
 // Explicit trusted host path; module lives until close/destroy complete.

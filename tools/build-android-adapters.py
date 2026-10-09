@@ -180,9 +180,10 @@ def build(runtime, output):
             ],
             check=True,
         )
-        # ActivityProbe's play-mode JNI bridge (scripts/test_android_framework.py --play).
+        # ManagedLauncher and ActivityProbe share the window/identity JNI bridge.
         subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
-                                 str(ROOT / "guest/android/activity_window.c"), str(bionic / "libc.so"),
+                                 str(ROOT / "guest/android/activity_window.c"),
+                                 str(staging / "libandroid.so"), str(bionic / "libc.so"),
                                  "-o", str(staging / "libbifrost-activity.so")], check=True)
         names = list(groups) + ["bifrost-native", "libbifrost-activity.so", "libz.so",
                                 "libz.so.LICENSE"]
@@ -223,9 +224,11 @@ def build(runtime, output):
                                      "-x", "assembler", "/dev/null", "-o", str(stub)],
                            check=True)
             assembly = staging / ("managed-" + soname + ".S")
-            assembly.write_text(shim(table, exports))
+            hidden = {"ANativeWindow_fromSurface"} if soname == "libandroid.so" else set()
+            assembly.write_text(shim(table, exports, hidden))
+            wrapper = [str(ROOT / "guest/android/surface.c"), str(bionic / "libc.so")] if hidden else []
             subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + soname,
-                                     "-Wl,--no-as-needed", str(assembly), str(stub),
+                                     "-Wl,--no-as-needed", str(assembly), *wrapper, str(stub),
                                      "-o", str(managed / soname)], check=True)
             names.append("managed/" + soname)
         metadata = {

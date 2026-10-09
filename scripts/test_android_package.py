@@ -131,7 +131,7 @@ class PackageTests(unittest.TestCase):
             f"""<manifest xmlns:android="http://schemas.android.com/apk/res/android"
             package="org.bifrost.fixture" android:versionCode="{version}"{split_attr}>
             <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="35"/>
-            <application android:hasCode="false"{required}>{component}</application></manifest>"""
+            <application android:label="Managed Fixture" android:hasCode="{'true' if managed else 'false'}"{required}>{component}</application></manifest>"""
         )
         subprocess.run(
             [
@@ -147,6 +147,20 @@ class PackageTests(unittest.TestCase):
             check=True,
             capture_output=True,
         )
+        if managed:
+            classes = cls.work / (name + "-classes")
+            classes.mkdir()
+            dex = cls.work / (name + "-dex")
+            dex.mkdir()
+            subprocess.run([os.environ.get("JAVAC", "javac"), "--release", "8", "-cp",
+                            str(cls.tools / "android.jar"), "-d", str(classes),
+                            str(ROOT / "ctest/host/Managed.java")], check=True, capture_output=True)
+            subprocess.run(["java", "-cp", str(cls.tools / "d8.jar"),
+                            "com.android.tools.r8.D8", "--min-api", "26", "--lib",
+                            str(cls.tools / "android.jar"), "--output", str(dex),
+                            *map(str, classes.rglob("*.class"))], check=True, capture_output=True)
+            with zipfile.ZipFile(apk, "a") as archive:
+                archive.write(dex / "classes.dex", "classes.dex")
         if native:
             with zipfile.ZipFile(apk, "a") as archive:
                 archive.write(cls.native, "lib/arm64-v8a/libfixture.so")
@@ -432,7 +446,7 @@ class PackageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package.regular_archive(archive)
 
-    def test_managed_launcher_is_installed_but_rejected_before_execution(self):
+    def test_managed_launcher_persists_data_and_finishes_activity(self):
         state = self.work / "managed-state"
         base = self.apk("managed", managed=True)
         bundle = self.work / "managed.apkm"
@@ -440,8 +454,20 @@ class PackageTests(unittest.TestCase):
             archive.write(base, "base.apk")
             archive.write(self.split, "split.apk")
         self.install(bundle, state)
-        with self.assertRaisesRegex(ValueError, "ART/framework"):
-            package.launch("org.bifrost.fixture", state, Path("/must/not/execute"))
+        app = state / "org.bifrost.fixture"
+        for starts in (1, 2):
+            status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+            text = (app / "managed/last-run.log").read_text()
+            self.assertEqual(status, 0, text[-30000:])
+            self.assertIn("APP_WINDOW_IDENTITY Managed Fixture icon=", text)
+            self.assertIn(f"MANAGED_FIXTURE_START {starts}", text)
+            markers = ("MANAGED_FIXTURE_SURFACE_CREATED", "MANAGED_FIXTURE_PAUSED",
+                       "MANAGED_FIXTURE_SURFACE_DESTROYED", "MANAGED_FIXTURE_STOPPED",
+                       "MANAGED_FIXTURE_DESTROYED", "APP_WINDOW_CLOSED")
+            positions = [text.index(marker) for marker in markers]
+            self.assertEqual(positions, sorted(positions))
+            self.assertNotIn("bifrost.registration_probe", text)
+        self.assertTrue((app / "managed/rootfs/data/user/0/org.bifrost.fixture/shared_prefs/fixture.xml").is_file())
 
 
 if __name__ == "__main__":

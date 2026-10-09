@@ -1,7 +1,9 @@
 # Signed APK installation and native launch
 
 Checkpoint: October 5, 2026. Bifrost installs signed APK sets and executes a
-native-only `android.app.NativeActivity` through the real guest Bionic linker.
+`android.app.NativeActivity` through the real guest Bionic linker, and managed
+SurfaceView Activities through the ART/framework
+[managed launcher](ANDROID_RUNTIME.md#managed-apk-launcher-2026-10-08).
 The regression APK uses split assets, pthread/TLS, persistent storage, EGL
 pixel readback and an actual Binder service call. Managed Activities still
 require guest ART and Android framework startup.
@@ -164,10 +166,11 @@ queue) require the Android runtime profile. They are not Android kernel APIs.
 
 ## Compatibility boundaries
 
-Only the exact `android.app.NativeActivity` launcher class is executable here.
-`JavaVM`, `JNIEnv` and the Java Activity object are null; apps must avoid JNI.
-The launcher invokes startup, window/input, redraw and teardown callbacks.
-It does not implement full Activity lifecycle transitions, resource-table
+The native-only path accepts the exact `android.app.NativeActivity` class.
+On that path, `JavaVM`, `JNIEnv` and the Java Activity object are null; apps must
+avoid JNI. Managed launcher classes instead use the separate ART/framework path.
+The native-only launcher invokes startup, window/input, redraw and teardown callbacks.
+That path does not implement full Activity lifecycle transitions, resource-table
 resolution, Java class loading, DEX execution or Android property services.
 
 `ALooper` is per guest thread, as AOSP's `Looper::getForThread` is:
@@ -196,9 +199,10 @@ compatibility. Missing adapter exports fail explicitly.
 PackageManager or other framework service is supplied by this checkpoint.
 
 The user-provided SpongeBob 5.11.5 set installs successfully: nine signed APKs
-and 21 ARM64 libraries. The normal APK runner rejects
-`com.clevertap.unity.CleverTapOverrideActivity` before executing the emulator
-because that runner has no managed Activity lifecycle. A separate
+and 21 ARM64 libraries. The normal APK runner now launches
+`com.clevertap.unity.CleverTapOverrideActivity` through ManagedLauncher.
+Its SurfaceView path provides a window and input; this remains a bounded
+framework profile rather than a complete Android system. A separate
 [installed-app framework probe](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07)
 now reaches the real launcher's `onCreate`, including IL2CPP JNI startup, in
 both engines. It exits after creation and does not draw or accept input.
@@ -270,7 +274,9 @@ exit-handler failure also pass: the latter preserves `LOAD_OK` while failing
 the command with guest exit 23. The six host test cases also cover path
 and symlink rejection, input growth bounds, signature tampering, signer mismatch,
 version mismatch, downgrade prevention, reordered reinstall, modified installed
-code, and managed-launcher rejection. The fixture does not test ART or JNI.
+code, and native-launcher boundaries. An additional signed managed fixture now tests
+ART Activity startup, resource labels, persistent preferences and ordered
+Activity.finish teardown over two launches; see the managed launcher guide.
 The real Media NDK additionally passes 256 repeated metadata ownership/type
 cycles per fixture process in all six backend/execution-mode combinations.
 These checks exercise metadata, not Android media services or decoding.

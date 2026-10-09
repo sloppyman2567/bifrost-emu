@@ -63,7 +63,19 @@ bool AndroidSurfaceManager::open_host_window() {
     return true;
 }
 
+int AndroidSurfaceManager::set_window_identity(const std::string& title, const uint8_t* rgba,
+                                               int32_t width, int32_t height) {
+    if (!window_open_) return -ENODEV;
+    if (!title.empty()) window_backend_->set_title(title.c_str());
+    if (rgba && !window_backend_->set_icon(rgba, width, height)) return -ENOTSUP;
+    return 0;
+}
+
 void AndroidSurfaceManager::close_host_window() {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    arm64emu::window_stats::forget(window_backend_.get());
+    for (auto& [handle, surface] : surfaces_)
+        if (surface.backend) surface.backend->close();
     window_backend_->close();
     window_open_ = false;
 }
@@ -77,30 +89,120 @@ int AndroidSurfaceManager::handle_host_resize(int32_t width, int32_t height) {
     return 0;
 }
 
-uint64_t AndroidSurfaceManager::from_surface() {
+uint64_t AndroidSurfaceManager::from_surface(uint64_t identity) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
     if (!ready()) return 0;
-    if (surface_handle_ == 0) {
-        surface_handle_ = kHandleBase + 1;
-        refs_ = 1;
-    } else {
-        ++refs_;
+    for (auto& [handle, surface] : surfaces_) {
+        if (surface.identity == identity) { ++surface.refs; return handle; }
     }
-    return surface_handle_;
+    if (next_surface_ >= 0xFFFF) return 0;
+    Surface surface;
+    surface.identity = identity;
+    surface.width = width_; surface.height = height_; surface.format = format_;
+    if (surface_handle_) {
+        surface.backend = window_backend_->create_surface(width_, height_);
+        if (!surface.backend) return 0;
+    }
+    uint64_t handle = kHandleBase + ++next_surface_;
+    surfaces_.emplace(handle, std::move(surface));
+    if (!surface_handle_) surface_handle_ = handle;
+    return handle;
 }
 
 void AndroidSurfaceManager::acquire(uint64_t handle) {
-    if (is_shim(handle) && handle == surface_handle_) ++refs_;
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto it = surfaces_.find(handle);
+    if (it != surfaces_.end()) ++it->second.refs;
 }
 
 void AndroidSurfaceManager::release(uint64_t handle) {
-    if (is_shim(handle) && handle == surface_handle_ && refs_ > 0) --refs_;
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto it = surfaces_.find(handle);
+    if (it == surfaces_.end() || !it->second.refs) return;
+    if (--it->second.refs == 0) {
+        if (it->second.backend) it->second.backend->set_visible(false);
+        if (handle == surface_handle_) surface_handle_ = 0;
+        surfaces_.erase(it);
+    }
+}
+
+void AndroidSurfaceManager::register_egl_surface(uint64_t egl_surface, uint64_t handle) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto it = surfaces_.find(handle);
+    if (it != surfaces_.end() && egl_surfaces_.emplace(egl_surface, handle).second)
+        ++it->second.refs;
+}
+bool AndroidSurfaceManager::present_egl_surface(uint64_t egl_surface) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!window_open_ || !egl_surfaces_.count(egl_surface)) return false;
+    arm64emu::window_stats::note_present(window_backend_.get(), "Android EGL");
+    return true;
+}
+void AndroidSurfaceManager::destroy_egl_surface(uint64_t egl_surface) {
+    uint64_t handle;
+    {
+        std::lock_guard<std::mutex> lock(surface_mu_);
+        auto it = egl_surfaces_.find(egl_surface);
+        if (it == egl_surfaces_.end()) return;
+        handle = it->second;
+        egl_surfaces_.erase(it);
+    }
+    release(handle);
+}
+
+int AndroidSurfaceManager::set_surface_opaque(uint64_t handle, bool opaque) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto it = surfaces_.find(handle);
+    if (it == surfaces_.end()) return -EINVAL;
+    // Opacity is an EGL creation attribute. Changing the SurfaceView format
+    // requires recreating its surface, as SurfaceView.updateSurface does.
+    if (it->second.opaque != opaque)
+        for (const auto& [egl, window] : egl_surfaces_)
+            if (window == handle) return -EBUSY;
+    it->second.opaque = opaque;
+    return 0;
+}
+
+bool AndroidSurfaceManager::surface_opaque(uint64_t handle) const {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto it = surfaces_.find(handle);
+    return it != surfaces_.end() && it->second.opaque;
+}
+
+int32_t AndroidSurfaceManager::width(uint64_t handle) const {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!handle || handle == surface_handle_) return width_;
+    auto it = surfaces_.find(handle);
+    return it == surfaces_.end() ? -EINVAL : it->second.width;
+}
+int32_t AndroidSurfaceManager::height(uint64_t handle) const {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!handle || handle == surface_handle_) return height_;
+    auto it = surfaces_.find(handle);
+    return it == surfaces_.end() ? -EINVAL : it->second.height;
+}
+int32_t AndroidSurfaceManager::format(uint64_t handle) const {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!handle || handle == surface_handle_) return format_;
+    auto it = surfaces_.find(handle);
+    return it == surfaces_.end() ? -EINVAL : it->second.format;
 }
 
 int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
-                                                    int32_t fmt) {
+                                                    int32_t fmt, uint64_t handle) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
     if (w < 0 || h < 0 || fmt < 0 || (w == 0) != (h == 0)) return -EINVAL;
     if (fmt && fmt != kFormatRGBA8888) return -ENOTSUP;
     int32_t width = w ? w : kBaseWidth, height = h ? h : kBaseHeight;
+    if (handle && handle != surface_handle_) {
+        auto it = surfaces_.find(handle);
+        if (it == surfaces_.end() || !it->second.backend) return -EINVAL;
+        int error = it->second.backend->resize(width, height, false);
+        if (error) return error;
+        it->second.width = width; it->second.height = height;
+        it->second.format = fmt ? fmt : kFormatRGBA8888;
+        return 0;
+    }
     int error = window_backend_->resize(width, height, true);
     if (error) return error;
     width_ = width;
@@ -109,8 +211,12 @@ int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
     return 0;
 }
 
-uint64_t AndroidSurfaceManager::host_native_window() {
-    return window_backend_->binding().window;
+uint64_t AndroidSurfaceManager::host_native_window(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!handle) return window_backend_->binding().window;
+    auto it = surfaces_.find(handle);
+    if (it == surfaces_.end()) return 0;
+    return it->second.backend ? it->second.backend->binding().window : window_backend_->binding().window;
 }
 void* AndroidSurfaceManager::native_display() const {
     return window_backend_->binding().display;
@@ -125,11 +231,11 @@ AndroidSurfaceManager::AndroidSurfaceManager(std::unique_ptr<AndroidWindowBacken
 }
 
 AndroidSurfaceManager::~AndroidSurfaceManager() {
-    window_backend_->close();
+    close_host_window();
 }
 
 bool AndroidSurfaceManager::install_window_backend(std::unique_ptr<AndroidWindowBackend> backend) {
-    if (!backend || ready() || surface_handle_) return false;
+    if (!backend || ready() || next_surface_) return false;
     if (backend->resize(width_, height_, false)) return false;
     window_backend_ = std::move(backend);
     return true;
@@ -728,6 +834,11 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
 }
 
 void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
+    arm64emu::window_stats::WindowInfo info;
+    if (window_open_ && window_backend_->window_info(info)) {
+        auto title = arm64emu::window_stats::update_native(window_backend_.get(), info);
+        if (!title.empty()) window_backend_->set_title(title.c_str());
+    }
     // Bound plugin work per pump, including a plugin that never reports empty.
     for (unsigned i = 0; i < 256; ++i) {
         AndroidWindowEvent event{};

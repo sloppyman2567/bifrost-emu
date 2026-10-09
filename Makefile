@@ -99,7 +99,8 @@ ifeq ($(USE_SDL3),1)
     SDL3_CFLAGS := $(shell pkg-config --cflags sdl3 2>/dev/null)
     SDL3_AVAILABLE := $(shell pkg-config --exists 'sdl3 >= 3.2.0' 2>/dev/null && echo yes)
     ifeq ($(SDL3_AVAILABLE),yes)
-        CXXFLAGS += $(SDL3_CFLAGS) -DBIFROST_USE_SDL3
+        CXXFLAGS += $(SDL3_CFLAGS) $(shell pkg-config --cflags wayland-client x11) -DBIFROST_USE_SDL3
+        LDFLAGS += $(shell pkg-config --libs wayland-client x11)
     else
         $(warning "SDL3 development headers unavailable; Android window backend returns ENOSYS")
     endif
@@ -533,7 +534,7 @@ ifeq ($(SDL3_AVAILABLE),yes)
 	@mkdir -p $(OBJDIR)/test-wayland
 	$(CC) -std=c11 -Wall -Wextra -fPIC -shared ctest/host/android_sdl3_fixture.c $(SDL3_CFLAGS) -o $(OBJDIR)/test-wayland/libSDL3.so.0
 	$(CC) -std=c11 -Wall -Wextra -fPIC -shared ctest/host/wayland_egl_lifetime_fixture.c -o $(OBJDIR)/test-wayland/libwayland-egl.so.1
-	$(CXX) $(CXXFLAGS) ctest/host/android_sdl_backend_lifetime.cpp src/frost_graphics/android_window_backend.cpp -o $(OBJDIR)/android_sdl_backend_lifetime -pthread -ldl
+	$(CXX) $(CXXFLAGS) ctest/host/android_sdl_backend_lifetime.cpp src/frost_graphics/android_window_backend.cpp -o $(OBJDIR)/android_sdl_backend_lifetime -pthread -ldl $(shell pkg-config --libs wayland-client x11)
 	LD_LIBRARY_PATH=$(abspath $(OBJDIR)/test-wayland) ./$(OBJDIR)/android_sdl_backend_lifetime
 else
 	@echo "error: test-android-sdl-backend requires USE_SDL3=1 and SDL3 development headers" >&2
@@ -544,6 +545,10 @@ ANDROID_WINDOW_PLUGIN := $(OBJDIR)/plugins/android-window-sdl.so
 .PHONY: android-window-plugin test-android-window-plugin test-android-window-plugin-cli
 
 .PHONY: android-runtime-adapters test-android-package
+.PHONY: android-managed-launcher
+android-managed-launcher:
+	python3 scripts/android_managed.py build
+
 android-runtime-adapters:
 	python3 tools/build-android-adapters.py
 
@@ -554,7 +559,7 @@ android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
 
 $(ANDROID_WINDOW_PLUGIN): plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp include/frost/android_window_backend.hpp include/bifrost/android_window_plugin.h Makefile $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp -o $@ -pthread -ldl
+	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared plugins/android-window-sdl/plugin.cpp src/frost_graphics/android_window_backend.cpp -o $@ -pthread -ldl $(shell pkg-config --libs wayland-client x11)
 
 test-android-window-plugin: $(LIB)
 	$(CC) -std=c11 -Wall -Wextra -Iinclude -fPIC -shared ctest/host/android_window_plugin_fixture.c -o $(OBJDIR)/android_window_plugin_fixture.so
@@ -586,3 +591,6 @@ test-nb: lib $(TARGET) $(NB_TESTLIB)
 	@$(CXX) $(OBJDIR)/test_nb_host.o $(LIB) -o $(OBJDIR)/test_nb_host $(LDFLAGS)
 	@echo "=== Running host native bridge test ==="
 	@./$(OBJDIR)/test_nb_host
+
+# Hardware telemetry uses the vendored Vulkan ABI without a host SDK dependency.
+$(OBJDIR)/src/frost_graphics/window_stats.o: CXXFLAGS += -Itools/vulkan-headers/include

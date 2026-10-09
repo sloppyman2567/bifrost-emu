@@ -7,6 +7,8 @@
 #include <dlfcn.h>
 #if defined(BIFROST_USE_SDL3)
 #include <SDL3/SDL.h>
+#include <wayland-client.h>
+#include <X11/Xlib.h>
 #endif
 namespace frost {
 namespace {
@@ -15,9 +17,13 @@ namespace {
 // own DSO, as sdl2-compat does, rather than interposing overlapping SDL names.
 #define SDL3_FUNCTIONS(X) \
   X(InitSubSystem) X(QuitSubSystem) X(SetHint) X(GetError) \
-  X(CreateWindow) X(DestroyWindow) X(GetWindowProperties) \
+  X(CreateWindowWithProperties) X(CreateProperties) X(DestroyProperties) \
+  X(SetStringProperty) X(SetNumberProperty) X(SetBooleanProperty) \
+  X(DestroyWindow) X(GetWindowProperties) \
   X(GetPointerProperty) X(GetNumberProperty) X(SetWindowSize) \
-  X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent)
+  X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent) \
+  X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
+  X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -97,8 +103,151 @@ int android_key(SDL_Scancode key) {
   }
 }
 #endif
+#if defined(BIFROST_USE_SDL3)
+class WaylandSurfaceBackend final : public AndroidWindowBackend {
+public:
+  WaylandSurfaceBackend(wl_display* display, wl_surface* parent, int32_t width, int32_t height)
+      : display_(display), width_(width), height_(height) {
+    queue_ = wl_display_create_queue(display_);
+    if (!queue_) return;
+    auto wrapper = static_cast<wl_display*>(wl_proxy_create_wrapper(display_));
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(wrapper), queue_);
+    registry_ = wl_display_get_registry(wrapper);
+    wl_proxy_wrapper_destroy(wrapper);
+    static const wl_registry_listener listener = {
+      [](void* data, wl_registry* registry, uint32_t id, const char* name, uint32_t) {
+        auto& self = *static_cast<WaylandSurfaceBackend*>(data);
+        if (!std::strcmp(name, "wl_compositor"))
+          self.compositor_ = static_cast<wl_compositor*>(wl_registry_bind(registry, id, &wl_compositor_interface, 1));
+        else if (!std::strcmp(name, "wl_subcompositor"))
+          self.subcompositor_ = static_cast<wl_subcompositor*>(wl_registry_bind(registry, id, &wl_subcompositor_interface, 1));
+      }, [](void*, wl_registry*, uint32_t) {}};
+    wl_registry_add_listener(registry_, &listener, this);
+    if (wl_display_roundtrip_queue(display_, queue_) < 0 || !compositor_ || !subcompositor_) return;
+    surface_ = wl_compositor_create_surface(compositor_);
+    subsurface_ = wl_subcompositor_get_subsurface(subcompositor_, surface_, parent);
+    wl_subsurface_set_desync(subsurface_);
+    wl_subsurface_place_above(subsurface_, parent);
+    if (egl_.create) window_ = egl_.create(surface_, width_, height_);
+    wl_surface_commit(parent);
+    wl_display_flush(display_);
+  }
+  ~WaylandSurfaceBackend() override { close(); }
+  const char* name() const noexcept override { return "wayland-subsurface-egl"; }
+  int open(const char*, int32_t, int32_t) override { return window_ ? 0 : -ENODEV; }
+  void close() noexcept override {
+    if (window_) egl_.destroy(window_);
+    window_ = nullptr;
+    if (subsurface_) wl_subsurface_destroy(subsurface_);
+    if (surface_) wl_surface_destroy(surface_);
+    if (subcompositor_) wl_subcompositor_destroy(subcompositor_);
+    if (compositor_) wl_compositor_destroy(compositor_);
+    if (registry_) wl_registry_destroy(registry_);
+    if (queue_) wl_event_queue_destroy(queue_);
+    queue_ = nullptr;
+    subsurface_ = nullptr; surface_ = nullptr; subcompositor_ = nullptr;
+    compositor_ = nullptr; registry_ = nullptr;
+  }
+  int resize(int32_t width, int32_t height, bool) override {
+    if (width <= 0 || height <= 0 || !window_) return -EINVAL;
+    egl_.resize(window_, width, height, 0, 0); width_ = width; height_ = height; return 0;
+  }
+  AndroidWindowBinding binding() override { return {reinterpret_cast<uint64_t>(window_), display_}; }
+  int poll(AndroidWindowEvent& event) override { event = {}; return 0; }
+  void set_visible(bool visible) override {
+    if (!visible && surface_) {
+      wl_surface_attach(surface_, nullptr, 0, 0);
+      wl_surface_commit(surface_);
+      wl_display_flush(display_);
+    }
+  }
+private:
+  wl_display* display_;
+  wl_event_queue* queue_ = nullptr;
+  wl_registry* registry_ = nullptr;
+  wl_compositor* compositor_ = nullptr;
+  wl_subcompositor* subcompositor_ = nullptr;
+  wl_surface* surface_ = nullptr;
+  wl_subsurface* subsurface_ = nullptr;
+  WlEglFns egl_;
+  void* window_ = nullptr;
+  int32_t width_, height_;
+};
+class X11SurfaceBackend final : public AndroidWindowBackend {
+public:
+  X11SurfaceBackend(Display* display, Window parent, int32_t width, int32_t height) : display_(display) {
+    XWindowAttributes attrs{};
+    if (!XGetWindowAttributes(display, parent, &attrs)) return;
+    XSetWindowAttributes settings{};
+    settings.colormap = attrs.colormap;
+    settings.background_pixel = 0;
+    window_ = XCreateWindow(display, parent, 0, 0, width, height, 0, attrs.depth,
+                            InputOutput, attrs.visual, CWColormap | CWBackPixel, &settings);
+    if (window_) { XMapRaised(display_, window_); XFlush(display_); }
+  }
+  ~X11SurfaceBackend() override { close(); }
+  const char* name() const noexcept override { return "x11-child-egl"; }
+  int open(const char*, int32_t, int32_t) override { return window_ ? 0 : -ENODEV; }
+  void close() noexcept override {
+    if (window_) { XDestroyWindow(display_, window_); XFlush(display_); window_ = 0; }
+  }
+  int resize(int32_t width, int32_t height, bool) override {
+    if (!window_ || width <= 0 || height <= 0) return -EINVAL;
+    XResizeWindow(display_, window_, width, height); XFlush(display_); return 0;
+  }
+  AndroidWindowBinding binding() override { return {window_, display_}; }
+  int poll(AndroidWindowEvent& event) override { event = {}; return 0; }
+  void set_visible(bool visible) override {
+    if (!window_) return;
+    if (visible) XMapRaised(display_, window_); else XUnmapWindow(display_, window_);
+    XFlush(display_);
+  }
+private:
+  Display* display_;
+  Window window_ = 0;
+};
+#endif
 class SdlAndroidWindowBackend final : public AndroidWindowBackend {
 public:
+  bool window_info(arm64emu::window_stats::WindowInfo &info) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return false;
+    info.title = sdl_.GetWindowTitle(window_);
+    sdl_.GetWindowPosition(window_, &info.x, &info.y);
+    sdl_.GetWindowSize(window_, &info.w, &info.h);
+    auto flags = sdl_.GetWindowFlags(window_);
+    info.visible = (flags & SDL_WINDOW_INPUT_FOCUS) &&
+                   !(flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED));
+    auto props = sdl_.GetWindowProperties(window_);
+    info.xwindow = sdl_.GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+    return true;
+#else
+    (void)info;
+    return false;
+#endif
+  }
+  void set_title(const char *title) override {
+#if defined(BIFROST_USE_SDL3)
+    if (window_) sdl_.SetWindowTitle(window_, title);
+#else
+    (void)title;
+#endif
+  }
+  bool set_icon(const uint8_t *rgba, int32_t width, int32_t height) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return false;
+    // SDL copies the icon; the guest buffer and temporary surface can expire.
+    auto *surface = sdl_.CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32,
+                                           const_cast<uint8_t *>(rgba), width * 4);
+    if (!surface) return false;
+    bool result = sdl_.SetWindowIcon(window_, surface);
+    sdl_.DestroySurface(surface);
+    return result;
+#else
+    (void)rgba; (void)width; (void)height;
+    return false;
+#endif
+  }
   ~SdlAndroidWindowBackend() override { close(); }
   const char *name() const noexcept override { return "sdl3-egl"; }
   int open(const char *title, int32_t width, int32_t height) override {
@@ -108,7 +257,15 @@ public:
     if (!sdl_.load()) return -ENOSYS;
     sdl_.SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     if (!sdl_.InitSubSystem(SDL_INIT_VIDEO)) return fail("video initialization");
-    window_ = sdl_.CreateWindow(title, width, height, SDL_WINDOW_RESIZABLE);
+    auto props = sdl_.CreateProperties();
+    if (!props) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window properties"); }
+    bool configured = sdl_.SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title) &&
+        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width) &&
+        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height) &&
+        sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true) &&
+        sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, true);
+    window_ = configured ? sdl_.CreateWindowWithProperties(props) : nullptr;
+    sdl_.DestroyProperties(props);
     if (!window_) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window creation"); }
     width_ = width; height_ = height;
     if (int result = resize(width, height, true)) { close(); return result; }
@@ -173,6 +330,26 @@ public:
 #else
     return {};
 #endif
+  }
+  std::unique_ptr<AndroidWindowBackend> create_surface(int32_t width, int32_t height) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return {};
+    auto props = sdl_.GetWindowProperties(window_);
+    auto display = static_cast<wl_display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr));
+    auto parent = static_cast<wl_surface*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr));
+    if (display && parent) {
+      auto layer = std::make_unique<WaylandSurfaceBackend>(display, parent, width, height);
+      if (layer->binding().window) return layer;
+    } else {
+      auto xdisplay = static_cast<Display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
+      auto parent_window = sdl_.GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+      if (xdisplay && parent_window) {
+        auto layer = std::make_unique<X11SurfaceBackend>(xdisplay, parent_window, width, height);
+        if (layer->binding().window) return layer;
+      }
+    }
+#endif
+    return {};
   }
   int poll(AndroidWindowEvent &out) override {
     out = {};

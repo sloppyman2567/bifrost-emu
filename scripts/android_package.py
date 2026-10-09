@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install signed APK sets and launch native-only Activities through guest Bionic."""
+"""Install signed APK sets and launch native or managed Activities through guest Bionic."""
 
 import argparse
 from contextlib import contextmanager
@@ -169,9 +169,12 @@ def verify_adapters(adapters, runtime):
         "libz.so",
         "libz.so.LICENSE",
     }
+    managed = {"libbifrost-activity.so", "managed/libandroid.so", "managed/libEGL.so",
+               "managed/libGLESv2.so", "managed/libGLESv3.so", "managed/libaaudio.so"}
+    files = set(metadata.get("files", {}))
     if (
         metadata.get("runtime_archive_sha256") != runtime.SHA256
-        or set(metadata.get("files", {})) != expected
+        or files not in (expected, expected | managed)
     ):
         raise ValueError("Adapters do not match the pinned runtime")
     for name, value in metadata["files"].items():
@@ -204,6 +207,9 @@ def app_linker_configuration(has_media=False):
 def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None):
     runtime_module = verify_runtime(runtime)
     adapter_metadata = verify_adapters(adapters, runtime_module)
+    adapter_metadata = dict(adapter_metadata, files={
+        name: value for name, value in adapter_metadata["files"].items()
+        if not name.startswith("managed/")})
     media_metadata = media.verify(media_root) if media_root is not None else None
     state.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".apk-validation-", dir=state) as work:
@@ -449,17 +455,25 @@ def verify_installed(package, app, metadata):
     return code, root
 
 
-def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0):
+def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
+           emu_args=(), timeout=0):
     if not PACKAGE.fullmatch(package):
         raise ValueError("Invalid package name")
     app = state / package
     with app_lock(app):
         metadata = json.loads((app / "package.json").read_text())
         launcher = metadata["launcher"]
+        if launcher["kind"] == "managed_activity":
+            if frames:
+                raise ValueError("--frames is a NativeActivity redraw bound; use --timeout for managed apps")
+            code, root = verify_installed(package, app, metadata)
+            from android_managed import launch_managed
+            return launch_managed(app, metadata, code, root, emu, no_jit,
+                                  window_plugin, emu_args, timeout)
         if launcher["kind"] != "native_activity":
-            raise ValueError(
-                f"{launcher.get('class','No launcher')} requires guest ART/framework Activity startup; installed APK cannot yet launch"
-            )
+            raise ValueError("Installed package has no supported launcher Activity")
+        if timeout:
+            raise ValueError("--timeout is managed-only; use --frames for NativeActivity")
         library = launcher.get("native_library")
         entry = launcher.get("native_entrypoint")
         if (
@@ -473,7 +487,7 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0):
         if relative not in metadata["files"]:
             raise ValueError("NativeActivity has no packaged ARM64 entry library")
         code, root = verify_installed(package, app, metadata)
-        command = [str(emu)]
+        command = [str(emu), *emu_args]
         if no_jit:
             command += ["--no-jit"]
         if window_plugin:
@@ -591,6 +605,11 @@ def main():
     runner.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
     runner.add_argument("--no-jit", action="store_true")
     runner.add_argument("--android-window-plugin", type=Path)
+    runner.add_argument("--timeout", type=int, default=0,
+                        help="managed session seconds; zero runs until window close")
+    for mode in ("", "-title", "-window", "-overlay"):
+        runner.add_argument("--window-stats" + mode, action=argparse.BooleanOptionalAction,
+                            default=None, help="configure emulator presentation statistics")
     runner.add_argument(
         "--frames",
         type=int,
@@ -625,6 +644,14 @@ def main():
                          args.no_jit, args.timeout, args.preload)
         if not 0 <= args.frames <= 36000:
             raise ValueError("--frames must be in 0..36000")
+        if args.timeout < 0:
+            raise ValueError("--timeout must be nonnegative")
+        emu_args = []
+        for mode in ("", "_title", "_window", "_overlay"):
+            value = getattr(args, "window_stats" + mode)
+            if value is not None:
+                emu_args.append(("--window-stats" if value else "--no-window-stats") +
+                                mode.replace("_", "-"))
         return launch(
             args.package,
             args.state_root,
@@ -632,6 +659,8 @@ def main():
             args.no_jit,
             args.android_window_plugin,
             args.frames,
+            emu_args,
+            args.timeout,
         )
     except (
         OSError,

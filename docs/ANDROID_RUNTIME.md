@@ -7,7 +7,8 @@ A separate same-image ART/libcore provisioner and DEX/JNI bootstrap now create
 a real ART VM and pass their JNI fixture; see the bounded checkpoint below.
 The separate installed-app Activity probe now reaches SpongeBob's real
 `CleverTapOverrideActivity.onCreate` and IL2CPP's JNI startup in both engines;
-the normal APK runner still supports only NativeActivity launchers.
+the normal APK runner now also launches managed SurfaceView Activities through
+`ManagedLauncher`, with persistent app data and supervised process lifetime (see below).
 The APK native-load diagnostic now checks real packaged dependencies separately:
 19/21 SpongeBob libraries complete loading/cleanup in all three execution modes.
 Firebase Messaging's direct probe loads successfully, then double-destroys a
@@ -20,7 +21,8 @@ the signed APK gate in all modes. With this bundle, the full EGL adapter and
 the per-thread looper, choreographer and sensor exports, every Unity import
 resolves and all 21 libraries load in the native probe. That diagnostic does
 not invoke JNI. The framework app probe below invokes the game's startup;
-media services/decoding and playable managed windows remain unsupported.
+media services/decoding remain bounded; the managed launcher now supplies a
+window, input and presentation for the SurfaceView path described below.
 See the APK guide for provisioning and namespace boundaries.
 
 ## Android 15 framework probe
@@ -115,14 +117,9 @@ It compiles against the checksum-pinned API-35 `android.jar` from
 
 ```bash
 python3 tools/fetch-android-package-tools.py
-mkdir -p build/activity-probe/classes
-javac --release 8 -cp tools/android-tools/android.jar \
-  -d build/activity-probe/classes guest/android/ActivityProbe.java
-java -cp tools/android-tools/d8.jar com.android.tools.r8.D8 --min-api 26 \
-  --lib tools/android-tools/android.jar --output build/activity-probe \
-  build/activity-probe/classes/*.class
+make android-managed-launcher
 timeout -s KILL 310 python3 scripts/test_android_framework.py --services \
-  --probe build/activity-probe/classes.dex --main-class ActivityProbe \
+  --probe build/android-managed-launcher/classes.dex --main-class ActivityProbe \
   --mode jit --timeout 300 --output build/android-activity-results
 ```
 
@@ -145,6 +142,37 @@ controller. Window reports no navigation bar and animator scale 1.0. Activity
 creation alone does not resume or attach a drawable window. The optional
 `--play` path described below delivers additional lifecycle and surface events;
 real system services remain unimplemented.
+
+In installed-app mode the package service also answers `getServiceInfo` from
+the APK's parsed service declarations, including service metadata requested
+with `GET_META_DATA`. This supplies Firebase's component registrar discovery
+without fabricating services. Replies copy the metadata and normalize the
+ApplicationInfo to the installed package's paths and UID. Unknown components
+or users return null (the framework raises `NameNotFoundException`); disabled
+components and direct-boot matching follow the request flags. As in
+`ComputerEngine.updateFlags`, requests without explicit direct-boot flags
+match both kinds for this profile's unlocked user; Firebase's ordinary
+`GET_META_DATA` lookup relies on this default. The
+`APP_PACKAGE_SERVICES_OK` checkpoint checks every parsed service through the
+framework API, metadata values and copy isolation, metadata omission without
+the flag, implicit direct-boot queries, and missing-service/package behavior.
+
+`resolveContentProvider` resolves the parsed APK's authority declarations,
+including semicolon-separated authorities, with the same component filters
+and copied metadata. Unknown authorities return null. Install-source queries
+describe a host-installed APK with no Android installer of record; unknown
+packages remain absent. The package checkpoint exercises these queries too.
+`getRunningAppProcesses` returns this launcher's one app process with its real
+guest PID/UID, manifest process name, package list and lifecycle importance;
+`APP_PROCESS_LIST_OK` checks it before and after resume. These are launcher
+profile services, not a full Android system-server process registry.
+
+References: Android 15
+[ApplicationPackageManager](https://github.com/aosp-mirror/platform_frameworks_base/blob/android15-release/core/java/android/app/ApplicationPackageManager.java),
+[ComputerEngine](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/ComputerEngine.java),
+[PackageUserStateUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/android15-release/services/core/java/com/android/server/pm/pkg/PackageUserStateUtils.java),
+and Firebase's
+[ComponentDiscovery](https://github.com/firebase/firebase-android-sdk/blob/master/firebase-components/src/main/java/com/google/firebase/components/ComponentDiscovery.java).
 
 ### Framework display events (2026-10-07)
 
@@ -213,7 +241,7 @@ After compiling ActivityProbe as above:
 
 ```bash
 python3 scripts/test_android_framework.py --services \
-  --probe build/activity-probe/classes.dex --main-class ActivityProbe \
+  --probe build/android-managed-launcher/classes.dex --main-class ActivityProbe \
   --installed-app android-state/choreo-sensor/com.tiltingpoint.spongebob \
   --mode jit --timeout 150 --output build/android-spongebob-results
 ```
@@ -239,7 +267,8 @@ manifest content providers, start/resume the Activity, attach a drawable window,
 or deliver input. Logs still contain missing user/clipboard services, SQLite
 locking errors and missing SurfaceFlingerAIDL transaction failures. Those are
 remaining compatibility gaps, not evidence of a playable game. Normal
-`android_package.py run` keeps its managed-launcher rejection.
+`android_package.py run` now uses the managed launcher below; the creation-only
+probe remains available for diagnostics.
 
 #### Managed play diagnostic (2026-10-07)
 
@@ -257,6 +286,19 @@ they do not implement lifecycle recovery. Error state is not consumed by the
 logger. Add `BIFROST_THUNK_TRACE=1` for the GL call stream. Avoid blanket
 `BIFROST_TRACE=1` here: it also enables instruction logging and diagnostic modes
 that change unsupported-instruction behavior.
+
+Play-mode SurfaceView setup reports the holder's requested pixel format and
+retains the same JNI Surface identity for the Activity and app. Following
+[Android 15 SurfaceView.updateOpaqueFlag](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/view/SurfaceView.java),
+formats without alpha request opaque composition independently of the app's
+EGLConfig. The host EGL bridge carries this policy through
+[EGL_EXT_present_opaque](https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_present_opaque.txt)
+without changing framebuffer alpha or other creation attributes. Translucent
+surfaces retain per-pixel alpha. Hosts without the extension can use alpha-free
+configs; an opaque surface with alpha bits fails creation rather than exposing
+the desktop. Changing opacity on a live EGL surface requires recreation and is
+rejected with EBUSY. Dynamic SurfaceView replacement remains unsupported by the
+play-mode traversal adapter.
 
 Adding `--play` opens a host window, starts/resumes the Activity, reports
 SurfaceView holder callbacks and pumps host input. These callbacks use the
@@ -622,3 +664,92 @@ libsensor to query static/dynamic lists and default accelerometer/gyroscope.
 `ACTIVITY_SENSOR_SERVICE_OK` is required by the framework runner with services
 enabled. This verifies that native clients discover the service, rather than
 only finding a Java service-cache entry. See [test evidence](TESTS.md#native-sensor-service-follow-up-2026-10-07).
+
+
+## Managed APK launcher (2026-10-08)
+
+`ManagedLauncher` contains the Activity bootstrap previously exercised through
+`ActivityProbe --play`. Normal app launches use a real ActivityThread, LoadedApk,
+Application and Instrumentation, the verified installed base/splits, and the
+app's launcher Activity. Diagnostic registration tests and probe preferences
+are disabled during ordinary launches. `ActivityProbe` remains a compatibility
+entry point for the diagnostic checks.
+
+```bash
+make android-managed-launcher
+python3 scripts/android_package.py --state-root android-state run PACKAGE
+# Optional bounded run and title statistics, without a separate stats window:
+python3 scripts/android_package.py --state-root android-state run PACKAGE \
+  --timeout 180 --window-stats --no-window-stats-window
+```
+
+The explicit build needs `javac`, Java and the provisioned API-35 android.jar/D8.
+Set `JAVAC=/path/to/javac` if needed. Launching never invokes a compiler: stale
+launcher sources or modified DEX/adapter files cause an error. The framework and
+ART roots must already be provisioned as described above.
+
+Each package owns `managed/rootfs`, `managed/last-run.log` and
+`managed/last-logd.log` under its installed package directory. The runtime is
+cached by code, framework, adapter and launcher hashes; immutable runtime files
+are checked before reuse. Replacement copies `data/user`, `data/user_de` and
+`storage` before publishing the new root, preserving saves across runs and
+runtime upgrades. The installed package's verified root is kept separate.
+A temporary short root alias avoids Linux's Unix-socket pathname limit without
+making app data temporary. A per-package lock covers preparation and the entire
+session. The supervisor forwards interruption, terminates owned descendants,
+removes its log socket, and propagates guest failure; a requested timeout returns
+124 and interruption returns 130. Normal runs have no time limit.
+
+Window close and Activity.finish drive pause, SurfaceView destruction, stop,
+queued preference writes and destroy before releasing the native surface.
+This is a bounded SurfaceView launcher, not a complete Android system_server or
+WindowManager implementation: arbitrary framework View drawing, dynamically
+replacing SurfaceViews, every service, and every Activity transition are not
+implemented. Unsupported service calls remain explicit failures.
+
+The managed window uses the launcher Activity label and icon from the APK's
+real resources (with Android's application/default fallbacks). Android renders
+the icon into ARGB pixels; the JNI bridge supplies standard UTF-8 and RGBA to
+the host. SDL3 applies title/icon updates on its window thread. Compositor icon
+support varies; window plugins without the optional identity operations retain
+their own defaults. The native-only launcher still uses its existing identity.
+Android EGL presentations now feed the shared [window statistics](window-stats.md)
+without passing SDL3 pointers through SDL2 APIs. The title is the default;
+the independent stats window remains opt-in.
+
+The signed managed fixture verifies two launches, persistent preferences,
+resource label resolution, a real SurfaceView, Activity.finish and ordered
+pause/surface destruction/stop/destroy/close. These checks do not establish
+compatibility with arbitrary managed games.
+
+### ART field lookup restart correction
+
+A SpongeBob crash in ART's Class::FindField came from a post-index
+`ldr w8,[x1],#4` on a userfaultfd missing page. The interpreter advanced X1
+before the memory read. After the SIGBUS handler filled the page, retry loaded
+an ArtField's declaring-class pointer as the array length and walked out of
+bounds. JIT guarded-access recovery uses this interpreter path too.
+Indexed scalar/vector and paired transfers now commit base writeback only after
+the access succeeds. `test_userfaultfd` reproduces the exact header retry and
+checks pre/post-index stores, loads and page-crossing pair/vector accesses in
+both engines. This fixes the observed corruption; an info-button click is a
+separate live interaction check, not evidence supplied by the memory regression.
+
+
+The post-fix SpongeBob live run presented more than 2,000 frames over a
+220-second session, rendered the age dropdown and consent screen, and reached
+the subsequent loading screen. The user confirmed the info button opened
+without crashing. This verifies that interaction; completing a gameplay session
+remains unverified. The native-only launcher now acquires its owned window via
+private launcher operation 7 rather than passing a null Java Surface to the
+public ANativeWindow_fromSurface API.
+
+
+The diagnostic ActivityProbe still reaches FRAMEWORK_OK in JIT mode after the
+launcher promotion. Its interpreter-only framework-vsync check currently fails
+with an unmapped null read in the callback thread and a vsync timeout. The older
+pre-promotion ActivityProbe DEX fails the same check on the current emulator,
+so this is not established as a launcher-promotion regression. A separate live
+SpongeBob restart also encountered ART's thread-suspension timeout before its
+first frame. These failures remain unresolved; the successful age/info session
+does not establish reliable startup on every run.

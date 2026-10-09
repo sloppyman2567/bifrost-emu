@@ -1250,10 +1250,10 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // Open the backend-owned window before resolving the EGL pair.
         ensure_android_window();
         if (n == "ANativeWindow_fromSurface") {
-            // (JNIEnv*, jobject) — both opaque; v1 is a single-surface
-            // singleton. Returns 0 (NULL) when no host window exists,
+            // The managed adapter supplies a stable identity, not a JNI pointer.
+            // Returns 0 (NULL) when no host window exists,
             // matching Android's behavior without a valid surface.
-            cpu.regs[0] = mgr.from_surface();
+            cpu.regs[0] = cpu.regs[1] ? mgr.from_surface(cpu.regs[1]) : 0;
             if (trace) fprintf(stderr, "[android] fromSurface -> 0x%llx\n",
                                static_cast<unsigned long long>(cpu.regs[0]));
             return 0;
@@ -1272,19 +1272,19 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = 0;
         } else if (n == "ANativeWindow_getWidth") {
             cpu.regs[0] = static_cast<uint64_t>(
-                static_cast<int64_t>(mgr.width()));
+                static_cast<int64_t>(mgr.width(cpu.regs[0])));
         } else if (n == "ANativeWindow_getHeight") {
             cpu.regs[0] = static_cast<uint64_t>(
-                static_cast<int64_t>(mgr.height()));
+                static_cast<int64_t>(mgr.height(cpu.regs[0])));
         } else if (n == "ANativeWindow_getFormat") {
             cpu.regs[0] = static_cast<uint64_t>(
-                static_cast<int64_t>(mgr.format()));
+                static_cast<int64_t>(mgr.format(cpu.regs[0])));
         } else if (n == "ANativeWindow_setBuffersGeometry") {
             // (window, width, height, format); zero restores base settings.
             cpu.regs[0] = static_cast<uint64_t>(mgr.set_buffers_geometry(
                 static_cast<int32_t>(cpu.regs[1]),
                 static_cast<int32_t>(cpu.regs[2]),
-                static_cast<int32_t>(cpu.regs[3])));
+                static_cast<int32_t>(cpu.regs[3]), cpu.regs[0]));
         } else {
             cpu.regs[0] = 0;
         }

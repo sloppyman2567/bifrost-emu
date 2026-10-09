@@ -1116,6 +1116,36 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 try { emu.mem_.write(cpu.regs[1], data, sizeof(data)); ret_host(0); }
                 catch (const EmuError&) { ret_host(-EFAULT); }
             }
+            else if (cpu.regs[0] == 5) { // Managed SurfaceView composition policy.
+                if (cpu.regs[2] > 1) ret_host(-EINVAL);
+                else ret_host(manager.set_surface_opaque(cpu.regs[1], cpu.regs[2] != 0));
+            }
+            else if (cpu.regs[0] == 6) { // UI thread: UTF-8 title and RGBA icon.
+                try {
+                    uint64_t record[4]; // title, pixels, width, height
+                    emu.mem_.read(cpu.regs[1], record, sizeof(record));
+                    if (record[2] > 256 || record[3] > 256 ||
+                        (record[1] && (!record[2] || !record[3]))) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    std::string title;
+                    if (record[0]) {
+                        for (size_t i = 0; i < 1024; ++i) {
+                            char c = emu.mem_.load<uint8_t>(record[0] + i);
+                            if (!c) break;
+                            title.push_back(c);
+                        }
+                        if (title.size() == 1024) { ret_host(-EINVAL); return 0; }
+                    }
+                    std::vector<uint8_t> pixels(record[1] ? record[2] * record[3] * 4 : 0);
+                    if (!pixels.empty()) emu.mem_.read(record[1], pixels.data(), pixels.size());
+                    ret_host(manager.set_window_identity(title, pixels.empty() ? nullptr : pixels.data(),
+                                                         record[2], record[3]));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
+            }
+            else if (cpu.regs[0] == 7) { // Native-only launcher: acquire its owned window.
+                ret_host(manager.open_host_window() ? manager.from_surface() : 0);
+            }
             else ret_host(-EINVAL);
             return 0;
         }

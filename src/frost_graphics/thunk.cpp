@@ -1259,10 +1259,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // (Android surface layer), substitute the HOST native window value so
     // host EGL creates a real window surface. eglSwapBuffers then presents
     // through the normal host path with no further interception.
+    uint64_t android_surface_handle = 0;
     if (entry.name == "eglCreateWindowSurface") {
         auto& mgr = frost::AndroidSurfaceManager::instance();
         if (frost::AndroidSurfaceManager::is_shim(cpu.regs[2])) {
-            uint64_t hw = mgr.host_native_window();
+            android_surface_handle = cpu.regs[2];
+            uint64_t hw = mgr.host_native_window(cpu.regs[2]);
             if (hw == 0) {
                 // No host window backing the shim — EGL_NO_SURFACE.
                 if (dbg().thunk_trace)
@@ -2968,6 +2970,59 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
+    // SurfaceView's OPAQUE flag is independent of its EGLConfig alpha bits.
+    // Android's compositor ignores buffer alpha on that layer; a Wayland
+    // compositor otherwise exposes the desktop when Unity clears alpha to 0.
+    // Copy the guest list without mutating it, preserving colorspace and other
+    // attributes. This is presentation policy, not a change to GL pixels.
+    std::vector<int32_t> android_window_attribs;
+#if defined(BIFROST_THUNK_HAVE_EGL)
+    if (android_surface_handle &&
+        frost::AndroidSurfaceManager::instance().surface_opaque(android_surface_handle)) {
+        constexpr int32_t present_opaque = 0x31DF; // EGL_EXT_present_opaque
+        auto display = reinterpret_cast<EGLDisplay>(args[0]);
+        const char* extensions = eglQueryString(display, EGL_EXTENSIONS);
+        bool supported = false;
+        if (extensions) {
+            constexpr const char* name = "EGL_EXT_present_opaque";
+            const size_t length = std::strlen(name);
+            for (const char* at = extensions; (at = std::strstr(at, name)); at += length)
+                if ((at == extensions || at[-1] == ' ') &&
+                    (at[length] == ' ' || at[length] == '\0')) { supported = true; break; }
+        }
+        EGLint alpha_bits = 0;
+        const bool no_alpha = eglGetConfigAttrib(display, reinterpret_cast<EGLConfig>(args[1]),
+                                                 EGL_ALPHA_SIZE, &alpha_bits) && alpha_bits == 0;
+        if (supported || !no_alpha) {
+            if (!supported)
+                fprintf(stderr, "[android] opaque RGBA presentation requires EGL_EXT_present_opaque\n");
+            // On an unsupported host, EGL rejects the attribute with
+            // EGL_BAD_ATTRIBUTE instead of silently creating a transparent
+            // surface. Alpha-free configs need no extension.
+            const uint64_t guest_list = cpu.regs[3];
+            bool terminated = !guest_list;
+            for (size_t i = 0; guest_list && i < 256; ++i) {
+                int32_t key = impl_->mem->load<int32_t>(guest_list + i * 8);
+                if (key == EGL_NONE) { terminated = true; break; }
+                int32_t value = impl_->mem->load<int32_t>(guest_list + i * 8 + 4);
+                if (key != present_opaque) {
+                    android_window_attribs.push_back(key);
+                    android_window_attribs.push_back(value);
+                }
+            }
+            if (terminated) {
+                android_window_attribs.push_back(present_opaque);
+                android_window_attribs.push_back(EGL_TRUE);
+            } else {
+                // Bound malformed lists and let EGL report BAD_ATTRIBUTE.
+                android_window_attribs = {-1, 0};
+            }
+            android_window_attribs.push_back(EGL_NONE);
+            args[3] = reinterpret_cast<uint64_t>(android_window_attribs.data());
+        }
+    }
+#endif
+
     // Bracket EGL calls to distinguish blocked calls from failed swaps.
     // Never query eglGetError here: that would consume the guest's error.
     const bool trace_present = dbg().frame_trace &&
@@ -3306,11 +3361,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.spec && entry.spec->ret == thunk::RetKind::STRING) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
+    if (android_surface_handle && ret)
+        frost::AndroidSurfaceManager::instance().register_egl_surface(ret, android_surface_handle);
+    if (entry.name == "eglDestroySurface" && ret)
+        frost::AndroidSurfaceManager::instance().destroy_egl_surface(args[1]);
     window_stats::api(entry.name,args,ret);
+    if (entry.name == "eglSwapBuffers" && ret &&
+        !frost::AndroidSurfaceManager::instance().present_egl_surface(args[1])) {
 #if defined(BIFROST_THUNK_HAVE_SDL2)
-    if (entry.name == "eglSwapBuffers" && ret)
         window_stats::sdl_present(impl_->sdl_window,"EGL");
 #endif
+    }
     cpu.regs[0] = ret;
     if (impl_->gl_state_tracker_ && entry.tracks_state) {
         impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);

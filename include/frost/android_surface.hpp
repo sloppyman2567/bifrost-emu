@@ -4,8 +4,8 @@
 // guest surface handle is a fake opaque pointer (0xA9xx… range) that the
 // EGL interception in GraphicThunk::dispatch substitutes for the real
 // host native window (X11 Window) when the guest calls
-// eglCreateWindowSurface. SINGLE surface backed by the DisplayProxy host
-// SDL window; fromSurface ignores the JNIEnv/jobject pair.
+// eglCreateWindowSurface. Each live surface has its own native backing;
+// managed adapters resolve Java object identity before thunking.
 //
 // v2 scope (2026-08): full NativeActivity lifecycle driver + ALooper +
 // AInputQueue + AConfiguration + liblog stubs, so guest .so's built
@@ -89,34 +89,42 @@ public:
 
     // Backend owns its host window; no SDL pointer crosses this interface.
     bool open_host_window();
+    int set_window_identity(const std::string& title, const uint8_t* rgba, int32_t width, int32_t height);
     void close_host_window();
     bool ready() const { return window_open_; }
     // Commit geometry only when the backend accepts the host notification.
     int handle_host_resize(int32_t width, int32_t height);
 
     // ── ANativeWindow shims (v1 API, unchanged) ────────────────────────
-    // ANativeWindow_fromSurface: returns the singleton shim handle (0 on
+    // ANativeWindow_fromSurface: returns a stable shim for this identity (0 on
     // failure — matches Android returning NULL without a valid surface).
-    uint64_t from_surface();
+    // Stable identity supplied by the managed JNI adapter (not a jobject address).
+    // Identity zero is reserved for the NativeActivity primary surface.
+    uint64_t from_surface(uint64_t identity = 0);
     static bool is_shim(uint64_t handle) {
         return handle >= kHandleBase && handle <= kHandleBase + 0xFFFF;
     }
-    // Refcounting is bookkeeping-only in v1 (the shim never dies).
+    // References retain surface backing through Java and EGL ownership.
     void acquire(uint64_t handle);
     void release(uint64_t handle);
+    void register_egl_surface(uint64_t egl_surface, uint64_t handle);
+    void destroy_egl_surface(uint64_t egl_surface);
+    bool present_egl_surface(uint64_t egl_surface);
+    int set_surface_opaque(uint64_t handle, bool opaque);
+    bool surface_opaque(uint64_t handle) const;
 
-    int32_t width() const { return width_; }
-    int32_t height() const { return height_; }
-    int32_t format() const { return format_; }
+    int32_t width(uint64_t handle = 0) const;
+    int32_t height(uint64_t handle = 0) const;
+    int32_t format(uint64_t handle = 0) const;
     // ANativeWindow_setBuffersGeometry: both dimensions must be zero or
     // positive. Zero restores the adapter's base geometry/format.
-    int32_t set_buffers_geometry(int32_t w, int32_t h, int32_t fmt);
+    int32_t set_buffers_geometry(int32_t w, int32_t h, int32_t fmt, uint64_t handle = 0);
 
     // The host-side native window value host EGL expects for
     // eglCreateWindowSurface: X11 Window id on an X11-backed display,
     // wl_egl_window* on Wayland. 0 when unknown — callers must fail the
     // surface creation.
-    uint64_t host_native_window();
+    uint64_t host_native_window(uint64_t handle = 0);
     // The native display the guest's eglGetDisplay(EGL_DEFAULT_DISPLAY)
     // should wrap so it lands on the SAME connection as the surface:
     // wl_display* on Wayland, Display* on X11.
@@ -339,8 +347,18 @@ public:
     bool window_open_ = false;
     int64_t pointer_down_time_ms_ = 0;
     std::unique_ptr<AndroidWindowBackend> window_backend_;
-    uint64_t surface_handle_ = 0;   // 0 = not created yet
-    int refs_ = 0;
+    struct Surface {
+        uint64_t identity = 0;
+        size_t refs = 1;
+        int32_t width = kBaseWidth, height = kBaseHeight, format = kFormatRGBA8888;
+        bool opaque = false;
+        std::unique_ptr<AndroidWindowBackend> backend;
+    };
+    mutable std::mutex surface_mu_;
+    std::map<uint64_t, Surface> surfaces_;
+    std::map<uint64_t, uint64_t> egl_surfaces_;
+    uint64_t surface_handle_ = 0;
+    uint64_t next_surface_ = 0;
     int32_t width_ = kBaseWidth;
     int32_t height_ = kBaseHeight;
     int32_t format_ = kFormatRGBA8888;

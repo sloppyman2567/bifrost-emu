@@ -82,13 +82,15 @@ int main(int argc, char **argv, char **envp) {
     if (!activity.assetManager)
         return 2;
     // No fake JavaVM/JNIEnv: only native Activities that do not require JNI
-    // are supported by this launcher. Managed Activities are rejected by host.
+    // are supported by this launcher. Managed Activities use the ART launcher.
     create(&activity, 0, 0);
     if (callbacks.onStart)
         callbacks.onStart(&activity);
     if (callbacks.onResume)
         callbacks.onResume(&activity);
-    ANativeWindow *window = ANativeWindow_fromSurface(0, 0);
+    // Private launcher ABI: no Java Surface exists in the native-only path.
+    // Keep ANativeWindow_fromSurface's public null-object rejection intact.
+    ANativeWindow *window = (ANativeWindow *)(uintptr_t)syscall(0x100e, 7L);
     if (!window) {
         printf("native launcher: Android window backend unavailable\n");
         if (callbacks.onPause)
