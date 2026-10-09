@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 from android_framework import install
 
 
-from android_managed import LogdReceiver, install_managed_graphics, installed_arguments, host_network_mode
+from android_managed import (LogdReceiver, install_managed_graphics, installed_arguments,
+                             host_network_mode, install_settings_key)
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
@@ -30,6 +31,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
         root = Path(temporary) / "rootfs"
         shutil.copytree(runtime, root, symlinks=True)
+        install_settings_key(root, os.urandom(32))
         (root / "data/local/tmp").mkdir(parents=True)
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
         (root / "storage/emulated/0").mkdir(parents=True, exist_ok=True)

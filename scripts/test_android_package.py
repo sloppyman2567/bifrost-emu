@@ -2,6 +2,9 @@
 """Signed split installation, rollback, real Bionic and native Wayland APK gate."""
 
 import argparse
+import concurrent.futures
+import hashlib
+import hmac
 import importlib.util
 import os
 from pathlib import Path
@@ -69,6 +72,40 @@ class HostNetworkTests(unittest.TestCase):
             self.assertEqual(host_network_mode(), "1")
         with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "maybe"}):
             with self.assertRaises(ValueError): host_network_mode()
+
+
+class SettingsIdentityTests(unittest.TestCase):
+    def test_concurrent_first_launches_share_a_persistent_user_key(self):
+        from android_managed import settings_user_key, install_settings_key
+        with tempfile.TemporaryDirectory(prefix="bifrost-settings-") as temporary:
+            state = Path(temporary)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                keys = list(pool.map(lambda _: settings_user_key(state), range(16)))
+            self.assertEqual(len(keys[0]), 32)
+            self.assertTrue(all(key == keys[0] for key in keys))
+            self.assertEqual(settings_user_key(state), keys[0])
+            self.assertNotEqual(settings_user_key(state, 1), keys[0])
+            self.assertNotEqual(settings_user_key(state / "other-device"), keys[0])
+            for runtime in (state / "app-one/rootfs", state / "app-two/rootfs"):
+                install_settings_key(runtime, keys[0])
+                self.assertEqual((runtime / "data/system/users/0/bifrost-ssaid-key").read_bytes(), keys[0])
+            self.assertEqual((state / ".settings/user-0.key").stat().st_mode & 0o777, 0o600)
+
+    def test_corrupt_or_redirected_key_is_not_replaced(self):
+        from android_managed import settings_user_key
+        with tempfile.TemporaryDirectory(prefix="bifrost-settings-") as temporary:
+            state = Path(temporary)
+            settings_user_key(state)
+            target = state / ".settings/user-0.key"
+            target.write_bytes(b"broken")
+            with self.assertRaises(ValueError): settings_user_key(state)
+            self.assertEqual(target.read_bytes(), b"broken")
+            target.unlink()
+            outside = state / "outside"
+            outside.write_bytes(b"a" * 32)
+            target.symlink_to(outside)
+            with self.assertRaises(OSError): settings_user_key(state)
+            self.assertEqual(outside.read_bytes(), b"a" * 32)
 
 
 class DnsProxyTests(unittest.TestCase):
@@ -625,12 +662,26 @@ class PackageTests(unittest.TestCase):
             archive.write(self.split, "split.apk")
         self.install(bundle, state)
         app = state / "org.bifrost.fixture"
-        for starts in (1, 2):
+        certificate = subprocess.check_output([
+            "keytool", "-exportcert", "-keystore", str(self.key),
+            "-storepass", "bifrost-test", "-alias", "fixture"])
+        for starts in (1, 2, 3):
+            if starts == 3:
+                # Force a runtime replacement, as a launcher upgrade does.
+                import json
+                stamp = app / "managed/runtime.json"
+                saved = json.loads(stamp.read_text())
+                saved["identity"]["schema"] = 0
+                stamp.write_text(json.dumps(saved))
             status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
             text = (app / "managed/last-run.log").read_text()
             self.assertEqual(status, 0, text[-30000:])
             self.assertIn("APP_WINDOW_IDENTITY Managed Fixture icon=", text)
             self.assertIn(f"MANAGED_FIXTURE_START {starts}", text)
+            key = (state / ".settings/user-0.key").read_bytes()
+            expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,
+                                   hashlib.sha256).hexdigest()[:16]
+            self.assertIn("MANAGED_FIXTURE_SETTINGS_OK " + expected_id, text)
             markers = ("MANAGED_FIXTURE_SURFACE_CREATED", "MANAGED_FIXTURE_PAUSED",
                        "MANAGED_FIXTURE_SURFACE_DESTROYED", "MANAGED_FIXTURE_STOPPED",
                        "MANAGED_FIXTURE_DESTROYED", "APP_WINDOW_CLOSED")

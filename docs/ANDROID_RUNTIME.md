@@ -136,7 +136,8 @@ including the inflated title `TextView`.
 enabled. Missing system services are in-process Java Binder stubs installed in
 `ServiceManager.sCache`. Each answers only the calls Activity creation makes,
 logs them as `LOCAL_SERVICE`, and throws on anything else. Display returns one
-480×800 display; package reports no features; settings returns empty values.
+480×800 display; package reports no features. Settings reads return absent
+values except for the installed app's scoped Android ID, described below.
 The `activity` and `activity_task` stubs return only the provider and Activity
 controller. Window reports no navigation bar and animator scale 1.0. Activity
 creation alone does not resume or attach a drawable window. The optional
@@ -760,6 +761,49 @@ including when SDKs requested them. [Facebook Unity's initialization callback](h
 reads `signatures` to calculate its key hash before sending `OnInitComplete`;
 a null array interrupts that callback.
 
+The settings provider implements `GET_secure`, `GET_system` and `GET_global`
+through the real framework `Settings` client. `Settings.Secure.ANDROID_ID`
+returns a persistent 16-character lowercase hexadecimal identifier scoped to
+the APK's signing certificates, virtual device and user. Derivation follows
+Android 15's
+[SettingsProvider.generateSsaidLocked](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java):
+HMAC-SHA256 of each certificate's big-endian four-byte length followed by its
+DER bytes, using a random 32-byte per-user key, truncated to the first 64 bits.
+Packages with the same signing certificates in the same state root share the ID;
+the package name does not enter the derivation.
+
+The device key lives in `<state-root>/.settings/user-0.key` (mode 0600), shared
+across package runtimes. Concurrent first launches publish one complete key
+atomically. Runtime preparation installs it at
+`/data/system/users/0/bifrost-ssaid-key` and checks that copy before reuse.
+Launcher/runtime upgrades preserve the host key and app data. A different state
+root represents a different virtual device; deleting the key changes its
+identity. Corrupt or redirected key files fail explicitly instead of silently
+generating a new identity.
+
+This is a bounded user-0 settings profile. Foreign users/callers are rejected;
+unprovided keys return null so framework defaults still apply. Settings writes,
+observers, query-based access and generation tracking are not implemented.
+`APP_SETTINGS_OK` checks real framework reads, defaults, write denial and a
+fixed derivation oracle; the signed fixture independently computes the expected
+ID from its actual certificate and checks persistence through a forced runtime
+replacement. `SettingsIdentityTests` checks concurrent initialization, device
+and user separation, and corrupt/symlink rejection.
+
+SpongeBob's previous `LoginWithAndroidDeviceID` failure reported
+`Invalid input parameters`, with the detail that `AndroidDeviceId` or
+`EncryptedRequest` must be defined. The old provider returned null for every
+setting, including Android ID. PlayFab's
+[Android device login contract](https://learn.microsoft.com/en-us/rest/api/playfab/client/authentication/login-with-android-device-id)
+recommends `Settings.Secure.ANDROID_ID` for that request. Supplying the ID repairs
+this missing framework value; it does not establish complete Android services
+or gameplay compatibility.
+The installed SpongeBob creation-only JIT probe reaches `APP_SETTINGS_OK` and
+`FRAMEWORK_OK`, and the signed managed fixture passes all three launches. An
+interpreter probe fails earlier, before these settings checks. Full-game
+validation remains incomplete: subsequent diagnostic launches encountered a
+host SIGSEGV during early startup, before the device-login callback was reached.
+
 Activity metadata queries now use the installed manifest, preserving aliases,
 orientation, enabled/direct-boot filters, and `GET_META_DATA` behavior, as service
 and provider queries do. Permission checks grant only the installed app's
@@ -804,7 +848,8 @@ Android EGL presentations now feed the shared [window statistics](window-stats.m
 without passing SDL3 pointers through SDL2 APIs. The title is the default;
 the independent stats window remains opt-in.
 
-The signed managed fixture verifies two launches, persistent preferences,
+The signed managed fixture verifies three launches, persistent preferences and
+Android ID across a runtime replacement,
 resource label resolution, a real SurfaceView, Activity.finish and ordered
 pause/surface destruction/stop/destroy/close. These checks do not establish
 compatibility with arbitrary managed games.

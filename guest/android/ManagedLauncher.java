@@ -9,6 +9,7 @@ import android.app.Application;
 import android.app.GameManager;
 import android.app.Instrumentation;
 import android.content.ComponentName;
+import android.content.AttributionSource;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -20,6 +21,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
+import android.content.pm.Signature;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -49,6 +51,7 @@ import android.os.SystemClock;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.storage.StorageVolume;
+import android.provider.Settings;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
@@ -58,6 +61,8 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import java.io.File;
+import java.io.DataInputStream;
+import java.io.FileInputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
@@ -80,6 +85,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Map;
 import java.util.UUID;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 public final class ManagedLauncher {
     private static boolean diagnostic;
@@ -90,6 +97,7 @@ public final class ManagedLauncher {
     private static final Map<IBinder, Long> fullyDrawn = new ConcurrentHashMap<>();
     // The package installed by app mode; the only package that exists here.
     private static volatile PackageInfo installed;
+    private static String androidId;
     // ActivityRecord's requested orientation is initialized from its manifest.
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
     private static Object display;  // the single DisplayInfo the display stub reports
@@ -1526,14 +1534,15 @@ public final class ManagedLauncher {
             if (method.equals("getActivityClientController")) return client;
             throw unsupported("activity_task", method);
         });
-        // Settings.Global/Secure/System reads go through a content provider
-        // call; an absent value makes the framework use its default.
         Object provider = service("bifrost.settings", "android.content.IContentProvider",
                 (method, a) -> {
-                    if (method.equals("call") && ((String) a[2]).startsWith("GET_")) {
-                        Bundle result = new Bundle();
-                        result.putString("value", null);
-                        return result;
+                    if (method.equals("call") && "settings".equals(a[1])) {
+                        AttributionSource caller = (AttributionSource) a[0];
+                        if (caller == null || caller.getUid() != Process.myUid()
+                                || (installed != null && !installed.packageName.equals(caller.getPackageName())
+                                    && !"android".equals(caller.getPackageName())))
+                            throw new SecurityException("Foreign settings caller");
+                        return settingsCall((String) a[2], (String) a[3], (Bundle) a[4]);
                     }
                     throw unsupported("settings", method);
                 });
@@ -1612,6 +1621,98 @@ public final class ManagedLauncher {
         field.set(target, value);
     }
 
+    // Android 15 SettingsProvider.generateSsaidLocked: HMAC the length-prefixed
+    // signing certificates with a device/user key, then keep the first 64 bits.
+    // Package names do not participate: apps signed alike share the scoped ID.
+    private static String scopedAndroidId(byte[] key, Signature[] signatures) throws Exception {
+        if (key.length != 32 || signatures == null || signatures.length == 0)
+            throw new IllegalStateException("Android ID requires a user key and APK signatures");
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, mac.getAlgorithm()));
+        for (Signature signature : signatures) {
+            byte[] certificate = signature.toByteArray();
+            mac.update(ByteBuffer.allocate(4).putInt(certificate.length).array());
+            mac.update(certificate);
+        }
+        byte[] digest = mac.doFinal();
+        char[] hex = "0123456789abcdef".toCharArray();
+        StringBuilder result = new StringBuilder(16);
+        for (int i = 0; i < 8; i++)
+            result.append(hex[(digest[i] & 255) >>> 4]).append(hex[digest[i] & 15]);
+        return result.toString();
+    }
+
+    private static byte[] settingsKey(int user) throws IOException {
+        byte[] key = new byte[32];
+        try (DataInputStream input = new DataInputStream(new FileInputStream(
+                "/data/system/users/" + user + "/bifrost-ssaid-key"))) {
+            input.readFully(key);
+            if (input.read() != -1) throw new IOException("Invalid settings user key");
+        }
+        return key;
+    }
+
+    private static Bundle settingsCall(String method, String name, Bundle extras) {
+        // This profile provides user 0 and immutable settings. Missing values
+        // remain absent, so the real Settings client applies its own defaults.
+        int user = extras == null ? 0 : extras.getInt("_user", 0);
+        if (user != 0 && user != -2 && user != -3)
+            throw new SecurityException("Settings for another user are unavailable");
+        if (name == null) throw new IllegalArgumentException("Missing setting name");
+        switch (method) {
+            case "GET_secure":
+            case "GET_system":
+            case "GET_global":
+                Bundle result = new Bundle();
+                result.putString("value", method.equals("GET_secure")
+                        && name.equals(Settings.Secure.ANDROID_ID) ? androidId : null);
+                return result;
+            case "PUT_secure":
+            case "PUT_global":
+            case "PUT_system":
+                throw new SecurityException("Settings writes are not granted by this profile");
+            default: throw unsupported("settings", method);
+        }
+    }
+
+    private static void checkSettings(Context context) throws Exception {
+        String id = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
+        if (id == null || !id.matches("[0-9a-f]{16}") || !id.equals(androidId)
+                || !id.equals(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID)))
+            throw new AssertionError("Scoped Android ID unavailable through Settings.Secure");
+        for (String namespace : new String[] {"GET_secure", "GET_system", "GET_global"}) {
+            if (settingsCall(namespace, "bifrost.missing", null).getString("value") != null)
+                throw new AssertionError("Missing settings must stay absent");
+        }
+        if (settingsCall("GET_global", Settings.Secure.ANDROID_ID, null).getString("value") != null
+                || settingsCall("GET_system", Settings.Secure.ANDROID_ID, null).getString("value") != null
+                || Settings.Global.getInt(context.getContentResolver(), "bifrost.missing", 37) != 37)
+            throw new AssertionError("Settings namespace/default mismatch");
+        Bundle other = new Bundle();
+        other.putInt("_user", 1);
+        try {
+            settingsCall("GET_secure", Settings.Secure.ANDROID_ID, other);
+            throw new AssertionError("Foreign settings user accepted");
+        } catch (SecurityException expected) {}
+        try {
+            Settings.Secure.putString(context.getContentResolver(), Settings.Secure.ANDROID_ID, "changed");
+            throw new AssertionError("Android ID write accepted");
+        } catch (SecurityException expected) {}
+        byte[] key = new byte[32];
+        for (int i = 0; i < key.length; i++) key[i] = (byte) i;
+        Signature[] first = {new Signature(new byte[] {1, 2, 3})};
+        // Independent Python HMAC oracle, using AOSP's big-endian length prefix.
+        if (!scopedAndroidId(key, first).equals("ea90c345cb4ad8ff"))
+            throw new AssertionError("SSAID derivation differs from AOSP");
+        if (scopedAndroidId(key, first).equals(scopedAndroidId(key,
+                new Signature[] {new Signature(new byte[] {1, 2, 4})})))
+            throw new AssertionError("Signing certificate did not scope Android ID");
+        key[0] ^= 1;
+        if (scopedAndroidId(key, first).equals("ea90c345cb4ad8ff"))
+            throw new AssertionError("Device/user key did not scope Android ID");
+        System.out.println("APP_SETTINGS_OK");
+    }
+
     // args: --app <package> <code dir> <launcher class> [<split>=<apk>]...
     private static void runApp(Object thread, Context system, String[] args) throws Exception {
         String packageName = args[1], code = args[2], launcher = args[3];
@@ -1657,7 +1758,11 @@ public final class ManagedLauncher {
         app.flags |= ApplicationInfo.FLAG_HAS_CODE;
         installPermissions(system, packageInfo);
         installed = packageInfo;
-        if (diagnostic) checkPackageServices(system);
+        androidId = scopedAndroidId(settingsKey(app.uid / 100000), packageInfo.signatures);
+        if (diagnostic) {
+            checkPackageServices(system);
+            checkSettings(system);
+        }
         System.out.println("APP_PARSED " + app.className + " " + activity.name);
         int width = 0, height = 0;
         if (play) {

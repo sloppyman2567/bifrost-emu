@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -20,6 +21,45 @@ sys.path.insert(0, str(ROOT / "tools"))
 import android_framework
 
 PRIORITIES = "??VDIWEFS"
+
+
+def settings_user_key(state, user=0):
+    """One persistent SSAID key per virtual device/user, shared by its apps."""
+    if user < 0:
+        raise ValueError("Invalid settings user")
+    directory = state / ".settings"
+    if directory.is_symlink():
+        raise ValueError("Refusing redirected settings directory")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = directory / f"user-{user}.key"
+    # Publish a complete key atomically. Independent package locks must not
+    # give simultaneous first launches different identities or partial keys.
+    if not target.exists():
+        with tempfile.NamedTemporaryFile(dir=directory) as temporary:
+            temporary.write(os.urandom(32))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            try:
+                os.link(temporary.name, target)
+            except FileExistsError:
+                pass
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("Settings user key is not a regular file")
+        key = source.read(33)
+    if len(key) != 32:
+        raise ValueError("Invalid settings user key; refusing to change device identity")
+    return key
+
+
+def install_settings_key(root, key, user=0):
+    if user < 0 or len(key) != 32:
+        raise ValueError("Invalid settings user key")
+    path = root / f"data/system/users/{user}/bifrost-ssaid-key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(key)
+    path.chmod(0o600)
 
 
 def host_network_available(proc=Path("/proc/net")):
@@ -357,10 +397,11 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     for name in adapter_names:
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)
-    identity = {"schema": 1, "code": code, "files": metadata["files"],
+    settings_key = settings_user_key(app.parent)
+    identity = {"schema": 2, "code": code, "files": metadata["files"],
                 "framework": file_hash(framework / "bifrost-framework.json"),
                 "adapters": {n: adapter_manifest["files"][n] for n in adapter_names},
-                "launcher": file_hash(dex)}
+                "launcher": file_hash(dex), "settings_key": hashlib.sha256(settings_key).hexdigest()}
     managed = app / "managed"
     root = managed / "rootfs"
     if managed.is_symlink() or root.is_symlink():
@@ -392,6 +433,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         shutil.copy2(dex, local / "launcher.dex")
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
         install_managed_graphics(fresh, adapters / "managed")
+        install_settings_key(fresh, settings_key)
         destination = fresh / code.lstrip("/")
         shutil.copytree(installed_root / code.lstrip("/"), destination)
         # Guest writes are live in this root, including if the host crashes.
@@ -410,7 +452,8 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         import android_art
         immutable = {name: value for name, value in android_art.inventory(fresh).items()
                      if name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/",
-                                         "data/app/", "data/local/tmp/"))}
+                                         "data/app/", "data/local/tmp/"))
+                     or name == "data/system/users/0/bifrost-ssaid-key"}
         backup = managed / "previous-rootfs"
         if backup.exists():
             raise ValueError("Interrupted managed runtime replacement; preserve previous-rootfs before retrying")
