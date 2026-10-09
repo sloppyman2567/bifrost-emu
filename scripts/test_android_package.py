@@ -18,6 +18,22 @@ ROOT = package.ROOT
 ARGS = None
 
 
+class LauncherArgumentTests(unittest.TestCase):
+    def test_split_paths_follow_install_order_before_abi_filtering(self):
+        from android_managed import installed_arguments
+        manifests = [{"split": name, "abis": abis} for name, abis in (
+            ("", []), ("config.armeabi_v7a", ["armeabi-v7a"]),
+            ("fonts", []), ("gamedata", []), ("config.arm64_v8a", ["arm64-v8a"]))]
+        expected = ["--app", "org.bifrost.fixture", "/data/app/fixture", "FixtureActivity",
+                    "config.arm64_v8a=split-1.apk", "fonts=split-3.apk", "gamedata=split-4.apk"]
+        for inventory in (manifests, list(reversed(manifests))):
+            metadata = {"package": "org.bifrost.fixture", "launcher": {"class": "FixtureActivity"},
+                        "packages": inventory}
+            original = list(inventory)
+            self.assertEqual(installed_arguments(metadata, "/data/app/fixture"), expected)
+            self.assertEqual(inventory, original)
+
+
 class PackageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

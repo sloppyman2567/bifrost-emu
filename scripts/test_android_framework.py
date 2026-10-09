@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from android_framework import install
 
 
-from android_managed import LogdReceiver, install_managed_graphics
+from android_managed import LogdReceiver, install_managed_graphics, installed_arguments
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
@@ -186,14 +186,7 @@ if __name__ == "__main__":
                 if package["launcher"]["kind"] != "managed_activity":
                     raise ValueError("ActivityProbe app mode requires a managed Activity")
                 args.app = root / code.lstrip("/")
-                # The installer retains all splits as split-<index>.apk.
-                # LoadedApk expects split names sorted, paired with their paths.
-                splits = sorted((p["split"], f"split-{i}.apk")
-                                for i, p in enumerate(package["packages"])
-                                if p["split"] and (not p["abis"] or "arm64-v8a" in p["abis"]))
-                args.probe_arg = (["--play"] if args.play else []) + ["--app", package["package"], code,
-                                  package["launcher"]["class"],
-                                  *(name + "=" + path for name, path in splits)]
+                args.probe_arg = (["--play"] if args.play else []) + installed_arguments(package, code)
         except (OSError, ValueError, KeyError) as error:
             parser.error(str(error))
     if args.app and not (args.app / "base.apk").is_file():

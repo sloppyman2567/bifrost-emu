@@ -156,9 +156,12 @@ def launcher_dex(directory):
 
 
 def installed_arguments(metadata, code):
-    splits = sorted((p["split"], f"split-{i}.apk")
-                    for i, p in enumerate(metadata["packages"])
-                    if p["split"] and (not p["abis"] or "arm64-v8a" in p["abis"]))
+    # Installation assigns filenames after sorting ALL manifests by split name.
+    # The inventory retains archive order. Assign indices before filtering ABIs,
+    # or asset packs and the arm64 code split can point at unrelated APKs.
+    packages = sorted(metadata["packages"], key=lambda p: p["split"] or "")
+    splits = [(p["split"], f"split-{i}.apk") for i, p in enumerate(packages)
+              if p["split"] and (not p["abis"] or "arm64-v8a" in p["abis"])]
     return ["--app", metadata["package"], code, metadata["launcher"]["class"],
             *(name + "=" + path for name, path in splits)]
 

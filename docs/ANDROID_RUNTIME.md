@@ -727,6 +727,18 @@ before initialization; with both services implemented, `isInitialized()` returns
 true and its asynchronous initialization callback runs. This verifies SDK startup
 independently of game loading and resize safety.
 
+Managed launches and ActivityProbe share the installed split-argument builder.
+The installer assigns `split-N.apk` after sorting all manifests by split name,
+while the saved inventory retains archive order. Launch arguments use that same
+complete sorted list before excluding other ABIs, retaining filename-index gaps.
+Enumerating archive order previously paired some asset-pack names with unrelated
+APKs (for example `gamedata` with the fonts APK), so Play Asset Delivery could
+recognize the pack name but fail to locate its local asset files.
+Observed with SpongeBob's actual SDK: `getAssetLocation` returned null for
+`gamedata` and `fonts` under the old arguments. The corrected arguments return
+the corresponding installed APK paths, offsets and sizes. The regression covers
+archive reordering and retaining the index of an excluded 32-bit split.
+
 Window close and Activity.finish drive pause, SurfaceView destruction, stop,
 queued preference writes and destroy before releasing the native surface.
 This is a bounded SurfaceView launcher, not a complete Android system_server or
