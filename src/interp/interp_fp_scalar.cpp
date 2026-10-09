@@ -19,6 +19,19 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // instructions would be silently NOP'd, producing wrong hashes.
     if (exec_crypto(op, cpu)) return;
     if (exec_reciprocal(op, cpu)) return;
+    // AdvSIMD scalar integer compare (Dd, Dn, Dm), used by Skia bounds.
+    // Read both operands before writing Rd; scalar results clear the high half.
+    const uint32_t compare = op & 0xFFE0FC00;
+    if (compare == 0x5EE03400 || compare == 0x5EE03C00 ||
+        compare == 0x7EE03400 || compare == 0x7EE03C00) {
+        const uint64_t a = cpu.v_lo[rn], b = cpu.v_lo[rm];
+        const bool ge = (op >> 11) & 1, uns = (op >> 29) & 1;
+        bool result = uns ? (ge ? a >= b : a > b)
+                         : (ge ? int64_t(a) >= int64_t(b) : int64_t(a) > int64_t(b));
+        cpu.v_lo[rd] = result ? ~0ULL : 0;
+        cpu.v_hi[rd] = 0;
+        return;
+    }
     // ── SHL (scalar, immediate): Dd, Dn, #imm ─────────────────
     // Encoding: 0x5F005400 (mask 0xFF00FC00).
     // silently NOP'd, breaking GCC -O2's vectorized TLS init

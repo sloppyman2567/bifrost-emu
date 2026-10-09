@@ -80,6 +80,32 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         }
         return true;
     }
+    // FCVTNU: nearest-even unsigned conversion, independent of FPCR.RMode.
+    // Skia's icon rasterizer uses the in-place .4s form. Q=0,.d is reserved.
+    if ((op & 0xBFBFFC00) == 0x2E21A800) {
+        const bool dbl = (op >> 22) & 1;
+        if (dbl && !Q) throw DecodeError(cpu.pc, op);
+        uint8_t source[16], result[16] = {};
+        memcpy(source, &cpu.v_lo[rn], 8);
+        memcpy(source + 8, &cpu.v_hi[rn], 8);
+        RecipFpEnv environment(cpu);
+        fesetround(FE_TONEAREST);
+        const int bytes = dbl ? 8 : 4;
+        for (int i = 0; i < (Q ? 16 : 8) / bytes; ++i) {
+            double value;
+            if (dbl) { memcpy(&value, source + i * bytes, 8); value = recip_input(cpu, value); }
+            else { float f; memcpy(&f, source + i * bytes, 4); value = recip_input(cpu, f); }
+            double rounded = std::nearbyint(value);
+            const double limit = dbl ? 18446744073709551616.0 : 4294967296.0;
+            if (std::isnan(value) || rounded < 0 || rounded >= limit) cpu.fpsr |= 1;
+            else if (rounded != value) cpu.fpsr |= 16;
+            uint64_t integer = fp_to_unsigned_sat(rounded, dbl);
+            memcpy(result + i * bytes, &integer, bytes);
+        }
+        memcpy(&cpu.v_lo[rd], result, 8);
+        memcpy(&cpu.v_hi[rd], result + 8, 8);
+        return true;
+    }
     // ── Vector FRINTN/A/M/I/Z/X (round to integral) ──
     // Checked BEFORE the sub_noq switch: FRINTx shares sub_noq
     // with CMGT/CMGE/CMLE-vs-zero (they differ only in bit16,
@@ -93,10 +119,12 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     // Half-precision lives in a different slice — untouched.
     {
         uint32_t fr = op & 0xBFFFFC00;
-        // 0=N 1=A 2=M 3=X 4=Z 5=I, or -1 when not FRINT.
+        // 0=N 1=A 2=M 3=X 4=Z 5=I 6=P, or -1 when not FRINT.
         int frmode = -1;
         bool frdbl = false;
         switch (fr) {
+        case 0x0EA18800: frmode = 6; break;
+        case 0x0EE18800: frmode = 6; frdbl = true; break;
         case 0x0E218800: frmode = 0; break;
         case 0x0E618800: frmode = 0; frdbl = true; break;
         case 0x2E218800: frmode = 1; break;
@@ -130,6 +158,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
                     float r = (frmode == 0) ? std::rint(a)
                             : (frmode == 1) ? std::round(a)
                             : (frmode == 2) ? std::floor(a)
+                            : (frmode == 6) ? std::ceil(a)
                             : (frmode == 4) ? std::trunc(a)
                             : std::rint(a);  // X/I: rint
                     memcpy(fbuf + i * 4, &r, 4);
@@ -139,7 +168,8 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
                     double r = (frmode == 0) ? std::rint(a)
                              : (frmode == 1) ? std::round(a)
                              : (frmode == 2) ? std::floor(a)
-                             : (frmode == 4) ? std::trunc(a)
+                             : (frmode == 6) ? std::ceil(a)
+                            : (frmode == 4) ? std::trunc(a)
                              : std::rint(a);  // X/I: rint
                     memcpy(fbuf + i * 8, &r, 8);
                 }

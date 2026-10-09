@@ -986,17 +986,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     s1 = (d.rt  == 31) ? 0 : cpu.regs[d.rt];
                     s2 = (d.rt2 == 31) ? 0 : cpu.regs[d.rt2];
                 }
-                if (d.mode == 1) {            // post-index
-                    addr = base;
-                    uint64_t nb = base + disp;
-                    if (d.rn == 31) cpu.sp = nb; else cpu.regs[d.rn] = nb;
-                } else if (d.mode == 3) {     // pre-index
-                    addr = base + disp;
-                    uint64_t nb = base + disp;
-                    if (d.rn == 31) cpu.sp = nb; else cpu.regs[d.rn] = nb;
-                } else {                       // signed offset (mode == 2 or 0)
-                    addr = base + disp;
-                }
+                addr = (d.mode == 1) ? base : base + disp;
+                // A fault retries this instruction with its original base.
+                // Commit writeback only after every transfer succeeds.
                 if (d.is_vec) {
                     // Vector STP/LDP. Each register transfer is `esize` bytes:
                     //   - esize=4 (S-form): 4 bytes (low 32 bits of v_lo)
@@ -1067,6 +1059,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         mem_.write(addr, &s1, esize);
                         mem_.write(addr + esize, &s2, esize);
                     }
+                }
+                if (d.mode == 1 || d.mode == 3) {
+                    if (d.rn == 31) cpu.sp = base + disp;
+                    else cpu.regs[d.rn] = base + disp;
                 }
                 return;
             }
@@ -1214,17 +1210,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 int64_t disp = d.disp;  // sign-extended imm9
                 uint64_t addr;
-                if (d.mode == 1) {            // post-index
-                    addr = base;
-                    uint64_t nb = base + disp;
-                    if (d.rn == 31) cpu.sp = nb; else cpu.regs[d.rn] = nb;
-                } else {                       // unscaled (mode=0) or pre-index (mode=2)
-                    addr = base + disp;
-                    if (d.mode == 2) {         // pre-index: writeback
-                        uint64_t nb = base + disp;
-                        if (d.rn == 31) cpu.sp = nb; else cpu.regs[d.rn] = nb;
+                addr = (d.mode == 1) ? base : base + disp;
+                // In particular, ART retries a post-index LDR after its
+                // userfaultfd SIGBUS handler fills the missing page. Updating
+                // Rn before the read would skip the header on that retry.
+                auto writeback = [&] {
+                    if (d.mode == 1 || d.mode == 2) {
+                        if (d.rn == 31) cpu.sp = base + disp;
+                        else cpu.regs[d.rn] = base + disp;
                     }
-                }
+                };
                 if (d.is_vec) {
                     bool is_q = (opc & 2) && size == 0;
                     int nbytes = is_q ? 16 : (1 << size);
@@ -1242,6 +1237,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             mem_.write(addr + 8, &hi, nbytes - 8);
                         }
                     }
+                    writeback();
                     return;
                 }
                 int width_bytes = 1 << size;
@@ -1259,6 +1255,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     v &= mask;
                     mem_.write(addr, &v, width_bytes);
                 }
+                writeback();
                 return;
             }
             // ── Load/store (register offset) ──────────────────────────

@@ -297,7 +297,7 @@ UNIT_TESTS=(
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
     "simd_recip|ctest/jit_simd_recip.elf||10|45/45 checks passed"
     "simd_faddp|ctest/jit_simd_faddp.elf||5|14/14 checks passed"
-    "simd_fixconv|ctest/jit_simd_fixconv.elf||5|11/11 checks passed"
+    "simd_fixconv|ctest/jit_simd_fixconv.elf||5|35/35 checks passed"
     # Vector FP NaN/zero rules (ARM FPProcessNaNs, fused FMLA). The JIT's
     # native vector FP still follows x86 NaN rules, so interpreter only.
     "simd_fp_nan|ctest/jit_simd_fp_nan.elf||5|14/14 checks passed|INTERP"

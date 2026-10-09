@@ -37,6 +37,34 @@ atomics, and guest SIGILL for an illegal opcode. Use its `no-trap` argument
 for JIT differential replay, which does not deliver the fixture's guest
 signal handler.
 
+### Indexed memory accesses and fault retry
+
+Base-register writeback for pre/post-index LDR/STR and LDP/STP belongs after
+successful memory access, including SIMD transfers. A missing userfaultfd page
+raises SIGBUS before the instruction completes; Android's handler fills the page
+and retries the same PC with the original base. JIT guard recovery executes the
+interpreter, so this ordering is required in both modes. SpongeBob's ART
+Class::FindField exposed the old early writeback in `ldr w8,[x1],#4`: retry skipped
+the array header and treated a declaring-class pointer as its length.
+`test_userfaultfd` checks that exact warmed instruction and pre/post-index,
+store, pair and page-crossing vector variants, including the saved signal
+context's base register. The ordering follows the
+[Arm LDR operation](https://www.scs.stanford.edu/~zyedidia/arm64/ldr_imm_gen.html).
+
+### APK resource icon instructions
+
+Rendering the installed launcher's icon through Android Skia exposed vector
+FCVTNU (nearest-even unsigned conversion), FRINTP (round toward positive infinity),
+and scalar D-register CMGT/CMGE/CMHI/CMHS. Their interpreter implementations are
+also the JIT fallback. Inputs are captured before destination writes and unused
+vector bits clear. FCVTNU uses nearest-even independently of FPCR rounding,
+saturates unsigned results and records conversion exceptions. The existing
+FRINT family retains its bounded exception model; synchronous FP traps are not
+implemented. `jit_simd_fixconv` compares aliases, widths, ties, saturation,
+NaNs, directed rounding and signed/unsigned comparisons with QEMU.
+References: [Arm FCVTNU](https://www.scs.stanford.edu/~zyedidia/arm64/fcvtnu_advsimd.html),
+[Arm CMGT](https://www.scs.stanford.edu/~zyedidia/arm64/cmgt_advsimd_reg.html).
+
 ### Reciprocal estimates and refinement (SpongeBob, 2026-10-07)
 
 The installed Unity library's first missing reciprocal step was

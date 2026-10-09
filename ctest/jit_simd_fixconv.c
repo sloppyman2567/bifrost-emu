@@ -108,6 +108,77 @@ int main(void) {
     pack32(want, 20, (uint32_t)-2, 0, 0);
     check_u64("fcvtzs .2s #3 in place", out, want);
 
+    // Android Skia's icon rasterizer: nearest-even conversion in place.
+    pack32(in, fbits32(0.5f), fbits32(1.5f), fbits32(2.5f), fbits32(-0.5f));
+    RUN("fcvtnu v1.4s, v0.4s", in, out);
+    pack32(want, 0, 2, 2, 0);
+    check_u64("fcvtnu .4s ties-even", out, want);
+    RUN("mov v1.16b, v0.16b\n\tfcvtnu v1.4s, v1.4s", in, out);
+    check_u64("fcvtnu .4s alias", out, want);
+    RUN("fcvtnu v1.2s, v0.2s", in, out);
+    pack32(want, 0, 2, 0, 0);
+    check_u64("fcvtnu .2s clears high", out, want);
+    pack32(in, fbits32(-1.0f), fbits32(1e30f), fbits32(nanf_), fbits32(3.25f));
+    RUN("fcvtnu v1.4s, v0.4s", in, out);
+    pack32(want, 0, 0xffffffff, 0, 3);
+    check_u64("fcvtnu .4s saturation nan", out, want);
+    in[0] = fbits64(2.5); in[1] = fbits64(3.5);
+    RUN("fcvtnu v1.2d, v0.2d", in, out);
+    want[0] = 2; want[1] = 4;
+    check_u64("fcvtnu .2d", out, want);
+    in[0] = fbits64(9223372036854775808.0); in[1] = fbits64(18446744073709551616.0);
+    RUN("fcvtnu v1.2d, v0.2d", in, out);
+    want[0] = 0x8000000000000000ull; want[1] = ~0ull;
+    check_u64("fcvtnu .2d upper unsigned", out, want);
+
+    uint64_t saved_fpcr, saved_fpsr, status;
+    __asm__ volatile("mrs %0,fpcr; mrs %1,fpsr" : "=r"(saved_fpcr), "=r"(saved_fpsr));
+    pack32(in, fbits32(0.5f), fbits32(1.5f), fbits32(2.5f), fbits32(-0.5f));
+    pack32(want, 0, 2, 2, 0);
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        uint64_t fpcr = (saved_fpcr & ~(3ull << 22)) | ((uint64_t)mode << 22);
+        __asm__ volatile("msr fpcr,%0; msr fpsr,xzr" :: "r"(fpcr) : "memory");
+        RUN("fcvtnu v1.4s, v0.4s", in, out);
+        __asm__ volatile("mrs %0,fpsr" : "=r"(status));
+        check_u64("fcvtnu independent of FPCR rounding", out, want);
+        checks++; if (status != 16) { printf("FAIL fcvtnu inexact FPSR=%llx\n", (unsigned long long)status); failures++; }
+    }
+    pack32(in, fbits32(-1.f), fbits32(nanf_), fbits32(1e30f), fbits32(3.25f));
+    __asm__ volatile("msr fpsr,xzr" ::: "memory");
+    RUN("fcvtnu v1.4s, v0.4s", in, out);
+    __asm__ volatile("mrs %0,fpsr; msr fpcr,%1; msr fpsr,%2" : "=r"(status) : "r"(saved_fpcr), "r"(saved_fpsr) : "memory");
+    checks++; if (status != 17) { printf("FAIL fcvtnu invalid/inexact FPSR=%llx\n", (unsigned long long)status); failures++; }
+
+    pack32(in, fbits32(0.25f), fbits32(-0.25f), fbits32(1.5f), fbits32(-1.5f));
+    RUN("frintp v1.4s, v0.4s", in, out);
+    pack32(want, fbits32(1.f), fbits32(-0.f), fbits32(2.f), fbits32(-1.f));
+    check_u64("frintp .4s", out, want);
+    RUN("frintp v1.2s, v0.2s", in, out);
+    want[1] = 0;
+    check_u64("frintp .2s", out, want);
+    in[0] = fbits64(1.25); in[1] = fbits64(-1.25);
+    RUN("mov v1.16b, v0.16b\n\tfrintp v1.2d, v1.2d", in, out);
+    want[0] = fbits64(2.); want[1] = fbits64(-1.);
+    check_u64("frintp .2d alias", out, want);
+
+    // Scalar integer comparisons must clear the upper 64 bits and preserve
+    // both inputs when Rd aliases Rn or Rm. Signed and unsigned differ here.
+#define COMPARE(insn, a, b, expected) do {                              \
+        in[0] = (a); in[1] = (b);                                       \
+        __asm__ volatile("ldr d0,[%0]\n ldr d2,[%0,#8]\n"               \
+                         "movi v1.16b,#0xaa\n" insn "\n str q1,[%1]"  \
+                         :: "r"(in), "r"(out) : "v0","v1","v2","memory"); \
+        want[0] = (expected) ? ~0ull : 0; want[1] = 0;                   \
+        check_u64(insn, out, want);                                     \
+    } while (0)
+    COMPARE("cmgt d1,d0,d2", ~0ull, 1, 0);
+    COMPARE("cmge d1,d0,d2", ~0ull, ~0ull, 1);
+    COMPARE("cmhi d1,d0,d2", ~0ull, 1, 1);
+    COMPARE("cmhs d1,d0,d2", 1, ~0ull, 0);
+    COMPARE("mov v1.16b,v0.16b\n cmgt d1,d1,d2", 2, 1, 1);
+    COMPARE("mov v1.16b,v2.16b\n cmgt d1,d0,d1", 1, 2, 0);
+#undef COMPARE
+
     if (failures) {
         printf("%d/%d checks failed\n", failures, checks);
         return 1;

@@ -21,6 +21,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <ucontext.h>
 
 #ifndef MREMAP_DONTUNMAP
 #define MREMAP_DONTUNMAP 4
@@ -39,6 +40,8 @@ static int uffd = -1;
 static char *heap, *from;  // registered range and its moved-away contents
 static volatile int faults, bad_faults;
 static volatile uintptr_t last_addr;
+static volatile uintptr_t post_fault_base;
+static volatile int check_post_fault;
 static volatile int zero_fill;  // handler uses UFFDIO_ZEROPAGE instead of COPY
 
 static void on_sigbus(int sig, siginfo_t *info, void *context) {
@@ -49,6 +52,9 @@ static void on_sigbus(int sig, siginfo_t *info, void *context) {
         bad_faults++;
         _exit(3);  // a wrong signal would otherwise retry forever
     }
+#if defined(__aarch64__)
+    if (check_post_fault) post_fault_base = ((ucontext_t *)context)->uc_mcontext.regs[1];
+#endif
     faults++;
     last_addr = addr;
     uintptr_t at = addr & ~(uintptr_t)(page - 1);
@@ -61,6 +67,49 @@ static void on_sigbus(int sig, siginfo_t *info, void *context) {
         if (ioctl(uffd, UFFDIO_COPY, &c)) _exit(5);
     }
 }
+
+// ART Class::FindField reads a LengthPrefixedArray this way. A missing
+// first page must preserve X1 until the instruction completes on retry.
+__attribute__((noinline)) static uint64_t post_header(uint32_t *p, uintptr_t *end) {
+#if defined(__aarch64__)
+    register uintptr_t pointer __asm__("x1") = (uintptr_t)p;
+    register uint64_t value __asm__("x8") = 0;
+    __asm__ volatile("ldr w8,[x1],#4\n cbz w8,1f\n lsl x8,x8,#4\n1:"
+                     : "+r"(pointer), "+r"(value) :: "memory", "cc");
+    *end = pointer;
+    return value;
+#else
+    uint32_t value = *p;
+    *end = (uintptr_t)(p + 1);
+    return (uint64_t)value * 16;
+#endif
+}
+
+// Exercise the same restart contract for pre-index, stores, pairs and Q
+// transfers. Pairs/Q straddle a page so a later sub-access also faults.
+#if defined(__aarch64__)
+__attribute__((noinline)) static void indexed_transfer(int kind, uintptr_t p,
+                                                       uintptr_t *end, uint64_t *out) {
+    register uintptr_t pointer __asm__("x1") = p;
+    register uint64_t a __asm__("x8") = 0x1111111111111111ull;
+    register uint64_t b __asm__("x9") = 0x2222222222222222ull;
+#define ACCESS(op) __asm__ volatile(op : "+r"(pointer), "+r"(a), "+r"(b) :: "memory", "v0")
+    switch (kind) {
+    case 0: ACCESS("ldr x8,[x1,#16]!"); break;
+    case 1: ACCESS("str x8,[x1],#16"); break;
+    case 2: ACCESS("str x8,[x1,#16]!"); break;
+    case 3: ACCESS("ldp x8,x9,[x1],#16"); break;
+    case 4: ACCESS("ldp x8,x9,[x1,#16]!"); break;
+    case 5: ACCESS("stp x8,x9,[x1],#16"); break;
+    case 6: ACCESS("stp x8,x9,[x1,#16]!"); break;
+    case 7: ACCESS("ldr q0,[x1],#16; umov x8,v0.d[0]; umov x9,v0.d[1]"); break;
+    case 8: ACCESS("fmov d0,x8; ins v0.d[1],x9; str q0,[x1,#16]!"); break;
+    }
+#undef ACCESS
+    *end = pointer;
+    out[0] = a; out[1] = b;
+}
+#endif
 
 static int open_uffd(void) {
     int fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY);
@@ -270,6 +319,62 @@ int main(void) {
     CHECK(ioctl(uffd, UFFDIO_UNREGISTER, &(struct uffdio_range){
         .start = (uintptr_t)arena, .len = PAGES * page}) == 0);
     CHECK(arena[1] == 0 && arena[3 * page] == 33 && faults == before + PAGES + 1);
+    // Exact failing SpongeBob/ART case, after warming the same instruction.
+    uint32_t header[] = {3, 0x1418e2d8, 0xaaaaaaaa, 0xbbbbbbbb};
+    uintptr_t end;
+    for (int i = 0; i < 20000; ++i) {
+        if (post_header(header, &end) != 48 || end != (uintptr_t)(header + 1)) _exit(6);
+    }
+    heap = mmap(NULL, PAGES * page, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(heap != MAP_FAILED);
+    memcpy(heap, header, sizeof(header));
+    from = mremap(heap, PAGES * page, PAGES * page,
+                  MREMAP_MAYMOVE | MREMAP_DONTUNMAP, NULL);
+    CHECK(from != MAP_FAILED);
+    reg = (struct uffdio_register){.range = {.start = (uintptr_t)heap, .len = PAGES * page},
+                                   .mode = UFFDIO_REGISTER_MODE_MISSING};
+    CHECK(ioctl(uffd, UFFDIO_REGISTER, &reg) == 0);
+    check_post_fault = 1;
+    int prior_faults = faults;
+    uint64_t bytes = post_header((uint32_t *)heap, &end);
+    check_post_fault = 0;
+    CHECK(bytes == 48);
+    CHECK(end == (uintptr_t)heap + 4);
+    CHECK(faults == prior_faults + 1);
+#if defined(__aarch64__)
+    CHECK(post_fault_base == (uintptr_t)heap);
+#endif
+#if defined(__aarch64__)
+    for (int kind = 0; kind < 9; ++kind) {
+        int pre = kind == 0 || kind == 2 || kind == 4 || kind == 6 || kind == 8;
+        int wide = kind >= 3;
+        int store = kind == 1 || kind == 2 || kind == 5 || kind == 6 || kind == 8;
+        uintptr_t target = (uintptr_t)heap + page - 8;
+        uintptr_t original = target - (pre ? 16 : 0);
+        uint64_t *source = (uint64_t *)(from + page - 8);
+        source[0] = 0x1111111111111111ull;
+        source[1] = 0x2222222222222222ull;
+        uint64_t out[2];
+        for (int i = 0; i < 20000; ++i)
+            indexed_transfer(kind, (uintptr_t)source - (pre ? 16 : 0), &end, out);
+        CHECK(madvise(heap, PAGES * page, MADV_DONTNEED) == 0);
+        prior_faults = faults;
+        check_post_fault = 1;
+        indexed_transfer(kind, original, &end, out);
+        check_post_fault = 0;
+        CHECK(end == original + 16);
+        CHECK(out[0] == source[0] && out[1] == source[1]);
+        CHECK(faults == prior_faults + (wide ? 2 : 1));
+        CHECK(post_fault_base == original);
+        if (store) {
+            CHECK(*(uint64_t *)target == source[0]);
+            if (wide) CHECK(*(uint64_t *)(target + 8) == source[1]);
+        }
+    }
+#endif
+    CHECK(ioctl(uffd, UFFDIO_UNREGISTER, &(struct uffdio_range){
+        .start = (uintptr_t)heap, .len = PAGES * page}) == 0);
     CHECK(bad_faults == 0);
     close(uffd);
     printf("userfaultfd: %d checks %s\n", checks, failures ? "FAILED" : "ALL PASS");
