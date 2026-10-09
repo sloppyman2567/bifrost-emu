@@ -250,24 +250,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             //   AND  (0): pand     = 66 0F DB /r
             //   ORR  (1): por      = 66 0F EB /r
             //   EOR  (2): pxor     = 66 0F EF /r
-            //   BIC  (3): a & ~b   = pandn xmm2,xmm1 (xmm2=~xmm1); pand xmm0,xmm2
-            //   ORN  (4): a | ~b   = pandn xmm2,xmm1 (xmm2=~xmm1); por  xmm0,xmm2
-            //   EON  (5): a ^ ~b   = pxor xmm0,xmm1; pcmpeqd xmm1,xmm1 (all-ones);
-            //                       pxor xmm0,xmm1  →  ~xmm0
+            //   BIC/ORN/EON (3-5): invert b with pcmpeqd + pxor,
+            //                     then apply pand/por/pxor to a and ~b.
             clobber_flags();
             // SIMD_LOGICAL touches no GPRs: the SSE2 XMM half-loop and the
             // VEX vec-cache path both use XMM0-2 only, and the RBX base
             // register is reserved (never holds a cached vreg). No GPR flush.
             const auto logic = inst.logical_params();
             uint8_t opc = logic.subop;
-            // For opc 0-2 we use a single SSE2 op; for 3-5 we emit a
-            // 2-3 instruction sequence.
-            uint8_t sse_op = 0;
-            bool simple = false;
-            if (opc == 0) { sse_op = 0xDB; simple = true; }       // PAND
-            else if (opc == 1) { sse_op = 0xEB; simple = true; }  // POR
-            else if (opc == 2) { sse_op = 0xEF; simple = true; }  // PXOR
-            else if (opc > 5) {
+            // Opcodes 3-5 apply the same operation after inverting b.
+            if (opc > 5) {
                 // Unknown opcode — fall back to interpreter.
                 emit_call_interp(inst.arm_pc, false);
                 return true;
@@ -322,44 +314,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 // movsd xmm1, [rbx+off2]
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
-                if (simple) {
-                    // 66 0F sse_op C1  (xmm0, xmm1)
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op);
-                    emit_byte(0xC1);
-                } else if (opc == 3) {
-                    // BIC: a & ~b
-                    // pandn xmm2, xmm1  →  xmm2 = ~xmm1 & xmm2
-                    // First set xmm2 to all-ones: pcmpeqd xmm2, xmm2
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x76);
-                    emit_byte(0xE2);  // modrm(3, xmm2, xmm2)
-                    // pandn xmm2, xmm1  →  xmm2 = ~xmm1 & xmm2 = ~xmm1
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xDF);
-                    emit_byte(0xE1);  // modrm(3, xmm2, xmm1)
-                    // pand xmm0, xmm2
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xDB);
-                    emit_byte(0xC2);  // modrm(3, xmm0, xmm2)
-                } else if (opc == 4) {
-                    // ORN: a | ~b
-                    // pcmpeqd xmm2, xmm2  (xmm2 = all-ones)
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x76);
-                    emit_byte(0xE2);
-                    // pandn xmm2, xmm1  →  xmm2 = ~xmm1
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xDF);
-                    emit_byte(0xE1);
-                    // por xmm0, xmm2
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEB);
-                    emit_byte(0xC2);
-                } else { // opc == 5: EON: a ^ ~b = ~(a^b)
-                    // pxor xmm0, xmm1
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
-                    emit_byte(0xC1);
-                    // pcmpeqd xmm1, xmm1  (xmm1 = all-ones)
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x76);
-                    emit_byte(0xE1);
-                    // pxor xmm0, xmm1  →  ~xmm0
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
-                    emit_byte(0xC1);
+                if (opc >= 3) {
+                    // Legacy PANDN computes ~dst & src, so an all-ones
+                    // destination would produce zero, not ~src. Invert b
+                    // explicitly; the helpers also encode scratch regs.
+                    sse2_op(0x76, 2, 2);  // pcmpeqd xmm2,xmm2 (all ones)
+                    sse2_op(0xEF, 1, 2);  // pxor xmm1,xmm2 (~b)
                 }
+                static constexpr uint8_t logical_ops[] = {0xDB, 0xEB, 0xEF};
+                sse2_op(logical_ops[opc % 3], 0, 1);  // a OP b (or ~b)
                 // movsd [rbx+offd], xmm0  (MOVSD store = F2 0F 11)
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);

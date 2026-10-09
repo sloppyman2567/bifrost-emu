@@ -79,6 +79,35 @@ and [estimate helpers](https://github.com/qemu/qemu/blob/master/target/arm/tcg/v
 provided an independent implementation comparison. `jit_simd_recip` checks
 45 assertions, including result/FPSR corpus hashes from QEMU cortex-a53.
 
+### SIMD logical fallback and Unity UI colors (2026-10-08)
+
+The SSE2 memory path for `SIMD_LOGICAL` inverts its second operand with
+`pcmpeqd xmm2,xmm2; pxor xmm1,xmm2`, then applies PAND, POR or PXOR for
+BIC, ORN or EON. Use the register encoding helpers: the former literal
+ModRM bytes `E2`/`E1` addressed XMM4 instead of the documented scratch
+registers. Legacy PANDN computes `~destination & source`, so an all-ones
+destination cannot be used to invert its source. The VEX cache path uses
+VPANDN with the second Arm operand as its first source for BIC.
+These operand rules were checked against Intel's
+[instruction reference, PANDN](https://cdrdv2-public.intel.com/789581/325383-sdm-vol-2abcd.pdf).
+
+In the installed SpongeBob Unity library, the first wrong instruction in
+the color packer at `libunity.so+0x4f4ab8` was the BIC at `+0x4f4ac8`.
+Opaque white packed to `00000000` under JIT, versus `ffffffff` under the
+interpreter and QEMU. UI meshes were submitted with zero vertex colors,
+making the age dialog and ocean background invisible while bubbles rendered.
+`ctest/jit_simd.c` reproduces that exact instruction sequence, checks six
+packed colors including clamping, and checks 256 BIC/ORN cases across
+both Q widths, destination aliases and equal operands. Run it with
+`BIFROST_NO_VEC_CACHE=1` to force the repaired SSE2 fallback. These tests
+do not directly exercise the EON IR suboperation.
+
+The rebuilt game displayed the age dialog and ocean background without
+the diagnostic color override, then advanced to its loading screen.
+The real-GPU run presented 2,195 frames over 204 seconds, including
+120 seconds after the age dialog appeared, with no reported guest failure.
+Gameplay beyond the loading screen was not verified.
+
 ## Translation path
 
 ```text

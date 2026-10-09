@@ -8,8 +8,8 @@
  *   still go through CALL_INTERP, but these four cover the patterns
  *   most C programs hit (vectorized memcmp, vectorized memset, etc.).
  *
- * Uses pure C with vectorized loops.  The compiler at -O2 emits
- * NEON SIMD ops for these patterns.  We verify the result.
+ * Uses vectorized C loops plus explicit instructions for logical operand
+ * aliasing and the Unity color-pack regression.
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -21,7 +21,97 @@ static int fails = 0;
     else      { printf("NG %s\n", tag); fails++; } \
 } while (0)
 
+/* Keep the instructions explicit: C may fold BIC/ORN into other forms.
+ * Store the full Q register even for .8b to check upper-half clearing. */
+#define LOGICAL_CASE(name, op, lanes, dest, lhs, rhs) \
+static void name(uint64_t out[2], const uint64_t a[2], const uint64_t b[2]) { \
+    __asm__ volatile("ldr q0, [%1]\n\tldr q1, [%2]\n\t" \
+                     "movi v2.16b, #0xa5\n\t" \
+                     op " v" dest "." lanes ", v" lhs "." lanes ", v" rhs "." lanes "\n\t" \
+                     "str q" dest ", [%0]" \
+                     : : "r"(out), "r"(a), "r"(b) : "v0", "v1", "v2", "memory"); \
+}
+#define LOGICAL_WIDTH(op, lanes) \
+    LOGICAL_CASE(op##_##lanes##_distinct, #op, #lanes, "2", "0", "1") \
+    LOGICAL_CASE(op##_##lanes##_lhs, #op, #lanes, "0", "0", "1") \
+    LOGICAL_CASE(op##_##lanes##_rhs, #op, #lanes, "1", "0", "1") \
+    LOGICAL_CASE(op##_##lanes##_same, #op, #lanes, "0", "0", "0")
+LOGICAL_WIDTH(bic, 8b)
+LOGICAL_WIDTH(bic, 16b)
+LOGICAL_WIDTH(orn, 8b)
+LOGICAL_WIDTH(orn, 16b)
+
+static void check_logical(void) {
+    typedef void (*logical_fn)(uint64_t *, const uint64_t *, const uint64_t *);
+#define LOGICAL_ROW(op, lanes, q, is_or) \
+    {op##_##lanes##_distinct, q, is_or, 0}, {op##_##lanes##_lhs, q, is_or, 0}, \
+    {op##_##lanes##_rhs, q, is_or, 0}, {op##_##lanes##_same, q, is_or, 1}
+    static const struct { logical_fn fn; int q, is_or, same; } cases[] = {
+        LOGICAL_ROW(bic, 8b, 0, 0), LOGICAL_ROW(bic, 16b, 1, 0),
+        LOGICAL_ROW(orn, 8b, 0, 1), LOGICAL_ROW(orn, 16b, 1, 1),
+    };
+    static const uint64_t patterns[][2] = {
+        {0, 0}, {UINT64_MAX, UINT64_MAX},
+        {0x0123456789abcdefULL, 0xfedcba9876543210ULL},
+        {0xaaaaaaaa55555555ULL, 0x55555555aaaaaaaaULL},
+    };
+    int ok = 1;
+    for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        for (unsigned a = 0; a < 4; a++) for (unsigned b = 0; b < 4; b++) {
+            uint64_t out[2];
+            cases[c].fn(out, patterns[a], patterns[b]);
+            for (int half = 0; half < 2; half++) {
+                uint64_t av = patterns[a][half];
+                uint64_t bv = patterns[cases[c].same ? a : b][half];
+                uint64_t want = cases[c].is_or ? av | ~bv : av & ~bv;
+                if (!cases[c].q && half == 1) want = 0;
+                if (out[half] != want) {
+                    printf("logical case=%u a=%u b=%u half=%d got=%016llx want=%016llx\n",
+                           c, a, b, half, (unsigned long long)out[half],
+                           (unsigned long long)want);
+                    ok = 0;
+                }
+            }
+        }
+    }
+    CHECK(ok, "bic_orn_widths_aliases_256_cases");
+}
+
+/* Exact sequence at libunity.so+0x4f4ab8 in the affected game. BIC
+ * clears negative components before clamping, scaling and packing RGBA.
+ * A broken SSE2 fallback produced 00000000 for opaque white. */
+__asm__(".text\n.p2align 2\n.type unity_color_pack,%function\n"
+        "unity_color_pack:\n"
+        "ldr q0, [x1]\nfmov v2.4s, #1\nmov w8, #0x437f0000\n"
+        "fcmlt v1.4s, v0.4s, #0\nbic v0.16b, v0.16b, v1.16b\n"
+        "fcmgt v1.4s, v0.4s, v2.4s\nbit v0.16b, v2.16b, v1.16b\n"
+        "dup v1.4s, w8\nfmul v0.4s, v0.4s, v1.4s\n"
+        "movi v1.4s, #0x3f, lsl #24\nfadd v0.4s, v0.4s, v1.4s\n"
+        "fcvtzu v0.4s, v0.4s\nxtn v0.4h, v0.4s\nxtn v0.8b, v0.8h\n"
+        "str s0, [x0]\nret\n.size unity_color_pack, .-unity_color_pack\n");
+extern void unity_color_pack(uint32_t *, const float *);
+
+static void check_unity_colors(void) {
+    static const struct { float rgba[4]; uint32_t packed; } cases[] = {
+        {{1, 1, 1, 1}, 0xffffffff}, {{.5f, .2f, .8f, 1}, 0xffcc3380},
+        {{1, 0, 0, 1}, 0xff0000ff}, {{0, 0, 0, 1}, 0xff000000},
+        {{.1f, .2f, .3f, .4f}, 0x664d331a}, {{-1, 2, .5f, 1}, 0xff80ff00},
+    };
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint32_t got = 0xdeadbeef;
+        unity_color_pack(&got, cases[i].rgba);
+        if (got != cases[i].packed) {
+            printf("unity color=%u got=%08x want=%08x\n", i, got, cases[i].packed);
+            ok = 0;
+        }
+    }
+    CHECK(ok, "unity_rgba_pack");
+}
+
 int main(void) {
+    check_logical();
+    check_unity_colors();
     /* ── Vectorized memset (uses MOVI + ST1) ──────────────────────── */
     /* The compiler should vectorize this loop into NEON stores. */
     static uint8_t buf[64];
