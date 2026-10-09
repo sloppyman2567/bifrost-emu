@@ -700,6 +700,18 @@ session. The supervisor forwards interruption, terminates owned descendants,
 removes its log socket, and propagates guest failure; a requested timeout returns
 124 and interruption returns 130. Normal runs have no time limit.
 
+The managed launcher collects the APK's real signing certificates through
+Android's archive parser. Its package service returns legacy `signatures` only
+for `GET_SIGNATURES` and `signingInfo` only for `GET_SIGNING_CERTIFICATES`, with
+independent package records and certificate arrays. The diagnostic app probe
+checks both query flags and queries without them against the installed APK.
+This follows AOSP's
+[PackageParser signing fields](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/content/pm/PackageParser.java).
+Previously the service returned a manifest-only record with null certificates,
+including when SDKs requested them. [Facebook Unity's initialization callback](https://github.com/facebook/facebook-sdk-for-unity/blob/sdk-version-18.0.0/facebook-android-wrapper/src/com/facebook/unity/FB.java)
+reads `signatures` to calculate its key hash before sending `OnInitComplete`;
+a null array interrupts that callback.
+
 Window close and Activity.finish drive pause, SurfaceView destruction, stop,
 queued preference writes and destroy before releasing the native surface.
 This is a bounded SurfaceView launcher, not a complete Android system_server or

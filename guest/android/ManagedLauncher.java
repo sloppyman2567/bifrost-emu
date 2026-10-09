@@ -739,6 +739,24 @@ public final class ManagedLauncher {
                 ? new Bundle(installed.applicationInfo.metaData) : null;
     }
 
+    private static PackageInfo packageInfo(String name, long flags, int userId) {
+        if (installed == null || !installed.packageName.equals(name)
+                || userId != installed.applicationInfo.uid / 100000) return null;
+        // PackageInfo has no copy constructor. Parcel it as the framework's
+        // Binder service does, so callers cannot change the installed record.
+        Parcel parcel = Parcel.obtain();
+        try {
+            installed.writeToParcel(parcel, 0);
+            parcel.setDataPosition(0);
+            PackageInfo result = PackageInfo.CREATOR.createFromParcel(parcel);
+            if ((flags & PackageManager.GET_SIGNATURES) == 0) result.signatures = null;
+            if ((flags & PackageManager.GET_SIGNING_CERTIFICATES) == 0) result.signingInfo = null;
+            return result;
+        } finally {
+            parcel.recycle();
+        }
+    }
+
     private static ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
         PackageInfo pkg = installed;
         if (pkg == null || !pkg.packageName.equals(component.getPackageName()) || pkg.services == null)
@@ -768,6 +786,23 @@ public final class ManagedLauncher {
 
     private static void checkPackageServices(Context context) throws Exception {
         PackageManager manager = context.getPackageManager();
+        PackageInfo signing = manager.getPackageInfo(installed.packageName,
+                PackageManager.GET_SIGNATURES | PackageManager.GET_SIGNING_CERTIFICATES);
+        if (signing.signatures == null || signing.signatures.length == 0 || signing.signingInfo == null
+                || !Arrays.equals(signing.signatures, installed.signatures)
+                || !Arrays.equals(signing.signingInfo.getApkContentsSigners(),
+                        installed.signingInfo.getApkContentsSigners()))
+            throw new AssertionError("installed package signing certificates missing");
+        PackageInfo plain = manager.getPackageInfo(installed.packageName, 0);
+        if (plain.signatures != null || plain.signingInfo != null)
+            throw new AssertionError("signing certificates returned without query flags");
+        if (manager.getPackageInfo(installed.packageName, PackageManager.GET_SIGNATURES).signingInfo != null
+                || manager.getPackageInfo(installed.packageName,
+                        PackageManager.GET_SIGNING_CERTIFICATES).signatures != null)
+            throw new AssertionError("legacy and current signing query flags conflated");
+        signing.signatures[0] = null;
+        if (manager.getPackageInfo(installed.packageName, PackageManager.GET_SIGNATURES).signatures[0] == null)
+            throw new AssertionError("signing certificate array aliases package state");
         int flags = PackageManager.MATCH_DISABLED_COMPONENTS | PackageManager.MATCH_DIRECT_BOOT_AWARE
                 | PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
         int services = 0, metadata = 0;
@@ -1107,8 +1142,7 @@ public final class ManagedLauncher {
                 // (name, flags, user): null means "not installed", which the
                 // client turns into NameNotFoundException.
                 case "getPackageInfo":
-                    return installed != null && installed.packageName.equals(a[0])
-                            ? installed : null;
+                    return packageInfo((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
                 case "getApplicationInfo":
                     return installed != null && installed.packageName.equals(a[0])
                             ? installed.applicationInfo : null;
@@ -1353,6 +1387,7 @@ public final class ManagedLauncher {
         PackageInfo packageInfo = system.getPackageManager().getPackageArchiveInfo(
                 code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_SERVICES
                         | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
+                        | PackageManager.GET_SIGNATURES | PackageManager.GET_SIGNING_CERTIFICATES
                         | PackageManager.MATCH_DISABLED_COMPONENTS
                         | PackageManager.MATCH_DIRECT_BOOT_AWARE | PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
         if (packageInfo == null || !packageName.equals(packageInfo.packageName))
