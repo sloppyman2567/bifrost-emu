@@ -74,6 +74,13 @@ int main(int argc, char **argv) {
       CHECK(strstr(title(w), "bifrost-emu "));
       CHECK(strstr(title(w), "FPS"));
       CHECK(strstr(title(w), "stats regression |"));
+      CHECK(!strstr(title(w), " | CPU "));
+      CHECK(!strstr(title(w), " | GPU "));
+      CHECK(!strstr(title(w), "MiB"));
+      CHECK(!strstr(title(w), "GiB"));
+      const char *vram = strstr(title(w), " | VRAM ");
+      CHECK(vram && strchr(vram, '/'));
+      if (!strstr(vram, "unavailable/shared")) CHECK(strstr(vram, " MB"));
     } else
       CHECK(strcmp(title(w), "stats regression") == 0);
     set_title(w, "renamed game");

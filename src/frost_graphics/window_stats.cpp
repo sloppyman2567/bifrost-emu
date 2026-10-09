@@ -4,12 +4,17 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <dirent.h>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <spawn.h>
+#include <set>
+#include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -52,12 +57,113 @@ double Clock::active_fps(uint64_t now) const {
 }
 struct Packet {
   uint64_t frames{}, last_ns{}, xwindow{};
-  uint64_t ram{}, total_ram{}, vram{};
+  uint64_t ram{}, total_ram{}, vram{}, used_vram{};
+  bool vram_known{};
   double fps{};
   int x{}, y{}, w{}, h{}, visible{}, separate{}, overlay{};
   char backend[32]{};
-  char cpu[128]{}, gpu[192]{};
+  char cpu[512]{}, gpu[512]{};
 };
+
+detail::DrmClient detail::read_drm_client(std::istream &input) {
+  DrmClient result;
+  std::map<std::string, uint64_t> resident, legacy;
+  std::string line;
+  while (std::getline(input, line)) {
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const auto key = line.substr(0, colon);
+    std::istringstream value(line.substr(colon + 1));
+    if (key == "drm-client-id") { value >> result.id; continue; }
+    if (key == "drm-pdev") { value >> result.device; continue; }
+    const bool old = key.compare(0, 11, "drm-memory-") == 0;
+    const bool current = key.compare(0, 13, "drm-resident-") == 0;
+    if (!old && !current) continue;
+    const auto region = key.substr(old ? 11 : 13);
+    if (region.compare(0, 4, "vram") ||
+        region.find_first_not_of("0123456789", 4) != std::string::npos) continue;
+    std::string number, unit, extra;
+    value >> number;
+    if (number.empty() || number.find_first_not_of("0123456789") != std::string::npos) continue;
+    errno = 0;
+    char *end = nullptr;
+    const auto count = strtoull(number.c_str(), &end, 10);
+    if (errno || *end) continue;
+    value >> unit;
+    if (value >> extra) continue;
+    uint64_t scale = unit.empty() ? 1 : unit == "KiB" ? 1024 : unit == "MiB" ? 1048576 : 0;
+    if (!scale || count > std::numeric_limits<uint64_t>::max() / scale) continue;
+    (old ? legacy : resident)[region] = count * scale;
+  }
+  // The deprecated amdgpu field aliases resident storage; never add both.
+  for (const auto &[region, bytes] : legacy) resident.emplace(region, bytes);
+  result.known = !resident.empty();
+  for (const auto &[region, bytes] : resident) {
+    if (bytes > std::numeric_limits<uint64_t>::max() - result.resident) {
+      result.known = false; break;
+    }
+    result.resident += bytes;
+  }
+  return result;
+}
+
+bool detail::sum_drm_clients(const std::vector<DrmClient> &clients,
+                            const std::string &device, uint64_t &bytes) {
+  std::set<std::string> devices, seen;
+  for (const auto &client : clients)
+    if (!client.id.empty() && !client.device.empty()) devices.insert(client.device);
+  // GLX may not expose its render node. Only infer it for a single-device process.
+  const auto selected = !device.empty() ? device : devices.size() == 1 ? *devices.begin() : "";
+  if (selected.empty()) return false;
+  uint64_t total = 0;
+  for (const auto &client : clients) {
+    if (client.device != selected) continue;
+    if (client.id.empty() || !client.known) return false;
+    if (!seen.insert(client.id).second) continue;
+    if (client.resident > std::numeric_limits<uint64_t>::max() - total) return false;
+    total += client.resident;
+  }
+  bytes = total;
+  return !seen.empty();
+}
+
+std::string detail::vram_text(uint64_t used, uint64_t total, bool known) {
+  if (!total) return "unavailable/shared";
+  char text[96];
+  if (known) snprintf(text, sizeof(text), "%.0f/%.0f MB", used / 1e6, total / 1e6);
+  else snprintf(text, sizeof(text), "unavailable/%.0f MB", total / 1e6);
+  return text;
+}
+
+static std::string drm_device(dev_t device) {
+  char path[128];
+  snprintf(path, sizeof(path), "/sys/dev/char/%u:%u/device", major(device), minor(device));
+  char *resolved = realpath(path, nullptr);
+  std::string result = resolved ? resolved : "";
+  free(resolved);
+  return result;
+}
+
+static bool used_vram(const std::string &device, uint64_t &bytes) {
+  DIR *dir = opendir("/proc/self/fdinfo");
+  if (!dir) return false;
+  std::vector<detail::DrmClient> clients;
+  while (const auto *entry = readdir(dir)) {
+    if (entry->d_name[0] == '.') continue;
+    const std::string number = entry->d_name;
+    struct stat st{};
+    const auto fd = "/proc/self/fd/" + number;
+    if (stat(fd.c_str(), &st) || !S_ISCHR(st.st_mode)) continue;
+    std::ifstream file("/proc/self/fdinfo/" + number);
+    auto client = detail::read_drm_client(file);
+    if (client.id.empty()) continue;
+    const auto canonical = drm_device(st.st_rdev);
+    if (!canonical.empty()) client.device = canonical;
+    clients.push_back(std::move(client));
+  }
+  closedir(dir);
+  return detail::sum_drm_clients(clients, device, bytes);
+}
 
 // These are host measurements, never guest /proc emulation. RSS includes the
 // emulator and guest's resident pages, not the reserved virtual address window.
@@ -90,7 +196,7 @@ static std::string cpu_name() {
 // Match an EGL renderer's DRM render node to Vulkan's physical device. Never
 // report the first GPU's memory on a multi-GPU machine. Device-local heaps on
 // integrated GPUs are shared system RAM, so they are not reported as VRAM.
-static uint64_t egl_vram(void *egl) {
+static uint64_t egl_vram(void *egl, std::string &drm) {
   using Current = void *(*)();
   using Query = unsigned (*)(void *, int, intptr_t *);
   using String = const char *(*)(void *, int);
@@ -113,6 +219,7 @@ static uint64_t egl_vram(void *egl) {
   const char *node = string(reinterpret_cast<void *>(device), 0x3377);
   struct stat st{};
   if (!node || stat(node, &st) || !S_ISCHR(st.st_mode)) return 0;
+  drm = drm_device(st.st_rdev);
   void *vk = dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL);
   if (!vk) return 0;
   auto create = reinterpret_cast<PFN_vkCreateInstance>(dlsym(vk, "vkCreateInstance"));
@@ -162,7 +269,7 @@ static uint64_t egl_vram(void *egl) {
   return bytes;
 }
 
-static void gpu_info(std::string &name, uint64_t &vram) {
+static void gpu_info(std::string &name, uint64_t &vram, std::string &device) {
   // This runs on a presenting thread with its GL context current. Every entry
   // is resolved from the host DSO, never from guest thunks or SDL2/SDL3 globals.
   static void *gl = dlopen("libGL.so.1", RTLD_LAZY | RTLD_LOCAL);
@@ -176,7 +283,7 @@ static void gpu_info(std::string &name, uint64_t &vram) {
   const auto *renderer = string ? string(0x1f01) : nullptr; // GL_RENDERER
   if (!renderer) return;
   name = reinterpret_cast<const char *>(renderer);
-  if (egl) vram = egl_vram(egl);
+  if (egl) vram = egl_vram(egl, device);
   using MesaQuery = int (*)(int, unsigned *);
   auto query = gl ? reinterpret_cast<MesaQuery>(dlsym(gl, "glXQueryCurrentRendererIntegerMESA")) : nullptr;
   unsigned mb = 0, unified = 1;
@@ -196,6 +303,9 @@ struct State {
   std::string backend;
   std::string gpu;
   uint64_t vram = 0;
+  std::string device;
+  uint64_t used_vram = 0, vram_sample = 0;
+  bool vram_known = false;
   unsigned gpu_attempts = 0;
   ~State() {
     if (socket >= 0)
@@ -252,7 +362,7 @@ static void record_present(State &state, const char *backend, uint64_t now) {
             VERSION, backend);
   state.clock.present(now);
   if (enabled() && (state.gpu.empty() || !state.vram) && state.gpu_attempts < 4) {
-    ++state.gpu_attempts; gpu_info(state.gpu, state.vram);
+    ++state.gpu_attempts; gpu_info(state.gpu, state.vram, state.device);
   }
 }
 
@@ -269,6 +379,11 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
     ram = proc_kb("/proc/self/status", "VmRSS:"); ram_sample = now;
   }
   packet.ram = ram; packet.total_ram = total; packet.vram = state.vram;
+  if (!state.vram_sample || now - state.vram_sample >= 1000000000ULL) {
+    state.vram_known = state.vram && used_vram(state.device, state.used_vram);
+    state.vram_sample = now;
+  }
+  packet.used_vram = state.used_vram; packet.vram_known = state.vram_known;
   snprintf(packet.cpu, sizeof(packet.cpu), "%s", cpu.c_str());
   snprintf(packet.gpu, sizeof(packet.gpu), "%s", state.gpu.empty() ? "unavailable" : state.gpu.c_str());
   packet.frames = state.clock.frames;
@@ -283,17 +398,15 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
     state.title = info.title;
   std::string title;
   if (dbg().window_stats_title) {
-    char suffix[768];
-    char vram[48];
-    if (packet.vram) snprintf(vram, sizeof(vram), "%.0f MiB (%.2f GiB)",
-                              packet.vram / 1048576.0, packet.vram / 1073741824.0);
-    else snprintf(vram, sizeof(vram), "unavailable/shared");
+    char suffix[256];
     snprintf(suffix, sizeof(suffix),
-             " | bifrost-emu %s | %s %.1f FPS | %dx%d | frame %llu | RAM %.0f/%.0f MB | CPU %.64s | GPU %.80s | VRAM %s", VERSION,
+             " | bifrost-emu %s | %s %.1f FPS | %dx%d | frame %llu | RAM %.0f/%.0f MB", VERSION,
              now - state.clock.last_ns > 2000000000ULL ? "idle" : state.backend.c_str(),
              packet.fps, packet.w, packet.h, (unsigned long long)packet.frames,
-             packet.ram / 1e6, packet.total_ram / 1e6, packet.cpu, packet.gpu, vram);
-    title = state.decorated = state.title + suffix;
+             packet.ram / 1e6, packet.total_ram / 1e6);
+    title = state.decorated = state.title + suffix + " | " + cpu + " | " +
+        (state.gpu.empty() ? "unavailable" : state.gpu) + " | VRAM " +
+        detail::vram_text(packet.used_vram, packet.vram, packet.vram_known);
   }
   packet.separate = dbg().window_stats_window;
   packet.overlay = dbg().window_stats_overlay;
@@ -737,17 +850,22 @@ int ui_main(int fd) {
       snprintf(line, sizeof(line), "SIZE %d X %d - LAST FRAME %.1f S", p.w, p.h,
                (now_ns() - p.last_ns) / 1e9);
       text(renderers[i], line, 84);
-      snprintf(line, sizeof(line), "CPU %.70s", p.cpu);
-      text(renderers[i], line, 108);
-      snprintf(line, sizeof(line), "GPU %.70s", p.gpu);
-      text(renderers[i], line, 132);
-      if (strlen(p.gpu) > 70) text(renderers[i], p.gpu + 70, 156);
+      int y = 108;
+      for (const char *name : {p.cpu, p.gpu}) {
+        const std::string full = name;
+        for (size_t offset = 0; offset < full.size(); offset += 70) {
+          text(renderers[i], full.substr(offset, 70).c_str(), y);
+          y += 24;
+        }
+      }
       snprintf(line, sizeof(line), "EMULATOR RAM %.0f / %.0f MB SYSTEM TOTAL", p.ram / 1e6, p.total_ram / 1e6);
-      text(renderers[i], line, 180);
-      if (p.vram) snprintf(line, sizeof(line), "GPU VRAM TOTAL %.0f MiB (%.2f GiB) - EXPERIMENTAL",
-                           p.vram / 1048576.0, p.vram / 1073741824.0);
-      else snprintf(line, sizeof(line), "GPU VRAM UNAVAILABLE OR SHARED - EXPERIMENTAL");
-      text(renderers[i], line, 204);
+      text(renderers[i], line, y);
+      snprintf(line, sizeof(line), "VRAM %s - EXPERIMENTAL",
+               detail::vram_text(p.used_vram, p.vram, p.vram_known).c_str());
+      text(renderers[i], line, y + 24);
+      int width, height;
+      SDL_GetWindowSize(windows[i], &width, &height);
+      if (height != y + 60) SDL_SetWindowSize(windows[i], width, y + 60);
       SDL_RenderPresent(renderers[i]);
     }
     SDL_Delay(100);

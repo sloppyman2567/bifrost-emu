@@ -6,20 +6,31 @@ The separate stats window and overlay remain opt-in. The emulator name and
 version come from `bifrost/version.hpp`.
 The display includes the presentation backend, FPS, logical window dimensions
 and total presented frames. The original game title is retained.
-Experimental hardware fields show the host CPU and current GL renderer, emulator
-resident RAM / total system RAM, and total dedicated GPU VRAM when available.
-RAM is displayed in decimal MB; VRAM uses binary MiB and GiB to match GPU
-capacity conventions. The value is the driver-reported device-local heap
-capacity, which can be smaller than the physical memory fitted to the card. Resident RAM includes the emulator and guest
-resident allocations; it is not the guest's reserved virtual address space.
-System RAM comes from Linux MemTotal, so it may be lower than installed capacity.
-VRAM is capacity, not per-app GPU usage. EGL's actual DRM render node is matched
-to a Vulkan physical device before summing its device-local heaps; a Mesa GLX
-renderer query is a fallback. Shared integrated-GPU memory and unsupported
-queries display unavailable/shared. These values are discovered at runtime,
-without assumptions about CPU/GPU vendor or installed capacity. GPU names and
-VRAM currently require a presenting GL context; Vulkan-only paths retain the
-presentation counters but may show hardware as unavailable.
+Experimental hardware fields show the full host CPU and current GL renderer names
+without CPU/GPU prefixes, emulator resident RAM / total system RAM, and emulator
+resident VRAM / total dedicated GPU VRAM when available. Both memory fields use
+decimal MB (1,000,000 bytes), for example `RAM 400/33567 MB | ... | VRAM 300/8573 MB`.
+The driver-reported device-local heap capacity can be smaller than the physical
+memory fitted to the card. Resident RAM includes emulator and guest allocations;
+it is not the guest's reserved virtual address space. System RAM comes from
+Linux MemTotal, so it may be lower than installed capacity.
+
+VRAM usage is sampled once per second from the emulator's Linux DRM fdinfo
+resident VRAM regions. Duplicate descriptors for the same device/client are
+counted once; the deprecated `drm-memory-vram` field is accepted as a fallback
+without adding it to its resident alias. Numbered VRAM regions are supported.
+This measures driver-accounted resident buffer storage for the process, including
+shared buffers, rather than global GPU usage or requested allocations. A buffer
+shared across distinct clients may be included in each client's accounting.
+EGL's actual DRM render node is matched to the usage counters and to a Vulkan
+physical device before summing its device-local heaps; a Mesa GLX renderer query
+is a capacity fallback. When GLX does not expose a device identity, usage is
+reported only if the process has a single identifiable DRM device. Unsupported
+usage counters display `unavailable/total MB`; shared integrated-GPU memory or
+unknown capacity displays `unavailable/shared`. These values are discovered at
+runtime, without assumptions about CPU/GPU vendor or installed capacity. GPU
+names and capacity currently require a presenting GL context; Vulkan-only paths
+retain the presentation counters but may show hardware as unavailable.
 
 Each display has its own enable and disable switch:
 
@@ -86,13 +97,14 @@ EMU=build/release-sdl1-gl1/bifrost-emu ./scripts/test_window_stats.sh
 
 The regression checks the presentation clock, default first-frame logging,
 default titles, title renaming, idle detection, native-window recreation, hardware
-field formatting and explicit disable
-switches. Optional UI placement and click-through require a real X11 desktop.
+field formatting and explicit disable switches. DRM fixtures cover duplicate
+clients, multiple devices/regions, legacy aliases, invalid units and overflow,
+and zero versus unsupported usage. Optional UI placement and click-through
+require a real X11 desktop.
 
 
 Hardware discovery follows [EGL_EXT_device_query](https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_device_query.txt)
 and Vulkan's [physical-device DRM properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceDrmPropertiesEXT.html).
-The host-driver check reported a device-local heap of 8,573,157,376 bytes:
-8176 MiB (7.98 GiB). The previous 8573 MB label represented the same bytes in
-decimal units; it was not an allocation or usage measurement. These exact
-numbers are verification evidence, not constants used by the implementation.
+VRAM accounting follows Linux's [DRM client usage statistics](https://kernel.org/doc/html/next/gpu/drm-usage-stats.html),
+including device/client deduplication, resident regions, and byte/KiB/MiB input
+units. Display units are always decimal MB, matching system RAM.

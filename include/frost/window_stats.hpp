@@ -1,8 +1,22 @@
 #pragma once
 #include <cstdint>
+#include <istream>
 #include <string>
+#include <vector>
 
 namespace arm64emu::window_stats {
+namespace detail {
+// Host DRM accounting helpers, shared with the focused regression.
+struct DrmClient {
+  std::string device, id;
+  uint64_t resident = 0;
+  bool known = false;
+};
+DrmClient read_drm_client(std::istream &input);
+bool sum_drm_clients(const std::vector<DrmClient> &clients,
+                     const std::string &device, uint64_t &bytes);
+std::string vram_text(uint64_t used, uint64_t total, bool known);
+}
 // Monotonic presentation clock, independent of guest time and instruction rate.
 struct Clock {
   uint64_t frames = 0, sample_frames = 0, sample_ns = 0, last_ns = 0;
