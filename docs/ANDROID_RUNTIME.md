@@ -712,6 +712,21 @@ including when SDKs requested them. [Facebook Unity's initialization callback](h
 reads `signatures` to calculate its key hash before sending `OnInitComplete`;
 a null array interrupts that callback.
 
+Activity metadata queries now use the installed manifest, preserving aliases,
+orientation, enabled/direct-boot filters, and `GET_META_DATA` behavior, as service
+and provider queries do. Permission checks grant only the installed app's
+requested normal permissions, using protection levels parsed from the runtime's
+`framework-res.apk` and the app's own permission definitions. Unknown names,
+other UIDs/devices, runtime permissions and signature permissions are denied;
+runtime grant dialogs and signature grant policy are not implemented. Package
+permission flags agree with this bounded policy. See Android's
+[permission types](https://developer.android.com/guide/topics/permissions/overview#types_of_permissions).
+An isolated call into SpongeBob's actual Facebook SDK exposed
+`package.getActivityInfo`, then `activity.checkPermissionForDevice` throwing
+before initialization; with both services implemented, `isInitialized()` returns
+true and its asynchronous initialization callback runs. This verifies SDK startup
+independently of game loading and resize safety.
+
 Window close and Activity.finish drive pause, SurfaceView destruction, stop,
 queued preference writes and destroy before releasing the native surface.
 This is a bounded SurfaceView launcher, not a complete Android system_server or

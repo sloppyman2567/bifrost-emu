@@ -17,6 +17,7 @@ import android.content.pm.ComponentInfo;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
 import android.content.res.Configuration;
@@ -75,6 +76,7 @@ public final class ManagedLauncher {
     private static boolean diagnostic;
     private static boolean created;
     private static volatile Activity activeActivity;
+    private static final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
     private static volatile boolean windowOpen;
     private static final Map<IBinder, Long> fullyDrawn = new ConcurrentHashMap<>();
     // The package installed by app mode; the only package that exists here.
@@ -751,10 +753,60 @@ public final class ManagedLauncher {
             PackageInfo result = PackageInfo.CREATOR.createFromParcel(parcel);
             if ((flags & PackageManager.GET_SIGNATURES) == 0) result.signatures = null;
             if ((flags & PackageManager.GET_SIGNING_CERTIFICATES) == 0) result.signingInfo = null;
+            if ((flags & PackageManager.GET_PERMISSIONS) == 0) {
+                result.permissions = null;
+                result.requestedPermissions = null;
+                result.requestedPermissionsFlags = null;
+            }
             return result;
         } finally {
             parcel.recycle();
         }
+    }
+
+    private static ActivityInfo activityInfo(ComponentName component, long flags, int userId) {
+        if (installed == null || !installed.packageName.equals(component.getPackageName())
+                || installed.activities == null) return null;
+        for (ActivityInfo activity : installed.activities) {
+            if (!activity.name.equals(component.getClassName())) continue;
+            if (!componentMatches(activity, flags, userId)) return null;
+            ActivityInfo result = new ActivityInfo(activity);
+            installedComponentInfo(result, flags);
+            return result;
+        }
+        return null;
+    }
+
+    private static void installPermissions(Context system, PackageInfo pkg) {
+        // The single-app profile grants manifest-requested normal permissions
+        // at install time. Runtime and signature grants require services this
+        // profile does not provide; unknown permission names stay denied.
+        PackageInfo platform = system.getPackageManager().getPackageArchiveInfo(
+                "/system/framework/framework-res.apk", PackageManager.GET_PERMISSIONS);
+        if (platform == null || platform.permissions == null)
+            throw new IllegalStateException("platform permission definitions unavailable");
+        Map<String, PermissionInfo> definitions = new java.util.HashMap<>();
+        for (PermissionInfo permission : platform.permissions) definitions.put(permission.name, permission);
+        if (pkg.permissions != null)
+            for (PermissionInfo permission : pkg.permissions) definitions.putIfAbsent(permission.name, permission);
+        grantedPermissions.clear();
+        if (pkg.requestedPermissions == null) return;
+        for (int i = 0; i < pkg.requestedPermissions.length; i++) {
+            String name = pkg.requestedPermissions[i];
+            PermissionInfo definition = definitions.get(name);
+            if (definition != null && (definition.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE)
+                    == PermissionInfo.PROTECTION_NORMAL) {
+                grantedPermissions.add(name);
+                pkg.requestedPermissionsFlags[i] |= PackageInfo.REQUESTED_PERMISSION_GRANTED;
+            }
+        }
+    }
+
+    private static int checkPermission(String permission, int uid, int deviceId) {
+        return permission != null && installed != null && uid == installed.applicationInfo.uid
+                && deviceId == Context.DEVICE_ID_DEFAULT
+                && grantedPermissions.contains(permission)
+                ? PackageManager.PERMISSION_GRANTED : PackageManager.PERMISSION_DENIED;
     }
 
     private static ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
@@ -786,6 +838,13 @@ public final class ManagedLauncher {
 
     private static void checkPackageServices(Context context) throws Exception {
         PackageManager manager = context.getPackageManager();
+        if (context.checkCallingOrSelfPermission("bifrost.missing.permission") != PackageManager.PERMISSION_DENIED
+                || context.checkPermission("android.permission.INTERNET", Process.myPid(), Process.myUid() + 1)
+                        != PackageManager.PERMISSION_DENIED)
+            throw new AssertionError("permission check granted an unknown permission or foreign UID");
+        for (String permission : grantedPermissions)
+            if (context.checkCallingOrSelfPermission(permission) != PackageManager.PERMISSION_GRANTED)
+                throw new AssertionError("normal install permission missing: " + permission);
         PackageInfo signing = manager.getPackageInfo(installed.packageName,
                 PackageManager.GET_SIGNATURES | PackageManager.GET_SIGNING_CERTIFICATES);
         if (signing.signatures == null || signing.signatures.length == 0 || signing.signingInfo == null
@@ -805,6 +864,25 @@ public final class ManagedLauncher {
             throw new AssertionError("signing certificate array aliases package state");
         int flags = PackageManager.MATCH_DISABLED_COMPONENTS | PackageManager.MATCH_DIRECT_BOOT_AWARE
                 | PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
+        if (installed.activities != null) for (ActivityInfo parsed : installed.activities) {
+            ComponentName component = new ComponentName(installed.packageName, parsed.name);
+            ActivityInfo result = manager.getActivityInfo(component, flags | PackageManager.GET_META_DATA);
+            if (!parsed.name.equals(result.name) || result.applicationInfo.uid != installed.applicationInfo.uid
+                    || !java.util.Objects.equals(parsed.targetActivity, result.targetActivity)
+                    || result.screenOrientation != parsed.screenOrientation
+                    || (parsed.metaData != null && (result.metaData == null
+                    || !parsed.metaData.keySet().equals(result.metaData.keySet()))))
+                throw new AssertionError("activity differs from installed manifest: " + component);
+            result = manager.getActivityInfo(component, flags);
+            if (result.metaData != null || result.applicationInfo.metaData != null)
+                throw new AssertionError("activity metadata returned without GET_META_DATA");
+        }
+        try {
+            manager.getActivityInfo(new ComponentName(installed.packageName, "bifrost.missing.Activity"), flags);
+            throw new AssertionError("unknown activity found");
+        } catch (PackageManager.NameNotFoundException expected) {
+            // The real framework translates a null activity reply.
+        }
         int services = 0, metadata = 0;
         if (installed.services != null) for (ServiceInfo parsed : installed.services) {
             ComponentName component = new ComponentName(installed.packageName, parsed.name);
@@ -1146,6 +1224,8 @@ public final class ManagedLauncher {
                 case "getApplicationInfo":
                     return installed != null && installed.packageName.equals(a[0])
                             ? installed.applicationInfo : null;
+                case "getActivityInfo":
+                    return activityInfo((ComponentName) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
                 case "getServiceInfo":
                     return serviceInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2]);
@@ -1321,6 +1401,10 @@ public final class ManagedLauncher {
         holderType.getField("provider").set(holder, provider);
         holderType.getField("noReleaseNeeded").setBoolean(holder, true);
         service("activity", "android.app.IActivityManager", (method, a) -> {
+            if (method.equals("checkPermissionForDevice"))
+                return checkPermission((String) a[0], (Integer) a[2], (Integer) a[3]);
+            if (method.equals("checkPermission"))
+                return checkPermission((String) a[0], (Integer) a[2], Context.DEVICE_ID_DEFAULT);
             if (method.equals("getContentProvider") && Arrays.asList(a).contains("settings"))
                 return holder;
             // Log.wtf report; false means "do not kill this process".
@@ -1387,6 +1471,7 @@ public final class ManagedLauncher {
         PackageInfo packageInfo = system.getPackageManager().getPackageArchiveInfo(
                 code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_SERVICES
                         | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
+                        | PackageManager.GET_PERMISSIONS
                         | PackageManager.GET_SIGNATURES | PackageManager.GET_SIGNING_CERTIFICATES
                         | PackageManager.MATCH_DISABLED_COMPONENTS
                         | PackageManager.MATCH_DIRECT_BOOT_AWARE | PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
@@ -1423,6 +1508,7 @@ public final class ManagedLauncher {
         // code; the archive-parsed one here does not, and LoadedApk then builds
         // a class loader without the APK's dex files.
         app.flags |= ApplicationInfo.FLAG_HAS_CODE;
+        installPermissions(system, packageInfo);
         installed = packageInfo;
         if (diagnostic) checkPackageServices(system);
         System.out.println("APP_PARSED " + app.className + " " + activity.name);
