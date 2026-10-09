@@ -134,68 +134,28 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
     switch (inst.op) {
         case IROp::BRCOND_ZERO: {
             const BrCondZeroParams bp = inst.brcond_zero_params();
-            // CBZ/CBNZ: branch on (val == 0) without touching flags.
-            // cond=0 (EQ) → branch if val == 0
-            // cond=1 (NE) → branch if val != 0
-            // We emit: test val, val; jcc (JE for EQ, JNE for NE)
-            // The test sets ZF but we don't materialize flags (CBZ/CBNZ
-            // don't modify architectural flags). We save/restore RFLAGS
-            // around the test to avoid clobbering pending flags.
-            //
-            // the previous code did
-            //   int s1 = ensure_vreg(inst.src1, RAX);
-            //   if (s1 != RAX) emit_mov_reg(RAX, s1);
-            // which would overwrite RAX without evicting whatever dirty
-            // vreg was cached there — typically the value computed by the
-            // immediately preceding SBFM/UBFM/ADDS that wrote to an
-            // architectural reg. The epilogue's flush_all_vregs() would
-            // then write the next-PC value (left in RAX by this branch)
-            // to that architectural reg, corrupting it.
-            //
-            // Fix: evict any dirty vreg in RAX BEFORE loading the test
-            // value, and drop RAX's cache mapping so flush_all_vregs
-            // can't miswrite it.
-            clobber_flags();  // materialize any pending flags first
-            // use drop_vreg — evicts if dirty, drops if not.
-            if (reg_vreg_[RAX] >= 0) {
-                drop_vreg(reg_vreg_[RAX]);
-            }
-            int s1 = ensure_vreg(inst.src1, RAX);
-            if (s1 != RAX) emit_mov_reg(RAX, s1);
-            // RAX now holds the test value. Drop RAX's cache mapping so
-            // the upcoming `mov eax, <pc>` doesn't corrupt any vreg.
-            // use drop_vreg — if RAX holds a dirty vreg,
-            // evict it to memory first so the value is preserved.
-            if (reg_vreg_[RAX] >= 0) {
-                drop_vreg(reg_vreg_[RAX]);
-            }
-            // Save RFLAGS (CBZ/CBNZ don't modify architectural flags).
-            emit_pushfq();
-            // W-form (cbz/cbnz W) tests ONLY the low 32 bits. The guest
-            // register's upper half may be dirty (hand-written asm like
-            // glibc __strlen_asimd keeps fold state across `cbnz w3`),
-            // so mask RAX before the 64-bit test — mov eax,eax zeroes
-            // bits [63:32].
-            if (!bp.sf) {
-                emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
-            }
-            // test rax, rax
-            emit_test_reg(RAX, RAX);
+            // NZCV is authoritative in pstate after clobber_flags(). TEST
+            // may overwrite host flags; neither edge needs PUSHFQ/POPFQ.
+            // Test the allocator's existing home without moving the operand
+            // into RAX or destructively clearing its high half for W-form.
+            clobber_flags();
+            int s1 = ensure_vreg(inst.src1);
+            emit_byte(rex(bp.sf, s1 >= 8, false, s1 >= 8));
+            emit_byte(0x85); emit_byte(modrm(3, s1 & 7, s1 & 7));
+            // RAX will hold the next PC. Spill its occupant before the MOV;
+            // spills are flag-neutral, so they preserve TEST's branch result.
+            clobber_host_reg(RAX);
             // jcc to taken target
             uint8_t cc = (bp.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
             emit_mov_imm_to_rax(fall);
-            // Restore RFLAGS before jumping to epilogue
-            emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-            // Restore RFLAGS (CBZ/CBNZ don't modify flags)
-            emit_popfq();
             // ── Self-loop chaining (mirrors BRCOND) ──
             // A CBZ/CBNZ while-loop (bench_mips's counter loop, GCC
             // vectorized memchr/strchr) gets the tight 5-byte jmp slot
@@ -239,31 +199,15 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         }
         case IROp::BRCOND_BIT: {
             const BrCondBitParams bp = inst.brcond_bit_params();
-            // TBZ/TBNZ: branch on ((val >> bit) & 1) without touching flags.
-            // cond=0 (EQ) → branch if bit == 0 (TBZ)
-            // cond=1 (NE) → branch if bit == 1 (TBNZ)
-            // We emit: bt rax, bit; jcc (JNC for bit==0, JC for bit==1)
-            // BT sets CF = (val >> bit) & 1. We save/restore RFLAGS.
-            // same RAX eviction as BRCOND_ZERO —
-            // see the comment there for the rationale.
+            // As with CBZ, guest NZCV has been committed before BT.
+            // Use the operand in place and let BT overwrite dead host CF.
             clobber_flags();
-            // use drop_vreg — evicts if dirty, drops if not.
-            if (reg_vreg_[RAX] >= 0) {
-                drop_vreg(reg_vreg_[RAX]);
-            }
-            int s1 = ensure_vreg(inst.src1, RAX);
-            if (s1 != RAX) emit_mov_reg(RAX, s1);
-            // use drop_vreg — if RAX holds a dirty vreg,
-            // evict it to memory first so the value is preserved.
-            if (reg_vreg_[RAX] >= 0) {
-                drop_vreg(reg_vreg_[RAX]);
-            }
-            emit_pushfq();
-            // bt rax, imm8  — 0x48 0x0F 0xBA /5 r/m, imm8
-            emit_byte(rex(true, false, false, RAX >= 8));
+            int s1 = ensure_vreg(inst.src1);
+            emit_byte(rex(true, false, false, s1 >= 8));
             emit_byte(0x0F); emit_byte(0xBA);
-            emit_byte(modrm(3, 5, RAX & 7));
-            emit_byte(bp.bit);  // bit number
+            emit_byte(modrm(3, 4, s1 & 7)); // BT /4 (not BTS /5)
+            emit_byte(bp.bit);
+            clobber_host_reg(RAX);
             // jcc: TBZ (cond=0, EQ) → JNC (bit==0, CF=0) → JAE (cc=3)
             //      TBNZ (cond=1, NE) → JC (bit==1, CF=1) → JB (cc=2)
             uint8_t cc = (bp.cond == 0) ? 3 /*JNC/JAE*/ : 2 /*JC/JB*/;
@@ -271,13 +215,11 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
             emit_mov_imm_to_rax(fall);
-            emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-            emit_popfq();
             // ── Self-loop chaining (mirrors BRCOND/BRCOND_ZERO) ──
             // TBZ/TBNZ while-loops get the tight 5-byte jmp slot patched to
             // the block body start. Also required for loop-carried pinning:

@@ -330,6 +330,24 @@ requires offsets relative to the mapping. The persistent/coherent cases are
 existing emulator behavior tests, not ES 3 conformance tests. Those separate
 compatibility gaps are not repaired by selecting the GLES policies.
 
+## Tier-1 zero and bit branches
+
+CBZ/CBNZ and TBZ/TBNZ first commit pending NZCV with `clobber_flags()`.
+Their TEST/BT instructions can then overwrite host flags: guest flags remain
+in `cpu.pstate`, so the branch needs no PUSHFQ/POPFQ. Operands are tested in
+their allocated registers instead of copied through RAX. W-form TEST reads
+only the low 32 bits without changing the source. The next-PC MOV still
+spills any dirty RAX occupant before overwriting it. Immediate BT uses `/4`;
+`/5` is BTS and would mutate an operand tested in place. The encodings follow
+Intel's [instruction reference](https://cdrdv2-public.intel.com/868140/253666-089-sdm-vol-2a.pdf).
+
+`jit_flags_passthrough` checks all sixteen NZCV combinations, W/X zero
+branches, low/high bit branches, unchanged source values and warmed chains.
+Its 69,152 checks pass QEMU and differential replay. Five alternating runs of
+a 50-million-iteration CBNZ loop measured median times of 0.586 s before and
+0.372 s after this change (36% less time). This isolates branch overhead;
+it does not establish a game FPS or loading-time improvement.
+
 ## Conditional compares and register forwarding
 
 CCMP and CCMN only define NZCV flags. Their IR `dest=0` is a placeholder,
