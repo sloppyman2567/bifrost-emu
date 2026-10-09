@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from android_framework import install
 
 
-from android_managed import LogdReceiver, install_managed_graphics, installed_arguments
+from android_managed import LogdReceiver, install_managed_graphics, installed_arguments, host_network_mode
 
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
@@ -62,7 +62,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                    "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", main_class, *probe_args]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
-        guest_env = metadata["environment"]
+        guest_env = dict(metadata["environment"], BIFROST_ANDROID_HOST_NETWORK=host_network_mode())
         if mode == "qemu":
             # QEMU's AT_EXECFN carries the host-prefixed path; map it to the
             # same linker section in this temporary copy only.

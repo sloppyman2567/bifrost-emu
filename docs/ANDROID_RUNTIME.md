@@ -710,6 +710,32 @@ This supplies the host's default network. Android per-network routing, legacy
 hostent commands and raw `resnsend` queries are not implemented. No DNS server
 address or application hostname is hardcoded.
 
+The managed connectivity service snapshots the host's IPv4/IPv6 default routes
+at launch and exposes one virtual Ethernet network through active-network,
+legacy connection-info and capability queries. Default callbacks and matching
+network listeners receive Android's `AVAILABLE` message with capabilities and
+link properties; unmatched requests with a timeout receive `UNAVAILABLE`.
+Requests have independent identifiers and can be released separately. This
+follows the framework's
+[ConnectivityManager callback protocol](https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/master/framework/src/android/net/ConnectivityManager.java).
+Route availability does not establish Internet validation or the host's billing
+policy: the network is not advertised as validated or unmetered. Link properties
+are empty, explicit per-network routing is unsupported, and changes to the host
+network during a session are not tracked. `BIFROST_ANDROID_HOST_NETWORK=0` or `1`
+overrides the launch snapshot for deterministic offline/online diagnostics.
+
+The APK's Unity connectivity helper queries `getActiveNetwork()` and
+`getNetworkCapabilities()` before registering its default callback. Returning
+null for every query previously made Unity report no reachable network even
+when host sockets and DNS worked. SpongeBob then skipped device login and left
+its `WaitForUserId` loading task unfinished. Exposing the route allows the login
+path to run, but the observed game session still reached its PlayFab failure
+path with no user ID; successful loading is not established. The real-framework
+JIT probes cover both route modes, matching listeners, independent release and
+an unmatched cellular request's timeout. An interpreter probe failed earlier
+in `FrameworkVsyncProbe0` with an unmapped read, before connectivity checks;
+interpreter coverage remains unverified.
+
 Previously, SpongeBob's TiltingPoint registration request failed with
 `Cannot resolve destination host`. With the resolver, the actual game obtains
 its SDK device ID; the user observed loading pass its former 73% plateau to 74%.

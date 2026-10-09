@@ -22,6 +22,36 @@ import android_framework
 PRIORITIES = "??VDIWEFS"
 
 
+def host_network_available(proc=Path("/proc/net")):
+    """Snapshot default-route availability, without contacting an Internet host."""
+    for name, ipv6 in (("route", False), ("ipv6_route", True)):
+        try:
+            lines = (proc / name).read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            try:
+                if ipv6:
+                    default = len(fields) == 10 and fields[0] == "0" * 32 and fields[1] == "00"
+                    flags, interface = int(fields[8], 16), fields[9]
+                else:
+                    default = len(fields) >= 8 and fields[1] == "00000000" and fields[7] == "00000000"
+                    flags, interface = int(fields[3], 16), fields[0]
+                if default and interface != "lo" and flags & 1 and not flags & 0x200:
+                    return True
+            except (IndexError, ValueError):
+                continue
+    return False
+
+
+def host_network_mode():
+    override = os.environ.get("BIFROST_ANDROID_HOST_NETWORK")
+    if override is not None and override not in ("0", "1"):
+        raise ValueError("BIFROST_ANDROID_HOST_NETWORK must be 0 or 1")
+    return override if override is not None else str(int(host_network_available()))
+
+
 def set_soname(path, soname):
     """Rewrite DT_SONAME in place; the new name must not be longer."""
     data = bytearray(path.read_bytes())
@@ -405,6 +435,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                   ROOT / "build/android-framework/rootfs",
                                   ROOT / "build/android-art/rootfs",
                                   ROOT / "build/android-adapters", dex)
+    guest_env = dict(guest_env, BIFROST_ANDROID_HOST_NETWORK=host_network_mode())
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;
     # only this alias is temporary, every app write targets persistent rootfs.

@@ -37,6 +37,40 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(inventory, original)
 
 
+class HostNetworkTests(unittest.TestCase):
+    def test_default_routes_and_offline_profiles(self):
+        from android_managed import host_network_available
+        with tempfile.TemporaryDirectory(prefix="bifrost-network-") as directory:
+            root = Path(directory)
+            self.assertFalse(host_network_available(root))
+            route = root / "route"
+            route.write_text("Iface Destination Gateway Flags RefCnt Use Metric Mask\n"
+                             "eth-test 0001A8C0 00000000 0001 0 0 600 00FFFFFF\n")
+            self.assertFalse(host_network_available(root))
+            route.write_text("eth-test 00000000 0101A8C0 0003 0 0 600 00000000\n")
+            self.assertTrue(host_network_available(root))
+            route.write_text("lo 00000000 00000000 0001 0 0 0 00000000\n"
+                             "eth-test 00000000 00000000 0201 0 0 0 00000000\n")
+            self.assertFalse(host_network_available(root))
+            (root / "ipv6_route").write_text(
+                "0" * 32 + " 00 " + "0" * 32 + " 00 " + "0" * 32 +
+                " 00000064 00000000 00000000 00000003 tun-test\n")
+            self.assertTrue(host_network_available(root))
+            (root / "ipv6_route").write_text("malformed\n")
+            self.assertFalse(host_network_available(root))
+
+    def test_explicit_network_modes_and_auto_discovery(self):
+        from android_managed import host_network_mode
+        with patch.dict(os.environ, {}, clear=True), patch("android_managed.host_network_available", return_value=True):
+            self.assertEqual(host_network_mode(), "1")
+        with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "0"}):
+            self.assertEqual(host_network_mode(), "0")
+        with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "1"}):
+            self.assertEqual(host_network_mode(), "1")
+        with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "maybe"}):
+            with self.assertRaises(ValueError): host_network_mode()
+
+
 class DnsProxyTests(unittest.TestCase):
     def test_android_flags_and_ipv6_wire_layout(self):
         from android_managed import DnsProxy
