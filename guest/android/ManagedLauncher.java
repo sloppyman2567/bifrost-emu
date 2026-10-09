@@ -76,6 +76,7 @@ import javax.crypto.spec.SecretKeySpec;
 public final class ManagedLauncher {
     private static final FrameworkServices services = new FrameworkServices();
     private static final FrameworkPackages packages = new FrameworkPackages();
+    private static final FrameworkServiceRuntime serviceRuntime = new FrameworkServiceRuntime(packages);
     private static final FrameworkConnectivity connectivity = new FrameworkConnectivity();
     private static boolean diagnostic;
     private static boolean created;
@@ -1050,6 +1051,19 @@ public final class ManagedLauncher {
         holderType.getField("provider").set(holder, provider);
         holderType.getField("noReleaseNeeded").setBoolean(holder, true);
         services.register("activity", "android.app.IActivityManager", (method, a) -> {
+            switch (method) {
+                case "startService": return serviceRuntime.start(a);
+                case "stopService": return serviceRuntime.stop(a);
+                case "stopServiceToken": return serviceRuntime.stopSelf(
+                        (android.content.ComponentName) a[0], (IBinder) a[1], (Integer) a[2]);
+                case "bindService": return serviceRuntime.bind(a, false);
+                case "bindServiceInstance": return serviceRuntime.bind(a, true);
+                case "unbindService": return serviceRuntime.unbind(a[0]);
+                case "peekService": return serviceRuntime.peek((Intent) a[0], (String) a[2]);
+                case "publishService": serviceRuntime.publish((IBinder) a[0], (Intent) a[1], (IBinder) a[2]); return null;
+                case "unbindFinished": serviceRuntime.unbindFinished((IBinder) a[0], (Intent) a[1], (Boolean) a[2]); return null;
+                case "serviceDoneExecuting": serviceRuntime.done((IBinder) a[0], (Integer) a[1], (Intent) a[4]); return null;
+            }
             if (method.equals("checkPermissionForDevice"))
                 return packages.checkPermission((String) a[0], (Integer) a[2], (Integer) a[3]);
             if (method.equals("checkPermission"))
@@ -1343,6 +1357,7 @@ public final class ManagedLauncher {
                 throw new AssertionError("AudioFlinger output differs from host backend");
             System.out.println("APP_AUDIO_ROUTING_READY " + config[0] + " " + config[1]);
         }
+        serviceRuntime.attach(thread, app);
         instrumentation.callApplicationOnCreate(application);
         System.out.println("APP_APPLICATION_STARTED");
 
@@ -1456,6 +1471,8 @@ public final class ManagedLauncher {
         System.out.println("APP_STOPPED");
         call(Class.forName("android.app.QueuedWork"), "waitToFinish", new Class<?>[0]);
         call(activity, "performDestroy", new Class<?>[0]);
+        call(activity.getBaseContext(), "scheduleFinalCleanup", new Class<?>[] {String.class, String.class},
+                activity.getClass().getName(), "Activity");
         System.out.println("APP_DESTROYED");
         for (long window : surfaceWindows.values()) releaseSurface(window);
         surfaceWindows.clear();
@@ -1485,8 +1502,11 @@ public final class ManagedLauncher {
                         int error = pollWindow(event);
                         if (error != 0) throw new IllegalStateException("window poll: " + error);
                         if (event[1] != 0 || activity.isFinishing()) {
+                            boolean hostClosed = event[1] != 0;
                             closeActivity(activity);
-                            System.exit(0);
+                            if (hostClosed) serviceRuntime.shutdown(() -> System.exit(0));
+                            else serviceRuntime.whenIdle(() -> System.exit(0));
+                            return;
                         }
                         if (event[2] != size[0] || event[3] != size[1]) {
                             size[0] = (int) event[2];

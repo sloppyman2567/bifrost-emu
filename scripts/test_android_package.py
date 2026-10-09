@@ -352,7 +352,8 @@ class PackageTests(unittest.TestCase):
         manifest = cls.work / (name + ".xml")
         apk = cls.work / (name + ".apk")
         activity = (
-            "org.bifrost.fixture.Managed" if managed else "android.app.NativeActivity"
+            "org.bifrost.fixture." + (managed if isinstance(managed, str) else "Managed")
+            if managed else "android.app.NativeActivity"
         )
         split_attr = f' split="{split}"' if split else ""
         component = (
@@ -363,6 +364,11 @@ class PackageTests(unittest.TestCase):
             <intent-filter><action android:name="android.intent.action.MAIN"/>
             <category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>"""
         )
+        if managed == "ManagedServices" and not split:
+            for service in ("Lifecycle", "NullBinding", "SelfStopping", "AfterActivity"):
+                component += f'<service android:name="{activity}${service}" android:exported="false"/>'
+            component += f'<service android:name="{activity}$LifecycleDisabled" android:enabled="false" android:exported="false"/>'
+            component += f'<service android:name="{activity}$LifecycleRemote" android:process=":remote" android:exported="false"/>'
         required = ' android:isSplitRequired="true"' if not split else ""
         manifest.write_text(
             f"""<manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -391,7 +397,8 @@ class PackageTests(unittest.TestCase):
             dex.mkdir()
             subprocess.run([os.environ.get("JAVAC", "javac"), "--release", "8", "-cp",
                             str(cls.tools / "android.jar"), "-d", str(classes),
-                            str(ROOT / "ctest/host/Managed.java")], check=True, capture_output=True)
+                            str(ROOT / "ctest/host" / (activity.rsplit(".", 1)[-1] + ".java"))],
+                           check=True, capture_output=True)
             subprocess.run(["java", "-cp", str(cls.tools / "d8.jar"),
                             "com.android.tools.r8.D8", "--min-api", "26", "--lib",
                             str(cls.tools / "android.jar"), "--output", str(dex),
@@ -682,6 +689,30 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(path) as archive:
             with self.assertRaises(ValueError):
                 package.regular_archive(archive)
+
+    def test_managed_service_execution(self):
+        state = self.work / "service-state"
+        base = self.apk("managed-services", managed="ManagedServices")
+        bundle = self.work / "managed-services.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(base, "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        app = state / "org.bifrost.fixture"
+        output = ROOT / "build/android-service-results"
+        output.mkdir(parents=True, exist_ok=True)
+        # Full interpreter APK startup still has pre-existing font-worker null reads.
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        log = app / "managed/last-run.log"
+        shutil.copyfile(log, output / "jit.log")
+        text = log.read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertIn("SERVICE_EXECUTION_OK", text)
+        self.assertNotRegex(text, r"thread \d+: exception:|FATAL EXCEPTION|AssertionError")
+        markers = ("SERVICE_EXECUTION_OK", "SERVICE_FIXTURE Activity destroyed",
+                   "SERVICE_FIXTURE alive after Activity destruction", "SERVICE_FIXTURE destroy after-activity")
+        positions = [text.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
 
     def test_managed_launcher_persists_data_and_finishes_activity(self):
         state = self.work / "managed-state"

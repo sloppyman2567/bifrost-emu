@@ -67,6 +67,11 @@ final class FrameworkPackages {
                 case "getActivityInfo":
                     return activityInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2], installed == null ? null : installed.activities);
+                case "resolveService":
+                    return resolveService((android.content.Intent) a[0], ((Number) a[2]).longValue(), (Integer) a[3]);
+                case "queryIntentServices":
+                    return listSlice(resolveService((android.content.Intent) a[0],
+                            ((Number) a[2]).longValue(), (Integer) a[3]));
                 case "getServiceInfo":
                     return serviceInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2]);
@@ -297,7 +302,19 @@ final class FrameworkPackages {
                 ? PackageManager.PERMISSION_GRANTED : PackageManager.PERMISSION_DENIED;
     }
 
-    private ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
+    private android.content.pm.ResolveInfo resolveService(android.content.Intent intent, long flags, int userId) {
+        if (intent != null && intent.getComponent() == null && intent.getPackage() != null
+                && (installed == null || !intent.getPackage().equals(installed.packageName))) return null;
+        if (intent == null || intent.getComponent() == null)
+            throw new UnsupportedOperationException("Service intent-filter resolution is not implemented");
+        ServiceInfo info = serviceInfo(intent.getComponent(), flags, userId);
+        if (info == null) return null;
+        android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+        result.serviceInfo = info;
+        return result;
+    }
+
+    ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
         PackageInfo pkg = installed;
         if (pkg == null || !pkg.packageName.equals(component.getPackageName()) || pkg.services == null)
             return null;

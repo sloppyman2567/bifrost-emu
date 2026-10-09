@@ -220,10 +220,9 @@ client in both engines. Results and logs are saved under
 `build/android-framework-package-contract/`. The suite exercises query flags,
 copy isolation including nested arrays, missing entries, receiver/provider and UID
 lookups, installed lists, disabled/default component transitions, direct-boot
-filters and user isolation. It does not start or bind manifest Android Services,
-resolve intent filters, test multiple installed packages/users, or implement a
-system_server. Those remain separate framework work; package metadata support is
-not service execution support.
+filters and user isolation. Service execution has a separate APK regression gate
+below. Intent-filter resolution, multiple installed packages/users and a full
+system_server remain outside this profile.
 
 Observed verification: 51 package contract checks pass in each engine, and the
 related launcher/network/settings/DNS test selection passes 11 tests. The managed
@@ -241,6 +240,90 @@ Reference contracts were checked against Android 15's
 [PackageManagerService](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/PackageManagerService.java),
 [PackageUserStateUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/pkg/PackageUserStateUtils.java),
 and [ArrayUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/com/android/internal/util/ArrayUtils.java).
+
+### Managed Android Service execution (2026-10-09)
+
+[`FrameworkServiceRuntime.java`](../guest/android/FrameworkServiceRuntime.java)
+implements started and bound Services for explicit components in the installed
+APK's main process. It manages service tokens, start IDs, intent-filter binding
+records and client connections. Android's real `ActivityThread` creates the app's
+Service class with its Application, class loader and attached Context, and runs
+`onCreate`, `onStartCommand`, `onBind`, `onUnbind`, `onRebind` and `onDestroy` on
+the main Looper through `IApplicationThread`. The framework's `ServiceDispatcher`
+delivers the actual Binder returned by `onBind`, including null bindings and
+binding-death notifications.
+
+`startService`, `stopService`, `stopSelf`/`stopSelfResult`, `bindService`,
+`unbindService` and `peekService` now execute this lifecycle. Repeated starts
+reuse the instance and receive increasing start IDs; an old start ID cannot stop
+a newer request. Binding identity uses `Intent.FilterComparison`, so extras do
+not create a second binding, while distinct actions/data do. Intents are copied
+at submission. A non-auto-create binding waits for a subsequent start without
+creating the Service. Stopping a started Service preserves it while auto-create
+clients remain bound; the final unbind destroys a bound-only Service. Cached
+Binders and `onUnbind(true)`/`onRebind` follow Android's distinct paths, including
+a rebind requested before the previous unbind callback completes. Existing
+records remain stoppable after disabling their component with `DONT_KILL_APP`.
+PackageManager supports explicit `resolveService`/`queryIntentServices` using
+the same manifest-backed component lookup.
+
+Finishing the Activity performs Context connection cleanup and keeps the main
+Looper alive until its remaining started Services stop and finish destruction.
+Closing the host window explicitly shuts down Services and waits for their
+destruction callbacks before process exit. Application `onCreate` can start
+Services because the runtime is attached before that callback.
+
+This profile rejects foreground-service requests (notification/deadline support
+is absent), separate/isolated/named service processes, external-service process
+binding and installed-package intent-filter resolution. Unknown explicit
+components and packages return absent results. It does not implement sticky
+restart/redelivery after process death, cross-app Services, Android background
+execution policy, or system_server process management.
+
+Build and focused APK gate:
+
+```bash
+make android-managed-launcher
+python3 scripts/test_android_package.py --emu ./bifrost-emu PackageTests.test_managed_service_execution
+```
+
+The signed split APK in `ctest/host/ManagedServices.java` exercises the public
+Context/PackageManager APIs and real Service callbacks, Binder transactions,
+multiple clients, distinct binding filters, immediate unbind, cached/rebound and
+null Binders, dormant non-auto-create bindings, disabled/missing components,
+start-ID-aware self-stop, recreation and service survival after Activity
+destruction. Its JIT log is saved at `build/android-service-results/jit.log`;
+the gate rejects guest worker faults and fatal Java errors. The interpreter
+delivered the initial 25 service assertions and post-Activity destruction
+callbacks, but its full APK run failed the gate on font-worker null reads before
+Application creation. Those same worker faults were reproduced with the prior
+launcher DEX; the full interpreter service gate remains unverified.
+
+Observed JIT verification: all 38 APK assertions pass, including stopping an
+already running component after disabling it. The existing managed APK still
+completes its three-launch persistence/lifecycle test, and all 51 package checks
+pass in each engine. A separate 45-second SpongeBob run reaches resume and a
+ready surface, presents 325 frames and logs no guest worker/fatal failure before
+the harness deadline. Missing optional platform services remain logged; this
+smoke run does not verify SpongeBob service callbacks or playable gameplay.
+
+The subsequent requested 240-second run exits early at 142.073 seconds (status
+127). It reports 1,615 frames, logs the real Firebase `AppMeasurementService`
+starting, publishing a Binder and shutting down repeatedly, then aborts with
+ART `SuspendAll timeout` on `Firebase Background Thread #3`. Results are saved
+under `build/android-service-spongebob-240/`. Immediately before abort, host `ps`
+reports 4,482,968 KiB RSS in the main emulator and 2,176,492 KiB RSS in its forked
+child; shared pages were not measured before exit, so those values must not be
+added as unique RAM usage. The longer run fails; neither the abort nor high RAM
+has been localized to the service implementation.
+
+Scheduling signatures and lifecycle/binding rules were checked against Android
+15's [ActivityThread](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/ActivityThread.java),
+[ActiveServices](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/ActiveServices.java),
+[ContextImpl](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/ContextImpl.java)
+and [IApplicationThread](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/IApplicationThread.aidl).
+Passing the APK gate is observed emulator behavior for the covered cases; it
+does not establish all of Android's service policy or application gameplay.
 
 ### Framework display events (2026-10-07)
 

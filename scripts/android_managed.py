@@ -22,7 +22,7 @@ import android_framework
 
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "FrameworkServices.java",
-                    "FrameworkPackages.java", "FrameworkConnectivity.java")
+                    "FrameworkPackages.java", "FrameworkConnectivity.java", "FrameworkServiceRuntime.java")
 
 
 def settings_user_key(state, user=0):
