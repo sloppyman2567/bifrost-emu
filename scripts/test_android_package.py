@@ -41,6 +41,9 @@ class LauncherArgumentTests(unittest.TestCase):
 
 
 class FrameworkPackageContractTests(unittest.TestCase):
+    probe_class = "FrameworkPackagesProbe"
+    output_name = "android-framework-package-contract"
+    marker = "FRAMEWORK_PACKAGE_CONTRACT_OK"
     @classmethod
     def setUpClass(cls):
         from android_managed import build_launcher
@@ -53,21 +56,27 @@ class FrameworkPackageContractTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory(prefix="bifrost-package-contract-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.probe = Path(cls.temporary.name) / "probe"
-        build_launcher(cls.probe, [ROOT / "ctest/host/FrameworkPackagesProbe.java"])
+        build_launcher(cls.probe, [ROOT / "ctest/host" / (cls.probe_class + ".java")])
 
     def check_mode(self, mode):
         from test_android_framework import run
-        output = ROOT / "build/android-framework-package-contract" / mode
+        output = ROOT / "build" / self.output_name / mode
         passed = run(ARGS.emu.resolve(), self.runtime, self.art, self.probe / "classes.dex",
-                     mode, output, 90, services=True, main_class="FrameworkPackagesProbe")
+                     mode, output, 90, services=True, main_class=self.probe_class)
         self.assertTrue(passed, f"{mode} package contract failed; see {output}")
-        self.assertIn("FRAMEWORK_PACKAGE_CONTRACT_OK", (output / (mode + ".log")).read_text())
+        self.assertIn(self.marker, (output / (mode + ".log")).read_text())
 
     def test_jit(self):
         self.check_mode("jit")
 
     def test_interpreter(self):
         self.check_mode("interp")
+
+
+class FrameworkDisplayContractTests(FrameworkPackageContractTests):
+    probe_class = "FrameworkDisplayProbe"
+    output_name = "android-framework-display-contract"
+    marker = "FRAMEWORK_DISPLAY_CONTRACT_OK"
 
 
 class HostNetworkTests(unittest.TestCase):

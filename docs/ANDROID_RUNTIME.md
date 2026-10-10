@@ -382,6 +382,56 @@ and [ART trace.cc](https://android.googlesource.com/platform/art/+/refs/tags/and
 The focused APK gate is `PackageTests.test_managed_service_trace` in
 `scripts/test_android_package.py`.
 
+### Managed display enumeration and listeners (2026-10-09)
+
+`FrameworkDisplay.java` owns the launcher's single virtual display and the local
+`IDisplayManager` contract. It supports `getDisplayIds`, legacy `registerCallback`
+and `registerCallbackWithEventMask`. The first callback for the guest process is
+retained, and subsequent registrations update its event mask, matching AOSP's
+per-PID callback record. A zero mask disables events; a null callback is rejected.
+Display 0 is enabled, internal, 160 dpi and nominally 60 Hz. Unknown display IDs
+return null. DisplayInfo replies cross a Parcel boundary, so client mutation
+cannot corrupt the service's state.
+
+Window creation and host-window resize publish current dimensions before
+queuing a CHANGED event (event 2, mask bit 4). `DisplayManagerGlobal` then dispatches
+to each app listener's selected Handler/Executor. Callbacks execute outside the
+service lock. Repeating the same dimensions queues no event. Enumeration returns
+only display 0 for either include-disabled setting; this profile has no disabled
+or hot-pluggable displays and does not advertise a presentation display.
+
+The concrete failure was Unity `nativeRender` calling
+`DisplayManager.registerDisplayListener`, which threw on
+`display.registerCallbackWithEventMask`. MediaRouter also failed on
+`display.getDisplayIds`. These operations now return through the real Android
+framework path. This fixes those display contracts; other missing window/audio
+operations and the game's loading stall remain separate issues.
+
+Focused gate:
+
+```bash
+make android-managed-launcher
+python3 scripts/test_android_package.py --emu ./bifrost-emu FrameworkDisplayContractTests
+```
+
+`ctest/host/FrameworkDisplayProbe.java` runs in both engines with real
+DisplayManager/DisplayManagerGlobal clients. It checks enumeration, absent IDs,
+presentation filtering, mode/state, copy isolation, null-listener rejection,
+event-mask updates, resize dimensions, callback delivery on a worker Handler and
+unregister behavior. Logs are under `build/android-framework-display-contract/`.
+All 11 checks passed in each engine. A 240-second-bound SpongeBob run with call
+tracing completed display enumeration and callback registration without display
+exceptions, and delivered two display-change callbacks. It still aborted after
+108.991 seconds with an ART `SuspendAll timeout` (670 reported frames); this does
+not establish that the loading stall is fixed. The run and trace are under
+`build/android-display-spongebob/`.
+This does not test physical hotplug, HDR/brightness events or a changing refresh
+rate. The implementation remains strict for unsupported display operations.
+
+Signatures, event masks and per-process callback behavior were checked against
+Android 15 [DisplayManagerService](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/display/DisplayManagerService.java)
+and [DisplayManagerGlobal](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/hardware/display/DisplayManagerGlobal.java).
+
 ### Framework display events (2026-10-07)
 
 The Activity launcher profile publishes `SurfaceFlingerAIDL` with the Android 15

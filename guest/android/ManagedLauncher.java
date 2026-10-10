@@ -88,7 +88,7 @@ public final class ManagedLauncher {
     private static String androidId;
     // ActivityRecord's requested orientation is initialized from its manifest.
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
-    private static Object display;  // the single DisplayInfo the display stub reports
+    private static final FrameworkDisplay displays = new FrameworkDisplay();
     private static boolean play;
     // guest/android/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
@@ -795,36 +795,6 @@ public final class ManagedLauncher {
         System.out.println("APP_RUNTIME_SERVICES_OK resumed=" + resumed);
     }
 
-    // One 160 dpi, 60 Hz display with id 0: 480x800 unless play mode sizes
-    // it to the host window before the app first queries it.
-    private static Object displayInfo(int width, int height) throws Exception {
-        Class<?> type = Class.forName("android.view.DisplayInfo");
-        Object info = type.getConstructor().newInstance();
-        type.getField("name").set(info, "Bifrost");
-        type.getField("uniqueId").set(info, "bifrost:0");
-        for (String field : new String[] {"appWidth", "logicalWidth", "largestNominalAppWidth"})
-            type.getField(field).setInt(info, width);
-        for (String field : new String[] {"appHeight", "logicalHeight", "largestNominalAppHeight"})
-            type.getField(field).setInt(info, height);
-        type.getField("smallestNominalAppWidth").setInt(info, Math.min(width, height));
-        type.getField("smallestNominalAppHeight").setInt(info, Math.min(width, height));
-        type.getField("logicalDensityDpi").setInt(info, 160);
-        type.getField("physicalXDpi").setFloat(info, 160);
-        type.getField("physicalYDpi").setFloat(info, 160);
-        type.getField("state").setInt(info, 2);  // Display.STATE_ON
-        type.getField("type").setInt(info, 1);   // Display.TYPE_INTERNAL
-        Class<?> modeType = Class.forName("android.view.Display$Mode");
-        Object mode = modeType.getConstructor(int.class, int.class, int.class, float.class)
-                .newInstance(1, width, height, 60f);
-        Object modes = Array.newInstance(modeType, 1);
-        Array.set(modes, 0, mode);
-        type.getField("supportedModes").set(info, modes);
-        type.getField("appsSupportedModes").set(info, modes);
-        type.getField("modeId").setInt(info, 1);
-        type.getField("defaultModeId").setInt(info, 1);
-        return info;
-    }
-
     private static void installServices() throws Exception {
         services.diagnostic = diagnostic;
         connectivity.install(services);
@@ -858,18 +828,7 @@ public final class ManagedLauncher {
             }
             throw unsupported("mount", method);
         });
-        display = displayInfo(480, 800);
-        services.register("display", "android.hardware.display.IDisplayManager", (method, a) -> {
-            switch (method) {
-                case "getDisplayInfo": return ((Integer) a[0]) == 0 ? display : null;
-                case "getPreferredWideGamutColorSpaceId": return 0;
-                // What system_server reports without hardware-composer data.
-                case "getOverlaySupport":
-                    return Class.forName("android.hardware.OverlayProperties")
-                            .getMethod("getDefault").invoke(null);
-                default: throw unsupported("display", method);
-            }
-        });
+        displays.install(services);
         // No physical input devices exist here, so the id list holds only
         // the virtual keyboard. Host key/touch events do not pass through
         // this service: the play loop pumps them from the window backend and
@@ -1282,7 +1241,7 @@ public final class ManagedLauncher {
                     .contains(activity.screenOrientation);
             width = landscape ? 1280 : 720;
             height = landscape ? 720 : 1280;
-            display = displayInfo(width, height);
+            displays.setSize(width, height);
             System.load("/data/local/tmp/libbifrost-activity.so");
             int error = openWindow(width, height);
             if (error != 0) throw new IllegalStateException("host window: " + error);
@@ -1511,6 +1470,7 @@ public final class ManagedLauncher {
                         if (event[2] != size[0] || event[3] != size[1]) {
                             size[0] = (int) event[2];
                             size[1] = (int) event[3];
+                            displays.setSize(size[0], size[1]);
                             layoutAndReportSurfaces(activity, size[0], size[1], false);
                         }
                         if (event[0] == 0) break;

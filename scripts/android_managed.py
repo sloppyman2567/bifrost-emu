@@ -24,7 +24,7 @@ import android_framework
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "FrameworkServices.java",
                     "FrameworkPackages.java", "FrameworkConnectivity.java", "FrameworkServiceRuntime.java",
-                    "FrameworkTrace.java")
+                    "FrameworkTrace.java", "FrameworkDisplay.java")
 
 
 def add_trace_arguments(parser):
