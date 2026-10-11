@@ -20,7 +20,7 @@ guest tests does.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.5.5](https://img.shields.io/badge/version-1.5.5-orange.svg)](docs/CHANGELOG.md)
+[![Version: 1.5.5](https://img.shields.io/badge/version-1.5.5-orange.svg)](Docs/CHANGELOG.md)
 
 ## What is bifrost-emu?
 
@@ -37,7 +37,7 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   focused correctness regressions
 - Recover eligible native memory faults through host page protection;
   paired accesses and userfaultfd retain software checks. See the
-  [JIT memory contracts](docs/JIT.md#registered-native-memory-faults).
+  [JIT memory contracts](Docs/JIT.md#registered-native-memory-faults).
 - Emulate 200+ Linux syscalls (threads, signals, filesystem, memory)
 - Provide a virtual filesystem (/proc, /dev, /sys, framebuffer, audio)
 - Forward GL/EGL/Vulkan/SDL2/ALSA calls to host libraries (thunking)
@@ -46,27 +46,27 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   a rendering menu with sound initialized in the latest launch
 - Run Neverball 1.6.0 with user-confirmed stable gameplay, replay, readable
   menus and fonts, and repaired JPEG previews; see the
-  [Neverball setup and validation notes](docs/neverball.md)
+  [Neverball setup and validation notes](Docs/Apps/neverball.md)
 - Run vkQuake 1.33.1 through the Vulkan thunks with user-confirmed gameplay,
   menus, and no sudden crashes during the observed session. Texture corruption
   remains; the user later reported the mouse issue resolved, with its cause
-  and repeatable input validation still pending. See [vkQuake status](docs/vkquake.md).
+  and repeatable input validation still pending. See [vkQuake status](Docs/Apps/vkquake.md).
 - Run Doom 3 through ARM64 dhewm3, with user-reported extended gameplay,
   repaired character animation and working audio. Demanding scenes remain
   slow, and save compatibility depends on the game build; see
-  [Doom 3 status](docs/doom3.md).
+  [Doom 3 status](Docs/Apps/doom3.md).
 
 **Full-suite checkpoint (October 5, 2026, including ART foundations):**
 After the audio wake-up fix, strict full-suite reruns pass 275/275 in JIT
 mode and 268/268 in interpreter mode, with seven expected JIT-only skips.
 AAudio passes in both full runs; 20 callback stress runs and four focused
-audio/thread tests per engine also pass. See [test evidence](docs/TESTS.md).
+audio/thread tests per engine also pass. See [test evidence](Docs/TESTS.md).
 The verification gate now passes 60 single-thread differential fixtures and
 five separate threaded oracle workloads. Shared-memory replay is suspended
-when a second guest CPU starts; see [test evidence](docs/TESTS.md).
+when a second guest CPU starts; see [test evidence](Docs/TESTS.md).
 Dispatch and nested-call microbenchmarks improved 2.32× and 1.93× respectively;
 those figures are not whole-game FPS gains. Signed native APK launch now works;
-ART/framework integration remains planned for [v2.0](roadmap.md).
+ART/framework integration remains planned for [v2.0](Docs/roadmap.md).
 
 **What it is NOT:**
 
@@ -85,10 +85,10 @@ make
 ./bifrost-emu hello.elf
 
 # Verbose — show execution stats on exit
-./bifrost-emu -v ctest_real/fib.elf
+./bifrost-emu -v Tests/Apps/fib.elf
 
 # Pass arguments to the emulated program
-./bifrost-emu ctest_real/toybox seq 1 10
+./bifrost-emu Tests/Apps/toybox seq 1 10
 
 # Run a dynamically-linked binary (requires rootfs — see below)
 export BIFROST_ROOT=$PWD/rootfs
@@ -98,7 +98,7 @@ export BIFROST_ROOT=$PWD/rootfs
 ./bifrost-emu -d hello.elf
 
 # Use --no-jit to force the interpreter (debugging)
-./bifrost-emu --no-jit ctest_real/fib.elf
+./bifrost-emu --no-jit Tests/Apps/fib.elf
 ```
 
 The tier-1 JIT and block chaining are enabled by default. Experimental
@@ -110,7 +110,7 @@ Use `--no-render-log` to suppress that message. Bifrost's version and
 presentation FPS appear in the game title by default. Use `--no-window-stats`
 to disable stats, or `--window-stats` (also `--window_stats`) to enable the title.
 Independent title, separate-window and overlay switches are described in
-[window stats](docs/window-stats.md).
+[window stats](Docs/window-stats.md).
 
 ## Running ARM64 Applications
 
@@ -132,14 +132,14 @@ set up a rootfs with a single command:
 
 ```bash
 # One-command rootfs setup (fetches toolchains + libs, ~250 MB total):
-./scripts/setup-rootfs-all.sh
+./Scripts/Setup/setup-rootfs-all.sh
 
 # Or step-by-step:
-./tools/fetch-glibc-toolchain.sh     # glibc toolchain (130 MB)
-./tools/fetch-musl-toolchain.sh      # musl toolchain (104 MB)
-./scripts/setup-rootfs.sh            # create rootfs with glibc + musl libs
-./scripts/fetch-realworld-libs.sh    # libselinux, libpcre2, libssl, etc.
-./scripts/fetch-curl-deps.sh         # curl's 24 dependency libs
+./Tools/Fetch/fetch-glibc-toolchain.sh     # glibc toolchain (130 MB)
+./Tools/Fetch/fetch-musl-toolchain.sh      # musl toolchain (104 MB)
+./Scripts/Setup/setup-rootfs.sh            # create rootfs with glibc + musl libs
+./Scripts/Setup/fetch-realworld-libs.sh    # libselinux, libpcre2, libssl, etc.
+./Scripts/Setup/fetch-curl-deps.sh         # curl's 24 dependency libs
 
 # Run with --rootfs (or BIFROST_ROOT env var):
 ./bifrost-emu --rootfs $PWD/rootfs my_dynamic_app.elf
@@ -179,9 +179,9 @@ The rootfs includes:
 **Asgard** is Bifrost's Android compatibility layer. Its app supervisor and
 shared Binder broker let independent guest processes exchange native Binder
 transactions, object handles and host-backed file descriptors. Use
-`python3 scripts/asgard.py start PACKAGE` to launch into a shared realm, and
-`python3 scripts/asgard.py realm status` to inspect it. See
-[Asgard setup, process tests and current limits](docs/ANDROID_RUNTIME.md).
+`python3 Scripts/Android/asgard.py start PACKAGE` to launch into a shared realm, and
+`python3 Scripts/Android/asgard.py realm status` to inspect it. See
+[Asgard setup, process tests and current limits](Docs/Android/ANDROID_RUNTIME.md).
 
 The standalone Android path targets **NativeActivity-style native libraries**
 through `--android`. Surface, activity/looper and audio probes pass in both
@@ -215,19 +215,19 @@ uses this profile for native-only Activities, with split assets and persistent
 per-app data:
 
 ```bash
-python3 tools/fetch-android-runtime.py
-python3 tools/fetch-aapt2.py
-python3 tools/fetch-android-package-tools.py
+python3 Tools/Android/fetch-android-runtime.py
+python3 Tools/Android/fetch-aapt2.py
+python3 Tools/Android/fetch-android-package-tools.py
 make android-runtime-adapters
-python3 scripts/android_package.py install /path/to/package.apkm
-python3 scripts/android_package.py run org.example.package
-python3 scripts/android_package.py probe org.example.package --library libunity.so
+python3 Scripts/Android/android_package.py install /path/to/package.apkm
+python3 Scripts/Android/android_package.py run org.example.package
+python3 Scripts/Android/android_package.py probe org.example.package --library libunity.so
 ```
 
-See [APK setup, validation and limits](docs/ANDROID_APK.md) and the
-[bootstrap instructions](docs/ANDROID_RUNTIME.md). Virtual Binder devices
+See [APK setup, validation and limits](Docs/Android/ANDROID_APK.md) and the
+[bootstrap instructions](Docs/Android/ANDROID_RUNTIME.md). Virtual Binder devices
 support bounded transactions and object handles. `--android-services` adds a
-native service-manager registry; see [Binder limits and tests](docs/ANDROID_BINDER.md).
+native service-manager registry; see [Binder limits and tests](Docs/Android/ANDROID_BINDER.md).
 The Android surface adapter uses an SDL3 window backend behind a versioned
 host C plugin interface. Plugins own their windows and return native EGL handles
 and normalized input events; no SDL object crosses the interface. Guest SDL2
@@ -239,13 +239,13 @@ Failed resizes preserve reported geometry and unsupported formats return errors.
 The V2 checkpoint passes 21 focused graphics tests in each engine, host/CLI
 contracts, 256 SDL3 teardown cycles and a complete signed APK gate; these are
 not a new full-suite or gameplay-performance claim. See the
-[window plugin guide](docs/ANDROID_WINDOW_PLUGINS.md) for coverage and limits.
+[window plugin guide](Docs/Android/ANDROID_WINDOW_PLUGINS.md) for coverage and limits.
 
 The same-image ART/libcore fixture creates a real VM and passes DEX/JNI checks
 in both engines. A framework probe creates a real Activity, and the separate
 installed-app probe now reaches SpongeBob's CleverTap Activity `onCreate` and
 IL2CPP JNI startup in JIT and interpreter modes. See the
-[installed-app checkpoint](docs/ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
+[installed-app checkpoint](Docs/Android/ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
 That probe exits after creation. The normal managed runner additionally supplies
 Activity resume, a SurfaceView window and input; those paths remain experimental.
 
@@ -253,9 +253,9 @@ The separate native-load probe loads all 21 SpongeBob libraries with the real
 Media NDK bundle and an explicit Firebase App preload. It reports loading and
 shutdown separately and does not invoke JNI entrypoints. Guest adapters use
 official AOSP headers, real guest zlib, and EGL/looper/choreographer/sensor
-exports covering Unity's imports. See the [APK guide](docs/ANDROID_APK.md) for
+exports covering Unity's imports. See the [APK guide](Docs/Android/ANDROID_APK.md) for
 dependency pins and verification limits. The optional ARM64 Media NDK bundle
-(`tools/android_media.py`, installer `--media-root`) supports metadata operations;
+(`Tools/Android/android_media.py`, installer `--media-root`) supports metadata operations;
 Android media services and decoding remain unimplemented.
 The native-bridge adapter below is a separate integration interface, not a
 complete Android runtime.
@@ -294,16 +294,19 @@ complete Android runtime.
 
 | Component | Files | Description |
 |-----------|-------|-------------|
-| **ELF Loader** | `src/frontend/elf_loader.cpp` | Loads static & PIE ELF binaries, processes RELA relocations |
-| **Dynamic Linker** | `src/frontend/dynamic_linker.cpp` | DT_NEEDED, GOT/PLT, TLS, ifuncs, versioned symbols, ld-linux shim |
-| **Decoder** | `src/frontend/decoder.cpp` | Hierarchical ARM64 instruction decoder |
-| **IR Translator** | `src/ir/ir_translate*.cpp` | ARM64 → IR (peephole-optimizable) |
-| **FrostJIT** | `src/jit/frostjit.cpp` | IR → x86_64 native codegen (AVX2/AVX-512) |
-| **Interpreter** | `src/interp/interpreter.cpp` | Switch-based interpreter (JIT verify mode) |
-| **Syscall Layer** | `src/syscalls/*.cpp` | 200+ Linux AArch64 syscalls |
-| **Yggdrasil VFS** | `src/yggdrasil/*.cpp` | Virtual /proc, /dev, /sys, framebuffer, audio, input |
-| **Signal/Thread** | `src/core/signal.cpp`, `thread_mgr.cpp` | rt_sigaction, clone, futex, per-thread JIT |
-| **Thunks** | `src/frost_graphics/*.cpp` | GL/EGL/Vulkan/SDL2/ALSA forwarding |
+| **ELF Loader** | `Source/System/Loader/ElfLoader.cpp` | Loads static & PIE ELF binaries, processes RELA relocations |
+| **Dynamic Linker** | `Source/System/Loader/DynamicLinker/` | DT_NEEDED, GOT/PLT, TLS, ifuncs, versioned symbols, ld-linux shim |
+| **Decoder** | `Source/Interpreter/Decoder/Decoder.cpp` | Hierarchical ARM64 instruction decoder |
+| **IR Translator** | `Source/FrostJIT/IR/Translate/` | ARM64 → typed IR, scalar SSA and optimization passes |
+| **FrostJIT** | `Source/FrostJIT/Compiler/FrostJIT.cpp` | IR → x86_64 native codegen (AVX2/AVX-512) |
+| **Interpreter** | `Source/Interpreter/Core/Interpreter.cpp` | Switch-based interpreter (JIT verify mode) |
+| **Syscall Layer** | `Source/System/Syscalls/*.cpp` | 200+ Linux AArch64 syscalls |
+| **Yggdrasil VFS** | `Source/System/VFS/*.cpp` | Virtual /proc, /dev, /sys, framebuffer, audio, input |
+| **Signal/Thread** | `Source/System/Core/Signals.cpp`, `Threads.cpp` | rt_sigaction, clone, futex, per-thread JIT |
+| **Thunks** | `Source/System/Graphics/Thunks/`, `Source/System/Audio/AudioThunk/` | GL/EGL/Vulkan/SDL2/audio forwarding |
+
+See [the source layout](Docs/ARCHITECTURE.md) for the compiler phases, host
+adapter splits, test directories and tooling entry points.
 
 ## Building
 
@@ -314,7 +317,7 @@ complete Android runtime.
 - Linux x86_64 host
 
 Optional (for full feature set):
-- **SDL2 dev headers** (`./tools/fetch-sdl2-headers.sh`) — for framebuffer and guest SDL2 thunks
+- **SDL2 dev headers** (`./Tools/Fetch/fetch-sdl2-headers.sh`) — for framebuffer and guest SDL2 thunks
 - **SDL3 dev headers >=3.2**, plus the SDL3 runtime — for Android host windows
 - **AArch64 cross-toolchain** — for cross-compiling test binaries
 
@@ -355,13 +358,13 @@ also copied to `./bifrost-emu`; `make clean` removes all build profiles.
 
 ```bash
 # Fetch the musl cross-toolchain (104 MB)
-./tools/fetch-musl-toolchain.sh
+./Tools/Fetch/fetch-musl-toolchain.sh
 
 # Cross-compile test C sources and assemble the freestanding test programs
 make setup-tests
 
 # Or compile a single file
-make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
+make cross SRC=Tests/Apps/my_test.c OUT=Tests/Apps/my_test.elf
 ```
 
 ## Testing
@@ -388,19 +391,19 @@ make ci
 make check-all
 
 # Run only specific categories
-./scripts/run_tests.sh --unit         # JIT regression tests
-./scripts/run_tests.sh --toybox       # ToyBox integration
-./scripts/run_tests.sh --dynamic      # Dynamic linking tests
-./scripts/run_tests.sh --bench        # Performance benchmarks
+./Scripts/Testing/run_tests.sh --unit         # JIT regression tests
+./Scripts/Testing/run_tests.sh --toybox       # ToyBox integration
+./Scripts/Testing/run_tests.sh --dynamic      # Dynamic linking tests
+./Scripts/Testing/run_tests.sh --bench        # Performance benchmarks
 
 # Filter by name
-./scripts/run_tests.sh --filter "sig|brk|pipe"
+./Scripts/Testing/run_tests.sh --filter "sig|brk|pipe"
 ```
 
 With all fixtures available, the runner selects **275 tests**, including 97
 unit regressions. Without rootfs-dependent tests it selects 252 (247 with
 `--quick`). Interpreter mode intentionally skips seven JIT-only cases.
-Sources live in `ctest/`, `ctest_real/` and `test/`; build their ignored guest
+Sources live in `Tests/Unit/`, `Tests/Apps/` and `test/`; build their ignored guest
 ELFs with `make setup-tests`. External fixtures and desktop/audio availability
 can change coverage. Strict mode fails missing selected fixtures, while
 exit-77 environment skips remain visible.
@@ -408,8 +411,8 @@ exit-77 environment skips remain visible.
 `make verify` checks single-thread differential fixtures and runs the original
 concurrent cache/call workloads separately against their expected results.
 It fails missing/stale fixtures, nonzero exits, timeouts and reported
-divergences. See [test evidence](docs/TESTS.md) and
-[fixture licensing and distribution](docs/THIRD_PARTY.md).
+divergences. See [test evidence](Docs/TESTS.md) and
+[fixture licensing and distribution](Docs/THIRD_PARTY.md).
 
 ### Host Input
 
@@ -473,20 +476,20 @@ Demo:
 
 ```bash
 make USE_SDL2=1 USE_THUNK_GL=1
-make cross SRC=ctest_real/test_sdl_gl_triangle.c OUT=ctest_real/test_sdl_gl_triangle.elf
-DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf
+make cross SRC=Tests/Apps/test_sdl_gl_triangle.c OUT=Tests/Apps/test_sdl_gl_triangle.elf
+DISPLAY=:0 ./bifrost-emu Tests/Apps/test_sdl_gl_triangle.elf
 ```
 
 See `bifrost.toml.sample` for all options.
 
 ## C API (libbifrost)
 
-bifrost-emu exposes a stable C API (`api/bifrost.h`) for embedding the
+bifrost-emu exposes a stable C API (`Source/System/API/Bifrost.h`) for embedding the
 emulator in host programs. Build it with `make lib` (produces
-`libbifrost.a`; `main.cpp` is excluded — link your own driver):
+`libbifrost.a`; `Source/Main.cpp` is excluded — link your own driver):
 
 ```c
-#include "bifrost.h"
+#include "Bifrost.h"
 
 bifrost_emu_t* emu = bifrost_create();
 bifrost_load_elf(emu, "hello.elf", argc, argv);
@@ -526,20 +529,20 @@ Key features:
   unloads it (0 success / -1 error). Foundation for the native bridge
   adapter below.
 
-The full API reference and semantics live in `api/bifrost.h`. A
-host-side test (`ctest/test_capi.c`, built via `make test-capi`, wired
+The full API reference and semantics live in `Source/System/API/Bifrost.h`. A
+host-side test (`Tests/Unit/test_capi.c`, built via `make test-capi`, wired
 into `make check-all`) covers the API with 55 checks.
 
-## Android native bridge adapter (`api/native_bridge.h`)
+## Android native bridge adapter (`Source/System/API/NativeBridge.h`)
 
 bifrost exposes an Android native-bridge integration adapter. Its host
 API tests do not demonstrate an actual ART runtime or a drop-in Android
-translation environment. `api/native_bridge.h` is a clean-room ABI mirror of Android's
-`NativeBridgeCallbacks`; `api/native_bridge.cpp` fills the table over
+translation environment. `Source/System/API/NativeBridge.h` is a clean-room ABI mirror of Android's
+`NativeBridgeCallbacks`; `Source/System/API/NativeBridge.cpp` fills the table over
 the C API:
 
 ```c
-#include "native_bridge.h"
+#include "NativeBridge.h"
 bifrost_emu_t* emu = bifrost_create();
 bifrost_load_elf(emu, "system_lib.elf", argc, argv);
 bifrost_nb_init(emu);                     // fills NativeBridgeItf
@@ -558,12 +561,12 @@ signatures (JNIEnv/jobject prefix, x/d-reg split per AAPCS, libffi
 closures, `bifrost_call`/`bifrost_call_f` drive). No namespaces, no
 CriticalNative, no borrowed method pointers — `version = 4` claims the
 pre-Q ABI so ART uses the legacy `getTrampoline` path. Host test
-`ctest/test_nb.c` (61 checks, `make test-nb`, wired into `check-all`).
+`Tests/Unit/test_nb.c` (61 checks, `make test-nb`, wired into `check-all`).
 
 ## Performance
 
 Historical development measurements on a Ryzen 7 5800X3D with GCC -O3,
-reported by `ctest_real/bench_*.elf` itself (not freshly rerun for this
+reported by `Tests/Apps/bench_*.elf` itself (not freshly rerun for this
 documentation update):
 
 | Benchmark | Interpreter | JIT | Speedup |
@@ -575,13 +578,13 @@ documentation update):
 | MIPS (bench_mips, 800M instr) | ~56 MIPS | ~4,400 MIPS | ~78x |
 
 Repeatable samples with checksums and host/compiler metadata can be captured
-with `scripts/run_benchmarks.py`; see [docs/TESTS.md](docs/TESTS.md).
+with `Scripts/Bench/run_benchmarks.py`; see [Docs/TESTS.md](Docs/TESTS.md).
 
 These compute results do not predict game FPS. Current dispatch/cache and
 short-call benchmarks show targeted improvements, while the observed Doom
 profile still spends most sampled CPU time in translated game/library code.
 Matched scenes and frame-time measurements are required to quantify gameplay
-improvement; see [Doom 3 measurements](docs/doom3.md).
+improvement; see [Doom 3 measurements](Docs/Apps/doom3.md).
 
 The audio callback worker starts only when a callback stream opens, so
 single-threaded guests without callback audio retain JIT chaining and Tier-2
@@ -601,7 +604,7 @@ The JIT uses:
 - Test ARM64 builds on x86_64 CI runners
 - Test ARM64 game builds (SDL2, OpenGL ES) during development
 - Run ARM64 binaries with a remapped guest filesystem; see the [security
-  model](docs/SECURITY.md) before using untrusted binaries
+  model](Docs/SECURITY.md) before using untrusted binaries
 - Run real ARM64 games (SDL2/OpenGL voxel games, teeworlds) on x86_64
   desktops without QEMU
 
@@ -620,22 +623,22 @@ through `aa5dcc7`.
 
 Game setup, screenshots, and current compatibility issues:
 
-- [Neverball](docs/neverball.md)
-- [vkQuake](docs/vkquake.md)
-- [Doom 3 / dhewm3](docs/doom3.md)
-- [Minecraft Weekend](docs/minecraft-weekend.md)
+- [Neverball](Docs/Apps/neverball.md)
+- [vkQuake](Docs/Apps/vkquake.md)
+- [Doom 3 / dhewm3](Docs/Apps/doom3.md)
+- [Minecraft Weekend](Docs/Apps/minecraft-weekend.md)
 
 Build, test, and maintenance references:
 
-- [v2.0 roadmap](roadmap.md) — Android games, runtime integration, performance and input
+- [v2.0 roadmap](Docs/roadmap.md) — Android games, runtime integration, performance and input
 
-- [docs/JIT.md](docs/JIT.md) — JIT architecture and instruction-change guide
-- [docs/SUPPORT.md](docs/SUPPORT.md) — platform and compatibility support matrix
-- [docs/SECURITY.md](docs/SECURITY.md) — BIFROST_ROOT scope and guest trust model
-- [docs/CHANGELOG.md](docs/CHANGELOG.md) — Release history
-- [docs/TESTS.md](docs/TESTS.md) — Test suite details
-- [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) — Test distribution and third-party licenses
-- [window stats](docs/window-stats.md) — FPS title, stats window and overlay
+- [Docs/JIT.md](Docs/JIT.md) — JIT architecture and instruction-change guide
+- [Docs/SUPPORT.md](Docs/SUPPORT.md) — platform and compatibility support matrix
+- [Docs/SECURITY.md](Docs/SECURITY.md) — BIFROST_ROOT scope and guest trust model
+- [Docs/CHANGELOG.md](Docs/CHANGELOG.md) — Release history
+- [Docs/TESTS.md](Docs/TESTS.md) — Test suite details
+- [Docs/THIRD_PARTY.md](Docs/THIRD_PARTY.md) — Test distribution and third-party licenses
+- [window stats](Docs/window-stats.md) — FPS title, stats window and overlay
 - [bifrost.toml.sample](bifrost.toml.sample) — Config file reference
 
 ## License
@@ -643,7 +646,7 @@ Build, test, and maintenance references:
 Bifrost's original code and original regression tests use the
 [Unlicense](LICENSE). Third-party fixtures, vendored dependencies and game
 assets retain their own terms; the root license does not relicense them.
-See [third-party and test distribution notes](docs/THIRD_PARTY.md).
+See [third-party and test distribution notes](Docs/THIRD_PARTY.md).
 
 ## Contributing
 
@@ -651,7 +654,7 @@ See [third-party and test distribution notes](docs/THIRD_PARTY.md).
 2. Make your changes (follow the existing code style)
 3. Build current guest fixtures with `make setup-tests`, then run relevant
    JIT and interpreter checks; use `make check-all` for provisioned coverage
-4. For JIT changes, read [docs/JIT.md](docs/JIT.md) and run differential checks.
+4. For JIT changes, read [Docs/JIT.md](Docs/JIT.md) and run differential checks.
    Report existing verifier failures separately from newly introduced failures
 5. Preserve upstream notices for reused code and include validation evidence
    with your pull request. Original contributions, including tests, use the

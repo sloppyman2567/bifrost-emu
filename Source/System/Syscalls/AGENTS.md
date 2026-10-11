@@ -1,0 +1,17 @@
+# Linux syscall translation
+
+- Decode the AArch64 ABI's actual slots, widths, signed values, structures and
+  errno rules. Compare the concrete failing syscall with the native kernel or
+  a trusted reference before adding compatibility behavior.
+- Preserve Linux fd/poll/epoll ownership and timeout semantics. A ready socket
+  must not lose readiness when translating guest event structures or masks.
+- `exit_group` uses Emulator::group_exit, waking blocked CPUs and preserving
+  the successful exit code through native JIT callers. Signal delivery uses
+  the shared reporter/recovery path, not uncaught worker exceptions.
+- `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
+  reads its count from the correct ABI slot. Preserve the relevant regressions.
+- Memory operations retain alias/file identity and userfaultfd registration;
+  TLS allocation stays consistent with the loader's layout. Follow those scoped
+  guides when changing their syscall entry points.
+- Compatibility families belong in `Compatibility.cpp`; unsupported semantics
+  should fail deliberately rather than returning guessed successful values.

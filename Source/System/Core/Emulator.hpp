@@ -1,0 +1,803 @@
+// core/emulator.h — Emulator class definition (private header).
+//
+// The Emulator ties everything together: it owns a Memory, a pool of vCPUs
+// (one main + N cloned via clone()), a futex table, signal table, graphics
+// backend, and (optionally) a FrostJIT instance.
+//
+// Two headers expose Emulator:
+//   - Include/Bifrost/Emulator.hpp   — public API surface (lifecycle + run)
+//   - Source/System/Core/Emulator.hpp            — full class definition (private members)
+//
+// Translation units inside Source/ include this private header. External
+// consumers (libbifrost users, the JIT glue layer) include the public one.
+#pragma once
+#include "Bifrost/Types.hpp"
+#include "Bifrost/Version.hpp"
+#include "System/Core/CPU.hpp"
+#include "System/Memory/Memory.hpp"
+#include "System/Core/Signals.hpp"
+#include "System/Graphics/Display/Graphics.hpp"
+#include "System/Audio/Audio.hpp"
+#include "System/VFS/VFS.hpp"
+// Bring Yggdrasil and FdTable into the arm64emu namespace so existing
+// callers (Emulator::vfs(), Emulator::fds(), syscall handlers) can refer
+// to them unqualified. The yggdrasil:: prefix is still required in the
+// .cpp files that #include the node headers directly.
+namespace arm64emu {
+    using yggdrasil::Yggdrasil;
+    using yggdrasil::FdTable;
+    using yggdrasil::Node;
+}
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <pthread.h>
+#include <string>
+#include <sys/types.h>  // mode_t
+#include <thread>
+#include <unordered_map>
+#include <vector>
+// Forward-declare FrostJIT (full definition in Source/FrostJIT/Compiler/FrostJIT.hpp).
+// We only need a forward decl here because FrostJIT is held via unique_ptr.
+namespace arm64emu { class FrostJIT; }
+// Forward-declare syscall handlers (defined in Source/System/Syscalls/*.cpp) so
+// they can be declared as friends of Emulator below.
+namespace arm64emu {
+    int64_t syscall_fs(Emulator&, CPU&, uint64_t);
+    int64_t syscall_mem(Emulator&, CPU&, uint64_t);
+    int64_t syscall_threads(Emulator&, CPU&, uint64_t);
+    int64_t syscall_time(Emulator&, CPU&, uint64_t);
+    int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
+    int64_t syscall_misc(Emulator&, CPU&, uint64_t);
+}
+namespace arm64emu {
+// ── ELF loader (definition lives in Source/System/Loader/ElfLoader.cpp) ──────
+class ElfLoader {
+public:
+    struct Options {
+        // A guest dynamic linker owns all relocations, including its own.
+        bool apply_relocations = true;
+        // Reserve an aligned ET_DYN image in the mmap arena (for PT_INTERP).
+        bool reserve_image = false;
+    };
+    struct Loaded {
+        uint64_t entry;
+        uint64_t phdr_addr;
+        uint64_t phnum;
+        uint64_t phent;
+        uint64_t start_addr; // lowest PT_LOAD page (0 if none)
+        uint64_t end_addr;   // highest mapped addr (for brk baseline)
+        uint64_t base_addr;  // load bias (0 for ET_EXEC, randomized pie_base() for ET_DYN)
+        bool     has_lse;    // ELF declared AArch64 LSE atomic feature
+        std::string interp;  // PT_INTERP path (dynamic linker), empty if static
+    };
+    static Loaded load(Memory& mem, const std::vector<uint8_t>& data);
+    static Loaded load(Memory& mem, const std::vector<uint8_t>& data,
+                       const Options& options);
+};
+// Forward-declare DynamicLinker (defined in Source/System/Loader/DynamicLinker.hpp).
+class DynamicLinker;
+// shared crash path: one short [crash] line always, detail behind flags.
+void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst);
+// ── Emulator ──────────────────────────────────────────────────────────
+struct SimdDpFields;
+class Emulator {
+public:
+    Emulator();
+    ~Emulator();
+    Emulator(const Emulator&) = delete;
+    Emulator& operator=(const Emulator&) = delete;
+    // ── Lifecycle (public) ────────────────────────────────────────────
+    void load_elf_file(const std::string& path, std::vector<std::string>& argv);
+    // Bootstrap profile: Bionic's linker owns relocation and TLS setup.
+    void set_android_runtime(bool enabled) {
+        android_runtime_ = enabled;
+        mem_.set_data_top_byte_ignore(enabled);
+        mem_.set_low_hints_reserved(enabled);
+        if (enabled) vfs_.enable_android_properties();
+        // Android FIRST_APPLICATION_UID, user 0. Host IDs (often system UID
+        // 1000 on Android) must not select privileged framework code paths.
+        vfs_.set_process_identity(enabled ? 10000 : 0, enabled ? 10000 : 0);
+    }
+    bool android_runtime() const { return android_runtime_; }
+    void enable_android_services() { vfs_.enable_android_services(); }
+    std::atomic<uint32_t> guest_membarrier_registrations{0};
+    std::atomic<int> guest_dumpable{1};
+    std::atomic<bool> guest_thp_disabled{false};
+    int  run();
+    // Load the embedded AArch64 vDSO into guest memory and return its
+    // base address (for AT_SYSINFO_EHDR). Returns 0 on failure. The vDSO
+    // provides gettimeofday/clock_gettime/clock_getres/rt_sigreturn
+    // stubs that trap to the emulator's syscall handler. Called from
+    // load_elf_file before build_initial_stack.
+    uint64_t load_vdso();
+    // True if pc falls within the mapped vDSO (used by the syscall
+    // dispatcher and JIT vDSO clock fast path).
+    bool in_vdso_range(uint64_t pc) const {
+        return vdso_base_ != 0 && pc >= vdso_base_ && pc < vdso_base_ + vdso_size_;
+    }
+    // Execute one instruction on the given CPU. Used by the interpreter,
+    // JIT CALL_INTERP fallback, IR executor, and thread manager.
+    void step(CPU& cpu);
+    // Execute a syscall on the given CPU (reads x8 for number, x0-x5 for
+    // args, writes return to x0). Used by the IR executor for SVC.
+    void syscall(CPU& cpu);
+    // SVC hook: invoked at the top of syscall() for EVERY guest syscall
+    // (interpreter + JIT native svc both funnel through Emulator::syscall;
+    // the JIT thunk fast path for num==0x1000 bypasses it). Returns 1 to
+    // handle the syscall: *result is written back to x0 and normal dispatch
+    // is skipped. Returns 0 to let the emulator handle it normally.
+    int (*svc_hook_)(void* ud, uint64_t num, const uint64_t* args,
+                     uint64_t* result) = nullptr;
+    void* svc_hook_ud_ = nullptr;
+    void set_svc_hook(int (*fn)(void*, uint64_t, const uint64_t*, uint64_t*),
+                      void* ud) {
+        svc_hook_ = fn;
+        svc_hook_ud_ = ud;
+    }
+    // Borrow-CPU guest function call: save/restore ALL architectural state,
+    // set x0..xN from iargs and d0..dN from fargs, pc = fn, LR = sentinel,
+    // run step() until the callee RETs, then restore and return x0. If
+    // fp_result is non-null, the callee's d0 (FP return value) is written
+    // there too. Mirrors the dynamic linker's guest_call_args_ / GLFW
+    // callback runner pattern. Used by libbifrost's bifrost_call().
+    uint64_t call_guest_function(CPU& cpu, uint64_t fn,
+                                  const int64_t* iargs, size_t n_iargs,
+                                  const double* fargs, size_t n_fargs,
+                                  double* fp_result = nullptr);
+    // Android --android driver (2026-08): load a bare .so exporting
+    // ANativeActivity_onCreate and drive its lifecycle via the
+    // AndroidSurfaceManager. argv[0] is the .so path; the rest are guest
+    // argv for diagnostics.
+    void load_android_activity(const std::string& path,
+                               std::vector<std::string>& argv);
+    int run_android();
+    // Drain any host-forwarded signals (SIGINT/SIGTERM/SIGCHLD) to the
+    // guest. Called by spawned threads at syscall boundaries.
+    bool drain_host_signals(CPU& cpu);
+    // Drain any per-CPU pending signals queued by cross-thread tgkill/
+    // tkill/kill. Called by every CPU's run loop at the same 4K-instr
+    // boundary as drain_host_signals(). This is the fix for the
+    // cross-thread CPU-mutation race.
+    bool drain_pending_signals(CPU& cpu);
+    // Install host signal handlers for forwarding to the guest.
+    void install_host_signal_handlers();
+    // Helper for blocking syscalls that returned -EINTR. Drains pending
+    // host signals (so any guest signal handler runs before the guest
+    // sees -EINTR) and always returns false (the caller should return
+    // -EINTR to the guest). The guest's libc wrapper then decides
+    // whether to retry or propagate the error.
+    bool handle_eintr(CPU& cpu);
+    // ── Configuration (public) ────────────────────────────────────────
+    void set_verbose(bool v) { verbose_ = v; }
+    void set_trace(bool v)   { trace_  = v; }
+    void set_brk_verbose(bool v) { brk_verbose_ = v; }
+    void set_jit_enabled(bool v) { jit_enabled_ = v; }
+    bool jit_enabled() const { return jit_enabled_; }
+    // Set the JIT warmup threshold: use the interpreter for the first
+    // `n` instructions, then switch to JIT. This avoids JIT compilation
+    // overhead for short programs (e.g., `toybox seq 1 10`). Set to 0
+    // (default) to use the JIT from the start.
+    void set_jit_threshold(uint64_t n) { jit_threshold_ = n; }
+    uint64_t jit_threshold() const { return jit_threshold_; }
+    // ── Guest environment ─────────────────────────────────────────────
+    // Replace the guest's environment with `envs` (each string "KEY=VALUE").
+    // If never called, build_initial_stack() uses a sensible default
+    // environment that propagates a curated set of host env vars (TZ,
+    // LANG, LC_*, etc.) so locale-aware programs (toybox uptime, date,
+    // ls, etc.) display correct local time and language conventions.
+    void set_guest_env(const std::vector<std::string>& envs) {
+        guest_env_ = envs;
+    }
+    const std::vector<std::string>& guest_env() const { return guest_env_; }
+    // Guest process name (comm). Set by prctl(PR_SET_NAME), returned by
+    // prctl(PR_GET_NAME) and /proc/self/comm.
+    void set_guest_comm(const std::string& name) {
+        // Linux kernel truncates to 16 bytes (15 + NUL).
+        guest_comm_ = name.size() > 15 ? name.substr(0, 15) : name;
+    }
+    const std::string& guest_comm() const { return guest_comm_; }
+    // Guest umask (tracked separately from host for sandbox isolation
+    // and JIT verify-mode correctness).
+    // Linux do_group_exit: exit_group or a fatal default signal on ANY
+    // guest thread ends the whole process with `code` (first request
+    // wins). Stops the caller, the main CPU and every guest thread, wakes
+    // futex sleepers and kicks blocked host threads. run() then joins
+    // everything and returns the code. Callable from any guest thread.
+    void group_exit(CPU& caller, int code);
+    bool group_exit_requested() const {
+        return group_exit_.load(std::memory_order_acquire);
+    }
+    mode_t guest_umask() const { return guest_umask_; }
+    void set_guest_umask(mode_t m) { guest_umask_ = m & 0777; }
+    // Build the default guest environment, propagating locale/timezone-
+    // related host env vars. Used by build_initial_stack when set_guest_env
+    // was not called. Also used by execve to give the new process image
+    // a consistent environment.
+    static std::vector<std::string> build_default_guest_env();
+    // ── Accessors (public) ────────────────────────────────────────────
+    Memory&         mem()      { return mem_; }
+    DynamicLinker* dyn_linker(){ return dyn_linker_.get(); }
+    FrostGraphics& graphics() { return graphics_; }
+    Audio&          audio()    { return audio_; }
+    SignalTable&    signals()  { return signals_; }
+    Yggdrasil&      vfs()      { return vfs_; }
+    FdTable&        fds()      { return fds_; }
+    const std::string& elf_path() const { return elf_path_; }
+    CPU&            main_cpu() { return main_cpu_; }
+    // Async-signal-safe access to the active emulator (the guard-fault
+    // reporter in Signals.cpp runs in a host signal context and cannot use
+    // instance globals directly). Single active emulator per host process.
+    static Emulator* active_emulator() { return g_active_emu_; }
+    FrostJIT*       jit() { return jit_.get(); }
+    void            enable_jit();
+    // SMC / mapping invalidation (see FrostJIT::invalidate_range/all):
+    // drops JIT translations overlapping [addr, addr+size) (or everything)
+    // on the main JIT and every per-thread JIT. Collects JIT pointers
+    // under threads_mu_ first, then invalidates without holding it (each
+    // FrostJIT takes its own blocks_mutex_). No-op when the JIT is off.
+    // Defined in Source/System/Core/Threads.cpp. Called for IC cache maintenance
+    // (interp MSR_SYS CRn==7), munmap, and MAP_FIXED-replace mmap.
+    void invalidate_jit_range(uint64_t addr, uint64_t size);
+    void invalidate_jit_all();
+    // Defined in Source/FrostJIT/Runtime/EmulatorBridge.cpp so the FrostJIT definition is visible.
+    void jit_step(CPU& cpu);
+    void print_jit_stats();
+    void dump_prof_snapshot();
+    // Periodic real-guest-throughput + block-structure reporter. Uses real
+    // instructions_executed (not the run-loop dispatch counter) and prints
+    // block-end reasons so the codegen-quality levers stay visible mid-run.
+    void dump_periodic_stats(double dt);
+    // BIFROST_STATS_PERIOD reporter thread (2026-08-21). The old check sat
+    // in run()'s outer loop, which STOPS ITERATING once a game's frame loop
+    // parks inside jit_call_helper's callee-dispatch loop — the reporter
+    // never evaluated during exactly the mid-run phases it exists for (and
+    // dump_periodic_stats silently no-oped under --no-jit). A detached-free
+    // background thread ticks on wall time regardless of which loop is hot.
+    std::thread stats_reporter_thread_;
+    std::atomic<bool> stats_reporter_stop_{false};
+    // ── vCPU management ───────────────────────────────────────────────
+    // Futex table: maps a guest address → (mutex, condvar, waiter count).
+    // Used by clone-spawned threads for synchronization.
+    //
+    // std::unordered_map for the whole table. Every FUTEX_WAIT/WAKE/REQUEUE
+    // took the same lock, serializing all futex ops across all vCPUs.
+    // Real games have dozens to hundreds of distinct futex words (one per
+    // pthread mutex/cond/barrier); each op contended on the same lock.
+    //
+    // New design: 64 shards keyed by (addr >> 3) & 63 (mirror the exclusive
+    // monitor's design, but with 4x more shards for better scalability on
+    // 8+ vCPU guests). Two futex ops only contend if their addresses map
+    // to the same shard — unlikely for unrelated mutexes.
+    //
+    // Also: when a FutexSlot's waiters transitions to 0, the slot is
+    // erased from its shard (reclaim memory for freed mutexes). The
+    // caller (FUTEX_WAIT/WAKE) is responsible for calling
+    // release_futex_if_empty(addr) when waiters hits 0.
+    struct FutexSlot {
+        std::mutex mu;
+        std::condition_variable cv;
+        int waiters = 0;
+    };
+    static constexpr size_t FUTEX_SHARDS = 64;
+    struct FutexShard {
+        std::mutex mu;
+        std::unordered_map<uint64_t, std::unique_ptr<FutexSlot>> slots;
+    };
+    FutexShard futex_shards_[FUTEX_SHARDS];
+    static size_t futex_shard_idx(uint64_t addr) {
+        return (addr >> 3) & (FUTEX_SHARDS - 1);
+    }
+    // Look up (or create) the FutexSlot for `addr`. Returns a pointer
+    // owned by the shard. The caller MUST NOT hold the shard mutex when
+    // calling wait/wake on the slot.
+    FutexSlot* get_futex(uint64_t addr) {
+        size_t idx = futex_shard_idx(addr);
+        std::lock_guard<std::mutex> g(futex_shards_[idx].mu);
+        auto& shard = futex_shards_[idx].slots;
+        auto it = shard.find(addr);
+        if (it == shard.end()) {
+            auto slot = std::make_unique<FutexSlot>();
+            FutexSlot* raw = slot.get();
+            shard.emplace(addr, std::move(slot));
+            return raw;
+        }
+        return it->second.get();
+    }
+    // Erase a FutexSlot when its waiter count hits 0 (called by FUTEX_WAKE
+    // after notifying). Reclaims memory for freed mutexes — without this,
+    // a long-running game that allocates/frees millions of mutexes would
+    // leak indefinitely.
+    void release_futex_if_empty(uint64_t addr) {
+        size_t idx = futex_shard_idx(addr);
+        std::lock_guard<std::mutex> g(futex_shards_[idx].mu);
+        auto& shard = futex_shards_[idx].slots;
+        auto it = shard.find(addr);
+        if (it == shard.end()) return;
+        // Double-check waiters under the shard lock (the slot's own mu
+        // is NOT held here, but the shard lock prevents new waiters from
+        // finding this slot between the check and the erase).
+        if (it->second->waiters == 0) {
+            shard.erase(it);
+        }
+    }
+    void decrement_alive_threads() { alive_threads_.fetch_sub(1); }
+    // Per-thread lookup (for tgkill, etc.)
+    // Return a shared_ptr to the target CPU so a concurrent
+    // kill_other_threads()/reap cannot free it while the caller uses it.
+    // For the main thread the pointer aliases main_cpu_ (no-op deleter).
+    std::shared_ptr<CPU> find_cpu_by_tid(int tid);
+    // Interrupt a target's host I/O and its published futex wait after
+    // queuing an unblocked guest signal. Delivery remains on the target CPU.
+    void kick_cpu_wait(CPU& target);
+    // Guest masks must not block the emulator's private host wakeup.
+    static void unblock_host_wakeup(sigset_t& mask);
+    // Public accessor for JIT fast LL/SC helpers.
+    struct ExclMonitorShardAccess {
+        std::mutex mu;
+        std::unordered_map<uint64_t, std::vector<CPU*>> reservations;
+    };
+    static size_t excl_shard_idx_pub(uint64_t addr) {
+        return (addr >> 3) & 15;
+    }
+    void* excl_monitor_shard_pub(uint64_t addr);
+    // ── Fork support (clone without CLONE_VM) ────────────────────────
+    // Fork the guest: snapshot the current memory + CPU state and
+    // create a child "process" that runs in a host thread with its own
+    // Memory. The child gets a new TID (PID). The parent returns the
+    // child's PID; the child returns 0.
+    //
+    // The child runs independently until it calls exit/exit_group, at
+    // which point its exit code is stored in the fork_children_ table
+    // for the parent's wait4() to retrieve.
+    struct ForkChild {
+        std::unique_ptr<Memory> mem;
+        CPU cpu;
+        int pid = 0;
+        int exit_code = 0;
+        bool exited = false;
+        bool waited = false;
+        std::thread host_thread;
+        std::mutex mu;
+        std::condition_variable cv;
+        // wait4's rusage can report accurate per-guest user/sys time
+        // instead of the host emulator process's CPU time (which includes
+        // JIT compilation, memory management, etc. — useless to the guest).
+        // Measured in guest instructions executed. Converted to seconds
+        // via the guest MIPS estimate at wait4 time.
+        uint64_t guest_instructions = 0;
+        // Wall-clock time the child spent running (for "real" time in
+        // `toybox time`). Recorded as a steady_clock time_point pair.
+        std::chrono::steady_clock::time_point start_time;
+        std::chrono::steady_clock::time_point end_time;
+        bool timed = false;
+    };
+    int fork_guest(CPU& parent_cpu, uint64_t child_stack, uint64_t flags,
+                   uint64_t ptid_ptr, uint64_t ctid_ptr, uint64_t tls);
+    // Look up a forked child by PID. Returns nullptr if not found.
+    // The caller should hold fork_children_mu_ while accessing the
+    // returned pointer.
+    ForkChild* find_fork_child(int pid);
+    // Reap a forked child (called by wait4). Returns the exit code,
+    // or -ECHILD if the PID doesn't exist.
+    int reap_fork_child(int pid, int options, bool& found);
+private:
+    // ── Owned state ───────────────────────────────────────────────────
+    Memory mem_;
+    CPU    main_cpu_;          // main thread's CPU state
+    uint64_t entry_ = 0;
+    uint64_t end_addr_ = 0;
+    uint64_t exe_start_ = 0;   // main ELF's lowest PT_LOAD page, for /proc/self/maps
+    uint64_t brk_ = 0;
+    uint64_t brk_start_ = 0;   // initial brk (set at ELF load time)
+    std::mutex brk_mu_;        // serializes concurrent brk() calls
+    uint64_t phdr_addr_ = 0;
+    uint64_t phnum_ = 0;
+    uint64_t phent_ = 0;
+    uint64_t interp_base_ = 0;  // dynamic linker load address (0 if static)
+    uint64_t interp_end_ = 0;   // end of its last PT_LOAD, for /proc/self/maps
+    uint64_t prog_entry_ = 0;   // original program entry (for AT_ENTRY)
+    uint64_t vdso_base_ = 0;    // vDSO ELF load address (for AT_SYSINFO_EHDR)
+    uint64_t vdso_size_ = 0;    // vDSO mapped size (page-rounded), for fast-path PC checks
+    bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
+    bool verbose_ = false;
+    bool android_runtime_ = false;
+    bool trace_ = false;
+    bool brk_verbose_ = true; // controlled by cfg.log_brk_verbose / -q flag
+    std::string elf_path_;
+    // Guest address of the envp array on the initial stack. Captured by
+    // build_initial_stack and used to point glibc's __environ at it (the
+    // native dynlink path never runs ld.so to do this itself).
+    uint64_t guest_envp_addr_ = 0;
+    // Guest argv string block, [arg_start_, arg_end_), for /proc/self/cmdline.
+    uint64_t arg_start_ = 0, arg_end_ = 0;
+    // Guest-side current working directory. Decoupled from the host cwd
+    // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
+    // chdir/fchdir; returned by getcwd. Defaults to "/".
+    std::string guest_cwd_ = "/";
+    // Guest environment (each string "KEY=VALUE"). Populated by
+    // set_guest_env() or by build_initial_stack() using
+    // build_default_guest_env() when empty.
+    std::vector<std::string> guest_env_;
+    // Guest process name (set by prctl(PR_SET_NAME), returned by
+    // prctl(PR_GET_NAME) and /proc/self/comm). Max 16 bytes (15 + NUL)
+    // per Linux kernel. Defaults to the ELF basename.
+    std::string guest_comm_ = "bifrost";
+    // Guest umask (tracked separately from host so JIT verify mode
+    // doesn't see false-positive divergences from the host umask being
+    // changed twice). Also provides sandbox isolation.
+    mode_t guest_umask_ = 0022;  // default: rwxr-xr-x → rw-r--r--
+    std::atomic<bool> group_exit_{false};
+    std::atomic<int> group_exit_code_{0};
+    // Host thread running run()'s main loop, kicked by a worker's
+    // group_exit. Unset in a fork child created from a worker thread.
+    pthread_t main_host_thread_{};
+    std::atomic<bool> main_host_thread_set_{false};
+    // Decode cache type alias (constants + CacheEntry type live on CPU).
+    using CacheEntry = CPU::CacheEntry;
+    // ── Thread management (for clone()) ───────────────────────────────
+    struct GuestThread {
+        CPU cpu;
+        std::thread host_thread;
+        // Per-thread FrostJIT instance (only with BIFROST_NO_SHARED_JIT=1;
+        // default shares the main JIT to save 64 MiB/thread, serializing
+        // run_block via blocks_mutex_). nullptr if JIT is disabled
+        // (thread uses interpreter only).
+        std::unique_ptr<FrostJIT> jit;
+        uint64_t stack_top = 0;
+        uint64_t stack_size = 0;
+        uint64_t tls_base = 0;
+        int tid = 0;
+        // Set by thread_entry as its final action. reap_finished_threads()
+        // joins + erases finished threads. Because threads are owned via
+        // shared_ptr, an in-flight user (find_cpu_by_tid / invalidate_jit_*)
+        // keeps the object alive until it releases, so reaping cannot
+        // free state another vCPU is still touching.
+        std::atomic<bool> finished{false};
+    };
+    std::vector<std::shared_ptr<GuestThread>> threads_;
+    std::mutex threads_mu_;
+    std::atomic<int> next_tid_{2};
+    std::atomic<int> alive_threads_{0};
+    // ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ──────────
+    // 1.5.4-alpha. The game spawns worker threads (timer/music/event) via
+    // SDL_CreateThread and joins them with SDL_WaitThread. These are real
+    // concurrent guest threads: each gets its own GuestThread (own CPU +
+    // host thread + optional per-thread JIT), a fresh guest stack, and a
+    // per-thread glibc TLS block (via DynamicLinker::allocate_thread_tls).
+    // The guest SDL_Thread* handle is a small guest-addressable struct
+    // (guest handle_addr) that stores the thread's done flag + exit code;
+    // SDL_WaitThread futex-waits on it. Resources (stack + TLS + handle)
+    // live until the thread is joined, so a concurrently-running thread
+    // never touches freed guest memory. A handle != 0 returned by
+    // SDL_CreateThread means success; the game cbz-checks it (fatal error
+    // path on NULL, e.g. "Error: Unable to start timer thread").
+    struct SdlThread {
+        CPU cpu;
+        std::thread host_thread;
+        uint64_t stack_top = 0;
+        uint64_t stack_size = 0;
+        uint64_t tls = 0;        // per-thread TLS block base (TPIDR_EL0)
+        uint64_t handle_addr = 0;  // guest VA of the SDL_Thread* handle
+        uint64_t tid = 0;
+        // Join + guest-resource-free coordination between SDL_WaitThread,
+        // a detached thread's reaper, and stop_sdl_threads(). Lock order:
+        // finish_mu is a leaf (never held while taking sdl_threads_mu_).
+        std::mutex finish_mu;
+        bool reaped = false;                 // guarded by finish_mu
+        std::atomic<bool> finished{false};   // set at sdl_thread_entry exit
+    };
+    // shared_ptr so wait/detach/stop can each pin the record instead of
+    // holding a raw pointer across an unlock (the old double-join/UAF).
+    std::unordered_map<uint64_t, std::shared_ptr<SdlThread>> sdl_threads_;
+    // Detached threads: no waiter will ever join them, so they move here and
+    // reap_retired_sdl_threads() joins them once `finished` and frees their
+    // guest stack/handle. (Previously detach leaked the record AND left the
+    // guest stack live while the detached host thread ran on it.)
+    std::vector<std::shared_ptr<SdlThread>> retired_sdl_threads_;
+    std::mutex sdl_threads_mu_;
+    uint64_t spawn_sdl_thread(uint64_t fn, uint64_t data);
+    int64_t wait_sdl_thread(uint64_t handle, uint64_t status_ptr);
+    void reap_retired_sdl_threads();
+    // SDL_DetachThread: the guest promises never to wait on `handle`. The
+    // record moves to retired_sdl_threads_; reap_retired_sdl_threads()
+    // joins it once it finishes and frees its guest stack/handle (and
+    // stop_sdl_threads covers shutdown), so nothing leaks and the guest
+    // stack stays valid while the detached thread runs.
+    void detach_sdl_thread(uint64_t handle);
+    void wire_thunk_sdl_thread_runner_();
+    // Guest VA of libc's __libc_single_threaded BSS word (set by the
+    // dynamic linker during link(); 0 for musl). spawn_thread flips it
+    // to 0 when creating the first guest thread (glibc's pthread_create
+    // does the same) so multi-threaded guests take the correct paths.
+    uint64_t libc_single_threaded_addr_ = 0;
+    // ── Futex table ───────────────────────────────────────────────────
+    // (sharded — see futex_shards_ above. The old single-mutex + single-map
+    // design was)
+    // ── Global exclusive monitor (LL/SC atomics) ──────────────────────
+    // AArch64's LDXR/STXR (load-linked / store-conditional) atomics rely
+    // on a GLOBAL exclusive monitor that tracks all CPUs' reservations.
+    // When any CPU stores to a reserved address, OTHER CPUs' reservations
+    // for that address are invalidated. This is what makes LL/SC correct.
+    //
+    // The monitor is SHARDED into 16 stripes by address bits ((addr>>3)&0xF)
+    // so independent atomics on different addresses proceed in parallel.
+    // Two CPUs only contend if they map to the same stripe.
+    static constexpr size_t EXCL_MONITOR_SHARDS = 16;
+    struct ExclMonitorShard {
+        std::mutex mu;
+        // Map: address → set of CPU* with a reservation at that address.
+        std::unordered_map<uint64_t, std::vector<CPU*>> reservations;
+    };
+    ExclMonitorShard excl_monitor_shards_[EXCL_MONITOR_SHARDS];
+    static size_t excl_shard_idx(uint64_t addr) {
+        return (addr >> 3) & (EXCL_MONITOR_SHARDS - 1);
+    }
+    // Remove `cpu` from every shard's reservation lists. MUST be called
+    // from thread_entry before the GuestThread can be destroyed: an LDXR
+    // leaves a raw CPU* registered until another CPU stores to that
+    // address, so freeing the CPU first leaves a dangling pointer that a
+    // later store dereferences (heap-use-after-free; found via ASan).
+    void excl_remove_cpu(CPU* cpu);
+    // jit_ldxr/jit_stxr/jit_stlr are extern "C" functions defined in
+    // X86Emitter.cpp. They access excl_monitor_shards_ directly.
+    // No friend declaration needed — the functions are in the global
+    // namespace (extern "C") and access the shards via the public
+    // excl_shard_idx + the shard array. The x86 JIT helpers
+    // (jit_ldxr/stxr/stlr, extern "C" in X86Emitter.cpp) reach the
+    // shards via the public excl_shard_idx_pub() /
+    // excl_monitor_shard_pub() accessors below.
+    // ── Fork children (clone without CLONE_VM) ───────────────────────
+    std::mutex fork_children_mu_;
+    std::vector<std::unique_ptr<ForkChild>> fork_children_;
+    // ── Guest CPU time tracking ──────────────────────────────
+    // We track guest instructions executed to provide accurate rusage/
+    // times values. The host's getrusage/wait4/times return the emulator
+    // process's CPU time (including JIT compilation, memory management,
+    // etc.) which is meaningless to the guest. Instead, we count guest
+    // instructions and convert to seconds using the measured MIPS rate.
+    //
+    // guest_instructions_total_: atomic, incremented by every CPU's run
+    //   loop (main + spawned threads + fork children). Represents the
+    //   total guest CPU work done.
+    // run_start_time_: when Emulator::run() was called. Used for the
+    //   wall-clock "real" time in `toybox time`.
+    // mips_estimate_: guest MIPS, updated periodically from the run loop.
+    //   Used to convert guest_instructions → seconds. If 0 (before first
+    //   measurement), we fall back to wall-clock time as the user/sys
+    //   time estimate (better than zeros).
+    std::atomic<uint64_t> guest_instructions_total_{0};
+    std::chrono::steady_clock::time_point run_start_time_;
+    std::atomic<double> mips_estimate_{0.0};
+    // Convert guest instructions to seconds (user/sys CPU time).
+    // If we have a MIPS estimate, use it; otherwise fall back to
+    // wall-clock elapsed time (split 70/30 user/sys as a heuristic).
+    double guest_instr_to_seconds(uint64_t instr) const {
+        double mips = mips_estimate_.load(std::memory_order_relaxed);
+        if (mips > 0.0 && instr > 0) {
+            return static_cast<double>(instr) / (mips * 1e6);
+        }
+        return 0.0;
+    }
+    // Get the total guest instructions executed by this process (main +
+    // spawned threads, NOT fork children — those are tracked separately
+    // in ForkChild::guest_instructions).
+    uint64_t get_guest_instructions() const {
+        return guest_instructions_total_.load(std::memory_order_relaxed);
+    }
+    void add_guest_instructions(uint64_t n) {
+        guest_instructions_total_.fetch_add(n, std::memory_order_relaxed);
+    }
+    // ── Graphics backend (virtual /dev/fb0) ───────────────────────────
+    FrostGraphics graphics_;
+    // ── Audio backend (virtual /dev/dsp, /dev/snd) ────────────────────
+    Audio audio_;
+    // ── Yggdrasil VFS + fd table ────────────────────────────────────
+    // Yggdrasil (the world-tree) resolves guest paths to Nodes; FdTable
+    // maps guest fds to Nodes. Owned by Emulator so all vCPUs share the
+    // same view. (v1.4.5-alpha: renamed from VFS/VNode to Yggdrasil/Node.)
+    Yggdrasil vfs_;
+    FdTable   fds_;
+    // ── Signal delivery ───────────────────────────────────────────────
+    SignalTable signals_;
+    // ── Host-to-guest signal forwarding ───────────────────────────────
+    // Producers are host signal handlers (async-signal context, so no
+    // locks), and consumers are every vCPU's drain. A bounded lock-free
+    // MPMC queue (Vyukov): each slot carries a sequence number, so a
+    // producer only publishes after writing its slot and a consumer only
+    // claims a slot after the producer released it. The previous
+    // fetch_add(tail)-then-write-slot design published `tail` BEFORE the
+    // slot store (consumer could read stale/torn data), and its
+    // load+store on `head` let two consumers drain the same slot.
+    static constexpr size_t HOST_SIGNAL_QUEUE_CAP = 64;  // power of two
+    struct HostSignalQueue {
+        struct Cell {
+            std::atomic<size_t> seq;
+            int sig;
+        };
+        Cell cells[HOST_SIGNAL_QUEUE_CAP];
+        HostSignalQueue() {
+            for (size_t i = 0; i < HOST_SIGNAL_QUEUE_CAP; i++) {
+                cells[i].seq.store(i, std::memory_order_relaxed);
+                cells[i].sig = 0;
+            }
+        }
+        // Enqueue from a signal handler. Returns false if the queue is
+        // full (signal dropped — POSIX allows loss on overflow).
+        bool push(int signo) {
+            size_t pos = tail_.load(std::memory_order_relaxed);
+            for (;;) {
+                Cell& c = cells[pos & (HOST_SIGNAL_QUEUE_CAP - 1)];
+                const size_t seq = c.seq.load(std::memory_order_acquire);
+                const long diff = static_cast<long>(seq) - static_cast<long>(pos);
+                if (diff == 0) {
+                    if (tail_.compare_exchange_weak(pos, pos + 1,
+                            std::memory_order_relaxed)) {
+                        c.sig = signo;
+                        c.seq.store(pos + 1, std::memory_order_release);
+                        return true;
+                    }
+                } else if (diff < 0) {
+                    return false;
+                } else {
+                    pos = tail_.load(std::memory_order_relaxed);
+                }
+            }
+        }
+        // Dequeue one signal. Returns false if empty.
+        bool pop(int& out) {
+            size_t pos = head_.load(std::memory_order_relaxed);
+            for (;;) {
+                Cell& c = cells[pos & (HOST_SIGNAL_QUEUE_CAP - 1)];
+                const size_t seq = c.seq.load(std::memory_order_acquire);
+                const long diff =
+                    static_cast<long>(seq) - static_cast<long>(pos + 1);
+                if (diff == 0) {
+                    if (head_.compare_exchange_weak(pos, pos + 1,
+                            std::memory_order_relaxed)) {
+                        out = c.sig;
+                        c.seq.store(pos + HOST_SIGNAL_QUEUE_CAP,
+                                    std::memory_order_release);
+                        return true;
+                    }
+                } else if (diff < 0) {
+                    return false;
+                } else {
+                    pos = head_.load(std::memory_order_relaxed);
+                }
+            }
+        }
+    private:
+        std::atomic<size_t> head_{0};
+        std::atomic<size_t> tail_{0};
+    };
+    HostSignalQueue host_signal_queue_;
+    static Emulator* g_active_emu_;  // for host signal handler (single active emu)
+    static void host_signal_handler(int signo);
+    void queue_host_signal(int signo);
+    // Internal host signal used ONLY to interrupt a vCPU blocked in a host
+    // syscall (read/nanosleep/poll/wait/…) so it can observe
+    // cpu.running==false and exit at shutdown. It is never forwarded to the
+    // guest (QEMU solves the same problem with its per-vCPU "kick").
+    // SIGPWR is chosen because it is not in the forwarded set; fall back to
+    // the raw number if the header lacks it.
+#ifdef SIGPWR
+    static constexpr int KICK_SIGNAL = SIGPWR;
+#else
+    static constexpr int KICK_SIGNAL = 30;
+#endif
+    static void kick_signal_handler(int signo);
+    // ── frostJIT ──────────────────────────────────────────────────────
+    std::unique_ptr<FrostJIT> jit_;
+    bool jit_enabled_ = false;
+    uint64_t jit_threshold_ = 0;  // 0 = use JIT from start; N = interp for N instructions
+    uint64_t interp_count_  = 0;  // instructions run under interpreter (for threshold)
+    // ── Dynamic linker (for dynamically-linked binaries) ────────────
+    // Owned via unique_ptr so we don't need the full DynamicLinker
+    // definition in this header. Created on first load_elf_file() if
+    // the binary has a PT_INTERP.
+    std::unique_ptr<DynamicLinker> dyn_linker_;
+    // Friend declaration must come AFTER GuestThread is defined.
+    friend void thread_entry(Emulator* emu, GuestThread* gt);
+    // SDL thunk threads (SDL_CreateThread): the entry trampoline that
+    // runs the guest thread function until it returns to the sentinel LR.
+    friend void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st);
+    // ── Syscall layer friends (so handlers can access private state) ──
+    // Each handler lives in Source/System/Syscalls/{fs,mem,threads,time,ioctls}.cpp
+    // and needs to read/write brk_, brk_mu_, phdr_addr_, etc. directly.
+    friend int64_t syscall_fs(Emulator&, CPU&, uint64_t);
+    friend int64_t syscall_mem(Emulator&, CPU&, uint64_t);
+    friend int64_t syscall_threads(Emulator&, CPU&, uint64_t);
+    friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
+    friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
+    friend int64_t syscall_misc(Emulator&, CPU&, uint64_t);
+    // 1.5.4-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
+    // also called from the syscall dispatcher and the JIT trampoline.
+    friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
+    // ── Internal helpers ──────────────────────────────────────────────
+    // Lays out argv then env strings below stack_top (Linux order) and
+    // records the argv block for /proc/self/cmdline; returns the lowest byte.
+    uint64_t place_argument_strings(uint64_t stack_top,
+                                    const std::vector<std::string>& argv,
+                                    const std::vector<std::string>& env,
+                                    std::vector<uint64_t>& argv_addrs,
+                                    std::vector<uint64_t>& envp_addrs);
+    uint64_t build_initial_stack(uint64_t stack_top,
+                                 std::vector<std::string>& argv,
+                                 ElfLoader::Loaded& info);
+    void execute(uint32_t inst, uint64_t& next_pc, CPU& cpu);
+    // ── Interpreter dispatch helpers ───────────────────────────────────
+    // v1.4.5-alpha refactor: the giant switch in execute() was split into
+    // per-category member functions, each handling a group of InstClass
+    // cases. They live in Source/Interpreter/interp_{fp,branch}.cpp and have full
+    // access to Emulator state (mem_, brk_verbose_, syscall(), etc.).
+    // The signature mirrors execute() (inst + next_pc + cpu + d) so the
+    // dispatcher can call them with the same locals it already has.
+    //   execute_fp     — FMOV_VD1, FMOV_RVD1, SIMD_LD1, SIMD_ST1,
+    //                    SIMD_DP, FP_SCALAR  (Source/Interpreter/FloatSIMD/Dispatch.cpp
+    //                    dispatches to interp_simd_*.cpp / FloatScalar.cpp)
+    //   execute_branch — B, BL, Bcond, CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET,
+    //                    SVC_IMM, BRK_IMM, HLT_IMM, CLREX_INST, HINT,
+    //                    MRS_SYS, MSR_SYS    (Source/Interpreter/Core/BranchSystem.cpp)
+    void execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
+    // execute_fp's groups (Source/Interpreter/interp_simd_*.cpp, FloatScalar.cpp).
+    // SIMD_DP groups return true when they handled the instruction and
+    // run in a fixed order because their encodings overlap.
+    bool exec_simd_three(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_misc(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_imm(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_arith(const SimdDpFields& f, CPU& cpu);
+    void exec_fp_scalar(const DecodedInst& d, CPU& cpu);
+    void execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
+    int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
+                      uint64_t entry_pc, uint64_t arg, uint64_t tls);
+    void join_threads();
+    // Join + erase finished guest threads. Snapshots under threads_mu_,
+    // joins OUTSIDE it (a finishing thread takes threads_mu_ on some exit
+    // paths). Safe now that guest threads are shared_ptr-owned: any
+    // in-flight find_cpu_by_tid/invalidate holder pins the object.
+    void reap_finished_threads();
+    // execve: stop + join every guest thread except the caller, mirroring
+    // Linux (other threads die, caller survives as the new main). Each
+    // victim runs the normal thread exit path (robust cleanup, alive
+    // decrement), so no count fixups here. Futex sleepers are woken so
+    // join can't hang on them; threads stuck in uninterruptible host
+    // calls are a best-effort limitation (same as join_threads).
+    void kill_other_threads(CPU& caller);
+    // Wake every futex waiter in every shard (execve kill assist).
+    void wake_all_futexes();
+    // 1.5.4-alpha: stop + join every SDL worker thread. Real Linux
+    // exit_group kills ALL threads; group_exit() stops the guest threads
+    // but not these. SDL threads spawned via
+    // SDL_CreateThread run in REAL host std::threads and may be blocked
+    // in host SDL calls (SDL_SemWait, SDL_Delay) at that point. This
+    // sets each thread's cpu.running=false (so its interpreter loop
+    // exits), wakes blocked host SDL semaphore waits via the thunk, then
+    // joins each host thread. Without this, ~Emulator destroys joinable
+    // std::threads → std::terminate ("terminate called without an active
+    // exception"). Called at the end of run() and again defensively in
+    // ~Emulator (idempotent).
+    void stop_sdl_threads();
+    // 1.5.4-alpha: wire the GraphicThunk's GLFW-callback runner to a
+    // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
+    // d0..=fargs, pc = callback, run step() to the sentinel LR).
+    // Called after the thunk is initialized on both the dynamic-linker
+    // and static-ELF paths.
+    void wire_thunk_glfw_cb_runner_();
+    void wire_thunk_wl_cb_runner_();
+    void wire_thunk_wl_fd_publisher_();
+    void wire_thunk_android_runner_();
+    // AudioThunk engine + borrow-CPU callback runner wiring (1.5.5-alpha).
+    void wire_thunk_audio_runner_();
+    void ensure_thunk_linker_();
+    uint64_t android_on_create_ = 0;
+    static std::string to_hex(uint64_t v) {
+        char b[32]; snprintf(b, sizeof(b), "%llx", static_cast<unsigned long long>(v));
+        return b;
+    }
+};
+// Implemented in Source/System/Core/Threads.cpp — friend of Emulator.
+void thread_entry(Emulator* emu, Emulator::GuestThread* gt);
+} // namespace arm64emu

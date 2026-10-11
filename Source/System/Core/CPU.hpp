@@ -1,0 +1,399 @@
+// core/cpu.h — ARM64 register file + PSTATE + per-vCPU state.
+//
+// A CPU instance represents one virtual CPU (vCPU). The Emulator owns one
+// main_cpu_ plus N cloned vCPUs (one per guest thread spawned via clone()).
+//
+// The CPU owns:
+//   - The 31 general-purpose registers (X0..X30) + SP + PC + PSTATE
+//   - The 32 SIMD/FP registers (V0..V31), stored as low/high 64-bit halves
+//   - Per-vCPU decode cache (2-way set-associative, ~1.5 MiB)
+//   - Per-vCPU page cache (for the Memory hot path)
+//   - Local exclusive monitor state (for LDXR/STXR atomics)
+//   - Thread-local storage pointers (TPIDR_EL0, TPIDRRO_EL0)
+//   - Clear-child-tid pointer (for clone(CLONE_CHILD_CLEARTID) + futex)
+#pragma once
+#include "Bifrost/Types.hpp"
+#include "System/Memory/Memory.hpp"
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <mutex>
+#include <vector>
+namespace arm64emu {
+class Emulator;
+// Saved CPU state for one signal delivery. Signal frames are PER-THREAD
+// (each thread owns its own handler-call stack), so the stack lives in CPU,
+// not in the process-wide SignalTable. The definition lives here rather
+// than signal.h to avoid a CPU.hpp <-> signal.h include cycle.
+struct SignalFrame {
+    uint64_t regs[31];   // X0..X30
+    uint64_t sp;
+    uint64_t pc;
+    uint32_t pstate;
+    int      signo;       // which signal this frame is for
+    uint64_t saved_mask;  // signal mask to restore on rt_sigreturn
+    uint64_t fault_addr;  // si_addr for SIGSEGV/SIGBUS
+    int      si_code;     // si_code for siginfo_t
+    bool     on_altstack; // was the handler entered on the altstack?
+    // FP/SIMD state must survive handler execution: handlers using NEON
+    // (crypto, DSP, image processing) would otherwise see corrupted V regs.
+    uint64_t v_lo[32];    // bits 63:0 of each V register
+    uint64_t v_hi[32];    // bits 127:64 of each V register
+    uint32_t fpcr;
+    uint32_t fpsr;
+    // TLS + exclusive state: a handler calling pthread funcs or LDXR/STXR
+    // would otherwise corrupt TP / succeed a stale reservation across
+    // sigreturn. Real hardware clears exclusives on exception entry and
+    // the kernel restores TP from sigcontext.
+    uint64_t tpidr_el0 = 0;
+    uint64_t tpidrro_el0 = 0;
+};
+class CPU {
+public:
+    // We store 32 entries; regs[31] is always 0 (XZR). This lets us index
+    // safely without special-casing source operands. For destination
+    // operands, callers must still check rd != 31 before storing, OR rely
+    // on the fact that writing 0 to regs[31] is harmless (but it would
+    // corrupt the XZR semantics if we then read it back expecting 0).
+    // We treat writes to regs[31] as no-ops at the call sites.
+    uint64_t regs[32] = {0};
+    uint64_t sp = 0;
+    uint64_t pc = 0;
+    uint32_t pstate = 0;        // NZCV in bits 31:28 (N=31,Z=30,C=29,V=28)
+    bool     running = true;
+    int      exit_code = 0;
+    // SIMD/FP register file. Each Vn is 128 bits (16 bytes). We store as
+    // two 64-bit halves (low and high). FP scalar ops use the low bits.
+    uint64_t v_lo[32] = {0};    // bits 63:0 of each V register
+    uint64_t v_hi[32] = {0};    // bits 127:64 of each V register
+    uint32_t fpcr = 0;
+    uint32_t fpsr = 0;
+    // Thread-local storage pointers. glibc's __libc_setup_tls sets
+    // TPIDR_EL0 via MSR to point to the TCB (Thread Control Block).
+    // All TLS variable access is relative to this register.
+    // TPIDRRO_EL0 is the read-only variant (usually same as TPIDR_EL0
+    // for the main thread).
+    uint64_t tpidr_el0   = 0;
+    uint64_t tpidrro_el0 = 0;
+    // Thread ID (guest TID). Main thread is 1; cloned threads get 2, 3, ...
+    // Forked children (clone without CLONE_VM) get the host PID as their
+    // tid, and is_fork_process is set so getpid() returns the host PID
+    // instead of 1. This lets the child detect it's a forked process
+    // (getpid() != parent_pid) and reset signal handlers accordingly.
+    bool no_new_privs = false;
+    uint64_t timer_slack_ns = 50000;
+    uint64_t timer_slack_default_ns = 50000;
+    int tid = 1;
+    bool is_fork_process = false;  // true for fork() children (no CLONE_VM)
+    // ── Per-CPU decode cache ───────────────────────────────────────
+    // Lives in CPU (not Emulator) so each vCPU has its own cache with
+    // no locking. 2-way set-associative: 8192 sets × 2 ways = 16384
+    // entries (~1.5 MiB per vCPU). This is the hot path — ~100% hit
+    // rate for tight loops.
+    //
+    // upgraded from direct-mapped to 2-way
+    // set-associative to reduce conflict misses.
+    static constexpr size_t DECODE_CACHE_BITS = 13;   // 8192 sets
+    static constexpr size_t DECODE_CACHE_WAYS = 2;
+    static constexpr size_t DECODE_CACHE_SIZE = (1 << DECODE_CACHE_BITS) * DECODE_CACHE_WAYS;
+    static constexpr size_t DECODE_CACHE_SETS = 1 << DECODE_CACHE_BITS;
+    static constexpr size_t DECODE_CACHE_SET_MASK = DECODE_CACHE_SETS - 1;
+    struct CacheEntry {
+        uint64_t    tag = UINT64_MAX;  // PC; UINT64_MAX = empty slot
+        // d.raw is also part of the key: a reused PC may hold new code.
+        DecodedInst d;
+    };
+    std::vector<CacheEntry> decode_cache{DECODE_CACHE_SIZE};
+    uint64_t decode_cache_hits = 0;
+    uint64_t decode_cache_misses = 0;
+    // LRU bit per set: 0 = way 0 most-recently-used, 1 = way 1 MRU.
+    std::vector<uint8_t> decode_cache_lru =
+        std::vector<uint8_t>((DECODE_CACHE_SETS + 7) / 8, 0);
+    // Address set via set_tid_address() — used by futex on child
+    // termination (set_child_tid). When this thread exits, the kernel
+    // writes the TID to *tid_address and performs a futex wake on it.
+    // The exit-time write+wake is implemented in thread_entry.
+    uint64_t set_tid_address_ptr = 0;
+    // ── Robust futex list ───────────────────────────────────────────
+    // set_robust_list(head, len) records the head of a linked list of
+    // robust futexes held by this thread. When the thread exits (or is
+    // killed), the kernel walks the list and unlocks each futex with
+    // FUTEX_OWNER_DIED. This is how pthread_mutex with
+    // PTHREAD_MUTEX_ROBUST behaves when a thread dies holding the lock.
+    //
+    // Each list entry is a struct robust_list_head + per-futex nodes:
+    //   struct robust_list { struct robust_list *next; };
+    //   struct robust_list_head {
+    //       struct robust_list list;
+    //       long futex_offset;
+    //       struct robust_list __user *pending_list;
+    //   };
+    // The futex word is at (node + futex_offset). We walk via `next`
+    // until we hit the head again (circular list) or a limit (to avoid
+    // infinite loops on corrupt lists).
+    uint64_t robust_list_head = 0;   // guest VA of robust_list_head.list
+    uint64_t robust_list_len  = 0;   // len passed to set_robust_list (sanity)
+    // Clear-child-tid pointer set via clone(CLONE_CHILD_CLEARTID, ...).
+    // When this thread exits, the word at this address is zeroed and a
+    // futex wake is performed on it. Required for pthread_join to work.
+    uint64_t clear_child_tid = 0;
+    // ── Per-thread rseq (restartable sequences) state ───────────────
+    // a per-thread rseq area. We model a "proper" single-CPU, non-
+    // preempting rseq: we accept the registration, record the area,
+    // write cpu_id=0 into the guest's rseq area (we're always on CPU 0),
+    // and clear it on unregister / thread exit. We NEVER abort a
+    // critical section (no preemption mid-section, no CPU migration),
+    // so rseq critical sections always run to completion — which is the
+    // correct behavior for a non-preempting single-CPU emulator.
+    //
+    // struct rseq (Linux uapi, AArch64 — 32 bytes):
+    //   +0:  __u32 cpu_id_start   (guest writes; we keep at 0)
+    //   +4:  __u32 cpu_id         (kernel writes; -1 = unregistered)
+    //   +8:  __u64 rseq_cs        (ptr to current critical section)
+    //   +16: __u64 flags          (RSEQ_CS_FLAG_*)
+    //   +24: ... (node_id, mm_cid, etc. in newer kernels)
+    bool     rseq_registered = false;   // is this thread's rseq active?
+    uint64_t rseq_addr       = 0;       // guest VA of the rseq area
+    uint32_t rseq_sig        = 0;       // signature passed at registration
+    // ── Per-CPU signal state ────────────────────────────────────────
+    // The signal mask and altstack live in the CPU so each vCPU has its
+    // own state (set by rt_sigprocmask/sigaltstack, read by
+    // deliver_signal). Bit numbering is 1-based: bit `signo-1` is set
+    // when `signo` is blocked/pending — this matches the Linux kernel
+    // sigset_t layout that rt_sigprocmask/rt_sigpending read/write.
+    std::atomic<uint64_t> sigmask{0}; // read by cross-thread signal senders
+    // Published under the futex slot lock; UINT64_MAX means no active wait.
+    std::atomic<uint64_t> futex_wait_address{UINT64_MAX};
+    // Pending-signal bitmask (bit `signo-1` set = pending). ATOMIC: the
+    // owning thread manipulates it (deliver_signal/deliver_pending_signals/
+    // rt_sigprocmask), but a cross-thread tgkill/tkill/kill queue-overflow
+    // fallback sets a bit too (see Threads.cpp). A plain RMW there raced the
+    // owner's accesses — use fetch_or/fetch_and/load/store.
+    std::atomic<uint64_t> sigpending{0};
+    // Per-thread handler-call stack for signal delivery. Pushed by
+    // deliver_signal, popped by rt_sigreturn. Owned by this CPU (only its
+    // own host thread touches it), so no lock is needed — sharing one
+    // process-wide vector was a data race (concurrent emplace_back +
+    // reallocation dangled the returned SignalFrame& across vCPUs).
+    std::vector<SignalFrame> sig_frames;
+    // sigsuspend(2) temporarily installs a new mask. When a signal is
+    // delivered, Linux restores the PRE-sigsuspend mask before running the
+    // handler, so the handler frame (and rt_sigreturn) must save the
+    // original mask, not the temporary one. These fields bridge the
+    // syscall to deliver_signal.
+    uint64_t sigsuspend_saved_mask = 0;
+    bool     sigsuspend_active = false;
+    // ── Per-CPU pending-signal queue ─────────────────────────────────
+    // to call deliver_signal() directly on the target CPU while the
+    // target's host thread was concurrently executing on it — a textbook
+    // data race (regs/pc/sp/sigmask/sigpending mutated under the target's
+    // feet). Now cross-thread signal delivery pushes (signo, si_code,
+    // fault_addr) onto the target's pending queue under a mutex, and the
+    // target's run loop drains its own queue at the next 4K-instruction
+    // boundary (the existing drain_host_signals() call point). This
+    // matches the kernel's per-task task->pending queue semantics.
+    //
+    // The queue is small (64 entries) — kernel task->pending is also
+    // bounded (default 32, max _NSIG_WORDS*8). If overflow happens we
+    // coalesce by setting the bit in `sigpending` so the signal is at
+    // least not lost (the bit-based pending delivery path still works).
+    struct PendingSig {
+        int      signo;
+        int      si_code;
+        uint64_t fault_addr;
+    };
+    static constexpr size_t PENDING_QUEUE_CAP = 64;
+    std::mutex              pending_mu;
+    PendingSig              pending_queue[PENDING_QUEUE_CAP];
+    std::atomic<size_t>     pending_head{0};  // consumer index
+    std::atomic<size_t>     pending_tail{0};  // producer index
+    // Producer (other thread delivering signal) — returns true if queued,
+    // false if the queue is full (caller should fall back to setting the
+    // bit in sigpending so the signal isn't completely lost).
+    bool push_pending(int signo, int si_code, uint64_t fault_addr) {
+        std::lock_guard<std::mutex> lock(pending_mu);
+        const size_t t = pending_tail.load(std::memory_order_relaxed);
+        const size_t h = pending_head.load(std::memory_order_acquire);
+        const size_t used = t - h;  // wraparound-safe
+        if (used >= PENDING_QUEUE_CAP) return false;
+        pending_queue[t % PENDING_QUEUE_CAP] = PendingSig{signo, si_code, fault_addr};
+        pending_tail.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    // Consumer (this CPU's run loop) — pops one deliverable signal.
+    // A synchronous sigwait consumer may also dequeue blocked members
+    // of its wait set, without making them eligible for handler delivery.
+    bool pop_pending(PendingSig& out, uint64_t wait_set = 0) {
+        std::lock_guard<std::mutex> lock(pending_mu);
+        const size_t h = pending_head.load(std::memory_order_relaxed);
+        const size_t t = pending_tail.load(std::memory_order_acquire);
+        if (h == t) return false;
+        const uint64_t blocked = sigmask.load() & ~wait_set;
+        size_t selected = h;
+        while (selected != t &&
+               (blocked & (1ULL << (pending_queue[selected % PENDING_QUEUE_CAP].signo - 1))))
+            ++selected;
+        if (selected == t) return false;
+        out = pending_queue[selected % PENDING_QUEUE_CAP];
+        // Leave blocked entries pending without hiding later unblocked ones.
+        for (size_t i = selected; i != h; --i)
+            pending_queue[i % PENDING_QUEUE_CAP] = pending_queue[(i - 1) % PENDING_QUEUE_CAP];
+        pending_head.store(h + 1, std::memory_order_release);
+        return true;
+    }
+    bool has_unblocked_pending_signals() {
+        std::lock_guard<std::mutex> lock(pending_mu);
+        const uint64_t mask = sigmask.load();
+        const size_t end = pending_tail.load();
+        for (size_t i = pending_head.load(); i != end; ++i)
+            if (!(mask & (1ULL << (pending_queue[i % PENDING_QUEUE_CAP].signo - 1)))) return true;
+        return (sigpending.load() & ~mask) != 0;
+    }
+    bool has_pending_signals() const {
+        return pending_head.load(std::memory_order_acquire) !=
+               pending_tail.load(std::memory_order_acquire);
+    }
+    // Set when SIGINT was received from the terminal (Ctrl+C) but the
+    // guest has SIGINT set to SIG_IGN. The read() handler checks this
+    // flag and injects a newline byte so the shell prints a new prompt
+    // (mimicking bash/dash behavior). Without this, Ctrl+C at an empty
+    // prompt would do nothing visible — the signal is silently dropped
+    // and the shell stays blocked on read().
+    bool sigint_ignored = false;
+    // ── Last-syscall record (crash attribution) ──────────────────────
+    // Set on every Emulator::syscall and JIT thunk call. Lets the crash
+    // reporter print what the guest last asked the kernel/thunk for.
+    // Not copied across clone (child starts clean — see below).
+    uint64_t last_svc_num = 0;    // syscall number (0x1000 = graphics thunk)
+    uint64_t last_svc_pc = 0;     // guest pc at the call (return addr under JIT)
+    uint64_t last_thunk_sym = 0;  // thunk symbol id (x9) when num == 0x1000
+    bool     has_last_svc = false;
+    struct AltStack {
+        uint64_t sp    = 0;     // base address
+        uint64_t size  = 0;     // size in bytes
+        uint32_t flags = 0;     // SS_ONSTACK / SS_DISABLE
+        static constexpr uint32_t SS_ONSTACK_EMU  = 1;
+        static constexpr uint32_t SS_DISABLE_EMU  = 2;
+        bool active() const { return (flags & SS_ONSTACK_EMU) != 0; }
+        bool disabled() const { return (flags & SS_DISABLE_EMU) != 0 || size == 0; }
+        uint64_t top() const { return sp + size; }
+    } altstack;
+    // ── Local Exclusive Monitor ─────────────────────────────────────
+    // AArch64 LL/SC atomics use an "exclusive monitor" — a single-entry
+    // hardware tag that records the address of the most recent LDXR/LDAXR.
+    // STXR succeeds only if the monitor is still tagged for that address,
+    // and clears the tag. Any other memory access, branch, or exception
+    // also clears the tag.
+    //
+    // Per-thread monitor state (each thread has its own, like real HW).
+    bool     excl_tag_valid = false;
+    uint64_t excl_tag_addr  = 0;
+    uint32_t excl_tag_size  = 0;
+    uint64_t excl_value = 0;
+    void excl_mark(uint64_t addr, uint32_t size, uint64_t value) {
+        excl_tag_valid = true;
+        excl_tag_addr  = addr;
+        excl_tag_size  = size;
+        excl_value = value;
+    }
+    void excl_clear() { excl_tag_valid = false; }
+    bool excl_check(uint64_t addr, uint32_t size) const {
+        if (!excl_tag_valid) return false;
+        return excl_tag_addr == addr && excl_tag_size == size;
+    }
+    // Host-managed return boundary for guest SDL thread functions. Nested
+    // native call dispatch must unwind when a nonlocal jump reaches it.
+    uint64_t jit_stop_pc = 0;
+    // Bound host frames independently of the guest's stack. At the limit,
+    // native callers unwind without resuming their guest continuations;
+    // the outer dispatcher continues at the already committed CPU.pc.
+    static constexpr uint64_t JIT_MAX_CALL_DEPTH = 16;
+    uint64_t jit_call_depth = 0;
+    bool jit_dispatch_requested = false;
+    uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
+    // Host-only Tier-2 observations. Generated hot completions deposit one
+    // credit using a flag-neutral store; cold exits consume it in C++.
+    // Slots are CPU-local. Collisions can only delay retirement, not create
+    // pressure for an unrelated region. Architectural copies exclude these.
+    struct Tier2FeedbackSlot {
+        uint64_t owner = 0;
+        uint32_t pressure = 0, credit = 0;
+        uint64_t baseline_ns = 0, baseline_exit = 0;
+        uint32_t baseline_work = 0, sample_quota = 256;
+        uint64_t baseline_hash = 0;
+    };
+    static constexpr unsigned TIER2_FEEDBACK_SLOTS = 16;
+    Tier2FeedbackSlot jit_tier2_feedback[TIER2_FEEDBACK_SLOTS]{};
+    // CPU-local, host-only state for bounded real-execution A/B trials.
+    void* jit_tier2_trial = nullptr;
+    uint64_t (*jit_tier2_trial_fn)(CPU*, Emulator*) = nullptr;
+    uint64_t (*jit_tier2_trial_chain_fn)(CPU*, Emulator*) = nullptr;
+    uint32_t jit_tier2_trial_remaining = 0;
+    uint32_t jit_tier2_trial_work = 0;
+    uint64_t jit_tier2_trial_hash = 0;
+
+    // ── PSTATE flag accessors ────────────────────────────────────────
+    void set_flag_n(bool v) { if (v) pstate |= (1u<<31); else pstate &= ~(1u<<31); }
+    void set_flag_z(bool v) { if (v) pstate |= (1u<<30); else pstate &= ~(1u<<30); }
+    void set_flag_c(bool v) { if (v) pstate |= (1u<<29); else pstate &= ~(1u<<29); }
+    void set_flag_v(bool v) { if (v) pstate |= (1u<<28); else pstate &= ~(1u<<28); }
+    bool flag_n() const { return pstate & (1u<<31); }
+    bool flag_z() const { return pstate & (1u<<30); }
+    bool flag_c() const { return pstate & (1u<<29); }
+    bool flag_v() const { return pstate & (1u<<28); }
+    // Read a register operand; XZR (31) reads as 0.
+    uint64_t r(int r) const { return regs[r & 31]; }
+    // Write a register operand; writes to XZR (31) are discarded.
+    void w(int r, uint64_t v) { if (r != 31) regs[r] = v; }
+    // ── Architectural-state copy ─────────────────────────────────────
+    // signal queue has mutex + atomic members. clone() and the ifunc
+    // resolver need to copy/restore the architectural state (everything
+    // except the pending queue, which is per-thread and shouldn't be
+    // inherited anyway). copy_arch_state_from() copies all architectural
+    // fields; the caller is responsible for resetting the pending queue
+    // and exclusive monitor as needed (see Threads.cpp spawn_thread).
+    void copy_arch_state_from(const CPU& src) {
+        std::memcpy(regs, src.regs, sizeof(regs));
+        sp = src.sp;
+        pc = src.pc;
+        pstate = src.pstate;
+        running = src.running;
+        exit_code = src.exit_code;
+        std::memcpy(v_lo, src.v_lo, sizeof(v_lo));
+        std::memcpy(v_hi, src.v_hi, sizeof(v_hi));
+        fpcr = src.fpcr;
+        fpsr = src.fpsr;
+        tpidr_el0 = src.tpidr_el0;
+        tpidrro_el0 = src.tpidrro_el0;
+        tid = src.tid;
+        no_new_privs = src.no_new_privs;
+        timer_slack_ns = src.timer_slack_ns;
+        timer_slack_default_ns = src.timer_slack_ns;
+        is_fork_process = src.is_fork_process;
+        // decode_cache: NOT copied (per-thread, fresh in child)
+        set_tid_address_ptr = 0;   // child starts with no clear_child_tid
+        robust_list_head = 0;
+        robust_list_len = 0;
+        // rseq: child starts UNregistered (Linux semantics — rseq is
+        // per-task, not inherited across clone). start_thread will
+        // re-register via rseq(2).
+        rseq_registered = false;
+        rseq_addr = 0;
+        rseq_sig = 0;
+        sigmask = src.sigmask.load();
+        // A cloned thread does not inherit an in-progress sigsuspend.
+        sigsuspend_saved_mask = 0;
+        sigsuspend_active = false;
+        // last-svc record: child starts clean (no syscalls yet).
+        last_svc_num = 0;
+        last_svc_pc = 0;
+        last_thunk_sym = 0;
+        has_last_svc = false;
+        // sigpending, altstack: reset by caller (per Linux semantics)
+        // pending queue: untouched (each CPU has its own, empty at init)
+        excl_tag_valid = false;    // fresh exclusive monitor
+        excl_tag_addr = 0;
+        excl_tag_size = 0;
+    }
+};
+} // namespace arm64emu
