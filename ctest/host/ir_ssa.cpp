@@ -152,6 +152,44 @@ int main() {
         State s{}; s[0] = n + 0x2222; s[32] = n * 0x123456789ULL;
         check(execute({{before, {}}}, s) == execute({{straight, {}}}, s), "SSA scalar adapter execution");
     }
+    // Constants stay single-use for the backend's immediate folding; inputs
+    // load at their first use, but never after a store to their own slot.
+    IRBlock sunk;
+    sunk.insts = {IRInst::make_load_reg(33, 5, false), IRInst::make_imm(34, 7),
+        IRInst::make_store_reg(5, 34, false), IRInst::make_load_reg(35, 6, false),
+        IRInst::make_imm(36, 7), IRInst::make(IROp::ADD, 37, 35, 36),
+        IRInst::make_store_reg(7, 37, false), IRInst::make(IROp::ADD, 38, 33, 34),
+        IRInst::make_store_reg(8, 38, false)};
+    IRBlock sunk_before = sunk;
+    check(optimize_ir_ssa(sunk, true), "input sinking adapter");
+    int imms = 0, load5 = -1, load6 = -1, store5 = -1, first_imm = -1;
+    for (size_t k = 0; k < sunk.insts.size(); ++k) {
+        const auto& i = sunk.insts[k];
+        if (i.op == IROp::IMM) { ++imms; if (first_imm < 0) first_imm = static_cast<int>(k); }
+        if (i.op == IROp::LOAD_REG && i.src1 == 5) load5 = static_cast<int>(k);
+        if (i.op == IROp::LOAD_REG && i.src1 == 6) load6 = static_cast<int>(k);
+        if (i.op == IROp::STORE_REG && i.dest == 5) store5 = static_cast<int>(k);
+    }
+    // IMM 7 reaches the second ADD both directly and through x5's store.
+    check(imms == 3, "constants are not value-numbered; shared src2 is rematerialized");
+    bool folded = false;
+    for (size_t k = 1; k < sunk.insts.size(); ++k) {
+        const auto& i = sunk.insts[k];
+        const auto& p = sunk.insts[k - 1];
+        folded |= i.op == IROp::ADD && p.op == IROp::IMM && p.dest == i.src2 && p.imm_value() == 7;
+    }
+    check(folded, "shared constant copy precedes its folding consumer");
+    bool adjacent = false;
+    for (size_t k = 1; load6 >= 0 && k < sunk.insts.size(); ++k)
+        adjacent |= sunk.insts[k].op == IROp::ADD && sunk.insts[k].src1 == sunk.insts[load6].dest &&
+                    sunk.insts[k - 1].op == IROp::IMM && sunk.insts[k - 1].dest == sunk.insts[k].src2;
+    check(adjacent, "sunk input load keeps IMM -> consumer adjacency");
+    check(load5 >= 0 && store5 >= 0 && load5 < store5, "input load stays before its slot's store");
+    check(load6 > first_imm, "input load sinks to its first use");
+    for (uint64_t n = 0; n < 256; ++n) {
+        State s{}; s[5] = n * 3 + 1; s[6] = n << 20;
+        check(execute({{sunk_before, {}}}, s) == execute({{sunk, {}}}, s), "sunk input execution");
+    }
     auto invalid = before;
     invalid.insts[0] = IRInst::make(IROp::MOV, 33, 200);
     SSAFunction sentinel;

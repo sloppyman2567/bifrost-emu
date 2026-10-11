@@ -244,6 +244,8 @@ at the instruction cap or the shared IR/vreg complexity budget. Long blocks
 are no longer automatically demoted solely for exceeding 32 instructions;
 actual interpreter-fallback density still controls demotion. Larger limits
 are diagnostic options, not a verified performance default for every game.
+The Tier-2 discovery, feedback and measure scripts unset the variable: their
+expected region shapes assume the default cap.
 `jit_bitfield_regalloc` covers immediate multiplier signs/widths, aliases and
 a long body with fifteen live GPRs.
 
@@ -262,6 +264,15 @@ consistent CFG edges, use dominance, same-block definition order, and phi uses
 on predecessor edges. Construction and lowering validate transactionally:
 failure retains the original IR. Value numbering uses dominator-scoped
 availability, so sibling-branch expressions cannot supply each other's values.
+Constants are not value-numbered: the backend folds an IMM into its single,
+immediately following consumer as an x86 immediate, and a shared constant
+register defeats that. Lowering also rematerializes a constant reached by more
+than one use (for example through a STORE_REG/LOAD_REG pair) right before each
+consumer that can fold it as src2, using the backend's fold rules (any shift
+count; ALU constants that sign-extend from 32 bits). Tier-1 input loads are
+placed at their first use in the entry block, never after a store to their own
+slot and never between an IMM and its consumer; hoisting every input to the
+block start held all live-ins at once against ten host registers.
 Def-use traversal removes dead pure computations. Memory accesses, flags,
 system-register operations, barriers, and guest-state stores retain order;
 loads from guest memory are never commoned or speculated by SSA. Flag consumers
@@ -331,7 +342,11 @@ exceeded ten seconds and passed the seed, list, matrix, state and final CRC
 checks. That comparison predates SSA and does not measure its benefit.
 A separate same-binary Tier-1 SSA on/off comparison measured medians of
 4,360.15 and 4,382.44 iterations/s respectively (about 0.5% lower with SSA).
-Treat SSA's result as approximately neutral here. Neither comparison
+Treat SSA's result as approximately neutral here. Unshared constants and
+first-use input placement then turned SSA's CoreMark code-size change from
++207 bytes (243 blocks larger, 213 smaller) into -3,155 bytes (20 larger,
+211 smaller), but medians stayed at 4,377.01 (SSA) and 4,397.22 (legacy)
+iterations/s: code size was not the cause of the remaining difference. Neither comparison
 remeasures the emulator's percentage of native CPU performance or establishes
 a Tier-2 SSA speedup.
 

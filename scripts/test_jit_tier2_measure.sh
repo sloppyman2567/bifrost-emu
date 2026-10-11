@@ -15,7 +15,7 @@ for mode in single mt; do
     for chain in ordinary skip; do
         settings=()
         [[ $chain != skip ]] || settings=(BIFROST_CHAIN_SKIP=1)
-        env -u BIFROST_ROOT -u BIFROST_CHAIN_SKIP -u BIFROST_NO_CHAIN \
+        env -u BIFROST_ROOT -u BIFROST_CHAIN_SKIP -u BIFROST_NO_CHAIN -u BIFROST_JIT_BLOCK_LIMIT \
             BIFROST_TIER2=1 BIFROST_TIER2_HITS=32 BIFROST_IR_VALIDATE=1 \
             BIFROST_REGALLOC_CHECK=1 "${settings[@]}" timeout -s KILL 30 "$task_tmp/test" "${args[@]}"
     done

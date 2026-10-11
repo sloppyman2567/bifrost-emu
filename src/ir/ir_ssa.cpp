@@ -164,10 +164,11 @@ private:
 
 // Only operations without implicit state inputs may be value-numbered. Typed
 // readers form semantic keys; arm_pc and original destination are not values.
+// IMM is excluded: the backend folds a constant into its single following
+// consumer as an x86 immediate, which a shared constant register defeats.
 bool cse_parameter(const IRInst& i, uint64_t& parameter) {
     parameter = 0;
     switch (i.op) {
-        case IROp::IMM: parameter = i.imm_value(); return true;
         case IROp::MOV: case IROp::ADD: case IROp::SUB: case IROp::MUL:
         case IROp::AND: case IROp::OR: case IROp::XOR:
         case IROp::NOT: case IROp::NEG: case IROp::SMULH: case IROp::UMULH:
@@ -389,11 +390,60 @@ bool lower_ssa(const SSAFunction& f, std::vector<SSASourceBlock>& result,
         for (const auto& block : f.blocks) for (const auto& node : block.instructions)
             for (unsigned k = 0; k < 3; ++k) if (node.input_mask & (1u << k))
                 body_inputs.insert(node.inputs[k]);
+    // A shared constant (e.g. forwarded through a STORE_REG/LOAD_REG pair)
+    // is rematerialized right before each consumer that can fold it as src2,
+    // under the backend's own fold rules, so its immediate form survives.
+    std::unordered_map<SSAValue, uint64_t> constants;
+    std::unordered_map<SSAValue, unsigned> constant_uses;
+    for (const auto& block : f.blocks)
+        for (const auto& node : block.instructions)
+            if (node.ir.op == IROp::IMM && node.result) constants[node.result] = node.ir.imm_value();
+    for (const auto& block : f.blocks) {
+        for (const auto& phi : block.phis)
+            for (auto edge : phi.incoming) if (constants.count(edge.second)) ++constant_uses[edge.second];
+        for (const auto& node : block.instructions)
+            for (unsigned k = 0; k < 3; ++k)
+                if ((node.input_mask & (1u << k)) && constants.count(node.inputs[k]))
+                    ++constant_uses[node.inputs[k]];
+    }
+    auto rematerialize = [&](const SSAInstruction& node) -> bool {
+        if (!(node.input_mask & 2) || node.inputs[0] == node.inputs[1]) return false;
+        auto c = constants.find(node.inputs[1]);
+        if (c == constants.end() || constant_uses[c->first] < 2) return false;
+        switch (node.ir.op) {
+            case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR: return true;
+            case IROp::ADD: case IROp::SUB: case IROp::AND:
+            case IROp::OR:  case IROp::XOR: case IROp::MUL: {
+                const int64_t v = static_cast<int64_t>(c->second);
+                return static_cast<int64_t>(static_cast<int32_t>(v)) == v;
+            }
+            default: return false;
+        }
+    };
+    // Read each input just before its first use in the entry block, keeping
+    // short live ranges for the backend's ten host registers. A load never
+    // moves past a store to its own slot. Inputs used only by later blocks
+    // or phi edges stay at the entry's start.
+    const auto& entry = f.blocks[0].instructions;
+    std::vector<std::vector<IRInst>> input_loads(entry.size() + 1);
     for (auto input : f.inputs) {
         if (phis == SSAPhiLowering::ArchitecturalState && !body_inputs.count(input.first)) continue;
         bool fp = input.second >= SSA_FP;
         auto slot = static_cast<uint16_t>(input.second - (fp ? SSA_FP : SSA_GPR));
-        out[0].ir.insts.push_back(IRInst::make_load_reg(home(input.first), slot, fp));
+        size_t at = 0;
+        bool used = false;
+        for (size_t j = 0; j < entry.size() && !used; ++j) {
+            const auto& node = entry[j];
+            for (unsigned k = 0; k < 3; ++k)
+                used |= (node.input_mask & (1u << k)) && node.inputs[k] == input.first;
+            used |= node.ir.op == IROp::STORE_REG &&
+                (node.ir.is_fp_store() ? SSA_FP : SSA_GPR) + node.ir.dest == input.second;
+            if (used) at = j;
+        }
+        // Keep IMM -> consumer adjacency: the backend skips a constant's
+        // mov only when its single consumer immediately follows it.
+        while (at > 0 && entry[at - 1].ir.op == IROp::IMM) --at;
+        input_loads[at].push_back(IRInst::make_load_reg(home(input.first), slot, fp));
     }
     for (size_t b = 0; b < f.blocks.size(); ++b) {
         out[b].successors = f.blocks[b].successors;
@@ -404,14 +454,26 @@ bool lower_ssa(const SSAFunction& f, std::vector<SSASourceBlock>& result,
             auto slot = static_cast<uint16_t>(phi.variable - (fp ? SSA_FP : SSA_GPR));
             out[b].ir.insts.push_back(IRInst::make_load_reg(home(phi.result), slot, fp));
         }
-        for (const auto& node : f.blocks[b].instructions) {
+        for (size_t j = 0; j < f.blocks[b].instructions.size(); ++j) {
+            if (b == 0)
+                out[0].ir.insts.insert(out[0].ir.insts.end(),
+                                       input_loads[j].begin(), input_loads[j].end());
+            const auto& node = f.blocks[b].instructions[j];
             IRInst i = node.ir;
             if (node.result) i.dest = home(node.result);
             if (node.input_mask & 1) i.src1 = home(node.inputs[0]);
             if (node.input_mask & 2) i.src2 = home(node.inputs[1]);
+            if (rematerialize(node)) {
+                if (next >= 4096) return fail(error, "SSA lowering exceeds vreg budget");
+                i.src2 = static_cast<uint16_t>(next++);
+                out[b].ir.insts.push_back(IRInst::make_imm(i.src2, constants[node.inputs[1]]));
+            }
             if (node.input_mask & 4) i.aux = home(node.inputs[2]);
             out[b].ir.insts.push_back(i);
         }
+        if (b == 0) // empty entry (Tier-2 preheader): every input loads here
+            out[0].ir.insts.insert(out[0].ir.insts.end(),
+                                   input_loads[entry.size()].begin(), input_loads[entry.size()].end());
     }
     if (phis == SSAPhiLowering::EdgeCopies) for (size_t b = 0; b < f.blocks.size(); ++b) {
         for (size_t e = 0; e < f.blocks[b].successors.size(); ++e) {
@@ -458,7 +520,7 @@ bool optimize_ir_ssa(IRBlock& block, bool check) {
     optimize_ssa(f);
     std::vector<SSASourceBlock> lowered;
     if (!lower_ssa(f, lowered, &error)) {
-        fprintf(stderr, "[SSA] lower @0x%llx: %s\n", (unsigned long long)block.start_pc, error.c_str());
+        if (check) fprintf(stderr, "[SSA] lower @0x%llx: %s\n", (unsigned long long)block.start_pc, error.c_str());
         return false;
     }
     block.insts = std::move(lowered[0].ir.insts);
