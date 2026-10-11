@@ -365,6 +365,41 @@ intermittent freezes. The freezes remain unresolved: no failing PC, wait state
 or controlled SSA on/off reproduction has been captured. See
 [the Doom 3 status](doom3.md). Do not describe this checkpoint as a freeze fix.
 
+## Native-code reduction checkpoint (2026-10-11, later)
+
+CoreMark was 100% generated code under `BIFROST_PROF=1` (no dispatch,
+translation or interpreter samples), so this pass removed host instructions
+from hot blocks rather than dispatcher work. A four-instruction list-walk
+block had been about 70 host instructions on its fast path.
+
+- **Flag commit:** `emit_materialize_flags` is `lahf; seto al; and eax,
+  0xC101; imul edx, eax, (1<<16)|(1<<21)|(1<<28); and edx, 0xF0000000`,
+  plus one XOR for SUB's inverted C and the from_sub bit. Each of NZCV
+  receives exactly one shifted copy and no lower copy can carry into
+  them. RAX is saved around it; no PUSHFQ.
+- **Flag load:** `emit_load_flags_from_pstate` builds the SAHF image, sets
+  OF with `add al, 0x7F` (AL = V) and returns SUB convention directly,
+  replacing its POPFQ and the separate CF-normalize helper (another
+  PUSHFQ/POPFQ pair).
+- **Guard flag:** the sticky software-check flag lives at
+  `window_base - 8` in a readable header page before the guest
+  reservation, so every native load/store tests it with one
+  `cmp byte [r10-8], 0` instead of `movabs`, `movzx` and `test`.
+- **Chain-skip by default:** chain edges skip the frame teardown and
+  prologue. Enabling it exposed a latent bug in both layouts: a mid-block
+  CALL_INTERP whose step changed the PC (SIGILL delivery) left through the
+  chain slot, which ran the static successor instead of the handler. That
+  exit now returns to the dispatcher (`jit_interp_exit`).
+
+Same-binary CoreMark (auto-calibrated, it/s): 4,365 before; ~4,400 with the
+guard flag; ~5,080 after the flag commit; ~5,420 after the flag load;
+~7,400–7,550 with chain-skip on. QEMU 11.1 TCG measured 7,699 on the same
+binary. The benchmark runner's fixed-iteration run (110,000) takes ~15.2 s.
+The `bench_*` microbenchmarks moved within run-to-run noise except `sort`
+(~8% faster) and `memcpy` (~0.78 s → ~0.59 s). The full suite (311),
+`--no-chain-skip` and `--no-jit` quick suites, `make verify` and the Tier-2/MT
+scripts pass. Games were not run in this pass, so application FPS is unmeasured.
+
 ## Adding or changing an instruction
 
 1. Check that `decode()` classifies the encoding correctly and extracts every
@@ -635,7 +670,8 @@ Ordinary scalar loads/stores, single 16-byte vector accesses and native LSE
 atomics use host page protection instead of consulting two guest page flags on
 every access. The reservation bounds check remains: adding an arbitrary guest
 address to a host base must never wrap into unrelated host storage. A single
-sticky `Memory::jit_software_checks_` byte selects the software permission path
+sticky `Memory::jit_software_checks_` byte (at `window_base - 8`, tested as
+`cmp byte [r10-8], 0`) selects the software permission path
 after userfaultfd tracking starts or a W/X-only guest mapping is created. x86
 cannot represent those guest read restrictions, and the emulated userfaultfd
 missing bits do not change host page protection. Already compiled code observes
@@ -1071,8 +1107,9 @@ short-lived execution cost and retained private code; validate application
 benchmarks as well as local trial decisions. Codegen/retirement oracles select candidates
 deterministically through a test friend; the separate timing oracle uses real
 controlled CPU work to verify both acceptance and rejection, without fake
-clock values. CoreMark comparisons use a fixed 60,000 iterations and labelled
-CRC/validation checks; 40,000 iterations can now finish below CoreMark's
+clock values. CoreMark comparisons use a fixed 110,000 iterations
+(`scripts/run_benchmarks.py`, crcfinal 0x33ff, checked against QEMU) and
+labelled CRC/validation checks; 60,000 iterations now finish below CoreMark's
 ten-second minimum. Auto-calibrated iteration counts cannot be compared by
 wall time. Counters expose measured pairs, keeps and rejections.
 

@@ -743,8 +743,9 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `BIFROST_JIT_VERIFY`. Do NOT remove the taken-path slot or restrict it
   to BRCOND — CBZ/CBNZ/TBZ/TBNZ while-loop edges (GCC vectorized
   memchr/strchr, pointer loops) rely on it.
-- Chain-skip (`BIFROST_CHAIN_SKIP=1`, DEFAULT OFF — `--chain-skip` in
-  run_tests.sh): a second block entry `BlockEntry.chain_entry` recorded in
+- Chain-skip (DEFAULT ON since 2026-10-11; `BIFROST_NO_CHAIN_SKIP=1` /
+  `run_tests.sh --no-chain-skip` select the ordinary frame layout for
+  bisection): a second block entry `BlockEntry.chain_entry` recorded in
   `jit_translate.cpp` right after the prologue's `mov rbx,rdi`/emu-slot
   store (BEFORE the R10 window load and vec prologue loads). Chain slots
   patch to
@@ -788,8 +789,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   frame. Measured on
   multi-block workloads: bench_fib +18.8% (0.653→0.530s), bench_sort +16.6%
   (0.699→0.583s), bench_matrix +1.2%; bench_mips NEUTRAL (single self-loop
-  block — the selfloop slot already skips all this overhead). Leave the env
-  default OFF (opt-in) until the game confirms a win.
+  block — the selfloop slot already skips all this overhead). With the
+  LAHF/SAHF flag helpers it took CoreMark from ~5,420 to ~7,400 it/s, so it
+  is the default. Chain-skip still disables native BL_CALL
+  (`bl_call_disabled_`): BL ends the block and chains to the callee.
+  A CALL_INTERP whose interpreter step changes the PC (signal delivery)
+  must leave through the separate dynamic exit (store PC, cold teardown,
+  `ret`), never through the chain slot: a patched slot (or MT target cell)
+  jumps to the STATIC successor and drops the new PC. Regression:
+  `ctest/jit_interp_exit.c` (hung in both layouts before).
 - BL_CALL's sibling BLR_CALL (`IROp::BLR_CALL`, the indirect/function-pointer
   form) is native too: `blr rn` emits it (ir_translate.cpp) whenever
   `!bl_call_disabled_`, codegen mirrors BL_CALL but loads the target from
@@ -895,14 +903,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   JIT_VERIFY/JIT_VERIFY_MEM/FWD.
 - **Flag-helper scratch contract (2026-08-21, csel-cmov-repair):**
   `emit_load_flags_from_pstate` (x86_backend.cpp) clobbers ONLY
-  RAX/RCX/RDX (+RFLAGS) — the C^from_sub extraction is computed in RDX
-  alone via `X = pstate ^ (pstate << 2)` then `>>29 &1` (a LEFT shift:
-  `(pstate << 2)`'s bit 29 is pstate's bit 27 = from_sub; a right shift
-  would XOR C with N instead and silently corrupt every carry-reading
-  condition — CS/CC/HI/LS — after a pstate load; PL/LE/GT-style tests
-  still pass, so only carry-condition tests catch it). Do NOT add another
-  scratch register to this helper or to `emit_normalize_cf_to_sub_
-  convention` / `emit_materialize_flags`: every other allocatable reg
+  RAX/RCX/RDX (+RFLAGS) and always produces SUB convention (x86 CF =
+  NOT ARM C; the former separate CF-normalize step is folded in): AH image
+  via SAHF, OF via `add al,0x7F` with AL = V, no POPFQ.
+  `emit_materialize_flags` is LAHF + SETO + one IMUL that scatters
+  SF/ZF/CF/OF into bits 31..28 (no PUSHFQ); it clobbers RDX and saves RAX
+  (epilogues commit flags after RAX holds the next PC — clobbering it sent
+  the host to `0x100`). LAHF/SAHF in 64-bit mode are not CPUID-gated
+  (absent only on the first Athlon 64 / Pentium 4 steppings). Do NOT add
+  another scratch register to these helpers: every other allocatable reg
   (R8/R9/R11/R12+) may hold a live vreg at the call site. The historical
   bug: the loader used R8 for the from_sub extraction while the CSEL/
   CCMP/BRCOND_SKIP/ADCS-SBCS callers flush ONLY FLAGS3 (BRCOND, tier2
@@ -1456,8 +1465,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **304 pass /
-  0 fail / 0 skip**; `--no-jit` = 296 pass + 8 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **311 pass /
+  0 fail / 0 skip**; `--no-jit --quick` = 298 pass + 8 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1467,8 +1476,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **304 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 299),
+  (interactive + real-world are the standard default) = **311 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 306),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

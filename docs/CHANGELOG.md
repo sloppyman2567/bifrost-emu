@@ -12,6 +12,21 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### JIT native-code reduction (2026-10-11)
+
+- Chain-skip is the default frame layout (`BIFROST_NO_CHAIN_SKIP=1` opts out;
+  `run_tests.sh --no-chain-skip`). CoreMark: 4,365 → ~7,400 it/s with the
+  changes below (QEMU 11.1 TCG: 7,699).
+- NZCV commit uses LAHF/SETO/IMUL and the pstate→flags load uses SAHF; both
+  drop PUSHFQ/POPFQ, and the separate CF-normalize helper is folded in.
+- The sticky software-guard flag moved to a header page below the guest
+  window, tested with one `cmp byte [r10-8], 0` per native access.
+- Fixed: a mid-block interpreter fallback that delivered a signal left
+  through the chain slot and ran the static successor instead of the
+  handler (both layouts). Regression: `ctest/jit_interp_exit.c`.
+- `run_benchmarks.py` runs CoreMark at 110,000 iterations; 60,000 now
+  finish under CoreMark's ten-second minimum.
+
 ### Installed managed Activity creation (2026-10-07)
 
 - The existing Activity probe now loads installed managed APKs through the real

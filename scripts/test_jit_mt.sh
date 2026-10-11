@@ -10,16 +10,16 @@ fixture="$repo/ctest/jit_mt_tier2.elf"
 }
 logs=$(mktemp -d)
 trap 'rm -rf -- "$logs"' EXIT
-for mode in default tier2 no-tier2 no-chain chain-skip; do
+for mode in default tier2 no-tier2 no-chain no-chain-skip; do
     args=()
     case $mode in
         tier2) args=(BIFROST_TIER2=1);;
         no-tier2) args=(BIFROST_TIER2=0);;
         no-chain) args=(BIFROST_TIER2=1 BIFROST_NO_CHAIN=1);;
-        chain-skip) args=(BIFROST_TIER2=1 BIFROST_CHAIN_SKIP=1);;
+        no-chain-skip) args=(BIFROST_TIER2=1 BIFROST_NO_CHAIN_SKIP=1);;
     esac
     env -u BIFROST_ROOT -u BIFROST_JIT_VERIFY -u BIFROST_NO_CHAIN \
-        -u BIFROST_TIER2 -u BIFROST_CHAIN_SKIP \
+        -u BIFROST_TIER2 -u BIFROST_CHAIN_SKIP -u BIFROST_NO_CHAIN_SKIP \
         BIFROST_IR_VALIDATE=1 BIFROST_TIER2_HITS=32 "${args[@]}" \
         timeout -s KILL 45 "$emu" --verbose "$fixture" > "$logs/$mode" 2>&1
     python3 - "$logs/$mode" "$mode" <<'PY'

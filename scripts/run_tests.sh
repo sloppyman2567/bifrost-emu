@@ -15,7 +15,7 @@
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
 #   ./scripts/run_tests.sh --fwd        # run with BIFROST_ENABLE_FWD=1
-#   ./scripts/run_tests.sh --chain-skip # run with BIFROST_CHAIN_SKIP=1
+#   ./scripts/run_tests.sh --no-chain-skip # run with BIFROST_NO_CHAIN_SKIP=1
 #   ./scripts/run_tests.sh --verbose    # show full output of each test
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --filter 'sig|brk' # filter without downloading fixtures
@@ -98,7 +98,7 @@ while [ $# -gt 0 ]; do
         --bench)        RUN_BENCH=1; RUN_ALL=0 ;;
         --no-jit)       EMU_FLAGS+=(--no-jit) ;;
         --fwd)          RUN_ENV+=(BIFROST_ENABLE_FWD=1) ;;
-        --chain-skip)   RUN_ENV+=(BIFROST_CHAIN_SKIP=1) ;;
+        --no-chain-skip) RUN_ENV+=(BIFROST_NO_CHAIN_SKIP=1) ;;
         --verbose|-v)   VERBOSE=1 ;;
         --quick)        QUICK=1 ;;
         --strict)       STRICT=1 ;;
@@ -458,6 +458,7 @@ UNIT_TESTS=(
     "test_shared_alias|ctest/test_shared_alias.elf||30|checks passed"
     "jit_call_exit|ctest/jit_call_exit.elf||10|checks passed"
     "jit_blr_lr|ctest/jit_blr_lr.elf||10|checks passed"
+    "jit_interp_exit|ctest/jit_interp_exit.elf||10|2001/2001 checks passed"
     "jit_flags_passthrough|ctest/jit_flags_passthrough.elf||10|checks passed"
     "socket_msg_layout|ctest/socket_msg_layout.elf||10|checks passed"
     "android_syscall_options|ctest/android_syscall_options.elf||10|checks passed"

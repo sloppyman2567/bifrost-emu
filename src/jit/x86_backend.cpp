@@ -20,6 +20,7 @@
 // they are pure code generators that take x86 register numbers and
 // offsets. The regalloc and IR compiler layer on top.
 #include "jit/frostjit.hpp"
+#include "core/memory.h"
 #include "arm64_emu.hpp"  // Emulator complete type (for slow-path helpers)
 #include <algorithm>
 #include <cstdint>
@@ -176,6 +177,15 @@ void FrostJIT::emit_load8(int dst, int base, int32_t off) {
     emit_byte(rex(false,dst>=8,false,base>=8));
     emit_byte(0x0F); emit_byte(0xB6);
     emit_modrm_disp(dst, base, off);
+}
+// cmp byte [WIN_REG + JIT_SOFTWARE_CHECKS_OFF], 0 — the sticky software
+// guard flag lives in the header page just below the guest window base.
+// Only flags change; valid wherever WIN_REG holds the window base.
+void FrostJIT::emit_test_software_checks() {
+    emit_byte(rex(false, false, false, WIN_REG >= 8));
+    emit_byte(0x80);
+    emit_modrm_disp(7, WIN_REG, Memory::JIT_SOFTWARE_CHECKS_OFF);
+    emit_byte(0);
 }
 void FrostJIT::emit_load32_sx(int dst, int base, int32_t off) {
     emit_byte(rex(true,dst>=8,false,base>=8));
@@ -391,112 +401,63 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
 // pstate layout: N=bit31, Z=bit30, C=bit29, V=bit28, from_sub=bit27.
 // This is compatible with the interpreter's pstate format (it ignores
 // bit 27).
+//
+// Scratch: clobbers RDX only. RAX is saved: epilogues with
+// rax_holds_next_pc_ commit flags after RAX already holds the next PC.
+//   lahf; seto al        eax: SF=15 ZF=14 CF=8 OF=0 (AF/PF/bit 9 masked)
+//   and  eax, 0xC101
+//   imul edx, eax, (1<<16)|(1<<21)|(1<<28)
+// The product sums three shifted copies: SF→31, ZF→30 (<<16), CF→29
+// (<<21), OF→28 (<<28). Each of bits 28..31 receives exactly one copy and
+// the lower copies (bits 16, 21, 24) are distinct, so no carry reaches
+// them. SUB then inverts C and sets from_sub with one XOR.
+// LAHF/SAHF in 64-bit mode (CPUID LAHF-SAHF) exists on every x86-64 CPU
+// except the first Athlon 64 / Pentium 4 steppings; it is not gated.
 void FrostJIT::emit_materialize_flags(bool from_sub) {
     emit_push(RAX);
-    emit_pushfq();
-    emit_byte(0x58);  // pop rax
-    // SF/ZF are adjacent in both layouts. Move them together instead of
-    // extracting and shifting each bit separately. 32-bit AND clears the
-    // upper half before the 64-bit shift.
-    emit_mov_reg(RCX, RAX);
-    emit_byte(0x81); emit_byte(0xE1); emit_u32(0xC0); // and ecx, SF|ZF
-    emit_shift_imm8(RCX, 4, 24);
-    // C = ARM C. For ADD: ARM C = x86 CF. For SUB: ARM C = NOT x86 CF.
-    emit_mov_reg(RDX, RAX);
-    emit_byte(0x83); emit_byte(0xE2); emit_byte(0x01); // and edx, 1 (x86 CF)
+    emit_byte(0x9F);                                    // lahf
+    emit_byte(0x0F); emit_byte(0x90); emit_byte(0xC0);  // seto al
+    emit_byte(0x25); emit_u32(0xC101);                  // and eax, SF|ZF|CF|OF
+    emit_byte(0x69); emit_byte(0xD0);                   // imul edx, eax, imm32
+    emit_u32((1u << 16) | (1u << 21) | (1u << 28));
+    emit_byte(0x81); emit_byte(0xE2); emit_u32(0xF0000000u); // and edx, NZCV
     if (from_sub) {
-        emit_byte(0x83); emit_byte(0xF2); emit_byte(0x01); // xor edx, 1 (invert)
-    }
-    emit_shift_imm8(RDX, 4, 29);
-    emit_or_reg(RDX, RCX);
-    // V = OF = (RAX >> 11) & 1, placed at bit 28
-    emit_mov_reg(RCX, RAX);
-    emit_shift_imm8(RCX, 5, 11);
-    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);
-    emit_shift_imm8(RCX, 4, 28);
-    emit_or_reg(RDX, RCX);
-    // Store from_sub flag in bit 27.
-    if (from_sub) {
-        emit_byte(0x81); emit_byte(0xCA); emit_u32(0x08000000); // or edx, 1<<27
+        emit_byte(0x81); emit_byte(0xF2); emit_u32(0x28000000u); // xor edx, C|from_sub
     }
     emit_store32(CPU_REG, PSTATE_OFF, RDX);
     emit_pop(RAX);
 }
-// Load NZCV from cpu.pstate into host flags.
-// Converts ARM C back to x86 CF: if from_sub (bit 27), x86 CF = NOT ARM C.
-// Otherwise x86 CF = ARM C.
+// Load NZCV from cpu.pstate into host flags in SUB convention:
+// SF=N, ZF=Z, OF=V and x86 CF = NOT ARM C, independent of the stored
+// from_sub bit, so arm_cond_to_x86() applies directly. Callers set
+// flags_from_sub_ = true.
 // Scratch contract: clobbers ONLY RAX/RCX/RDX (and RFLAGS). Callers that
 // flush+invalidate exactly FLAGS3 around this helper are correct. Do NOT
 // add another scratch register here: every other allocatable reg (R8, R9,
 // R11, R12+...) may hold a live vreg at the call site — the old sequence
 // used R8 for the from_sub extraction, and the CSEL/CCMP/BRCOND_SKIP/
 // ADCS-SBCS sites (which flush FLAGS3 only) silently lost whatever vreg
-// was staged in R8. That was the "cset after fcmpe always returns 0"
-// miscompile: FCMP materializes NZCV to pstate (flags_in_host_=false), so
-// the following CSEL ran the loader, whose R8 scratch clobbered the
-// CMOVcc else-value staged in R8 (minecraft's sign() → step=(0,0,0) →
-// raycast assert / falling through the ground).
+// was staged in R8 (minecraft's sign() → step=(0,0,0) after fcmp).
+//
+// No POPFQ: SAHF loads SF/ZF/CF from AH and leaves OF alone; OF comes
+// from `add al, 0x7F` with AL = V (0x7F+1 overflows, 0x7F+0 does not),
+// which only writes AL, so the AH image survives for the SAHF after it.
 void FrostJIT::emit_load_flags_from_pstate() {
-    emit_load32(RAX, CPU_REG, PSTATE_OFF);  // eax = pstate
-    emit_mov_reg(RCX, RAX);  // rcx = pstate
-    // Check from_sub flag (bit 27)
-    // (always emit the invert check — the from_sub bit may or may not be set)
-    // RAX = 0x02 (reserved EFLAGS bit)
-    emit_mov_imm32(RAX, 0x02);
-    // N → SF (bit 7): (pstate >> 24) & 0x80
+    emit_load32(RCX, CPU_REG, PSTATE_OFF);              // ecx = pstate
     emit_mov_reg(RDX, RCX);
-    emit_shift_imm8(RDX, 5, 24);
-    emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000080);
-    emit_or_reg(RAX, RDX);
-    // Z → ZF (bit 6): (pstate >> 24) & 0x40
-    emit_mov_reg(RDX, RCX);
-    emit_shift_imm8(RDX, 5, 24);
-    emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000040);
-    emit_or_reg(RAX, RDX);
-    // C → CF (bit 0): x86 CF = ARM C (bit 29) XOR from_sub (bit 27).
-    // Computed in RDX alone: X = pstate ^ (pstate << 2) places (C ^ from_sub)
-    // at bit 29 of X — (pstate << 2)'s bit 29 IS pstate's bit 27. A RIGHT
-    // shift here would XOR C with N (bit 31) instead — the sign of the last
-    // compare — silently corrupting every carry-reading condition (CS/CC/
-    // HI/LS) after a pstate load. No second scratch register.
-    emit_mov_reg(RDX, RCX);              // rdx = pstate
-    emit_shift_imm8(RDX, 4, 2);          // rdx = pstate << 2
-    emit_xor_reg(RDX, RCX);              // bit 29 of rdx = C ^ from_sub
-    emit_shift_imm8(RDX, 5, 29);         // move it to bit 0
-    emit_byte(0x83); emit_byte(0xE2); emit_byte(0x01); // and edx, 1
-    emit_or_reg(RAX, RDX);
-    // V → OF (bit 11): (pstate >> 17) & 0x800
-    emit_mov_reg(RDX, RCX);
-    emit_shift_imm8(RDX, 5, 17);
-    emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000800);
-    emit_or_reg(RAX, RDX);
-    emit_push(RAX);
-    emit_popfq();
-}
-// Normalize x86 CF to SUB convention (x86 CF = NOT ARM C) after
-// emit_load_flags_from_pstate. After loading, x86 CF = ARM C XOR from_sub:
-//   from_sub=1: x86 CF = NOT ARM C (already SUB convention — no change)
-//   from_sub=0: x86 CF = ARM C (ADD convention — need to invert)
-// We read the from_sub bit from pstate at runtime and invert CF if needed.
-// After this call, the default arm_cond_to_x86() mapping is correct.
-// Uses RAX/RCX as scratch; caller must flush/invalidate them first.
-void FrostJIT::emit_normalize_cf_to_sub_convention() {
-    // Save current flags (including the loaded CF) to RAX.
-    emit_pushfq();            // pushfq
-    emit_byte(0x58);          // pop rax  (RAX = saved RFLAGS, CF is bit 0)
-    // Read pstate and extract from_sub bit (bit 27).
-    emit_load32(RCX, CPU_REG, PSTATE_OFF);  // mov ecx, [rbx+PSTATE_OFF]
-    emit_shift_imm8(RCX, 5, 27);            // shr ecx, 27
-    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);  // and ecx, 1
-    // Compute mask = NOT from_sub = 1 XOR from_sub.
-    // If from_sub=0: mask=1 (need to flip CF).
-    // If from_sub=1: mask=0 (CF already correct).
-    emit_byte(0x83); emit_byte(0xF1); emit_byte(0x01);  // xor ecx, 1
-    // XOR RAX bit 0 (CF) with the mask. This flips CF iff from_sub=0.
-    emit_xor_reg(RAX, RCX);  // xor rax, rcx
-    // Restore flags from RAX (CF is now normalized to SUB convention).
-    emit_byte(0x50);          // push rax
-    emit_popfq();             // popfq
+    emit_shift_imm8(RDX, 5, 16);                         // N→15, Z→14
+    emit_byte(0x81); emit_byte(0xE2); emit_u32(0xC000);  // and edx, 0xC000
+    emit_mov_reg(RAX, RCX);
+    emit_shift_imm8(RAX, 5, 21);                         // C→8
+    emit_byte(0x25); emit_u32(0x100);                    // and eax, 0x100
+    emit_byte(0x35); emit_u32(0x100);                    // xor eax, 0x100 (CF = !C)
+    emit_or_reg(RDX, RAX);
+    emit_shift_imm8(RCX, 5, 28);                         // V→0
+    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);   // and ecx, 1
+    emit_or_reg(RDX, RCX);
+    emit_mov_reg(RAX, RDX);
+    emit_byte(0x04); emit_byte(0x7F);                    // add al, 0x7F → OF = V
+    emit_byte(0x9E);                                     // sahf
 }
 // ── Condition code mapping ─────────────────────────────────────────────
 // Maps ARM condition codes to x86 Jcc condition codes.

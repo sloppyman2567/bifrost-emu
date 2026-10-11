@@ -543,7 +543,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 flush_dirty_host_regs(FLAGS3);
                 flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
-                emit_normalize_cf_to_sub_convention();
                 invalidate_host_regs(FLAGS3);
                 flags_in_host_ = true;
                 flags_from_sub_ = true;  // CF is now in SUB convention
@@ -821,7 +820,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             uint8_t cc = resolve_arm_cond_with_carry(cp.cond, need_cmc);
             // Ensure flags in host.
             if (!flags_in_host_) {
-                // emit_normalize_cf_to_sub_convention only clobber
+                // emit_load_flags_from_pstate only clobbers
                 // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
                 // vregs cached in R8/R9/R11/R12/R13/R15.
                 // No pushfq/popfq: see BRCOND comment for rationale.
@@ -838,7 +837,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // for the CC/CS condition (taking the wrong branch), causing
                 // pstate divergences like jit=0x8000000 ref=0x88000000
                 // (JIT skipped the compare; interpreter did it).
-                emit_normalize_cf_to_sub_convention();
                 invalidate_host_regs(FLAGS3);
                 flags_in_host_ = true;
                 flags_from_sub_ = true;  // CF is now in SUB convention

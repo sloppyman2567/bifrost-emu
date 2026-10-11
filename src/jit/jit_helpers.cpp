@@ -99,9 +99,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
         // The bound remains mandatory: base+an arbitrary 64-bit guest address
         // could wrap into unrelated host storage without taking a host fault.
         // Cached code observes fallback activation without recompilation.
-        emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(guest_memory_->jit_software_checks()));
-        emit_load8(RDX, RDX, 0);
-        emit_alu_imm(RDX, 7, 0);
+        emit_test_software_checks();
         bypass_pages = emit_jcc_rel32_placeholder(4); // JE: ordinary host-MMU permissions
     }
     emit_mov_reg(RCX, RAX);

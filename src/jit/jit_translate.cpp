@@ -1324,13 +1324,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     // ── PC store point ───────────────────────────────────────────
-    // Both the normal epilogue and the CALL_INTERP early-exit converge
-    // here. At this point, flags are materialized and vregs are flushed.
-    // RAX holds the next PC (either from rax_holds_next_pc_ or from the
-    // CALL_INTERP's interpreter call).
-    // call_interp_branch_patches_ jump here (after the
-    // RAX overwrite) to preserve the interpreter's PC in RAX.
-    size_t pc_store_off = code_buf_used_;
+    // At this point, flags are materialized and vregs are flushed.
+    // RAX holds the next PC (either from rax_holds_next_pc_ or the
+    // static fall-through).
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_tier2_edge_profile(false);
     // ── Chain-capable epilogue ────────────────────────────────────
@@ -1388,13 +1384,24 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         int32_t rel = static_cast<int32_t>(epilogue_off - (p.patch_off + 5));
         patch_jmp_rel32(p.patch_off, rel);
     }
-    for (size_t off : call_interp_branch_patches_) {
-        // jump to pc_store_off (after the RAX overwrite)
-        // to preserve the interpreter's PC in RAX. emit_call_interp already
-        // materialized flags and flushed vregs before the JNE, so we can
-        // skip the normal epilogue's flag/vreg handling.
-        int32_t rel = static_cast<int32_t>(pc_store_off - (off + 6));
-        patch_jcc_rel32(off, rel);
+    if (!call_interp_branch_patches_.empty()) {
+        // ── Dynamic CALL_INTERP exit ────────────────────────────────
+        // The interpreter changed the PC (signal delivery, exception
+        // return, ...): RAX holds that dynamic PC. It must return to the
+        // dispatcher, never pass through the chain slot above — once
+        // patched (or in MT, once its target cell is set) that slot jumps
+        // to the STATIC successor and drops the new PC. emit_call_interp
+        // already materialized flags and flushed vregs before the JNE.
+        size_t dyn_exit_off = code_buf_used_;
+        emit_store(CPU_REG, PC_OFF, RAX);
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        emit_ret();
+        for (size_t off : call_interp_branch_patches_) {
+            int32_t rel = static_cast<int32_t>(dyn_exit_off - (off + 6));
+            patch_jcc_rel32(off, rel);
+        }
     }
     if (code_buf_overflow_) {
         rewind_codegen(block_start);

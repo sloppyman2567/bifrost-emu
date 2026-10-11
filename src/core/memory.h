@@ -199,12 +199,16 @@ public:
     // Missing-page tracking starts with the first userfaultfd and stays on.
     // The state lives in direct_page_flags_ for every guest page.
     void enable_uffd_tracking() {
-        jit_software_checks_.store(true, std::memory_order_release);
+        jit_software_checks_->store(true, std::memory_order_release);
         uffd_tracking_.store(true, std::memory_order_release);
     }
     // Sticky fallback for state the host MMU cannot represent exactly:
     // userfaultfd-missing pages and readable host aliases of guest W/X-only pages.
-    const std::atomic<bool>* jit_software_checks() const { return &jit_software_checks_; }
+    // It lives at JIT_SOFTWARE_CHECKS_OFF below direct_window() (a readable
+    // header page in front of the reservation), so generated code tests it
+    // with one `cmp byte [window_base + off], 0` through its window register.
+    static constexpr int32_t JIT_SOFTWARE_CHECKS_OFF = -8;
+    const std::atomic<bool>* jit_software_checks() const { return jit_software_checks_; }
     // UFFDIO_REGISTER/UNREGISTER of [addr, addr+len): the range is already
     // validated by the caller. Only mapped private anonymous pages are covered;
     // returns -EINVAL if none is, or if a file-backed page is included.
@@ -346,7 +350,7 @@ private:
     // at address 0).
     std::map<uint64_t, uint64_t> free_ranges_;
     std::atomic<bool> uffd_tracking_{false};
-    std::atomic<bool> jit_software_checks_{false};
+    std::atomic<bool>* jit_software_checks_ = nullptr;  // in the header page
     // Allocation cursors: the low heap from MMAP_BASE_MIN (randomized), and
     // above the low region once it is full or for Android's large maps.
     uint64_t mmap_next_ = 0;

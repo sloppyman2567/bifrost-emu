@@ -45,14 +45,14 @@
 #include <unordered_map>
 #include <vector>
 namespace arm64emu {
-// ── Chain-skip env gate (BIFROST_CHAIN_SKIP=1, default OFF) ────────────
-// Read once (static local, mirrors the BIFROST_NO_SELFLOOP pattern in
-// jit_codegen_branch.cpp). When enabled, every block is emitted with a
-// chain-skip entry point (BlockEntry.chain_entry) and a lease-style
-// epilogue (chain slot before the callee-saved restore), so chain edges
-// skip the predecessor's frame teardown AND the successor's prologue.
+// ── Chain-skip (default ON; BIFROST_NO_CHAIN_SKIP=1 opts out) ──────────
+// Read once. Every block is emitted with a chain-skip entry point
+// (BlockEntry.chain_entry) and a lease-style epilogue (chain slot before
+// the callee-saved restore), so chain edges skip the predecessor's frame
+// teardown AND the successor's prologue. BIFROST_CHAIN_SKIP=1 is still
+// accepted (it means on).
 bool FrostJIT::chain_skip_enabled() {
-    static const bool on = (getenv("BIFROST_CHAIN_SKIP") != nullptr);
+    static const bool on = (getenv("BIFROST_NO_CHAIN_SKIP") == nullptr);
     return on;
 }
 // ── Direct BL call env gate (default ON) ───────────────────────────────
@@ -614,11 +614,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // ARM C = NOT x86 CF for SBB (NOT borrow).
             //
             // We must load the C flag from pstate into x86 CF first.
-            // After loading, x86 CF = ARM C XOR from_sub. We need:
-            //   ADCS: x86 CF = ARM C (ADD convention)
-            //   SBCS: x86 CF = NOT ARM C (SUB convention)
-            // emit_normalize_cf_to_sub_convention normalizes to SUB convention.
-            // For ADCS, we then cmc to get ADD convention.
+            // emit_load_flags_from_pstate yields SUB convention
+            // (x86 CF = NOT ARM C), which SBCS uses directly; ADCS needs
+            // ADD convention (x86 CF = ARM C), so it then emits cmc.
             bool is_sub = (inst.op == IROp::SBCS);
             bool is_32bit = (inst.addsub_params().bits == 32);
             // Load flags from pstate (we need CF in x86 CF).
@@ -645,7 +643,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     emit_byte(0xF5);  // cmc: SUB → ADD
                 }
             } else {
-                // emit_normalize_cf_to_sub_convention only clobber
+                // emit_load_flags_from_pstate only clobbers
                 // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
                 // vregs cached in R8/R9/R11/R12/R13/R15.
                 // No pushfq/popfq: the goal is to LOAD flags, and
@@ -655,7 +653,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
                 // Normalize CF to SUB convention (x86 CF = NOT ARM C).
-                emit_normalize_cf_to_sub_convention();
                 invalidate_host_regs(FLAGS3);
                 // For SBCS: CF is now NOT ARM C. Correct.
                 // For ADCS: need ARM C. cmc to invert.

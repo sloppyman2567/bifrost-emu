@@ -297,7 +297,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 emit_load_flags_from_pstate();
                 // Normalize CF to SUB convention so the default
                 // arm_cond_to_x86() mapping works for all conditions.
-                emit_normalize_cf_to_sub_convention();
                 invalidate_host_regs(FLAGS3);
                 flags_from_sub_ = true;  // CF is now in SUB convention
                 flags_in_host_ = true;
@@ -446,7 +445,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 flush_dirty_host_regs(FLAGS3);
                 flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
-                emit_normalize_cf_to_sub_convention();
                 invalidate_host_regs(FLAGS3);
                 flags_from_sub_ = true;  // CF is now in SUB convention
                 flags_in_host_ = true;

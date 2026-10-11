@@ -82,7 +82,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             flush_invalidate_host_regs(clob);
             if (loaded_from_pstate) {
                 emit_load_flags_from_pstate();
-                emit_normalize_cf_to_sub_convention();
                 flags_from_sub_ = true;
                 flags_in_host_ = true;
             }
@@ -851,7 +850,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             size_t compare_branch = 0, skip_compare = 0;
             if (cp.conditional) {
                 emit_load_flags_from_pstate();
-                emit_normalize_cf_to_sub_convention();
                 flags_from_sub_ = true;
                 bool need_cmc = false;
                 uint8_t cc = resolve_arm_cond_with_carry(cp.condition, need_cmc);

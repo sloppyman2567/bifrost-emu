@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <fcntl.h>
+#include <new>
 #include <shared_mutex>
 #include <stdexcept>
 #include <sys/mman.h>
@@ -128,17 +129,25 @@ Memory::Memory(bool start_reporter) {
     // Reserve the largest guest address space the host grants. PROT_NONE +
     // MAP_NORESERVE costs only virtual address space (RLIMIT_AS still
     // counts it). The flag mirror is a lazily committed byte per page.
+    // One extra readable page precedes the window: it holds the JIT's
+    // sticky software-check flag (see JIT_SOFTWARE_CHECKS_OFF).
     for (uint64_t size = WINDOW_SIZE_MAX; size >= WINDOW_SIZE_MIN; size >>= 1) {
-        void* window = ::mmap(nullptr, size, PROT_NONE,
+        void* window = ::mmap(nullptr, size + PAGE_SIZE, PROT_NONE,
                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (window == MAP_FAILED) continue;
+        if (::mprotect(window, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
+            ::munmap(window, size + PAGE_SIZE);
+            continue;
+        }
         void* flags = ::mmap(nullptr, size / PAGE_SIZE, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (flags == MAP_FAILED) {
-            ::munmap(window, size);
+            ::munmap(window, size + PAGE_SIZE);
             continue;
         }
-        direct_window_ = static_cast<uint8_t*>(window);
+        direct_window_ = static_cast<uint8_t*>(window) + PAGE_SIZE;
+        jit_software_checks_ = new (direct_window_ + JIT_SOFTWARE_CHECKS_OFF)
+            std::atomic<bool>(false);
         direct_page_flags_ = static_cast<std::atomic<uint8_t>*>(flags);
         window_size_ = size;
         break;
@@ -193,7 +202,7 @@ uint64_t Memory::random_offset(uint64_t range) {
     return (entropy % npages) * PAGE_SIZE;
 }
 Memory::~Memory() {
-    if (direct_window_) ::munmap(direct_window_, window_size_);
+    if (direct_window_) ::munmap(direct_window_ - PAGE_SIZE, window_size_ + PAGE_SIZE);
     if (direct_page_flags_) ::munmap(direct_page_flags_, window_size_ / PAGE_SIZE);
 }
 // A guest range must lie inside the reservation, above the NULL page and
@@ -280,7 +289,7 @@ void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                 bool combine, bool keep_uffd) {
     if (lo >= hi) return;
     if (prot && !(prot & GUEST_PROT_READ))
-        jit_software_checks_.store(true, std::memory_order_release);
+        jit_software_checks_->store(true, std::memory_order_release);
     auto flags_for = [&](uint8_t old, uint8_t page_prot) {
         const uint8_t uffd = keep_uffd ? (old & GUEST_PAGE_UFFD_BITS) : 0;
         return static_cast<uint8_t>(page_prot ? (PAGE_MAPPED | uffd | page_prot) : uffd);

@@ -64,9 +64,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     cold.push_back(emit_jcc_rel32_placeholder(7)); // JA: full-width bounds
     // Activation is sticky and visible to already compiled code. Never hoist
     // this check out of a loop: another CPU can enable userfaultfd tracking.
-    emit_mov_imm64(temp, reinterpret_cast<uint64_t>(guest_memory_->jit_software_checks()));
-    emit_load8(temp, temp, 0);
-    emit_test_reg(temp, temp);
+    emit_test_software_checks();
     const size_t bypass_pages = emit_jcc_rel32_placeholder(4);
     const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
     const uint8_t required = Memory::GUEST_PAGE_MAPPED |

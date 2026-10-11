@@ -1686,7 +1686,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                         flush_dirty_host_regs(FLAGS3);
                         flush_scratch_host_regs(FLAGS3);
                         emit_load_flags_from_pstate();
-                        emit_normalize_cf_to_sub_convention();
                         invalidate_host_regs(FLAGS3);
                         flags_from_sub_ = true;  // CF is now in SUB convention
                         flags_in_host_ = true;

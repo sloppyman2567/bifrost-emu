@@ -562,7 +562,7 @@ public:
     static constexpr int CPU_REG = RBX;
     static constexpr int EMU_REG = R14;
     static constexpr int WIN_REG = R10;
-    // Chain-skip (BIFROST_CHAIN_SKIP=1, default OFF): chain edges jump
+    // Chain-skip (default ON; BIFROST_NO_CHAIN_SKIP=1 opts out): chain edges jump
     // directly to the successor's body start, skipping the predecessor's
     // frame teardown and the successor's push/frame/reg-setup prologue.
     // The chain root allocates ONE unified frame that every block in the
@@ -581,8 +581,7 @@ public:
     // is 32 KB per chain + C-call slack — reentrant JIT entry (GLFW cb
     // runner, dlopen) gets its own frame naturally.
     static constexpr uint32_t kChainSkipFrameBytes = 0x8000;  // 32 KiB
-    // Env gate, read once (mirrors the BIFROST_NO_SELFLOOP pattern).
-    // False by default; opt in with BIFROST_CHAIN_SKIP=1.
+    // Read once. True unless BIFROST_NO_CHAIN_SKIP=1.
     static bool chain_skip_enabled();
     // Direct BL call gate (default ON). BL_CALL sites emit a patchable
     // `call rel32` to the target block fn directly instead of going
@@ -955,6 +954,7 @@ private:
     void emit_store32(int base, int32_t off, int src);
     void emit_load16(int dst, int base, int32_t off);
     void emit_load8(int dst, int base, int32_t off);
+    void emit_test_software_checks();
     void emit_load32_sx(int dst, int base, int32_t off);
     void emit_load16_sx(int dst, int base, int32_t off);
     void emit_load8_sx(int dst, int base, int32_t off);
@@ -1070,7 +1070,6 @@ private:
     // the default arm_cond_to_x86() mapping (which assumes SUB convention)
     // is correct for all conditions.
     // Uses RAX and RCX as scratch (caller must ensure they're free).
-    void emit_normalize_cf_to_sub_convention();
     // Memory access (direct-window path).
     void emit_load_mem(int dst, int addr_reg, int32_t off, int w, bool sign_ext);
     void emit_store_mem(int addr_reg, int32_t off, int src_reg, int w);
