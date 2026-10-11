@@ -474,99 +474,61 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
         case IROp::ADDS: case IROp::SUBS: {
-            // Force src1 into RAX, src2 into RCX (same fixed-assignment
-            // pattern as SHL/SHR/SAR/ROR — handled by force_two_vregs_to).
-            // Call clobber_flags() first to materialize any pending flags
-            // before force_two_vregs_to potentially clobbers them.
+            // ADD/SUB and CMP accept any GPRs. Keep cached operands in
+            // place instead of spilling them through fixed RAX/RCX homes.
             clobber_flags();
-            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-            int s2 = RCX;
-            bool is_sub = (inst.op == IROp::SUBS);
-            bool is_32bit = (inst.addsub_params().bits == 32);
-            // Always compute in RAX (holds src1) to avoid alloc_reg_for
-            // evicting the operands under register pressure.
-            int d = RAX;
-            if (inst.dest != inst.src1 && inst.dest != 0) {
-                // Drop src1's mapping (don't spill — set_vreg_reg will
-                // handle the transition). If src1 was dirty, spill first
-                // to preserve its value for later readers — UNLESS src1 is
-                // a dead scratch vreg (its last use is THIS op, e.g. a
-                // chain `sub x0, x0, x1` where x0's vreg dies here): then
-                // its value is consumed by the op and never read again, so
-                // the spill is dead work and only the mapping is dropped.
-                if (vreg_home_[inst.src1] == RAX) {
-                    bool src1_dead = (inst.src1 > 32 &&
-                                      vreg_last_use_this_op(inst.src1));
-                    if (vreg_dirty_[inst.src1] && !src1_dead) {
-                        evict_vreg(inst.src1);
-                    } else {
-                        vreg_home_[inst.src1] = -1;
-                        reg_vreg_[RAX] = -1;
-                        dirty_host_regs_ &= ~(1u << RAX);
-                        vreg_last_use_[inst.src1] = 0;  // clear LRU timestamp
-                    }
-                }
-            } else if (inst.dest == inst.src1 && inst.dest != 0) {
-                vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << RAX);
-                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+            int s1, s2;
+            ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
+            const bool is_sub = inst.op == IROp::SUBS;
+            const bool is_32bit = inst.addsub_params().bits == 32;
+            // CMP normally has an unused temporary destination in the IR.
+            // Restrict this test to body liveness: Tier-2 preheader indices
+            // sit after the body in the allocator's synthetic use ordering.
+            const bool discard_result = inst.dest == 0 ||
+                (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
+                 cur_op_index_ < kills_per_op_.size() &&
+                 vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
+            auto consumable = [&](int v, int r) {
+                return v > 32 && vreg_last_use_this_op(v) &&
+                    !(pinned_host_regs_ & (1u << r));
+            };
+            int d = s1;
+            if (!(is_sub && discard_result)) {
+                if (!discard_result && inst.dest == inst.src1) d = s1;
+                else if (!is_sub && !discard_result && inst.dest == inst.src2) d = s2;
+                else if (consumable(inst.src1, s1)) d = s1;
+                else if (!is_sub && consumable(inst.src2, s2)) d = s2;
+                else d = alloc_reg_excluding(s1, s2 == s1 ? -1 : s2);
+                // Addition may consume src2 in place; subtraction must
+                // retain operand order, including equal-source aliases.
+                if (!is_sub && d == s2) s2 = s1;
+                else if (d != s1) emit_mov_reg(d, s1);
             }
-            if (is_32bit) {
-                // 0x29 /r = SUB r/m32, r32 (sub dst, src)
-                // 0x01 /r = ADD r/m32, r32 (add dst, src)
-                bool need_rex = (s2 >= 8) || (d >= 8);
-                if (need_rex) {
-                    emit_byte(rex(false, s2>=8, false, d>=8));
-                }
-                if (is_sub) { emit_byte(0x29); emit_byte(modrm(3, s2&7, d&7)); }
-                else        { emit_byte(0x01); emit_byte(modrm(3, s2&7, d&7)); }
-                // Zero-extend dest to 64 bits (32-bit ops zero-extend).
-                // mov e_d, e_d — BUGFIX: must set BOTH REX.R (reg field)
-                // and REX.B (r/m field) when d >= 8, otherwise the reg
-                // field defaults to EAX and we emit `mov r8d, eax` instead
-                // of `mov r8d, r8d`, corrupting the dest with EAX's value.
-                if (d >= 8) {
-                    emit_byte(rex(false, d>=8, false, d>=8));
-                }
-                emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
-            } else {
-                if (is_sub) emit_sub_reg(d, s2);
-                else        emit_add_reg(d, s2);
-            }
+            // A 32-bit ADD/SUB already zeroes the upper result bits. CMP
+            // leaves the full input value untouched in either width.
+            emit_byte(rex(!is_32bit, s2 >= 8, false, d >= 8));
+            emit_byte(is_sub ? (discard_result ? 0x39 : 0x29) : 0x01);
+            emit_byte(modrm(3, s2 & 7, d & 7));
             flags_in_host_ = true;
             flags_from_sub_ = is_sub;
-            if (inst.dest == 0) kill_vreg(inst.src1);
-            else if (inst.dest != inst.src1) set_vreg_reg(inst.dest, d);
+            if (!discard_result) set_vreg_reg(inst.dest, d);
+            else if (!is_sub) {
+                // CMN consumed a scratch result; do not leave a mapping
+                // claiming that the overwritten register still holds src1/2.
+                int old = reg_vreg_[d];
+                if (old >= 0) kill_vreg(old);
+            }
             return false;
         }
         case IROp::TST: {
             const TstParams tp = inst.tst_params();
-            // Force both operands into distinct host regs via force_two_vregs_to.
-            // but ensure_vreg ignores the `preferred` hint when the vreg is
-            // already cached elsewhere. Under high register pressure, the
-            // second ensure_vreg could evict the first operand's register
-            // (via alloc_reg evicting ALLOC_REGS[0]=RAX), causing both
-            // operands to end up in the same register — test rax, rax tests
-            // the wrong value.
+            // TEST reads its operands without modifying either mapping.
             clobber_flags();
-            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-            if (!tp.sf) {
-                // W-form ANDS/TST: the N flag must come from bit 31, so
-                // use a 32-bit TEST (no REX.W). A 64-bit test reads SF
-                // from bit 63, which is always 0 on zero-extended W
-                // operands — ARM N was stuck at 0 and every b.mi/b.pl/
-                // csel-mi consumer misbranched.
-                uint8_t rexx = 0;
-                if (RCX >= 8) rexx |= 4;  // rex.r (reg field = RCX)
-                if (RAX >= 8) rexx |= 1;  // rex.b (rm field = RAX)
-                if (rexx) emit_byte(0x40 | rexx);
-                emit_byte(0x85);
-                emit_byte(modrm(3, RCX & 7, RAX & 7));
-                flags_in_host_ = true;
-                flags_from_sub_ = false;
-                return false;
-            }
-            emit_test_reg(RAX, RCX);
+            int s1, s2;
+            ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
+            emit_byte(rex(tp.sf, s2 >= 8, false, s1 >= 8));
+            emit_byte(0x85);
+            emit_byte(modrm(3, s2 & 7, s1 & 7));
             flags_in_host_ = true;
             flags_from_sub_ = false;
             return false;

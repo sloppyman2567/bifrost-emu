@@ -10,6 +10,41 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Flag arithmetic register pressure (2026-10-11)
+
+The allocator-aware ADDS/SUBS/TST emission and two-input pinning pass the strict
+GPU-enabled JIT suite **311/311**, with IR validation and register-allocation
+checks. `make verify` passes **75 differential fixtures, six threaded oracle
+runs and 21,836 SSA host checks**. Tier-2 discovery, feedback and measured
+promotion pass with single/multithreaded execution and both frame layouts;
+mutex promotion stress passes twenty runs, and immutable-code publication
+passes its host oracle.
+
+`jit_same_operand` now holds twelve independent values across eighteen W/X
+ADDS/SUBS/CMP/CMN/TST forms, including destinations aliasing either source.
+It checks 1,152 operation/input combinations, repeated four times, against a
+C result/NZCV oracle. The rebuilt fixture passes the interpreter, QEMU and
+JIT verification, as well as the ordinary frame layout, block cap 128, SSA
+disabled and forwarding disabled. The complete interpreter suite was not
+repeated for this backend-only change.
+
+The x86 CMP encoding and its SUB-equivalent flags were checked against the
+[Intel SDM](https://cdrdv2-public.intel.com/868140/253666-089-sdm-vol-2a.pdf#page=279).
+The test counts and performance figures are local observations. CoreMark
+allocator diagnostics count **455 → 394 emitted spills** over the same 354
+benchmark-body blocks (`0x400ba0..0x4035b0`, excluding libc), including cold
+fault paths; this does not count executed memory traffic or prove a game FPS
+improvement. Block sizing and memory guards retain their existing defaults.
+
+Three alternating before/after pairs at 110,000 CoreMark iterations validated
+all CRCs and produced median reported rates of 7,322 → 7,602 iterations/s.
+These timings are **provisional**: the user was running Doom 3 concurrently,
+so they do not establish an isolated performance gain. Seven further pairs
+of short MIPS, sorting and matrix benchmarks validated their result markers;
+their wall-time medians differed by about 0–2%, also under competing load.
+A controlled performance comparison remains outstanding. No game FPS or
+freeze fix is claimed.
+
 ### Subsystem layout and source splits (2026-10-11)
 
 The completed layout builds from empty object directories in both SDL/GL and

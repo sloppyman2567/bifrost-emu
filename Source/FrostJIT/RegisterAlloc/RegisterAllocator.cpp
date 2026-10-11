@@ -348,8 +348,9 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
 // operand. next_use_after() excludes the current op, so an operand
 // that dies here scores as dead and is Belady's FIRST victim: loading
 // v1 under full pressure evicted v2, and re-loading v2 then evicted v1.
-// v2's register is therefore pinned while v1 loads. Pools too small for
-// that (all but two regs pinned) fall back to fixed RAX/RCX placement.
+// An already-cached operand is therefore pinned while its partner loads;
+// otherwise v2 loads first and stays pinned while v1 loads. Pools too small
+// for that fall back to fixed RAX/RCX placement.
 void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
     if (v1 == v2) {
         int r = ensure_vreg(v1);
@@ -357,10 +358,19 @@ void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
         *r2 = r;
         return;
     }
-    const int h2 = ensure_vreg(v2);
     const uint32_t saved_pins = pinned_host_regs_;
-    pinned_host_regs_ |= 1u << h2;
-    ensure_vreg(v1);
+    // Protect an already-cached first operand while loading the second.
+    // next_use_after excludes this op, so an operand consumed here can
+    // otherwise be selected as the eviction victim, then immediately
+    // spilled/reloaded just to establish the pair.
+    if (vreg_home_[v1] >= 0) {
+        pinned_host_regs_ |= 1u << vreg_home_[v1];
+        ensure_vreg(v2);
+    } else {
+        const int h2 = ensure_vreg(v2);
+        pinned_host_regs_ |= 1u << h2;
+        ensure_vreg(v1);
+    }
     pinned_host_regs_ = saved_pins;
     *r1 = vreg_home_[v1];
     *r2 = vreg_home_[v2];

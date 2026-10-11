@@ -245,6 +245,23 @@ larger constants retain the register form. ADD and eligible immediate SUB use
 LEA when needed to preserve lazy NZCV. Narrow ZEXT materializes live flags
 before allocating operands or emitting a flag-clobbering mask.
 
+ADDS/SUBS and TST use their allocated host registers rather than forcing
+operands through RAX/RCX. Flag arithmetic consumes a last-use scratch input
+when possible, while live inputs and loop pins retain their values. An unused
+SUBS result emits CMP instead of overwriting and preserving its first input;
+32-bit CMP/TST still preserve the full 64-bit input containers. CMP's operand
+encoding and SUB-equivalent flags follow the
+[Intel SDM, Volume 2A, CMP](https://cdrdv2-public.intel.com/868140/253666-089-sdm-vol-2a.pdf#page=279).
+Two-input allocation temporarily pins an already-cached first operand before
+loading the second, preventing an eviction followed by an immediate reload.
+
+With the default block cap and guard settings, one matched CoreMark compile
+recorded **455 → 394 emitted spills** across the same 354 benchmark-body blocks
+(13.4% fewer). This is a compile-time instruction count including cold fault
+paths, not a measurement of executed spill traffic. See
+[the validation record](TESTS.md#flag-arithmetic-register-pressure-2026-10-11)
+for the independent value/flag checks and timing bounds.
+
 The default block instruction limit remains 32. `BIFROST_JIT_BLOCK_LIMIT=8..128`
 allows bounded comparisons; both Tier-1 and the Tier-2 collector stop growth
 at the instruction cap or the shared IR/vreg complexity budget. Long blocks
@@ -577,18 +594,21 @@ that exposed this as missing glyph pixels in Neverball. See
 
 ## Same-operand two-register ops
 
-FWD forwards both reads of `cmp w23, w23` to one vreg, so ADDS/SUBS,
-ADCS/SBCS, TST and CCMP can reach `force_two_vregs_to(v, RAX, v, RCX)`.
+FWD forwards both reads of `cmp w23, w23` to one vreg. ADDS/SUBS and TST
+accept the same host register for both inputs via `ensure_two_vregs()`;
+ADCS/SBCS and CCMP still use `force_two_vregs_to(v, RAX, v, RCX)`.
 A vreg has exactly one home: it stays in RAX, and RCX receives an unmapped
-copy. Callers compute in RAX, so their "spill a live src1 before
-overwriting RAX" logic sees the real home. An allocation for a separate
-destination must not pick RCX (ADCS/SBCS pin it). Earlier code homed the
+copy when fixed placement is needed. Those callers compute in RAX, so their
+"spill a live src1 before overwriting RAX" logic sees the real home. An
+allocation for a separate destination must not pick RCX (ADCS/SBCS pin it). Earlier code homed the
 vreg in RCX while RAX still claimed it; SUBS then overwrote RAX without a
 spill, and a later `mov w5, w23` read a never-written stack slot. ART's
 boot image inlines `Arrays.copyOf` that way, so `System.arraycopy` got an
 object address as its length (ArrayIndexOutOfBoundsException, seen only
 when ART used its AOT boot code). `Tests/Unit/jit_same_operand.c` covers each
-flag op and the ART sequence around an in-block call.
+flag op and the ART sequence around an in-block call. Its pressure cases also
+keep twelve independent values live across W/X flag arithmetic, checking
+both destination aliases, CMP/CMN/TST inputs, result widths and NZCV.
 
 ## Shift source preservation and operand width
 

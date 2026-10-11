@@ -12,6 +12,20 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### JIT flag-arithmetic spills (2026-10-11)
+
+- ADDS/SUBS/TST retain allocated operand registers, reusing last-use scratch
+  inputs where possible. Unused SUBS results use CMP without overwriting their
+  inputs; W results retain zero-extension and W comparisons preserve full inputs.
+- Two-input allocation protects a cached operand while loading its partner,
+  avoiding needless spill/reload pairs under pressure.
+- CoreMark's 354 benchmark-body blocks emit 455 → 394 spill instructions
+  (13.4% fewer, including cold fault paths). This is a static count, not a
+  dynamic traffic or gameplay measurement. Guards and block limits are unchanged.
+- Extended `jit_same_operand` covers live inputs, both destination aliases and
+  NZCV. Full JIT, differential/SSA and Tier-2 checks pass; see
+  [the validation record](TESTS.md#flag-arithmetic-register-pressure-2026-10-11).
+
 ### Source layout and contributor guidance (2026-10-11)
 
 - Grouped implementation by `Source/FrostJIT/`, `Source/Interpreter/` and
