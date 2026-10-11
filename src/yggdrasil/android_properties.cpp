@@ -190,10 +190,10 @@ std::string build_property_area(const std::map<std::string, std::string>& props,
 std::map<std::string, std::string> load_android_properties(const std::string& root) {
     std::map<std::string, std::string> props;
     // init/property_service.cpp order: a later partition overrides an
-    // earlier one. Vendor and ODM props describe the image's emulator
-    // hardware, which Bifrost replaces, so they are not loaded. The debug
+    // earlier one. Vendor props include ART's application heap policy. The debug
     // ramdisk file (init/debug_ramdisk.h) carries test overrides.
     for (const char* path : {"/system/build.prop", "/system_ext/etc/build.prop",
+                             "/vendor/default.prop", "/vendor/build.prop",
                              "/product/etc/build.prop", "/debug_ramdisk/adb_debug.prop"}) {
         std::map<std::string, std::string> file;
         parse_build_prop(read_root_file(root, path), file);
@@ -209,6 +209,9 @@ std::map<std::string, std::string> load_android_properties(const std::string& ro
         {"ro.zygote", "zygote64"},
         {"ro.hardware", "bifrost"},
         {"ro.debuggable", "0"},
+        // libcutils probes memfd_create and F_SEAL_FUTURE_WRITE itself.
+        // Enable that path instead of requiring the removed ashmem driver.
+        {"sys.use_memfd", "true"},
     };
     for (const auto& [key, value] : kDefaults) props.emplace(key, value);
     return props;

@@ -15,6 +15,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
+#include "yggdrasil/yggdrasil.hpp"
 #include <errno.h>
 #include <algorithm>
 #include <sched.h>
@@ -56,25 +57,24 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
         case 123: { // sched_getaffinity(pid, cpusetsize, mask) — AArch64 123
             // Returns the CPU affinity mask. The kernel fills in
             // min(cpusetsize, ceil(ncpus/8)) bytes and returns that count.
-            // We advertise 8 CPUs (a reasonable default for modern systems),
-            // so the mask is 1 byte (0xFF) — but we fill the full
-            // cpusetsize with the mask pattern so guests requesting larger
-            // masks get valid data.
+            // We advertise kGuestCpuCount CPUs (a reasonable default for
+            // modern systems), so the mask is 1 byte (0xFF) — but we fill
+            // the full cpusetsize with the mask pattern so guests
+            // requesting larger masks get valid data.
             //
-            // 8, ignoring the cpusetsize argument. This broke programs that
-            // request larger masks (e.g., Python's os.sched_getaffinity(0)
-            // on systems with > 64 CPUs) — they'd see the 8-byte mask but
-            // interpret the missing bytes as zero, thinking only CPUs 0-5
-            // were available.
+            // kGuestCpuCount (yggdrasil/yggdrasil.hpp) is the single
+            // source of truth shared with the synthetic sysfs tree and
+            // /proc/cpuinfo — the three must never drift apart.
             if (a2 == 0) { ret_err(EFAULT); return 0; }
             if (a1 == 0) { ret_err(EINVAL); return 0; }
-            // Advertise 8 CPUs (mask = 0xFF in the first byte, 0 elsewhere).
-            // Cap the cpusetsize at 256 bytes (2048 CPUs) to prevent OOM
-            // from a corrupted size argument.
+            // Advertise kGuestCpuCount CPUs (one bit per CPU, 0
+            // elsewhere). Cap the cpusetsize at 256 bytes (2048 CPUs)
+            // to prevent OOM from a corrupted size argument.
             uint64_t cpusetsize = std::min<uint64_t>(a1, 256);
             std::vector<uint8_t> mask(cpusetsize, 0);
-            // Set the first byte to 0xFF (8 CPUs available).
-            mask[0] = 0xFF;
+            for (int cpu = 0; cpu < yggdrasil::kGuestCpuCount; ++cpu)
+                mask[cpu / 8] |=
+                    static_cast<uint8_t>(1u << (cpu % 8));
             try { mem_.write(a2, mask.data(), cpusetsize); }
             catch (...) { ret_err(EFAULT); return 0; }
             // Return the number of bytes written.

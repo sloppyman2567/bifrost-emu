@@ -96,6 +96,30 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   the looper and run from the owner's poll on a 60 Hz `CLOCK_MONOTONIC`
   tick. ASensorManager reports no sensors. Regression:
   `ctest_real/test_android_looper.c`.
+- Android AAudio uses the AudioThunk and host Audio engine; the Android runtime
+  path wires them too (`wire_thunk_audio_runner_`; without it every stream
+  open is `AAUDIO_ERROR_UNAVAILABLE`). The host pump cannot make Bionic TLS,
+  so data callbacks run on the managed `libaaudio.so` adapter's own pthread,
+  as in real libaaudio: `guest/android/aaudio.c` wraps openStream/close and
+  drives the private `bifrost_aaudio_claim/wait/finish_callback` thunks
+  (hidden `thunk_*` shim labels). A claimed stream (`guest_thread`) is
+  skipped by the pump and inline firing. The wait returns within 20 ms so a
+  group exit never sits in a host wait, and paces by ring fill, not a timer.
+  Regression: `ctest/android_aaudio_thread.c` in `scripts/test_android_bionic.sh`.
+- The managed `audio` service answers the SDK queries from AOSP
+  `AudioService`: `isMusicActive` is true while a host output stream is
+  started (private 0x100E op 8, `Audio::active_streams`), mode NORMAL, no
+  fixed volume, speakerphone or stream mute, ringer NORMAL, and
+  `MIN_STREAM_VOLUME`. ActivityProbe's `ACTIVITY_AUDIO_SERVICE_OK` covers them;
+  `test_android_framework.py --services` copies `libbifrost-activity.so`.
+- Managed connectivity (`guest/android/FrameworkConnectivity.java`) presents
+  the host route as Android Wi-Fi with AOSP's regular Wi-Fi capabilities, not
+  Ethernet: SDKs reported Ethernet as no connection and SpongeBob's loader
+  stopped at 40%. `VALIDATED` comes only from the launcher's NetworkMonitor-style
+  HTTPS `generate_204` probe (`host_network_validated`, 204 only); never set it
+  unconditionally. `BIFROST_ANDROID_HOST_NETWORK` / `_NETWORK_VALIDATED`
+  override the snapshot; ActivityProbe's `ACTIVITY_CONNECTIVITY_OK` covers all
+  three modes. See `docs/ANDROID_RUNTIME.md`.
 - The host Binder registry answers `PING_TRANSACTION` and accepts Java's
   `FLAG_COLLECT_NOTED_APP_OPS`; `BIFROST_BINDER_TRACE=1` traces transactions.
 - Framework provisioning schema 4 adds mainline APEX native libraries,
@@ -1049,6 +1073,23 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   Never back them with a finite buffer: guests keep the fd open and treat
   a short read as fatal (Teeworlds `secure_random_fill`; the old 256-byte
   memfd hit EOF minutes in). Regression: `ctest/test_dev_urandom.c`.
+- **Synthetic /sys CPU topology (`sysfs.cpp`, served by `Yggdrasil::open`
+  right after ProcFS, before DevFS and host passthrough).** Bionic's
+  `sysconf(_SC_NPROCESSORS_ONLN)` reads `/sys/devices/system/cpu/online`
+  and returns -1 when the file is missing; libunity.so feeds that into its
+  job-system worker count (`min(ncpu+1, ceil(total/batch))`), and -1 made
+  the count 0 — the presenting thread then spun forever on a zero batch
+  (SpongeBob: window black with cursor trails, audio still running).
+  `kGuestCpuCount` (in `yggdrasil.hpp`) is the ONE shared constant
+  driving the sysfs tree, `sched_getaffinity` (case 123) and
+  `/proc/cpuinfo`, so every guest-visible CPU-count source agrees; never
+  hardcode the count per-file. Served: `cpu/{online,possible,present}` =
+  `"0-7\n"`, `cpuN` dirs with `cpu_capacity` = `"1024\n"` and
+  `cpufreq/cpuinfo_max_freq` = `"1800000\n"`. `sysfs_stat` mirrors
+  `binder_device_stat` for fstatat/statx/faccessat/faccessat2 (they
+  stat the host path directly, where a real host `/sys` would report the
+  HOST's core count and contradict the affinity mask). Regression:
+  `ctest/test_sysfs_cpu.c` (both engines).
 - **Compatibility syscalls live in `misc_extended.cpp` (2026-09-12).**
   Permissive no-ops: NUMA `remap_file_pages`/`mbind`/`set_mempolicy`/
   `get_mempolicy` (MPOL_DEFAULT + zeroed nodemask)/`migrate_pages`/
@@ -1415,8 +1456,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **303 pass /
-  0 fail / 0 skip**; `--no-jit` = 295 pass + 8 JIT-only skips: unit +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **304 pass /
+  0 fail / 0 skip**; `--no-jit` = 296 pass + 8 JIT-only skips: unit +
   integration + toybox + real-world +
   benchmarks + dynamic + interactive). Zero skips needs the optional
   fixtures: the `ctest_real/{div_*,loop_div,simple_div}.elf` `make cross`
@@ -1426,8 +1467,8 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `rw_iperf3_version` SIGSEGVs at pc 0). `test_dladdr_glibc` must be a
   glibc-DYNAMIC binary or its dlopen stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **303 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 298),
+  (interactive + real-world are the standard default) = **304 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 299),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

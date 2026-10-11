@@ -71,8 +71,8 @@ ART/framework integration remains planned for [v2.0](roadmap.md).
 **What it is NOT:**
 
 - Not a full-system emulator (no kernel — use QEMU-system for that)
-- No ART/Dalvik or full Android framework; the APK path supports native-only
-  NativeActivity launch (see below)
+- Android support is experimental; Asgard supplies real Bionic/ART and selected
+  framework contracts, with incomplete Android service and renderer support
 - Not as mature as QEMU-user — it's a smaller, simpler alternative
 
 ## Quick Start
@@ -176,6 +176,13 @@ The rootfs includes:
 
 ### Android Applications
 
+**Asgard** is Bifrost's Android compatibility layer. Its app supervisor and
+shared Binder broker let independent guest processes exchange native Binder
+transactions, object handles and host-backed file descriptors. Use
+`python3 scripts/asgard.py start PACKAGE` to launch into a shared realm, and
+`python3 scripts/asgard.py realm status` to inspect it. See
+[Asgard setup, process tests and current limits](docs/ANDROID_RUNTIME.md).
+
 The standalone Android path targets **NativeActivity-style native libraries**
 through `--android`. Surface, activity/looper and audio probes pass in both
 engines; this does not establish compatibility with arbitrary Android game
@@ -217,9 +224,8 @@ python3 scripts/android_package.py run org.example.package
 python3 scripts/android_package.py probe org.example.package --library libunity.so
 ```
 
-See [APK setup, validation and limits](docs/ANDROID_APK.md), the
-[bootstrap instructions](docs/ANDROID_RUNTIME.md) and
-[Android architecture](docs/ANDROID_ARCHITECTURE.md). Virtual Binder devices
+See [APK setup, validation and limits](docs/ANDROID_APK.md) and the
+[bootstrap instructions](docs/ANDROID_RUNTIME.md). Virtual Binder devices
 support bounded transactions and object handles. `--android-services` adds a
 native service-manager registry; see [Binder limits and tests](docs/ANDROID_BINDER.md).
 The Android surface adapter uses an SDL3 window backend behind a versioned
@@ -240,8 +246,8 @@ in both engines. A framework probe creates a real Activity, and the separate
 installed-app probe now reaches SpongeBob's CleverTap Activity `onCreate` and
 IL2CPP JNI startup in JIT and interpreter modes. See the
 [installed-app checkpoint](docs/ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
-It exits after creation; Activity resume, drawable window attachment and input
-remain unsupported. The normal APK runner still rejects managed launchers.
+That probe exits after creation. The normal managed runner additionally supplies
+Activity resume, a SurfaceView window and input; those paths remain experimental.
 
 The separate native-load probe loads all 21 SpongeBob libraries with the real
 Media NDK bundle and an explicit Firebase App preload. It reports loading and

@@ -15,12 +15,17 @@ extern void AAudioStreamBuilder_setFormat(AAudioStreamBuilder*, int);
 extern void AAudioStreamBuilder_setChannelCount(AAudioStreamBuilder*, int);
 extern void AAudioStreamBuilder_setSampleRate(AAudioStreamBuilder*, int);
 extern void AAudioStreamBuilder_setFramesPerDataCallback(AAudioStreamBuilder*, int);
+extern void AAudioStreamBuilder_setUsage(AAudioStreamBuilder*, int);
+extern void AAudioStreamBuilder_setInputPreset(AAudioStreamBuilder*, int);
 extern void AAudioStreamBuilder_setDataCallback(AAudioStreamBuilder*, data_callback, void*);
 extern int AAudioStreamBuilder_openStream(AAudioStreamBuilder*, AAudioStream**);
 extern int AAudioStreamBuilder_delete(AAudioStreamBuilder*);
 extern int AAudioStream_requestStart(AAudioStream*);
 extern int AAudioStream_waitForStateChange(AAudioStream*, int, int*, long);
 extern int AAudioStream_close(AAudioStream*);
+extern int AAudioStream_getUsage(AAudioStream*);
+extern int AAudioStream_getInputPreset(AAudioStream*);
+extern int AAudioStream_getTimestamp(AAudioStream*, int, long*, long*);
 enum { FORMAT_FLOAT = 2, STATE_STARTED = 4, STATE_STOPPED = 10, FRAMES = 256 };
 
 static volatile int calls, stop_after, last_frames, callback_tid, errno_kept, user_ok;
@@ -58,6 +63,8 @@ static AAudioStream* open_stream(data_callback cb) {
     AAudioStreamBuilder_setChannelCount(builder, 2);
     AAudioStreamBuilder_setSampleRate(builder, 48000);
     AAudioStreamBuilder_setFramesPerDataCallback(builder, FRAMES);
+    AAudioStreamBuilder_setUsage(builder, 14); // AAUDIO_USAGE_GAME
+    AAudioStreamBuilder_setInputPreset(builder, 6); // VOICE_RECOGNITION
     if (cb) AAudioStreamBuilder_setDataCallback(builder, cb, &user_tag);
     int result = AAudioStreamBuilder_openStream(builder, &stream);
     AAudioStreamBuilder_delete(builder);
@@ -68,10 +75,22 @@ int main(void) {
     AAudioStream* stream = open_stream(callback);
     check(stream != 0, "callback stream opens");
     if (!stream) return 1;
+    check(AAudioStream_getUsage(stream) == 14 && AAudioStream_getInputPreset(stream) == 6,
+          "builder usage and input preset survive open");
+    long position = 123, timestamp = 456;
+    check(AAudioStream_getTimestamp(stream, 1, &position, &timestamp) == -895,
+          "timestamp before start is INVALID_STATE");
+    check(position == 123 && timestamp == 456, "failed timestamp preserves outputs");
+    check(AAudioStream_getTimestamp(stream, 0, &position, &timestamp) == -898,
+          "timestamp rejects unsupported clock");
     usleep(100000);
     check(count() == 0, "no callback before requestStart");
     check(AAudioStream_requestStart(stream) == 0, "requestStart");
     check(wait_calls(5), "callbacks run after start");
+    check(AAudioStream_getTimestamp(stream, 1, &position, &timestamp) == -889
+          && AAudioStream_getTimestamp(stream, 7, &position, &timestamp) == -889,
+          "host backend reports presentation timestamps unavailable");
+    check(position == 123 && timestamp == 456, "unavailable timestamp preserves outputs");
     check(callback_tid != gettid(), "callback runs on its own thread");
     check(errno_kept, "callback thread has Bionic TLS");
     check(user_ok && last_frames == FRAMES, "callback receives user data and frame count");

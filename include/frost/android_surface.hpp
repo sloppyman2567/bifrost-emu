@@ -119,6 +119,8 @@ public:
     // ANativeWindow_setBuffersGeometry: both dimensions must be zero or
     // positive. Zero restores the adapter's base geometry/format.
     int32_t set_buffers_geometry(int32_t w, int32_t h, int32_t fmt, uint64_t handle = 0);
+    // An advisory content-rate hint; this backend keeps its current display mode.
+    int32_t set_frame_rate(uint64_t handle, float rate, int8_t compatibility, int8_t strategy);
 
     // The host-side native window value host EGL expects for
     // eglCreateWindowSurface: X11 Window id on an X11-backed display,

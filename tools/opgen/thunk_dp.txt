@@ -465,7 +465,7 @@ eglReleaseThread          EGL    -             -     -              -
 eglWaitGL                 EGL    -             -     -              -
 eglWaitNative             EGL    i             -     -              -
 eglSwapInterval           EGL    ii            -     -              -
-eglQueryString            EGL    i             str   -              -
+eglQueryString            EGL    ii            str   -              -
 eglGetProcAddress         EGL    p             -     GET_PROC       -
 # Rest of EGL 1.5 core, as exported by Android's libEGL.map.txt (EGLTime is
 # a 64-bit x-reg; EGLClientBuffer/EGLImage/EGLSync are opaque 'i').
@@ -1092,6 +1092,8 @@ ANativeWindow_getWidth           ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_getHeight          ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_getFormat          ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_setBuffersGeometry ANDROID iiii   -     ANDROID_WINDOW -
+ANativeWindow_setFrameRate       ANDROID ifi    -     ANDROID_WINDOW -
+ANativeWindow_setFrameRateWithChangeStrategy ANDROID ifii - ANDROID_WINDOW -
 # ── Android NativeActivity lifecycle layer (v2, 2026-08) ─────────────
 # ALooper / AInputQueue / event getters / AConfiguration — the plumbing
 # android_native_app_glue needs to run a guest .so under --android.

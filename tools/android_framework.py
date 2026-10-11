@@ -21,7 +21,7 @@ import android_art
 # boot_classpaths): the primary boot.oat records its jars in the
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
-SCHEMA = 5
+SCHEMA = 6
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -144,7 +144,7 @@ def framework_linker_configuration(apexes, paths):
               "namespace.default.isolated = true\n"
               "namespace.default.visible = true\n"
               "namespace.default.search.paths = " + ":".join(paths) + "\n"
-              "namespace.default.permitted.paths = /apex:/system:/data/local/tmp\n")
+              "namespace.default.permitted.paths = /apex:/system:/product:/data/local/tmp\n")
     for name, namespace in zip(apexes, namespaces):
         prefix = "namespace." + namespace
         config += (prefix + ".isolated = true\n" + prefix + ".visible = true\n" +
@@ -209,11 +209,35 @@ def install(destination, art_root, archive=None):
         # init loads these after /system/build.prop. product sets
         # ro.dalvik.vm.enable_uffd_gc, which with userfaultfd selects ART's
         # CMC collector: the collector the image's boot image was built for.
-        subprocess.run(["lpunpack", "-p", "system_ext", "-p", "product", str(work / "super.img"),
+        subprocess.run(["lpunpack", "-p", "system_ext", "-p", "product", "-p", "vendor", str(work / "super.img"),
                         str(work / "partitions")], capture_output=True, check=True, timeout=300)
         for partition in ("system_ext", "product"):
             dump(work / "partitions" / f"{partition}.img", "/etc/build.prop",
                  root / partition / "etc/build.prop")
+        # The pinned image supplies its app heap policy here (192m growth,
+        # 512m maximum). Omitting it makes AndroidRuntime fall back to 16m.
+        dump(work / "partitions/vendor.img", "/build.prop", root / "vendor/build.prop")
+        # Use the real same-image provider, including its ARM64 JNI library.
+        # A feature flag alone cannot satisfy WebViewFactory's package and
+        # signature verification, or its native provider initialization.
+        webview = root / "product/app/webview"
+        apk = webview / "webview.apk"
+        dump(work / "partitions/product.img", "/app/webview/webview.apk", apk,
+             max_size=256 * 1024 * 1024)
+        apk.chmod(0o444)  # ART rejects writable provider DEX for an app UID.
+        with zipfile.ZipFile(apk) as package:
+            libraries = [member for member in package.infolist()
+                         if member.filename.startswith("lib/arm64-v8a/")]
+            if not libraries or len(libraries) > 16:
+                raise ValueError("Unexpected WebView native library set")
+            for member in libraries:
+                name = member.filename.removeprefix("lib/arm64-v8a/")
+                if not re.fullmatch(r"[A-Za-z0-9_.+-]+\.so", name) or member.file_size > 256 * 1024 * 1024:
+                    raise ValueError("Unsafe WebView native library")
+                target = webview / "lib/arm64" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with package.open(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
         dump(system, "/system/bin/app_process64", root / "system/bin/app_process64")
         (root / "system/bin/app_process64").chmod(0o755)
         graph, preloads = android_art.native_dependencies(root, system, limit=1024)

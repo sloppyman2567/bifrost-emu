@@ -81,36 +81,60 @@ class FrameworkDisplayContractTests(FrameworkPackageContractTests):
 
 class HostNetworkTests(unittest.TestCase):
     def test_default_routes_and_offline_profiles(self):
-        from android_managed import host_network_available
+        from android_managed import host_default_interface
         with tempfile.TemporaryDirectory(prefix="bifrost-network-") as directory:
             root = Path(directory)
-            self.assertFalse(host_network_available(root))
+            self.assertIsNone(host_default_interface(root))
             route = root / "route"
             route.write_text("Iface Destination Gateway Flags RefCnt Use Metric Mask\n"
                              "eth-test 0001A8C0 00000000 0001 0 0 600 00FFFFFF\n")
-            self.assertFalse(host_network_available(root))
+            self.assertIsNone(host_default_interface(root))
             route.write_text("eth-test 00000000 0101A8C0 0003 0 0 600 00000000\n")
-            self.assertTrue(host_network_available(root))
+            self.assertEqual(host_default_interface(root), "eth-test")
             route.write_text("lo 00000000 00000000 0001 0 0 0 00000000\n"
                              "eth-test 00000000 00000000 0201 0 0 0 00000000\n")
-            self.assertFalse(host_network_available(root))
+            self.assertIsNone(host_default_interface(root))
             (root / "ipv6_route").write_text(
                 "0" * 32 + " 00 " + "0" * 32 + " 00 " + "0" * 32 +
                 " 00000064 00000000 00000000 00000003 tun-test\n")
-            self.assertTrue(host_network_available(root))
+            self.assertEqual(host_default_interface(root), "tun-test")
             (root / "ipv6_route").write_text("malformed\n")
-            self.assertFalse(host_network_available(root))
+            self.assertIsNone(host_default_interface(root))
 
     def test_explicit_network_modes_and_auto_discovery(self):
-        from android_managed import host_network_mode
-        with patch.dict(os.environ, {}, clear=True), patch("android_managed.host_network_available", return_value=True):
-            self.assertEqual(host_network_mode(), "1")
-        with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "0"}):
-            self.assertEqual(host_network_mode(), "0")
-        with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "1"}):
-            self.assertEqual(host_network_mode(), "1")
-        with patch.dict(os.environ, {"BIFROST_ANDROID_HOST_NETWORK": "maybe"}):
-            with self.assertRaises(ValueError): host_network_mode()
+        from android_managed import host_network_environment
+        def environment(variables, interface="eth-test", validated=True):
+            with patch.dict(os.environ, variables, clear=True), \
+                    patch("android_managed.host_default_interface", return_value=interface), \
+                    patch("android_managed.host_network_validated", return_value=validated) as probe:
+                result = host_network_environment()
+            return [result[k] for k in ("BIFROST_ANDROID_HOST_NETWORK",
+                    "BIFROST_ANDROID_NETWORK_VALIDATED", "BIFROST_ANDROID_NETWORK_INTERFACE")], probe.called
+        self.assertEqual(environment({}), (["1", "1", "eth-test"], True))
+        self.assertEqual(environment({}, validated=False), (["1", "0", "eth-test"], True))
+        self.assertEqual(environment({}, interface=None), (["0", "0", "wlan0"], False))
+        self.assertEqual(environment({"BIFROST_ANDROID_HOST_NETWORK": "0"}), (["0", "0", "eth-test"], False))
+        self.assertEqual(environment({"BIFROST_ANDROID_HOST_NETWORK": "1"}, interface=None),
+                         (["1", "1", "wlan0"], True))
+        self.assertEqual(environment({"BIFROST_ANDROID_NETWORK_VALIDATED": "0"}), (["1", "0", "eth-test"], False))
+        self.assertEqual(environment({"BIFROST_ANDROID_NETWORK_VALIDATED": "1"}, validated=False),
+                         (["1", "1", "eth-test"], False))
+        for name in ("BIFROST_ANDROID_HOST_NETWORK", "BIFROST_ANDROID_NETWORK_VALIDATED"):
+            with self.assertRaises(ValueError): environment({name: "maybe"})
+
+    def test_validation_probe_requires_https_204(self):
+        # NetworkMonitor: 204 validates, a redirect is a portal, the rest fails.
+        from android_managed import host_network_validated
+        for status, expected in ((204, True), (200, False), (302, False)):
+            with patch("http.client.HTTPSConnection") as connection:
+                connection.return_value.getresponse.return_value.status = status
+                self.assertEqual(host_network_validated(), expected)
+                connection.return_value.request.assert_called_once_with(
+                    "GET", "/generate_204", headers={"Connection": "close"})
+                connection.return_value.close.assert_called_once()
+        with patch("http.client.HTTPSConnection") as connection:
+            connection.return_value.request.side_effect = OSError("unreachable")
+            self.assertFalse(host_network_validated())
 
 
 class SettingsIdentityTests(unittest.TestCase):
@@ -378,11 +402,14 @@ class PackageTests(unittest.TestCase):
                 component += f'<service android:name="{activity}${service}" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleDisabled" android:enabled="false" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleRemote" android:process=":remote" android:exported="false"/>'
+            component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
         required = ' android:isSplitRequired="true"' if not split else ""
+        job_permission = '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>' if managed == "ManagedServices" else ""
         manifest.write_text(
             f"""<manifest xmlns:android="http://schemas.android.com/apk/res/android"
             package="org.bifrost.fixture" android:versionCode="{version}"{split_attr}>
             <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="35"/>
+            {job_permission}
             <application android:label="Managed Fixture" android:hasCode="{'true' if managed else 'false'}"{required}>{component}</application></manifest>"""
         )
         subprocess.run(
@@ -725,11 +752,19 @@ class PackageTests(unittest.TestCase):
         text = log.read_text()
         self.assertEqual(status, 0, text[-30000:])
         self.assertIn("SERVICE_EXECUTION_OK", text)
+        self.assertIn("JOB_SCHEDULER_OK", text)
+        self.assertIn("SERVICE_PROCESS_OK", text)
         self.assertNotRegex(text, r"thread \d+: exception:|FATAL EXCEPTION|AssertionError")
         markers = ("SERVICE_EXECUTION_OK", "SERVICE_FIXTURE Activity destroyed",
                    "SERVICE_FIXTURE alive after Activity destruction", "SERVICE_FIXTURE destroy after-activity")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions))
+        if not trace:
+            status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+            shutil.copyfile(log, output / "jit-restart.log")
+            restarted = log.read_text()
+            self.assertEqual(status, 0, restarted[-30000:])
+            self.assertIn("JOB_SCHEDULER_OK restart=true", restarted)
         if trace:
             import json
             directory, = (app / "managed/traces").iterdir()

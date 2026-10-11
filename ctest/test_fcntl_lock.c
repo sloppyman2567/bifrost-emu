@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -16,6 +17,21 @@ static void check(int ok, const char *what) {
 }
 
 int main(void) {
+    int sealed = syscall(SYS_memfd_create, "seal-test", 2); // MFD_ALLOW_SEALING
+    check(sealed >= 0, "create sealable memfd");
+    if (sealed >= 0) {
+        check(ftruncate(sealed, 4096) == 0, "size memfd");
+        check(fcntl(sealed, F_GET_SEALS) == 0, "read initial seals");
+        check(fcntl(sealed, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) == 0,
+              "add size seals");
+        check(fcntl(sealed, F_GET_SEALS) == (F_SEAL_SHRINK | F_SEAL_GROW),
+              "read back size seals");
+        errno = 0;
+        check(ftruncate(sealed, 0) == -1 && errno == EPERM, "sealed memfd cannot shrink");
+        errno = 0;
+        check(ftruncate(sealed, 8192) == -1 && errno == EPERM, "sealed memfd cannot grow");
+        close(sealed);
+    }
     char path[] = "/tmp/bifrost_lock_XXXXXX";
     int fd = mkstemp(path);
     check(fd >= 0, "create lock file");

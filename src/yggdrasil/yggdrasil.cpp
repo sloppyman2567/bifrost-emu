@@ -1,8 +1,9 @@
 // yggdrasil/yggdrasil.cpp — top-level resolver + FdTable + read_path helper.
 //
-// Yggdrasil::open() consults procfs, devfs, and host passthrough in order.
-// Each sub-resolver lives in its own file:
+// Yggdrasil::open() consults procfs, sysfs, devfs, and host
+// passthrough in order. Each sub-resolver lives in its own file:
 //   procfs → yggdrasil/procfs.cpp
+//   sysfs  → yggdrasil/sysfs.cpp
 //   devfs  → yggdrasil/devfs.cpp
 //   host   → yggdrasil/host.cpp (path remap + openat passthrough)
 #include "yggdrasil/yggdrasil.hpp"
@@ -42,10 +43,15 @@ std::unique_ptr<Node> Yggdrasil::open(const std::string& requested_path,
     // 1. ProcFS
     auto node = open_procfs(guest_path, flags, mode, err_out);
     if (node || *err_out != 0) return node;
-    // 2. DevFS
+    // 2. SysFS — always synthetic (before DevFS and the host
+    // passthrough): a rootfs has no /sys, and a host /sys would
+    // report the host's core count, contradicting sched_getaffinity.
+    node = open_sysfs(guest_path, flags, mode, err_out);
+    if (node || *err_out != 0) return node;
+    // 3. DevFS
     node = open_devfs(guest_path, flags, mode, err_out);
     if (node || *err_out != 0) return node;
-    // 3. Host passthrough (with BIFROST_ROOT remap)
+    // 4. Host passthrough (with BIFROST_ROOT remap)
     return open_host(guest_path, flags, mode, err_out);
 }
 // ── Yggdrasil::open_at: explicit-dirfd open ──────────────────────────

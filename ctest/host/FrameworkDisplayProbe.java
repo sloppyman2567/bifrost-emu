@@ -40,6 +40,7 @@ public final class FrameworkDisplayProbe {
         FrameworkDisplay service = (FrameworkDisplay) field.get(null);
         Object thread = Class.forName("android.app.ActivityThread").getMethod("systemMain").invoke(null);
         Context context = (Context) thread.getClass().getMethod("getSystemContext").invoke(thread);
+        service.attachApplicationThread(thread);
         DisplayManager manager = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
         Display[] displays = manager.getDisplays();
         check(displays.length == 1 && displays[0].getDisplayId() == 0, "default display enumeration incorrect");
@@ -51,6 +52,26 @@ public final class FrameworkDisplayProbe {
         Point size = new Point();
         displays[0].getRealSize(size);
         check(size.x == 480 && size.y == 800, "initial size incorrect");
+        Context windowContext = context.createWindowContext(displays[0],
+                android.view.WindowManager.LayoutParams.TYPE_APPLICATION, null);
+        check(windowContext.getResources().getConfiguration().screenWidthDp == 480,
+                "window context initial configuration incorrect");
+        android.view.WindowManager windows = windowContext.getSystemService(android.view.WindowManager.class);
+        android.view.WindowMetrics metrics = windows.getCurrentWindowMetrics();
+        check(metrics.getBounds().equals(new android.graphics.Rect(0, 0, 480, 800)),
+                "window metrics bounds incorrect");
+        check(metrics.getWindowInsets().getInsets(android.view.WindowInsets.Type.systemBars()
+                | android.view.WindowInsets.Type.ime()).equals(android.graphics.Insets.NONE),
+                "virtual window has unexpected system-bar or IME insets");
+        Object insets = Class.forName("android.view.InsetsState").getConstructor().newInstance();
+        try { service.windowInsets(1234, insets); throw new AssertionError("unknown display has insets"); }
+        catch (android.view.WindowManager.InvalidDisplayException expected) { checks++; }
+        check(service.attachWindowContext(new Object(), new android.os.Binder(), 1, 0) == null,
+                "foreign process attached window context");
+        Method appThread = thread.getClass().getDeclaredMethod("getApplicationThread");
+        appThread.setAccessible(true);
+        check(service.attachWindowContext(appThread.invoke(thread), new android.os.Binder(), 1, 1234) == null,
+                "window context attached to unknown display");
         Class<?> iface = Class.forName("android.hardware.display.IDisplayManager");
         Object remote = Class.forName("android.hardware.display.IDisplayManager$Stub")
                 .getMethod("asInterface", android.os.IBinder.class).invoke(null,
@@ -90,17 +111,28 @@ public final class FrameworkDisplayProbe {
         main.postDelayed(() -> {
             try {
                 check(changed.get() == 0, "changed event ignored listener mask");
+                check(windowContext.getResources().getConfiguration().screenWidthDp == 640,
+                        "window context resize incorrectly depends on display listener mask");
                 manager.unregisterDisplayListener(listener);
                 manager.registerDisplayListener(listener, delivery);
                 service.setSize(800, 600);
                 await(() -> changed.get() == 1, () -> {
                     displays[0].getRealSize(size);
                     check(size.x == 800 && size.y == 600, "callback observed stale display dimensions");
+                    check(windowContext.getResources().getConfiguration().screenWidthDp == 800
+                            && windowContext.getResources().getConfiguration().screenHeightDp == 600,
+                            "window context configuration stale after resize");
+                    check(windows.getCurrentWindowMetrics().getBounds().equals(new android.graphics.Rect(0, 0, 800, 600)),
+                            "window metrics stale after resize");
                     manager.unregisterDisplayListener(listener);
+                    try { windowContext.getClass().getMethod("release").invoke(windowContext); }
+                    catch (Exception error) { throw new RuntimeException(error); }
                     try { service.setSize(900, 600); }
                     catch (Exception error) { throw new RuntimeException(error); }
                     main.postDelayed(() -> {
                         check(changed.get() == 1, "callback delivered after unregister");
+                        check(windowContext.getResources().getConfiguration().screenWidthDp == 800,
+                                "released window context still receives configuration updates");
                         worker.quitSafely();
                         System.out.println("FRAMEWORK_DISPLAY_CONTRACT_OK checks=" + checks);
                         System.out.println("FRAMEWORK_OK");

@@ -1279,6 +1279,13 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         } else if (n == "ANativeWindow_getFormat") {
             cpu.regs[0] = static_cast<uint64_t>(
                 static_cast<int64_t>(mgr.format(cpu.regs[0])));
+        } else if (n == "ANativeWindow_setFrameRate" ||
+                   n == "ANativeWindow_setFrameRateWithChangeStrategy") {
+            float rate;
+            std::memcpy(&rate, &cpu.v_lo[0], sizeof(rate));
+            cpu.regs[0] = static_cast<uint64_t>(mgr.set_frame_rate(cpu.regs[0], rate,
+                static_cast<int8_t>(cpu.regs[1]), n == "ANativeWindow_setFrameRate" ? 0 :
+                static_cast<int8_t>(cpu.regs[2])));
         } else if (n == "ANativeWindow_setBuffersGeometry") {
             // (window, width, height, format); zero restores base settings.
             cpu.regs[0] = static_cast<uint64_t>(mgr.set_buffers_geometry(

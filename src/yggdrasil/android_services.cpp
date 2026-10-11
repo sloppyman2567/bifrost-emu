@@ -107,7 +107,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     if (existing != domain_->services.end()) {
                         // Keep promotion alive through replacement: teardown
                         // removes owned services and could invalidate existing.
-                        replaced_owner = existing->second.object->owner.lock();
+                        replaced_owner = domain_->promote(existing->second.object->owner);
                         if (replaced_owner &&
                             static_cast<BinderNode *>(replaced_owner.get())->incoming_.size() + 2 > 256)
                             throw std::invalid_argument("service owner queue full");
@@ -161,7 +161,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                         ++handles_.at(id).temporary_strong;
                         change_reference(object, 1, 0);
                         reply.references.push_back({id, false, object});
-                        if (object->owner.lock().get() == this) {
+                        if (domain_->promote(object->owner).get() == this) {
                             flat.binder = object->pointer;
                             flat.cookie = object->cookie;
                         } else {
@@ -196,7 +196,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
     queued_bytes_ += std::max<uint64_t>(8, (reply.payload.size() + 7) & ~uint64_t(7));
     replies_[tid].push_back(Event{BF_BR_TRANSACTION_COMPLETE});
     replies_[tid].push_back(std::move(reply));
-    domain_->ready.notify_all();
+    ready_.notify_all();
     return 0;
 }
 } // namespace arm64emu::yggdrasil

@@ -29,6 +29,12 @@ void Audio::output_config(uint32_t& rate, uint32_t& frames) {
     rate = sample_rate_;
     frames = output_frames_;
 }
+size_t Audio::active_streams() {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t active = 0;
+    for (const auto& entry : streams_) active += !entry.second.paused;
+    return active;
+}
 Audio::~Audio() {
     close();
 }
@@ -196,6 +202,7 @@ void Audio::stream_clear(int id) {
     if (it != streams_.end()) {
         it->second.head = 0;
         it->second.tail = 0;
+        it->second.frame_batches.clear();
     }
 }
 size_t Audio::stream_queued_frames(int id) {
@@ -211,6 +218,14 @@ bool Audio::stream_buffer_info(int id, uint32_t rate, size_t& queued, size_t& ca
     // Round queued input frames up, so callers never over-report free space.
     queued = ((s.tail - s.head) * static_cast<uint64_t>(rate) + sample_rate_ - 1) / sample_rate_;
     capacity = s.cap_frames * static_cast<uint64_t>(rate) / sample_rate_;
+    return true;
+}
+bool Audio::stream_frame_counters(int id, uint64_t& written, uint64_t& read) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    if (it == streams_.end()) return false;
+    written = it->second.frames_written;
+    read = it->second.frames_read;
     return true;
 }
 ssize_t Audio::stream_write(int id, uint32_t fmt, uint32_t rate, uint8_t ch,
@@ -288,17 +303,20 @@ ssize_t Audio::push_frames_locked_(Stream& s, uint32_t fmt, uint32_t rate,
     if (accept_in > frames_in) accept_in = frames_in;
     if (!accept_in) return 0;
     convert_to_f32_(fmt, rate, ch, data, accept_in, conv_);
-    const size_t out_frames = conv_.size() / channels_;
+    size_t out_frames = conv_.size() / channels_;
     if (!out_frames || out_frames > free_frames) {
         if (accept_in > 1) accept_in--;          // rounding safety
         if (!accept_in) return 0;
         convert_to_f32_(fmt, rate, ch, data, accept_in, conv_);
-        if (conv_.size() / channels_ > free_frames) return 0;
+        out_frames = conv_.size() / channels_;
+        if (!out_frames || out_frames > free_frames) return 0;
     }
     const size_t mask = s.cap_frames * channels_ - 1;
     for (size_t i = 0; i < conv_.size(); i++)
         s.ring[(s.tail * channels_ + i) & mask] = conv_[i];
     s.tail += out_frames;
+    s.frames_written += accept_in;
+    s.frame_batches.push_back({accept_in, out_frames});
     bytes_pushed_.fetch_add(accept_in * frame_sz_in, std::memory_order_relaxed);
     // Optional WAV dump records the guest's own bytes (pre-conversion),
     // matching the old headless behavior.
@@ -441,6 +459,18 @@ void Audio::mixer_callback_(void* userdata, uint8_t* stream, int len) {
                     (unsigned long long)(n*1000ull/self->sample_rate_),
                     (unsigned long long)(s.cap_frames*1000ull/self->sample_rate_));
         s.head += n;
+        size_t remaining = n;
+        while (remaining && !s.frame_batches.empty()) {
+            auto& batch = s.frame_batches.front();
+            uint64_t take = std::min<uint64_t>(remaining, batch.output - batch.consumed);
+            batch.consumed += take;
+            remaining -= take;
+            uint64_t credit = batch.consumed == batch.output ? batch.input :
+                static_cast<uint64_t>((static_cast<__uint128_t>(batch.consumed) * batch.input) / batch.output);
+            s.frames_read += credit - batch.credited;
+            batch.credited = credit;
+            if (batch.consumed == batch.output) s.frame_batches.pop_front();
+        }
     }
     // Convert + clip into the output stream.
     size_t oi = 0;

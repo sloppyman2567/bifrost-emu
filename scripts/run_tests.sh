@@ -370,6 +370,12 @@ UNIT_TESTS=(
     # /dev/urandom and /dev/random never run dry: one open stream reads
     # far past 256 bytes (Teeworlds' secure_random_fill traps on a short read).
     "test_dev_urandom|ctest/test_dev_urandom.elf||10|ALL PASS"
+    # Synthetic /sys CPU topology: sysconf(_SC_NPROCESSORS_ONLN), the
+    # /sys/devices/system/cpu/{online,possible,present} files, their
+    # stat types/sizes, the getdents64 listing (3 files + 8 cpu dirs),
+    # sched_getaffinity, and the per-CPU capacity/freq leaves. libunity
+    # sizes its job-system worker pool from these (SpongeBob stall).
+    "test_sysfs_cpu|ctest/test_sysfs_cpu.elf||10|ALL PASS"
     # userfaultfd SIGBUS mode as ART's CMC GC uses it, including
     # MREMAP_DONTUNMAP and registered ranges on both sides of 4 GiB.
     "test_userfaultfd|ctest/test_userfaultfd.elf||10|ALL PASS"
@@ -444,6 +450,7 @@ UNIT_TESTS=(
     # userfaultfd/mqueue/quotactl).
     "android_binder_exit|ctest/android_binder_exit.elf||5|checks passed"
     "android_binder|ctest/android_binder.elf||10|checks passed"
+    "android_binder_features|ctest/android_binder_features.elf||10|checks passed"
     "android_binder_objects|ctest/android_binder_objects.elf||10|checks passed"
     "jit_bfm_masks|ctest/jit_bfm_masks.elf||30|checks passed"
     "jit_android_semantics|ctest/jit_android_semantics.elf||10|checks passed"

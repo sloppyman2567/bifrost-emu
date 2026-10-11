@@ -1,3 +1,4 @@
+#include "yggdrasil/binder_broker.hpp"
 // main.cpp — bifrost-emu: fast ARM64 Linux user-mode emulator
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
@@ -84,6 +85,9 @@ static void print_banner() {
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
         "    --android-services provide the API-35 Binder service-manager subset\n"
+        "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
+        "    --android-binder-broker SOCKET  join a shared guest Binder domain\n"
+        "    --android-app-id N  user-0 app UID (10000..19999) or isolated UID (99000..99999)\n"
         "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
         "    --print-config     print resolved config and exit\n"
         "    -V, --version      show version and exit\n"
@@ -183,6 +187,8 @@ static bool install_android_window_plugin(const std::string& path) {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--asgard-broker")
+        return arm64emu::yggdrasil::asgard_broker_main(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
         return arm64emu::window_stats::ui_main(std::atoi(argv[2]));
     bool debug   = false;
@@ -195,7 +201,10 @@ int main(int argc, char** argv) {
     bool use_jit = true;
     bool android_runtime = false;
     bool android_services = false;
+    uint32_t android_app_id = 10000;
+    bool android_app_id_set = false;
     std::string android_window_plugin;
+    std::string android_binder_broker;
     std::string fb_dump_path;
     std::string audio_dump_path;
     uint64_t jit_threshold = 0;  // 0 = use JIT from start
@@ -221,7 +230,8 @@ int main(int argc, char** argv) {
             print_config_only = true;
         } else if (a == "--rootfs" || a == "--jit-threshold" ||
                    a == "--fb-dump" || a == "--audio-dump" ||
-                   a == "--android-window-plugin") {
+                   a == "--android-window-plugin" || a == "--android-binder-broker" ||
+                   a == "--android-app-id") {
             if (i + 1 < argc) i++;
         }
     }
@@ -262,6 +272,23 @@ int main(int argc, char** argv) {
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
         if (a == "--android-services")      { android_services = true; arg_i++; continue; }
+        if (a == "--android-binder-broker") {
+            if (arg_i + 1 >= argc) { fprintf(stderr, "Asgard: --android-binder-broker requires a socket path\n"); return 2; }
+            android_binder_broker = argv[arg_i + 1]; arg_i += 2; continue;
+        }
+        if (a == "--android-app-id") {
+            if (arg_i + 1 >= argc) { fprintf(stderr, "bifrost-emu: --android-app-id requires N\n"); return 2; }
+            std::string value = argv[arg_i + 1];
+            if (value.size() != 5 || value.find_first_not_of("0123456789") != std::string::npos
+                    || !((value >= "10000" && value <= "19999")
+                         || (value >= "99000" && value <= "99999"))) {
+                fprintf(stderr, "bifrost-emu: Android UID must be in 10000..19999 or 99000..99999\n"); return 2;
+            }
+            android_app_id = static_cast<uint32_t>(std::stoul(value));
+            android_app_id_set = true;
+            arg_i += 2;
+            continue;
+        }
         if (a == "--android-window-plugin") {
             if (arg_i + 1 >= argc) {
                 fprintf(stderr, "bifrost-emu: --android-window-plugin requires a PATH argument\n");
@@ -358,7 +385,13 @@ int main(int argc, char** argv) {
             for (int i = arg_i + 2; i < argc; i++) guest_argv.push_back(argv[i]);
             if (raw_tty) set_raw_terminal();
             Emulator emu;
-            if (android_services) emu.enable_android_services();
+            if (!android_binder_broker.empty()) {
+                emu.vfs().set_binder_broker(android_binder_broker);
+                emu.vfs().set_self_pid(::getpid());
+                emu.main_cpu().tid = ::getpid();
+                emu.main_cpu().is_fork_process = true;
+            }
+            if (android_services || !android_binder_broker.empty()) emu.enable_android_services();
             // Mirror the normal path's CLI-over-config precedence
             // (applied below the loop there; here the branch exits early).
             emu.set_verbose(verbose || cfg.log_verbose);
@@ -437,9 +470,19 @@ int main(int argc, char** argv) {
     // for it. Default: leave the TTY alone so the host line discipline can
     // buffer input for guest line-oriented stdio (fgets, gets, scanf, …).
     if (raw_tty) set_raw_terminal();
+    if (android_app_id_set && !android_runtime) {
+        fprintf(stderr, "bifrost-emu: --android-app-id requires --android-runtime\n"); return 2;
+    }
     Emulator emu;
     emu.set_android_runtime(android_runtime);
-    if (android_services) emu.enable_android_services();
+    if (android_runtime) emu.vfs().set_process_identity(android_app_id, android_app_id);
+    if (!android_binder_broker.empty()) {
+        emu.vfs().set_binder_broker(android_binder_broker);
+        emu.vfs().set_self_pid(::getpid());
+        emu.main_cpu().tid = ::getpid();
+        emu.main_cpu().is_fork_process = true;
+    }
+    if (android_services || !android_binder_broker.empty()) emu.enable_android_services();
     emu.set_verbose(cfg.log_verbose);
     emu.set_trace(cfg.log_trace);
     emu.set_brk_verbose(cfg.log_brk_verbose);

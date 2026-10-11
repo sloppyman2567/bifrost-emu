@@ -1,9 +1,12 @@
 // Manifest-backed package service for the single installed-app profile.
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ComponentInfo;
+import android.content.pm.FeatureInfo;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -20,18 +23,48 @@ import java.util.Map;
 
 final class FrameworkPackages {
     private volatile PackageInfo installed;
+    private final Map<String, PackageInfo> systemPackages = new ConcurrentHashMap<>();
     private final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
+    private final Map<String, Map<ComponentName, List<IntentFilter>>> providerFilters = new ConcurrentHashMap<>();
 
     void install(Context system, PackageInfo pkg) {
         installPermissions(system, pkg);
         installed = copy(pkg, PackageInfo.CREATOR);
         componentStates.clear();
+        providerFilters.remove(pkg.packageName);
+    }
+
+    void installSystem(PackageInfo pkg) {
+        if ((pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0)
+            throw new IllegalArgumentException("Not a system package: " + pkg.packageName);
+        systemPackages.put(pkg.packageName, copy(pkg, PackageInfo.CREATOR));
+        providerFilters.remove(pkg.packageName);
+    }
+
+    PackageInfo systemPackage(String name) {
+        PackageInfo pkg = systemPackages.get(name);
+        return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
+    }
+
+    PackageInfo processPackage(String name) {
+        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : systemPackages.get(name);
+        return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
     void register(FrameworkServices services) throws Exception {
         services.register("package", "android.content.pm.IPackageManager", (method, a) -> {
             switch (method) {
-                case "hasSystemFeature": return false;
+                case "hasSystemFeature":
+                    return PackageManager.FEATURE_WEBVIEW.equals(a[0]) && (Integer) a[1] <= 0
+                            && systemPackages.containsKey("com.android.webview");
+                case "getSystemAvailableFeatures": {
+                    FeatureInfo feature = null;
+                    if (systemPackages.containsKey("com.android.webview")) {
+                        feature = new FeatureInfo();
+                        feature.name = PackageManager.FEATURE_WEBVIEW;
+                    }
+                    return listSlice(feature);
+                }
                 case "isInstantApp": return false;  // This profile installs full APKs only.
                 case "notifyPackageUse": return null;  // one-way usage report
                 // (name, flags, user): null means "not installed", which the
@@ -40,19 +73,23 @@ final class FrameworkPackages {
                     return packageInfo((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
                 case "getApplicationInfo":
                     return applicationInfo((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
-                case "getInstalledPackages": {
-                    PackageInfo info = packageInfo(installed == null ? null : installed.packageName,
-                            ((Number) a[0]).longValue(), (Integer) a[1]);
-                    return listSlice(info);
-                }
+                case "getInstalledPackages":
                 case "getInstalledApplications": {
-                    ApplicationInfo info = applicationInfo(installed == null ? null : installed.packageName,
-                            ((Number) a[0]).longValue(), (Integer) a[1]);
-                    return listSlice(info);
+                    List<Object> values = new ArrayList<>();
+                    List<String> names = new ArrayList<>(systemPackages.keySet());
+                    if (installed != null) names.add(installed.packageName);
+                    java.util.Collections.sort(names);
+                    for (String name : names) {
+                        PackageInfo info = packageInfo(name, ((Number) a[0]).longValue(), (Integer) a[1]);
+                        if (info != null) values.add(method.equals("getInstalledPackages") ? info : info.applicationInfo);
+                    }
+                    return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
+                            .newInstance(values);
                 }
-                case "getPackageUid":
-                    return packageMatches((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2])
-                            ? installed.applicationInfo.uid : -1;
+                case "getPackageUid": {
+                    PackageInfo pkg = findPackage((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
+                    return pkg == null ? -1 : pkg.applicationInfo.uid;
+                }
                 case "getPackagesForUid":
                     return installed != null && (Integer) a[0] == installed.applicationInfo.uid
                             ? new String[] {installed.packageName} : null;
@@ -77,6 +114,10 @@ final class FrameworkPackages {
                             (Integer) a[2]);
                 case "resolveContentProvider":
                     return resolveProvider((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
+                case "queryIntentContentProviders":
+                    return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
+                            .newInstance(queryProviders((Intent) a[0], (String) a[1],
+                                    ((Number) a[2]).longValue(), (Integer) a[3]));
                 case "getInstallerPackageName":
                     if (installed == null || !installed.packageName.equals(a[0]))
                         throw new IllegalArgumentException("Unknown package: " + a[0]);
@@ -90,8 +131,7 @@ final class FrameworkPackages {
                 // An app may change its own components (PackageManagerService
                 // rejects components of packages that are not installed).
                 case "getComponentEnabledSetting":
-                    return componentStates.getOrDefault(ownComponent(a[0], (Integer) a[1], false),
-                            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+                    return componentEnabledSetting((ComponentName) a[0], (Integer) a[1]);
                 case "setComponentEnabledSetting":
                     ComponentName component = ownComponent(a[0], (Integer) a[3], true);
                     int state = (Integer) a[1];
@@ -107,6 +147,17 @@ final class FrameworkPackages {
     }
 
     private final Map<ComponentName, Integer> componentStates = new ConcurrentHashMap<>();
+
+    private int componentEnabledSetting(ComponentName component, int userId) {
+        if (userId != Process.myUid() / 100000)
+            throw new SecurityException("Foreign package user: " + userId);
+        if (component == null) return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+        if (findPackage(component.getPackageName(), 0, userId) == null)
+            throw new IllegalArgumentException("Unknown component: " + component);
+        // Reading a visible system package's override is allowed; changing
+        // another UID's components still goes through ownComponent below.
+        return componentStates.getOrDefault(component, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+    }
 
     private ComponentName ownComponent(Object argument, int userId, boolean declared) {
         ComponentName component = (ComponentName) argument;
@@ -128,10 +179,16 @@ final class FrameworkPackages {
     }
 
     private boolean packageMatches(String name, long flags, int userId) {
-        return installed != null && installed.packageName.equals(name)
-                && userId == installed.applicationInfo.uid / 100000
+        return findPackage(name, flags, userId) != null;
+    }
+
+    private PackageInfo findPackage(String name, long flags, int userId) {
+        if (name == null) return null;
+        PackageInfo pkg = installed != null && installed.packageName.equals(name)
+                ? installed : systemPackages.get(name);
+        return pkg != null && userId == pkg.applicationInfo.uid / 100000
                 && ((flags & PackageManager.MATCH_SYSTEM_ONLY) == 0
-                    || (installed.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
+                    || (pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0) ? pkg : null;
     }
 
     private static <T extends android.os.Parcelable> T copy(T value, android.os.Parcelable.Creator<T> creator) {
@@ -152,7 +209,7 @@ final class FrameworkPackages {
 
     private ApplicationInfo applicationInfo(String name, long flags, int userId) {
         if (!packageMatches(name, flags, userId)) return null;
-        ApplicationInfo result = copy(installed.applicationInfo, ApplicationInfo.CREATOR);
+        ApplicationInfo result = copy(findPackage(name, flags, userId).applicationInfo, ApplicationInfo.CREATOR);
         filterApplicationInfo(result, flags);
         return result;
     }
@@ -173,7 +230,7 @@ final class FrameworkPackages {
     // PackageManagerService returns a manifest ServiceInfo, not a running
     // service. Firebase discovers its registrars through this metadata.
     private boolean componentMatches(ComponentInfo info, long flags, int userId) {
-        PackageInfo pkg = installed;
+        PackageInfo pkg = findPackage(info.packageName, flags, userId);
         if (pkg == null || userId != pkg.applicationInfo.uid / 100000
                 || !pkg.packageName.equals(info.packageName)) return false;
         if ((flags & PackageManager.MATCH_SYSTEM_ONLY) != 0
@@ -195,8 +252,8 @@ final class FrameworkPackages {
     }
 
     private void installedComponentInfo(ComponentInfo result, long flags) {
-        result.applicationInfo = applicationInfo(installed.packageName, flags,
-                installed.applicationInfo.uid / 100000);
+        result.applicationInfo = applicationInfo(result.packageName, flags,
+                result.applicationInfo.uid / 100000);
         if ((flags & PackageManager.GET_META_DATA) == 0) result.metaData = null;
         if (result instanceof ProviderInfo && (flags & PackageManager.GET_URI_PERMISSION_PATTERNS) == 0)
             ((ProviderInfo) result).uriPermissionPatterns = null;
@@ -217,7 +274,7 @@ final class FrameworkPackages {
 
     private PackageInfo packageInfo(String name, long flags, int userId) {
         if (!packageMatches(name, flags, userId)) return null;
-        PackageInfo result = copy(installed, PackageInfo.CREATOR);
+        PackageInfo result = copy(findPackage(name, flags, userId), PackageInfo.CREATOR);
         filterApplicationInfo(result.applicationInfo, flags);
         result.activities = components(result.activities, flags, userId, PackageManager.GET_ACTIVITIES);
         result.receivers = components(result.receivers, flags, userId, PackageManager.GET_RECEIVERS);
@@ -258,9 +315,10 @@ final class FrameworkPackages {
     }
 
     private ProviderInfo providerInfo(ComponentName component, long flags, int userId) {
-        if (component == null || installed == null || installed.providers == null
-                || !packageMatches(component.getPackageName(), flags, userId)) return null;
-        for (ProviderInfo provider : installed.providers) {
+        if (component == null) return null;
+        PackageInfo pkg = findPackage(component.getPackageName(), flags, userId);
+        if (pkg == null || pkg.providers == null) return null;
+        for (ProviderInfo provider : pkg.providers) {
             if (!provider.name.equals(component.getClassName())) continue;
             if (!componentMatches(provider, flags, userId)) return null;
             ProviderInfo result = copy(provider, ProviderInfo.CREATOR);
@@ -268,6 +326,84 @@ final class FrameworkPackages {
             return result;
         }
         return null;
+    }
+
+    private Map<ComponentName, List<IntentFilter>> providerFilters(PackageInfo pkg) throws Exception {
+        Map<ComponentName, List<IntentFilter>> cached = providerFilters.get(pkg.packageName);
+        if (cached != null) return cached;
+        Map<ComponentName, List<IntentFilter>> filters = new java.util.HashMap<>();
+        // PackageInfo omits intent filters. Reuse the image's manifest parser
+        // for their full action/category/type/URI semantics rather than guess
+        // from provider authorities. Parse the installed cluster, including splits.
+        java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
+        if (base.isFile() && pkg.providers != null && pkg.providers.length != 0) {
+            Class<?> parserType = Class.forName("android.content.pm.PackageParser");
+            Object parser = parserType.getConstructor().newInstance();
+            java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
+                    && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
+            Object parsed = parserType.getMethod("parsePackage", java.io.File.class, int.class)
+                    .invoke(parser, archive, 0);
+            for (Object provider : (List<?>) parsed.getClass().getField("providers").get(parsed)) {
+                ProviderInfo info = (ProviderInfo) provider.getClass().getField("info").get(provider);
+                List<IntentFilter> intents = new ArrayList<>();
+                for (Object filter : (List<?>) provider.getClass().getField("intents").get(provider))
+                    intents.add(new IntentFilter((IntentFilter) filter));
+                filters.put(new ComponentName(pkg.packageName, info.name), intents);
+            }
+        }
+        Map<ComponentName, List<IntentFilter>> previous = providerFilters.putIfAbsent(pkg.packageName, filters);
+        return previous == null ? filters : previous;
+    }
+
+    private List<android.content.pm.ResolveInfo> queryProviders(Intent original, String type,
+            long flags, int userId) throws Exception {
+        if (original == null) throw new IllegalArgumentException("Null provider intent");
+        Intent intent = original.getComponent() == null && original.getSelector() != null
+                ? original.getSelector() : original;
+        List<android.content.pm.ResolveInfo> results = new ArrayList<>();
+        if (intent.getComponent() != null) {
+            ProviderInfo info = providerInfo(intent.getComponent(), flags, userId);
+            if (info != null) {
+                android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+                result.providerInfo = info;
+                results.add(result);
+            }
+            return results;
+        }
+        List<PackageInfo> packages = new ArrayList<>(systemPackages.values());
+        if (installed != null) packages.add(installed);
+        for (PackageInfo pkg : packages) {
+            if (findPackage(pkg.packageName, flags, userId) == null || pkg.providers == null
+                    || (intent.getPackage() != null && !intent.getPackage().equals(pkg.packageName))) continue;
+            Map<ComponentName, List<IntentFilter>> filters = providerFilters(pkg);
+            for (ProviderInfo info : pkg.providers) {
+                if (!componentMatches(info, flags, userId)) continue;
+                android.content.pm.ResolveInfo best = null;
+                for (IntentFilter filter : filters.getOrDefault(new ComponentName(pkg.packageName, info.name),
+                        java.util.Collections.emptyList())) {
+                    int match = filter.match(intent.getAction(), type, intent.getScheme(), intent.getData(),
+                            intent.getCategories(), "BifrostPackageResolver");
+                    boolean isDefault = filter.hasCategory(Intent.CATEGORY_DEFAULT);
+                    if (match < 0 || ((flags & PackageManager.MATCH_DEFAULT_ONLY) != 0 && !isDefault)) continue;
+                    android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+                    result.providerInfo = providerInfo(new ComponentName(pkg.packageName, info.name), flags, userId);
+                    result.priority = filter.getPriority();
+                    result.match = match;
+                    result.isDefault = isDefault;
+                    if ((flags & PackageManager.GET_RESOLVED_FILTER) != 0) result.filter = new IntentFilter(filter);
+                    if (best == null || result.priority > best.priority
+                            || (result.priority == best.priority && result.match > best.match)) best = result;
+                }
+                if (best != null) results.add(best);
+            }
+        }
+        results.sort((a, b) -> {
+            int order = Integer.compare(b.priority, a.priority);
+            if (order == 0) order = Boolean.compare(b.isDefault, a.isDefault);
+            if (order == 0) order = Integer.compare(b.match, a.match);
+            return order;
+        });
+        return results;
     }
 
     private void installPermissions(Context system, PackageInfo pkg) {
@@ -315,8 +451,9 @@ final class FrameworkPackages {
     }
 
     ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
-        PackageInfo pkg = installed;
-        if (pkg == null || !pkg.packageName.equals(component.getPackageName()) || pkg.services == null)
+        if (component == null) return null;
+        PackageInfo pkg = findPackage(component.getPackageName(), flags, userId);
+        if (pkg == null || pkg.services == null)
             return null;
         for (ServiceInfo service : pkg.services) {
             if (!service.name.equals(component.getClassName())) continue;

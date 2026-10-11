@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -63,6 +64,8 @@ public:
     size_t stream_queued_frames(int id);
     // Queue/capacity in the caller's input-frame units, atomically sampled.
     bool stream_buffer_info(int id, uint32_t input_rate, size_t& queued, size_t& capacity);
+    // Lifetime counters in this stream's input frames; clear/flush never resets them.
+    bool stream_frame_counters(int id, uint64_t& written, uint64_t& read);
     // Format-converting push into the stream's own ring. `data` is
     // interleaved samples in `fmt` at `rate` Hz / `ch` channels. Converts
     // to float at the device rate (linear resample when needed) and
@@ -76,6 +79,8 @@ public:
     uint64_t bytes_pushed() const { return bytes_pushed_.load(std::memory_order_relaxed); }
     // Snapshot for Android's primary-output queries; valid before first open.
     void output_config(uint32_t& rate, uint32_t& frames);
+    // Open streams that are started (not paused): Android's active outputs.
+    size_t active_streams();
     // ── Legacy single-device API (/dev/dsp VFS node + old callers) ────
     // Routes onto an implicit legacy stream (id 1) with this format.
     bool open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size);
@@ -104,6 +109,9 @@ private:
         size_t head = 0, tail = 0;      // monotonic frame counters
         size_t cap_frames = 0;          // power of two
         bool paused = false;
+        uint64_t frames_written = 0, frames_read = 0;
+        struct FrameBatch { uint64_t input, output, consumed = 0, credited = 0; };
+        std::deque<FrameBatch> frame_batches;
     };
     bool opened_ = false;               // physical device open
     uint32_t sample_rate_ = 44100;

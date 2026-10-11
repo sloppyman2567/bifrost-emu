@@ -529,6 +529,12 @@ test-ir-ssa:
 	$(CXX) $(CXXFLAGS) ctest/host/ir_ssa.cpp src/ir/ir_ssa.cpp -o $(OBJDIR)/ir_ssa_test $(LDFLAGS)
 	./$(OBJDIR)/ir_ssa_test
 
+.PHONY: test-audio-frame-counters
+test-audio-frame-counters:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) ctest/host/audio_frame_counters.cpp src/audio/audio.cpp -o $(OBJDIR)/audio_frame_counters $(LDFLAGS)
+	./$(OBJDIR)/audio_frame_counters
+
 .PHONY: test-android-window-backend
 test-android-window-backend: $(LIB)
 	$(CXX) $(CXXFLAGS) ctest/android_window_backend_host.cpp $(LIB) -o $(OBJDIR)/android_window_backend_host $(LDFLAGS)

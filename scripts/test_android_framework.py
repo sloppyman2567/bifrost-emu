@@ -14,6 +14,8 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import ExitStack, closing
+from android_processes import ProcessHost
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -21,7 +23,7 @@ from android_framework import install
 
 
 from android_managed import (LogdReceiver, install_managed_graphics, installed_arguments,
-                             host_network_mode, install_settings_key, add_trace_arguments,
+                             host_network_environment, install_settings_key, add_trace_arguments,
                              trace_options, collect_trace)
 
 
@@ -38,6 +40,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
         (root / "storage/emulated/0").mkdir(parents=True, exist_ok=True)
         shutil.copy2(probe, root / "data/local/tmp/probe.dex")
+        (root / "data/local/tmp/probe.dex").chmod(0o444)
         for library in libraries:
             if not library.name.endswith(".so") or not library.is_file():
                 raise ValueError("Probe libraries must be regular .so files")
@@ -70,7 +73,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         if trace_apk:
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"
-        guest_env = dict(metadata["environment"], BIFROST_ANDROID_HOST_NETWORK=host_network_mode())
+        guest_env = dict(metadata["environment"], **host_network_environment())
         if mode == "qemu":
             # QEMU's AT_EXECFN carries the host-prefixed path; map it to the
             # same linker section in this temporary copy only.
@@ -100,7 +103,13 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         log_path = output / (mode + ".log")
         started = time.monotonic()
         timed_out = False
-        with log_path.open("wb") as log, (output / (mode + ".logd")).open("wb") as logd_sink:
+        with log_path.open("wb") as log, (output / (mode + ".logd")).open("wb") as logd_sink, ExitStack() as hosts:
+            if services and mode != "qemu":
+                process_host = hosts.enter_context(closing(ProcessHost(root, emu,
+                    ["--no-jit"] if mode == "interp" else [], environment,
+                    "/data/local/tmp/probe.dex", output / "processes", trace_args)))
+                environment = process_host.environment
+                arguments[1:1] = ["--android-binder-broker", process_host.socket]
             logd = LogdReceiver(root, logd_sink)
             child = subprocess.Popen(arguments, stdout=log, stderr=subprocess.STDOUT,
                                      env=environment, start_new_session=True)
@@ -117,15 +126,31 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                     child.wait()
                 logd.close()
         text = log_path.read_bytes().decode(errors="replace")
+        diagnostic_text = text + (output / (mode + ".logd")).read_bytes().decode(errors="replace")
         app_mode = "--app" in probe_args
         play = "--play" in probe_args
         markers = ("APP_CLASSLOADER_OK", "APP_STORAGE_READY", "APP_PREFERENCES_READY",
                    "APP_APPLICATION_STARTED", "APP_ACTIVITY_CREATED", "FRAMEWORK_OK") \
             if app_mode else ("FRAMEWORK_OK",)
+        if services and main_class == "ActivityProbe$InputMethodProbe":
+            markers += ("INPUT_METHOD_PROTOCOL_OK",)
+        if main_class == "ActivityProbe$NativeLooperProbe":
+            markers += ("ANDROID_JAVA_NATIVE_LOOPER_OK",)
+        if main_class == "ActivityProbe$NativeChoreographerProbe":
+            markers += ("ANDROID_NATIVE_CHOREOGRAPHER_OK",)
         if services and main_class == "ActivityProbe":
-            markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK")
+            markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK",
+                        "ACTIVITY_TELEPHONY_SERVICE_OK", "ACTIVITY_SHARED_MEMORY_OK", "ACTIVITY_AUDIO_SERVICE_OK",
+                        "ACTIVITY_EXIT_HISTORY_OK", "ACTIVITY_START_HISTORY_OK")
             if not play:
                 markers += ("ACTIVITY_FRAMEWORK_VSYNC_OK",)
+            if "--webview" in probe_args or "--webview-renderer" in probe_args:
+                markers += ("ACTIVITY_WEBVIEW_PACKAGE_OK", "ACTIVITY_APPLICATION_RESTRICTIONS_OK",
+                            "ACTIVITY_WINDOW_CONTEXT_OK", "ACTIVITY_INPUT_METHOD_OK",
+                            "ACTIVITY_WEBVIEW_CONSTRUCTION_OK", "ACTIVITY_WEBVIEW_OK")
+            if "--webview-renderer" in probe_args:
+                markers += ("ASGARD_PROCESS_READY", "ACTIVITY_WEBVIEW_RENDERER_DOM_OK",
+                            "ACTIVITY_WEBVIEW_RENDERER_PIXELS_OK")
         if play:
             markers += ("APP_WINDOW_OPEN", "APP_AUDIO_ROUTING_READY", "APP_RESUMED", "APP_SURFACE_READY")
         # A play session ends when its window closes (exit 0) or its time runs out.
@@ -135,7 +160,9 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         guest_failure = bool(re.search(r"\[bifrost-emu\] thread \d+: exception:|"
                                        r"E CRASH\s*: Forwarding signal \d+|"
                                        r"E AndroidRuntime: .*FATAL EXCEPTION|"
-                                       r"F app_process64: .*?(?:Runtime aborting|Failed to abort)", text))
+                                       r"E cr_JniAndroid\s*: (?:Handling|Crashing due to) uncaught Java exception|"
+                                       r"(?:F libc\s*:|F/libc:) Fatal signal \d+|"
+                                       r"F app_process64: .*?(?:Runtime aborting|Failed to abort)", diagnostic_text))
         frames = max((int(n) for n in re.findall(r"\[frame\] eglSwapBuffers: (\d+) frames", text)),
                      default=0)
         finished = child.returncode == 0 or (play and timed_out)
@@ -203,14 +230,17 @@ if __name__ == "__main__":
             parser.error(str(error))
     if args.app and not (args.app / "base.apk").is_file():
         parser.error("--app must be an installed code directory containing base.apk")
-    if not args.main_class.isidentifier():
-        parser.error("--main-class must be a Java class name in the default package")
+    if not all(part.isidentifier() for part in args.main_class.split("$")):
+        parser.error("--main-class must be a Java class name (optionally nested) in the default package")
     if args.play:
         if not args.installed_app:
             parser.error("--play requires --installed-app")
         adapters = ROOT / "build/android-adapters"
         args.managed_graphics = args.managed_graphics or adapters / "managed"
         args.library.append(adapters / "libbifrost-activity.so")
+    elif args.services:
+        # ManagedLauncher services answer host-backed queries through this bridge.
+        args.library.append(ROOT / "build/android-adapters/libbifrost-activity.so")
     if not (1 <= args.timeout <= 300 or (args.play and args.timeout == 0)):
         parser.error("timeout must be between 1 and 300 seconds (0 = unlimited with --play)")
     if args.emu is None:

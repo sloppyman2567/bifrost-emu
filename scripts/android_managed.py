@@ -2,8 +2,10 @@
 """Managed Activity launcher build, persistent runtime and host supervision."""
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -20,11 +22,13 @@ import threading
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import android_framework
+from android_processes import ProcessHost
 
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "FrameworkServices.java",
                     "FrameworkPackages.java", "FrameworkConnectivity.java", "FrameworkServiceRuntime.java",
-                    "FrameworkTrace.java", "FrameworkDisplay.java")
+                    "FrameworkTrace.java", "FrameworkDisplay.java", "FrameworkInputMethod.java",
+                    "FrameworkProcessRuntime.java", "FrameworkJobs.java", "FrameworkContent.java")
 
 
 def add_trace_arguments(parser):
@@ -42,7 +46,8 @@ def trace_options(root, mode=None, after=0, duration=15):
         if after or duration != 15: raise ValueError("Trace window requires --trace-apk")
         return [], None
     directory = Path(tempfile.mkdtemp(prefix="apk-trace-", dir=root / "data/local/tmp"))
-    guest_path = "/" + directory.relative_to(root).as_posix()
+    # mkdtemp returns an absolute path even when the state root is relative.
+    guest_path = "/" + directory.relative_to(root.absolute()).as_posix()
     return [f"-Dbifrost.apk.trace.dir={guest_path}", f"-Dbifrost.apk.trace.mode={mode}",
             f"-Dbifrost.apk.trace.after={after}", f"-Dbifrost.apk.trace.duration={duration}"], directory
 
@@ -182,8 +187,8 @@ def install_settings_key(root, key, user=0):
     path.chmod(0o600)
 
 
-def host_network_available(proc=Path("/proc/net")):
-    """Snapshot default-route availability, without contacting an Internet host."""
+def host_default_interface(proc=Path("/proc/net")):
+    """Snapshot the default-route interface, without contacting an Internet host."""
     for name, ipv6 in (("route", False), ("ipv6_route", True)):
         try:
             lines = (proc / name).read_text().splitlines()
@@ -199,17 +204,44 @@ def host_network_available(proc=Path("/proc/net")):
                     default = len(fields) >= 8 and fields[1] == "00000000" and fields[7] == "00000000"
                     flags, interface = int(fields[3], 16), fields[0]
                 if default and interface != "lo" and flags & 1 and not flags & 0x200:
-                    return True
+                    return interface
             except (IndexError, ValueError):
                 continue
-    return False
+    return None
 
 
-def host_network_mode():
-    override = os.environ.get("BIFROST_ANDROID_HOST_NETWORK")
-    if override is not None and override not in ("0", "1"):
-        raise ValueError("BIFROST_ANDROID_HOST_NETWORK must be 0 or 1")
-    return override if override is not None else str(int(host_network_available()))
+def host_network_validated(host="www.google.com", timeout=3):
+    """Android's HTTPS validation probe: only HTTP 204 validates.
+
+    NetworkMonitor treats a redirect as a captive portal and anything else as
+    failure, so redirects are not followed. Plain-HTTP partial connectivity and
+    captive-portal login are not modelled; both leave the network unvalidated.
+    """
+    connection = http.client.HTTPSConnection(host, timeout=timeout)
+    try:
+        connection.request("GET", "/generate_204", headers={"Connection": "close"})
+        return connection.getresponse().status == 204
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+def host_network_environment():
+    """Guest variables describing the launch-time host network snapshot."""
+    def override(name):
+        value = os.environ.get(name)
+        if value is not None and value not in ("0", "1"):
+            raise ValueError(name + " must be 0 or 1")
+        return value
+    route, validation = override("BIFROST_ANDROID_HOST_NETWORK"), override("BIFROST_ANDROID_NETWORK_VALIDATED")
+    interface = host_default_interface()
+    online = route == "1" if route is not None else interface is not None
+    validated = online and (validation == "1" if validation is not None else host_network_validated())
+    # An explicitly online profile without a host route keeps Android's Wi-Fi name.
+    return {"BIFROST_ANDROID_HOST_NETWORK": str(int(online)),
+            "BIFROST_ANDROID_NETWORK_VALIDATED": str(int(validated)),
+            "BIFROST_ANDROID_NETWORK_INTERFACE": interface or "wlan0"}
 
 
 def set_soname(path, soname):
@@ -518,7 +550,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)
     settings_key = settings_user_key(app.parent)
-    identity = {"schema": 2, "code": code, "files": metadata["files"],
+    identity = {"schema": 3, "code": code, "files": metadata["files"],
                 "framework": file_hash(framework / "bifrost-framework.json"),
                 "adapters": {n: adapter_manifest["files"][n] for n in adapter_names},
                 "launcher": file_hash(dex), "settings_key": hashlib.sha256(settings_key).hexdigest()}
@@ -551,6 +583,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         local = fresh / "data/local/tmp"
         local.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dex, local / "launcher.dex")
+        (local / "launcher.dex").chmod(0o444)  # ART rejects writable DEX for ordinary app UIDs.
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
         install_managed_graphics(fresh, adapters / "managed")
         install_settings_key(fresh, settings_key)
@@ -592,13 +625,18 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
 
 
 def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
-                   window_plugin=None, emu_args=(), timeout=0, trace_apk=None, trace_after=0, trace_duration=15):
+                   window_plugin=None, emu_args=(), timeout=0, trace_apk=None, trace_after=0, trace_duration=15,
+                   process_session=None):
+    if process_session is None: raise ValueError("Managed launch requires an app process session")
     dex = launcher_dex(ROOT / "build/android-managed-launcher")
-    root, guest_env = prepare_root(app, metadata, code, installed_root,
-                                  ROOT / "build/android-framework/rootfs",
-                                  ROOT / "build/android-art/rootfs",
-                                  ROOT / "build/android-adapters", dex)
-    guest_env = dict(guest_env, BIFROST_ANDROID_HOST_NETWORK=host_network_mode())
+    # The validation probe can wait for its timeout; overlap it with root setup.
+    with ThreadPoolExecutor(1) as pool:
+        network = pool.submit(host_network_environment)
+        root, guest_env = prepare_root(app, metadata, code, installed_root,
+                                      ROOT / "build/android-framework/rootfs",
+                                      ROOT / "build/android-art/rootfs",
+                                      ROOT / "build/android-adapters", dex)
+        guest_env = dict(guest_env, **network.result())
     trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;
@@ -609,7 +647,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         command = [str(emu), *emu_args]
         if no_jit: command.append("--no-jit")
         if window_plugin: command += ["--android-window-plugin", str(window_plugin)]
-        command += ["--android-runtime", "--android-services", "--rootfs", str(guest_root),
+        command += ["--android-runtime", "--android-services",
+                    "--android-app-id", str(process_session.data["uid"]), "--rootfs", str(guest_root),
                     "/system/bin/app_process64", "-Xuse-stderr-logger", *trace_args,
                     "-Djava.class.path=/data/local/tmp/launcher.dex", "/system/bin",
                     "ManagedLauncher", *installed_arguments(metadata, code)]
@@ -619,42 +658,25 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"
         environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())
-        log_path = app / "managed/last-run.log"
+        log_path, logd_path = process_session.logs()
         print(f"Launching {metadata['package']} (log: {log_path})", flush=True)
         # A socket pathname can remain after a killed host process. No other
         # session for this package is live while the caller holds its lock.
         for name in ("logdw", "dnsproxyd"):
             (root / "dev/socket" / name).unlink(missing_ok=True)
-        with log_path.open("wb") as log, (app / "managed/last-logd.log").open("wb") as sink, ExitStack() as services:
+        with log_path.open("wb") as log, logd_path.open("wb") as sink, ExitStack() as services:
+            process_host = services.enter_context(closing(ProcessHost(guest_root, emu,
+                    list(emu_args) + (["--no-jit"] if no_jit else [])
+                    + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
+                environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args)))
+            environment = process_host.environment
+            command[1:1] = ["--android-binder-broker", process_host.socket]
             services.enter_context(closing(LogdReceiver(guest_root, sink)))
             services.enter_context(closing(DnsProxy(guest_root)))
-            child = None
-            old_term = signal.getsignal(signal.SIGTERM)
-            def interrupted(signum, frame):
-                raise KeyboardInterrupt
-            signal.signal(signal.SIGTERM, interrupted)
             status = 1
             try:
-                child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                         env=environment, start_new_session=True)
-                try:
-                    status = child.wait(timeout=timeout or None)
-                except subprocess.TimeoutExpired:
-                    status = 124
-                except KeyboardInterrupt:
-                    status = 130
+                status = process_session.run(command, stdout=log, env=environment, timeout=timeout)
             finally:
-                signal.signal(signal.SIGTERM, old_term)
-                if child is not None:
-                    # End forked descendants too; none may retain package files
-                    # after the lock is released for an install or another run.
-                    try: os.killpg(child.pid, signal.SIGTERM)
-                    except ProcessLookupError: pass
-                    try: child.wait(timeout=5)
-                    except subprocess.TimeoutExpired: pass
-                    try: os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError: pass
-                    child.wait()
                 (root / "dev/socket/logdw").unlink(missing_ok=True)
                 collect_trace(trace_directory, app / "managed/traces")
                 if trace_directory is not None: shutil.rmtree(trace_directory)

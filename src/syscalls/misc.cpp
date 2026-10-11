@@ -71,6 +71,51 @@
 #include <sys/file.h>
 #include <sys/sendfile.h>
 namespace arm64emu {
+// recvmsg installs new host descriptors. Keep them owned even if guest
+// copyback faults; only a completed receive transfers ownership to FdTable.
+class ReceivedSocketRights {
+public:
+    ReceivedSocketRights(yggdrasil::FdTable& fds, msghdr& message)
+        : fds_(fds), message_(message) {}
+    ~ReceivedSocketRights() {
+        size_t index = 0;
+        for (auto* c = CMSG_FIRSTHDR(&message_); c; c = CMSG_NXTHDR(&message_, c)) {
+            if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
+            for (size_t off = 0; off + sizeof(int) <= c->cmsg_len - CMSG_LEN(0); off += sizeof(int)) {
+                int fd; memcpy(&fd, CMSG_DATA(c) + off, sizeof(fd));
+                if (index++ >= converted_ && fd >= 0) ::close(fd);
+            }
+        }
+        if (!committed_) for (int fd : guest_fds_) fds_.close(fd);
+    }
+    void adopt() {
+        size_t count = 0;
+        for (auto* c = CMSG_FIRSTHDR(&message_); c; c = CMSG_NXTHDR(&message_, c))
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
+                count += (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        guest_fds_.reserve(count);
+        for (auto* c = CMSG_FIRSTHDR(&message_); c; c = CMSG_NXTHDR(&message_, c)) {
+            if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
+            for (size_t off = 0; off + sizeof(int) <= c->cmsg_len - CMSG_LEN(0); off += sizeof(int)) {
+                int host; memcpy(&host, CMSG_DATA(c) + off, sizeof(host));
+                int flags = ::fcntl(host, F_GETFL);
+                auto node = std::make_shared<yggdrasil::HostNode>(host, flags < 0 ? O_RDWR : flags);
+                int invalid = -1; memcpy(CMSG_DATA(c) + off, &invalid, sizeof(invalid));
+                int guest = fds_.allocate(node);
+                guest_fds_.push_back(guest);
+                memcpy(CMSG_DATA(c) + off, &guest, sizeof(guest));
+                ++converted_;
+            }
+        }
+    }
+    void commit() { committed_ = true; }
+private:
+    yggdrasil::FdTable& fds_;
+    msghdr& message_;
+    std::vector<int> guest_fds_;
+    size_t converted_ = 0;
+    bool committed_ = false;
+};
 static void xseq_append(const char* path, char dir, const uint8_t* p, size_t n) {
     if (!path) return;
     FILE* f = fopen(path, "ab");
@@ -493,9 +538,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.read(msg_name, name_buf.data(), msg_namelen);
             }
             // Marshal msg_control (cmsg buffer).
-            // The control buffer is opaque to the host kernel; we just
-            // copy it verbatim. The guest and host share the same
-            // cmsghdr layout (AArch64 and x86_64 Linux both use LP64 here).
+            // LP64 cmsghdr layouts match, but SCM_RIGHTS numbers belong to
+            // the guest descriptor table and must be translated individually.
             std::vector<uint8_t> ctrl_buf;
             if (msg_control && msg_controllen) {
                 if (msg_controllen > 4096) msg_controllen = 4096;
@@ -510,6 +554,20 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             host_msg.msg_iovlen = msg_iovlen;
             host_msg.msg_control = ctrl_buf.empty() ? nullptr : ctrl_buf.data();
             host_msg.msg_controllen = msg_controllen;
+            std::vector<std::shared_ptr<yggdrasil::Node>> sent_rights;
+            for (auto* c = CMSG_FIRSTHDR(&host_msg); c; c = CMSG_NXTHDR(&host_msg, c)) {
+                size_t remaining = ctrl_buf.data() + ctrl_buf.size() - reinterpret_cast<uint8_t*>(c);
+                if (c->cmsg_len < CMSG_LEN(0) || c->cmsg_len > remaining) { ret_err(EINVAL); return 0; }
+                if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
+                for (size_t off = 0; off + sizeof(int) <= c->cmsg_len - CMSG_LEN(0); off += sizeof(int)) {
+                    int guest; memcpy(&guest, CMSG_DATA(c) + off, sizeof(guest));
+                    auto right = fds_.get(guest);
+                    int host = right ? right->host_fd() : -1;
+                    if (host < 0) { ret_err(EBADF); return 0; }
+                    sent_rights.push_back(right); // pin through sendmsg against concurrent close
+                    memcpy(CMSG_DATA(c) + off, &host, sizeof(host));
+                }
+            }
             ssize_t r = ::sendmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             if (static_cast<int>(a0) == 3 && r > 0) {
@@ -596,6 +654,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ssize_t r = ::recvmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
+            ReceivedSocketRights received_rights(fds_, host_msg);
+            received_rights.adopt();
             if (static_cast<int>(a0) == 3 && dbg().xtrace && r > 0) {
                 // peek what is actually sitting in the kernel socket queue
                 uint8_t peekbuf[128] = {0};
@@ -669,6 +729,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             mem_.store<uint64_t>(a1 + 40, host_msg.msg_controllen);
             // AArch64 LP64 flags follow the full eight-byte control length.
             mem_.store<uint32_t>(a1 + 48, static_cast<uint32_t>(host_msg.msg_flags));
+            received_rights.commit();
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
@@ -717,7 +778,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 439: { // faccessat2(dirfd, pathname, mode, flags)
             std::string path = Yggdrasil::read_path(mem_, a1);
             struct stat device_stat;
-            if (Yggdrasil::binder_device_stat(path, &device_stat)) {
+            if (Yggdrasil::binder_device_stat(path, &device_stat) ||
+                Yggdrasil::sysfs_stat(path, &device_stat)) {
                 if ((a2 & ~uint64_t(7)) || (a3 & ~uint64_t(0x100 | 0x200 | 0x1000))) {
                     ret_err(EINVAL); return 0;
                 }
@@ -1145,6 +1207,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             else if (cpu.regs[0] == 7) { // Native-only launcher: acquire its owned window.
                 ret_host(manager.open_host_window() ? manager.from_surface() : 0);
+            }
+            else if (cpu.regs[0] == 8) { // Managed audio: started host output streams.
+                ret_host(static_cast<int64_t>(emu.audio().active_streams()));
             }
             else ret_host(-EINVAL);
             return 0;

@@ -16,6 +16,7 @@
 //     guests that keep the fd open, e.g. Teeworlds' secure_random_fill.)
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/binder_node.hpp"
+#include "yggdrasil/binder_broker.hpp"
 #include "yggdrasil/host_node.hpp"
 #include "yggdrasil/memfd_node.hpp"
 #include "yggdrasil/fb_node.hpp"
@@ -76,10 +77,13 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
     }
     if (path == "/dev/binder" || path == "/dev/hwbinder" || path == "/dev/vndbinder") {
         if ((flags & O_ACCMODE) != O_RDWR) { *err_out = -EINVAL; return nullptr; }
+        if (!binder_broker_.empty())
+            return open_broker_binder(binder_broker_, path, flags, process_uid_, ::getpid(), err_out);
         std::lock_guard<std::mutex> lock(binder_mu_);
         auto& domain = binder_domains_[path];
         if (!domain) {
             domain = std::make_shared<BinderDomain>();
+            domain->sender_euid = process_uid_;
             domain->service_manager = android_services_ && path == "/dev/binder";
         }
         return std::make_unique<BinderNode>(domain, flags);
@@ -209,11 +213,7 @@ void Yggdrasil::enable_android_services() {
 }
 void Yggdrasil::stop_binder() {
     std::lock_guard<std::mutex> lock(binder_mu_);
-    for (auto& entry : binder_domains_) {
-        std::lock_guard<std::recursive_mutex> guard(entry.second->mutex);
-        entry.second->stopped = true;
-        entry.second->ready.notify_all();
-    }
+    for (auto& entry : binder_domains_) entry.second->stop();
     binder_domains_.clear();
 }
 }

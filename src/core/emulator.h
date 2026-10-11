@@ -97,6 +97,9 @@ public:
         mem_.set_data_top_byte_ignore(enabled);
         mem_.set_low_hints_reserved(enabled);
         if (enabled) vfs_.enable_android_properties();
+        // Android FIRST_APPLICATION_UID, user 0. Host IDs (often system UID
+        // 1000 on Android) must not select privileged framework code paths.
+        vfs_.set_process_identity(enabled ? 10000 : 0, enabled ? 10000 : 0);
     }
     bool android_runtime() const { return android_runtime_; }
     void enable_android_services() { vfs_.enable_android_services(); }

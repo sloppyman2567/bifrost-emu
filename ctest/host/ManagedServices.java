@@ -129,6 +129,52 @@ public final class ManagedServices extends Activity {
         }
         public void onDestroy() { event("destroy after-activity"); }
     }
+    public static final class LifecycleRemote extends Service {
+        @Override public IBinder onBind(Intent intent) {
+            return new Binder() {
+                @Override protected boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) {
+                    if (code != 42) return false;
+                    reply.writeInt(android.os.Process.myPid()); reply.writeInt(android.os.Process.myUid());
+                    reply.writeInt(data.readInt() + 1);
+                    return true;
+                }
+            };
+        }
+    }
+    public static final class Jobs extends android.app.job.JobService {
+        static int starts, stops, work, triggers;
+        @Override public boolean onStartJob(android.app.job.JobParameters params) {
+            event("job-start " + params.getJobNamespace() + ":" + params.getJobId()); starts++;
+            if (params.getJobId() == 12) return true;
+            if (params.getJobId() == 14) {
+                require(params.getTriggeredContentUris() != null && params.getTriggeredContentUris().length == 1
+                        && params.getTriggeredContentUris()[0].toString().equals("content://org.bifrost.fixture/jobs/1"),
+                        "content trigger URI was not delivered");
+                require(params.getTriggeredContentAuthorities() != null
+                        && params.getTriggeredContentAuthorities()[0].equals("org.bifrost.fixture"),
+                        "content trigger authority was not delivered");
+                triggers++;
+            }
+            if (params.getJobId() == 11) {
+                android.app.job.JobWorkItem item;
+                while ((item = params.dequeueWork()) != null) {
+                    require(item.getDeliveryCount() == 1, "work delivery count incorrect");
+                    require(item.getIntent().getIntExtra("value", -1) == ++work, "work order incorrect");
+                    params.completeWork(item);
+                }
+                android.app.job.JobParameters current = params;
+                new Handler().postDelayed(() -> jobFinished(current, false), 50);
+                return true;
+            }
+            return false;
+        }
+        @Override public boolean onStopJob(android.app.job.JobParameters params) {
+            event("job-stop " + params.getJobId()); stops++;
+            require(params.getStopReason() == android.app.job.JobParameters.STOP_REASON_CANCELLED_BY_APP,
+                    "wrong cancellation reason");
+            return false;
+        }
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -137,9 +183,95 @@ public final class ManagedServices extends Activity {
     }
     @Override public void onResume() {
         super.onResume();
-        main.post(this::begin);
+        main.post(this::jobChecks);
+    }
+    private void jobChecks() {
+        android.app.job.JobScheduler scheduler = getSystemService(android.app.job.JobScheduler.class);
+        android.app.job.JobScheduler named = scheduler.forNamespace("fixture");
+        ComponentName service = new ComponentName(this, Jobs.class);
+        boolean second = getPreferences(0).getBoolean("jobsSaved", false);
+        check((scheduler.getPendingJob(900) != null) == second, "persisted job did not survive restart");
+        android.app.job.JobInfo saved = new android.app.job.JobInfo.Builder(900, service)
+                .setMinimumLatency(3600000).setPersisted(true).build();
+        check(scheduler.schedule(saved) == android.app.job.JobScheduler.RESULT_SUCCESS, "persisted schedule failed");
+        getPreferences(0).edit().putBoolean("jobsSaved", true).commit();
+        android.app.job.JobInfo sync = new android.app.job.JobInfo.Builder(10, service).setMinimumLatency(1).build();
+        check(scheduler.schedule(sync) == 1 && named.schedule(sync) == 1, "namespaced schedule failed");
+        check(scheduler.getPendingJob(10) != null && named.getPendingJob(10) != null, "namespaces collided");
+        check(scheduler.getPendingJobsInAllNamespaces().size() == 2, "namespace inventory incorrect");
+        check(scheduler.getPendingJobReason(12345) == android.app.job.JobScheduler.PENDING_JOB_REASON_INVALID_JOB_ID,
+                "missing job reason incorrect");
+        try {
+            scheduler.schedule(new android.app.job.JobInfo.Builder(9, new ComponentName(this, Lifecycle.class))
+                    .setMinimumLatency(1).build());
+            throw new AssertionError("service without BIND_JOB_SERVICE was accepted");
+        } catch (IllegalArgumentException expected) { checks++; }
+        android.app.job.JobInfo work = new android.app.job.JobInfo.Builder(11, service).setMinimumLatency(1).build();
+        check(scheduler.enqueue(work, new android.app.job.JobWorkItem(new Intent().putExtra("value", 1))) == 1,
+                "first work enqueue failed");
+        check(scheduler.enqueue(work, new android.app.job.JobWorkItem(new Intent().putExtra("value", 2))) == 1,
+                "second work enqueue failed");
+        scheduler.schedule(new android.app.job.JobInfo.Builder(12, service).setMinimumLatency(1).build());
+        await(() -> Jobs.starts == 4 && Jobs.work == 2 && scheduler.getPendingJob(10) == null
+                && named.getPendingJob(10) == null && scheduler.getPendingJob(11) == null, () -> {
+            check(scheduler.getPendingJobReason(12) == android.app.job.JobScheduler.PENDING_JOB_REASON_EXECUTING,
+                    "running job reason incorrect");
+            scheduler.cancel(12);
+            await(() -> Jobs.stops == 1, () -> {
+                check(scheduler.getPendingJob(12) == null && scheduler.getPendingJob(900) != null,
+                        "cancel removed wrong job");
+                android.net.Uri uri = android.net.Uri.parse("content://org.bifrost.fixture/jobs");
+                scheduler.schedule(new android.app.job.JobInfo.Builder(14, service)
+                        .addTriggerContentUri(new android.app.job.JobInfo.TriggerContentUri(uri,
+                                android.app.job.JobInfo.TriggerContentUri.FLAG_NOTIFY_FOR_DESCENDANTS))
+                        .setTriggerContentUpdateDelay(500).setTriggerContentMaxDelay(1000).build());
+                check(scheduler.getPendingJobReason(14) == android.app.job.JobScheduler.PENDING_JOB_REASON_CONSTRAINT_CONTENT_TRIGGER,
+                        "content job started without a notification");
+                getContentResolver().notifyChange(android.net.Uri.parse("content://org.bifrost.fixture/other"), null, 0);
+                getContentResolver().notifyChange(uri, null, android.content.ContentResolver.NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS);
+                main.postDelayed(() -> {
+                    check(Jobs.triggers == 0, "unmatched or skipped notification triggered a job");
+                    getContentResolver().notifyChange(android.net.Uri.withAppendedPath(uri, "1"), null, 0);
+                    await(() -> Jobs.triggers == 1 && scheduler.getPendingJob(14) == null, () -> {
+                        System.out.println("JOB_SCHEDULER_OK restart=" + second + " checks=" + checks);
+                        remoteCheck();
+                    });
+                }, 1100);
+            });
+        });
+    }
+    private void remoteCheck() {
+        Client remote = new Client();
+        check(bindService(intent(LifecycleRemote.class), remote, BIND_AUTO_CREATE), "remote service bind failed");
+        await(() -> remote.connected == 1, () -> {
+            android.os.Parcel data = android.os.Parcel.obtain(), reply = android.os.Parcel.obtain();
+            try {
+                data.writeInt(41);
+                check(remote.binder.transact(42, data, reply, 0), "remote Binder transaction failed");
+                check(reply.readInt() != android.os.Process.myPid(), "remote service ran in the app process");
+                check(reply.readInt() == android.os.Process.myUid() && reply.readInt() == 42,
+                        "remote UID or Binder result incorrect");
+                System.out.println("SERVICE_PROCESS_OK");
+            } catch (android.os.RemoteException error) { throw new AssertionError(error); }
+            finally { data.recycle(); reply.recycle(); }
+            unbindService(remote);
+            begin();
+        });
     }
     private void begin() {
+        require(android.os.Process.myUid() == 10000 && getApplicationInfo().uid == 10000,
+                "installed app has privileged/mismatched UID");
+        // Both provisioned and provider-free profiles must respect app identity.
+        if (!getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_WEBVIEW)) {
+            try {
+                new android.webkit.WebView(this).destroy();
+                throw new AssertionError("WebView constructed without a provisioned provider");
+            } catch (UnsupportedOperationException expected) {
+                require(expected.getMessage() == null || !expected.getMessage().contains("privileged"),
+                        "WebView rejected app UID");
+            }
+        }
+        System.out.println("MANAGED_APP_IDENTITY_OK uid=" + android.os.Process.myUid());
         check(getPackageManager().resolveService(intent(Lifecycle.class), 0).serviceInfo.name
                 .equals(Lifecycle.class.getName()), "explicit service resolution failed");
         check(getPackageManager().queryIntentServices(intent(Lifecycle.class), 0).size() == 1,
@@ -157,10 +289,6 @@ public final class ManagedServices extends Activity {
                 "missing service started");
         check(startService(intent(Lifecycle.class).setClassName(getPackageName(), Lifecycle.class.getName() + "Disabled")) == null,
                 "disabled service started");
-        try {
-            startService(intent(Lifecycle.class).setClassName(getPackageName(), Lifecycle.class.getName() + "Remote"));
-            throw new AssertionError("remote-process service silently ran locally");
-        } catch (UnsupportedOperationException expected) { checks++; }
         try {
             startForegroundService(intent(Lifecycle.class));
             throw new AssertionError("unsupported foreground service reported success");

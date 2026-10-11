@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <climits>
 #include <ctime>
 #include <thread>
@@ -208,6 +209,17 @@ int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
     width_ = width;
     height_ = height;
     format_ = fmt ? fmt : kFormatRGBA8888;
+    return 0;
+}
+
+int32_t AndroidSurfaceManager::set_frame_rate(uint64_t handle, float rate,
+                                             int8_t compatibility, int8_t strategy) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!surfaces_.count(handle) || !std::isfinite(rate) || rate < 0 ||
+            (compatibility != 0 && compatibility != 1) || (strategy != 0 && strategy != 1))
+        return -EINVAL;
+    // Like Surface::setFrameRate when its destination is not SurfaceFlinger,
+    // accept the hint without changing the host display's refresh rate.
     return 0;
 }
 

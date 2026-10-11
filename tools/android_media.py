@@ -63,14 +63,14 @@ def needed(path):
     return re.findall(r"\(NEEDED\).*\[([^\]]+)\]", result.stdout)
 
 
-def dump(image, remote, target):
+def dump(image, remote, target, max_size=64 * 1024 * 1024):
     target.parent.mkdir(parents=True, exist_ok=True)
     # debugfs parses its command separately from shell argv. Use a fixed safe
     # basename and cwd so workspace paths containing spaces need no quoting.
     subprocess.run(["debugfs", "-R", f"dump {remote} {target.name}", str(image.resolve())],
                    cwd=target.parent, capture_output=True, check=True, timeout=30)
     # debugfs can return zero when a requested inode is absent.
-    if not target.is_file() or target.stat().st_size > 64 * 1024 * 1024:
+    if not target.is_file() or target.stat().st_size > max_size:
         raise ValueError(f"Cannot extract bounded Android file: {remote}")
 
 

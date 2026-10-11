@@ -1,4 +1,85 @@
-# Android native runtime bootstrap
+# Asgard Android compatibility layer
+
+Asgard is the Android layer of Bifrost: guest Bionic/ART, framework adapters,
+APK installation, app sessions, and shared Binder communication. Existing
+`android_package.py` commands remain supported. The Asgard entry point also
+starts one shared Binder broker per state root:
+
+```sh
+python3 scripts/asgard.py --state-root android-state realm start
+python3 scripts/asgard.py --state-root android-state start com.example.app
+python3 scripts/asgard.py --state-root android-state list
+python3 scripts/asgard.py --state-root android-state realm status
+# Stop app sessions first; stopping the realm disconnects all its clients.
+python3 scripts/asgard.py --state-root android-state realm stop
+```
+
+### Shared guest processes (October 11, 2026)
+
+Independent emulator OS processes can join the same Binder realm using
+`--android-binder-broker SOCKET`. The broker owns separate `/dev/binder`,
+`/dev/hwbinder`, and `/dev/vndbinder` domains. `/dev/binder` includes the native
+service registry; the other domains accept guest context managers. Receive
+arenas are shared memfds mapped read-only in each guest. Transaction payloads
+are copied through bounded RPCs; a pointer from one process is never dereferenced
+in another process. Real host-backed descriptors use SCM_RIGHTS, and Binder
+objects are translated to receiving-process handles and back to their original
+pointer/cookie when returned to their owner.
+
+Broker-connected Android processes use distinct host process IDs, matching
+process-leader TIDs, and their configured `--android-app-id` credentials.
+Thread clones retain their process identity; process-directed signals find the
+actual leader rather than a hard-coded TID 1. Closing the owning connection removes
+its registrations, delivers registered `BR_DEAD_BINDER` cookies and returns
+`BR_DEAD_REPLY` for abandoned synchronous calls.
+Blocking client calls observe guest cancellation. A fork child must open a new
+Binder connection; an inherited connection rejects operations with EBADF.
+The private socket checks the host UID, and endpoint keys are randomly generated.
+Limits are 128 Binder opens, 1024 thread identities per open, 16 MiB per RPC,
+256 memory chunks and 64 descriptors, with at most 512 simultaneous broker
+connections and a five-second initial packet deadline. RPC streams are reused,
+with up to eight idle channels per Binder open. Wire protocol 2 adds SG FD-array
+patch widths and buffer cleanup; stop app sessions and restart older realms
+before using the new executable. Transaction and arena limits of the local
+Binder implementation still apply. This is a same-host-user compatibility
+mechanism; virtual Android UIDs do not provide host DAC or SELinux isolation.
+
+`python3 scripts/test_asgard.py` builds a Bionic fixture and checks all four
+JIT/interpreter server/client combinations, distinct sender identities,
+leader PID/TID equality, worker-thread identity and main-thread signal delivery,
+descriptor contents, Binder-object round trips, nested scatter/gather request and
+reply buffers, FD-array cleanup, death subscriptions/acknowledgements, server
+death, and broker restart. It also checks 1,000 operations on one persistent
+stream, the focused looper/death/SG contracts in both engines, and eight
+concurrent clients completing 1,600 verified RPCs. Domain metadata remains
+serialized; payload staging and endpoint wakeups avoid holding/waking the whole
+domain for that work. See [Binder contracts and remaining limits](ANDROID_BINDER.md).
+The existing native service-manager fixture also passed 78 checks through the
+broker in each engine. Read-only arena use, descriptor translation and dead-reply
+behavior were compared with Android 15's
+[ProcessState](https://android.googlesource.com/platform/frameworks/native/+/refs/tags/android-15.0.0_r1/libs/binder/ProcessState.cpp)
+and [Binder driver](https://android.googlesource.com/kernel/common/+/refs/heads/android15-6.6/drivers/android/binder.c).
+These tests establish native cross-process IPC, not complete Android application
+process management. Manifest remote/isolated service launch and Chromium renderer
+spawning now use fresh ART VMs; Zygote, process-wide framework service publication, arbitrary
+virtual-device descriptor transfer, and SELinux policy remain unsupported.
+Broker restart creates a fresh registry; live clients must reopen their Binder
+connections. Staging pages are retained until the corresponding Binder open
+closes; the RPC size limit is not a lifetime memory quota.
+
+Game validation: a normal-chaining, host-GPU SpongeBob run completed its
+600-second bound without the previous ART abort/monitor-ownership exception.
+A subsequent broker-connected run reached Activity resume, SurfaceView creation
+and WebView loading, then hit an ART `art_method.cc` virtual-method-index
+assertion during GC. That managed-app failure remains under investigation;
+passing native IPC tests does not establish working multi-process WebView or
+playable SpongeBob.
+After repairing the separately reproduced process-leader PID/TID mismatch,
+a fresh broker-connected run reached its 120-second timeout without that
+assertion. This shorter run does not establish the mismatch as the assertion's
+cause or prove long-term stability.
+
+## Android native runtime bootstrap
 
 Checkpoint: October 6, 2026. Bifrost can enter a real guest ARM64 Android
 linker and execute Bionic-linked programs. Signed APK installation and native-only
@@ -27,18 +108,228 @@ See the APK guide for provisioning and namespace boundaries.
 
 ## Android 15 framework probe
 
+### Android app credentials (2026-10-09)
+
+`--android-runtime` uses UID/GID 10000 (Android's first application ID, user 0),
+independent of the host account. The single-app profile reports that identity
+through getuid/geteuid/getgid/getegid, getresuid/getresgid, supplementary groups,
+the ELF auxiliary vector, `/proc/self/status` and native Binder sender credentials.
+Managed ApplicationInfo and PackageManager replies take their UID from the real
+guest Process API. Android apps have no effective/permitted/inheritable
+capabilities. ID changes outside the fixed identity fail with EPERM; setfsuid
+and setfsgid retain it and return the previous ID.
+
+Previously the syscall path returned the host UID, typically 1000, while auxv
+and procfs claimed root. Android interprets 1000 as the system UID. SpongeBob's
+LevelPlay SDK hit WebView's explicit privileged-process rejection, and ContextImpl
+selected system-process warnings. The app ID range and WebView check were verified
+against Android 15 [Process](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/os/Process.java)
+and [WebViewFactory](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/webkit/WebViewFactory.java).
+This fixes the process identity. Schema 6 adds the same-image WebView provider;
+its current execution limits are described below.
+
+ART also enforces read-only dynamic DEX for ordinary app UIDs. The managed
+runtime and framework harness copy their launcher/probe DEX with mode 0444;
+managed runtime schema 3 rebuilds older writable copies while retaining app data.
+The native Bionic gate checks IDs, auxv, procfs, groups, rejected ID/capability
+changes and same-ID operations in JIT, interpreter and Tier-2, with fixed/random
+ASLR and Binder services on/off. Package contracts pass 52 checks in each engine;
+the signed service APK passes 38 lifecycle checks and exercises WebView's
+ordinary unsupported-device gate without the privileged-process error.
+
+This is a fixed identity in each independently launched app runtime, not a
+multi-package UID allocator or filesystem ownership/DAC virtualization. Linux
+guest identity behavior is unchanged, including host UID reporting for D-Bus.
+
+### Provisioned framework
+
 The same pinned API-35 image now supplies `app_process64`, framework boot jars,
-and the mainline APEX native libraries. Framework provisioning schema 5
-verifies 919 files and exports a linker namespace for every installed boot
+and the mainline APEX native libraries. Framework provisioning schema 6
+verifies 923 files and exports a linker namespace for every installed boot
 APEX, including `com_android_tethering`. Each delegates to the same canonical
 native-library scope so JNI loading does not instantiate a second ART VM.
 Schema 4 adds `framework-res.apk`, `fonts.xml`, `font_fallback.xml` and
 `/system/fonts`: `Resources.getSystem()` and text layout need them before an
 Activity draws. Schema 5 adds the `system_ext` and `product` `build.prop`
-files (see the CMC note below). This bootstrap layout does not reproduce production Android
-namespace isolation. Older schema-2/3 framework roots must be re-provisioned
+files (see the CMC note below). Schema 6 also includes `/vendor/build.prop`
+and the product WebView APK/native libraries. Vendor properties are loaded
+between system_ext and product, following Android 15
+[PropertyLoadBootDefaults](https://android.googlesource.com/platform/system/core/+/android-15.0.0_r1/init/property_service.cpp).
+The pinned image specifies a 192 MiB app growth limit and 512 MiB maximum;
+omitting these properties made
+[AndroidRuntime](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/jni/AndroidRuntime.cpp)
+use its 16 MiB default. The WebView probe observed `Runtime.maxMemory()` as
+192 MiB after the change. This bootstrap layout does not reproduce production Android
+namespace isolation. Older framework roots must be re-provisioned
 in a fresh destination; preserve the old directory if it is still useful for
 comparison.
+
+### WebView startup checkpoint (2026-10-10)
+
+The managed runtime registers the pinned image's genuine `com.android.webview`
+124.0.6367.219 package, signatures, metadata and service declarations. Its APK
+is read-only for ART. Package queries and feature enumeration expose that
+registered provider; reads of visible system-component overrides are allowed,
+while component changes remain restricted to the installed app.
+`webviewupdate.waitForAndGetProvider` returns the real package with AOSP's
+`LIBLOAD_FAILED_WAITING_FOR_RELRO` status: there is no zygote-created shared
+RELRO, and [WebViewFactory](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/webkit/WebViewFactory.java)
+accepts that status and loads the provider without it.
+
+Application binding records both the native process name and the framework's
+`AppBindData` before creating the Application, following
+[ActivityThread](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/ActivityThread.java).
+The launcher checks `Application.getProcessName()` against that binding.
+Previously only `setArgV0` was called, leaving the Java name null and breaking
+Chromium's data-directory lock.
+
+For this unmanaged, single-user profile, application restrictions return a
+fresh empty Bundle for the calling app, following
+[UserManagerService](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/UserManagerService.java).
+Other apps/users and policy writes are denied. `FrameworkDisplay` owns window
+context tokens for display 0: attachment returns its bounds/density configuration,
+resize posts configuration changes to the framework client controller, and
+release detaches the token. Unknown callers/displays cannot attach. This follows
+the attachment contract in
+[WindowManagerService](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/wm/WindowManagerService.java);
+it does not implement arbitrary window creation or additional display areas.
+
+The provider's native AAudio imports resolve through the managed adapter.
+Usage and input-preset setters are validated at open and retained by the stream.
+`AAudioStream_getTimestamp` follows the
+[AAudio contract](https://android.googlesource.com/platform/frameworks/av/+/android-15.0.0_r1/media/libaaudio/include/aaudio/AAudio.h):
+not-started streams return `INVALID_STATE`, invalid clocks are rejected, and
+the SDL backend returns `UNAVAILABLE` for hardware presentation timestamps,
+preserving both outputs. Mixer-consumption counters are not hardware timestamps.
+The Bionic callback/timestamp regression passes in JIT, interpreter and Tier-2.
+
+```bash
+python3 scripts/test_android_framework.py --services \
+  --probe build/android-managed-launcher/classes.dex --main-class ActivityProbe \
+  --probe-arg=--webview --managed-graphics --timeout 60 \
+  --output build/android-webview-results
+```
+
+This opt-in probe exercises provider class loading, cookies, user-agent startup,
+and construction/destruction of a real WebView using an app `LoadedApk` context.
+The system context's singleton
+resources cannot serve as a WebView embedding app. The harness also inspects
+logd for fatal native signals and Chromium's uncaught JNI exceptions;
+successful process exit or `FRAMEWORK_OK` alone
+does not pass this probe.
+
+The launcher now starts fresh ART
+VMs for remote and isolated Services, including Chromium's named renderer
+instance, and publishes their real service Binders through the shared realm.
+With normal JIT chaining, the bounded `--webview-renderer` probe completes a
+local HTML navigation and evaluates its DOM expression to `"asgard:42"`
+(`ACTIVITY_WEBVIEW_RENDERER_DOM_OK`). After the renderer's visual-state callback,
+it draws the WebView into an Android bitmap and checks distinct CSS foreground
+and background pixels (`ACTIVITY_WEBVIEW_RENDERER_PIXELS_OK`). The combined
+probe passed in 23.9 seconds on October 11. This offscreen software drawing
+probe has no attached ViewRoot and does not establish visible game/WebView GPU
+compositing.
+
+```bash
+python3 scripts/test_android_framework.py --services \
+  --probe build/android-managed-launcher/classes.dex --main-class ActivityProbe \
+  --probe-arg=--webview-renderer --managed-graphics \
+  --library build/android-adapters/libbifrost-activity.so --timeout 100 \
+  --output build/android-renderer-pixels
+```
+
+The managed libandroid forwards ALooper and AChoreographer to the platform's
+real libandroid (`re_android.so`), so Java MessageQueue and Chromium's
+[MessagePumpAndroid](https://chromium.googlesource.com/chromium/src/+/124.0.6367.219/base/message_loop/message_pump_android.cc)
+share the same thread-local libutils Looper, following
+[AOSP's ALooper implementation](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/native/android/looper.cpp).
+`ActivityProbe$NativeLooperProbe` passes main/worker Java-driven eventfd callbacks
+in JIT and interpreter modes (`ANDROID_JAVA_NATIVE_LOOPER_OK`). Standalone native
+adapters retain the host looper implementation.
+
+Unix `sendmsg`/`recvmsg` SCM_RIGHTS now translate guest descriptors into referenced
+host descriptors and register newly received descriptors in the guest table.
+Receive copyback failures close transferred descriptors. `socket_msg_layout`
+passes native Linux, JIT and interpreter checks for deliberately divergent FD
+numbers, duplicate transfers, shared mmap contents, seals and CLOEXEC. The
+`sendmmsg`/`recvmmsg` ancillary paths remain outside this fix. The renderer also
+exposed the halfword atomic encoding/result bug documented in [JIT.md](JIT.md).
+
+The managed EGL adapter exports the Android 15 public EGL symbol inventory.
+It filters host extensions to supported guest contracts, implements blob-cache
+callback registration without handing Arm callbacks to a host driver, and
+provides the monotonic NV system clock. Android platform/window entry points
+use the existing owned host display/window connection. Native-buffer allocation,
+native-fence FD export, pixmaps, EGLStreams and presentation timestamps remain
+unsupported and their extensions are not advertised. Symbol coverage is not
+EGL conformance. The host-GPU `ActivityProbe$EglProbe` passes registration,
+duplicate/invalid-argument errors, proc-address identity, platform selection,
+clock and terminate/reinitialize checks (`ANDROID_EGL_CONTRACT_OK`). Generated
+EGL signatures also pass `make opgen-thunk-check egl-check`.
+
+### Input methods (October 11, 2026)
+
+`FrameworkInputMethod` publishes the process-local `input_method` service using
+Android 15's [IInputMethodManager contract](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/java/com/android/internal/view/IInputMethodManager.aidl).
+It records clients' UID/PID, reported display and fallback connection, rejects
+duplicate process/display registrations, and removes dead clients. As in AOSP's
+[ClientController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/inputmethod/ClientController.java),
+untrusted display IDs are accepted during registration and checked when input
+starts. Display 0 is the only available display. Start-input validates the client, user and editor
+package, records the window/editor, and returns the framework's `NO_IME`,
+`NULL_EDITOR_INFO`, `NULL`, `INVALID_DISPLAY_ID` or `INVALID_PACKAGE_NAME` result as appropriate.
+Asynchronous starts deliver `onStartInputResult` with the caller's sequence on a
+service HandlerThread. IME tracking has bounded token lifetime/storage;
+privileged mutation and test methods are denied. Unknown methods fail explicitly.
+
+There is no installed/selected Android IME in this image. Inventories and
+subtypes are empty, keyboard visibility stays hidden, show/hide return false
+and notify their ResultReceiver with `RESULT_UNCHANGED_HIDDEN`, and IME height
+is zero. This follows the no-selected-method path in
+[InputMethodManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java).
+It does not install an on-screen keyboard or implement IME binding/sessions,
+WindowManager focus arbitration, ViewRoot input stages, or cross-process Java
+framework services. Host key events still dispatch directly to the Activity;
+full Android text composition is unimplemented.
+
+Actual WebView construction also exposed `Settings.Config`'s null-name
+`LIST_config` call. The immutable Settings provider now returns a fresh empty
+serialized map under `value`, matching
+[SettingsProvider](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java),
+so DeviceConfig consumers apply their defaults. It does not invent flag values.
+
+The focused probe runs on real ART in both engines and checks service
+publication, inventory copy isolation, invalid clients/displays/users/packages,
+synchronous and asynchronous start results, ResultReceiver visibility and
+privileged-operation rejection:
+
+```sh
+python3 scripts/test_android_framework.py --services \
+  --probe build/android-managed-launcher/classes.dex \
+  --main-class 'ActivityProbe$InputMethodProbe' --timeout 90 \
+  --output build/android-input-method-probe/protocol-jit
+# Repeat with --mode interp and a separate output directory.
+```
+
+Both modes passed, and the genuine pinned WebView constructed and destroyed
+successfully in the JIT Activity probe. These observations do not establish
+renderer-process startup, HTML rendering, or working text entry in SpongeBob.
+
+The initial input-method build also ran SpongeBob with normal JIT and the
+protocol-2 broker for the requested 400 seconds (session
+`1f9e865ddeca4176a24109b2242d2b3b`). It reached the timeout (`124`), with no ART
+abort, fatal JNI exception, or missing `IInputMethodManager` error in stdout or
+logd. The host process opened `/dev/dri/renderD128` through Mesa EGL. Chromium
+renderer-service connection failures, Chartboost's `window.getWindowInsets`,
+and AppLovin's `audio.isMusicActive` failures remain. Loading beyond 40% and
+gameplay were not visually verified. The subsequent duplicate-client and
+deferred-display validation refinements passed both contract probes and real
+WebView construction; the 400-second session preceded those refinements.
+The JIT startup probe passes provider loading, cookie-manager creation, user-agent
+retrieval, restriction isolation and window-context attachment/release in 15.1 s.
+It does not test renderer execution, page loads or gameplay. One preceding probe
+timed out in the independent framework-vsync check; the two subsequent startup
+runs passed, so repeated vsync reliability remains unproven.
 
 ```bash
 python3 tools/android_framework.py
@@ -71,6 +362,59 @@ backings now retain kernel aliases across unmap, replacement, remap and fork;
 `msync` writes back, and `MADV_DONTNEED` refaults file data. Binder arenas stay
 in the low 4 GiB even after high ART reservations. Native Bifrost
 callers unwind after guest process exit instead of reaching libc's fallback trap.
+
+Private file mappings now use host `MAP_PRIVATE` backings too. Previously
+`mmap` copied their bytes into anonymous storage, so `MADV_DONTNEED` erased
+file contents instead of refaulting them. Trickcal 1.6.1 exposed this while
+loading Unity: a discard covered the initializer at `libunity.so+0x5804b8`,
+and execution reached zero instructions instead of the installed library's
+`adrp`. File backings now survive descriptor close, partial replacement and
+ordinary remap, including private COW bytes on a move. The low/high cases
+in `ctest/test_madv_remove.c` fail on the old implementation and match a
+native Linux run in both Bifrost engines after the fix. Private-file
+`MADV_REMOVE` now returns `EACCES`, also checked against the kernel.
+File-backed `MREMAP_DONTUNMAP` remains unsupported; moving private files
+currently copies their contents into the new file mapping rather than
+moving host page tables. This regression does not cover file truncation
+or interpreter accesses beyond EOF.
+
+The GPU-enabled Trickcal rerun passed the former zero-code failure and reached
+Unity's product initialization and `SwappyWrapperInit`. It then exited in
+`JavaBBinder::onTransact` with `env null. Attach JVM?`, before a game screen
+was verified. The launcher publishes Java implementations of native services
+inside the app process; direct calls from native workers without a JVM
+attachment can therefore reach Java Binder directly. A bounded guest-stack
+capture confirmed the failing path: Swappy's native worker calls
+`Choreographer::getForThread`, then `DisplayEventReceiver` and
+`BpSurfaceComposer::createDisplayEventConnection`, reaching
+`BBinder::transact` and the Java Binder fatal check on the same thread.
+The activity JNI bridge now registers its `JavaVM` with the managed adapter
+before these services are published. `AChoreographer_getInstance` attaches
+an otherwise unattached native owner as a daemon and detaches it at pthread
+exit; an attachment owned by ART or the app is left alone. The platform
+Looper remains shared with Java MessageQueue. This follows Android's
+[JNI thread lifetime guidance](https://developer.android.com/ndk/guides/jni-tips).
+`ActivityProbe$NativeChoreographerProbe` starts two independent Bionic pthreads,
+checks their initially detached state, and requires three increasing frame
+timestamps on each owner before joining it. With the old adapter this path
+reproduced the Java Binder fatal check; the repaired adapter passes in JIT.
+Run with `--services --managed-graphics` and the current launcher DEX.
+
+The next GPU-enabled run reached rendering and a user-confirmed splash/loading
+screen, then crashed in the image's `libnativewindow.so` at
+`ANativeWindow_setFrameRate+0x28`. The saved instruction bytes identified that
+function, and X0 held Bifrost's opaque native-window handle. Swappy resolves
+this export through `libandroid.so`; without an adapter export, lookup reached
+the real platform function, which dereferenced the handle as a native struct.
+Both frame-rate setters now use the window thunk registry, validate live
+handles and rate/compatibility/strategy arguments, and accept the advisory
+hint without switching the host display mode. This matches the documented
+[NDK frame-rate hint contract](https://developer.android.com/ndk/reference/group/a-native-window)
+and AOSP's non-SurfaceFlinger destination behavior. The existing surface test
+passes 66 checks, including rendered pixels and these setters, in both engines.
+The AVProVideo plugin also could not resolve `ANativeWindow_toSurface`; this
+separate missing export remains open. Startup fixes and a visible splash do
+not establish Trickcal gameplay or resolve SpongeBob's intermittent stall.
 
 The Android profile leaves guest page 0 unmapped, as Linux does
 (`mmap_min_addr`). ART's implicit null checks need that fault: its SIGSEGV
@@ -127,8 +471,76 @@ Both engines print `FRAMEWORK_OK` on a schema-5 root with CMC: 8.4 s JIT
 and 18.0 s interpreter on an idle host (2026-10-07; 22.6 s and 45.0 s before
 guest memory became one host reservation, when ART's heaps above 4 GiB used a
 locked sparse map). The probe
-calls `ActivityThread.systemMain()` and loads the preinstalled font map. It
+calls `ActivityThread.initializeMainlineModules()` before preparing the main
+Looper, matching Android 15's `ActivityThread.main()`, then calls
+`ActivityThread.systemMain()` and loads the preinstalled font map. Mainline
+initialization installs per-process managers for telephony, media, Bluetooth
+and other modules; it does not provide their system services. The regression
+calls `TelephonyManager.getNetworkCountryIso()` and requires an empty country
+on this device without a radio, rather than a null-manager exception. It
 then runs `Instrumentation.newActivity` and `callActivityOnCreate`.
+The mainline regression (2026-10-10) reproduced the SDK's null-manager
+exception before the initialization call and passed with it under JIT.
+The interpreter run failed earlier in `FrameworkVsyncProbe0`, so this
+checkpoint does not establish interpreter coverage. A subsequent SpongeBob
+run stopped with a host SIGSEGV at 1%; passing the probe does not establish
+successful game login.
+
+Android SDK startup exposed two further stack failures (2026-10-10).
+Native JIT guest calls now have a bounded host frame depth; see `JIT.md`.
+The next captured exit was a child of raw `clone` with a zero stack argument:
+the emulator replaced its SP with zero. Like arm64 Linux
+[`copy_thread`](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kernel/process.c#L350-L369),
+`spawn_thread` now retains the inherited SP unless the supplied stack is
+nonzero. `test_fork_threads` checks ten such clones and their stack reads,
+alongside the existing fork-with-live-workers checks. This does not add
+`CLONE_VFORK` suspension or full process isolation for shared-VM children.
+The subsequent SpongeBob trace captured `clone(0x4111, 0, ...)` (vfork) on
+the AdQuality SDK thread, followed by the child's `exit_group(-1)` ending
+the whole emulator with status 255. Shared-VM clones without `CLONE_THREAD`
+now return `ENOSYS` in both clone APIs instead of entering the thread
+backend. This is an explicit compatibility limitation, not vfork support;
+Linux suspends the caller until the child releases its address space and
+gives the child its own thread group (see
+[`kernel_clone`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c)).
+The regression exercises the captured flags and child `exit_group(7)`:
+the old backend killed the test with status 7, while the corrected backend
+rejects the unsupported operation and preserves the parent. QEMU checks the
+supported legacy child-exit path and reports clone3 as unavailable.
+
+The next real-game failure was AdMob initialization querying
+`ActivityManager.getHistoricalProcessExitReasons`: the strict service stub
+threw `UnsupportedOperationException`, and RuntimeInit killed the app with
+SIGKILL (status 137). The service now returns an empty `ParceledListSlice`
+for the caller's package/UID on user 0, matching
+[AOSP's empty-result shape](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java#L9519-L9550).
+Foreign package/user queries are denied. This launcher has no persistent
+exit-history tracker; previous host runs are not reported as Android exit
+records. The framework probe checks the public API with caller/default
+filters and a denied foreign-package query (`ACTIVITY_EXIT_HISTORY_OK`).
+Validation: the JIT framework probe passed with that marker, and eight
+focused JIT/thread/shared-memory regressions passed. The combined-patch
+SpongeBob run reached its 240-second timeout with repeated ART GC before
+AdQuality initialization; the timeout sent SIGTERM (guest status 143,
+runner status 124). It did not exercise the exit-history query in the game,
+so it does not establish successful SDK initialization or gameplay.
+
+CursorWindow shared memory uses libcutils' memfd path: `sys.use_memfd`
+defaults to true (an image override is retained), and `F_ADD_SEALS` /
+`F_GET_SEALS` forward to the host descriptor with host errors preserved.
+libcutils still probes kernel support for `F_SEAL_FUTURE_WRITE`; unsupported
+hosts do not receive fake success. This removes the dependency on a host
+ashmem driver for this path. The framework probe creates a CursorWindow,
+writes/reads a value, and requires `ACTIVITY_SHARED_MEMORY_OK`. The fcntl
+regression checks seal readback and rejected resizing against native Linux
+and QEMU. See AOSP
+[`ashmem-dev.cpp`](https://android.googlesource.com/platform/system/core/+/android-15.0.0_r1/libcutils/ashmem-dev.cpp).
+`BIFROST_PROCESS_TRACE=1` logs non-thread shared-VM clone inputs and guest
+group exits (`[clone]`, `[guest-exit]`) to distinguish child-process lifecycle
+errors from memory-access faults without stopping threads in a debugger or
+changing the JIT memory-guard trace path. `BIFROST_FAULT_TRACE` includes these
+process records too.
+
 `FRAMEWORK_OK` requires that `onCreate` ran and the decor view exists,
 including the inflated title `TextView`.
 `Typeface.loadPreinstalledSystemFontMap()` stands in for
@@ -245,7 +657,7 @@ and [ArrayUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/an
 
 [`FrameworkServiceRuntime.java`](../guest/android/FrameworkServiceRuntime.java)
 implements started and bound Services for explicit components in the installed
-APK's main process. It manages service tokens, start IDs, intent-filter binding
+APK's main process or a fresh remote ART VM. It manages service tokens, start IDs, intent-filter binding
 records and client connections. Android's real `ActivityThread` creates the app's
 Service class with its Application, class loader and attached Context, and runs
 `onCreate`, `onStartCommand`, `onBind`, `onUnbind`, `onRebind` and `onDestroy` on
@@ -273,12 +685,47 @@ Closing the host window explicitly shuts down Services and waits for their
 destruction callbacks before process exit. Application `onCreate` can start
 Services because the runtime is attached before that callback.
 
-This profile rejects foreground-service requests (notification/deadline support
-is absent), separate/isolated/named service processes, external-service process
-binding and installed-package intent-filter resolution. Unknown explicit
-components and packages return absent results. It does not implement sticky
+`FrameworkProcessRuntime` bootstraps children through an authenticated host
+supervisor and the shared Binder realm. Named isolated services receive UIDs
+99000..99999 leased within that realm; ordinary remote Services retain the app
+UID. Application metadata and the WebView provider snapshot cross Binder before
+ActivityThread creates the service. External isolated binding validates the
+manifest flags and uses the caller's package identity with the provider's code.
+The supervisor bounds child count, reaps exits and kills its owned children on
+shutdown. These VMs share a guest root and the host user's permissions; isolated
+Android identity is not a host filesystem or SELinux sandbox.
+
+The real APK service gate checks a different PID, the same ordinary app UID,
+and a synchronous Binder round trip, in addition to local lifecycle behavior.
+The isolated WebView handshake is still incomplete. This profile rejects
+foreground-service requests (notification/deadline support is absent) and
+installed-package intent-filter resolution. Unknown explicit components and
+packages return absent results. It does not implement sticky
 restart/redelivery after process death, cross-app Services, Android background
 execution policy, or system_server process management.
+
+### Managed JobScheduler (October 11, 2026)
+
+`FrameworkJobs` provides namespaced queues, owned-UID and `BIND_JOB_SERVICE`
+validation, real JobService/JobParameters callbacks, cancellation, work-item
+delivery/completion, latency/deadline and backoff timing, periodic scheduling,
+and AtomicFile persistence of JobInfo across launches. It permits at most 150
+queued jobs and four concurrent bindings per launcher, and bounds service
+connection/execution waits. Content observers route URI notifications to job
+triggers with descendant matching and debounce/max-delay timing. Connectivity
+and storage constraints use the current host-network model and guest data
+filesystem. The virtual power profile is plugged in; idle means the launcher's
+host window is closed.
+
+The real APK gate passes completion, same-ID namespace isolation, two work
+items, cancellation reason, content-trigger URI/authority delivery, rejection
+of unrelated/skipped notifications, and persisted-job recovery on a second
+launch. These results cover that fixture, not all Android scheduling policy.
+Queues are launcher-local rather than a realm-wide system service. Persisted
+work items, URI permission grants, predictive prefetch, user-initiated transfer
+notifications and privileged system scheduling are not implemented; unsupported
+operations fail explicitly. No Doze, quota, thermal, standby-bucket or global
+cross-process scheduling equivalence is claimed.
 
 Build and focused APK gate:
 
@@ -425,6 +872,10 @@ exceptions, and delivered two display-change callbacks. It still aborted after
 108.991 seconds with an ART `SuspendAll timeout` (670 reported frames); this does
 not establish that the loading stall is fixed. The run and trace are under
 `build/android-display-spongebob/`.
+A follow-up normal managed launch without APK tracing reached its full
+240-second deadline without a reported ART suspension abort. Its logs are in
+`build/android-display-control/`. This separates the successful control run from
+the failing instrumented runs; it does not prove a cause for those timeouts.
 This does not test physical hotplug, HDR/brightness events or a changing refresh
 rate. The implementation remains strict for unsupported display operations.
 
@@ -456,8 +907,9 @@ Binder now transfers `BINDER_TYPE_FD` objects when the destination accepts FDs
 (or the original caller sets `TF_ACCEPT_FDS` for a reply). Queued messages retain
 the open Node; receiver descriptor numbers are installed on delivery, so closing
 and reusing a sender FD cannot redirect the transfer. Rejected messages do not
-install descriptors. Binder-device FD transfer and scatter/gather FD arrays
-remain unsupported, as does the FdTable's pre-existing per-descriptor CLOEXEC
+install descriptors. Scatter/gather FD arrays are now supported and close their
+installed descriptors when the receive buffer is freed. Binder-device FD transfer
+remains unsupported, as does the FdTable's pre-existing per-descriptor CLOEXEC
 tracking gap. Device destruction happens outside the FdTable lock to avoid
 inverting the Binder-domain/table lock order during concurrent close/transfer.
 
@@ -968,19 +1420,56 @@ This supplies the host's default network. Android per-network routing, legacy
 hostent commands and raw `resnsend` queries are not implemented. No DNS server
 address or application hostname is hardcoded.
 
+The activity service answers `getHistoricalProcessStartReasons` with an empty
+`ParceledListSlice<ApplicationStartInfo>` for the caller's package/UID; the public
+`ActivityManager` API returns its empty list. This profile has no start-info
+tracker. It does not invent launch reasons or
+timestamps. Foreign-package/user queries are rejected; `USER_ALL` and
+`USER_CURRENT` are invalid, matching Android 15's
+[ActivityManagerService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java).
+The framework probe checks the public API and the Binder package/user access
+boundaries (`ACTIVITY_START_HISTORY_OK`). Persistent process-start history
+remains unsupported.
+
 The managed connectivity service snapshots the host's IPv4/IPv6 default routes
-at launch and exposes one virtual Ethernet network through active-network,
+at launch and exposes one virtual Wi-Fi network through active-network,
 legacy connection-info and capability queries. Default callbacks and matching
 network listeners receive Android's `AVAILABLE` message with capabilities and
 link properties; unmatched requests with a timeout receive `UNAVAILABLE`.
 Requests have independent identifiers and can be released separately. This
 follows the framework's
 [ConnectivityManager callback protocol](https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/master/framework/src/android/net/ConnectivityManager.java).
-Route availability does not establish Internet validation or the host's billing
-policy: the network is not advertised as validated or unmetered. Link properties
-are empty, explicit per-network routing is unsupported, and changes to the host
-network during a session are not tracked. `BIFROST_ANDROID_HOST_NETWORK=0` or `1`
-overrides the launch snapshot for deterministic offline/online diagnostics.
+The network is Wi-Fi (`TYPE_WIFI`, `TRANSPORT_WIFI`) whatever the host link is:
+phone apps expect Wi-Fi or cellular, and SDKs reported the earlier virtual
+Ethernet as `connectionType: none`. Its capabilities are the regular Wi-Fi filter
+from Android 15's
+[WifiInjector](https://android.googlesource.com/platform/packages/modules/Wifi/+/refs/tags/android-15.0.0_r1/service/java/com/android/server/wifi/WifiInjector.java)
+(`INTERNET`, `NOT_METERED`, `NOT_ROAMING`, `NOT_CONGESTED`, `NOT_SUSPENDED`,
+`NOT_VCN_MANAGED`, 1 Gbit/s link estimates) over the framework defaults, plus
+`FOREGROUND`, which
+[ConnectivityService](https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/tags/android-15.0.0_r1/service/src/com/android/server/ConnectivityService.java)
+gives every non-background network. Wi-Fi is unmetered unless an access-point hint
+or user override marks it metered (`WifiConfiguration.isMetered`); the host
+supplies neither, so `isActiveNetworkMetered()` is false online and true with no
+network.
+`VALIDATED` follows Android's
+[NetworkMonitor](https://android.googlesource.com/platform/packages/modules/NetworkStack/+/refs/tags/android-15.0.0_r1/src/com/android/server/connectivity/NetworkMonitor.java)
+HTTPS probe: the launcher requests `https://www.google.com/generate_204` once,
+alongside runtime preparation (3-second timeout), and only HTTP 204 validates;
+redirects (captive portals) and failures leave the network unvalidated.
+Partial connectivity, captive-portal login and later revalidation are not
+modelled. Link properties carry the host default-route interface name, which
+apps also see through netlink; addresses, routes and DNS servers are empty.
+Explicit per-network routing is unsupported, and changes to the host network
+during a session are not tracked. `BIFROST_ANDROID_HOST_NETWORK=0` or `1`
+overrides the route snapshot and `BIFROST_ANDROID_NETWORK_VALIDATED=0` or `1`
+skips the probe, for deterministic offline/online diagnostics.
+`ConnectivityManager.getRestrictBackgroundStatus()` reports
+`RESTRICT_BACKGROUND_STATUS_DISABLED`: the host bridge enforces no Android
+Data Saver or per-UID background restriction. This policy is independent of
+route availability and metering. The online/offline
+framework checks exercise the public API. The status follows Android 15's
+[NetworkPolicyManagerService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/net/NetworkPolicyManagerService.java).
 
 The APK's Unity connectivity helper queries `getActiveNetwork()` and
 `getNetworkCapabilities()` before registering its default callback. Returning
@@ -993,6 +1482,15 @@ JIT probes cover both route modes, matching listeners, independent release and
 an unmatched cellular request's timeout. An interpreter probe failed earlier
 in `FrameworkVsyncProbe0` with an unmapped read, before connectivity checks;
 interpreter coverage remains unverified.
+
+With the network presented as validated Wi-Fi (above), SpongeBob's loader
+passes 40% in some runs (observed: 4 of 10 runs of 200-360 seconds) and then downloads
+its `CityLevelData*` files. Stuck runs stay at the "DOWNLOADING 0%" step near
+40% with the emulator mostly idle (about 1-2 host cores), so the stall is not
+CPU saturation. Its cause is not localized: a full ART method trace of a stuck
+run shows no Java activity in the native loader, and stuck runs keep idle
+sockets with unread bytes (`ss` Recv-Q) whose meaning is unproven. A Galaxy
+S24 FE running 5.12.0 with cached data loads to the menu in about 15 seconds.
 
 Previously, SpongeBob's TiltingPoint registration request failed with
 `Cannot resolve destination host`. With the resolver, the actual game obtains

@@ -1,6 +1,124 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <android/looper.h>
+#include <android/choreographer.h>
+#include <pthread.h>
+#include <sys/eventfd.h>
+#include <time.h>
+#include <unistd.h>
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    // The managed adapter can call in-process Java services from native
+    // workers. The standalone NativeActivity adapter has no such boundary.
+    void (*set_vm)(JavaVM *) = dlsym(RTLD_DEFAULT, "bifrost_managed_set_java_vm");
+    if (set_vm) set_vm(vm);
+    return JNI_VERSION_1_6;
+}
+
+struct native_frame_probe {
+    JavaVM *vm;
+    pthread_t owner;
+    AChoreographer *choreographer;
+    int result, frames;
+    int64_t previous;
+};
+static void native_frame_ready(int64_t time, void *data) {
+    struct native_frame_probe *probe = data;
+    if (!pthread_equal(pthread_self(), probe->owner) || time <= probe->previous) {
+        probe->result = -4;
+        return;
+    }
+    probe->previous = time;
+    if (++probe->frames < 3)
+        AChoreographer_postFrameCallback64(probe->choreographer, native_frame_ready, probe);
+}
+static void *native_frame_worker(void *data) {
+    struct native_frame_probe *probe = data;
+    JNIEnv *env;
+    probe->owner = pthread_self();
+    if ((*probe->vm)->GetEnv(probe->vm, (void **)&env, JNI_VERSION_1_6) != JNI_EDETACHED) {
+        probe->result = -1;
+        return NULL;
+    }
+    if (!ALooper_prepare(0) || !(probe->choreographer = AChoreographer_getInstance())) {
+        probe->result = -2;
+        return NULL;
+    }
+    if ((*probe->vm)->GetEnv(probe->vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        probe->result = -3;
+        return NULL;
+    }
+    AChoreographer_postFrameCallback64(probe->choreographer, native_frame_ready, probe);
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    do {
+        ALooper_pollOnce(100, NULL, NULL, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+    } while (!probe->result && probe->frames < 3 && now.tv_sec - start.tv_sec < 10);
+    if (!probe->result) probe->result = probe->frames == 3 ? 1 : -5;
+    return NULL;
+}
+JNIEXPORT jint JNICALL Java_ActivityProbe_00024NativeLooperProbe_nativeFrames(JNIEnv *env,
+        jclass type) {
+    (void)type;
+    // Exercise thread exit and a second independent native owner as well as
+    // the service call. ART aborts on exit if an attached pthread is not detached.
+    for (int i = 0; i < 2; ++i) {
+        struct native_frame_probe probe = {0};
+        if ((*env)->GetJavaVM(env, &probe.vm) != JNI_OK) return -6;
+        pthread_t worker;
+        if (pthread_create(&worker, NULL, native_frame_worker, &probe)) return -7;
+        if (pthread_join(worker, NULL)) return -8;
+        if (probe.result != 1) return probe.result;
+    }
+    return 1;
+}
+
+struct native_looper_registration { ALooper *looper; int fd, result; };
+static int native_looper_ready(int fd, int events, void *data) {
+    struct native_looper_registration *registration = data;
+    uint64_t value;
+    registration->result = ALooper_forThread() == registration->looper
+            && (events & ALOOPER_EVENT_INPUT) && read(fd, &value, sizeof(value)) == sizeof(value)
+            && value == 1 ? 1 : -1;
+    return 0; // one-shot registration
+}
+JNIEXPORT jlong JNICALL Java_ActivityProbe_00024NativeLooperProbe_arm(JNIEnv *env, jclass type) {
+    (void)env; (void)type;
+    struct native_looper_registration *registration = calloc(1, sizeof(*registration));
+    if (!registration) return 0;
+    registration->looper = ALooper_prepare(0);
+    registration->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (!registration->looper || registration->fd < 0) goto failed;
+    if (ALooper_addFd(registration->looper, registration->fd, 0, ALOOPER_EVENT_INPUT,
+            native_looper_ready, registration) != 1) goto failed;
+    uint64_t value = 1;
+    if (write(registration->fd, &value, sizeof(value)) != sizeof(value)) {
+        ALooper_removeFd(registration->looper, registration->fd);
+        goto failed;
+    }
+    ALooper_acquire(registration->looper);
+    return (jlong)(uintptr_t)registration;
+failed:
+    if (registration->fd >= 0) close(registration->fd);
+    free(registration);
+    return 0;
+}
+JNIEXPORT jint JNICALL Java_ActivityProbe_00024NativeLooperProbe_finish(JNIEnv *env, jclass type,
+        jlong handle) {
+    (void)env; (void)type;
+    struct native_looper_registration *registration = (void *)(uintptr_t)handle;
+    int result = ALooper_forThread() == registration->looper ? registration->result : -2;
+    ALooper_removeFd(registration->looper, registration->fd);
+    ALooper_release(registration->looper);
+    close(registration->fd);
+    free(registration);
+    return result;
+}
 
 void *ANativeWindow_fromSurface(JNIEnv *, jobject);
 void ANativeWindow_release(void *);
@@ -74,6 +192,12 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_pollWindow(JNIEnv *e, jclass c, jlon
 JNIEXPORT jint JNICALL Java_ManagedLauncher_audioConfig(JNIEnv *e, jclass c, jlongArray a) {
     return Java_ActivityProbe_audioConfig(e, c, a);
 }
+// Started (unpaused) host output streams; AAudio starts/stops map onto these.
+JNIEXPORT jint JNICALL Java_ManagedLauncher_activeAudioOutputs(JNIEnv *e, jclass c) {
+    (void)e;
+    (void)c;
+    return (jint)bifrost_window(8, 0, 0);
+}
 JNIEXPORT jlong JNICALL Java_ManagedLauncher_prepareSurface(JNIEnv *e, jclass c, jobject s, jboolean o) {
     return Java_ActivityProbe_prepareSurface(e, c, s, o);
 }
@@ -111,4 +235,54 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_setWindowIdentity(JNIEnv *env, jclas
     free(rgba);
     free(text);
     return result;
+}
+
+static void cache_set(const void *key, intptr_t key_size, const void *value, intptr_t value_size) {
+    (void)key; (void)key_size; (void)value; (void)value_size;
+}
+static intptr_t cache_get(const void *key, intptr_t key_size, void *value, intptr_t value_size) {
+    (void)key; (void)key_size; (void)value; (void)value_size; return 0;
+}
+JNIEXPORT jint JNICALL Java_ActivityProbe_00024EglProbe_check(JNIEnv *env, jclass type) {
+    (void)env; (void)type;
+    if (bifrost_window(2, 320, 240)) return __LINE__;
+    void *lib = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return __LINE__;
+#define FN(result, name, args) result (*name) args = (result (*) args)dlsym(lib, #name); if (!name) return __LINE__
+#define CHECK(test) if (!(test)) return __LINE__
+    FN(void *, eglGetDisplay, (void *));
+    FN(unsigned, eglInitialize, (void *, int *, int *));
+    FN(unsigned, eglTerminate, (void *));
+    FN(int, eglGetError, (void));
+    FN(const char *, eglQueryString, (void *, int));
+    FN(void *, eglGetProcAddress, (const char *));
+    FN(void, eglSetBlobCacheFuncsANDROID, (void *, void *, void *));
+    FN(void *, eglGetPlatformDisplay, (unsigned, void *, const intptr_t *));
+    FN(uint64_t, eglGetSystemTimeNV, (void));
+    FN(uint64_t, eglGetSystemTimeFrequencyNV, (void));
+    void *display = eglGetDisplay(NULL);
+    CHECK(display && eglInitialize(display, NULL, NULL));
+    (void)eglGetError();
+    const char *extensions = eglQueryString(display, 0x3055);
+    CHECK(extensions && strstr(extensions, "EGL_ANDROID_blob_cache"));
+    CHECK(!strstr(extensions, "EGL_ANDROID_native_fence_sync") && !strstr(extensions, "EGL_KHR_stream"));
+    CHECK(eglGetProcAddress("eglSetBlobCacheFuncsANDROID") == (void *)eglSetBlobCacheFuncsANDROID);
+    eglSetBlobCacheFuncsANDROID(display, NULL, (void *)cache_get);
+    CHECK(eglGetError() == 0x300C && eglGetError() == 0x3000);
+    eglSetBlobCacheFuncsANDROID(display, (void *)cache_set, (void *)cache_get);
+    CHECK(eglGetError() == 0x3000);
+    eglSetBlobCacheFuncsANDROID(display, (void *)cache_set, (void *)cache_get);
+    CHECK(eglGetError() == 0x300C);
+    CHECK(eglGetPlatformDisplay(0x3141, NULL, NULL) == display);
+    const intptr_t invalid[] = {123, 0, 0x3038};
+    CHECK(!eglGetPlatformDisplay(0x3141, NULL, invalid) && eglGetError() == 0x3004);
+    CHECK(eglGetSystemTimeFrequencyNV() == 1000000000 && eglGetSystemTimeNV() > 0);
+    CHECK(eglTerminate(display) && eglInitialize(display, NULL, NULL));
+    eglSetBlobCacheFuncsANDROID(display, (void *)cache_set, (void *)cache_get);
+    CHECK(eglGetError() == 0x3000);
+    CHECK(eglTerminate(display));
+#undef CHECK
+#undef FN
+    dlclose(lib);
+    return 0;
 }

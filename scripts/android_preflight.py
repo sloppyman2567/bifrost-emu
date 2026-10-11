@@ -143,6 +143,7 @@ def inspect_apk(name, path, aapt2, directory):
     identity = fields["package"]
     launcher = fields.get("launchable-activity", {}).get("name")
     report = {"archive": name, "package": identity["name"], "split": identity.get("split", ""),
+              "label": fields.get("launchable-activity", {}).get("label") or fields.get("application", {}).get("label") or identity["name"],
               "version_code": identity.get("versionCode"), "version_name": identity.get("versionName"),
               "min_sdk": fields.get("minSdkVersion", fields.get("sdkVersion")),
               "target_sdk": fields.get("targetSdkVersion"),

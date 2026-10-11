@@ -1,4 +1,4 @@
-// Single-process counterpart of ActiveServices. ActivityThread owns all Service
+// Session counterpart of ActiveServices. ActivityThread owns all Service
 // instances and lifecycle callbacks; this class owns tokens, starts and bindings.
 import android.app.ActivityManager;
 import android.content.ComponentName;
@@ -23,9 +23,12 @@ final class FrameworkServiceRuntime {
     // Android 15 ActivityThread.SERVICE_DONE_EXECUTING_*.
     private static final int DONE_STOP = 2, DONE_UNBIND = 4;
     private final FrameworkPackages packages;
+    private final FrameworkProcessRuntime processes;
+    private FrameworkProcessRuntime.Remote remote;
     private final Map<ComponentName, Record> names = new LinkedHashMap<>();
     private final Map<IBinder, Record> tokens = new LinkedHashMap<>();
     private final Map<IBinder, List<Connection>> connections = new LinkedHashMap<>();
+    private final Map<String, Record> instances = new LinkedHashMap<>();
     private Object applicationThread;
     private ApplicationInfo application;
     private Handler main;
@@ -41,6 +44,8 @@ final class FrameworkServiceRuntime {
         final Map<Intent.FilterComparison, Binding> bindings = new LinkedHashMap<>();
         boolean created, started, stopping;
         int lastStartId;
+        String instance;
+        FrameworkProcessRuntime.Child child;
         Record(ServiceInfo info) {
             this.info = info;
             name = new ComponentName(info.packageName, info.name);
@@ -63,7 +68,12 @@ final class FrameworkServiceRuntime {
         }
     }
 
-    FrameworkServiceRuntime(FrameworkPackages packages) { this.packages = packages; }
+    FrameworkServiceRuntime(FrameworkPackages packages) {
+        this.packages = packages;
+        processes = new FrameworkProcessRuntime(packages, this);
+    }
+
+    void remote(FrameworkProcessRuntime.Remote remote) { this.remote = remote; }
 
     synchronized void attach(Object thread, ApplicationInfo application) throws Exception {
         this.application = new ApplicationInfo(application);
@@ -94,9 +104,15 @@ final class FrameworkServiceRuntime {
         }
     }
 
+    private void schedule(Record record, String method, Class<?>[] types, Object... args) throws Exception {
+        if (record.child == null) schedule(method, types, args);
+        else processes.schedule(record.child, method, types, args);
+    }
+
     private ServiceInfo resolve(Object caller, Intent intent, String callingPackage, int user) {
         if (application == null || shuttingDown)
             throw new IllegalStateException("Service runtime is not accepting requests");
+        if (application.uid >= 99000) throw new SecurityException("Isolated processes cannot start or bind services");
         if (caller != applicationThread || !application.packageName.equals(callingPackage)
                 || user != application.uid / 100000)
             throw new SecurityException("Foreign service caller or user");
@@ -111,11 +127,19 @@ final class FrameworkServiceRuntime {
         if (existing != null) return existing.info;
         ServiceInfo info = packages.serviceInfo(intent.getComponent(), PackageManager.GET_META_DATA, user);
         if (info == null) return null;
+        if (info.applicationInfo.uid != application.uid && (!info.exported
+                || (info.permission != null && packages.checkPermission(info.permission,
+                        application.uid, Context.DEVICE_ID_DEFAULT) != PackageManager.PERMISSION_GRANTED)))
+            throw new SecurityException("Service is not accessible: " + info.name);
+        return info;
+    }
+
+    private boolean separateProcess(ServiceInfo info) {
         String process = application.processName == null ? application.packageName : application.processName;
         String serviceProcess = info.processName == null ? info.packageName : info.processName;
-        if (!process.equals(serviceProcess) || (info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) != 0)
-            throw new UnsupportedOperationException("Service requires a separate process: " + info.name);
-        return info;
+        if (process.equals(serviceProcess) && info.applicationInfo.uid == application.uid
+                && (info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) == 0) return false;
+        return true;
     }
 
     private Record record(ServiceInfo info) {
@@ -131,8 +155,9 @@ final class FrameworkServiceRuntime {
 
     private void create(Record record) throws Exception {
         if (record.created) return;
+        if (separateProcess(record.info)) record.child = processes.start(record.info, record.instance);
         Class<?> compat = Class.forName("android.content.res.CompatibilityInfo");
-        schedule("scheduleCreateService", new Class<?>[] {IBinder.class, ServiceInfo.class, compat, int.class},
+        schedule(record, "scheduleCreateService", new Class<?>[] {IBinder.class, ServiceInfo.class, compat, int.class},
                 record.token, record.info, compat.getField("DEFAULT_COMPATIBILITY_INFO").get(null),
                 processState);
         record.created = true;
@@ -153,7 +178,7 @@ final class FrameworkServiceRuntime {
         Object args = argsType.getConstructor(boolean.class, int.class, int.class, Intent.class)
                 .newInstance(false, record.lastStartId, 0, intent);
         Class<?> slice = Class.forName("android.content.pm.ParceledListSlice");
-        schedule("scheduleServiceArgs", new Class<?>[] {IBinder.class, slice}, record.token,
+        schedule(record, "scheduleServiceArgs", new Class<?>[] {IBinder.class, slice}, record.token,
                 slice.getConstructor(List.class).newInstance(Arrays.asList(args)));
         return record.name;
     }
@@ -182,12 +207,34 @@ final class FrameworkServiceRuntime {
         Intent intent = copy((Intent) a[2]);
         ServiceInfo info = resolve(a[0], intent, (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
         if (info == null) return 0;
-        if (instance && a[6] != null)
-            throw new UnsupportedOperationException("Named/isolated service instances are not implemented");
+        // ActiveServices returns 0 when bringUpServiceLocked cannot start
+        // the hosting process. Context.bindService then returns false.
+        // An unavailable process must not become an uncaught SDK exception.
         long flags = ((Number) a[5]).longValue();
-        if ((flags & Integer.toUnsignedLong(Context.BIND_EXTERNAL_SERVICE)) != 0)
-            throw new UnsupportedOperationException("External service processes are not implemented");
-        Record record = record(info);
+        if ((flags & Integer.toUnsignedLong(Context.BIND_EXTERNAL_SERVICE)) != 0) {
+            // ActiveServices runs an exported external isolated service under
+            // its client's package identity, retaining the provider's APK/code.
+            if (!info.exported || (info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) == 0
+                    || (info.flags & ServiceInfo.FLAG_EXTERNAL_SERVICE) == 0)
+                throw new SecurityException("Service is not an external isolated service");
+            info = new ServiceInfo(info);
+            info.applicationInfo = new ApplicationInfo(info.applicationInfo);
+            info.packageName = info.applicationInfo.packageName = application.packageName;
+            info.applicationInfo.uid = application.uid;
+        }
+        String instanceName = instance ? (String) a[6] : null;
+        Record record;
+        if (instanceName == null) record = record(info);
+        else {
+            if ((info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) == 0)
+                throw new IllegalArgumentException("Named instances require an isolated service");
+            String key = info.packageName + "/" + info.name + ":" + instanceName;
+            record = instances.get(key);
+            if (record == null) {
+                record = new Record(info); record.instance = instanceName;
+                instances.put(key, record); tokens.put(record.token, record);
+            }
+        }
         Intent.FilterComparison key = new Intent.FilterComparison(intent);
         Binding binding = record.bindings.get(key);
         if (binding == null) { binding = new Binding(record, intent); record.bindings.put(key, binding); }
@@ -204,7 +251,7 @@ final class FrameworkServiceRuntime {
 
     private void requestBinding(Binding binding, boolean rebind) throws Exception {
         if (binding.clients.isEmpty() || binding.record.stopping || (binding.requested && !rebind)) return;
-        schedule("scheduleBindService", new Class<?>[] {IBinder.class, Intent.class, boolean.class, int.class, long.class},
+        schedule(binding.record, "scheduleBindService", new Class<?>[] {IBinder.class, Intent.class, boolean.class, int.class, long.class},
                 binding.record.token, copy(binding.intent), rebind,
                 processState, ++bindSequence);
         binding.requested = true;
@@ -213,8 +260,16 @@ final class FrameworkServiceRuntime {
     }
 
     private static void connected(Connection connection, IBinder binder, boolean dead) throws Exception {
-        Class.forName("android.app.IServiceConnection").getMethod("connected", ComponentName.class,
-                IBinder.class, boolean.class).invoke(connection.client, connection.binding.record.name, binder, dead);
+        long trace = FrameworkTrace.begin("serviceConnection", "connected",
+                new Object[] {connection.binding.record.name, binder, dead});
+        try {
+            Class.forName("android.app.IServiceConnection").getMethod("connected", ComponentName.class,
+                    IBinder.class, boolean.class).invoke(connection.client, connection.binding.record.name, binder, dead);
+            FrameworkTrace.end(trace, null, null);
+        } catch (Exception error) {
+            FrameworkTrace.end(trace, null, error);
+            throw error;
+        }
     }
 
     synchronized IBinder peek(Intent intent, String callingPackage) {
@@ -229,7 +284,11 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized void publish(IBinder token, Intent intent, IBinder binder) throws Exception {
+        if (remote != null && !tokens.containsKey(token)) { remote.publish(token, intent, binder); return; }
         Record record = tokens.get(token);
+        long trace = FrameworkTrace.begin("serviceRuntime", "publishLookup",
+                new Object[] {token, intent, record != null});
+        FrameworkTrace.end(trace, record == null ? null : record.name, null);
         if (record == null || record.stopping) return;
         Binding binding = record.bindings.get(new Intent.FilterComparison(intent));
         if (binding == null || binding.received) return;
@@ -252,7 +311,7 @@ final class FrameworkServiceRuntime {
 
     private void requestUnbind(Binding binding) throws Exception {
         if (!binding.hasBound) return;
-        schedule("scheduleUnbindService", new Class<?>[] {IBinder.class, Intent.class},
+        schedule(binding.record, "scheduleUnbindService", new Class<?>[] {IBinder.class, Intent.class},
                 binding.record.token, copy(binding.intent));
         binding.hasBound = false;
         binding.unbinding = true;
@@ -260,6 +319,7 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized void unbindFinished(IBinder token, Intent intent, boolean rebind) throws Exception {
+        if (remote != null && !tokens.containsKey(token)) { remote.unbind(token, intent, rebind); return; }
         Record record = tokens.get(token);
         if (record == null) return;
         Binding binding = record.bindings.get(new Intent.FilterComparison(intent));
@@ -270,11 +330,19 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized void done(IBinder token, int type, Intent intent) throws Exception {
+        if (remote != null && !tokens.containsKey(token)) { remote.done(token, type, intent); return; }
         Record record = tokens.get(token);
         if (record == null) return;
         if (type == DONE_UNBIND && intent != null) unbindFinished(token, intent, false);
         if (type == DONE_STOP) {
             tokens.remove(token);
+            FrameworkProcessRuntime.Child child = record.child;
+            if (child != null) main.post(() -> {
+                synchronized (FrameworkServiceRuntime.this) {
+                    for (Record live : tokens.values()) if (live.child == child) return;
+                    processes.stop(child);
+                }
+            });
             notifyIdle();
         }
     }
@@ -290,7 +358,8 @@ final class FrameworkServiceRuntime {
     private void destroy(Record record) throws Exception {
         if (record.stopping) return;
         record.stopping = true;
-        names.remove(record.name);
+        if (record.instance == null) names.remove(record.name);
+        else instances.values().remove(record);
         for (Binding binding : record.bindings.values()) {
             requestUnbind(binding);
             for (Connection connection : new ArrayList<>(binding.clients)) {
@@ -301,8 +370,24 @@ final class FrameworkServiceRuntime {
             }
             binding.clients.clear();
         }
-        if (record.created) schedule("scheduleStopService", new Class<?>[] {IBinder.class}, record.token);
+        if (record.created) schedule(record, "scheduleStopService", new Class<?>[] {IBinder.class}, record.token);
         else { tokens.remove(record.token); notifyIdle(); }
+    }
+
+    synchronized void processDied(FrameworkProcessRuntime.Child child) throws Exception {
+        for (Record record : new ArrayList<>(tokens.values())) {
+            if (record.child != child) continue;
+            record.created = false; record.child = null;
+            for (Binding binding : record.bindings.values()) {
+                binding.requested = binding.received = binding.hasBound = false;
+                binding.binder = null;
+                for (Connection connection : new ArrayList<>(binding.clients)) connected(connection, null, true);
+            }
+            if (record.stopping) {
+                tokens.remove(record.token);
+                notifyIdle();
+            }
+        }
     }
 
     synchronized void whenIdle(Runnable callback) {
@@ -311,7 +396,9 @@ final class FrameworkServiceRuntime {
     }
 
     private boolean active() {
-        for (Record record : tokens.values()) if (record.created) return true;
+        for (Record record : tokens.values())
+            if (record.created && (record.child == null || record.started
+                    || record.info.applicationInfo.uid == application.uid)) return true;
         return false;
     }
 
@@ -330,7 +417,7 @@ final class FrameworkServiceRuntime {
 
     synchronized void shutdown(Runnable callback) throws Exception {
         shuttingDown = true;
-        for (Record record : new ArrayList<>(names.values())) destroy(record);
+        for (Record record : new ArrayList<>(tokens.values())) destroy(record);
         whenIdle(callback);
     }
 }

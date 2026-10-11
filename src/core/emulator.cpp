@@ -1005,7 +1005,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     if (!android_runtime_) mem_.map_range(0, 4096);
     main_cpu_.pc = entry_;
     main_cpu_.running = true;
-    main_cpu_.tid = 1;  // main thread TID
+    main_cpu_.tid = vfs_.self_pid();  // A process leader's TID equals its PID.
     next_tid_ = 2;
     main_cpu_.set_tid_address_ptr = 0;
 }
@@ -1305,12 +1305,12 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         // glibc reads these in __libc_start_main / _dl_aux_init; musl reads
         // AT_UID/AT_EUID to set the getuid/geteuid caches. AT_CLKTCK backs
         // sysconf(_SC_CLK_TCK); without it, sysconf returns -1 and tools
-        // like top/ps miscompute CPU%. We return 0 for UID/GID (sandbox
-        // is single-user root) and 100 for CLKTCK (the standard value).
-        11, 0,               // AT_UID
-        12, 0,               // AT_EUID
-        13, 0,               // AT_GID
-        14, 0,               // AT_EGID
+        // like top/ps miscompute CPU%. Android uses the installed-app
+        // credentials; the Linux profile retains its legacy auxiliary IDs.
+        11, vfs_.process_uid(), // AT_UID
+        12, vfs_.process_uid(), // AT_EUID
+        13, vfs_.process_gid(), // AT_GID
+        14, vfs_.process_gid(), // AT_EGID
         15, platform_addr,   // AT_PLATFORM ("aarch64")
         17, 100,             // AT_CLKTCK (sysconf(_SC_CLK_TCK))
         0,  0,               // AT_NULL
@@ -2280,7 +2280,7 @@ void Emulator::load_android_activity(const std::string& path,
         brk_start_ = brk_;
     }
     mem_.map_range(0, 4096);
-    main_cpu_.tid = 1; next_tid_ = 2;
+    main_cpu_.tid = vfs_.self_pid(); next_tid_ = 2;
     main_cpu_.set_tid_address_ptr = 0;
     main_cpu_.pc = 0;
     main_cpu_.running = false;

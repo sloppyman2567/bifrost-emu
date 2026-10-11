@@ -2,14 +2,16 @@
 //
 // Yggdrasil is the VFS subsystem of bifrost-emu. In Norse cosmology,
 // Yggdrasil is the world-tree that connects the nine realms; here it
-// connects the guest's path namespace to four "worlds":
+// connects the guest's path namespace to five "worlds":
 //
 //   1. ProcFS    — /proc/self/{exe,cmdline,maps,status,auxv,environ},
 //                  /proc/{meminfo,cpuinfo,version}, /proc/sys/kernel/osrelease
-//   2. DevFS     — /dev/{null,zero,urandom,random,tty,fb0,stdin,stdout,stderr,
+//   2. SysFS     — /sys/devices/system/cpu/* (synthetic CPU
+//                  topology, all served from kGuestCpuCount)
+//   3. DevFS     — /dev/{null,zero,urandom,random,tty,fb0,stdin,stdout,stderr,
 //                  dsp,snd,ptmx,pts/*}
-//   3. PathRemap — BIFROST_ROOT sandbox (if set)
-//   4. Host      — openat() passthrough on the (possibly remapped) host path
+//   4. PathRemap — BIFROST_ROOT sandbox (if set)
+//   5. Host      — openat() passthrough on the (possibly remapped) host path
 //
 //   Guest path ──► Yggdrasil::open() ──► Node* ──► FdTable::allocate()
 //                                                    │
@@ -52,25 +54,52 @@ namespace arm64emu {
 }
 namespace arm64emu::yggdrasil {
 struct BinderDomain;
+// ── Guest CPU topology: the single source of truth ─────────
+// Every guest-visible CPU-count source advertises this many
+// CPUs: sched_getaffinity (syscalls/misc_sched.cpp), the
+// synthetic sysfs tree (yggdrasil/sysfs.cpp) and
+// /proc/cpuinfo (yggdrasil/procfs.cpp). Bionic's
+// sysconf(_SC_NPROCESSORS_ONLN) reads
+// /sys/devices/system/cpu/online, so the sysfs tree and the
+// affinity mask MUST agree — a mismatch (or a missing sysfs,
+// which made sysconf return -1) made libunity's job system
+// compute a zero worker count and stall the presentation
+// thread. Change the count here only; never per-file.
+inline constexpr int kGuestCpuCount = 8;
 // ── Yggdrasil: path → Node resolver ───────────────────────────────────
 class Yggdrasil {
 public:
     Yggdrasil();
     void stop_binder();
+    void set_binder_broker(std::string path) { binder_broker_ = std::move(path); }
     // Select before opening Binder devices. Only /dev/binder gets a manager;
     // hardware/vendor domains retain the raw transport contract.
     void enable_android_services();
     // Serve Bionic system properties at /dev/__properties__ (Android runtime).
     void enable_android_properties() { android_properties_ = true; }
+    // Fixed credentials for the single installed-app process. Set before load.
+    void set_process_identity(uint32_t uid, uint32_t gid) { process_uid_ = uid; process_gid_ = gid; }
+    uint32_t process_uid() const { return process_uid_; }
+    uint32_t process_gid() const { return process_gid_; }
     static bool binder_device_stat(const std::string& path, struct stat* st);
+    // Synthetic stat for the SysFS tree (fstatat/statx/faccessat do
+    // not consult Yggdrasil::open — they go straight to the host via
+    // remap_path). Mirrors binder_device_stat: fills `st` from the
+    // same classifier that serves the open path, so a guest that
+    // stats /sys/devices/system/cpu/* before opening sees the same
+    // types and sizes (a host /sys would report the HOST's core
+    // count and contradict sched_getaffinity). Returns false when
+    // `path` is not part of the synthetic tree.
+    static bool sysfs_stat(const std::string& path, struct stat* st);
     // Resolve a guest path to a Node. Returns nullptr on failure (with
     // errno set via the `*err_out` parameter).
     //
     // Resolution order:
     //   1. ProcFS  (/proc/*)
-    //   2. DevFS   (/dev/*)
-    //   3. PathRemap (BIFROST_ROOT sandbox)
-    //   4. Host passthrough (openat on the remapped path)
+    //   2. SysFS   (/sys/* — always synthetic)
+    //   3. DevFS   (/dev/*)
+    //   4. PathRemap (BIFROST_ROOT sandbox)
+    //   5. Host passthrough (openat on the remapped path)
     std::unique_ptr<Node> open(const std::string& guest_path,
                                int flags, mode_t mode, int* err_out);
     // Read a NUL-terminated path string from guest memory. Reads at most
@@ -147,6 +176,7 @@ public:
     // The guest's own pid as getpid() reports it: 1, or the host pid in a
     // fork child. /proc/<that pid> names the same process as /proc/self.
     void set_self_pid(int pid) { self_pid_ = pid; }
+    int self_pid() const { return self_pid_; }
     std::string canonical_proc_path(const std::string& path) const;
     // Wire up the graphics backend (for /dev/fb0). May be null if the
     // emulator was built without SDL2 and the guest never opens /dev/fb0.
@@ -204,9 +234,11 @@ private:
     std::mutex binder_mu_;
     bool android_services_ = false;
     bool android_properties_ = false;
+    uint32_t process_uid_ = 0, process_gid_ = 0;
     std::once_flag property_area_once_;
     std::string property_area_;  // built from the root on first open
     std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;
+    std::string binder_broker_;
     std::string elf_path_;
     // Exact host file selected by the ELF loader, independent of guest cwd.
     std::string elf_backing_path_;
@@ -220,10 +252,13 @@ private:
     std::function<std::string()> cwd_getter_;
     std::function<bool(const std::string&)> cwd_setter_;
     std::string guest_cwd_ = "/";
-    // Sub-resolvers (defined in yggdrasil/procfs.cpp / devfs.cpp /
-    // host.cpp). Each returns nullptr if it doesn't handle the path.
+    // Sub-resolvers (defined in yggdrasil/procfs.cpp / sysfs.cpp /
+    // devfs.cpp / host.cpp). Each returns nullptr if it doesn't handle
+    // the path.
     std::unique_ptr<Node> open_procfs(const std::string& path,
                                       int flags, mode_t mode, int* err_out);
+    std::unique_ptr<Node> open_sysfs(const std::string& path,
+                                     int flags, mode_t mode, int* err_out);
     std::unique_ptr<Node> open_devfs(const std::string& path,
                                      int flags, mode_t mode, int* err_out);
     std::unique_ptr<Node> open_host(const std::string& path,
@@ -239,6 +274,7 @@ private:
 class FdTable {
 public:
     FdTable();
+    ~FdTable() { close_range(0, INT32_MAX); }
     // Allocate a new guest fd holding `node`. Returns the fd, or -errno.
     int allocate(std::shared_ptr<Node> node);
     // Look up the Node for `fd`. Returns nullptr if fd is not open.

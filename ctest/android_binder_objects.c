@@ -91,9 +91,9 @@ int main(void) {
     offset=4;publish.offsets=(uintptr_t)&offset;
     CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_FAILED_REPLY,0));
     struct bf_binder_error error;CHECK(ioctl(service,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-EINVAL);
-    offset=0;object.type=0x70742a85; // Scatter/gather BINDER_TYPE_PTR remains unsupported.
+    offset=0;object.type=0x70742a85; // A PTR object is 40 bytes, not a truncated flat object.
     CHECK(exchange(service,BF_BC_TRANSACTION,&publish)==0 && contains(BF_BR_FAILED_REPLY,0));
-    CHECK(ioctl(service,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-ENOTSUP);
+    CHECK(ioctl(service,BF_BINDER_GET_EXTENDED_ERROR,&error)==0 && error.param==-EINVAL);
     // A queued descriptor holds the open file, not the sender's fd number.
     int pipefd[2];CHECK(pipe(pipefd)==0);
     struct bf_flat_binder descriptor={BF_BINDER_TYPE_FD,0,(uint32_t)pipefd[0],0};

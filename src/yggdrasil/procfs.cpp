@@ -246,8 +246,11 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             s += "Pid:\t1\n";
             s += "PPid:\t0\n";
             s += "TracerPid:\t0\n";
-            s += "Uid:\t0\t0\t0\t0\n";
-            s += "Gid:\t0\t0\t0\t0\n";
+            for (const auto& identity : {std::make_pair("Uid", process_uid_), std::make_pair("Gid", process_gid_)}) {
+                s += std::string(identity.first) + ":";
+                for (int i = 0; i < 4; ++i) s += '\t' + std::to_string(identity.second);
+                s += '\n';
+            }
             s += "NStgid:\t1\n";
             s += "NSpid:\t1\n";
             s += "NSpgid:\t1\n";
@@ -277,8 +280,8 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             s += "SigIgn:\t0000000000000000\n";
             s += "SigCgt:\t0000000000000000\n";
             s += "CapInh:\t0000000000000000\n";
-            s += "CapPrm:\t0000003fffffffff\n";
-            s += "CapEff:\t0000003fffffffff\n";
+            s += process_uid_ ? "CapPrm:\t0000000000000000\n" : "CapPrm:\t0000003fffffffff\n";
+            s += process_uid_ ? "CapEff:\t0000000000000000\n" : "CapEff:\t0000003fffffffff\n";
             s += "CapBnd:\t0000003fffffffff\n";
             s += "CapAmb:\t0000000000000000\n";
             s += "NoNewPrivs:\t0\n";
@@ -340,12 +343,17 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         return serve_static(s, flags);
     }
     if (path == "/proc/cpuinfo") {
+        // One block per advertised CPU (kGuestCpuCount) so this
+        // source agrees with /sys/devices/system/cpu/* and
+        // sched_getaffinity.
         std::string s;
-        s += "processor\t: 0\n";
-        s += "BogoMIPS\t: 100.00\n";
-        s += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics\n";
-        s += "CPU implementer\t: 0x41\n";
-        s += "CPU architecture: 8\n";
+        for (int i = 0; i < kGuestCpuCount; ++i) {
+            s += "processor\t: " + std::to_string(i) + "\n";
+            s += "BogoMIPS\t: 100.00\n";
+            s += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics\n";
+            s += "CPU implementer\t: 0x41\n";
+            s += "CPU architecture: 8\n";
+        }
         return serve_static(s, flags);
     }
     if (path == "/proc/self/auxv") return serve_static(std::string(), flags);

@@ -16,6 +16,16 @@ final class FrameworkServices {
     // ServiceManager.getService consults sCache before any Binder lookup.
     @SuppressWarnings("unchecked")
     Object register(String name, String iface, Call call) throws Exception {
+        Object proxy = local(name, iface, call);
+        Field cache = Class.forName("android.os.ServiceManager").getDeclaredField("sCache");
+        cache.setAccessible(true);
+        ((Map<String, IBinder>) cache.get(null)).put(name, ((IInterface) proxy).asBinder());
+        return proxy;
+    }
+
+    // Child Binder interfaces (for example IImeTracker) are returned by their
+    // parent service rather than published in ServiceManager.
+    Object local(String name, String iface, Call call) throws Exception {
         Class<?> type = Class.forName(iface);
         Binder binder = new Binder();
         Object proxy = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
@@ -41,9 +51,6 @@ final class FrameworkServices {
                     }
                 });
         binder.attachInterface((IInterface) proxy, iface);
-        Field cache = Class.forName("android.os.ServiceManager").getDeclaredField("sCache");
-        cache.setAccessible(true);
-        ((Map<String, IBinder>) cache.get(null)).put(name, binder);
         return proxy;
     }
 

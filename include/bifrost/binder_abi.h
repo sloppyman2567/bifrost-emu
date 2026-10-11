@@ -19,6 +19,10 @@ struct bf_binder_transaction {
     uint32_t sender_euid;
     uint64_t data_size, offsets_size, buffer, offsets;
 };
+struct bf_binder_transaction_sg { struct bf_binder_transaction transaction; uint64_t buffers_size; };
+struct bf_binder_handle_cookie { uint32_t handle; uint64_t cookie; } __attribute__((packed));
+struct bf_binder_buffer { uint32_t type, flags; uint64_t buffer, length, parent, parent_offset; };
+struct bf_binder_fd_array { uint32_t type, pad; uint64_t num_fds, parent, parent_offset; };
 struct bf_flat_binder { uint32_t type, flags; uint64_t binder, cookie; };
 struct bf_binder_ptr_cookie { uint64_t ptr, cookie; };
 struct bf_binder_error { uint32_t id, command; int32_t param; };
@@ -41,6 +45,11 @@ struct bf_binder_error { uint32_t id, command; int32_t param; };
 #define BF_BC_REGISTER_LOOPER BF_IO('c',11)
 #define BF_BC_ENTER_LOOPER BF_IO('c',12)
 #define BF_BC_EXIT_LOOPER BF_IO('c',13)
+#define BF_BC_REQUEST_DEATH_NOTIFICATION BF_IOW('c',14,struct bf_binder_handle_cookie)
+#define BF_BC_CLEAR_DEATH_NOTIFICATION BF_IOW('c',15,struct bf_binder_handle_cookie)
+#define BF_BC_DEAD_BINDER_DONE BF_IOW('c',16,uint64_t)
+#define BF_BC_TRANSACTION_SG BF_IOW('c',17,struct bf_binder_transaction_sg)
+#define BF_BC_REPLY_SG BF_IOW('c',18,struct bf_binder_transaction_sg)
 #define BF_BR_OK BF_IO('r',1)
 #define BF_BR_TRANSACTION BF_IOR('r',2,struct bf_binder_transaction)
 #define BF_BR_REPLY BF_IOR('r',3,struct bf_binder_transaction)
@@ -51,6 +60,9 @@ struct bf_binder_error { uint32_t id, command; int32_t param; };
 #define BF_BR_RELEASE BF_IOR('r',9,struct bf_binder_ptr_cookie)
 #define BF_BR_DECREFS BF_IOR('r',10,struct bf_binder_ptr_cookie)
 #define BF_BR_NOOP BF_IO('r',12)
+#define BF_BR_SPAWN_LOOPER BF_IO('r',13)
+#define BF_BR_DEAD_BINDER BF_IOR('r',15,uint64_t)
+#define BF_BR_CLEAR_DEATH_NOTIFICATION_DONE BF_IOR('r',16,uint64_t)
 #define BF_BR_FAILED_REPLY BF_IO('r',17)
 #define BF_TF_ONE_WAY 1u
 #define BF_TF_ACCEPT_FDS 0x10u
@@ -63,4 +75,7 @@ struct bf_binder_error { uint32_t id, command; int32_t param; };
 #define BF_BINDER_TYPE_HANDLE 0x73682a85u
 #define BF_BINDER_TYPE_WEAK_HANDLE 0x77682a85u
 #define BF_BINDER_TYPE_FD 0x66642a85u
+#define BF_BINDER_TYPE_PTR 0x70742a85u
+#define BF_BINDER_TYPE_FDA 0x66646185u
+#define BF_BINDER_BUFFER_FLAG_HAS_PARENT 1u
 #endif

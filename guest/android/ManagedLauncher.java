@@ -9,6 +9,7 @@ import android.app.Application;
 import android.app.GameManager;
 import android.app.Instrumentation;
 import android.content.AttributionSource;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -23,6 +24,7 @@ import android.graphics.Rect;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.hardware.input.InputManager;
+import android.media.AudioManager;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -39,6 +41,7 @@ import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.storage.StorageVolume;
 import android.provider.Settings;
+import android.telephony.TelephonyManager;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
@@ -78,6 +81,7 @@ public final class ManagedLauncher {
     private static final FrameworkPackages packages = new FrameworkPackages();
     private static final FrameworkServiceRuntime serviceRuntime = new FrameworkServiceRuntime(packages);
     private static final FrameworkConnectivity connectivity = new FrameworkConnectivity();
+    private static final FrameworkContent content = new FrameworkContent();
     private static boolean diagnostic;
     private static boolean created;
     private static volatile Activity activeActivity;
@@ -85,16 +89,25 @@ public final class ManagedLauncher {
     private static final Map<IBinder, Long> fullyDrawn = new ConcurrentHashMap<>();
     // The package installed by app mode; the only package that exists here.
     private static volatile PackageInfo installed;
+    private static final FrameworkInputMethod inputMethod = new FrameworkInputMethod((name, uid) ->
+            installed != null && installed.packageName.equals(name) && installed.applicationInfo.uid == uid);
     private static String androidId;
     // ActivityRecord's requested orientation is initialized from its manifest.
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
     private static final FrameworkDisplay displays = new FrameworkDisplay();
     private static boolean play;
+    private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
     // guest/android/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
     private static native int pollWindow(long[] event);
     private static native int audioConfig(long[] config);
+    private static native int activeAudioOutputs();
+
+    // The launcher's JNI bridge; loading the same path again is a no-op.
+    private static void loadActivityLibrary() {
+        System.load("/data/local/tmp/libbifrost-activity.so");
+    }
     private static native long prepareSurface(android.view.Surface surface, boolean opaque);
     private static native void releaseSurface(long window);
     private static final Map<SurfaceView, Long> surfaceWindows = new java.util.IdentityHashMap<>();
@@ -739,10 +752,74 @@ public final class ManagedLauncher {
             throw new IllegalStateException("Failed to prepare " + path);
     }
 
+    // Public AudioManager queries the app SDKs use; the probe starts no stream.
+    private static void checkAudioService(Context context) throws Exception {
+        AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        if (audio == null || audio.getMode() != AudioManager.MODE_NORMAL || audio.isVolumeFixed()
+                || audio.isMusicActive() || activeAudioOutputs() != 0)
+            throw new AssertionError("audio service state differs from an idle device");
+        System.out.println("ACTIVITY_AUDIO_SERVICE_OK");
+    }
+
     private static void checkRuntimeServices(Context context, boolean resumed) throws Exception {
         checkSensorService(context);
+        checkAudioService(context);
         checkInputService(context);
+        inputMethod.check(context);
         checkGameServices(context);
+        TelephonyManager telephony = (TelephonyManager)
+                context.getSystemService(Context.TELEPHONY_SERVICE);
+        // A device without a radio has no country, but its per-process
+        // TelephonyServiceManager must still be initialized (as in ActivityThread.main).
+        if (telephony == null || !telephony.getNetworkCountryIso().isEmpty())
+            throw new AssertionError("virtual device unexpectedly reports a mobile network");
+        System.out.println("ACTIVITY_TELEPHONY_SERVICE_OK");
+        try (android.database.CursorWindow window = new android.database.CursorWindow("bifrost-probe")) {
+            if (!window.setNumColumns(1) || !window.allocRow() ||
+                    !window.putLong(42, 0, 0) || window.getLong(0, 0) != 42)
+                throw new AssertionError("CursorWindow shared memory round-trip failed");
+        }
+        System.out.println("ACTIVITY_SHARED_MEMORY_OK");
+        ActivityManager activityManager = (ActivityManager)
+                context.getSystemService(Context.ACTIVITY_SERVICE);
+        if (!activityManager.getHistoricalProcessExitReasons(null, 0, 0).isEmpty()
+                || !activityManager.getHistoricalProcessExitReasons(
+                        context.getPackageName(), Process.myPid(), 1).isEmpty())
+            throw new AssertionError("launcher unexpectedly reports historical exits");
+        try {
+            activityManager.getHistoricalProcessExitReasons("bifrost.foreign.package", 0, 0);
+            throw new AssertionError("foreign exit history query was permitted");
+        } catch (SecurityException expected) {
+            // Only the launcher's own package/UID is available to this caller.
+        }
+        System.out.println("ACTIVITY_EXIT_HISTORY_OK");
+        if (!activityManager.getHistoricalProcessStartReasons(0).isEmpty())
+            throw new AssertionError("launcher unexpectedly reports historical starts");
+        Object historyService = call(ActivityManager.class, "getService", new Class<?>[0]);
+        Method historyQuery = Class.forName("android.app.IActivityManager").getMethod(
+                "getHistoricalProcessStartReasons", String.class, int.class, int.class);
+        Object ownHistory = historyQuery.invoke(historyService, context.getPackageName(), 1, 0);
+        if (!((List<?>) call(ownHistory, "getList", new Class<?>[0])).isEmpty())
+            throw new AssertionError("launcher unexpectedly reports package start history");
+        try {
+            historyQuery.invoke(historyService, "bifrost.foreign.package", 1, 0);
+            throw new AssertionError("foreign start history query was permitted");
+        } catch (java.lang.reflect.InvocationTargetException expected) {
+            if (!(expected.getCause() instanceof SecurityException)) throw expected;
+            // Start history follows the same package/UID boundary as exit history.
+        }
+        for (int user : new int[] {-1, -2, 1}) {
+            try {
+                historyQuery.invoke(historyService, null, 1, user);
+                throw new AssertionError("invalid/foreign start history user was permitted");
+            } catch (java.lang.reflect.InvocationTargetException expected) {
+                Throwable cause = expected.getCause();
+                if (user < 0 ? !(cause instanceof IllegalArgumentException)
+                        : !(cause instanceof SecurityException))
+                    throw new AssertionError("incorrect start history user exception", cause);
+            }
+        }
+        System.out.println("ACTIVITY_START_HISTORY_OK");
         ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
         info.lastTrimLevel = 99;
         info.importanceReasonCode = 99;
@@ -796,14 +873,28 @@ public final class ManagedLauncher {
     }
 
     private static void installServices() throws Exception {
+        jobs.install(services);
         services.diagnostic = diagnostic;
         connectivity.install(services);
+        inputMethod.install(services);
         // The runner exposes both credential and device protected storage
         // for user 0, so this single user is running and unlocked.
         services.register("user", "android.os.IUserManager", (method, a) -> {
             switch (method) {
                 case "isUserUnlockingOrUnlocked":
                 case "isUserUnlocked": return ((Integer) a[0]) == 0;
+                case "getApplicationRestrictions":
+                case "getApplicationRestrictionsForUser": {
+                    int user = method.equals("getApplicationRestrictionsForUser") ? (Integer) a[1] : 0;
+                    if (user != 0 || installed == null || !installed.packageName.equals(a[0])
+                            || installed.applicationInfo.uid != Process.myUid())
+                        throw new SecurityException("Application restrictions for another app/user");
+                    // No system administrator provisions restrictions in this
+                    // profile. AOSP returns a fresh empty Bundle without XML.
+                    return new Bundle();
+                }
+                case "setApplicationRestrictions":
+                    throw new SecurityException("Application restrictions require system/root");
                 default: throw unsupported("user", method);
             }
         });
@@ -861,13 +952,17 @@ public final class ManagedLauncher {
         });
         packages.register(services);
         // A fresh device's volumes: AudioSystem.DEFAULT_STREAM_VOLUME (client
-        // side, read from this image) and AudioService.MAX_STREAM_VOLUME.
+        // side, read from this image) and AudioService.MAX/MIN_STREAM_VOLUME.
         int[] volumes = (int[]) Class.forName("android.media.AudioSystem")
                 .getField("DEFAULT_STREAM_VOLUME").get(null);
         int[] maxVolumes = {5, 7, 7, 15, 7, 7, 15, 7, 15, 15, 15, 15};
+        int[] minVolumes = {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0}; // AudioService.MIN_STREAM_VOLUME
         if ((Boolean) Class.forName("android.os.SystemProperties")
                 .getMethod("getBoolean", String.class, boolean.class)
                 .invoke(null, "servicemanager.ready", false)) {
+            // Register the VM before publishing Java-backed native services:
+            // an SDK's own pthread may call them before an Activity opens.
+            loadActivityLibrary();
             Class.forName("android.os.ServiceManager").getMethod(
                     "addService", String.class, IBinder.class)
                     .invoke(null, "sensorservice", sensorService);
@@ -886,21 +981,38 @@ public final class ManagedLauncher {
             switch (method) {
                 case "getStreamVolume": return volumes[(Integer) a[0]];
                 case "getStreamMaxVolume": return maxVolumes[(Integer) a[0]];
+                // AudioService: telephony/communication changes the mode; this
+                // device has neither, and config_useFixedVolume defaults to false.
+                case "getMode": return AudioManager.MODE_NORMAL;
+                case "isVolumeFixed": return false;
+                // No call route, ringer policy or per-stream mute exists here.
+                case "isSpeakerphoneOn": return false;
+                case "getRingerModeExternal": return AudioManager.RINGER_MODE_NORMAL;
+                case "isStreamMute": return false;
+                case "getStreamMinVolume": return minVolumes[(Integer) a[0]];
+                case "isMusicActive": {
+                    // AudioSystem.isStreamActive(STREAM_MUSIC): a started output.
+                    // Every host stream plays as media; there is no remote submix.
+                    if ((Boolean) a[0]) return false;
+                    loadActivityLibrary(); // SDKs may ask before the window opens.
+                    int active = activeAudioOutputs();
+                    if (active < 0) throw new IllegalStateException("host audio state unavailable: " + active);
+                    return active > 0;
+                }
                 default: throw unsupported("audio", method);
             }
         });
-        // Observers are kept nowhere: no settings provider ever changes here.
-        services.register("content", "android.content.IContentService", (method, a) -> {
-            switch (method) {
-                case "registerContentObserver":
-                case "unregisterContentObserver": return null;
-                default: throw unsupported("content", method);
-            }
-        });
+        services.register("content", "android.content.IContentService", content::call);
         services.register("window", "android.view.IWindowManager", (method, a) -> {
             switch (method) {
                 case "hasNavigationBar": return false;
                 case "getCurrentAnimatorScale": return 1f;
+                case "getWindowInsets": return displays.windowInsets((Integer) a[0], a[2]);
+                case "attachWindowContextToDisplayArea":
+                    return displays.attachWindowContext(a[0], (IBinder) a[1], (Integer) a[2], (Integer) a[3]);
+                case "detachWindowContext":
+                    displays.detachWindowContext((IBinder) a[0]);
+                    return null;
                 default: throw unsupported("window", method);
             }
         });
@@ -1011,6 +1123,36 @@ public final class ManagedLauncher {
         holderType.getField("noReleaseNeeded").setBoolean(holder, true);
         services.register("activity", "android.app.IActivityManager", (method, a) -> {
             switch (method) {
+                case "addPackageDependency":
+                    if (packages.systemPackage((String) a[0]) == null)
+                        throw new IllegalArgumentException("Unknown system package dependency: " + a[0]);
+                    // Provisioned system packages are immutable for this session.
+                    return null;
+                case "getHistoricalProcessExitReasons": {
+                    String packageName = (String) a[0];
+                    String ownPackage = installed == null ? "android" : installed.packageName;
+                    if ((Integer) a[3] != 0 || (packageName != null && !packageName.isEmpty()
+                            && !ownPackage.equals(packageName)))
+                        throw new SecurityException("Foreign process exit history");
+                    // This launcher has no persistent exit-info tracker. The
+                    // current live process is not a historical exit record.
+                    return Class.forName("android.content.pm.ParceledListSlice")
+                            .getConstructor(List.class).newInstance(java.util.Collections.emptyList());
+                }
+                case "getHistoricalProcessStartReasons": {
+                    String packageName = (String) a[0];
+                    int userId = (Integer) a[2];
+                    if (userId == -1 || userId == -2)
+                        throw new IllegalArgumentException("Unsupported userId");
+                    String ownPackage = installed == null ? "android" : installed.packageName;
+                    if (userId != 0 || (packageName != null && !packageName.isEmpty()
+                            && !ownPackage.equals(packageName)))
+                        throw new SecurityException("Foreign process start history");
+                    // No start-info tracker is provisioned. Do not invent launch
+                    // reasons or timestamps for the current or earlier processes.
+                    return Class.forName("android.content.pm.ParceledListSlice")
+                            .getConstructor(List.class).newInstance(java.util.Collections.emptyList());
+                }
                 case "startService": return serviceRuntime.start(a);
                 case "stopService": return serviceRuntime.stop(a);
                 case "stopServiceToken": return serviceRuntime.stopSelf(
@@ -1081,7 +1223,7 @@ public final class ManagedLauncher {
         return method.invoke(target instanceof Class ? null : target, arguments);
     }
 
-    private static void setField(Object target, String name, Object value) throws Exception {
+    static void setField(Object target, String name, Object value) throws Exception {
         Field field = target.getClass().getDeclaredField(name);
         field.setAccessible(true);
         field.set(target, value);
@@ -1124,6 +1266,15 @@ public final class ManagedLauncher {
         int user = extras == null ? 0 : extras.getInt("_user", 0);
         if (user != 0 && user != -2 && user != -3)
             throw new SecurityException("Settings for another user are unavailable");
+        // Settings.Config lists a namespace using a null setting name and
+        // extras._prefix. This immutable profile has no DeviceConfig overrides.
+        // Match SettingsProvider's serialized map response, allowing clients
+        // such as AutofillFeatureFlags to apply their platform defaults.
+        if (method.equals("LIST_config")) {
+            Bundle result = new Bundle();
+            result.putSerializable("value", new java.util.HashMap<String, String>());
+            return result;
+        }
         if (name == null) throw new IllegalArgumentException("Missing setting name");
         switch (method) {
             case "GET_secure":
@@ -1180,6 +1331,43 @@ public final class ManagedLauncher {
     }
 
     // args: --app <package> <code dir> <launcher class> [<split>=<apk>]...
+    private static void bindApplicationMetadata(Object thread, Context system, ApplicationInfo app,
+                                                Object loaded) throws Exception {
+        // handleBindApplication installs this before creating the Application.
+        // setArgV0 alone names /proc but leaves Application.getProcessName()
+        // null; Chromium records that Java name in its data-directory lock.
+        Class<?> bindType = Class.forName("android.app.ActivityThread$AppBindData");
+        java.lang.reflect.Constructor<?> constructor = bindType.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object binding = constructor.newInstance();
+        String processName = app.processName != null ? app.processName : app.packageName;
+        setField(binding, "processName", processName);
+        setField(binding, "appInfo", app);
+        setField(binding, "info", loaded);
+        setField(binding, "config", new Configuration(system.getResources().getConfiguration()));
+        setField(binding, "compatInfo", Class.forName("android.content.res.CompatibilityInfo")
+                .getField("DEFAULT_COMPATIBILITY_INFO").get(null));
+        setField(thread, "mBoundApplication", binding);
+        displays.attachApplicationThread(thread);
+        call(Process.class, "setArgV0", new Class<?>[] {String.class}, processName);
+        if (!processName.equals(Application.getProcessName()))
+            throw new AssertionError("Java process identity differs from bound application");
+    }
+
+    private static void checkApplicationRestrictions(Context context) {
+        android.os.UserManager manager = context.getSystemService(android.os.UserManager.class);
+        Bundle restrictions = manager.getApplicationRestrictions(context.getPackageName());
+        if (!restrictions.isEmpty()) throw new AssertionError("unexpected application restrictions");
+        restrictions.putString("local", "mutation");
+        if (!manager.getApplicationRestrictions(context.getPackageName()).isEmpty())
+            throw new AssertionError("application restrictions leaked caller mutation");
+        try {
+            manager.getApplicationRestrictions("org.bifrost.foreign");
+            throw new AssertionError("foreign application restrictions allowed");
+        } catch (SecurityException expected) {}
+        System.out.println("ACTIVITY_APPLICATION_RESTRICTIONS_OK");
+    }
+
     private static void runApp(Object thread, Context system, String[] args) throws Exception {
         String packageName = args[1], code = args[2], launcher = args[3];
         PackageInfo packageInfo = system.getPackageManager().getPackageArchiveInfo(
@@ -1242,7 +1430,7 @@ public final class ManagedLauncher {
             width = landscape ? 1280 : 720;
             height = landscape ? 720 : 1280;
             displays.setSize(width, height);
-            System.load("/data/local/tmp/libbifrost-activity.so");
+            loadActivityLibrary();
             int error = openWindow(width, height);
             if (error != 0) throw new IllegalStateException("host window: " + error);
             windowOpen = true;
@@ -1257,15 +1445,13 @@ public final class ManagedLauncher {
         Class<?> launcherClass = loader.loadClass(launcher);
         System.out.println("APP_CLASSLOADER_OK " + launcherClass.getName());
 
-        // handleBindApplication names the process before creating the
-        // Application; native code (Unity) reads it from /proc/<pid>/cmdline.
-        call(Process.class, "setArgV0", new Class<?>[] {String.class},
-                app.processName != null ? app.processName : packageName);
+        bindApplicationMetadata(thread, system, app, loaded);
         Instrumentation instrumentation =
                 (Instrumentation) call(thread, "getInstrumentation", new Class<?>[0]);
         Application application = (Application) call(loaded, "makeApplicationInner",
                 new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
         setField(thread, "mInitialApplication", application);
+        if (diagnostic) checkApplicationRestrictions(application);
         System.out.println("APP_APPLICATION_CREATED " + application.getClass().getName());
         if (play) {
             PackageManager pm = application.getPackageManager();
@@ -1317,6 +1503,7 @@ public final class ManagedLauncher {
             System.out.println("APP_AUDIO_ROUTING_READY " + config[0] + " " + config[1]);
         }
         serviceRuntime.attach(thread, app);
+        jobs.attach(application);
         instrumentation.callApplicationOnCreate(application);
         System.out.println("APP_APPLICATION_STARTED");
 
@@ -1463,6 +1650,7 @@ public final class ManagedLauncher {
                         if (event[1] != 0 || activity.isFinishing()) {
                             boolean hostClosed = event[1] != 0;
                             closeActivity(activity);
+                            jobs.close();
                             if (hostClosed) serviceRuntime.shutdown(() -> System.exit(0));
                             else serviceRuntime.whenIdle(() -> System.exit(0));
                             return;
@@ -1487,19 +1675,43 @@ public final class ManagedLauncher {
     }
 
     private static void run(String[] args) throws Exception {
+        boolean nativeChoreographer = diagnostic && args.length == 1
+                && args[0].equals("--native-choreographer");
+        if (nativeChoreographer) args = new String[0];
+        boolean probeRenderer = diagnostic && args.length == 1 && args[0].equals("--webview-renderer");
+        boolean probeWebView = probeRenderer || (diagnostic && args.length == 1 && args[0].equals("--webview"));
+        if (probeWebView) args = new String[0];
         if (args.length > 0 && args[0].equals("--play")) {
             play = true;
             args = Arrays.copyOfRange(args, 1, args.length);
         }
+        Class<?> threadType = Class.forName("android.app.ActivityThread");
+        // Match ActivityThread.main before any SDK can access mainline APIs.
+        // systemMain() alone does not initialize their per-process service managers.
+        threadType.getMethod("initializeMainlineModules").invoke(null);
         Looper.prepareMainLooper();
         if (diagnostic) checkServiceRegistration();
         installServices();
+        if (nativeChoreographer) {
+            loadActivityLibrary();
+            ActivityProbe.NativeLooperProbe.checkNativeFrames();
+            System.out.println("FRAMEWORK_OK");
+            System.exit(0);
+            return;
+        }
         if (diagnostic && !play) checkFrameworkVsync();
         System.out.println("ACTIVITY_BOOTSTRAP_BEGIN");
-        Class<?> threadType = Class.forName("android.app.ActivityThread");
         Object thread = threadType.getMethod("systemMain").invoke(null);
         Context context = (Context) threadType.getMethod("getSystemContext").invoke(thread);
         System.out.println("ACTIVITY_CONTEXT_OK " + context);
+        boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
+        FrameworkProcessRuntime.Remote parent = serviceChild
+                ? new FrameworkProcessRuntime.Remote(args[1], args[2]) : null;
+        PackageInfo childPackage = parent == null ? null : parent.bootstrap();
+        // The parent already parsed and validated the immutable provider APK.
+        // Reuse its parcel snapshot so cold child startup fits Chromium's bind deadline.
+        if (parent == null) installWebView(context);
+        else if (parent.webViewProvider != null) installWebView(context, parent.webViewProvider);
         if (diagnostic) checkRuntimeServices(context, false);
         // ActivityThread.handleBindApplication's fallback when no serialized
         // font map arrives (lazy Typeface initialization). This probe has
@@ -1507,11 +1719,77 @@ public final class ManagedLauncher {
         Class.forName("android.graphics.Typeface")
                 .getMethod("loadPreinstalledSystemFontMap").invoke(null);
         System.out.println("ACTIVITY_FONTS_OK");
+        if (serviceChild) {
+            PackageInfo pkg = childPackage;
+            ApplicationInfo app = pkg.applicationInfo;
+            new File(app.dataDir).mkdirs();
+            packages.install(context, pkg); installed = pkg;
+            Class<?> compat = Class.forName("android.content.res.CompatibilityInfo");
+            Object loaded = call(thread, "getPackageInfoNoCheck", new Class<?>[] {ApplicationInfo.class, compat},
+                    app, compat.getField("DEFAULT_COMPATIBILITY_INFO").get(null));
+            bindApplicationMetadata(thread, context, app, loaded);
+            Application application = (Application) call(loaded, "makeApplicationInner",
+                    new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
+            setField(thread, "mInitialApplication", application);
+            serviceRuntime.attach(thread, app); serviceRuntime.remote(parent);
+            jobs.attach(application);
+            parent.ready(call(thread, "getApplicationThread", new Class<?>[0]));
+            Looper.loop();
+            return;
+        }
         if (args.length >= 4 && args[0].equals("--app")) {
             runApp(thread, context, args);
             return;
         }
         if (args.length != 0) throw new IllegalArgumentException("unexpected arguments");
+
+        if (probeWebView) {
+            // The system context uses Resources.getSystem(), which is outside
+            // ResourcesManager's app-resource tracking. WebView appends its
+            // shared assets to an application's tracked Resources instead.
+            // Give this resource-only probe the same LoadedApk context path as
+            // runApp, using the image's existing framework resources.
+            ApplicationInfo probeInfo = new ApplicationInfo(context.getApplicationInfo());
+            probeInfo.packageName = "org.bifrost.activity";
+            probeInfo.processName = probeInfo.packageName;
+            probeInfo.uid = Process.myUid();
+            probeInfo.sourceDir = probeInfo.publicSourceDir = "/system/framework/framework-res.apk";
+            probeInfo.nativeLibraryDir = "/data/local/tmp";
+            probeInfo.dataDir = "/data/user/0/" + probeInfo.packageName;
+            if (!new File(probeInfo.dataDir).mkdirs())
+                throw new IllegalStateException("Cannot create probe data directory");
+            setField(probeInfo, "credentialProtectedDataDir", probeInfo.dataDir);
+            setField(probeInfo, "deviceProtectedDataDir", "/data/user_de/0/" + probeInfo.packageName);
+            probeInfo.flags &= ~(ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_HAS_CODE);
+            PackageInfo probePackage = new PackageInfo();
+            probePackage.packageName = probeInfo.packageName;
+            probePackage.applicationInfo = probeInfo;
+            packages.install(context, probePackage);
+            installed = probePackage;
+            Class<?> compatibility = Class.forName("android.content.res.CompatibilityInfo");
+            Object loaded = call(thread, "getPackageInfoNoCheck",
+                    new Class<?>[] {ApplicationInfo.class, compatibility}, probeInfo,
+                    compatibility.getField("DEFAULT_COMPATIBILITY_INFO").get(null));
+            bindApplicationMetadata(thread, context, probeInfo, loaded);
+            Application application = (Application) call(loaded, "makeApplicationInner",
+                    new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
+            setField(thread, "mInitialApplication", application);
+            serviceRuntime.attach(thread, probeInfo);
+            jobs.attach(application);
+            context = application;
+            checkApplicationRestrictions(context);
+            android.view.Display display = context.getSystemService(android.hardware.display.DisplayManager.class)
+                    .getDisplay(0);
+            Context windowContext = context.createWindowContext(display,
+                    android.view.WindowManager.LayoutParams.TYPE_APPLICATION, null);
+            Configuration windowConfig = windowContext.getResources().getConfiguration();
+            if (windowContext.getDisplay().getDisplayId() != 0 || windowConfig.densityDpi != 160
+                    || windowConfig.screenWidthDp != display.getWidth()
+                    || windowConfig.screenHeightDp != display.getHeight())
+                throw new AssertionError("window context display/configuration mismatch");
+            windowContext.getClass().getMethod("release").invoke(windowContext);
+            System.out.println("ACTIVITY_WINDOW_CONTEXT_OK");
+        }
 
         ActivityInfo info = new ActivityInfo();
         info.applicationInfo = context.getApplicationInfo();
@@ -1536,6 +1814,102 @@ public final class ManagedLauncher {
                 activity.getWindow().peekDecorView() == null)
             throw new IllegalStateException("onCreate did not complete with a decor view");
         System.out.println("FRAMEWORK_OK");
+        if (probeWebView) {
+            if (probeRenderer) {
+                loadActivityLibrary();
+                int error = openWindow(640, 480);
+                if (error != 0) throw new IllegalStateException("renderer probe window: " + error);
+            }
+            System.out.println("ACTIVITY_HEAP_POLICY maxMb=" + Runtime.getRuntime().maxMemory() / 1048576);
+            if (android.webkit.WebView.getWebViewClassLoader() == null)
+                throw new AssertionError("real WebView provider startup failed");
+            if (android.webkit.CookieManager.getInstance() == null)
+                throw new AssertionError("real WebView cookie manager unavailable");
+            if (android.webkit.WebSettings.getDefaultUserAgent(context).isEmpty())
+                throw new AssertionError("real WebView user agent unavailable");
+            android.webkit.WebView view = new android.webkit.WebView(activity);
+            if (view.getSettings() == null) throw new AssertionError("WebView settings unavailable");
+            if (probeRenderer) {
+                Handler timeout = new Handler(Looper.getMainLooper());
+                timeout.postDelayed(() -> {
+                    System.err.println("WebView renderer did not finish the local page: url="
+                            + view.getUrl() + " progress=" + view.getProgress()
+                            + " height=" + view.getContentHeight());
+                    System.exit(1);
+                }, 60000);
+                view.getSettings().setJavaScriptEnabled(true);
+                view.setWebViewClient(new android.webkit.WebViewClient() {
+                    @Override public void onPageStarted(android.webkit.WebView page, String url,
+                            android.graphics.Bitmap favicon) {
+                        System.out.println("ACTIVITY_WEBVIEW_PAGE_STARTED " + url);
+                        timeout.postDelayed(() -> page.evaluateJavascript(
+                                "JSON.stringify({state:document.readyState,url:location.href,"
+                                + "html:document.documentElement&&document.documentElement.outerHTML})",
+                                value -> System.out.println("ACTIVITY_WEBVIEW_DOCUMENT_STATE " + value)), 2000);
+                    }
+                    @Override public void onReceivedError(android.webkit.WebView page,
+                            android.webkit.WebResourceRequest request,
+                            android.webkit.WebResourceError error) {
+                        System.err.println("ACTIVITY_WEBVIEW_PAGE_ERROR " + error.getErrorCode()
+                                + " " + error.getDescription());
+                    }
+                    @Override public boolean onRenderProcessGone(android.webkit.WebView page,
+                            android.webkit.RenderProcessGoneDetail detail) {
+                        System.err.println("ACTIVITY_WEBVIEW_RENDERER_GONE crashed=" + detail.didCrash());
+                        System.exit(1);
+                        return true;
+                    }
+                    @Override public void onPageFinished(android.webkit.WebView page, String url) {
+                        System.out.println("ACTIVITY_WEBVIEW_PAGE_FINISHED " + url);
+                        page.evaluateJavascript("document.getElementById('probe').textContent + ':' + (6 * 7)", value -> {
+                            if (!"\"asgard:42\"".equals(value)) {
+                                System.err.println("Unexpected WebView DOM result: " + value);
+                                System.exit(1);
+                            }
+                            System.out.println("ACTIVITY_WEBVIEW_RENDERER_DOM_OK " + value);
+                            page.postVisualStateCallback(1, new android.webkit.WebView.VisualStateCallback() {
+                                @Override public void onComplete(long requestId) {
+                                    android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(
+                                            640, 480, android.graphics.Bitmap.Config.ARGB_8888);
+                                    page.draw(new android.graphics.Canvas(bitmap));
+                                    int foreground = bitmap.getPixel(40, 40);
+                                    int background = bitmap.getPixel(500, 400);
+                                    if (foreground != 0xffe63946 || background != 0xff1d3557) {
+                                        System.err.println("Unexpected WebView pixels: "
+                                                + Integer.toHexString(foreground) + " "
+                                                + Integer.toHexString(background));
+                                        System.exit(1);
+                                    }
+                                    System.out.println("ACTIVITY_WEBVIEW_RENDERER_PIXELS_OK");
+                                    bitmap.recycle();
+                                    page.destroy();
+                                    System.exit(0);
+                                }
+                            });
+                        });
+                    }
+                });
+                view.measure(android.view.View.MeasureSpec.makeMeasureSpec(640,
+                                android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(480,
+                                android.view.View.MeasureSpec.EXACTLY));
+                view.layout(0, 0, 640, 480);
+                view.loadDataWithBaseURL("https://asgard.invalid/", "<!doctype html><html><head>"
+                        + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                        + "<style>html,body{margin:0;background:#1d3557}"
+                        + "#probe{width:120px;height:120px;background:#e63946;color:#e63946}</style>"
+                        + "</head><body>"
+                        + "<div id='probe'>asgard</div><input id='editor'></body></html>",
+                        "text/html", "UTF-8", null);
+                System.out.println("ACTIVITY_WEBVIEW_CONSTRUCTION_OK");
+                System.out.println("ACTIVITY_WEBVIEW_OK heapMaxMb=" + Runtime.getRuntime().maxMemory() / 1048576);
+                Looper.loop();
+                return;
+            }
+            view.destroy();
+            System.out.println("ACTIVITY_WEBVIEW_CONSTRUCTION_OK");
+            System.out.println("ACTIVITY_WEBVIEW_OK heapMaxMb=" + Runtime.getRuntime().maxMemory() / 1048576);
+        }
         // Exercise the report transport without invoking RuntimeInit's
         // uncaught-exception handler (which would correctly kill the process).
         Object manager = call(ActivityManager.class, "getService", new Class<?>[0]);
@@ -1547,7 +1921,82 @@ public final class ManagedLauncher {
         System.exit(0);
     }
 
+    private static void installWebView(Context system) throws Exception {
+        String apk = "/product/app/webview/webview.apk";
+        if (!new File(apk).isFile()) return;
+        PackageInfo pkg = system.getPackageManager().getPackageArchiveInfo(apk,
+                PackageManager.GET_META_DATA | PackageManager.GET_SIGNATURES
+                        | PackageManager.GET_SIGNING_CERTIFICATES | PackageManager.GET_SERVICES
+                        | PackageManager.MATCH_DISABLED_COMPONENTS);
+        if (pkg == null || !"com.android.webview".equals(pkg.packageName)
+                || pkg.applicationInfo.metaData == null
+                || pkg.applicationInfo.metaData.getString("com.android.webview.WebViewLibrary") == null)
+            throw new IllegalStateException("Invalid same-image WebView provider");
+        installWebView(system, pkg);
+    }
+
+    private static void installWebView(Context system, PackageInfo pkg) throws Exception {
+        String apk = "/product/app/webview/webview.apk";
+        ApplicationInfo app = pkg.applicationInfo;
+        app.sourceDir = app.publicSourceDir = apk;
+        app.nativeLibraryDir = "/product/app/webview/lib/arm64";
+        setField(app, "nativeLibraryRootDir", "/product/app/webview/lib");
+        setField(app, "primaryCpuAbi", "arm64-v8a");
+        app.dataDir = "/data/user/0/" + pkg.packageName;
+        setField(app, "credentialProtectedDataDir", app.dataDir);
+        setField(app, "deviceProtectedDataDir", "/data/user_de/0/" + pkg.packageName);
+        app.uid = 10001;
+        app.flags |= ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_HAS_CODE | ApplicationInfo.FLAG_INSTALLED;
+        if (pkg.services != null)
+            for (android.content.pm.ServiceInfo service : pkg.services) service.applicationInfo = app;
+        packages.installSystem(pkg);
+        services.register("webviewupdate", "android.webkit.IWebViewUpdateService", (method, a) -> {
+            switch (method) {
+                case "waitForAndGetProvider":
+                    // No zygote-created RELRO: AOSP accepts this status and
+                    // loads the real provider library without shared RELRO.
+                    return Class.forName("android.webkit.WebViewProviderResponse")
+                            .getConstructor(PackageInfo.class, int.class)
+                            .newInstance(packages.systemPackage(pkg.packageName), 3);
+                case "getCurrentWebViewPackage": return packages.systemPackage(pkg.packageName);
+                case "getCurrentWebViewPackageName": return pkg.packageName;
+                case "isMultiProcessEnabled": return false;
+                default: throw unsupported("webviewupdate", method);
+            }
+        });
+        if (diagnostic) {
+            PackageInfo lookup = system.getPackageManager().getPackageInfo(pkg.packageName,
+                    PackageManager.GET_META_DATA | PackageManager.GET_SIGNATURES);
+            if (!system.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WEBVIEW)
+                    || system.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WEBVIEW, 1)
+                    || lookup.signatures == null || lookup.signatures.length == 0
+                    || !apk.equals(lookup.applicationInfo.sourceDir))
+                throw new AssertionError("WebView provider package contract failed");
+            boolean listed = false;
+            for (android.content.pm.FeatureInfo feature : system.getPackageManager().getSystemAvailableFeatures())
+                if (PackageManager.FEATURE_WEBVIEW.equals(feature.name) && feature.version == 0) listed = true;
+            if (!listed) throw new AssertionError("WebView feature missing from feature list");
+            ComponentName component = new ComponentName(pkg.packageName,
+                    "org.chromium.android_webview.devui.DeveloperModeState");
+            if (system.getPackageManager().getComponentEnabledSetting(component)
+                    != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT)
+                throw new AssertionError("unexpected system component override");
+            try {
+                system.getPackageManager().setComponentEnabledSetting(component,
+                        PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP);
+                throw new AssertionError("foreign component mutation allowed");
+            } catch (IllegalArgumentException expected) {
+                // This app may read the system provider, but does not own it.
+            }
+            System.out.println("ACTIVITY_WEBVIEW_PACKAGE_OK " + pkg.versionName);
+        }
+    }
+
     public static void main(String[] args) {
+        if (args.length == 3 && args[0].equals("--service-child")) {
+            execute(args);
+            return;
+        }
         if (args.length < 4 || !args[0].equals("--app")) {
             System.err.println("ManagedLauncher requires --app <package> <code> <activity> [split=apk]...");
             System.exit(2);

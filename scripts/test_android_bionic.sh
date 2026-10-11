@@ -8,7 +8,7 @@ runtime=${BIFROST_ANDROID_ROOT:-$repo/tools/android-runtime/rootfs}
 task_tmp=$(mktemp -d /tmp/bifrost-bionic-test.XXXXXX)
 trap 'rm -rf -- "$task_tmp"' EXIT
 python3 tools/fetch-android-runtime.py --destination "$runtime"
-clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -fPIE -pie -O2 \
+clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -ffreestanding -fPIE -pie -O2 \
     -Wl,-z,max-page-size=16384 -Wl,--dynamic-linker=/system/bin/linker64 \
     -Wl,-rpath,/apex/com.android.runtime/lib64/bionic -Wl,--allow-shlib-undefined \
     ctest/android_bionic_start.S ctest/android_bionic_bootstrap.c \

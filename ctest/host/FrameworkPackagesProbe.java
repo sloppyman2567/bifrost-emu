@@ -65,6 +65,9 @@ public final class FrameworkPackagesProbe {
         ApplicationInfo app = pkg.applicationInfo = new ApplicationInfo();
         app.packageName = NAME;
         app.uid = Process.myUid();
+        check(app.uid == 10000 && android.system.Os.getuid() == app.uid
+                && android.system.Os.geteuid() == app.uid && android.os.Binder.getCallingUid() == app.uid,
+                "framework/native/Binder app identity incorrect");
         app.enabled = true;
         app.targetSdkVersion = 35;
         app.sourceDir = app.publicSourceDir = "/data/app/contract/base.apk";

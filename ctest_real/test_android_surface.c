@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 // ── Android NDK types (minimal) ───────────────────────────────────────
 typedef struct ANativeWindow ANativeWindow;
@@ -86,6 +87,8 @@ typedef int32_t     (*ANativeWindow_getWidth_t)(ANativeWindow*);
 typedef int32_t     (*ANativeWindow_getHeight_t)(ANativeWindow*);
 typedef int32_t     (*ANativeWindow_getFormat_t)(ANativeWindow*);
 typedef int32_t     (*ANativeWindow_setBuffersGeometry_t)(ANativeWindow*, int32_t, int32_t, int32_t);
+typedef int32_t     (*ANativeWindow_setFrameRate_t)(ANativeWindow*, float, int8_t);
+typedef int32_t     (*ANativeWindow_setFrameRateWithChangeStrategy_t)(ANativeWindow*, float, int8_t, int8_t);
 static ANativeWindow_fromSurface_t ANativeWindow_fromSurface;
 static ANativeWindow_acquire_t ANativeWindow_acquire;
 static ANativeWindow_release_t ANativeWindow_release;
@@ -93,6 +96,8 @@ static ANativeWindow_getWidth_t ANativeWindow_getWidth;
 static ANativeWindow_getHeight_t ANativeWindow_getHeight;
 static ANativeWindow_getFormat_t ANativeWindow_getFormat;
 static ANativeWindow_setBuffersGeometry_t ANativeWindow_setBuffersGeometry;
+static ANativeWindow_setFrameRate_t ANativeWindow_setFrameRate;
+static ANativeWindow_setFrameRateWithChangeStrategy_t ANativeWindow_setFrameRateWithChangeStrategy;
 
 // ── EGL fn types ──────────────────────────────────────────────────────
 typedef EGLDisplay  (*eglGetDisplay_t)(void* native_display);
@@ -165,6 +170,8 @@ int main(int argc, char** argv) {
     LOAD(hand, ANativeWindow_getHeight_t, ANativeWindow_getHeight);
     LOAD(hand, ANativeWindow_getFormat_t, ANativeWindow_getFormat);
     LOAD(hand, ANativeWindow_setBuffersGeometry_t, ANativeWindow_setBuffersGeometry);
+    LOAD(hand, ANativeWindow_setFrameRate_t, ANativeWindow_setFrameRate);
+    LOAD(hand, ANativeWindow_setFrameRateWithChangeStrategy_t, ANativeWindow_setFrameRateWithChangeStrategy);
 
     // Raw thunk mode accepts explicit identities; managed apps use the JNI wrapper.
     ANativeWindow* win = ANativeWindow_fromSurface((void*)0x1234, (void*)0x5678);
@@ -174,6 +181,17 @@ int main(int argc, char** argv) {
     ANativeWindow_release(same);
     chk(ANativeWindow_fromSurface((void*)0x1234, NULL) == NULL, "null surface rejected");
     chk(ANativeWindow_getWidth(win) > 0, "getWidth positive");
+    chk(ANativeWindow_setFrameRate(win, 60.0f, 0) == 0, "content frame rate hint accepted");
+    chk(ANativeWindow_setFrameRate(win, 0.0f, 1) == 0, "content frame rate hint cleared");
+    chk(ANativeWindow_setFrameRateWithChangeStrategy(win, 24.0f, 1, 1) == 0,
+        "frame rate change strategy accepted");
+    chk(ANativeWindow_setFrameRate(NULL, 60.0f, 0) == -22, "null frame rate window rejected");
+    chk(ANativeWindow_setFrameRate(win, -1.0f, 0) == -22, "negative frame rate rejected");
+    chk(ANativeWindow_setFrameRate(win, NAN, 0) == -22, "NaN frame rate rejected");
+    chk(ANativeWindow_setFrameRate(win, INFINITY, 0) == -22, "infinite frame rate rejected");
+    chk(ANativeWindow_setFrameRate(win, 60.0f, 3) == -22, "invalid compatibility rejected");
+    chk(ANativeWindow_setFrameRateWithChangeStrategy(win, 60.0f, 0, 2) == -22,
+        "invalid change strategy rejected");
     chk(ANativeWindow_getHeight(win) > 0, "getHeight positive");
     chk(ANativeWindow_getFormat(win) == 1 /* WINDOW_FORMAT_RGBA_8888 */,
         "getFormat RGBA8888");
@@ -418,6 +436,7 @@ int main(int argc, char** argv) {
     chk(eglMakeCurrent(dpy, surf, surf, ctx), "restore primary current");
     chk(eglDestroySurface(dpy, layer_surface), "destroy layer EGL surface");
     chk(ANativeWindow_getWidth(layer) == -22, "retired layer handle rejected");
+    chk(ANativeWindow_setFrameRate(layer, 60.0f, 0) == -22, "retired frame rate window rejected");
 
     // ── teardown ─────────────────────────────────────────────────────
     chk(eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) != 0,

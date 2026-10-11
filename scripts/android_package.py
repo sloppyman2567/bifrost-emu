@@ -16,6 +16,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 import zipfile
 
 import android_preflight as preflight
@@ -132,10 +134,13 @@ def manifest_contract(path, aapt2):
 
 
 @contextmanager
-def app_lock(directory):
+def app_lock(directory, blocking=True):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".install.lock").open("a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise ValueError("App is busy: " + directory.name) from None
         yield
 
 
@@ -456,60 +461,70 @@ def verify_installed(package, app, metadata):
 
 
 def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
-           emu_args=(), timeout=0, trace_apk=None, trace_after=0, trace_duration=15):
+           emu_args=(), timeout=0, trace_apk=None, trace_after=0, trace_duration=15, session_id=None):
     if not PACKAGE.fullmatch(package):
         raise ValueError("Invalid package name")
     app = state / package
-    with app_lock(app):
+    from android_sessions import Session, app_id
+    with app_lock(app, blocking=False):
         metadata = json.loads((app / "package.json").read_text())
-        launcher = metadata["launcher"]
-        if launcher["kind"] == "managed_activity":
-            if frames:
-                raise ValueError("--frames is a NativeActivity redraw bound; use --timeout for managed apps")
-            code, root = verify_installed(package, app, metadata)
-            from android_managed import launch_managed
-            return launch_managed(app, metadata, code, root, emu, no_jit,
-                                  window_plugin, emu_args, timeout, trace_apk, trace_after, trace_duration)
-        if trace_apk is not None or trace_after or trace_duration != 15:
-            raise ValueError("APK framework/method tracing requires a managed Activity")
-        if launcher["kind"] != "native_activity":
-            raise ValueError("Installed package has no supported launcher Activity")
-        if timeout:
-            raise ValueError("--timeout is managed-only; use --frames for NativeActivity")
-        library = launcher.get("native_library")
-        entry = launcher.get("native_entrypoint")
-        if (
-            not library
-            or not re.fullmatch(r"[A-Za-z0-9_]+", library)
-            or not entry
-            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry)
-        ):
-            raise ValueError("Invalid native Activity library/entrypoint")
-        relative = "lib/arm64/lib" + library + ".so"
-        if relative not in metadata["files"]:
-            raise ValueError("NativeActivity has no packaged ARM64 entry library")
+        uid = app_id(state, package)
+        with Session(app, package, uid, session_id) as session:
+            return launch_session(package, app, metadata, emu, no_jit, window_plugin, frames,
+                                  emu_args, timeout, trace_apk, trace_after, trace_duration, session)
+
+
+def launch_session(package, app, metadata, emu, no_jit, window_plugin, frames,
+                   emu_args, timeout, trace_apk, trace_after, trace_duration, session):
+    launcher = metadata["launcher"]
+    if launcher["kind"] == "managed_activity":
+        if frames:
+            raise ValueError("--frames is a NativeActivity redraw bound; use --timeout for managed apps")
         code, root = verify_installed(package, app, metadata)
-        command = [str(emu), *emu_args]
-        if no_jit:
-            command += ["--no-jit"]
-        if window_plugin:
-            command += ["--android-window-plugin", str(window_plugin)]
-        command += [
-            "--android-runtime",
-            "--android-services",
-            "--rootfs",
-            str(root),
-            "/system/bin/bifrost-native",
-            code + "/" + relative,
-            entry,
-            f"/data/user/0/{package}/files",
-            f"/storage/emulated/0/Android/data/{package}/files",
-            code + "/assets",
-            str(API),
-            str(frames),
-        ]
-    # No compiler, custom linker, synthetic TLS or host library search in launch.
-    return subprocess.run(command, check=False).returncode
+        from android_managed import launch_managed
+        return launch_managed(app, metadata, code, root, emu, no_jit,
+                              window_plugin, emu_args, timeout, trace_apk, trace_after, trace_duration, session)
+    if trace_apk is not None or trace_after or trace_duration != 15:
+        raise ValueError("APK framework/method tracing requires a managed Activity")
+    if launcher["kind"] != "native_activity":
+        raise ValueError("Installed package has no supported launcher Activity")
+    library = launcher.get("native_library")
+    entry = launcher.get("native_entrypoint")
+    if (
+        not library
+        or not re.fullmatch(r"[A-Za-z0-9_]+", library)
+        or not entry
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry)
+    ):
+        raise ValueError("Invalid native Activity library/entrypoint")
+    relative = "lib/arm64/lib" + library + ".so"
+    if relative not in metadata["files"]:
+        raise ValueError("NativeActivity has no packaged ARM64 entry library")
+    code, root = verify_installed(package, app, metadata)
+    command = [str(emu), *emu_args]
+    if no_jit:
+        command += ["--no-jit"]
+    if window_plugin:
+        command += ["--android-window-plugin", str(window_plugin)]
+    command += [
+        "--android-runtime",
+        "--android-services",
+        "--android-app-id", str(session.data["uid"]),
+        "--rootfs",
+        str(root),
+        "/system/bin/bifrost-native",
+        code + "/" + relative,
+        entry,
+        f"/data/user/0/{package}/files",
+        f"/storage/emulated/0/Android/data/{package}/files",
+        code + "/assets",
+        str(API),
+        str(frames),
+    ]
+    log_path, _ = session.logs()
+    print(f"Launching {package} (log: {log_path})", flush=True)
+    with log_path.open("wb") as log:
+        return session.run(command, stdout=log, timeout=timeout)
 
 
 def probe(package, state, emu, libraries=None, no_jit=False, timeout=45, preloads=None):
@@ -582,6 +597,67 @@ def probe(package, state, emu, libraries=None, no_jit=False, timeout=45, preload
     return 1 if failures else 0
 
 
+def installed_apps(state):
+    from android_sessions import control
+    result = []
+    if not state.is_dir(): return result
+    for app in sorted(state.iterdir()):
+        if not PACKAGE.fullmatch(app.name) or not (app / "package.json").is_file(): continue
+        try:
+            metadata = json.loads((app / "package.json").read_text())
+            if metadata["package"] != app.name: raise ValueError("Package directory mismatch")
+            session = control(app)
+            result.append({"package": app.name, "label": metadata.get("label", app.name),
+                           "version": metadata["version_code"], "launcher": metadata["launcher"]["kind"],
+                           "session": session})
+        except (OSError, ValueError, KeyError) as error:
+            result.append({"package": app.name, "label": app.name, "error": str(error),
+                           "session": {"state": "invalid"}})
+    return result
+
+
+def start_background(package, state, options=()):
+    from android_sessions import control
+    if not PACKAGE.fullmatch(package) or not (state / package / "package.json").is_file():
+        raise ValueError("Package is not installed: " + package)
+    app = state / package
+    saved = control(app)
+    if saved.get("state") in ("preparing", "running", "stopping"):
+        raise ValueError("App is already active: " + package)
+    session_id = uuid.uuid4().hex
+    directory = app / "managed/sessions" / session_id
+    directory.mkdir(parents=True)
+    with (directory / "launcher.log").open("wb") as log:
+        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                                  "--state-root", str(state.resolve()), "run", package,
+                                  "--session-id", session_id, *options], stdout=log,
+                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        saved = control(app)
+        if saved.get("session_id") == session_id: return saved
+        if child.poll() is not None:
+            raise ValueError((directory / "launcher.log").read_text(errors="replace").strip())
+        time.sleep(0.05)
+    # It may still be starting; leave the owned worker running and report its log.
+    return {"package": package, "session_id": session_id, "state": "starting",
+            "log": str(directory / "launcher.log")}
+
+
+def add_launch_options(parser):
+    from android_managed import add_trace_arguments
+    add_trace_arguments(parser)
+    parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    parser.add_argument("--no-jit", action="store_true")
+    parser.add_argument("--binder-broker", type=Path, help="join an Asgard shared Binder realm")
+    parser.add_argument("--android-window-plugin", type=Path)
+    parser.add_argument("--timeout", type=int, default=0, help="session seconds; zero runs until window close")
+    for mode in ("", "-title", "-window", "-overlay"):
+        parser.add_argument("--window-stats" + mode, action=argparse.BooleanOptionalAction,
+                            default=None, help="configure emulator presentation statistics")
+    parser.add_argument("--frames", type=int, default=0, help="NativeActivity redraw cycles; zero runs until window close")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
@@ -603,23 +679,22 @@ def main():
     installer.add_argument("--media-root", type=Path,
                            help="verified real Media NDK bundle from tools/android_media.py")
     runner = commands.add_parser("run")
-    from android_managed import add_trace_arguments
-    add_trace_arguments(runner)
+    add_launch_options(runner)
     runner.add_argument("package")
-    runner.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
-    runner.add_argument("--no-jit", action="store_true")
-    runner.add_argument("--android-window-plugin", type=Path)
-    runner.add_argument("--timeout", type=int, default=0,
-                        help="managed session seconds; zero runs until window close")
-    for mode in ("", "-title", "-window", "-overlay"):
-        runner.add_argument("--window-stats" + mode, action=argparse.BooleanOptionalAction,
-                            default=None, help="configure emulator presentation statistics")
-    runner.add_argument(
-        "--frames",
-        type=int,
-        default=0,
-        help="bounded redraw cycles; zero runs until window close",
-    )
+    runner.add_argument("--session-id", help=argparse.SUPPRESS)
+    starter = commands.add_parser("start", help="launch one or more apps in independent background sessions")
+    starter.add_argument("packages", nargs="+")
+    add_launch_options(starter)
+    listing = commands.add_parser("list", aliases=["apps"], help="show installed apps and live sessions")
+    listing.add_argument("--json", action="store_true")
+    for name in ("status", "stop", "logs"):
+        command = commands.add_parser(name)
+        command.add_argument("package")
+        if name == "status": command.add_argument("--json", action="store_true")
+        if name == "logs":
+            command.add_argument("--lines", type=int, default=80)
+            command.add_argument("--logd", action="store_true")
+    commands.add_parser("launcher", help="open the desktop app library")
     diagnostic = commands.add_parser("probe", help="dlopen native libraries without JNI/Activity startup")
     diagnostic.add_argument("package")
     diagnostic.add_argument("--library", action="append", help="packaged basename; repeatable, default all")
@@ -629,6 +704,36 @@ def main():
     diagnostic.add_argument("--timeout", type=int, default=45, help="seconds per library, 1..300")
     args = parser.parse_args()
     try:
+        if args.command == "launcher":
+            from android_launcher import show
+            return show(args.state_root.resolve())
+        if args.command in ("list", "apps"):
+            apps = installed_apps(args.state_root)
+            if args.json: print(json.dumps(apps))
+            else:
+                for app in apps:
+                    session = app["session"]
+                    print(f"{app['package']}  {session['state']}  pid={session.get('pid') or '-'}"
+                          f"  version={app.get('version', '?')}")
+                if not apps: print("No apps installed. Use install <APK/APKM> or open launcher.")
+            return 0
+        if args.command in ("status", "stop", "logs"):
+            from android_sessions import control
+            if not PACKAGE.fullmatch(args.package) or not (args.state_root / args.package / "package.json").is_file():
+                raise ValueError("Package is not installed: " + args.package)
+            value = control(args.state_root / args.package, "stop" if args.command == "stop" else "status")
+            if args.command == "logs":
+                if not 1 <= args.lines <= 10000: raise ValueError("--lines must be in 1..10000")
+                path = value.get("logd" if args.logd else "log")
+                if not path or not Path(path).is_file(): raise ValueError("No session log available")
+                from collections import deque
+                with Path(path).open(errors="replace") as log:
+                    print("".join(deque(log, maxlen=args.lines)), end="")
+            elif args.command == "status" and args.json: print(json.dumps(value))
+            else:
+                print(f"{args.package}: {'stop requested' if args.command == 'stop' and value['state'] in ('running', 'preparing', 'stopping') else value['state']}"
+                      f" (pid={value.get('pid') or '-'}, exit={value.get('exit_code')})")
+            return 0
         if args.command == "install":
             value = install(
                 args.input,
@@ -656,6 +761,27 @@ def main():
             if value is not None:
                 emu_args.append(("--window-stats" if value else "--no-window-stats") +
                                 mode.replace("_", "-"))
+        if args.command == "start":
+            options = ["--emu", str(args.emu.resolve()), "--timeout", str(args.timeout),
+                       "--frames", str(args.frames), *emu_args]
+            if args.binder_broker: options += ["--binder-broker", str(args.binder_broker.resolve())]
+            if args.no_jit: options.append("--no-jit")
+            if args.android_window_plugin: options += ["--android-window-plugin", str(args.android_window_plugin.resolve())]
+            if args.trace_apk: options += ["--trace-apk", args.trace_apk, "--trace-after", str(args.trace_after),
+                                          "--trace-duration", str(args.trace_duration)]
+            elif args.trace_after or args.trace_duration != 15: raise ValueError("Trace window requires --trace-apk")
+            failed = False
+            for package in dict.fromkeys(args.packages):
+                try:
+                    value = start_background(package, args.state_root, options)
+                    print(f"{package}: {value['state']} (session {value['session_id']})")
+                    failed |= value["state"] in ("failed", "interrupted")
+                except (OSError, ValueError) as error:
+                    print(str(error), file=sys.stderr)
+                    failed = True
+            return 1 if failed else 0
+        if args.binder_broker:
+            emu_args += ["--android-binder-broker", str(args.binder_broker.resolve())]
         return launch(
             args.package,
             args.state_root,
@@ -668,6 +794,7 @@ def main():
             args.trace_apk,
             args.trace_after,
             args.trace_duration,
+            args.session_id,
         )
     except (
         OSError,

@@ -376,30 +376,56 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         // ── Identity / process-group syscalls ────────────────────────
-        // We're a single-process guest running as root (uid 0). set*id
-        // calls succeed silently (we're already 0); get*id calls return 0.
+        // Fixed Android app credentials: unprivileged callers may retain
+        // their IDs, but cannot switch identity. Linux keeps legacy behavior.
         case 143: { // setregid(rgid, egid) — accept silently
+            if (emu.android_runtime() &&
+                ((uint32_t(a0) != UINT32_MAX && uint32_t(a0) != emu.vfs().process_gid()) ||
+                 (uint32_t(a1) != UINT32_MAX && uint32_t(a1) != emu.vfs().process_gid()))) {
+                ret_err(EPERM); return 0;
+            }
             ret_host(0); return 0;
         }
         case 144: { // setgid(gid)
+            if (emu.android_runtime() && uint32_t(a0) != emu.vfs().process_gid()) {
+                ret_err(EPERM); return 0;
+            }
             ret_host(0); return 0;
         }
         case 145: { // setreuid(ruid, euid)
+            if (emu.android_runtime() &&
+                ((uint32_t(a0) != UINT32_MAX && uint32_t(a0) != emu.vfs().process_uid()) ||
+                 (uint32_t(a1) != UINT32_MAX && uint32_t(a1) != emu.vfs().process_uid()))) {
+                ret_err(EPERM); return 0;
+            }
             ret_host(0); return 0;
         }
         case 146: { // setuid(uid)
+            if (emu.android_runtime() && uint32_t(a0) != emu.vfs().process_uid()) {
+                ret_err(EPERM); return 0;
+            }
             ret_host(0); return 0;
         }
         case 147: { // setresuid(ruid, euid, suid)
+            if (emu.android_runtime()) for (uint32_t id : {uint32_t(a0), uint32_t(a1), uint32_t(a2)}) {
+                if (id != UINT32_MAX && id != emu.vfs().process_uid()) { ret_err(EPERM); return 0; }
+            }
             ret_host(0); return 0;
         }
-        case 148: { // getresuid(ruid, euid, suid) — all 0
-            if (a0) { try { mem_.store<uint32_t>(a0, 0); } catch (...) { ret_err(EFAULT); return 0; } }
-            if (a1) { try { mem_.store<uint32_t>(a1, 0); } catch (...) { ret_err(EFAULT); return 0; } }
-            if (a2) { try { mem_.store<uint32_t>(a2, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+        case 148: // getresuid(ruid, euid, suid)
+        case 150: { // getresgid(rgid, egid, sgid)
+            uint32_t id = num == 148 ? emu.vfs().process_uid() : emu.vfs().process_gid();
+            for (uint64_t pointer : {a0, a1, a2}) {
+                if (!pointer && !emu.android_runtime()) continue;
+                try { mem_.store<uint32_t>(pointer, id); }
+                catch (...) { ret_err(EFAULT); return 0; }
+            }
             ret_host(0); return 0;
         }
         case 149: { // setresgid(rgid, egid, sgid)
+            if (emu.android_runtime()) for (uint32_t id : {uint32_t(a0), uint32_t(a1), uint32_t(a2)}) {
+                if (id != UINT32_MAX && id != emu.vfs().process_gid()) { ret_err(EPERM); return 0; }
+            }
             ret_host(0); return 0;
         }
         case 142: { // reboot(magic1, magic2, cmd, arg) — AArch64 142
@@ -407,17 +433,11 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-EPERM));
             return 0;
         }
-        case 150: { // getresgid(rgid, egid, sgid) — all 0
-            if (a0) { try { mem_.store<uint32_t>(a0, 0); } catch (...) { ret_err(EFAULT); return 0; } }
-            if (a1) { try { mem_.store<uint32_t>(a1, 0); } catch (...) { ret_err(EFAULT); return 0; } }
-            if (a2) { try { mem_.store<uint32_t>(a2, 0); } catch (...) { ret_err(EFAULT); return 0; } }
-            ret_host(0); return 0;
-        }
         case 151: { // setfsuid(uid)
-            ret_host(0); return 0;
+            ret_host(emu.vfs().process_uid()); return 0;
         }
         case 152: { // setfsgid(gid)
-            ret_host(0); return 0;
+            ret_host(emu.vfs().process_gid()); return 0;
         }
         case 154: { // setpgid(pid, pgid)
             // Single-process sandbox: silently accept. Real pgid is 1.
@@ -1027,6 +1047,22 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         // Linux capabilities. We're a single-user guest with full perms;
         // return a fully-capable set for capget, accept capset silently.
         case 90: { // capget(hdr, data)
+            if (emu.android_runtime()) {
+                try {
+                    uint32_t version = mem_.load<uint32_t>(a0);
+                    unsigned words = version == 0x19980330 ? 3 : 6;
+                    if (version != 0x19980330 && version != 0x20071026 && version != 0x20080522) {
+                        mem_.store<uint32_t>(a0, 0x20080522);
+                        ret_err(a1 ? EINVAL : 0); return 0; // capget(NULL) probes the ABI version
+                    }
+                    if (!a1) { ret_host(0); return 0; }
+                    int32_t pid = mem_.load<int32_t>(a0 + 4);
+                    if (pid < 0) { ret_err(EINVAL); return 0; }
+                    if (pid && pid != (cpu.is_fork_process ? ::getpid() : 1)) { ret_err(ESRCH); return 0; }
+                    if (a1) for (unsigned i = 0; i < words; ++i) mem_.store<uint32_t>(a1 + 4 * i, 0);
+                } catch (...) { ret_err(EFAULT); return 0; }
+                ret_host(0); return 0;
+            }
             // hdr: { u32 version; int pid; }
             // data: struct __user_cap_data_struct { int effective; int permitted; int inheritable; }
             // We report full caps (CAP_FULL_SET = 0x1ffffffff).
@@ -1040,6 +1076,19 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         case 91: { // capset(hdr, data)
+            if (emu.android_runtime()) {
+                try {
+                    uint32_t version = mem_.load<uint32_t>(a0);
+                    unsigned words = version == 0x19980330 ? 3 : 6;
+                    if (version != 0x19980330 && version != 0x20071026 && version != 0x20080522) {
+                        mem_.store<uint32_t>(a0, 0x20080522); ret_err(EINVAL); return 0;
+                    }
+                    int32_t pid = mem_.load<int32_t>(a0 + 4);
+                    if (pid && pid != (cpu.is_fork_process ? ::getpid() : 1)) { ret_err(EPERM); return 0; }
+                    for (unsigned i = 0; i < words; ++i)
+                        if (mem_.load<uint32_t>(a1 + 4 * i)) { ret_err(EPERM); return 0; }
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
             // Accept silently.
             ret_host(0); return 0;
         }

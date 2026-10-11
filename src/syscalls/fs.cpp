@@ -863,7 +863,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +0x9C: stx_dio_offset_align (u32), ... (rest is padding)
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat st;
-            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st)) {
+            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st) ||
+                yggdrasil::Yggdrasil::sysfs_stat(raw_path, &st)) {
                 if (a2 & ~uint64_t(0x100 | 0x800 | 0x1000 | 0x6000)) { ret_err(EINVAL); return 0; }
                 if ((a2 & 0x6000) == 0x6000) { ret_err(EINVAL); return 0; }
             } else if (is_proc_exe_path(raw_path)) {
@@ -945,7 +946,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // see correct file sizes, types, and permissions.
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat st;
-            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st)) {
+            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st) ||
+                yggdrasil::Yggdrasil::sysfs_stat(raw_path, &st)) {
                 if (a3 & ~uint64_t(0x100 | 0x800 | 0x1000)) { ret_err(EINVAL); return 0; }
             } else if (is_proc_exe_path(raw_path)) {
                 proc_exe_stat(elf_path_,
@@ -1219,6 +1221,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                     return 0;
                 }
+                case F_ADD_SEALS: // 1033, integer bitmask (not a guest pointer)
+                case F_GET_SEALS: { // 1034
+                    if (hfd < 0) { ret_err(EINVAL); return 0; }
+                    int r = ::fcntl(hfd, cmd, static_cast<int>(a2));
+                    if (r < 0) { ret_errno(); return 0; }
+                    ret_host(r);
+                    return 0;
+                }
                 default:
                     // Unknown cmd — return -EINVAL (not 0!) so the guest
                     // knows the cmd is unsupported. The old code returned 0
@@ -1290,7 +1300,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // fontconfig's FcConfigFilename existence checks.
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat device_stat;
-            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &device_stat)) {
+            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &device_stat) ||
+                yggdrasil::Yggdrasil::sysfs_stat(raw_path, &device_stat)) {
                 if (a2 & ~uint64_t(7)) { ret_err(EINVAL); return 0; }
                 if (a2 & 1) { ret_err(EACCES); return 0; }
                 ret_host(0); return 0;

@@ -77,6 +77,7 @@ struct AudioThunkImpl {
         bool aaudio = false;                 // AAudio cb signature vs SDL2
         int32_t aa_state = 2;                // AAUDIO_STREAM_STATE_OPEN
         int32_t aa_session = -1;
+        int32_t aa_usage = 1, aa_input_preset = 6;
         uint32_t aa_buffer_frames = 0;
         // AAudio: a guest thread made by the Android libaaudio adapter runs
         // the data callback, so the pump and inline firing skip the stream.
@@ -154,6 +155,7 @@ struct AudioThunkImpl {
         int32_t ch = 0, rate = 0, frames_per_cb = 0;
         int32_t device = 0, direction = 0, sharing = 1, performance = 10;
         int32_t session = -1, capacity = 0;
+        int32_t usage = 1, input_preset = 6;
         uint64_t cb_fn = 0, cb_ud = 0, err_fn = 0, err_ud = 0;
     };
     std::map<uint64_t, AaBuilder> aa_builders_;
@@ -1578,6 +1580,8 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         name == "AAudioStreamBuilder_setDirection" ||
         name == "AAudioStreamBuilder_setSharingMode" ||
         name == "AAudioStreamBuilder_setPerformanceMode" ||
+        name == "AAudioStreamBuilder_setUsage" ||
+        name == "AAudioStreamBuilder_setInputPreset" ||
         name == "AAudioStreamBuilder_setSessionId" ||
         name == "AAudioStreamBuilder_setBufferCapacityInFrames") {
         std::lock_guard<std::recursive_mutex> g(I.mu);
@@ -1589,6 +1593,8 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             else if (name == "AAudioStreamBuilder_setDirection") b.direction = value;
             else if (name == "AAudioStreamBuilder_setSharingMode") b.sharing = value;
             else if (name == "AAudioStreamBuilder_setPerformanceMode") b.performance = value;
+            else if (name == "AAudioStreamBuilder_setUsage") b.usage = value;
+            else if (name == "AAudioStreamBuilder_setInputPreset") b.input_preset = value;
             else if (name == "AAudioStreamBuilder_setSessionId") b.session = value;
             else b.capacity = value;
         }
@@ -1624,6 +1630,18 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             b = bit->second;   // copy: another thread may delete the builder
         }
         wr64(I, out, 0);
+        // AAudio's setters defer validation until openStream. Zero means
+        // unspecified; keep the Android defaults in the opened stream.
+        if (b.usage == 0) b.usage = 1;
+        if (b.input_preset == 0) b.input_preset = 6;
+        const bool valid_usage = (b.usage >= 1 && b.usage <= 6) ||
+            (b.usage >= 10 && b.usage <= 14) || b.usage == 16 ||
+            (b.usage >= 1000 && b.usage <= 1003);
+        const bool valid_preset = b.input_preset == 1 || b.input_preset == 5 ||
+            b.input_preset == 6 || b.input_preset == 7 ||
+            b.input_preset == 9 || b.input_preset == 10 ||
+            b.input_preset == 1997 || b.input_preset == 1999;
+        if (!valid_usage || !valid_preset) { tr(-898); return -898; }
         if (b.direction == 1) { tr(-890); return -890; } // Input not implemented.
         if (b.direction != 0 || b.ch < 0 || b.ch > 8 || b.rate < 0 ||
             b.rate > 384000 || b.frames_per_cb < 0 || b.frames_per_cb > 65536 ||
@@ -1642,6 +1660,8 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         s.frames_per_cb = b.frames_per_cb > 0
             ? (uint32_t)b.frames_per_cb : 1024;
         s.aa_session = b.session == 0 ? static_cast<int32_t>(I.next_aa_stream_) : b.session;
+        s.aa_usage = b.usage;
+        s.aa_input_preset = b.input_preset;
         s.cb_fn = b.cb_fn; s.cb_ud = b.cb_ud;
         s.stream_arg = (int64_t)h;
         s.aaudio = true;
@@ -1868,7 +1888,22 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         int64_t result = changed ? 0 : -885; // AAUDIO_ERROR_TIMEOUT
         tr(result); return result;
     }
+    if (name == "AAudioStream_getTimestamp") {
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        if (!R(2) || !R(3)) { tr(-886); return -886; }
+        // Android clock IDs: CLOCK_MONOTONIC=1 and CLOCK_BOOTTIME=7.
+        if (R(1) != 1 && R(1) != 7) { tr(-898); return -898; }
+        if (it->second.aa_state != 4) { tr(-895); return -895; }
+        // SDL's mixer callback measures consumption into the host queue,
+        // not hardware presentation. No presentation timestamp is available
+        // from this backend. AAudio permits UNAVAILABLE and requires both
+        // output arguments to remain unchanged on any error.
+        tr(-889); return -889;
+    }
     if (name == "AAudioStream_getDeviceId" || name == "AAudioStream_getSessionId" ||
+        name == "AAudioStream_getUsage" || name == "AAudioStream_getInputPreset" ||
         name == "AAudioStream_getXRunCount" || name == "AAudioStream_isMMapUsed" ||
         name == "AAudioStream_getSharingMode" || name == "AAudioStream_getPerformanceMode" ||
         name == "AAudioStream_getDirection" || name == "AAudioStream_getBufferCapacityInFrames") {
@@ -1877,6 +1912,8 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (it == I.aa_streams_.end()) { tr(-892); return -892; }
         int64_t result = 0;
         if (name == "AAudioStream_getSessionId") result = it->second.aa_session;
+        else if (name == "AAudioStream_getUsage") result = it->second.aa_usage;
+        else if (name == "AAudioStream_getInputPreset") result = it->second.aa_input_preset;
         else if (name == "AAudioStream_getSharingMode") result = 1; // Host mixer is shared.
         else if (name == "AAudioStream_getPerformanceMode") result = 10; // No low-latency HAL.
         else if (name == "AAudioStream_getBufferCapacityInFrames") {
@@ -1924,9 +1961,15 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(r); return r;
     }
     if (name == "AAudioStream_getFramesRead" || name == "AAudioStream_getFramesWritten") {
-        int64_t r = I.engine ? (int64_t)(I.engine->bytes_pushed() /
-                    (4 * 2)) : 0;   // rough frame count at S16 stereo
-        tr(r); return r;
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        uint64_t written = 0, read = 0;
+        if (it == I.aa_streams_.end() || !I.engine ||
+            !I.engine->stream_frame_counters(it->second.engine_stream, written, read)) {
+            tr(-892); return -892;
+        }
+        int64_t result = name == "AAudioStream_getFramesWritten" ? written : read;
+        tr(result); return result;
     }
 
     // ══ OpenSL ES (synthetic vtables) ═══════════════════════════════
@@ -2203,12 +2246,17 @@ void AudioThunk::register_known_symbols_() {
     REG(aa_libs, AAudioStreamBuilder_setDirection);
     REG(aa_libs, AAudioStreamBuilder_setSharingMode);
     REG(aa_libs, AAudioStreamBuilder_setPerformanceMode);
+    REG(aa_libs, AAudioStreamBuilder_setUsage);
+    REG(aa_libs, AAudioStreamBuilder_setInputPreset);
     REG(aa_libs, AAudioStreamBuilder_setSessionId);
     REG(aa_libs, AAudioStreamBuilder_setBufferCapacityInFrames);
     REG(aa_libs, AAudioStream_getBufferCapacityInFrames);
     REG(aa_libs, AAudioStream_setBufferSizeInFrames);
     REG(aa_libs, AAudioStream_getDeviceId);
     REG(aa_libs, AAudioStream_getSessionId);
+    REG(aa_libs, AAudioStream_getUsage);
+    REG(aa_libs, AAudioStream_getInputPreset);
+    REG(aa_libs, AAudioStream_getTimestamp);
     REG(aa_libs, AAudioStream_getXRunCount);
     REG(aa_libs, AAudioStream_isMMapUsed);
     REG(aa_libs, AAudioStream_getSharingMode);

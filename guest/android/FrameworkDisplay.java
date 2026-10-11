@@ -1,10 +1,15 @@
 // One virtual display; real DisplayManagerGlobal owns client listeners and dispatch.
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.Parcelable;
 import java.lang.reflect.Array;
+import android.content.res.Configuration;
+import android.graphics.Rect;
+import java.util.HashSet;
+import java.util.Set;
 
 final class FrameworkDisplay {
     private static final long CHANGED_MASK = 4; // DisplayManager.EVENT_FLAG_DISPLAY_CHANGED
@@ -14,6 +19,76 @@ final class FrameworkDisplay {
     private IInterface callback;
     private long eventsMask;
     private Handler main;
+    private Object applicationThread;
+    private final Set<IBinder> windowContexts = new HashSet<>();
+
+    synchronized void attachApplicationThread(Object thread) throws Exception {
+        java.lang.reflect.Method method = thread.getClass().getDeclaredMethod("getApplicationThread");
+        method.setAccessible(true);
+        applicationThread = method.invoke(thread);
+    }
+
+    synchronized Object attachWindowContext(Object caller, IBinder token, int type, int displayId)
+            throws Exception {
+        if (caller == null || token == null) throw new NullPointerException("window context caller/token");
+        if (caller != applicationThread || displayId != 0) return null;
+        if (type < 1 || type > 2999) throw new IllegalArgumentException("Invalid window type " + type);
+        Object info = windowContextInfo();
+        windowContexts.add(token);
+        return info;
+    }
+
+    synchronized void detachWindowContext(IBinder token) {
+        if (token == null) throw new NullPointerException("window context token");
+        windowContexts.remove(token);
+    }
+
+    synchronized boolean windowInsets(int displayId, Object out) throws Exception {
+        if (displayId != 0) throw new android.view.WindowManager.InvalidDisplayException(
+                "Display#" + displayId + " could not be found");
+        if (out == null) throw new NullPointerException("outInsetsState");
+        Class<?> state = Class.forName("android.view.InsetsState");
+        Object value = state.getConstructor().newInstance();
+        state.getMethod("setDisplayFrame", Rect.class).invoke(value, new Rect(0, 0, width, height));
+        state.getMethod("set", state).invoke(out, value);
+        // The owned host window has no Android status/navigation bars. IME
+        // sources will be supplied by the input-method window when installed.
+        return false;
+    }
+
+    private Object windowContextInfo() throws Exception {
+        Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
+        config.densityDpi = 160;
+        config.screenWidthDp = width;
+        config.screenHeightDp = height;
+        config.smallestScreenWidthDp = Math.min(width, height);
+        config.orientation = width > height ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
+        Object window = Configuration.class.getField("windowConfiguration").get(config);
+        Rect bounds = new Rect(0, 0, width, height);
+        window.getClass().getMethod("setBounds", Rect.class).invoke(window, bounds);
+        window.getClass().getMethod("setMaxBounds", Rect.class).invoke(window, bounds);
+        window.getClass().getMethod("setAppBounds", Rect.class).invoke(window, bounds);
+        return Class.forName("android.window.WindowContextInfo")
+                .getConstructor(Configuration.class, int.class).newInstance(config, 0);
+    }
+
+    private void dispatchWindowContexts() throws Exception {
+        IBinder[] clients;
+        Object config;
+        synchronized (this) {
+            clients = windowContexts.toArray(new IBinder[0]);
+            config = windowContextInfo();
+        }
+        Class<?> controllerType = Class.forName("android.window.WindowTokenClientController");
+        Object controller = controllerType.getMethod("getInstance").invoke(null);
+        for (IBinder token : clients) {
+            synchronized (this) { if (!windowContexts.contains(token)) continue; }
+            // The single-process profile delivers the same client endpoint as
+            // WindowContextInfoChangeItem, on the application's main looper.
+            controllerType.getMethod("onWindowContextInfoChanged", IBinder.class, config.getClass())
+                    .invoke(controller, token, config);
+        }
+    }
 
     void install(FrameworkServices services) throws Exception {
         main = new Handler(Looper.getMainLooper());
@@ -65,6 +140,11 @@ final class FrameworkDisplay {
         }
         // Publish the new info before notifying, and never call clients under our lock.
         main.post(() -> {
+            try {
+                dispatchWindowContexts();
+            } catch (Exception error) {
+                throw new IllegalStateException("Window context configuration delivery failed", error);
+            }
             IInterface listener;
             synchronized (FrameworkDisplay.this) {
                 if ((eventsMask & CHANGED_MASK) == 0) return;

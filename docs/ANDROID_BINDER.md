@@ -1,8 +1,11 @@
-# Android Binder transport in Bifrost
+# Asgard Binder transport
 
 Bifrost provides virtual `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`
-character devices. Each device has an independent context per emulator; no
+character devices. By default each device has an independent context per emulator; no
 request reaches the host Binder driver or the host's Android services.
+Asgard's optional shared broker places these contexts in a separate OS process,
+allowing independent guests to communicate. See
+[shared process setup and tests](ANDROID_RUNTIME.md#shared-guest-processes-october-11-2026).
 The wire layout is AArch64 Binder protocol 8, checked against the
 [Linux Binder UAPI](https://raw.githubusercontent.com/torvalds/linux/v6.12/include/uapi/linux/android/binder.h)
 and [driver implementation](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/android/binder.c).
@@ -12,17 +15,56 @@ and [driver implementation](https://raw.githubusercontent.com/torvalds/linux/v6.
 - Device discovery through stat/fstatat/statx and access/faccessat2.
 - Version queries, maximum-thread configuration and per-thread extended errors.
 - Exclusive context-manager registration, including its pointer/cookie form.
-- Looper entry/exit and explicit thread exit when no synchronous call is active.
+- Looper entry/exit, `BR_SPAWN_LOOPER` requests, registration accounting and
+  maximum spawned-worker limits. User space creates the requested thread.
+  Explicit thread exit is supported when no synchronous call is active.
 - Transactions to context handle 0 and service handles, synchronous replies and one-way
-  delivery between guest endpoints in one emulator memory space.
+  delivery between guest endpoints, including independent emulator processes
+  attached to an Asgard realm.
 - Per-thread completion/reply queues, synchronous call stacks, and manager
   work delivered to registered loopers.
 - Blocking reads, nonblocking `EAGAIN`, guest-signal interruption with `EINTR`,
   and wakeups during process exit/emulator teardown.
 - `BR_DEAD_REPLY` when an endpoint closes with unhandled synchronous work.
+- Per-handle death subscriptions, `BR_DEAD_BINDER`, `BC_DEAD_BINDER_DONE` and
+  `BR_CLEAR_DEATH_NOTIFICATION_DONE`. Clear-before-death, clear while queued or
+  delivered, acknowledgement-before-clear, and already-dead subscriptions are
+  tracked separately. Releasing the final handle reference removes its watch.
 - Read-only receive arenas, buffer release, zeroing and free-range coalescing.
 - Flat Binder object translation, forwarding of handles, restoration of local
   pointer/cookie pairs, and strong/weak reference commands with owner notifications.
+- Flat descriptor transfer, `BC_TRANSACTION_SG`/`BC_REPLY_SG`, copied pointer
+  buffers, ordered nested-parent fixups and FD arrays. FD-array descriptors are
+  released with their receive buffer; flat descriptors remain open until closed
+  by the recipient. All source objects are validated before reference commit.
+
+## Concurrency and broker channels
+
+The domain uses an ordinary mutex for shared handle/ownership/queue metadata.
+Promoted peer references are retained until after unlocking, so a last-reference
+release cannot recursively enter teardown while the lock is held. Transaction
+command peers are released before a blocking read, so an acquire-and-read ioctl
+cannot pin the dying owner whose death notification it is waiting for. Transaction
+payload and scatter-buffer staging runs outside that lock. Wakeups target the
+receiving endpoint, rather than every Binder thread in the domain. A read returns
+at most one transaction, matching the Linux driver; delivering multiple calls in
+one read previously stacked unrelated callers and misrouted replies under load.
+
+Asgard RPC connections stay open across operations. Each Binder open pools up
+to eight idle channels, while concurrent blocking calls borrow separate channels.
+The separate lifetime connection still owns the endpoint and detects process
+exit. Imported sender FDs are scoped to each RPC, preventing concurrent sends
+from overwriting each other's captured files at a reused guest descriptor number.
+Cancelled or broken channels are discarded. Wire protocol 2 carries explicit
+FD patch widths and buffer lifetimes. The CLI detects protocol-1 brokers and
+requires their app sessions to stop before a realm restart; it does not silently
+replace a live older broker.
+
+Metadata updates and receive-arena allocation/copy still serialize within a
+domain. The broker still uses one host worker per connected channel, bounded by
+its connection limit. These changes remove per-operation connection/thread churn
+and broad wakeups; they do not establish kernel-Binder throughput or eliminate
+all lock contention.
 
 Receive arenas use offset-zero `MAP_PRIVATE` with `PROT_READ`, up to 4 MiB.
 Receive arenas reserve an unoccupied range below the direct-window boundary,
@@ -44,14 +86,16 @@ active Binder arenas cannot gain write/execute permission or move via mremap.
 ## Boundaries
 
 This is a transport foundation, not a complete Android Binder driver. It does
-not yet implement descriptor or scatter-gather
-transfer, death-notification subscriptions, transaction security contexts,
-automatic looper spawning, Binder polling/epoll, process freezing or Binder IPC
-across guest processes. Unsupported ioctls return `ENOTTY`; unsupported command
+not yet implement transaction security contexts, Binder polling/epoll, process
+freezing or Android zygote/isolated-service process launch. Reentrant synchronous
+callbacks do not yet have Linux's full transaction-stack thread targeting. Cross-process descriptor transfer requires
+host-backed descriptors. Unsupported ioctls return `ENOTTY`; unsupported command
 streams return `EINVAL`; transactions with unsupported objects receive
 `BR_FAILED_REPLY` and an `ENOTSUP` extended error. Malformed object offsets return
 an `EINVAL` extended error. Handle 0 is pinned while its manager endpoint is open.
-Each endpoint is limited to 1,024 objects/handles and each parcel to 64 objects.
+Each endpoint is limited to 1,024 objects/handles, 1,024 outstanding death records,
+64 objects and 64 descriptors per parcel. The 1 MiB transaction budget includes
+aligned data, offsets and scatter buffers.
 
 The opt-in service-manager subset below supports named native endpoints. Full
 Android servicemanager/framework compatibility remains incomplete. The separate
@@ -117,6 +161,7 @@ or MTE semantics, so these options do not claim success.
 make -j6
 make cross SRC=ctest/android_binder.c OUT=ctest/android_binder.elf
 make cross SRC=ctest/android_binder_objects.c OUT=ctest/android_binder_objects.elf
+make cross SRC=ctest/android_binder_features.c OUT=ctest/android_binder_features.elf
 make cross SRC=ctest/android_binder_exit.c OUT=ctest/android_binder_exit.elf
 make cross SRC=ctest/android_syscall_options.c OUT=ctest/android_syscall_options.elf
 make cross SRC=ctest/android_service_manager.c OUT=ctest/android_service_manager.elf
@@ -125,7 +170,24 @@ make cross SRC=ctest/android_service_manager.c OUT=ctest/android_service_manager
 ./scripts/run_tests.sh --filter android_service_manager
 ./scripts/run_tests.sh --no-jit --filter android_service_manager
 bash scripts/test_android_bionic.sh
+python3 scripts/test_asgard.py
 ```
+
+The October 11 feature fixture exercises nested pointer copying/rebasing,
+SG requests and replies, ordered-fixup rejection, insufficient scatter space,
+bad FDs, FD-array buffer cleanup, death clear/ack order, duplicate watches,
+already-dead objects, released watches, context-manager death, owner teardown
+while an acquire-and-read ioctl waits for death, looper requests,
+unsolicited/duplicate registration, thread exit and a zero worker limit. It runs
+locally under both engines and through the broker with real Bionic.
+
+`test_asgard.py` also exercises 1,000 ioctls on one persistent stream, all four
+JIT/interpreter combinations of independent server/client processes with nested
+SG buffers and descriptors, killed-server death recipients in both engines,
+and eight concurrent clients completing 1,600 checked request/reply calls.
+The observed stress duration is a local test measurement, not a comparison to
+kernel Binder. These tests do not cover every nested synchronous callback,
+Binder epoll integration, or a Chromium renderer process.
 
 The Binder fixture checks 61 behaviors including data round-trip, reply routing,
 read-only protection, malformed requests, isolated device contexts, peer close,

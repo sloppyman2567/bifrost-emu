@@ -184,6 +184,7 @@ def build(runtime, output):
         subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
                                  str(ROOT / "guest/android/activity_window.c"),
                                  str(staging / "libandroid.so"), str(bionic / "libc.so"),
+                                 str(bionic / "libdl.so"), str(bionic / "libdl_android.so"),
                                  "-o", str(staging / "libbifrost-activity.so")], check=True)
         names = list(groups) + ["bifrost-native", "libbifrost-activity.so", "libz.so",
                                 "libz.so.LICENSE"]
@@ -195,7 +196,11 @@ def build(runtime, output):
         managed = staging / "managed"
         managed.mkdir()
         thunked_android = [n for n in groups["libandroid.so"]
-                           if not n.startswith("AConfiguration_")]  # real AAssetManager
+                           if not n.startswith(("AConfiguration_", "ALooper_", "AChoreographer_"))]
+        # Managed Java MessageQueue polls the image's libutils Looper. Native
+        # consumers (including Chromium's MessagePumpAndroid) must register
+        # their event/timer fds with that SAME looper via re_android.so. A host
+        # thunk looper here silently strands native work while Java keeps polling.
         # Share the AudioThunk export registry. Managed AAudio streams must
         # stay on the host backend, rather than fall back to Android AudioTrack.
         aa_exports = re.findall(r"REG\(aa_libs,\s*(\w+)\)",
@@ -225,8 +230,17 @@ def build(runtime, output):
                            check=True)
             assembly = staging / ("managed-" + soname + ".S")
             hidden = {"ANativeWindow_fromSurface"} if soname == "libandroid.so" else set()
+            if soname == "libEGL.so":
+                wrappers = set(re.findall(r"^\s+EGL_WRAPPER\((\w+)\)",
+                    (ROOT / "guest/android/egl.c").read_text(), re.MULTILINE))
+                hidden = wrappers.intersection(exports)
             assembly.write_text(shim(table, exports, hidden))
             wrapper = [str(ROOT / "guest/android/surface.c"), str(bionic / "libc.so")] if hidden else []
+            if soname == "libEGL.so":
+                wrapper = [str(ROOT / "guest/android/egl.c"), str(bionic / "libc.so")]
+            if soname == "libandroid.so":
+                wrapper += [str(ROOT / "guest/android/managed_looper.c"),
+                            str(bionic / "libdl.so"), str(bionic / "libdl_android.so")]
             subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + soname,
                                      "-Wl,--no-as-needed", str(assembly), *wrapper, str(stub),
                                      "-o", str(managed / soname)], check=True)

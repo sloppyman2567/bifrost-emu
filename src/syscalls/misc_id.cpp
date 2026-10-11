@@ -47,18 +47,18 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& mem_ = emu.mem();
     switch (num) {
         case 158: { // getgroups(size, gid_t list[]) — AArch64 syscall 158
-            // Return just the effective GID (0 = root) in the supplied list.
-            // Most guests call getgroups(0, NULL) first to get the count, then
-            // allocate and call again. We return 1 group (GID 0).
+            // One supplementary group in the current single-user profile.
+            // Most guests query the count before allocating the list.
             if (a0 == 0) { ret_host(1); return 0; }  // query count
             if (a1 == 0) { ret_err(EFAULT); return 0; }
             try {
-                mem_.store<uint32_t>(a1, 0);  // GID 0 (root)
+                mem_.store<uint32_t>(a1, emu.vfs().process_gid());
             } catch (...) { ret_err(EFAULT); return 0; }
             ret_host(1);
             return 0;
         }
         case 159: { // setgroups(size, list[]) — AArch64 syscall 159
+            if (emu.android_runtime()) { ret_err(EPERM); return 0; }
             // No-op for emulation. The guest is a single-user sandbox; we
             // accept any setgroups() call and pretend it succeeded.
             ret_host(0);
@@ -361,25 +361,24 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 174: { // getuid
-            // Return the host's real UID. The guest is a host-bridging
-            // sandbox; reporting the host identity lets guest D-Bus
+            // Linux reports the host's real UID so guest D-Bus
             // (Qt AT-SPI a11y bridge) pass AUTH EXTERNAL against the
             // host session bus, whose SO_PEERCRED is the host uid.
-            // (A previous version returned 0/root, which is rejected by
-            // dbus-daemon: claimed uid 0 != peer uid 1000.)
-            ret_host(::getuid());
+            // Android instead uses its app identity, independent of the
+            // host account: 1000 would be Android's privileged system UID.
+            ret_host(emu.android_runtime() ? emu.vfs().process_uid() : ::getuid());
             return 0;
         }
         case 175: { // geteuid
-            ret_host(::geteuid());
+            ret_host(emu.android_runtime() ? emu.vfs().process_uid() : ::geteuid());
             return 0;
         }
         case 176: { // getgid
-            ret_host(::getgid());
+            ret_host(emu.android_runtime() ? emu.vfs().process_gid() : ::getgid());
             return 0;
         }
         case 177: { // getegid
-            ret_host(::getegid());
+            ret_host(emu.android_runtime() ? emu.vfs().process_gid() : ::getegid());
             return 0;
         }
         case 178: { // gettid
