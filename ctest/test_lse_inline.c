@@ -15,6 +15,27 @@
 int main(void) {
     int failures = 0;
 
+    // Chromium's renderer uses LDSETH for 16-bit flags. Check the complete
+    // X result, a dirty upper operand, and both neighboring halfwords.
+#define CHECK_HALFWORD(op, initial, operand, expected) do { \
+        uint16_t words[] = {0x1234, (initial), 0xabcd}; \
+        uint64_t old = UINT64_MAX, source = UINT64_C(0xdeadbeef98760000) | (operand); \
+        __asm__ volatile(".arch_extension lse\n\t" #op " %w1, %w0, [%2]" \
+                : "=&r"(old) : "r"(source), "r"(&words[1]) : "memory"); \
+        if (old != (initial) || words[1] != (expected) || \
+                words[0] != 0x1234 || words[2] != 0xabcd) { \
+            printf(#op ": old=0x%llx memory=%04x:%04x:%04x FAIL\n", \
+                    (unsigned long long)old, words[0], words[1], words[2]); \
+            failures++; \
+        } \
+    } while (0)
+    CHECK_HALFWORD(ldseth, 4, 2, 6);
+    CHECK_HALFWORD(ldclrh, 0xff81, 0x0081, 0xff00);
+    CHECK_HALFWORD(ldeorh, 0x81f0, 0x00ff, 0x810f);
+    CHECK_HALFWORD(ldaddh, 0xfffe, 3, 1);
+    CHECK_HALFWORD(swph, 0x8001, 0x7f23, 0x7f23);
+#undef CHECK_HALFWORD
+
     // ── CAS (compare-and-swap) ──
     {
         uint64_t val = 42;

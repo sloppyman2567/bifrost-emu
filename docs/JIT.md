@@ -70,6 +70,37 @@ atomics, and guest SIGILL for an illegal opcode. Use its `no-trap` argument
 for JIT differential replay, which does not deliver the fixture's guest
 signal handler.
 
+### Guest memory barriers
+
+Exclusive stores use both the local reservation and a host compare-exchange
+against the value loaded by LDXR/LDAXR. A process-local mutex alone cannot
+serialize against native JIT LSE instructions or another OS process mapping the
+same shared file. Interpreter LSE RMW operations also use native CAS loops.
+`test_atomic_stress` includes a deterministic LDAXR / competing CAS / STLXR
+regression: the conditional store must fail and preserve the competing value.
+This is value-based exclusive emulation; an ABA sequence that changes the word
+and restores its original value is not detected across processes. Pair-exclusive
+operations and full reservation-granule semantics need separate coverage.
+
+DMB and DSB decode through `HINT`, but must retain their memory effects.
+`is_data_memory_barrier()` recognizes their encodings including the domain/type
+option. Translation emits the side-effecting `MEMORY_BARRIER` IR operation;
+the JIT emits MFENCE without disturbing live GPRs, vectors or NZCV. The
+interpreter executes a sequentially consistent host fence. x86 TSO alone is
+insufficient: it permits a younger load to bypass an older store.
+
+All supported DMB/DSB options conservatively use this full fence. This covers
+ordering of ordinary guest memory; it does not establish device-memory or
+privileged cache/TLB semantics. ISB and the remaining hints retain their existing
+behavior. References: Arm [DMB](https://www.scs.stanford.edu/~zyedidia/arm64/dmb.html)
+and [DSB](https://www.scs.stanford.edu/~zyedidia/arm64/dsb.html).
+
+`test_atomic_stress` includes two-worker store-buffer tests for DMB/DSB ISH/SY,
+100,000 rounds each, plus GPR/NZCV preservation across additional options.
+An otherwise identical binary with the fences disabled observed forbidden
+both-zero results in all four cases. The repaired JIT, interpreter and QEMU
+observed zero; these bounded tests do not prove every multithreaded workload.
+
 ### Indexed memory accesses and fault retry
 
 Base-register writeback for pre/post-index LDR/STR and LDP/STP belongs after
@@ -186,6 +217,7 @@ AArch64 word
 | Translate decoded instructions to IR | `src/ir/ir_translate.cpp`, `ir_translate_fp.cpp`, `ir_translate_mem.cpp` |
 | Define typed IR parameters and factories | `include/ir/ir.hpp`, `src/ir/ir.h` |
 | Optimize and validate IR | `src/ir/ir_optimize.cpp`, `src/ir/ir_validate.cpp` |
+| Construct, verify, optimize and lower scalar SSA | `include/ir/ssa.hpp`, `src/ir/ir_ssa.cpp` |
 | Build Tier-1 blocks and patch exits | `src/jit/jit_translate.cpp`, `jit_codegen_branch.cpp` |
 | Emit x86_64 for IR operations | `src/jit/frostjit.cpp`, `jit_codegen_*.cpp` |
 | Allocate host registers and spill vregs | `src/jit/x86_regalloc.cpp` |
@@ -196,6 +228,127 @@ Tier-2 compiles region IR through the normal IR code generator, with its own
 region liveness, loop, and exit handling. An IR operation that works in a
 single Tier-1 block can still need region-specific handling when it affects a
 region boundary or control-flow exit.
+
+## Scalar register allocation and block sizing
+
+Scalar ALU emission reuses a temporary's host register after its last use,
+while preserving architectural values, live aliases and loop pins. Immediate
+MUL uses IMUL only when its constant fits the instruction's signed immediate;
+larger constants retain the register form. ADD and eligible immediate SUB use
+LEA when needed to preserve lazy NZCV. Narrow ZEXT materializes live flags
+before allocating operands or emitting a flag-clobbering mask.
+
+The default block instruction limit remains 32. `BIFROST_JIT_BLOCK_LIMIT=8..128`
+allows bounded comparisons; both Tier-1 and the Tier-2 collector stop growth
+at the instruction cap or the shared IR/vreg complexity budget. Long blocks
+are no longer automatically demoted solely for exceeding 32 instructions;
+actual interpreter-fallback density still controls demotion. Larger limits
+are diagnostic options, not a verified performance default for every game.
+`jit_bitfield_regalloc` covers immediate multiplier signs/widths, aliases and
+a long body with fifteen live GPRs.
+
+## Scalar SSA
+
+`include/ir/ssa.hpp` and `src/ir/ir_ssa.cpp` define a scalar SSA graph with
+explicit basic blocks, predecessor/successor edges, single-definition values,
+and predecessor-labelled phis. Sealed-block construction resolves reads before
+local definitions and loop backedges; trivial phis and copies are removed to a
+fixed point. GPR slots and FP low-half slots have separate variable namespaces.
+All scalar values are 64-bit containers; explicit ZEXT/SEXT and typed operation
+parameters retain narrower instruction semantics.
+
+The verifier checks unique definitions, complete phi predecessor lists,
+consistent CFG edges, use dominance, same-block definition order, and phi uses
+on predecessor edges. Construction and lowering validate transactionally:
+failure retains the original IR. Value numbering uses dominator-scoped
+availability, so sibling-branch expressions cannot supply each other's values.
+Def-use traversal removes dead pure computations. Memory accesses, flags,
+system-register operations, barriers, and guest-state stores retain order;
+loads from guest memory are never commoned or speculated by SSA. Flag consumers
+remain ordered effects because NZCV is not yet an SSA value.
+
+Tier-1 runs this pipeline for supported scalar blocks before the existing
+constant folding passes. `BIFROST_NO_SSA=1` selects the legacy path;
+`BIFROST_NO_FWD=1` and FWD range restrictions also bypass Tier-1 SSA forwarding.
+The legacy forwarding cache does not run again on an SSA-lowered block.
+`BRCOND_SKIP`, direct FP/SIMD operations, calls/helpers, and atomics retain their
+existing pipeline until their operand and state effects are modeled explicitly.
+This is scalar value SSA, not MemorySSA or a complete FP/vector conversion.
+
+Experimental Tier-2 single-thread loop regions build one SSA graph across
+all their blocks, with a separate entry, the actual loop backedge, and
+conditional side exits. Cross-block value numbering runs on this graph before
+lowering. Architectural phis lower to guest-state reads at the join: retained
+STORE_REG operations commit incoming values, pinned registers carry their
+current value, and non-pinned deferred stores commit on the backedge. This
+keeps the backend's existing precise side-exit and memory-fault state contract.
+It also avoids assuming that temporary homes survive its loop boundary.
+Regions with temporary phis or unsupported effects retain the existing path.
+Multithreaded regions retain their existing bounded, single-iteration path.
+Tier-2 remains opt-in; SSA does not change its promotion or timing policy.
+
+The general SSA destructor also supports parallel edge copies and splits
+critical edges. `make test-ir-ssa` executes independent non-SSA IR oracles for
+diamonds, cyclic loop-carried swaps, critical edges, architectural-state phi
+lowering, width-sensitive value numbering, and GPR/FP namespace separation;
+malformed graphs must fail validation. `make verify` runs this host test before
+the differential/threaded gate. The Tier-2 discovery oracle additionally runs
+generated loops with twelve carried GPRs, beyond the available host pins.
+These tests cover the scalar contracts above, not arbitrary FPCR/FPSR,
+concurrent memory reordering, or whole-program optimization.
+
+Construction follows [Braun et al., Simple and Efficient Construction of SSA](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf).
+The verifier's dominance and predecessor-edge rules match the
+[LLVM SSA and phi contracts](https://llvm.org/docs/LangRef.html#phi-instruction).
+
+## Scalar memory guards and NZCV packing
+
+Native scalar loads/stores select guard scratch registers through the allocator
+instead of discarding every caller-saved mapping on each access. Bounds,
+permissions, userfaultfd missing-page bits, and crossing-page checks remain.
+The sticky software-check flag is read on every access; another guest CPU may
+enable tracking while a block executes. The result register is separate from
+the address, preserving inputs if the host access faults. Cold recovery commits
+pre-instruction guest state and steps the instruction before returning to the
+dispatcher. Paired instructions retain the existing whole-footprint guard;
+forced software guards and slow-store tracing retain their existing path.
+`jit_memory_guard_address` covers live-register pressure, negative offsets,
+and byte/halfword/word/doubleword accesses; the host-fault and userfaultfd
+fixtures cover recovery and retry behavior.
+
+NZCV materialization packs adjacent host SF/ZF together, preserving the guest
+carry convention and overflow bit. BRCOND exits omit saving/restoring RFLAGS
+after their condition has already been consumed; both exits still commit NZCV.
+Other consumers retain RFLAGS preservation. `jit_flags_passthrough` checks
+32/64-bit add/sub results and all NZCV bits on both branch paths.
+
+## Optimization checkpoint (2026-10-11)
+
+Three matched 60,000-iteration CoreMark runs per binary measured median
+throughput of 2,689.86 iterations/s before the flag/guard changes and
+4,278.69 iterations/s after them: about 59.1% higher throughput. All runs
+exceeded ten seconds and passed the seed, list, matrix, state and final CRC
+checks. That comparison predates SSA and does not measure its benefit.
+A separate same-binary Tier-1 SSA on/off comparison measured medians of
+4,360.15 and 4,382.44 iterations/s respectively (about 0.5% lower with SSA).
+Treat SSA's result as approximately neutral here. Neither comparison
+remeasures the emulator's percentage of native CPU performance or establishes
+a Tier-2 SSA speedup.
+
+The differential gate passed 74 fixtures and six threaded oracle runs.
+The SSA host oracle passed 21,574 assertions. After the final Tier-2 backedge
+state fix, discovery, feedback and timing oracles passed all twelve combinations
+of single/multithread execution and ordinary/chain-skip layout. Focused flags,
+scalar guard and userfaultfd checks also passed with interpreter/reference
+comparisons and forced software guards. These are bounded correctness tests,
+not proof that arbitrary games are stable.
+
+A bounded real-GPU voxel-game run continued presenting for roughly 90 seconds
+without a reported guest failure; its swap-call count is not a gameplay FPS
+benchmark. The user reported a noticeable improvement in dhewm3, followed by
+intermittent freezes. The freezes remain unresolved: no failing PC, wait state
+or controlled SSA on/off reproduction has been captured. See
+[the Doom 3 status](doom3.md). Do not describe this checkpoint as a freeze fix.
 
 ## Adding or changing an instruction
 
@@ -261,10 +414,17 @@ BIFROST_FWD_RANGES=0x400000-0x480000,0x500000-0x500100 ./bifrost-emu app.elf
 
 - `BIFROST_FAULT_TRACE` prints one `[fault]` line per delivered
   SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGTRAP: thread, signal, si_code, address,
-  pc, sp and lr. When a JIT memory guard left its block to interpret the
+  pc, sp, lr, x0-x3 and the eight instruction bytes at pc (zero when unreadable).
+  When a JIT memory guard left its block to interpret the
   faulting instruction, the line adds `jit-block=` with that block's start.
   The matching `rt_sigreturn` prints the resume pc and every general
   register and SP that the handler or ucontext changed.
+  It also prints `[clone]` inputs for shared-VM children without
+  `CLONE_THREAD` and `[guest-exit]` group termination with the requesting
+  thread, code, PC, SP and last syscall.
+- `BIFROST_PROCESS_TRACE` prints only those clone/exit records, including
+  rejected shared-VM process clones. It does not change the JIT guard
+  fallback used by fault tracing.
 - `BIFROST_BLOCK_TRACE=lo-hi[,...]` makes blocks starting in those ranges
   log every cold and chained entry: pc, whether FWD ran, NZCV and the raw
   pstate (bit 27 is the JIT's carry-convention bit), x0-x7, sp and lr. A
@@ -442,6 +602,19 @@ same-register aliasing. Both expected results are independently checked
 under QEMU.
 
 ## Registered native memory faults
+
+Halfword LSE operations require both correct x86 prefix ordering and a
+zero-extended old-value result. Emit `LOCK, 66, REX, 0F B1` for the
+LDSET/LDCLR/LDEOR CAS loop: a `66` after REX makes the processor ignore REX,
+changing `[r9], r8w` into `[rcx], ax`. This caused a real WebView renderer
+SIGSEGV at address 2. Load the expected halfword with MOVZX, and zero-extend
+the old value after halfword XADD/XCHG; a 16-bit write alone preserves stale
+upper register bits. See Intel's [prefix ordering contract, section 2.2.1](https://cdrdv2-public.intel.com/858446/253666-088-sdm-vol-2a.pdf).
+`test_lse_inline` checks five halfword operations, full X results, dirty source
+upper bits, overflow, and neighboring halfwords against the interpreter and
+QEMU. `jit_host_fault` also checks halfword LDSET read/write fault recovery on
+four CPUs. These additions do not establish all LSE orderings or contention
+patterns.
 
 Ordinary scalar loads/stores, single 16-byte vector accesses and native LSE
 atomics use host page protection instead of consulting two guest page flags on
@@ -639,6 +812,32 @@ SDL thread callbacks set `CPU::jit_stop_pc` to their return sentinel. Nested
 must unwind without reloading or writing stale cached caller state. Keep
 this host boundary out of architectural CPU copies and retain the interpreter
 runner for `--no-jit`. `test_sdl_thread` includes nonlocal return coverage.
+
+Native BL/BLR execution retains at most 16 nested guest-call frames on the
+host stack (`CPU::JIT_MAX_CALL_DEPTH`). Before another native call, commit
+guest registers, vectors, LR and target PC, then request dispatcher execution
+and unwind the existing native callers. Every direct-call continuation and
+`jit_call_helper` must propagate that request without executing the caller's
+guest continuation or restoring stale cached state. The outer dispatcher
+clears the request once the depth reaches zero and resumes at the committed
+target. This limits host stack use independently of guest recursion depth;
+it does not change or enlarge the guest stack. The depth and request are
+host-only fields, excluded from architectural CPU copies.
+
+`jit_call_helpers 20000 deep` checks both recursive BL and indirect BLR
+returns against their arithmetic result; the old unbounded implementation
+overflowed the host stack on this fixture. Also run it with
+`BIFROST_NO_DIRECT_CALL=1` to cover helper dispatch. These checks cover deep
+calls, not arbitrary embedding stack sizes or concurrent mapping changes.
+
+Separate known memory limitation: `Memory::read_access` and `Memory::write`
+validate permissions before copying through the host reservation without
+holding the mapping lock across the copy. Concurrent `mprotect`/unmap can
+invalidate that range between the check and `memcpy`; a repeated protection
+toggle against slow stores reproduces a host SIGSEGV. Registered native JIT
+fault recovery does not cover those C++ copies. The call-depth fix does not
+repair this race, and it was not the faulting operation in the captured
+host-stack overflow.
 
 Build the SDL/GL configuration, then run `bash scripts/test_native_doom_gaps.sh`
 for every retained Doom capture gap (625 encodings, 20,000 randomized cases).
@@ -857,8 +1056,9 @@ short-lived execution cost and retained private code; validate application
 benchmarks as well as local trial decisions. Codegen/retirement oracles select candidates
 deterministically through a test friend; the separate timing oracle uses real
 controlled CPU work to verify both acceptance and rejection, without fake
-clock values. CoreMark comparisons use a fixed 40,000 iterations and labelled
-CRC/validation checks; auto-calibrated iteration counts cannot be compared by
+clock values. CoreMark comparisons use a fixed 60,000 iterations and labelled
+CRC/validation checks; 40,000 iterations can now finish below CoreMark's
+ten-second minimum. Auto-calibrated iteration counts cannot be compared by
 wall time. Counters expose measured pairs, keeps and rejections.
 
 Automatic compilation stops after 32 MiB of emitted region, private sampling

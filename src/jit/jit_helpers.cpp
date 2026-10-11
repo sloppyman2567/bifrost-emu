@@ -115,21 +115,38 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
     emit_mov_imm64(RDX, flags);
     emit_add_reg(RDX, RAX);
-    emit_load8(RAX, RDX, 0);
-    emit_alu_imm(RAX, 4, mask); // AND
-    emit_alu_imm(RAX, 7, required); // CMP
+    emit_load8(RDX, RDX, 0);
+    emit_alu_imm(RDX, 4, mask); // AND
+    emit_alu_imm(RDX, 7, required); // CMP
     cold.push_back(emit_jcc_rel32_placeholder(5)); // JNE
-    emit_mov_imm64(RDX, flags);
-    emit_add_reg(RDX, RCX);
-    emit_load8(RAX, RDX, 0);
-    emit_alu_imm(RAX, 4, mask);
-    emit_alu_imm(RAX, 7, required);
-    cold.push_back(emit_jcc_rel32_placeholder(5));
+    // Most accesses stay on one page. Check it once, while retaining both
+    // checks for a crossing access (and the UFFD-missing bit in either).
+    if (size > 1) {
+        emit_cmp_reg(RAX, RCX);
+        size_t same_page = emit_jcc_rel32_placeholder(4); // JE
+        emit_mov_imm64(RDX, flags);
+        emit_add_reg(RDX, RCX);
+        emit_load8(RAX, RDX, 0);
+        emit_alu_imm(RAX, 4, mask);
+        emit_alu_imm(RAX, 7, required);
+        cold.push_back(emit_jcc_rel32_placeholder(5));
+        patch_jcc_rel32(same_page, static_cast<int32_t>(code_buf_used_ - (same_page + 6)));
+    }
     size_t hot = emit_jmp_rel32_placeholder();
     const size_t cold_offset = code_buf_used_;
     for (size_t p : cold)
         patch_jcc_rel32(p, static_cast<int32_t>(cold_offset - (p + 6)));
     if (!recoverable) { emit_pop(RDX); emit_pop(RCX); emit_pop(RAX); }
+    emit_memory_fault_exit(inst, recoverable);
+    patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
+    if (bypass_pages)
+        patch_jcc_rel32(bypass_pages, static_cast<int32_t>(code_buf_used_ - (bypass_pages + 6)));
+    if (!recoverable) { emit_pop(RDX); emit_pop(RCX); emit_pop(RAX); }
+}
+// Emit only the cold exit. Keep compiler mappings intact so the hot path
+// retains its registers. All mapped inputs must still hold their original
+// values when entering this stub, including after a redirected host fault.
+void FrostJIT::emit_memory_fault_exit(const IRInst& inst, bool recoverable) {
     if (recoverable) memory_fault_stub_ = code_buf_used_;
     flush_all_vregs_keep();
     // A self-loop/region may carry a dirty architectural pin from a write
@@ -158,10 +175,6 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     emit_pop(R15); emit_pop(R14); emit_pop(R13);
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
     emit_ret();
-    patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
-    if (bypass_pages)
-        patch_jcc_rel32(bypass_pages, static_cast<int32_t>(code_buf_used_ - (bypass_pages + 6)));
-    if (!recoverable) { emit_pop(RDX); emit_pop(RCX); emit_pop(RAX); }
 }
 // XMM0 holds a tentative packed FP result; architectural inputs are intact.
 // A rare ARM-semantic step preserves all live GPRs and reloads pinned vectors.

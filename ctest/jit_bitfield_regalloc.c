@@ -3,7 +3,78 @@
 #include <stdint.h>
 #include <stdio.h>
 
+// Keep the source live after MUL, so immediate lowering must preserve it.
+#define MUL_CASE(name, load, multiply) \
+    extern uint64_t name(uint64_t); \
+    __asm__(".text\n.align 4\n.global " #name "\n.type " #name ",%function\n" \
+        #name ":\n " load "\n " multiply "\n eor x0,x0,x3\n ret\n" \
+        ".size " #name ",.-" #name "\n");
+MUL_CASE(mul_byte, "mov x2,#127", "mul x3,x0,x2")
+MUL_CASE(mul_sbyte, "mov x2,#-128", "mul x3,x0,x2")
+MUL_CASE(mul_imm32, "mov x2,#0x5678\n movk x2,#0x1234,lsl #16", "mul x3,x0,x2")
+MUL_CASE(mul_negative, "mov x2,#-129", "mul x3,x0,x2")
+MUL_CASE(mul_wide, "mov x2,#1\n movk x2,#1,lsl #32", "mul x3,x0,x2")
+MUL_CASE(mul_unsigned32, "mov x2,#0x80000000", "mul x3,x0,x2")
+MUL_CASE(mul_word, "mov w2,#0x80000000", "mul w3,w0,w2")
+
+static int check_multipliers(void) {
+    uint64_t (*functions[])(uint64_t) = {mul_byte, mul_sbyte, mul_imm32,
+        mul_negative, mul_wide, mul_unsigned32, mul_word};
+    const uint64_t factors[] = {127, (uint64_t)-128, 0x12345678,
+        (uint64_t)-129, UINT64_C(0x100000001), 0x80000000, 0x80000000};
+    const uint64_t values[] = {0, 1, 127, 128, UINT64_MAX,
+        UINT64_C(0x8000000000000000), UINT64_C(0xfedcba9876543210)};
+    for (unsigned repeat = 0; repeat < 32; ++repeat) {
+        for (unsigned f = 0; f < 7; ++f) for (unsigned v = 0; v < 7; ++v) {
+            uint64_t product = values[v] * factors[f];
+            if (f == 6) product = (uint32_t)product;
+            uint64_t want = values[v] ^ product, got = functions[f](values[v]);
+            if (got != want) {
+                printf("FAIL multiply f=%u v=%u got=%llx want=%llx\n", f, v,
+                    (unsigned long long)got, (unsigned long long)want);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static uint64_t input[256], output[256];
+
+// Fifteen simultaneously live GPRs, with a body longer than the original
+// 32-instruction cap. Exercise spills and aliases across adaptive cuts.
+extern void long_pressure(const uint64_t *, uint64_t *, uint64_t);
+__asm__(".text\n.align 4\n.global long_pressure\n.type long_pressure,%function\n"
+    "long_pressure:\n ldp x3,x4,[x0]\n ldp x5,x6,[x0,#16]\n"
+    "ldp x7,x8,[x0,#32]\n ldp x9,x10,[x0,#48]\n ldp x11,x12,[x0,#64]\n"
+    "ldp x13,x14,[x0,#80]\n ldp x15,x16,[x0,#96]\n ldr x17,[x0,#112]\n"
+    "1:\n .rept 12\n add x3,x3,x4\n eor x5,x5,x6\n add x7,x7,x8\n"
+    "sub x9,x9,x10\n eor x11,x11,x12\n add x13,x13,x14\n"
+    "add x15,x15,x16\n eor x17,x17,x3\n .endr\n subs x2,x2,#1\n b.ne 1b\n"
+    "stp x3,x4,[x1]\n stp x5,x6,[x1,#16]\n stp x7,x8,[x1,#32]\n"
+    "stp x9,x10,[x1,#48]\n stp x11,x12,[x1,#64]\n stp x13,x14,[x1,#80]\n"
+    "stp x15,x16,[x1,#96]\n str x17,[x1,#112]\n ret\n"
+    ".size long_pressure,.-long_pressure\n");
+
+static int check_long_pressure(void) {
+    for (unsigned repeat = 1; repeat <= 32; ++repeat) {
+        uint64_t original[15], want[15], got[15];
+        for (unsigned i = 0; i < 15; ++i)
+            original[i] = want[i] = UINT64_C(0xfedcba9876543210) * (i + repeat);
+        for (unsigned step = 0; step < repeat * 12; ++step) {
+            want[0] += want[1]; want[2] ^= want[3]; want[4] += want[5];
+            want[6] -= want[7]; want[8] ^= want[9]; want[10] += want[11];
+            want[12] += want[13]; want[14] ^= want[0];
+        }
+        long_pressure(original, got, repeat);
+        for (unsigned i = 0; i < 15; ++i) if (got[i] != want[i]) {
+            printf("FAIL long pressure repeat=%u reg=%u got=%llx want=%llx\n",
+                repeat, i, (unsigned long long)got[i], (unsigned long long)want[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static uint64_t reference(unsigned count) {
     uint64_t sum = 0;
@@ -68,6 +139,7 @@ static uint64_t run(unsigned iterations) {
 }
 
 int main(void) {
+    if (check_multipliers() || check_long_pressure()) return 1;
     uint64_t seed = UINT64_C(0xfedcba9876543210);
     for (unsigned i = 0; i < 256; ++i) {
         seed = seed * UINT64_C(6364136223846793005) + 1;

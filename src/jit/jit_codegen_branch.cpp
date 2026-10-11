@@ -24,6 +24,28 @@
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
 namespace arm64emu {
+void FrostJIT::emit_call_depth_guard() {
+    emit_load(RCX, CPU_REG, offsetof(CPU, jit_call_depth));
+    emit_alu_imm(RCX, 7, CPU::JIT_MAX_CALL_DEPTH); // CMP
+    size_t enter = emit_jcc_rel32_placeholder(0x2); // JB
+    emit_mov_imm64(RAX, 1);
+    emit_store8(CPU_REG, offsetof(CPU, jit_dispatch_requested), RAX);
+    emit_load(RAX, CPU_REG, PC_OFF);
+    // Inputs, LR and target PC are committed before reaching this guard.
+    // Do not run a caller continuation or write its old cached state back.
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+    emit_pop(R15); emit_pop(R14); emit_pop(R13);
+    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+    emit_ret();
+    patch_jcc_rel32(enter, static_cast<int32_t>(code_buf_used_ - (enter + 6)));
+    emit_add_reg_imm(RCX, 1);
+    emit_store(CPU_REG, offsetof(CPU, jit_call_depth), RCX);
+}
+void FrostJIT::emit_call_depth_leave() {
+    emit_load(RCX, CPU_REG, offsetof(CPU, jit_call_depth));
+    emit_add_reg_imm(RCX, -1);
+    emit_store(CPU_REG, offsetof(CPU, jit_call_depth), RCX);
+}
 // Called after a native callee, with all caller state already flushed and
 // mappings invalidated. Do not write cached vectors back here: the callee's
 // CPU state is authoritative. This exit is never a patchable chain slot.
@@ -35,10 +57,14 @@ void FrostJIT::emit_call_stop_guard() {
     emit_load8(RCX, CPU_REG, offsetof(CPU, running));
     emit_test_reg(RCX, RCX);
     size_t stopped = emit_jcc_rel32_placeholder(0x4);
+    emit_load8(RCX, CPU_REG, offsetof(CPU, jit_dispatch_requested));
+    emit_test_reg(RCX, RCX);
+    size_t dispatch = emit_jcc_rel32_placeholder(0x5);
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_stop_pc));
     emit_cmp_reg(RAX, RCX);
     size_t resume = emit_jcc_rel32_placeholder(0x5);
     patch_jcc_rel32(stopped, static_cast<int32_t>(code_buf_used_ - (stopped + 6)));
+    patch_jcc_rel32(dispatch, static_cast<int32_t>(code_buf_used_ - (dispatch + 6)));
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp,rbp
     emit_pop(R15); emit_pop(R14); emit_pop(R13);
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -299,7 +325,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // caller, or be invalidated. Preserve architectural flags on
             // every cross-block edge; a local consumer scan is not liveness.
             if (need_cmc_for_hi_ls) emit_byte(0xF5);
-            materialize_flags_to_pstate();
+            // JCC has consumed the host flags. Only architectural NZCV must
+            // survive the exit; restoring RFLAGS here is dead work.
+            materialize_flags_to_pstate(false);
             emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
@@ -327,7 +355,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                     emit_byte(0xF5);  // cmc — restore CF to original
                 }
                 // Materialize flags to pstate (the taken-target block may read them).
-                materialize_flags_to_pstate();
+                materialize_flags_to_pstate(false);
 
             }
             // ── Self-loop chaining ──

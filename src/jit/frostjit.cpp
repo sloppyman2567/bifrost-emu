@@ -155,6 +155,7 @@ thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in x86_backend.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
+    if (compile_guarded_mem(inst)) return false;
     emit_memory_guard(inst);
     // v1.4.5-alpha: FP/SIMD ops are dispatched to
     // compile_ir_inst_fp_() (defined in jit_codegen_fp.cpp) before the
@@ -178,6 +179,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
     if ((ir_r = compile_ir_branch(inst)) >= 0) return ir_r == 1;
     switch (inst.op) {
         case IROp::NOP:
+            return false;
+        case IROp::MEMORY_BARRIER:
+            // x86 TSO still permits a younger load to bypass an older store.
+            // MFENCE orders both without touching live GPRs, vectors or NZCV.
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0);
             return false;
         case IROp::ATOMIC: {
             // Native LSE atomics via x86 lock-prefixed instructions.
@@ -263,8 +269,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // lock cmpxchg [R9], RCX
                 register_memory_fault_site();
                 emit_byte(0xF0);                    // LOCK
-                emit_byte(is_64 ? 0x49 : 0x41);     // REX.WB(64) or REX.B(32) for R9
                 if (is_16) emit_byte(0x66);         // operand-size prefix
+                emit_byte(is_64 ? 0x49 : 0x41);     // REX must follow all legacy prefixes
                 emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
                 emit_byte(0x09);                    // modrm(0, rcx, r9)
                 if (is_load) {
@@ -273,6 +279,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             } else if (atom_op == 0x8) {
                 // SWP: lock xchg [RAX], RCX (RCX gets old value)
                 emit_lock_op(0x87, RCX);
+                if (is_16) { emit_byte(0x0F); emit_byte(0xB7); emit_byte(0xC9); } // movzx ecx, cx
                 if (is_load) store_reg_to_vreg(inst.dest, RCX);
             } else if (atom_op == 0x0) {
                 // LDADD/STADD
@@ -285,6 +292,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     else if (is_16) emit_byte(0x66);
                     emit_byte(0x0F); emit_byte(0xC1);  // xadd r/m, r
                     emit_byte(modrm(0, RCX & 7, RAX & 7));
+                    if (is_16) { emit_byte(0x0F); emit_byte(0xB7); emit_byte(0xC9); } // movzx ecx, cx
                     store_reg_to_vreg(inst.dest, RCX);
                 } else {
                     // STADD: lock add [RAX], RCX
@@ -341,7 +349,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // RAX = [R9] (mov rax, [r9])
                 register_memory_fault_site();
                 if (is_64)      { emit_byte(0x49); emit_byte(0x8B); emit_byte(0x01); }
-                else if (is_16) { emit_byte(0x66); emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
+                else if (is_16) { emit_byte(0x41); emit_byte(0x0F); emit_byte(0xB7); emit_byte(0x01); }
                 else            { emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
                 // R8 = RAX (mov r8, rax = 4C 8B C0)
                 emit_byte(0x4C); emit_byte(0x8B); emit_byte(0xC0);
@@ -371,8 +379,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // REX.WRB (0x4D) = W=1, R=1(reg→r8), B=1(rm→r9).
                 register_memory_fault_site();
                 emit_byte(0xF0);                    // LOCK
-                emit_byte(is_64 ? 0x4D : 0x45);     // REX.WRB(64) or REX.RB(32)
                 if (is_16) emit_byte(0x66);
+                emit_byte(is_64 ? 0x4D : 0x45);     // REX must follow all legacy prefixes
                 emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
                 emit_byte(0x01);                    // modrm(0, r8, r9) = 00 000 001
                 // jnz loop_start (retry if CAS failed)
@@ -889,6 +897,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // it's in cpu.regs[src1] or its stack slot).
             load_vreg_to_reg(RAX, inst.src1);
             emit_store(CPU_REG, PC_OFF, RAX);
+            emit_call_depth_guard();
+            emit_load(RAX, CPU_REG, PC_OFF);
             emit_mov_reg(RDI, CPU_REG);
             emit_load(RSI, RBP, emu_slot_off());
             emit_mov_reg(RDX, RAX);  // RDX = target_pc
@@ -901,6 +911,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // accurate guest state during dispatch, but don't copy the
             // return value back over the field after the helper already set it.
             emit_pop(WIN_REG);
+            emit_call_depth_leave();
             invalidate_all_vregs();
             emit_call_stop_guard();
             if (vec_cache_active_) vec_emit_prologue_loads();
@@ -932,6 +943,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Set cpu.pc = target_pc so the callee's chain/self-loop logic works.
             emit_mov_imm_to_rax(bp.target);
             emit_store(CPU_REG, PC_OFF, RAX);
+            emit_call_depth_guard();
             // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
             emit_load(RSI, RBP, emu_slot_off());
@@ -965,6 +977,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_popfq();
                 emit_add_rsp_imm8(8);
                 emit_pop(WIN_REG);
+                emit_call_depth_leave();
                 size_t jmp_past = emit_jmp_rel32_placeholder();  // skip slow_path
                 // slow_path: dispatch through jit_call_helper. Entered at
                 // RSP%16==8 (after the slot's call pushed a return addr);
@@ -999,6 +1012,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // The helper already leaves cpu.pc at its return/stop PC.
                 // Match BLR_CALL: preserve RAX and avoid copying that PC again.
                 emit_pop(WIN_REG);
+                emit_call_depth_leave();
                 // Invalidate ALL cache mappings after the call.
                 // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
                 invalidate_all_vregs();
@@ -1035,6 +1049,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // direct calls too: each level's post_call sees cpu.pc != its
             // own continuation and also unwinds, so control reaches the
             // dispatcher.
+            emit_call_stop_guard();
             emit_load(RCX, CPU_REG, REGS_OFF + 30 * 8);  // rcx = x30
             emit_load(RAX, CPU_REG, PC_OFF);             // rax = cpu.pc
             emit_cmp_reg(RAX, RCX);                      // cpu.pc == x30?

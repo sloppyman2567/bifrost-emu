@@ -418,7 +418,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     } stats_guard(jit, call_depth);
     static const bool verify_mode_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
     uint64_t dbg2_count = 0;
-    while (cpu->running && cpu->pc != return_pc &&
+    while (cpu->running && !cpu->jit_dispatch_requested && cpu->pc != return_pc &&
            (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {
         if (__builtin_expect(++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
             if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);

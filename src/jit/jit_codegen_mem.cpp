@@ -21,6 +21,99 @@
 #include <cstddef>
 #include <cstdint>
 namespace arm64emu {
+// Scalar native accesses use allocator-selected scratch registers. Only the
+// cold exit spills live state for a C call; successful accesses retain all
+// other mappings. Paired instructions still use the whole-footprint guard.
+bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
+    const bool load = inst.op == IROp::LOAD_MEM;
+    if ((!load && inst.op != IROp::STORE_MEM) || !fault_sites_ ||
+        !guest_memory_ || !window_base_ || !inst.arm_pc) return false;
+    const MemParams mp = load ? inst.load_mem_params() : inst.store_mem_params();
+    const int64_t offset = static_cast<int64_t>(mp.offset);
+    if ((mp.width != 1 && mp.width != 2 && mp.width != 4 && mp.width != 8) ||
+        offset < INT32_MIN || offset > INT32_MAX) return false;
+    // Forced slow-store tracing disables fault_sites_, retaining the old path.
+    DecodedInst decoded;
+    if (!decode(decoded, guest_memory_->fetch_inst(inst.arm_pc)) ||
+        decoded.cls == InstClass::LDP || decoded.cls == InstClass::STP) return false;
+
+    memory_fault_stub_ = 0;
+    clobber_flags();
+    int address, value = -1;
+    if (load) address = ensure_vreg(inst.src1);
+    else ensure_two_vregs(inst.src1, inst.src2, &address, &value);
+    const uint16_t saved_pins = pinned_host_regs_;
+    pinned_host_regs_ |= (1u << address);
+    if (!load) pinned_host_regs_ |= (1u << value);
+    int effective = address;
+    if (mp.offset) {
+        effective = alloc_reg();
+        pinned_host_regs_ |= (1u << effective);
+        emit_byte(rex(true, effective >= 8, false, address >= 8));
+        emit_byte(0x8D);
+        emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
+    }
+    const int temp = alloc_reg();
+    pinned_host_regs_ |= (1u << temp);
+    const int page = alloc_reg();
+    pinned_host_regs_ |= (1u << page);
+
+    emit_window_limit(temp, mp.width);
+    emit_cmp_reg(effective, temp);
+    std::vector<size_t> cold;
+    cold.push_back(emit_jcc_rel32_placeholder(7)); // JA: full-width bounds
+    // Activation is sticky and visible to already compiled code. Never hoist
+    // this check out of a loop: another CPU can enable userfaultfd tracking.
+    emit_mov_imm64(temp, reinterpret_cast<uint64_t>(guest_memory_->jit_software_checks()));
+    emit_load8(temp, temp, 0);
+    emit_test_reg(temp, temp);
+    const size_t bypass_pages = emit_jcc_rel32_placeholder(4);
+    const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
+    const uint8_t required = Memory::GUEST_PAGE_MAPPED |
+        (load ? Memory::GUEST_PROT_READ : Memory::GUEST_PROT_WRITE);
+    const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
+    auto check_page = [&] {
+        emit_mov_imm64(temp, flags);
+        emit_add_reg(temp, page);
+        emit_load8(temp, temp, 0);
+        emit_alu_imm(temp, 4, mask);
+        emit_alu_imm(temp, 7, required);
+        cold.push_back(emit_jcc_rel32_placeholder(5));
+    };
+    emit_mov_reg(page, effective);
+    emit_shift_imm8(page, 5, 12);
+    check_page();
+    size_t same_page = 0;
+    if (mp.width > 1) {
+        emit_mov_reg(temp, effective);
+        emit_add_reg_imm(temp, mp.width - 1);
+        emit_shift_imm8(temp, 5, 12);
+        emit_cmp_reg(temp, page);
+        same_page = emit_jcc_rel32_placeholder(4);
+        emit_mov_reg(page, temp);
+        check_page();
+    }
+    const size_t hot = emit_jmp_rel32_placeholder();
+    const size_t cold_offset = code_buf_used_;
+    for (size_t p : cold)
+        patch_jcc_rel32(p, static_cast<int32_t>(cold_offset - (p + 6)));
+    emit_memory_fault_exit(inst, true);
+    const size_t access = code_buf_used_;
+    patch_jmp_rel32(hot, static_cast<int32_t>(access - (hot + 5)));
+    patch_jcc_rel32(bypass_pages, static_cast<int32_t>(access - (bypass_pages + 6)));
+    if (same_page)
+        patch_jcc_rel32(same_page, static_cast<int32_t>(access - (same_page + 6)));
+    if (load) {
+        // The result uses a scratch register, leaving the original address
+        // and every mapped architectural value intact if the load faults.
+        emit_load_mem(page, effective, 0, mp.width, false);
+        set_vreg_reg(inst.dest, page);
+    } else {
+        emit_store_mem(effective, 0, value, mp.width);
+    }
+    pinned_host_regs_ = saved_pins;
+    return true;
+}
 // ── FrostJIT::compile_ir_mem ───────────────────────────────────────────
 // Handles LOAD_MEM, STORE_MEM, LOAD_REG, STORE_REG. These are the only
 // IR ops that touch cpu.regs[]/cpu.v_lo[]/memory directly via the

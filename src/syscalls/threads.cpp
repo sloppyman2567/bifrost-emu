@@ -56,15 +56,21 @@ namespace clone_flags {
 // Namespace/isolation flags we cannot honor in user-mode emulation.
 // Accepting them silently would give the guest NO isolation while it
 // believes it has some (e.g. container runtimes, sandboxing libs).
-// VFORK/PIDFD keep their existing degraded behavior (documented);
-// only the namespace set fails here. Returns true when flags must be
-// rejected.
+// Returns true when flags must be rejected.
 inline bool clone_ns_rejected(uint64_t flags) {
     constexpr uint64_t kNamespaces =
         clone_flags::NEWNS | clone_flags::NEWCGROUP | clone_flags::NEWUTS |
         clone_flags::NEWIPC | clone_flags::NEWUSER | clone_flags::NEWPID |
         clone_flags::NEWNET;
     return (flags & kNamespaces) != 0;
+}
+// Sharing an address space does not make a child part of the parent's
+// thread group. In particular vfork must suspend its caller until exec/exit,
+// and the child's exit_group must not kill the parent. The thread backend
+// implements neither contract. Report an unsupported operation rather than
+// run two CPUs on the same vfork stack and corrupt the parent.
+inline bool clone_shared_process_unsupported(uint64_t flags) {
+    return (flags & clone_flags::VM) && !(flags & clone_flags::THREAD);
 }
 // Resolve a guest address to "name+0x..." using the dynamic linker's loaded
 // objects and their .dynsym. Used by the BIFROST_FUTEX_BT backtrace dump.
@@ -142,20 +148,20 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
         return emu.get_futex(addr);
     };
     switch (num) {
-        case 220: { // clone(flags, stack, ptid, ctid, tls)
+        case 220: { // clone(flags, stack, ptid, tls, ctid)
             // AArch64 clone() syscall signature (matches glibc/musl):
             //   x0 = flags        (CLONE_*)
             //   x1 = stack        (top of child stack)
             //   x2 = parent_tidptr
-            //   x3 = child_tidptr (CLONE_CHILD_SETTID writes TID here)
-            //   x4 = tls          (new TPIDR_EL0, if CLONE_SETTLS)
+            //   x3 = tls          (new TPIDR_EL0, if CLONE_SETTLS)
+            //   x4 = child_tidptr (CLONE_CHILD_SETTID writes TID here)
             //
             // On success: parent gets child TID, child gets 0.
             // The new thread starts at the same PC as the syscall return
-            // address (i.e., x30 / LR of the parent), with x0=0.
+            // address (SVC+4), with x0=0.
             //
             // We support two paths:
-            //   1. CLONE_VM (threads): spawn a vCPU on a host thread.
+            //   1. CLONE_VM | CLONE_THREAD: spawn a vCPU on a host thread.
             //   2. No CLONE_VM (fork): host fork() with CoW memory.
             // AArch64 clone() syscall argument order (per the kernel's
             // SYSCALL_DEFINE5(clone, flags, newsp, parent_tidptr, tls,
@@ -178,6 +184,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t tls = a3;       // AArch64: x3 = tls
             uint64_t ctid_ptr = a4;  // AArch64: x4 = ctid
             if (clone_ns_rejected(flags)) { ret_err(EINVAL); return 0; }
+            if (clone_shared_process_unsupported(flags)) {
+                if (dbg().process_trace || dbg().fault_trace)
+                    fprintf(stderr, "[clone] tid=%d flags=0x%llx unsupported shared-VM process: ENOSYS\n",
+                            cpu.tid, (unsigned long long)flags);
+                ret_err(ENOSYS);
+                return 0;
+            }
             if (!(flags & clone_flags::VM)) {
                 // ── Fork path (no CLONE_VM) ──
                 // Use host fork() for copy-on-write memory. The child
@@ -265,6 +278,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             (void)pidfd;       // CLONE_PIDFD — not yet supported
             (void)exit_signal; // we always deliver SIGCHLD to parent
             if (clone_ns_rejected(flags)) { ret_err(EINVAL); return 0; }
+            if (clone_shared_process_unsupported(flags)) {
+                if (dbg().process_trace || dbg().fault_trace)
+                    fprintf(stderr, "[clone] tid=%d flags=0x%llx unsupported shared-VM process: ENOSYS\n",
+                            cpu.tid, (unsigned long long)flags);
+                ret_err(ENOSYS);
+                return 0;
+            }
             // The child stack top is stack + stack_size (clone3 specifies
             // the stack base and size separately, unlike clone which takes
             // the stack top directly).
@@ -1234,12 +1254,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 pid == static_cast<int>(::getpid())) {
                 // Self-process: deliver to the main thread (TID 1) or
                 // the caller if it's the main thread.
-                if (cpu.tid == 1) {
+                if (cpu.tid == emu.main_cpu().tid) {
                     deliver_signal(emu, cpu, signals_, sig);
                 } else {
                     // Cross-thread: queue on main thread's pending queue
                     // (see tgkill above for rationale).
-                    auto main = emu.find_cpu_by_tid(1);
+                    auto main = emu.find_cpu_by_tid(emu.main_cpu().tid);
                     if (main && signal_kills_process(emu, *main, sig)) {
                         emu.group_exit(cpu, 128 + sig);
                     } else if (main) {

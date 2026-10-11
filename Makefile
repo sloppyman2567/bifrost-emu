@@ -335,7 +335,7 @@ test: $(TARGET)
 
 # Differential replay plus separate threaded oracle runs (no shared-memory replay).
 SHELL := /bin/bash
-verify: $(TARGET)
+verify: $(TARGET) test-ir-ssa
 	@bash scripts/verify_jit.sh "$(TARGET)"
 
 
@@ -522,6 +522,12 @@ test-capi: lib $(TARGET) $(CAPI_TESTLIB)
 	@$(CXX) $(OBJDIR)/test_capi_host.o $(LIB) -o $(OBJDIR)/test_capi_host $(LDFLAGS)
 	@echo "=== Running host C API test ==="
 	@./$(OBJDIR)/test_capi_host
+
+.PHONY: test-ir-ssa
+test-ir-ssa:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) ctest/host/ir_ssa.cpp src/ir/ir_ssa.cpp -o $(OBJDIR)/ir_ssa_test $(LDFLAGS)
+	./$(OBJDIR)/ir_ssa_test
 
 .PHONY: test-android-window-backend
 test-android-window-backend: $(LIB)

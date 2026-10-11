@@ -34,20 +34,20 @@ void FrostJIT::clobber_flags() {
         invalidate_host_regs(FLAGS_CLOBBER);
     }
 }
-// Materialize host flags to pstate, preserving RFLAGS around the materialize
-// (which clobbers them). Used at block exits (BRCOND fall-through and taken
-// paths) where the next block may read pstate. No-op if flags aren't
+// Materialize host flags to pstate. Preserve RFLAGS when a later instruction
+// still consumes them; BRCOND has already consumed its condition and opts out.
+// Both branch exits still commit guest NZCV. No-op if flags aren't
 // currently in host. Does NOT clear flags_in_host_ — the caller manages that,
 // since BRCOND emits this on both paths before clearing flags_in_host_ at the
 // end.
-void FrostJIT::materialize_flags_to_pstate() {
+void FrostJIT::materialize_flags_to_pstate(bool preserve_flags) {
     if (!flags_in_host_) return;
     constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
-    emit_pushfq();  // save RFLAGS (materialize clobbers them)
+    if (preserve_flags) emit_pushfq();
     flush_dirty_host_regs(FLAGS3);
     flush_scratch_host_regs(FLAGS3);
     emit_materialize_flags(flags_from_sub_);
-    emit_popfq();
+    if (preserve_flags) emit_popfq();
     invalidate_host_regs(FLAGS3);
 }
 // ── Block chaining helpers ──────────────────────────────────────────────

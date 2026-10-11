@@ -3,7 +3,7 @@
 // Guest address x lives at direct_window_ + x. Every mapping operation is a
 // host operation on that reservation (mmap MAP_FIXED, mprotect, madvise)
 // plus bookkeeping under mu_: vmas_ (the mapping index), allocations_ and
-// free_ranges_ (placement and reuse), shared_pages_ (MAP_SHARED aliases)
+// free_ranges_ (placement and reuse), file_pages_ (private/shared file backings)
 // and the per-page flag mirror read lock-free by check_access and the JIT.
 #include "core/memory.h"
 #include "debug_flags.h"
@@ -451,35 +451,39 @@ bool Memory::range_accessible(uint64_t addr, size_t size, uint8_t access) const 
         return false;
     }
 }
-// ── MAP_SHARED file aliases ────────────────────────────────────────────
-Memory::SharedBacking::~SharedBacking() {
+// ── File-backed mappings ──────────────────────────────────────────────
+Memory::FileBacking::~FileBacking() {
     if (fd >= 0) ::close(fd);
 }
-const Memory::SharedPage* Memory::shared_page_locked(uint64_t addr) const {
-    auto it = shared_pages_.find(addr / PAGE_SIZE);
-    return it == shared_pages_.end() ? nullptr : &it->second;
+const Memory::FilePage* Memory::file_page_locked(uint64_t addr) const {
+    auto it = file_pages_.find(addr / PAGE_SIZE);
+    return it == file_pages_.end() ? nullptr : &it->second;
 }
-void Memory::detach_shared_locked(uint64_t lo, uint64_t hi) {
+void Memory::detach_file_locked(uint64_t lo, uint64_t hi) {
     // Restore anonymous storage before zero/reuse, rather than overwriting
-    // a live file through the former MAP_SHARED alias. Adjacent aliases are
+    // a live file through a former MAP_SHARED alias. Adjacent file mappings are
     // replaced with one host mapping.
-    auto it = shared_pages_.lower_bound(lo / PAGE_SIZE);
-    while (it != shared_pages_.end() && it->first * PAGE_SIZE < hi) {
+    auto it = file_pages_.lower_bound(lo / PAGE_SIZE);
+    while (it != file_pages_.end() && it->first * PAGE_SIZE < hi) {
         const uint64_t addr = it->first * PAGE_SIZE;
         uint64_t end = addr + PAGE_SIZE;
         auto next = std::next(it);
-        while (next != shared_pages_.end() && next->first * PAGE_SIZE == end && end < hi) {
+        while (next != file_pages_.end() && next->first * PAGE_SIZE == end && end < hi) {
             end += PAGE_SIZE;
             ++next;
         }
         void* mapped = ::mmap(direct_window_ + addr, end - addr, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
         if (mapped == MAP_FAILED) throw std::bad_alloc();
-        it = shared_pages_.erase(it, next);
+        it = file_pages_.erase(it, next);
     }
 }
 int Memory::map_shared_file(uint64_t addr, uint64_t size, int fd,
                             uint64_t offset, uint8_t prot) {
+    return map_file(addr, size, fd, offset, prot, true);
+}
+int Memory::map_file(uint64_t addr, uint64_t size, int fd,
+                     uint64_t offset, uint8_t prot, bool shared) {
     if (!size || (addr & PAGE_MASK) || (offset & PAGE_MASK) ||
         size > UINT64_MAX - PAGE_MASK) return EINVAL;
     const uint64_t length = (size + PAGE_MASK) & ~PAGE_MASK;
@@ -488,11 +492,13 @@ int Memory::map_shared_file(uint64_t addr, uint64_t size, int fd,
     const int mode = ::fcntl(fd, F_GETFL);
     if (mode < 0) return errno;
     const bool writable = (mode & O_ACCMODE) != O_RDONLY;
-    if ((prot & GUEST_PROT_WRITE) && !writable) return EACCES;
-    auto owner = std::make_shared<SharedBacking>();
+    if ((mode & O_ACCMODE) == O_WRONLY ||
+        (shared && (prot & GUEST_PROT_WRITE) && !writable)) return EACCES;
+    auto owner = std::make_shared<FileBacking>();
     owner->fd = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
     if (owner->fd < 0) return errno;
     owner->writable = writable;
+    owner->shared = shared;
     owner->file_offset = offset;
     std::unique_lock<std::shared_mutex> lock(mu_);
     if (!range_mapped_locked(addr, addr + length)) return EINVAL;
@@ -500,10 +506,11 @@ int Memory::map_shared_file(uint64_t addr, uint64_t size, int fd,
     if (prot & (GUEST_PROT_READ | GUEST_PROT_EXEC)) host_prot |= PROT_READ;
     if (prot & GUEST_PROT_WRITE) host_prot |= PROT_WRITE;
     void* alias = ::mmap(direct_window_ + addr, length, host_prot,
-                         MAP_SHARED | MAP_FIXED, fd, static_cast<off_t>(offset));
+                         (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED,
+                         fd, static_cast<off_t>(offset));
     if (alias == MAP_FAILED) return errno;
     for (uint64_t a = addr; a < addr + length; a += PAGE_SIZE)
-        shared_pages_.insert_or_assign(a / PAGE_SIZE, SharedPage{owner, a - addr});
+        file_pages_.insert_or_assign(a / PAGE_SIZE, FilePage{owner, a - addr});
     set_mapping_locked(addr, addr + length, prot, false);
     return 0;
 }
@@ -534,9 +541,9 @@ bool Memory::mprotect_guest(uint64_t addr, uint64_t size, uint8_t prot, int* err
     std::unique_lock<std::shared_mutex> g(mu_);
     if (!range_mapped_locked(addr, end)) return false;
     if (prot & GUEST_PROT_WRITE) {
-        for (auto it = shared_pages_.lower_bound(addr / PAGE_SIZE);
-             it != shared_pages_.end() && it->first < end / PAGE_SIZE; ++it) {
-            if (!it->second.backing->writable) {
+        for (auto it = file_pages_.lower_bound(addr / PAGE_SIZE);
+             it != file_pages_.end() && it->first < end / PAGE_SIZE; ++it) {
+            if (it->second.backing->shared && !it->second.backing->writable) {
                 if (error) *error = EACCES;
                 return false;
             }
@@ -569,6 +576,10 @@ void Memory::write(uint64_t addr, const void* src, size_t n) {
     addr = data_address(addr);
     if (n == 0) return;
     check_access(addr, n, GUEST_PROT_WRITE);
+    record_write(addr, src, n);
+    std::memcpy(direct_window_ + addr, src, n);
+}
+void Memory::record_write(uint64_t addr, const void* src, size_t n) {
     // BIFROST_WATCH: attribute stores overlapping the watch range. Log the
     // first 8 bytes of the written value too — the heap-stomp hunt needs to
     // spot the offending VALUE (e.g. a negative extents 0xC700 or a shifted
@@ -648,7 +659,24 @@ void Memory::write(uint64_t addr, const void* src, size_t n) {
             (void)::write(wt_fd, rec, len);
         }
     }
-    std::memcpy(direct_window_ + addr, src, n);
+}
+bool Memory::compare_exchange(uint64_t addr, uint64_t expected, uint64_t desired, unsigned width, uint64_t* observed) {
+    addr = data_address(addr);
+    check_access(addr, width, GUEST_PROT_READ | GUEST_PROT_WRITE);
+    bool stored = false;
+#define CAS_WIDTH(T) { T old = static_cast<T>(expected); stored = __atomic_compare_exchange_n( \
+        reinterpret_cast<T*>(direct_window_ + addr), &old, static_cast<T>(desired), \
+        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); if (observed) *observed = old; break; }
+    switch (width) {
+        case 1: CAS_WIDTH(uint8_t)
+        case 2: CAS_WIDTH(uint16_t)
+        case 4: CAS_WIDTH(uint32_t)
+        case 8: CAS_WIDTH(uint64_t)
+        default: throw EmuError("unsupported exclusive access width");
+    }
+#undef CAS_WIDTH
+    if (stored) record_write(addr, &desired, width);
+    return stored;
 }
 void Memory::read(uint64_t addr, void* dst, size_t n) const {
     read_access(addr, dst, n, GUEST_PROT_READ);
@@ -762,7 +790,7 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve,
     // Reused or fixed pages may hold a previous owner's data. Fresh bump
     // space was never touched and is zero.
     if (reused || hint != 0) {
-        detach_shared_locked(base, end);
+        detach_file_locked(base, end);
         zero_range_locked(base, end, noreserve);
     }
     // BIFROST_GUARD_ALLOCS=1: append a PROT_NONE guard page right after
@@ -822,7 +850,7 @@ uint64_t Memory::mmap_noreplace(uint64_t addr, uint64_t size, bool noreserve,
     if (range_overlaps_locked(addr, end)) return UINT64_MAX;
     const uint64_t stack_bottom = stack_top_ - STACK_SIZE;
     if (addr < stack_top_ && end > stack_bottom) return 0;
-    detach_shared_locked(addr, end);
+    detach_file_locked(addr, end);
     zero_range_locked(addr, end, noreserve);
     allocations_[addr] = aligned_size;
     remove_free_range(addr, aligned_size);
@@ -887,7 +915,7 @@ uint64_t Memory::mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve
         if (at >= lo && at < hi) it = guard_pages_.erase(it);
         else ++it;
     }
-    detach_shared_locked(lo, hi);
+    detach_file_locked(lo, hi);
     remove_free_range(lo, aligned_size);
     if (zero_contents) zero_range_locked(lo, hi, noreserve);
     allocations_[lo] = aligned_size;
@@ -935,47 +963,50 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (fixed_addr && ((fixed_addr & PAGE_MASK) ||
         !is_valid_guest_range(fixed_addr, new_aligned) ||
         (old_addr < fixed_addr + new_aligned && fixed_addr < old_end))) return 0;
-    // A MAP_SHARED file mapping is resized by mapping more of the same
-    // file, so both views stay coherent with it.
-    std::shared_ptr<SharedBacking> shared;
-    uint64_t shared_offset = 0;
-    std::vector<uint8_t> shared_prots;
+    // File mappings retain their backing when resized or moved. Shared
+    // views stay coherent; private views also retain their dirty COW bytes.
+    std::shared_ptr<FileBacking> backing;
+    uint64_t file_offset = 0;
+    uint64_t file_size = 0;
+    std::vector<uint8_t> file_prots;
     {
         std::shared_lock<std::shared_mutex> lock(mu_);
-        if (const SharedPage* first = shared_page_locked(old_addr)) {
-            shared = first->backing;
-            shared_offset = first->offset;
+        if (const FilePage* first = file_page_locked(old_addr)) {
+            backing = first->backing;
+            file_offset = first->offset;
         }
-        if (shared) {
+        if (backing) {
             auto allocation = allocations_.find(old_addr);
             if (allocation == allocations_.end() || allocation->second != old_aligned) return 0;
             struct stat original;
-            if (::fstat(shared->fd, &original) < 0) return 0;
+            if (::fstat(backing->fd, &original) < 0) return 0;
+            file_size = static_cast<uint64_t>(original.st_size);
             for (uint64_t at = old_addr; at < old_end; at += PAGE_SIZE) {
-                const SharedPage* page = shared_page_locked(at);
+                const FilePage* page = file_page_locked(at);
                 uint8_t prot;
                 if (!page ||
+                    page->backing->shared != backing->shared ||
                     page->backing->file_offset + page->offset !=
-                        shared->file_offset + shared_offset + at - old_addr ||
+                        backing->file_offset + file_offset + at - old_addr ||
                     !mapping_prot_at_locked(at, prot)) return 0;
-                if (page->backing != shared) {
+                if (page->backing != backing) {
                     struct stat current;
                     if (::fstat(page->backing->fd, &current) < 0 ||
                         current.st_dev != original.st_dev || current.st_ino != original.st_ino)
                         return 0;
                 }
-                shared_prots.push_back(prot);
+                file_prots.push_back(prot);
             }
         }
     }
-    if (shared && (fixed_addr || new_aligned > old_aligned)) {
-        const uint64_t offset = shared->file_offset + shared_offset;
+    if (backing && (fixed_addr || new_aligned > old_aligned)) {
+        const uint64_t offset = backing->file_offset + file_offset;
         if (!fixed_addr) {
             uint64_t tail = mmap_hint(old_end, new_aligned - old_aligned, true,
-                                      shared_prots.back());
+                                      file_prots.back());
             if (tail == old_end) {
-                int error = map_shared_file(tail, new_aligned - old_aligned,
-                    shared->fd, offset + old_aligned, shared_prots.back());
+                int error = map_file(tail, new_aligned - old_aligned,
+                    backing->fd, offset + old_aligned, file_prots.back(), backing->shared);
                 if (!error) {
                     std::unique_lock<std::shared_mutex> lock(mu_);
                     allocations_.erase(tail);
@@ -987,15 +1018,37 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         }
         if (!may_move) return 0;
         uint64_t target = fixed_addr
-            ? mmap_fixed_replace(fixed_addr, new_aligned, true, true, shared_prots.back())
-            : mmap_alloc(new_aligned, 0, true, shared_prots.back());
+            ? mmap_fixed_replace(fixed_addr, new_aligned, true, true, file_prots.back())
+            : mmap_alloc(new_aligned, 0, true, file_prots.back());
         if (!target) return 0;
-        if (map_shared_file(target, new_aligned, shared->fd, offset, shared_prots.back())) {
+        const uint8_t target_prot = backing->shared ? file_prots.back()
+            : GUEST_PROT_READ | GUEST_PROT_WRITE;
+        if (map_file(target, new_aligned, backing->fd, offset, target_prot, backing->shared)) {
             untrack_allocation(target, new_aligned);
             return 0;
         }
-        for (size_t i = 0; i < shared_prots.size() && i * PAGE_SIZE < new_aligned; ++i)
-            (void)mprotect_guest(target + i * PAGE_SIZE, PAGE_SIZE, shared_prots[i]);
+        if (!backing->shared) {
+            // Copy dirty private data into a new MAP_PRIVATE view, rather
+            // than anonymous storage: MADV_DONTNEED must still refault the
+            // original file. No writes reach the file, including with an
+            // O_RDONLY descriptor. Restore each source protection below.
+            // Whole pages beyond EOF have no readable contents (SIGBUS).
+            // Moving such a mapping is legal; do not touch those pages.
+            const uint64_t file_end = (file_size + PAGE_MASK) & ~PAGE_MASK;
+            const uint64_t readable = file_end > offset ? file_end - offset : 0;
+            const uint64_t copy_size = std::min({old_aligned, new_aligned, readable});
+            std::unique_lock<std::shared_mutex> lock(mu_);
+            (void)set_direct_prot(old_addr, old_addr + copy_size, PROT_READ | PROT_WRITE);
+            std::memcpy(direct_window_ + target, direct_window_ + old_addr, copy_size);
+            for (size_t i = 0; i * PAGE_SIZE < copy_size; ++i)
+                (void)set_direct_prot(old_addr + i * PAGE_SIZE,
+                    old_addr + (i + 1) * PAGE_SIZE, file_prots[i]);
+        }
+        for (size_t i = 0; i < file_prots.size() && i * PAGE_SIZE < new_aligned; ++i)
+            (void)mprotect_guest(target + i * PAGE_SIZE, PAGE_SIZE, file_prots[i]);
+        if (!backing->shared && new_aligned > old_aligned)
+            (void)mprotect_guest(target + old_aligned, new_aligned - old_aligned,
+                                  file_prots.back());
         untrack_allocation(old_addr, old_aligned);
         return target;
     }
@@ -1008,7 +1061,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         const uint64_t fend = old_end;
         it->second = new_aligned;
         if (fstart < fend) {
-            detach_shared_locked(fstart, fend);
+            detach_file_locked(fstart, fend);
             clear_mapping_locked(fstart, fend);
             add_free_range(fstart, fend - fstart);
         }
@@ -1042,7 +1095,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (fixed_addr || range_overlaps_locked(extra_start, extra_end))
         can_grow_in_place = false;
     if (can_grow_in_place) {
-        detach_shared_locked(extra_start, extra_end);
+        detach_file_locked(extra_start, extra_end);
         zero_range_locked(extra_start, extra_end, false);
         allocations_[old_addr] = new_aligned;
         set_mapping_locked(extra_start, extra_end, old_page_prots.back(), false);
@@ -1129,7 +1182,7 @@ void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
     }
     // Remove mapping state even when the range was installed through
     // map_range (ELF PT_LOAD, brk, stacks, vDSO) rather than mmap_alloc.
-    detach_shared_locked(lo, std::min(hi, window_size_));
+    detach_file_locked(lo, std::min(hi, window_size_));
     clear_mapping_locked(lo, hi);
 }
 void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
@@ -1151,13 +1204,13 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
     for (; it != vmas_.end() && it->first < end; ++it) {
         if (it->second.end <= start) continue;
         const uint64_t a = std::max(start, it->first), b = std::min(end, it->second.end);
-        // Anonymous pages read back as zero, shared file pages refault
+        // Anonymous pages read back as zero, file pages refault
         // from the file: exactly the host semantics of the same call.
         (void)::madvise(direct_window_ + a, b - a, MADV_DONTNEED);
         if (!track || !it->second.prot) continue;
         // Discarded private pages become userfaultfd-missing.
         for (uint64_t p = a / PAGE_SIZE; p < b / PAGE_SIZE; ++p) {
-            if (shared_pages_.count(p)) continue;
+            if (file_pages_.count(p)) continue;
             direct_page_flags_[p].fetch_or(GUEST_PAGE_UFFD_MISSING,
                                            std::memory_order_release);
         }
@@ -1170,7 +1223,7 @@ int Memory::madvise_remove(uint64_t addr, uint64_t len) {
     end = std::min(end, window_size_);
     std::shared_lock<std::shared_mutex> lock(mu_);
     // Adjacent pages of one file are punched with a single fallocate.
-    const SharedBacking* run = nullptr;
+    const FileBacking* run = nullptr;
     uint64_t run_offset = 0, run_length = 0;
     auto punch = [&]() -> int {
         if (!run_length) return 0;
@@ -1182,10 +1235,10 @@ int Memory::madvise_remove(uint64_t addr, uint64_t len) {
     };
     // Linux stops at the first failing VMA after finishing the earlier ones.
     auto visit = [&](uint64_t at) -> int {
-        const SharedPage* page = shared_page_locked(at);
+        const FilePage* page = file_page_locked(at);
         int error = 0;
         if (!page) error = EINVAL;
-        else if (!page->backing->writable) error = EACCES;
+        else if (!page->backing->shared || !page->backing->writable) error = EACCES;
         if (error) {
             const int punched = punch();
             return punched ? punched : error;
@@ -1228,15 +1281,15 @@ int Memory::uffd_register(uint64_t addr, uint64_t len, bool registered) {
     if (__builtin_add_overflow(addr, len, &last)) return -EINVAL;
     last = std::min(last, window_size_);
     std::unique_lock<std::shared_mutex> g(mu_);
-    // Linux registers the VMAs present in the range; shmem is unsupported.
+    // Register anonymous VMAs present in the range; file backings are unsupported.
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
     auto it = vmas_.upper_bound(addr);
     if (it != vmas_.begin()) --it;
     for (; it != vmas_.end() && it->first < last; ++it) {
         const uint64_t lo = std::max(addr, it->first), hi = std::min(last, it->second.end);
         if (lo >= hi) continue;
-        auto shared = shared_pages_.lower_bound(lo / PAGE_SIZE);
-        if (shared != shared_pages_.end() && shared->first < hi / PAGE_SIZE) return -EINVAL;
+        auto shared = file_pages_.lower_bound(lo / PAGE_SIZE);
+        if (shared != file_pages_.end() && shared->first < hi / PAGE_SIZE) return -EINVAL;
         ranges.emplace_back(lo, hi);
     }
     if (ranges.empty()) return -EINVAL;
@@ -1294,8 +1347,20 @@ int64_t Memory::uffd_fill(uint64_t dst, const uint8_t* src, uint64_t len) {
     }
     return filled;
 }
+namespace {
+bool page_is_zero(const uint8_t* page) {
+    const auto* words = reinterpret_cast<const uint64_t*>(page);
+    for (size_t i = 0; i < Memory::PAGE_SIZE / sizeof(uint64_t); ++i)
+        if (words[i]) return false;
+    return true;
+}
+}  // namespace
 int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed_addr) {
     // ART's CMC moves its heap into a from-space reservation placed anywhere.
+    // Linux moves page tables, so untouched pages cost nothing on either side.
+    // The destination is lazily zeroed (noreserve): copy only nonzero pages,
+    // and release the source with one MADV_DONTNEED. Copying every page made
+    // each GC commit ART's whole 1 GiB linear-alloc pool and its from-space.
     if (!len || !is_valid_guest_range(old_addr, len) ||
         (fixed_addr && !is_valid_guest_range(fixed_addr, len)))
         return -EINVAL;
@@ -1306,7 +1371,7 @@ int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed
         for (uint64_t i = 0; i < pages; ++i) {
             const uint64_t at = old_addr + i * PAGE_SIZE;
             if (!mapping_prot_at_locked(at, prots[i])) return -EFAULT;  // Linux: no VMA
-            if (shared_page_locked(at)) return -EINVAL;  // private only
+            if (file_page_locked(at)) return -EINVAL;  // anonymous only
             flags[i] = direct_page_flags_[at / PAGE_SIZE].load(std::memory_order_relaxed);
         }
     }
@@ -1323,7 +1388,8 @@ int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed
         if (prot != first_prot) set_mapping_locked(to, to + PAGE_SIZE, prot, false);
         (void)set_direct_prot(from, from + PAGE_SIZE, PROT_READ | PROT_WRITE);
         (void)set_direct_prot(to, to + PAGE_SIZE, PROT_READ | PROT_WRITE);
-        std::memcpy(direct_window_ + to, direct_window_ + from, PAGE_SIZE);
+        if (!page_is_zero(direct_window_ + from))
+            std::memcpy(direct_window_ + to, direct_window_ + from, PAGE_SIZE);
         // The moved page keeps its permissions; a missing page stays
         // missing. The new VMA is not registered (no UFFD_FEATURE_EVENT_REMAP).
         const uint8_t missing = flags[i] & GUEST_PAGE_UFFD_MISSING;
@@ -1331,8 +1397,8 @@ int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed
             static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) | missing),
             std::memory_order_release);
         (void)set_direct_prot(to, to + PAGE_SIZE, prot);
-        // The old range keeps its permissions and registration, now empty.
-        std::memset(direct_window_ + from, 0, PAGE_SIZE);
+        // The old range keeps its permissions and registration, now empty
+        // (released below).
         direct_page_flags_[from / PAGE_SIZE].store(
             static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) |
                                  (flags[i] & GUEST_PAGE_UFFD_REGISTERED) |
@@ -1340,6 +1406,8 @@ int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed
             std::memory_order_release);
         (void)set_direct_prot(from, from + PAGE_SIZE, prot);
     }
+    // Private anonymous pages read back as zero, as after Linux's move.
+    (void)::madvise(direct_window_ + old_addr, len, MADV_DONTNEED);
     return static_cast<int64_t>(dst);
 }
 // ── Free-range bookkeeping ─────────────────────────────────────────────

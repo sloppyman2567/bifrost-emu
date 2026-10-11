@@ -20,8 +20,7 @@
 namespace arm64emu {
 // Resolve a guest file descriptor to its host file descriptor, or -1 if
 // the guest fd is invalid or does not wrap a host fd. mmap() with a
-// file-backed mapping needs the real host fd to preload the file
-// contents into the mapping (FdTable allocates guest fds independently
+// file-backed mapping needs the real host fd for its host file alias (FdTable allocates guest fds independently
 // of the host fd numbers, so the two are NOT interchangeable).
 static int resolve_host_fd(Emulator& emu, int guest_fd) {
     auto node = emu.fds().get(guest_fd);
@@ -146,45 +145,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
-                // Map succeeded — fall through to the file-load branch below
-                // using `addr` as both the requested and actual address.
-                // We continue into the regular MAP_FIXED path by setting
-                // the BIFROST_MAP_FIXED bit conceptually (no-op since we
-                // already placed the allocation).
-                if ((flags & 1) && !(flags & BIFROST_MAP_ANONYMOUS)) {
-                    int error = mem_.map_shared_file(addr, length,
-                        resolve_host_fd(emu, static_cast<int>(a4)), a5, prot);
+                if (!(flags & BIFROST_MAP_ANONYMOUS)) {
+                    const int error = mem_.map_file(addr, length,
+                        resolve_host_fd(emu, static_cast<int>(a4)), a5, prot, flags & 1);
                     if (error) {
                         mem_.untrack_allocation(addr, length);
                         ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
                         return 0;
                     }
-                } else if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0) {
-                    int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
-                    if (host_fd >= 0) {
-                        struct stat st;
-                        if (::fstat(host_fd, &st) == 0) {
-                            uint64_t avail = (st.st_size > (off_t)a5) ? (uint64_t)(st.st_size - (off_t)a5) : 0;
-                            uint64_t want = std::min<uint64_t>(length, avail);
-                            // Chunked preload so large libs/data files don't
-                            // allocate a single huge host bounce (OOM).
-                            uint64_t off = 0;
-                            std::vector<uint8_t> chunk(64 * 1024);
-                            while (off < want) {
-                                size_t take = (size_t)std::min<uint64_t>(want - off, chunk.size());
-                                ssize_t n = ::pread(host_fd, chunk.data(), take,
-                                                    static_cast<off_t>(a5 + off));
-                                if (n < 0 && errno == EINTR) continue;
-                                if (n <= 0) break;
-                                mem_.write(addr + off, chunk.data(), (size_t)n);
-                                off += (uint64_t)n;
-                                if ((size_t)n < take) break;
-                            }
-                        }
-                    }
-                    if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
+                    if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4)))
                         graphics_.set_guest_fb_addr(addr);
-                    }
                 }
                 if (!mem_.mprotect_guest(addr, length, static_cast<uint8_t>(prot))) {
                     mem_.untrack_allocation(addr, length);
@@ -294,51 +264,19 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)a5,
                         (unsigned long long)mapped);
             }
-            // If a file fd is given, read its contents in
-            // MAP_ANONYMOUS is 0x20 on Linux AArch64. The old code checked
-            // 0x2 (MAP_PRIVATE), so file-backed MAP_PRIVATE mmaps (the
-            // standard mechanism for mapping executables and shared
-            // libraries) skipped the file-load branch and the guest saw
-            // zero pages. Fix: check the correct bit.
-            if ((flags & 1) && !(flags & BIFROST_MAP_ANONYMOUS)) {
-                int error = mem_.map_shared_file(mapped, length,
-                    resolve_host_fd(emu, static_cast<int>(a4)), a5, prot);
+            // Keep private file mappings backed by the file too: a later
+            // MADV_DONTNEED must restore file bytes, not anonymous zeros.
+            if (!(flags & BIFROST_MAP_ANONYMOUS)) {
+                const int error = mem_.map_file(mapped, length,
+                    resolve_host_fd(emu, static_cast<int>(a4)), a5, prot, flags & 1);
                 if (error) {
                     mem_.untrack_allocation(mapped, length);
                     emu.invalidate_jit_range(mapped, length);
                     ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
                     return 0;
                 }
-            } else if ((a3 & BIFROST_MAP_ANONYMOUS) == 0) {
-                int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
-                if (host_fd >= 0) {
-                    struct stat st;
-                    if (::fstat(host_fd, &st) == 0) {
-                        uint64_t avail = (st.st_size > (off_t)a5) ? (uint64_t)(st.st_size - (off_t)a5) : 0;
-                        uint64_t want = std::min<uint64_t>(length, avail);
-                        uint64_t off = 0;
-                        std::vector<uint8_t> chunk(64 * 1024);
-                        while (off < want) {
-                            size_t take = (size_t)std::min<uint64_t>(want - off, chunk.size());
-                            ssize_t n = ::pread(host_fd, chunk.data(), take,
-                                                static_cast<off_t>(a5 + off));
-                            if (n < 0 && errno == EINTR) continue;
-                            if (n <= 0) break;
-                            mem_.write(mapped + off, chunk.data(), (size_t)n);
-                            off += (uint64_t)n;
-                            if ((size_t)n < take) break;
-                        }
-                    }
-                }
-                // If the guest is mmap'ing the graphics framebuffer fd,
-                // record the guest address so the host can sync the
-                // pixels back from the guest's pages on demand (for
-                // dump_to_ppm / refresh). Use owns_fd() (which does
-                // fstat comparison) because open_dev_fb0() returns a
-                // dup'd fd, not the original fb_fd_.
-                if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
+                if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4)))
                     graphics_.set_guest_fb_addr(mapped);
-                }
             }
             if (!mem_.mprotect_guest(mapped, length, static_cast<uint8_t>(prot))) {
                 mem_.untrack_allocation(mapped, length);
@@ -523,7 +461,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             // MADV_DONTNEED (4): Linux discards the pages — the next
-            // access refaults shared file data or anonymous zeros.
+            // access refaults file data or anonymous zeros.
             // vkQuake's mimalloc decommits freed
             // segments this way and reuses them as initially-zero pages;
             // a no-op here kept stale data and shredded its heap

@@ -285,6 +285,7 @@ UNIT_TESTS=(
     "jit_cache_invalidation|ctest/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
     "jit_dispatch_cache|ctest/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
     "jit_call_helpers|ctest/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
+    "jit_call_depth|ctest/jit_call_helpers.elf 20000 deep||15|jit_call_helpers: ALL PASS deep calls"
     "jit_mt_tier2|ctest/jit_mt_tier2.elf||30|jit_mt_tier2: ALL PASS"
     "shift_register|ctest/jit_shift_register.elf||5|checks passed"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"

@@ -15,6 +15,7 @@
 #include "core/emulator.h"
 #include "debug_flags.h"
 #include "ir/ir.hpp"
+#include "ir/ssa.hpp"
 #include "ir/ir.h"
 #include <chrono>
 #include <time.h>
@@ -333,7 +334,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     // bounded by the 4095-entry uint16_t vreg table).
     constexpr uint16_t  VREG_LIMIT = 4000;
     // Same block-size cap as translate_block.
-    constexpr int       MAX_BLOCK_REG_PRESSURE = 32;
+    const int max_block_insts = dbg().jit_block_limit;
 
     // Follow fall-through and direct-jump edges. Only a return to the head
     // closes a region loop; other cycles are bounded by the visited set.
@@ -387,7 +388,8 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
         bool trace_ends_after_block = false;
         uint64_t next_pc = cur_pc;
 
-        while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
+        while (!block_ended && instr_count < max_block_insts &&
+               !block_translation_budget_reached(tb.ir, instr_count, g_alloc.next)) {
             if (trace.total_insts + static_cast<uint64_t>(instr_count) >= MAX_TRACE_INSTS) {
                 // Mid-block instruction cap — a normal (bounded) end.
                 trace.stop_reason = "inst_cap";
@@ -822,7 +824,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         if (remapped_max >= 4096) return nullptr;
         cur_max = remapped_max;
     }
-    const int region_max_vreg = static_cast<int>(cur_max);
+    int region_max_vreg = static_cast<int>(cur_max);
 
     struct RBlock {
         size_t   start;      // first op index in region_ir
@@ -847,6 +849,60 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
         rblocks[i] = {start, region_ir.size() - 1, blocks[i].side_exits[0].first,
                       blocks[i].pc, static_cast<size_t>(blocks[i].ir.count)};
+    }
+
+    // Scalar loop SSA spans the entire region, including the backedge and
+    // each conditional side exit. Architectural stores remain observable;
+    // joins read that canonical state rather than depending on scratch homes
+    // surviving the backend's loop boundary. Cross-block value numbering is
+    // performed before destruction, with dominator-scoped availability.
+    std::vector<IRInst> ssa_preheader;
+    bool ssa_region = false;
+    if (last_is_backedge && !dbg().no_ssa && !getenv("BIFROST_NO_OPT")) {
+        bool conditional = false;
+        for (const auto& b : rblocks)
+            conditional |= region_ir[b.term].op != IROp::BRCOND_FALLTHRU;
+        const size_t exit = nblk + 1;
+        std::vector<SSASourceBlock> source(nblk + 1 + (conditional ? 1 : 0));
+        source[0].successors = {1}; // distinct entry, outside the loop
+        for (size_t b = 0; b < nblk; ++b) {
+            auto& input = source[b + 1];
+            input.ir.insts.assign(region_ir.begin() + rblocks[b].start,
+                                  region_ir.begin() + rblocks[b].term + 1);
+            input.successors = {b + 1 == nblk ? 1 : b + 2};
+            if (region_ir[rblocks[b].term].op != IROp::BRCOND_FALLTHRU)
+                input.successors.push_back(exit);
+        }
+        SSAFunction function;
+        std::vector<SSASourceBlock> lowered;
+        std::string error;
+        if (build_ssa(source, function, &error)) {
+            optimize_ssa(function);
+            if (lower_ssa(function, lowered, &error, SSAPhiLowering::ArchitecturalState)) {
+                ssa_preheader = std::move(lowered[0].ir.insts);
+                region_ir.clear();
+                for (size_t b = 0; b < nblk; ++b) {
+                    rblocks[b].start = region_ir.size();
+                    const auto& body = lowered[b + 1].ir.insts;
+                    region_ir.insert(region_ir.end(), body.begin(), body.end());
+                    rblocks[b].term = region_ir.size() - 1;
+                }
+                region_max_vreg = 32;
+                auto scan = [&](const std::vector<IRInst>& instructions) {
+                    for (const auto& i : instructions)
+                        region_max_vreg = std::max<int>(region_max_vreg,
+                            std::max({i.dest, i.src1, i.src2, i.aux}));
+                };
+                scan(ssa_preheader); scan(region_ir);
+                ssa_region = true;
+                if (tier2_trace_enabled()) {
+                    size_t phis = 0;
+                    for (const auto& b : function.blocks) phis += b.phis.size();
+                    fprintf(stderr, "[tier2] SSA head=%llx blocks=%zu values=%zu phis=%zu\n",
+                        (unsigned long long)trace.head_pc, nblk, function.variables.size() - 1, phis);
+                }
+            }
+        }
     }
 
     // Region-wide "contains a call" flag (Track 1 call-aware regions). A
@@ -1035,9 +1091,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // the slot once per region entry) — negligible. The hoisted results live
     // in their pre-assigned stack slots; block0's body is compiled after a
     // flush+invalidate, so it reloads them from the slots each iteration.
-    std::vector<IRInst> preheader;
+    std::vector<IRInst> preheader = std::move(ssa_preheader);
     if (last_is_backedge && !getenv("BIFROST_NO_LICM")) {
         std::vector<bool> hoisted_vreg(4096, false);
+        for (const auto& i : preheader) if (i.dest > 32) hoisted_vreg[i.dest] = true;
         std::vector<char> hoisted_op(region_ir.size(), 0);
         for (size_t i = 0; i < region_ir.size(); i++) {
             const IRInst& inst = region_ir[i];
@@ -1569,6 +1626,16 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             vreg_home_[v] = saved_homes[v]; vreg_dirty_[v] = saved_vdirty[v];
         }
     };
+    // State-phi reloads at the loop head use CPU storage for non-pinned
+    // architectural slots. A deferred STORE_REG in a safe host register
+    // must commit on the backedge even when that slot was statically clean
+    // when the head's load was emitted. Pins carry their value directly.
+    auto emit_ssa_backedge_state = [&] {
+        if (!ssa_region) return;
+        for (int a = 0; a < 32; ++a)
+            if (arch_pin_[a] < 0 && vreg_home_[a] >= 0 && vreg_dirty_[a])
+                emit_store_arm(a, vreg_home_[a]);
+    };
     size_t body_start = code_buf_used_;
 
     // ── Compile the region body ───────────────────────────────────────
@@ -1678,6 +1745,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                         if (region_flags_loop_carried) {
                             materialize_flags_to_pstate();
                         }
+                        emit_ssa_backedge_state();
                         emit_completion_credit();
                         emit_trial_backedge();
                         int32_t rel = static_cast<int32_t>(
@@ -1953,6 +2021,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // body (compiled with the pin mappings pre-established) reuses them.
     }
     if (!skip_exit_sections && last_is_backedge) {
+        emit_ssa_backedge_state();
         emit_completion_credit();
         emit_trial_backedge();
         int32_t rel = static_cast<int32_t>(body_start - (code_buf_used_ + 5));

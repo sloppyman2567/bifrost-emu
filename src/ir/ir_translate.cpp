@@ -52,7 +52,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     if (translate_mem(block, d, cur_pc)) return false;
     switch (d.cls) {
         case InstClass::HINT:
-            block.insts.push_back(IRInst::make(IROp::NOP));
+            block.insts.push_back(IRInst::make(is_data_memory_barrier(d.raw)
+                    ? IROp::MEMORY_BARRIER : IROp::NOP));
             return false;
         // ── MOVZ / MOVN / MOVK ───────────────────────────────────────
         case InstClass::MOVZ: {

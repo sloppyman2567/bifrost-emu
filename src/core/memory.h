@@ -3,7 +3,7 @@
 // The guest address space is a single host mapping reserved at startup:
 // guest VA x lives at host address window + x (the QEMU guest_base / FEX
 // layout). Host mmap(MAP_FIXED), mprotect, madvise and munmap on that
-// reservation do the real work: anonymous memory, MAP_SHARED file aliases,
+// reservation do the real work: anonymous memory, private/shared file mappings,
 // page permissions and freeing. The JIT and interpreter access guest memory
 // as `[window + addr]`.
 //
@@ -113,9 +113,12 @@ public:
     // Replace existing storage with coherent file aliases. Returns a host errno.
     int map_shared_file(uint64_t addr, uint64_t size, int fd, uint64_t offset,
                         uint8_t prot);
+    int map_file(uint64_t addr, uint64_t size, int fd, uint64_t offset,
+                 uint8_t prot, bool shared);
     int sync_shared(uint64_t addr, uint64_t size, int flags);
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n);
+    bool compare_exchange(uint64_t addr, uint64_t expected, uint64_t desired, unsigned width, uint64_t* observed = nullptr);
     // Validate a whole thunk output range before a host call has side effects.
     void check_access(uint64_t addr, size_t size, uint8_t access) const;
     void read(uint64_t addr, void* dst, size_t n) const;
@@ -179,14 +182,14 @@ public:
         high_next_ = LOW_REGION_SIZE;
     }
     // MADV_DONTNEED: discard covered pages without unmapping them.
-    // Anonymous pages read back as zero; shared file pages refault from
+    // Anonymous pages read back as zero; file pages refault from
     // the file. mimalloc reuses decommitted segments as "initially zero".
     void madvise_dontneed(uint64_t addr, uint64_t len);
     // MADV_REMOVE (mm/madvise.c madvise_remove): punch a hole in the file
     // behind a writable shared mapping, so the pages read back as zero.
     // Pages are visited in address order and the first failure stops:
     // EINVAL for storage with no file (private anonymous), EACCES for a
-    // shared mapping of a read-only fd. Unmapped holes give ENOMEM once
+    // private file or shared mapping of a read-only fd. Unmapped holes give ENOMEM once
     // the rest is done. addr is page-aligned and len page-rounded; returns
     // 0 or a host errno. ART's CMC arena release relies on EINVAL for
     // private arenas: success makes it skip zeroing them, and stale bytes
@@ -203,8 +206,8 @@ public:
     // userfaultfd-missing pages and readable host aliases of guest W/X-only pages.
     const std::atomic<bool>* jit_software_checks() const { return &jit_software_checks_; }
     // UFFDIO_REGISTER/UNREGISTER of [addr, addr+len): the range is already
-    // validated by the caller. Only mapped private pages are covered;
-    // returns -EINVAL if none is, or if a shared page is included.
+    // validated by the caller. Only mapped private anonymous pages are covered;
+    // returns -EINVAL if none is, or if a file-backed page is included.
     int uffd_register(uint64_t addr, uint64_t len, bool registered);
     // A forked child inherits no registration (no UFFD_FEATURE_EVENT_FORK);
     // its missing pages become ordinary zero pages.
@@ -279,6 +282,7 @@ public:
         return nullptr;
     }
 private:
+    void record_write(uint64_t addr, const void* src, size_t n);
     bool data_top_byte_ignore_ = false;
     bool low_hints_reserved_ = false;
     static constexpr uint8_t PAGE_MAPPED = GUEST_PAGE_MAPPED;
@@ -316,22 +320,23 @@ private:
     void read_access(uint64_t addr, void* dst, size_t n, uint8_t access) const;
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;
-    // A MAP_SHARED file alias: the host maps the file straight into the
-    // reservation; this keeps its fd for fallocate, msync and mremap.
-    struct SharedBacking {
+    // Host file mappings retain Linux COW/refault semantics in the guest
+    // reservation. Keep the fd for fallocate and mremap after guest close.
+    struct FileBacking {
         uint64_t file_offset = 0;
         int fd = -1;
         bool writable = false;
-        ~SharedBacking();
+        bool shared = false;
+        ~FileBacking();
     };
-    struct SharedPage {
-        std::shared_ptr<SharedBacking> backing;
+    struct FilePage {
+        std::shared_ptr<FileBacking> backing;
         uint64_t offset = 0;  // from the start of the original mapping
     };
-    std::map<uint64_t, SharedPage> shared_pages_;  // keyed by page number
-    const SharedPage* shared_page_locked(uint64_t addr) const;
-    // Restore private anonymous storage over shared aliases in [lo, hi).
-    void detach_shared_locked(uint64_t lo, uint64_t hi);
+    std::map<uint64_t, FilePage> file_pages_;  // keyed by page number
+    const FilePage* file_page_locked(uint64_t addr) const;
+    // Restore anonymous storage over file mappings in [lo, hi).
+    void detach_file_locked(uint64_t lo, uint64_t hi);
     std::map<uint64_t, Vma> vmas_;
     std::unordered_map<uint64_t, uint64_t> allocations_;
     // Reclaimed (munmap'd) address ranges available for reuse, keyed by

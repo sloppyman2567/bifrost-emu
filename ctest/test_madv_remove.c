@@ -58,6 +58,46 @@ static int make_file(void) {
     return n == 3 * page ? fd : -1;
 }
 
+// A private file mapping must refault file bytes, not anonymous zeros.
+// Trickcal discards portions of libunity.so before calling its initializers.
+static void private_case(void* hint) {
+    int fd = make_file();
+    unsigned char* p = mmap(hint, 2 * page, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | (hint ? MAP_FIXED_NOREPLACE : 0), fd, page);
+    check(fd >= 0 && p != MAP_FAILED, "private file: map with nonzero offset");
+    if (p == MAP_FAILED || fd < 0) { if (fd >= 0) close(fd); return; }
+    p[0] = 0xa5;
+    unsigned char byte = 0;
+    check(pread(fd, &byte, 1, page) == 1 && byte == 0x22,
+          "private file: writes do not change the file");
+    check(remove_errno(p, page) == EACCES, "private file: MADV_REMOVE is EACCES");
+    check(close(fd) == 0, "private file: close descriptor before discard");
+    check(madvise(p, 2 * page, MADV_DONTNEED) == 0 &&
+          all_bytes(p, page, 0x22) && all_bytes(p + page, page, 0x33),
+          "private file: discard restores file bytes after close");
+    // Moving a dirty private mapping must retain both its COW data and its
+    // backing file. Protection changes must survive the move as well.
+    p[0] = 0x5a;
+    check(mprotect(p + page, page, PROT_READ) == 0, "private file: read-only tail");
+    void* target = mmap(NULL, 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char* moved = target == MAP_FAILED ? MAP_FAILED :
+        mremap(p, 2 * page, 2 * page, MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    check(moved == target && moved != MAP_FAILED, "private file: fixed remap");
+    if (moved == MAP_FAILED) { munmap(p, 2 * page); return; }
+    p = moved;
+    check(p[0] == 0x5a && p[page] == 0x33, "private file: remap preserves COW bytes");
+    check(madvise(p, page, MADV_DONTNEED) == 0 && all_bytes(p, page, 0x22),
+          "private file: remap retains file backing");
+    // Replacing the first page must detach only that page's file backing.
+    check(mmap(p, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+               -1, 0) == p, "private file: partial anonymous replacement");
+    p[0] = 0x7f;
+    check(madvise(p, 2 * page, MADV_DONTNEED) == 0 &&
+          all_bytes(p, page, 0) && all_bytes(p + page, page, 0x33),
+          "private file: replacement zeroes, neighbour refaults file");
+    munmap(p, 2 * page);
+}
+
 // Punch the middle page of a shared mapping at hint (NULL = anywhere).
 static void shared_case(const char* name, void* hint) {
     char what[128];
@@ -92,6 +132,9 @@ static void shared_case(const char* name, void* hint) {
 int main(void) {
     page = sysconf(_SC_PAGESIZE);
 
+    private_case(NULL);
+    private_case((void*)(uintptr_t)0x6100000000ULL);
+
     // Private anonymous: no file to punch. Linux leaves the bytes alone.
     unsigned char* anon = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -121,6 +164,35 @@ int main(void) {
         check(remove_errno(rop, page) == EACCES, "read-only shared: EACCES");
         check(all_bytes(rop, page, 0x11), "read-only shared: bytes untouched");
         munmap(rop, page);
+    }
+    // O_RDONLY restricts shared writes, but private COW writes are allowed.
+    unsigned char* private_ro = ro < 0 ? MAP_FAILED :
+        mmap(NULL, page, PROT_READ, MAP_PRIVATE, ro, 0);
+    int private_writable = private_ro != MAP_FAILED &&
+        mprotect(private_ro, page, PROT_READ | PROT_WRITE) == 0;
+    check(private_writable,
+          "private read-only fd: writable COW protection allowed");
+    if (private_writable) {
+        private_ro[0] = 0x7a;
+        unsigned char byte = 0;
+        check(pread(ro, &byte, 1, 0) == 1 && byte == 0x11,
+              "private read-only fd: COW leaves file unchanged");
+        check(madvise(private_ro, page, MADV_DONTNEED) == 0 && private_ro[0] == 0x11,
+              "private read-only fd: discard restores file");
+    }
+    if (private_ro != MAP_FAILED) munmap(private_ro, page);
+    // Moving a mapping longer than the file must not read its EOF pages.
+    unsigned char* eof = ro < 0 ? MAP_FAILED :
+        mmap(NULL, 2 * page, PROT_READ, MAP_PRIVATE, ro, 0);
+    void* eof_target = mmap(NULL, 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char* eof_moved = eof == MAP_FAILED || eof_target == MAP_FAILED ? MAP_FAILED :
+        mremap(eof, 2 * page, 2 * page, MREMAP_MAYMOVE | MREMAP_FIXED, eof_target);
+    check(eof_moved != MAP_FAILED && eof_moved[0] == 0x11,
+          "private file: remap does not touch pages beyond EOF");
+    if (eof_moved != MAP_FAILED) munmap(eof_moved, 2 * page);
+    else {
+        if (eof != MAP_FAILED) munmap(eof, 2 * page);
+        if (eof_target != MAP_FAILED) munmap(eof_target, 2 * page);
     }
     if (ro >= 0) close(ro);
     if (fd >= 0) close(fd);

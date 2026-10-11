@@ -21,6 +21,7 @@ struct DebugFlags {
     // ── X protocol wire / fd-lifecycle traces ─────────────────────────
     size_t jit_cache_initial_mb = 64; // BIFROST_JIT_CACHE_INITIAL_MB: growth-regression diagnostic
     size_t jit_cache_mb = 1024; // BIFROST_JIT_CACHE_MB: bounded cache-budget diagnostic (1..1024 MiB)
+    int jit_block_limit = 32; // BIFROST_JIT_BLOCK_LIMIT: bounded instruction-cap comparison (8..128)
     bool xtrace   = false;  // BIFROST_XTRACE     — X wire + fd lifecycle
     bool xfull    = false;  // BIFROST_XFULL      — full X request payload dumps
     bool xbt      = false;  // BIFROST_XBT        — X opcode backtraces
@@ -44,11 +45,13 @@ struct DebugFlags {
     bool tier2 = false; // BIFROST_TIER2=1 — opt in to experimental region promotion
     bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
     bool jit_verify = false;  // BIFROST_JIT_VERIFY: presence enables differential replay
+    bool no_ssa = false; // BIFROST_NO_SSA — compare with the legacy scalar IR pipeline
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
     Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
     Ranges block_trace;  // BIFROST_BLOCK_TRACE=lo-hi,... — log every entry of blocks starting here
     bool fault_trace = false;  // BIFROST_FAULT_TRACE — one line per fault signal + its sigreturn
+    bool process_trace = false; // BIFROST_PROCESS_TRACE — shared-VM process clones and group exits
     bool jit_software_guard = false; // BIFROST_JIT_SOFTWARE_GUARD — compare with checked memory accesses
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
@@ -125,6 +128,12 @@ struct DebugFlags {
 
     static DebugFlags parse() {
         DebugFlags f;
+        if (const char* limit = std::getenv("BIFROST_JIT_BLOCK_LIMIT")) {
+            char* end = nullptr;
+            unsigned long n = std::strtoul(limit, &end, 10);
+            if (end != limit && *end == '\0' && n >= 8 && n <= 128)
+                f.jit_block_limit = static_cast<int>(n);
+        }
         if (const char* budget = std::getenv("BIFROST_JIT_CACHE_MB")) {
             char* end = nullptr;
             unsigned long mb = std::strtoul(budget, &end, 10);
@@ -156,10 +165,12 @@ struct DebugFlags {
         f.exec_trace= all || env("BIFROST_EXEC_TRACE");
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
+        f.no_ssa = env("BIFROST_NO_SSA");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
         f.fwd_ranges = parse_ranges(std::getenv("BIFROST_FWD_RANGES"));
         f.block_trace = parse_ranges(std::getenv("BIFROST_BLOCK_TRACE"));
         f.fault_trace = all || env("BIFROST_FAULT_TRACE");
+        f.process_trace = all || env("BIFROST_PROCESS_TRACE");
         f.jit_software_guard = env("BIFROST_JIT_SOFTWARE_GUARD") || env("BIFROST_GUARD_ALLOCS") || env("BIFROST_JIT_SLOW_STORES");
         f.no_chain = env("BIFROST_NO_CHAIN");
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;

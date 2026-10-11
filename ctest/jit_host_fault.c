@@ -65,6 +65,7 @@ static void *worker(void *unused) {
         if (lse) {
             PROBE(".arch_extension lse\n\tldadd x20, x11, [%0]", p + page_size);
             PROBE(".arch_extension lse\n\tldset x20, x11, [%0]", p + page_size);
+            PROBE(".arch_extension lse\n\tldseth w20, w11, [%0]", p + page_size);
             PROBE(".arch_extension lse\n\tcas x11, x20, [%0]", p + page_size);
         }
     }
@@ -74,6 +75,7 @@ static void *worker(void *unused) {
         if (mprotect(p, page_size, PROT_READ)) _exit(92);
         expected_addr = (uintptr_t)p;
         PROBE(".arch_extension lse\n\tldset x20, x11, [%0]", p);
+        PROBE(".arch_extension lse\n\tldseth w20, w11, [%0]", p);
     }
     if (munmap(p, 2 * page_size)) ++bad;
     return (void *)(uintptr_t)(bad != 0);

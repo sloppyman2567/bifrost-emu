@@ -31,11 +31,17 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - ART nterp invokes methods with `BLR X30`: capture the target BEFORE updating
   LR in both engines. `ctest/jit_blr_lr.c` is the regression.
 - File `MAP_SHARED` mappings are host `MAP_SHARED|MAP_FIXED` aliases of the
-  file inside the guest reservation (`shared_pages_` keeps the fd for
+  file inside the guest reservation (`file_pages_` keeps the fd for
   fallocate/mremap). Never copy them into private storage. Partial
-  unmap/replacement must detach an alias (`detach_shared_locked`) before
+  unmap/replacement must detach an alias (`detach_file_locked`) before
   zeroing anonymous storage; preserve file identity through fork/remap. ART's
   own JIT uses RW and R/RX views of the same memfd (`test_shared_alias`).
+- Private file mappings also retain host `MAP_PRIVATE` backings. Never
+  preload them into anonymous storage: `MADV_DONTNEED` must refault file
+  bytes, including after close/remap. Trickcal discards Unity code pages
+  before calling initializers; anonymous copies became zero instructions.
+  `ctest/test_madv_remove.c` compares discard, COW, remap and partial
+  replacement against the native kernel in low/high address space.
 - ART-generated code uses literal loads. Decoder `pc_relative` + `disp` is the
   shared address contract; interpreter and IR use PC rather than a GPR base.
 - Native call guards must unwind a stopped CPU after `exit_group`, preserving
@@ -77,6 +83,11 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `low_hints_reserved` places big unhinted maps above `LOW_REGION_SIZE`.
   Regression:
   `ctest/test_userfaultfd.c` (also runs natively as a kernel oracle).
+  `Memory::mremap_dontunmap` copies only nonzero pages into the lazily zeroed
+  destination and releases the source with one `MADV_DONTNEED`, like Linux's
+  page-table move. Copying every page made each CMC cycle commit ART's 1 GiB
+  linear-alloc pool and its from-space (about 2 GB extra RSS per process).
+  The sparse-move case in `test_userfaultfd` checks values and RSS growth.
 - libandroid `ALooper` is per guest thread (keyed by the monotonic
   `CPU::tid`), never a process singleton: `forThread`/`pollOnce`/`pollAll`
   use the calling thread's looper, as AOSP `Looper::getForThread` does.

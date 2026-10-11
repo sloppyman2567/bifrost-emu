@@ -168,6 +168,35 @@ int main(int argc, char** argv) {
         j->tier2_profit_rejections.load()<=rejections_before) {
         std::fprintf(stderr,"weak path profitability check failed: pc=%llx sum=%llu rejects=%llu before=%llu\n",(unsigned long long)weak_cpu.pc,(unsigned long long)weak_cpu.regs[1],(unsigned long long)j->tier2_profit_rejections.load(),(unsigned long long)rejections_before); return 1;
     }
+    // More loop-carried GPRs than host pins. SSA head phis must see each
+    // preceding iteration's writes, including deferred non-pinned stores.
+    j->invalidate_all();
+    std::vector<uint32_t> carried;
+    for (unsigned a = 1; a <= 12; ++a)
+        carried.push_back(0x91000000u | (a << 10) | (a << 5) | a);
+    carried.push_back(0xd1000400); // sub x0,x0,#1
+    const int64_t back = -static_cast<int64_t>(carried.size());
+    carried.push_back(0xb5000000u | ((static_cast<uint32_t>(back) & 0x7ffff) << 5));
+    carried.push_back(0xd65f03c0);
+    e->mem().write(head, carried.data(), carried.size() * 4);
+    const auto carried_trace = j->collect_tier2_trace(*e, head);
+    auto carried_fn = j->compile_tier2_region(*e, carried_trace);
+    if (!carried_fn) { std::fputs("carried SSA region did not compile\n", stderr); return 1; }
+    for (uint64_t count : {1ULL, 2ULL, 63ULL, 2000ULL}) {
+        CPU c; c.pc = head; c.regs[0] = count; c.regs[30] = stop; c.jit_stop_pc = stop;
+        for (unsigned a = 1; a <= 12; ++a) c.regs[a] = a * 0x1000;
+        unsigned entries = 0;
+        const uint64_t after_loop = head + (carried.size() - 1) * 4;
+        while (c.pc == head && ++entries <= count + 1) c.pc = carried_fn(&c, e.get());
+        if (c.pc != after_loop || c.regs[0]) {
+            std::fputs("carried SSA loop exit mismatch\n", stderr); return 1;
+        }
+        for (unsigned a = 1; a <= 12; ++a)
+            if (c.regs[a] != a * (0x1000 + count)) {
+                std::fprintf(stderr, "carried SSA x%u count=%llu got=%llu\n", a,
+                    (unsigned long long)count, (unsigned long long)c.regs[a]); return 1;
+            }
+    }
     // A fault in nested call dispatch must become a guest signal before
     // it can unwind through a generated host frame.
     auto fault_emu=std::make_unique<Emulator>();

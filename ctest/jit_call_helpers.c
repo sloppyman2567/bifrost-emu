@@ -8,6 +8,20 @@
 
 static unsigned loops = 30000;
 static int failed;
+__attribute__((noinline)) static uint64_t deep_call(uint64_t n) {
+    if (!n) return 0;
+    volatile uint64_t saved = n;
+    uint64_t result = deep_call(n - 1);
+    __asm__ volatile("" ::: "memory");
+    return result + saved;
+}
+static uint64_t (*volatile indirect_call)(uint64_t);
+__attribute__((noinline)) static uint64_t deep_indirect(uint64_t n) {
+    if (!n) return 0;
+    volatile uint64_t saved = n;
+    uint64_t result = indirect_call(n - 1);
+    return result + saved;
+}
 __attribute__((noinline)) static uint64_t leaf(uint64_t x) {
     __asm__ volatile("" : "+r"(x));
     return x * 3 + 5;
@@ -53,6 +67,16 @@ int main(int argc, char **argv) {
         run(NULL);
         if (failed) return 1;
         puts("jit_call_helpers: ALL PASS");
+        return 0;
+    }
+    if (argc > 2 && strcmp(argv[2], "deep") == 0) {
+        uint64_t expected = (uint64_t)loops * (loops + 1) / 2;
+        indirect_call = deep_indirect;
+        if (deep_call(loops) != expected || deep_indirect(loops) != expected) {
+            puts("jit_call_helpers: FAIL deep calls");
+            return 1;
+        }
+        puts("jit_call_helpers: ALL PASS deep calls");
         return 0;
     }
     pthread_t a, b;

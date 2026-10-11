@@ -30,6 +30,14 @@
 namespace arm64emu {
 // ── FrostJIT::compile_ir_alu ───────────────────────────────────────────
 int FrostJIT::compile_ir_alu(const IRInst& inst) {
+    // Reuse a consumed scratch value instead of allocating, spilling and
+    // copying it. Architectural values and pinned loop state stay live.
+    auto result_reg = [&](int source, int home, int excluded = -1) {
+        if (home != excluded && (inst.dest == source ||
+            (source > 32 && vreg_last_use_this_op(source) &&
+             !(pinned_host_regs_ & (1u << home))))) return home;
+        return alloc_reg_excluding(home, excluded);
+    };
     switch (inst.op) {
         case IROp::IMM:
             if (inst.dest) {
@@ -65,7 +73,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::MOV:
             if (inst.dest) {
                 int s = ensure_vreg(inst.src1);
-                int d = alloc_reg(s);
+                int d = result_reg(inst.src1, s);
                 if (d != s) {
                     emit_mov_reg(d, s);
                 }
@@ -74,7 +82,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         // ── Binary ALU ops ──
         // Use src1 and src2 in whatever host regs they're already cached in.
-        // Only allocate a fresh reg for dest when dest != src1 && dest != src2.
+        // Reuse dead scratch inputs before allocating a fresh result register.
         // This avoids the old "force everything into RAX/RCX" pattern that
         // caused massive stack spilling — values now stay in their host regs
         // across ALU ops, and the register allocator's caching actually pays
@@ -86,7 +94,19 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         // src2 before the subtraction).
         case IROp::ADD: case IROp::SUB: case IROp::AND:
         case IROp::OR:  case IROp::XOR: case IROp::MUL: {
-            clobber_flags();
+            // LEA preserves host flags. Keep lazy NZCV across ADD and a
+            // foldable SUB, avoiding materialization and its three spills.
+            // Negating INT32_MIN does not fit LEA's signed displacement.
+            bool lea_sub = false;
+            if (inst.op == IROp::SUB && inst.dest != inst.src2 &&
+                inst.src1 != inst.src2 && vreg_last_use_this_op(inst.src2)) {
+                auto cit = jit_consts_.find(inst.src2);
+                if (cit != jit_consts_.end()) {
+                    int64_t c = static_cast<int64_t>(cit->second);
+                    lea_sub = c > INT32_MIN && c <= INT32_MAX;
+                }
+            }
+            if (inst.op != IROp::ADD && !lea_sub) clobber_flags();
             // ── Constant-src2 immediate folding ──
             // If src2 is a block-local IMM constant (dead after this op and
             // not the dest), fold it into an x86 immediate form. The JIT ALU
@@ -95,7 +115,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // sign-extension fold: (int64)c == (int64)(int32)c. This covers
             // 12-bit add/sub immediates, stack-frame offsets, small masks
             // (0xFF/0x3F/...), and −1 (SUB #−1 → add r,−1).
-            if (inst.op != IROp::MUL && inst.dest != inst.src2 &&
+            if (inst.dest != inst.src2 &&
                 inst.src1 != inst.src2) {
                 auto cit = jit_consts_.find(inst.src2);
                 if (cit != jit_consts_.end() && vreg_last_use_this_op(inst.src2)) {
@@ -112,10 +132,26 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                         if (inst.dest == inst.src1) {
                             d = s1;
                         } else {
-                            d = alloc_reg_excluding(s1, -1);
-                            if (d != s1) emit_mov_reg(d, s1);
+                            d = result_reg(inst.src1, s1);
+                            if (d != s1 && inst.op != IROp::MUL &&
+                                inst.op != IROp::ADD && !lea_sub) emit_mov_reg(d, s1);
                         }
-                        emit_alu_imm(d, kind, imm);
+                        if (inst.op == IROp::MUL) {
+                            // IMUL r64,r/m64,imm8/imm32 sign-extends its
+                            // immediate; the fit check above is mandatory.
+                            emit_byte(rex(true, d >= 8, false, s1 >= 8));
+                            const bool byte_imm = imm >= -128 && imm <= 127;
+                            emit_byte(byte_imm ? 0x6B : 0x69);
+                            emit_byte(modrm(3, d & 7, s1 & 7));
+                            if (byte_imm) emit_byte(static_cast<uint8_t>(imm));
+                            else emit_u32(static_cast<uint32_t>(imm));
+                        } else if (inst.op == IROp::ADD || lea_sub) {
+                            if (flags_in_host_ || d != s1) {
+                                emit_byte(rex(true, d >= 8, false, s1 >= 8));
+                                emit_byte(0x8D);
+                                emit_modrm_disp(d, s1, lea_sub ? -imm : imm);
+                            } else emit_alu_imm(d, kind, imm);
+                        } else emit_alu_imm(d, kind, imm);
                         if (inst.dest == inst.src1) {
                             vreg_dirty_[inst.dest] = true;
                             dirty_host_regs_ |= (1u << d);
@@ -137,6 +173,24 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int s1, s2;
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             int d;
+            if (inst.op == IROp::ADD) {
+                if (inst.dest == inst.src2 || (inst.src2 > 32 &&
+                    vreg_last_use_this_op(inst.src2) &&
+                    !(pinned_host_regs_ & (1u << s2)))) d = s2;
+                else d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);
+                if (flags_in_host_ || d != s1) {
+                    // Allocatable registers exclude RSP. R12 is a valid
+                    // SIB index with REX.X; R13 as base needs disp8=0.
+                    const bool disp = (s1 & 7) == 5;
+                    emit_byte(rex(true, d >= 8, s2 >= 8, s1 >= 8));
+                    emit_byte(0x8D);
+                    emit_byte(modrm(disp ? 1 : 0, d & 7, 4));
+                    emit_byte(sib(0, s2 & 7, s1 & 7));
+                    if (disp) emit_byte(0);
+                } else emit_add_reg(d, s2);
+                set_vreg_reg(inst.dest, d);
+                return 0;
+            }
             // emit_alu_op: emit `d = d op src` for the current inst.op.
             auto emit_alu_op = [&](int d, int src) {
                 switch (inst.op) {
@@ -165,11 +219,18 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             } else {
                 // dest != src1 (and not the commutative src2 case):
-                // allocate a fresh reg for dest that doesn't collide with
-                // s1 or s2, then mov src1 and op src2.
-                d = alloc_reg_excluding(s1, s2);
-                if (d != s1) emit_mov_reg(d, s1);
-                emit_alu_op(d, s2);
+                // Prefer a dead scratch input, otherwise preserve both
+                // operands before moving src1 and applying the operation.
+                if (commutative && inst.src2 > 32 &&
+                    vreg_last_use_this_op(inst.src2) &&
+                    !(pinned_host_regs_ & (1u << s2))) {
+                    d = s2;
+                    emit_alu_op(d, s1);
+                } else {
+                    d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);
+                    if (d != s1) emit_mov_reg(d, s1);
+                    emit_alu_op(d, s2);
+                }
                 set_vreg_reg(inst.dest, d);
             }
             return 0;
@@ -192,7 +253,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     if (inst.dest == inst.src1) {
                         d = s1;
                     } else {
-                        d = alloc_reg_excluding(s1, -1);
+                        d = result_reg(inst.src1, s1);
                         if (d != s1) emit_mov_reg(d, s1);
                     }
                     bool is_32bit = (inst.gpr_shift_params().width == 32);
@@ -285,7 +346,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::NOT: {
             clobber_flags();
             int s = ensure_vreg(inst.src1);
-            int d = alloc_reg(s);
+            int d = result_reg(inst.src1, s);
             if (d != s) emit_mov_reg(d, s);
             emit_not_reg(d);
             set_vreg_reg(inst.dest, d);
@@ -294,7 +355,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::NEG: {
             clobber_flags();
             int s = ensure_vreg(inst.src1);
-            int d = alloc_reg(s);
+            int d = result_reg(inst.src1, s);
             if (d != s) emit_mov_reg(d, s);
             emit_neg_reg(d);
             set_vreg_reg(inst.dest, d);
@@ -303,7 +364,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::SEXT: {
             clobber_flags();  // shifts clobber RFLAGS
             int s = ensure_vreg(inst.src1);
-            int d = alloc_reg(s);
+            int d = result_reg(inst.src1, s);
             if (d != s) emit_mov_reg(d, s);
             int bits = inst.sext_bits();
             if (bits < 64) {
@@ -316,8 +377,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         }
         case IROp::ZEXT: {
             int bits = inst.zext_bits();
+            if (bits < 64 && bits != 32) clobber_flags();
             int s = ensure_vreg(inst.src1);
-            int d = alloc_reg(s);
+            int d = result_reg(inst.src1, s);
             if (d != s) emit_mov_reg(d, s);
             if (bits < 64) {
                 if (bits == 32) {
@@ -331,17 +393,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     }
                     emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
                 } else if (bits == 16) {
-                    clobber_flags();  // AND clobbers RFLAGS
                     emit_byte(rex(true,false,false,d>=8));
                     emit_byte(0x81); emit_byte(modrm(3,4,d&7)); emit_u32(0x0000FFFF);
                 } else if (bits == 8) {
-                    clobber_flags();  // AND clobbers RFLAGS
                     emit_byte(rex(true,false,false,d>=8));
                     emit_byte(0x81); emit_byte(modrm(3,4,d&7)); emit_u32(0x000000FF);
                 } else {
-                    clobber_flags();  // AND clobbers RFLAGS
                     // Use RCX as scratch for the mask.
-                    int tmp = alloc_reg(d);
+                    int tmp = alloc_reg_excluding(-1, d);
                     emit_mov_imm64(tmp, (1ULL << bits) - 1);
                     emit_and_reg(d, tmp);
                 }

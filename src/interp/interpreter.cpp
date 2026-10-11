@@ -1081,13 +1081,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t mask = (width_bytes == 8) ? ~0ULL
                               : ((1ULL << (width_bytes * 8)) - 1);
                 bool returns_old = (d.rt != 31);
-                // BUGFIX: take the exclusive-monitor shard lock around the
-                // entire RMW sequence. The old code did read→compute→write
-                // without any lock, so concurrent LSE atomics from multiple
-                // vCPUs could lose updates (and CAS could see stale values).
-                // The JIT path uses `lock`-prefixed x86 instructions and is
-                // correct, so this was also a JIT/interpreter divergence.
-                // The LDXR/STXR handler above uses the same shard mutex.
+                // Keep local exclusive-monitor serialization and use native CAS
+                // for the RMW itself: shard mutexes do not cross OS processes
+                // and cannot serialize against native JIT LSE instructions.
                 auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
                 std::lock_guard<std::mutex> gatom(shard.mu);
                 // CAS family (atom_op >= 0xC): compare-and-swap.
@@ -1097,25 +1093,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // Wt (rt) is the desired value (unchanged).
                 if (d.atom_op >= 0xC) {
                     uint64_t old = 0;
-                    mem_.read(base, &old, width_bytes);
                     uint64_t cmp = cpu.regs[d.rs] & mask;
-                    old &= mask;
-                    if (old == cmp) {
-                        uint64_t newv = cpu.regs[d.rt] & mask;
-                        mem_.write(base, &newv, width_bytes);
-                    }
+                    mem_.compare_exchange(base, cmp, cpu.regs[d.rt] & mask, width_bytes, &old);
                     // OLD value goes to Ws (rs), NOT Wt (rt). Guard XZR.
                     if (d.rs != 31) cpu.regs[d.rs] = old;
-                    return;
-                }
-                // SWP (atom_op == 0x8): atomic swap.
-                if (d.atom_op == 0x8) {
-                    uint64_t old = 0;
-                    mem_.read(base, &old, width_bytes);
-                    old &= mask;
-                    uint64_t newv = cpu.regs[d.rs] & mask;
-                    mem_.write(base, &newv, width_bytes);
-                    if (returns_old) cpu.regs[d.rt] = old;
                     return;
                 }
                 // Other LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN).
@@ -1124,26 +1105,31 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 a &= mask;
                 b &= mask;
                 uint64_t newv = 0;
-                switch (d.atom_op) {
-                    case 0x0: newv = (a + b) & mask; break;            // LDADD
-                    case 0x1: newv = (a & ~b) & mask; break;           // LDCLR
-                    case 0x2: newv = (a ^ b) & mask; break;            // LDEOR
-                    case 0x3: newv = (a | b) & mask; break;            // LDSET
-                    case 0x4: { // SMAX
-                        int64_t sa = static_cast<int64_t>(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                        int64_t sb = static_cast<int64_t>(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                        newv = (sa > sb ? sa : sb) & mask; break;
+                for (;;) {
+                    switch (d.atom_op) {
+                        case 0x0: newv = (a + b) & mask; break;            // LDADD
+                        case 0x1: newv = (a & ~b) & mask; break;           // LDCLR
+                        case 0x2: newv = (a ^ b) & mask; break;            // LDEOR
+                        case 0x3: newv = (a | b) & mask; break;            // LDSET
+                        case 0x4: { // SMAX
+                            int64_t sa = static_cast<int64_t>(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                            int64_t sb = static_cast<int64_t>(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                            newv = (sa > sb ? sa : sb) & mask; break;
+                        }
+                        case 0x5: { // SMIN
+                            int64_t sa = static_cast<int64_t>(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                            int64_t sb = static_cast<int64_t>(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                            newv = (sa < sb ? sa : sb) & mask; break;
+                        }
+                        case 0x6: newv = (a > b ? a : b) & mask; break;    // UMAX
+                        case 0x7: newv = (a < b ? a : b) & mask; break;    // UMIN
+                        case 0x8: newv = b; break;                       // SWP
+                        default:  newv = a & mask; break;
                     }
-                    case 0x5: { // SMIN
-                        int64_t sa = static_cast<int64_t>(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                        int64_t sb = static_cast<int64_t>(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                        newv = (sa < sb ? sa : sb) & mask; break;
-                    }
-                    case 0x6: newv = (a > b ? a : b) & mask; break;    // UMAX
-                    case 0x7: newv = (a < b ? a : b) & mask; break;    // UMIN
-                    default:  newv = a & mask; break;
+                    uint64_t observed;
+                    if (mem_.compare_exchange(base, a, newv, width_bytes, &observed)) break;
+                    a = observed;
                 }
-                mem_.write(base, &newv, width_bytes);
                 if (returns_old) cpu.regs[d.rt] = a;
                 return;
             }
@@ -1349,7 +1335,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             uint64_t mask = (width_bytes == 8) ? ~0ULL
                                           : ((1ULL << (width_bytes * 8)) - 1);
                             v &= mask;
-                            mem_.write(base, &v, width_bytes);
+                            ok = mem_.compare_exchange(base, cpu.excl_value, v, width_bytes);
                             // Invalidate OTHER CPUs' reservations at this
                             // address (inline, since we hold the shard lock).
                             auto it = shard.reservations.find(base);
@@ -1406,7 +1392,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     // LDR_UNS, LDR_REG) do this; LDXR was missing the guard.
                     if (d.rt != 31) cpu.regs[d.rt] = v;
                     if (use_monitor) {
-                        cpu.excl_mark(base, width_bytes);
+                        cpu.excl_mark(base, width_bytes, v);
                         // Register globally (inline, since we hold the lock).
                         auto& vec = shard.reservations[base];
                         bool found = false;

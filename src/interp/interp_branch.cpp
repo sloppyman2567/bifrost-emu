@@ -14,6 +14,7 @@
 #include "core/crash_report.h"
 #include "decoder.hpp"
 #include "debug_flags.h"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -243,9 +244,9 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             cpu.excl_clear();
             return;
         case InstClass::HINT:
-            // Hint space: NOP / YIELD / WFE / WFI / SEV / SEVL /
-            // DSB / DMB / ISB. All are no-ops for a single-threaded
-            // user-mode emulator.
+            if (is_data_memory_barrier(d.raw))
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+            // The remaining hints have no modeled scheduling/cache effect.
             return;
         case InstClass::MRS_SYS: {
             // MRS Xt, <sysreg> — read a system register.

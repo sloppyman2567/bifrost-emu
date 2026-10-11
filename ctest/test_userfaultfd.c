@@ -123,6 +123,42 @@ __attribute__((noinline)) static long sum_pages(const volatile char *p) {
     return sum;
 }
 
+static long rss_pages(void) {
+    long size = 0, resident = -1;
+    FILE *statm = fopen("/proc/self/statm", "r");
+    if (statm && fscanf(statm, "%ld %ld", &size, &resident) != 2) resident = -1;
+    if (statm) fclose(statm);
+    return resident;
+}
+
+// A DONTUNMAP move of a mostly untouched reservation (ART's 1 GiB pools)
+// must not commit it, and must move zero and nonzero pages exactly, even
+// onto a MREMAP_FIXED destination that held other data.
+static void check_sparse_move(void) {
+    const size_t len = 256u << 20;
+    char *space = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    char *target = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    CHECK(space != MAP_FAILED && target != MAP_FAILED);
+    if (space == MAP_FAILED || target == MAP_FAILED) return;
+    space[0] = 1;
+    space[len / 2 + 7] = 2;
+    memset(target + page, 0x77, page);  // stale bytes under a zero source page
+    long before = rss_pages();
+    char *moved = mremap(space, len, len, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+                         target);
+    CHECK(moved == target);
+    if (moved != target) return;
+    CHECK(moved[0] == 1 && moved[len / 2 + 7] == 2 && moved[page] == 0 &&
+          moved[2 * page - 1] == 0 && moved[len - 1] == 0);
+    CHECK(space[0] == 0 && space[len / 2 + 7] == 0);  // source stays mapped, empty
+    long after = rss_pages();
+    CHECK(before >= 0 && after >= 0 && (after - before) * (long)page < (32l << 20));
+    munmap(space, len);
+    munmap(target, len);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     page = (size_t)sysconf(_SC_PAGESIZE);
@@ -377,6 +413,7 @@ int main(void) {
         .start = (uintptr_t)heap, .len = PAGES * page}) == 0);
     CHECK(bad_faults == 0);
     close(uffd);
+    check_sparse_move();
     printf("userfaultfd: %d checks %s\n", checks, failures ? "FAILED" : "ALL PASS");
     return failures ? 1 : 0;
 }

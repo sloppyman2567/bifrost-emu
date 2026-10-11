@@ -39,6 +39,7 @@ struct IRBlock;
 // frostjit.cpp (codegen).
 enum class IROp : uint8_t {
     NOP,            // no operation (used by optimizer as a tombstone)
+    MEMORY_BARRIER, // order guest memory accesses; preserves registers/NZCV
     IMM,            // dest = imm                          (constant)
     MOV,            // dest = src1                         (copy)
     LOAD_REG,       // dest = arm64_reg[src1]              (read ARM64 reg)
@@ -2207,6 +2208,7 @@ struct IRBlock {
     // Optimization stats (filled by optimize_ir)
     int dce_removed = 0;
     int fold_subst  = 0;
+    bool ssa_optimized = false; // scalar SSA construction, value numbering and lowering ran
     bool fwd_enabled = false;  // load-forwarding ran (BIFROST_BLOCK_TRACE reports it)
     IRBlock() = default;
 };

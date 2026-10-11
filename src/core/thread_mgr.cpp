@@ -278,6 +278,10 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
 }
 int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                            uint64_t entry_pc, uint64_t arg, uint64_t tls) {
+    if ((dbg().process_trace || dbg().fault_trace) && !(flags & 0x00010000))
+        fprintf(stderr, "[clone] tid=%d flags=0x%llx stack=0x%llx inherited-sp=0x%llx pc=0x%llx\n",
+                parent_cpu.tid, (unsigned long long)flags, (unsigned long long)stack_top,
+                (unsigned long long)parent_cpu.sp, (unsigned long long)entry_pc);
     // arg is the pthread start_routine argument, but Linux clone() semantics
     // require the child to return to the caller (entry_pc) with x0=0; the
     // pthread library wrapper is responsible for fetching arg from a TLS slot
@@ -293,8 +297,8 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // Initialize the child CPU. The child inherits the parent's register
     // state (like clone() does on Linux) except:
     //   x0 = 0   (child return value)
-    //   pc = entry_pc (typically the parent's LR — return from clone())
-    //   sp = stack_top (caller-provided new stack)
+    //   pc = entry_pc (instruction after the clone syscall)
+    //   sp = stack_top when nonzero, otherwise retain the parent's SP
     //   TPIDR_EL0 = tls (if CLONE_SETTLS)
     //   tid = new TID
     //   clear_child_tid = ctid (if CLONE_CHILD_CLEARTID)
@@ -309,7 +313,10 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     gt->cpu.copy_arch_state_from(parent_cpu);
     gt->cpu.regs[0] = 0;
     gt->cpu.pc = entry_pc;
-    gt->cpu.sp = stack_top;
+    // arm64 copy_thread only replaces SP for a nonzero stack argument.
+    // Raw clone(CLONE_VM, 0, ...) is valid; setting SP=0 breaks the first
+    // child stack access and prevents construction of its signal frame.
+    if (stack_top) gt->cpu.sp = stack_top;
     gt->cpu.running = true;
     // Reset per-thread state that shouldn't be inherited from the parent.
     gt->cpu.clear_child_tid = 0;
@@ -451,6 +458,10 @@ void Emulator::join_threads() {
     }
 }
 void Emulator::group_exit(CPU& caller, int code) {
+    if (dbg().process_trace || dbg().fault_trace)
+        fprintf(stderr, "[guest-exit] tid=%d code=%d pc=0x%llx sp=0x%llx last-svc=%llu at=0x%llx\n",
+                caller.tid, code, (unsigned long long)caller.pc, (unsigned long long)caller.sp,
+                (unsigned long long)caller.last_svc_num, (unsigned long long)caller.last_svc_pc);
     caller.exit_code = code;
     caller.running = false;
     bool expected = false;
@@ -648,7 +659,7 @@ void Emulator::kick_cpu_wait(CPU& target) {
 }
 
 std::shared_ptr<CPU> Emulator::find_cpu_by_tid(int tid) {
-    if (tid == 1) return std::shared_ptr<CPU>(&main_cpu_, [](CPU*){});
+    if (tid == main_cpu_.tid) return std::shared_ptr<CPU>(&main_cpu_, [](CPU*){});
     std::lock_guard<std::mutex> g(threads_mu_);
     for (auto& gt : threads_) {
         if (gt->tid == tid) return std::shared_ptr<CPU>(gt, &gt->cpu);

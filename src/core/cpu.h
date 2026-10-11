@@ -289,23 +289,27 @@ public:
     bool     excl_tag_valid = false;
     uint64_t excl_tag_addr  = 0;
     uint32_t excl_tag_size  = 0;
-    void excl_mark(uint64_t addr, uint32_t size) {
+    uint64_t excl_value = 0;
+    void excl_mark(uint64_t addr, uint32_t size, uint64_t value) {
         excl_tag_valid = true;
         excl_tag_addr  = addr;
         excl_tag_size  = size;
+        excl_value = value;
     }
     void excl_clear() { excl_tag_valid = false; }
     bool excl_check(uint64_t addr, uint32_t size) const {
         if (!excl_tag_valid) return false;
-        uint64_t a_lo = excl_tag_addr;
-        uint64_t a_hi = excl_tag_addr + excl_tag_size;
-        uint64_t b_lo = addr;
-        uint64_t b_hi = addr + size;
-        return (a_lo < b_hi) && (b_lo < a_hi);
+        return excl_tag_addr == addr && excl_tag_size == size;
     }
     // Host-managed return boundary for guest SDL thread functions. Nested
     // native call dispatch must unwind when a nonlocal jump reaches it.
     uint64_t jit_stop_pc = 0;
+    // Bound host frames independently of the guest's stack. At the limit,
+    // native callers unwind without resuming their guest continuations;
+    // the outer dispatcher continues at the already committed CPU.pc.
+    static constexpr uint64_t JIT_MAX_CALL_DEPTH = 16;
+    uint64_t jit_call_depth = 0;
+    bool jit_dispatch_requested = false;
     uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
     // Host-only Tier-2 observations. Generated hot completions deposit one
     // credit using a flag-neutral store; cold exits consume it in C++.

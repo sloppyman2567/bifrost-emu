@@ -22,6 +22,7 @@
 // IR is roughly 40% smaller than the naive IR and runs ~3x faster in
 // the x86 codegen.
 #include "ir/ir.hpp"
+#include "ir/ssa.hpp"
 #include "core/emulator.h"
 #include "debug_flags.h"
 #include <unordered_map>
@@ -237,6 +238,10 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     const auto& fwd_ranges = dbg().fwd_ranges;
     if (!fwd_ranges.empty() && !bifrost::DebugFlags::in_ranges(fwd_ranges, block.start_pc))
         fwd_requested = false;
+    // Tier-2 still concatenates legacy blocks with globally allocated vregs;
+    // its region needs one SSA graph rather than independently lowered blocks.
+    block.ssa_optimized = !force_fwd && fwd_requested && !dbg().no_ssa &&
+        optimize_ir_ssa(block, dbg().ir_validate);
     bool block_has_atomics = false;
     if (fwd_requested) {
         for (const auto& inst : block.insts) {
@@ -249,7 +254,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             }
         }
     }
-    bool fwd_enabled = fwd_requested && !block_has_atomics;
+    bool fwd_enabled = fwd_requested && !block_has_atomics && !block.ssa_optimized;
     block.fwd_enabled = fwd_enabled;
     ConstMap consts;
     CopyMap  copies;
@@ -883,6 +888,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                 [](IROp op) -> const char* {
                     switch (op) {
                     case IROp::NOP: return "NOP";
+                    case IROp::MEMORY_BARRIER: return "MEMORY_BARRIER";
                     case IROp::IMM: return "IMM";
                     case IROp::MOV: return "MOV";
                     case IROp::LOAD_REG: return "LOAD_REG";

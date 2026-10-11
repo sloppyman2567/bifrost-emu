@@ -387,11 +387,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     IRBlock ir_block;
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
-    // Limit block size based on register pressure. With 10 host regs and
-    // >256 vregs, the allocator's spill/reload traffic becomes a
-    // correctness hazard. Cap blocks at 32 instructions — enough for
-    // tight loops, short enough that vreg count stays manageable.
-    constexpr int MAX_BLOCK_REG_PRESSURE = 32;
+    // Grow simple blocks beyond the old fixed cap, but stop dense IR
+    // before scratch/frame growth becomes excessive. Calls retain their
+    // independent limits. The diagnostic cap permits matched A/B runs.
+    const int max_block_insts = dbg().jit_block_limit;
     // limit the number of CALL_INTERP fallbacks per
     // block. Each CALL_INTERP invalidates all cached vregs, and each
     // subsequent clobber_flags() drops non-dirty vregs from RAX/RCX/RDX.
@@ -433,9 +432,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // future regalloc change that can run the leaf with a fresh register
     // context.
     static const bool leaf_inline_enabled_ = (getenv("BIFROST_ENABLE_LEAF_INLINE") != nullptr);
-    bool has_inlined_leaf = false;  // exempts the block from the >32 interp_only demotion
+    bool has_inlined_leaf = false;  // cannot use contiguous interpreter step counts
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
-    while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
+    while (!block_ended && instr_count < max_block_insts &&
+           !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
             block_profile.entry_point++;
@@ -566,7 +566,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
             cur_pc += 4;
         }
     }
-    if (instr_count >= MAX_BLOCK_REG_PRESSURE) block_profile.max_size++;
+    const bool size_limited = instr_count >= max_block_insts ||
+        block_translation_budget_reached(ir_block, instr_count, g_alloc.next);
+    if (size_limited) block_profile.max_size++;
     if (instr_count == 0) {
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
@@ -621,13 +623,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     //
     // Interp-only blocks are cached (so we skip the re-decode cost on
     // cache hits) and run exactly instr_count interpreter steps.
-    // blocks with >32 instructions have too much
-    // register pressure for the 10-host-reg allocator. The __multf3
-    // 82-instruction softfloat block generates ~246 vregs, causing
-    // spill/reload correctness bugs. Run long blocks via interpreter.
     // ── interp_only decision ────────────────────────────────────────
-    // Blocks whose instructions are mostly CALL_INTERP fallbacks (or very
-    // long blocks) run entirely via the interpreter — cached, so the
+    // Blocks whose instructions are mostly CALL_INTERP fallbacks
+    // run entirely via the interpreter — cached, so the
     // decode cost is skipped on hits. The heuristic call_interp_count
     // OVER-predicts (it fires for FP_SCALAR/SIMD_DP ops that the IR
     // translator actually handles natively, e.g. FMOV/FCVT/FADD), which
@@ -643,7 +641,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // Inlined-leaf blocks stay in the JIT: their instr_count is NOT a
 // contiguous guest-pc count (the inlined leaf body + implicit BL/RET
 // break the start_pc + count*4 model), so the interp_only step-count
-// semantics and the >32 register-pressure demotion don't apply. The
+// semantics don't apply. The
 // inlined body is native by construction (leaf scan rejects memory,
 // calls, stack, and system ops); CALL_INTERP-heavy caller code still
 // splits naturally via MAX_CALL_INTERP_PER_BLOCK. If the block is
@@ -651,8 +649,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
 // number of interpreter steps — so never demote inline blocks.
 bool demote_interp = false;
 if (!has_inlined_leaf) {
-    demote_interp = (instr_count > 32) ||
-                    (actual_call_interp > 0 && actual_call_interp * 2 > instr_count);
+    demote_interp = actual_call_interp > 0 && actual_call_interp * 2 > instr_count;
 }
 if (demote_interp) {
         if (getenv("BIFROST_CLASS_PROF")) {
@@ -870,7 +867,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             IROp last_op = ir_block.insts.back().op;
             if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||
                 last_op == IROp::BRCOND_BIT || last_op == IROp::BRCOND_FALLTHRU ||
-                (!block_ended && instr_count == MAX_BLOCK_REG_PRESSURE)) {
+                (!block_ended && size_limited)) {
                 tier2_head_eligible = true;
                 for (const auto& inst : ir_block.insts) {
                     if (inst.op == IROp::SVC || inst.op == IROp::BR ||
@@ -1180,7 +1177,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             if (nx.src2 != im.dest || nx.dest == nx.src2 || nx.src1 == nx.src2) continue;
             switch (nx.op) {
                 case IROp::ADD: case IROp::SUB: case IROp::AND:
-                case IROp::OR:  case IROp::XOR:
+                case IROp::OR:  case IROp::XOR: case IROp::MUL:
                     fold_ahead_kind_[i] = 1;  // ALU fold — const must survive imm32 sign-extend
                     break;
                 case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:

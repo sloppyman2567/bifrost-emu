@@ -684,6 +684,8 @@ private:
     std::atomic<size_t> fault_site_count_{0};
     size_t fault_site_constructed_ = 0;
     size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
+    bool compile_guarded_mem(const IRInst& inst);
+    void emit_memory_fault_exit(const IRInst& inst, bool recoverable);
     static thread_local std::atomic<FrostJIT*> fault_jit_;
     void init_fault_recovery();
     void destroy_fault_recovery();
@@ -992,6 +994,8 @@ private:
     // has_taken_chain_slot_. The caller sets taken_chain_target_pc_ first.
     void emit_taken_path_epilogue();
     void emit_call_stop_guard();
+    void emit_call_depth_guard();
+    void emit_call_depth_leave();
     // pushfq / popfq — save/restore x86 RFLAGS to/from stack.
     // Replaces the magic byte sequences `emit_byte(0x9C)` / `emit_byte(0x9D)`
     // that were scattered across ~20 call sites.
@@ -1100,6 +1104,13 @@ private:
     // traffic in SIMD-heavy blocks that fall back to the interpreter
     // frequently.
     static constexpr int NUM_ALLOC_REGS = 10;
+    // Translation complexity budgets, shared with the region collector.
+    // These bound scratch/frame growth, not the precise peak live set.
+    // Retain the original 32-instruction allowance for dense instructions.
+    static bool block_translation_budget_reached(const IRBlock& ir, int count,
+                                                 uint16_t next_vreg) {
+        return count >= 32 && (next_vreg >= 256 || ir.insts.size() >= 512);
+    }
     // R14 is allocatable too (1.5.4-alpha): EMU_REG is no longer read from
     // the register — every emu-consuming codegen site loads it from the
     // frame slot (emu_slot_off(), written by the prologue), so R14 is free
@@ -1685,7 +1696,7 @@ private:
     // Used at block exits (BRCOND fall-through and taken paths) where the
     // next block may read pstate. No-op if flags_in_host_ is false.
     // Does NOT clear flags_in_host_ — the caller manages that.
-    void materialize_flags_to_pstate();
+    void materialize_flags_to_pstate(bool preserve_flags = true);
     // Translation entry point.
     uint64_t (*translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry = nullptr))(CPU*, Emulator*);
 private:

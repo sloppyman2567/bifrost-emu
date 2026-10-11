@@ -395,26 +395,19 @@ void FrostJIT::emit_materialize_flags(bool from_sub) {
     emit_push(RAX);
     emit_pushfq();
     emit_byte(0x58);  // pop rax
-    emit_xor_reg(RDX, RDX);
-    // N = SF = (RAX >> 7) & 1, placed at bit 31
+    // SF/ZF are adjacent in both layouts. Move them together instead of
+    // extracting and shifting each bit separately. 32-bit AND clears the
+    // upper half before the 64-bit shift.
     emit_mov_reg(RCX, RAX);
-    emit_shift_imm8(RCX, 5, 7);
-    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);
-    emit_shift_imm8(RCX, 4, 31);
-    emit_or_reg(RDX, RCX);
-    // Z = ZF = (RAX >> 6) & 1, placed at bit 30
-    emit_mov_reg(RCX, RAX);
-    emit_shift_imm8(RCX, 5, 6);
-    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);
-    emit_shift_imm8(RCX, 4, 30);
-    emit_or_reg(RDX, RCX);
+    emit_byte(0x81); emit_byte(0xE1); emit_u32(0xC0); // and ecx, SF|ZF
+    emit_shift_imm8(RCX, 4, 24);
     // C = ARM C. For ADD: ARM C = x86 CF. For SUB: ARM C = NOT x86 CF.
-    emit_mov_reg(RCX, RAX);
-    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01); // and ecx, 1 (x86 CF)
+    emit_mov_reg(RDX, RAX);
+    emit_byte(0x83); emit_byte(0xE2); emit_byte(0x01); // and edx, 1 (x86 CF)
     if (from_sub) {
-        emit_byte(0x83); emit_byte(0xF1); emit_byte(0x01); // xor ecx, 1 (invert)
+        emit_byte(0x83); emit_byte(0xF2); emit_byte(0x01); // xor edx, 1 (invert)
     }
-    emit_shift_imm8(RCX, 4, 29);
+    emit_shift_imm8(RDX, 4, 29);
     emit_or_reg(RDX, RCX);
     // V = OF = (RAX >> 11) & 1, placed at bit 28
     emit_mov_reg(RCX, RAX);
@@ -656,7 +649,7 @@ extern "C" {
             return 0;
         }
         if (!exclusive) return v;
-        cpu->excl_mark(addr, width);
+        cpu->excl_mark(addr, width, v);
         auto& vec = shard->reservations[addr];
         bool found = false;
         for (auto*& p : vec) {
@@ -676,7 +669,7 @@ extern "C" {
             // (the JIT normally bypasses Memory::write; forced-slow stores
             // should still carry a pc).
             Memory::note_interp_pc(cpu->pc);
-            emu->mem().write(addr, &val, width);
+            ok = emu->mem().compare_exchange(addr, cpu->excl_value, val, width);
         } catch (UnmappedMemory& e) {
                 int si_code = e.segv_code();
                 deliver_signal(*emu, *cpu, emu->signals(), e.signo(),

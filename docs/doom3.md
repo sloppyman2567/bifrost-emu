@@ -1,6 +1,15 @@
 # Doom 3 (dhewm3)
 
-## Current status (2026-10-05)
+## Current status (2026-10-11)
+
+After the scalar JIT flag/guard optimizations and SSA integration, the user
+reported a noticeable gameplay improvement, followed by intermittent freezes.
+This is a live user observation, not a matched-scene benchmark. The freeze's
+cause has not been localized and no SSA on/off comparison has been captured;
+the JIT changes do not establish a stability fix. The measured CoreMark results,
+SSA coverage and verification limits are recorded in [JIT.md](JIT.md#optimization-checkpoint-2026-10-11).
+
+### Previous gameplay checkpoint (2026-10-05)
 
 Use the default tier-1 JIT with MT chaining. Tier-2 is now opt-in via
 `BIFROST_TIER2=1` after a reported gameplay slowdown with MT region promotion.

@@ -145,7 +145,7 @@ enum class InstClass : uint16_t {
     HLT_IMM,        // HLT #imm
     MSR_SYS,        // MSR <sysreg>, Xt
     MRS_SYS,        // MRS Xt, <sysreg>
-    HINT,           // NOP/WFE/WFI/SEV/YIELD
+    HINT,           // NOP/WFE/WFI/SEV/YIELD and DMB/DSB/ISB
     // BARRIER already declared above
     CLREX_INST,     // CLREX
     SYS_NOP,        // Other system instructions (NOP)
@@ -153,6 +153,12 @@ enum class InstClass : uint16_t {
     SIMD_DP,        // Generic SIMD data processing (sub-dispatch by raw bits)
     FP_SCALAR,      // Generic FP scalar (sub-dispatch by raw bits)
 };
+// DMB/DSB share the hint decode class, but have architectural memory effects.
+// Preserve every domain/type option; a full host fence may be stronger.
+constexpr bool is_data_memory_barrier(uint32_t raw) {
+    return (raw & 0xFFFFF0FFu) == 0xD50330BFu ||
+           (raw & 0xFFFFF0FFu) == 0xD503309Fu;
+}
 // ── Decoded instruction ─────────────────────────────────────────────────
 // All fields extracted from a 32-bit ARM64 instruction word. The decoder
 // fills these; the interpreter reads them. The interpreter NEVER does bit

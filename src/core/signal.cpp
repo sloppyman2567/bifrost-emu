@@ -532,11 +532,18 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         if (uint64_t block_pc = fault_trace_block_pc())
             snprintf(block, sizeof(block), " jit-block=0x%llx",
                      static_cast<unsigned long long>(block_pc));
-        fprintf(stderr, "[fault] tid=%d sig=%d code=%d addr=0x%llx pc=0x%llx%s sp=0x%llx lr=0x%llx\n",
+        uint64_t code = 0;
+        try { code = emu.mem().load<uint64_t>(cpu.pc); } catch (...) {}
+        fprintf(stderr, "[fault] tid=%d sig=%d code=%d addr=0x%llx pc=0x%llx%s sp=0x%llx lr=0x%llx insns=%016llx x0=%llx x1=%llx x2=%llx x3=%llx\n",
                 cpu.tid, signo, si_code, static_cast<unsigned long long>(fault_addr),
                 static_cast<unsigned long long>(cpu.pc), block,
                 static_cast<unsigned long long>(cpu.sp),
-                static_cast<unsigned long long>(cpu.regs[30]));
+                static_cast<unsigned long long>(cpu.regs[30]),
+                static_cast<unsigned long long>(code),
+                static_cast<unsigned long long>(cpu.regs[0]),
+                static_cast<unsigned long long>(cpu.regs[1]),
+                static_cast<unsigned long long>(cpu.regs[2]),
+                static_cast<unsigned long long>(cpu.regs[3]));
     }
     const bool trace = signal_trace_enabled();
     if (trace) {
