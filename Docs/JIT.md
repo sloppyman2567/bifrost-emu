@@ -987,6 +987,34 @@ replay is suspended rather than restoring shared memory underneath workers.
 
 ## Multithreaded Tier-2 and chaining (2026-10-04)
 
+### Bounded MT self-loops (2026-10-11)
+
+Tier-1 conditional branches to their own block now retain the current frame,
+eligible GPR pins and cached vectors in MT mode. The back-edge uses an immutable
+guard and an atomic cell pointing to this translation's body, bypassing prologue
+reloads. It checks the callback stop PC and the existing 256-edge execution
+lease; expiry or revocation commits carried state and returns to dispatch.
+Range/full invalidation clears the cell. Target refresh and Tier-2 publication
+never redirect a body cell into a different translation's frame or register
+layout. Cells and retired code retain the existing lifetime policy.
+
+BRCOND commits NZCV before the MT guard because its checks overwrite host
+flags and any iteration may become an exit. The ST-only dead-flag shortcut
+remains ST-only. CBZ/CBNZ and TBZ/TBNZ preserve their pre-branch NZCV contract.
+`BIFROST_NO_SELFLOOP=1` restores ordinary loop edges; `BIFROST_NO_PIN=1`
+disables GPR pinning, and `BIFROST_NO_CHAIN=1` also disables MT body edges.
+Both frame layouts support this path. Tier-2 multi-block regions retain their
+whole-iteration entry policy described below.
+
+In one matched synthetic batch, 200 million counter-loop iterations used
+239.2 → 195.2 ms of thread CPU time (18% less), and a two-lane vector
+accumulation loop used 1535.5 → 241.0 ms (6.4x throughput). The flag-heavy
+integer loop was unchanged at approximately 286 ms. These are local loop
+measurements, not game FPS or general MT scaling guarantees. See
+[validation and measurement bounds](TESTS.md#bounded-mt-self-loops-2026-10-11).
+
+### Region publication and execution
+
 Tier-1 and block chaining are the default. Tier-2 promotion is experimental
 and disabled by default in both single-threaded and MT execution. Opt in with
 `BIFROST_TIER2=1`; `BIFROST_TIER2=0` explicitly disables it. The current MT

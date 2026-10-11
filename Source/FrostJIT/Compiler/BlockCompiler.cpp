@@ -740,7 +740,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Eligibility (conservative — an un-pinned vreg is just a missed
     // optimization; an incorrectly pinned one is a miscompile):
     //   * the block actually gets the self-loop slot (is_selfloop &&
-    //     !BIFROST_NO_SELFLOOP — mirrors Branch.cpp).
+    //     !BIFROST_NO_SELFLOOP, plus chaining enabled in MT — mirrors Branch.cpp).
     //   * no call-like ops (CALL_INTERP/BL_CALL/BLR_CALL/SVC/BR): those run
     //     interpreter/guest code that writes cpu.regs[] DIRECTLY without a
     //     STORE_REG, so the pin would hold a stale value and a later
@@ -754,7 +754,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
         pinned_host_regs_ = 0;
         keep_store_dest_ = false;
-        bool no_selfloop = mt_active() || (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+        bool no_selfloop = (mt_active() && dbg().no_chain) ||
+            (getenv("BIFROST_NO_SELFLOOP") != nullptr);
         bool is_selfloop = false;
         if (!ir_block.insts.empty()) {
             const IRInst& last = ir_block.insts.back();
@@ -1225,14 +1226,18 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     if (has_selfloop_slot_) {
         entry.has_selfloop_slot = true;
         entry.selfloop_patch_off = selfloop_patch_off_;
-        // Patch the selfloop slot: `jmp rel32` → block body start.
-        size_t body_off = block_body_start_off_;
-        int32_t self_rel = static_cast<int32_t>(body_off - (selfloop_patch_off_ + 5));
-        code_buf_[selfloop_patch_off_] = 0xE9;  // jmp rel32
-        code_buf_[selfloop_patch_off_ + 1] = self_rel & 0xFF;
-        code_buf_[selfloop_patch_off_ + 2] = (self_rel >> 8) & 0xFF;
-        code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
-        code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
+        // MT body edges were emitted with a revocable data cell. Never
+        // patch their instructions or redirect them to a different prologue.
+        if (!mt_active()) {
+            // Patch the selfloop slot: `jmp rel32` → block body start.
+            size_t body_off = block_body_start_off_;
+            int32_t self_rel = static_cast<int32_t>(body_off - (selfloop_patch_off_ + 5));
+            code_buf_[selfloop_patch_off_] = 0xE9;  // jmp rel32
+            code_buf_[selfloop_patch_off_ + 1] = self_rel & 0xFF;
+            code_buf_[selfloop_patch_off_ + 2] = (self_rel >> 8) & 0xFF;
+            code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
+            code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
+        }
     }
     if (private_entry) {
         *private_entry = std::move(entry);

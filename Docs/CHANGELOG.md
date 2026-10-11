@@ -12,6 +12,20 @@ The runtime version remains **1.5.5**. This consolidates work on the current
 branch; it does not create a new release tag. Older version labels below
 are historical records, and v2.0 remains planned.
 
+### Bounded multithreaded JIT loops (2026-10-11)
+
+- Conditional Tier-1 self-loops retain their frame, eligible GPR pins and cached
+  vectors in MT mode. Immutable guards use revocable body-target cells, preserving
+  the 256-edge lease, callback boundaries and code invalidation. Body cells cannot
+  be redirected into a different translation's register/frame layout.
+- MT flag-setting branches commit NZCV before checking the loop guard. Cold exits
+  save carried register/vector state; both frame layouts and existing opt-outs work.
+- In a matched synthetic batch, counter-loop CPU time falls 18%, and vector-loop
+  throughput rises 6.4x; a flag-heavy loop is unchanged. These are loop results,
+  not game-performance claims. Four-worker zstd passes native round-trip validation.
+- Full JIT, differential/SSA, MT/Tier-2 and expanded immutable-publication oracles
+  pass. See [validation and timing limits](TESTS.md#bounded-mt-self-loops-2026-10-11).
+
 ### JIT flag-arithmetic spills (2026-10-11)
 
 - ADDS/SUBS/TST retain allocated operand registers, reusing last-use scratch

@@ -158,7 +158,9 @@ void FrostJIT::refresh_mt_edges(uint64_t pc) {
         fn = reinterpret_cast<uint64_t>(chain_skip_enabled() && block->second.chain_entry
             ? block->second.chain_entry : block->second.fn);
     for (MtEdge* edge : refs->second) {
-        if (!edge->live || edge->sampling_private) continue;
+        // A body entry carries this translation's pins and frame. It must
+        // never jump into another translation, including a promoted region.
+        if (!edge->live || edge->sampling_private || edge->internal_loop) continue;
         uint64_t target = edge->cold_entry && block != blocks_.end()
             ? reinterpret_cast<uint64_t>(block->second.fn) : fn;
         if (edge->target.exchange(target, std::memory_order_release) != target && target && mt_active())

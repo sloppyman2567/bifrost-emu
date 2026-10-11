@@ -20,10 +20,52 @@
 #include "System/Core/Emulator.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/CodeGen/Native/NativeStructure.hpp"
+#include "System/Core/DebugFlags.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
 namespace arm64emu {
+// Keep the current frame and cached loop state, but let MT invalidation
+// revoke the back-edge through a data cell. Flags must be committed before
+// entering this helper: its lease/sentinel checks overwrite host RFLAGS.
+bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
+    static const bool no_selfloop = getenv("BIFROST_NO_SELFLOOP") != nullptr;
+    if (target_pc != current_start_pc_ || no_selfloop ||
+        (mt_active() && dbg().no_chain)) return false;
+    has_selfloop_slot_ = true;
+    if (!mt_active()) {
+        selfloop_patch_off_ = code_buf_used_;
+        emit_byte(0xE9); emit_u32(0);
+        return true;
+    }
+    // R11 may hold a deferred STORE_REG value. Use only RAX, preserving
+    // its old mapping before the guard and writing the next PC on cold exit.
+    clobber_host_reg(RAX);
+    selfloop_patch_off_ = code_buf_used_;
+    MtEdge* edge = create_chain_edge(target_pc, false, selfloop_patch_off_);
+    edge->internal_loop = true;
+    edge->target.store(reinterpret_cast<uint64_t>(code_buf_ + block_body_start_off_),
+                       std::memory_order_relaxed);
+    mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
+    emit_mov_imm_to_rax(target_pc);
+    // cmp rax,[rbx+jit_stop_pc]; je cold exit
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
+    emit_u32(offsetof(CPU, jit_stop_pc));
+    size_t stop = emit_jcc_rel32_placeholder(0x4);
+    // Same 256-edge lease as ordinary MT chains (zero also expires).
+    emit_byte(0x83); emit_byte(0xAB);
+    emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+    size_t budget = emit_jcc_rel32_placeholder(0x6);
+    emit_mov_imm_to_rax(reinterpret_cast<uint64_t>(&edge->target));
+    emit_load(RAX, RAX, 0);
+    emit_test_reg(RAX, RAX);
+    size_t empty = emit_jcc_rel32_placeholder(0x4);
+    emit_byte(0xFF); emit_byte(0xE0); // jmp rax (body entry, same frame)
+    for (size_t p : {stop, budget, empty})
+        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    // The caller emits the taken cold exit, committing GPRs and vectors.
+    return true;
+}
 void FrostJIT::emit_call_depth_guard() {
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_call_depth));
     emit_alu_imm(RCX, 7, CPU::JIT_MAX_CALL_DEPTH); // CMP
@@ -191,13 +233,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // jumps to the body — a taken path returning to the dispatcher
             // re-runs the prologue, whose preloads read STALE cpu.regs[]
             // for the deferred pins (infinite loop).
-            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (bp.target == current_start_pc_) && !mt_active();
-            if (is_selfloop && !no_selfloop_) {
-                has_selfloop_slot_ = true;
-                selfloop_patch_off_ = code_buf_used_;
-                emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
-            }
+            emit_selfloop_backedge(bp.target);
             emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
@@ -209,7 +245,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
-                // Verification disables the loop jump and reaches this exit.
+                // Verification or an expired/revoked MT edge reaches this exit.
                 // Commit the iteration without consuming fall-through dirtiness.
                 flush_all_vregs_keep();
                 vec_cache_writeback_all(false);
@@ -251,13 +287,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // the block body start. Also required for loop-carried pinning:
             // deferred pins only persist across a back-edge that jumps to the
             // body, not one that re-enters the prologue (stale preloads).
-            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (bp.target == current_start_pc_) && !mt_active();
-            if (is_selfloop && !no_selfloop_) {
-                has_selfloop_slot_ = true;
-                selfloop_patch_off_ = code_buf_used_;
-                emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
-            }
+            emit_selfloop_backedge(bp.target);
             emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
@@ -266,7 +296,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
-                // Verification disables the loop jump and reaches this exit.
+                // Verification or an expired/revoked MT edge reaches this exit.
                 // Commit the iteration without consuming fall-through dirtiness.
                 flush_all_vregs_keep();
                 vec_cache_writeback_all(false);
@@ -334,7 +364,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (bp.target == current_start_pc_) && !mt_active();
+            bool is_selfloop = (bp.target == current_start_pc_) &&
+                (!mt_active() || !dbg().no_chain);
             // On a self-loop back-edge, skip the pstate materialization
             // entirely when the block never reads loop-carried flags
             // (flags_loop_carried_, precomputed in translate_block): the
@@ -342,7 +373,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // flags before any consumer, so the pstate store is dead work
             // every iteration (~60 bytes of pushfq/bit-extract/store).
             bool skip_taken_materialize =
-                is_selfloop && !no_selfloop_ && !flags_loop_carried_;
+                is_selfloop && !no_selfloop_ && !flags_loop_carried_ && !mt_active();
             // If CMC was emitted, re-invert CF before materializing flags.
             // Skipped along with the materialize: the loop body re-sets CF
             // before any consumer reads it.
@@ -366,11 +397,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // tight loops (e.g. bench_mips: 7.4s → 1.4s).
             //
             // Disable with BIFROST_NO_SELFLOOP=1 for debugging.
-            if (is_selfloop && !no_selfloop_) {
-                has_selfloop_slot_ = true;
-                selfloop_patch_off_ = code_buf_used_;
-                emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
-            }
+            emit_selfloop_backedge(bp.target);
             emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;
@@ -403,7 +430,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 taken_chain_target_pc_ = bp.target;
                 emit_taken_path_epilogue();
             } else {
-                // Verification disables the loop jump and reaches this exit.
+                // Verification or an expired/revoked MT edge reaches this exit.
                 // Commit the iteration without consuming fall-through dirtiness.
                 flush_all_vregs_keep();
                 vec_cache_writeback_all(false);

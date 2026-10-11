@@ -10,6 +10,53 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Bounded MT self-loops (2026-10-11)
+
+The strict GPU-enabled JIT suite passes **311/311** with IR validation and
+register-allocation checks. `make verify` passes **75 differential fixtures,
+six threaded oracle runs and 21,836 SSA host checks**. Concurrent execution
+uses independent oracles rather than shared-memory differential replay.
+
+The expanded `jit_mt_publication.cpp` oracle covers SUBS/B.NE, CBNZ, TBZ,
+vector FADD and loop-carried ADCS carry. Eight CPUs execute each loop while
+the host invalidates its code; final values, NZCV and vector lanes are checked.
+Separate checks cover lease expiry, an initially zero lease, callback stop
+sentinels, stale body revocation after retranslation and synchronized code
+rewrites. Published instruction bytes remain unchanged. Its runner now checks
+both frame layouts. The oracle also passes with self-loops disabled, GPR pins
+disabled, and AVX2/FMA3 disabled.
+
+`test_jit_mt.sh` passes default, Tier-2 enabled/disabled, chaining disabled and
+ordinary-frame modes, checking both results and actual edge/region publication.
+The full suite also includes Tier-2 discovery, feedback, measurement and
+twenty mutex promotion-stress runs. Headless publication checks and the final
+GPU-enabled executable/library build pass.
+
+A temporary host harness times 200 million iterations using
+`CLOCK_THREAD_CPUTIME_ID`, checking a closed-form integer sum and exact vector
+results. The first before/after batch has four measured samples per loop after
+one initial sample, with default guards, block cap and Tier-2 disabled:
+
+| Loop | Before median CPU ms | After median CPU ms |
+|---|---:|---:|
+| SUBS/B.NE integer sum | 285.9 | 286.0 |
+| CBNZ integer sum | 239.2 | 195.2 |
+| CBNZ with vector FADD | 1535.5 | 241.0 |
+
+A second batch measured 329.1/286.1, 284.4/195.2 and 1848.0/241.1 ms,
+respectively. Background load was not controlled; thread CPU time excludes
+descheduling but cannot eliminate frequency/cache interference. The vector
+and counter loops benefit consistently; the flag-heavy loop has no stable
+gain established by these samples.
+
+Real AArch64 zstd compression with four workers on a temporary 16 MiB corpus
+passes native decompression and byte-for-byte comparison in both before/after
+runs; verbose logs confirm MT mode. Two wall-time samples were 0.433/0.420 s
+before and 0.400/0.416 s after, too few and too short to establish a reliable
+application gain. The standard zstd regression also passes both engines.
+No interactive game was launched for this change, and game FPS, complete MT
+scaling and the reported Doom freeze remain unverified.
+
 ### Flag arithmetic register pressure (2026-10-11)
 
 The allocator-aware ADDS/SUBS/TST emission and two-input pinning pass the strict

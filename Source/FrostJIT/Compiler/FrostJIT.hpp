@@ -475,6 +475,7 @@ public:
         bool live = true; // compiler lock only
         bool cold_entry = false;
         bool sampling_private = false;
+        bool internal_loop = false; // body entry retains this block's register state
     };
     struct Tier2BranchProfile {
         std::atomic<uint32_t> enabled{1}, taken{0}, fallthrough{0};
@@ -511,6 +512,7 @@ public:
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false);
+    bool emit_selfloop_backedge(uint64_t target_pc);
     void refresh_mt_edges(uint64_t target_pc);
     void retire_mt_source(uint64_t source_pc);
 
@@ -818,17 +820,13 @@ private:
         // the JIT ran it as a call-and-continue, so end PCs never match and
         // the callee's stores escape the snapshot — quarantined like SVC.
         bool    has_call = false;
-        // Self-loop chaining: when the block's BRCOND taken target equals its
-        // own start PC, a 5-byte `jmp rel32` slot is emitted on the taken path.
-        // After the block is fully compiled, translate_block patches this slot
-        // to jump directly to the block body start — skipping the epilogue,
-        // dispatcher, and prologue. The block body runs again immediately.
-        // This is the single biggest win for tight loops (e.g. bench_mips):
-        // ~25 instructions of per-iteration overhead are eliminated.
+        // Conditional back-edge into this block's body, retaining its frame
+        // and cached registers. ST uses a patched rel32 jump; MT uses an
+        // immutable guard and revocable body-target cell with a bounded lease.
         // has_selfloop_slot = false means no slot was emitted (block is not
         // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
         bool    has_selfloop_slot = false;
-        size_t  selfloop_patch_off = 0;  // offset of the 5-byte jmp slot in code_buf_
+        size_t  selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
         // Taken-path chaining (1.5.4-alpha): a second 5-byte chain slot at
         // the end of the conditional-branch TAKEN path (ret + 4 NOPs). When
         // the taken target is translated, it's patched to `jmp rel32` so the
