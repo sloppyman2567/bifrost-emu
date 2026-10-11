@@ -23,7 +23,7 @@
 #include <thread>
 namespace arm64emu {
 // ── Clone flag constants ───────────────────────────────────────────────
-// Per Linux kernel Include/uapi/linux/sched.h. Named constants replace
+// Per Linux kernel include/uapi/linux/sched.h. Named constants replace
 // the raw hex values (0x100, 0x80000, etc.) that were sprinkled across
 // spawn_thread / fork_guest / the clone syscall handler. This makes the
 // code self-documenting and prevents transcription errors.

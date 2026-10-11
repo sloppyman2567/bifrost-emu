@@ -1,6 +1,6 @@
 // EmulatorBridge.cpp — Glue between Emulator and FrostJIT.
 //
-// Emulator's constructor/destructor live in Source/System/Core/Emulator.cpp.
+// Emulator's constructor/destructor live in System/Core/Emulator/Lifecycle.cpp.
 // This file holds the JIT-specific Emulator methods that need to see
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "System/Core/Emulator.hpp"

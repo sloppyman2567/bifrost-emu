@@ -36,6 +36,13 @@ check pass. An isolated fixture using the actual Makefile verifies source
 rename/removal, removal of obsolete archive members, executable relinking and
 an unchanged incremental rebuild. Python and shell tooling syntax checks pass.
 
+A follow-up path audit found and repaired the optional SDL2 downloader's
+incorrect capitalization of the SDK's `include/SDL2` directory and stale build
+instructions. An isolated synthetic `.deb` fixture fails on the prior script
+and passes fresh extraction, configuration-header compilation, runtime-library
+symlink and cached rerun checks on the repaired script. This does not test a live
+APT download. Source navigation comments now point to the split implementations.
+
 These are observed local test results, not a new ISA/API specification audit.
 Graphics/application smoke tests do not establish sustained gameplay or resolve
 the previously reported game freezes. Clean builds still emit existing warnings

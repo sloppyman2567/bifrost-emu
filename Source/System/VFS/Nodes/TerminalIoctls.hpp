@@ -36,7 +36,7 @@ namespace arm64emu::yggdrasil {
 // be identical, but relying on that coincidence is fragile — explicit
 // is better.
 //
-// Reference: Linux UAPI, Include/uapi/asm-generic/ioctls.h
+// Reference: Linux UAPI, include/uapi/asm-generic/ioctls.h
 namespace ioctl_num {
     constexpr uint32_t REQ_TCGETS     = 0x5401;  // read termios
     constexpr uint32_t REQ_TCSETS     = 0x5402;  // write termios

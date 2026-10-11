@@ -61,7 +61,7 @@
 #include <memory>
 #include <string>
 namespace arm64emu {
-// Forward-declare GraphicThunk (defined in Source/System/Graphics/Thunks/GraphicThunk.cpp).
+// Forward-declare GraphicThunk (defined in System/Graphics/Thunks/GraphicThunk.hpp).
 class GraphicThunk;
 // Forward-declare AudioThunk and DisplayThunk (1.5.4-alpha).
 class AudioThunk;
@@ -192,7 +192,7 @@ public:
     //     nullptr for every dlsym, so the guest falls back to its
     //     own software rendering (or fails gracefully).
     //
-    // See Source/System/Graphics/Thunks/GraphicThunk.cpp for the implementation and the
+    // See Source/System/Graphics/Thunks/GraphicThunk/ for the implementation and the
     // list of supported entry points.
     GraphicThunk* thunk();
     // ── EXPERIMENTAL: Audio API thunking (1.5.4-alpha) ─────────────

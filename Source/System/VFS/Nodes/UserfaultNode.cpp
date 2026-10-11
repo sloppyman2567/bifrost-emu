@@ -5,7 +5,7 @@
 
 namespace arm64emu::yggdrasil {
 namespace {
-// Include/uapi/linux/userfaultfd.h: _IOWR/_IOR(0xAA, nr, struct).
+// Linux include/uapi/linux/userfaultfd.h: _IOWR/_IOR(0xAA, nr, struct).
 constexpr uint32_t ioc(uint32_t dir, uint32_t nr, uint32_t size) {
     return dir << 30 | size << 16 | 0xAAu << 8 | nr;
 }

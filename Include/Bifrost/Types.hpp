@@ -18,13 +18,13 @@
 namespace arm64emu {
 // ── Forward declarations ──────────────────────────────────────────────
 // The full class definitions live in their respective subdirectories:
-//   Memory           — Source/System/Core/memory.{h,cpp}
-//   CPU              — Source/System/Core/cpu.{h,cpp}
-//   Emulator         — Source/System/Core/emulator.{h,cpp}  (public decl in bifrost/emulator.hpp)
+//   Memory           — Source/System/Memory/Memory.{hpp,cpp}
+//   CPU              — Source/System/Core/CPU.{hpp,cpp}
+//   Emulator         — Source/System/Core/Emulator/ (public decl in Bifrost/Emulator.hpp)
 //   ElfLoader        — Source/System/Loader/ElfLoader.cpp
-//   FrostJIT         — Source/FrostJIT/frostjit.{h,cpp}   (public decl in jit/frostjit.hpp)
-//   SignalTable      — Source/System/Core/signal.{h,cpp}
-//   GraphicsBackend  — Include/graphics.hpp
+//   FrostJIT         — Source/FrostJIT/Compiler/FrostJIT.{hpp,cpp}
+//   SignalTable      — Source/System/Core/Signals.{hpp,cpp}
+//   GraphicsBackend  — Source/System/Graphics/Display/Graphics.hpp
 //   IRBlock / IRInst — Source/FrostJIT/IR/IR.hpp
 class Memory;
 class CPU;

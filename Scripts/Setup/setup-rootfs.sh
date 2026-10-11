@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-# Resolve project root (parent of the scripts/ directory).
+# Resolve project root (two levels above Scripts/Setup/).
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 

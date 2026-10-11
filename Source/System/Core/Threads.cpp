@@ -342,7 +342,7 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // but the LRU state should start fresh).
     std::fill(gt->cpu.decode_cache.begin(), gt->cpu.decode_cache.end(),
               CPU::CacheEntry{});
-    // Named clone flag constants (per Include/uapi/linux/sched.h).
+    // Named clone flag constants (per Linux include/uapi/linux/sched.h).
     // Use a BIFROST_ prefix to avoid collision with system headers
     // that may #define CLONE_SETTLS etc.
     constexpr uint64_t BIFROST_CLONE_SETTLS          = 0x00080000;

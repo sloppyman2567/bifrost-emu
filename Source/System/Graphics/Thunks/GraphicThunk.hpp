@@ -1,14 +1,14 @@
-// frost/thunk.hpp — GraphicThunk: forward guest GL/EGL/SDL2 calls to host.
+// GraphicThunk.hpp — forward guest GL/EGL/SDL2 calls to host.
 //
 // v1.4.5-alpha: NEW. The GraphicThunk class is forward-
-// declared in frost/graphics.hpp (so the header doesn't pull in dlfcn.h
+// declared in System/Graphics/Display/Graphics.hpp (so it doesn't pull in dlfcn.h
 // / GL / EGL / SDL2 headers). This header provides the full class
 // definition, needed by:
-//   - frost_graphics/graphics.cpp (FrostGraphics destructor destroys
+//   - System/Graphics/Display/Graphics.cpp (FrostGraphics destructor destroys
 //     the unique_ptr<GraphicThunk> member)
-//   - frost_graphics/thunk.cpp (the class implementation)
-//   - Source/System/Loader/DynamicLinker.cpp (calls GraphicThunk::resolve)
-//   - Source/System/Syscalls/thunk.cpp (calls GraphicThunk::dispatch)
+//   - System/Graphics/Thunks/GraphicThunk/ (the class implementation)
+//   - System/Loader/DynamicLinker/ (calls GraphicThunk::resolve)
+//   - System/Syscalls/Miscellaneous.cpp (calls GraphicThunk::dispatch)
 //
 // External consumers (libbifrost users) do NOT need to include this
 // header — they use FrostGraphics::thunk() which returns a

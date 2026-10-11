@@ -8,12 +8,12 @@
 //   - Source/Interpreter/Decoder/Decoder.hpp            (decoder + DecodedInst)
 //   - Source/FrostJIT/IR/IR.hpp              (IR types + translate/optimize/dump)
 //   - Source/FrostJIT/Compiler/FrostJIT.hpp       (FrostJIT class)
-//   - Include/graphics.hpp           (GraphicsBackend)
+//   - Source/System/Graphics/Display/Graphics.hpp (GraphicsBackend)
 //
 // This umbrella pulls them all in so legacy `#include "System/Core/Common.hpp"`
 // keeps working. New code should include only what it needs.
 #pragma once
-#include "Bifrost/Emulator.hpp"   // pulls in types, version, core/* via core/emulator.h
+#include "Bifrost/Emulator.hpp"   // pulls in types, version and core interfaces
 #include "Bifrost/Version.hpp"
 #include "Interpreter/Decoder/Decoder.hpp"
 #include "FrostJIT/IR/IR.hpp"

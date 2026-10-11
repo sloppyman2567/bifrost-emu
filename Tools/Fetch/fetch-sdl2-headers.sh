@@ -9,8 +9,8 @@
 #   ./Tools/Fetch/fetch-sdl2-headers.sh
 #
 # Then build with:
-#   make USE_SDL2=1 SDL2_CFLAGS="-Itools/sdl2-sdk/include" \
-#        SDL2_LIBS="-Ltools/sdl2-sdk/lib -lSDL2"
+#   make USE_SDL2=1 SDL2_CFLAGS="-ITools/sdl2-sdk/include" \
+#        SDL2_LIBS="-LTools/sdl2-sdk/lib -lSDL2"
 #
 # Or, if sdl2-config is available system-wide, just:
 #   make USE_SDL2=1
@@ -22,10 +22,10 @@ DEB_DIR="sdl2-debs"
 DEB_PATTERN="libsdl2-dev_*.deb"
 
 # ── Check if already set up ──────────────────────────────────────────
-if [ -d "$SDK_DIR/Include/SDL2" ]; then
+if [ -d "$SDK_DIR/include/SDL2" ]; then
     echo "SDL2 SDK already present at Tools/$SDK_DIR/"
-    echo "  Headers:  Tools/$SDK_DIR/Include/SDL2/"
-    echo "  To build: make USE_SDL2=1 SDL2_CFLAGS=\"-I$SDK_DIR/include\" SDL2_LIBS=\"-L$SDK_DIR/lib -lSDL2\""
+    echo "  Headers:  Tools/$SDK_DIR/include/SDL2/"
+    echo "  To build: make USE_SDL2=1 SDL2_CFLAGS=\"-ITools/$SDK_DIR/include\" SDL2_LIBS=\"-LTools/$SDK_DIR/lib -lSDL2\""
     exit 0
 fi
 
@@ -113,10 +113,10 @@ fi
 # but the real config header is in the multiarch path. The data.tar.xz
 # of the .deb contains both — find the multiarch copy and move it
 # alongside the wrapper so `#include <SDL2/_real_SDL_config.h>` works
-# with just `-Itools/sdl2-sdk/include`.
+# with just `-ITools/sdl2-sdk/include`.
 REAL_CONFIG=$(find "$SDK_DIR" -name "_real_SDL_config.h" -type f 2>/dev/null | head -1)
-if [ -n "$REAL_CONFIG" ] && [ ! -f "$SDK_DIR/Include/SDL2/_real_SDL_config.h" ]; then
-    cp "$REAL_CONFIG" "$SDK_DIR/Include/SDL2/_real_SDL_config.h"
+if [ -n "$REAL_CONFIG" ] && [ ! -f "$SDK_DIR/include/SDL2/_real_SDL_config.h" ]; then
+    cp "$REAL_CONFIG" "$SDK_DIR/include/SDL2/_real_SDL_config.h"
     echo "  Copied _real_SDL_config.h (Debian multiarch config header)"
 fi
 
@@ -156,15 +156,15 @@ fi
 # Clean up .deb files (keep them for reference)
 echo ""
 echo "=== SDL2 SDK ready ==="
-echo "  Headers:  Tools/$SDK_DIR/Include/SDL2/"
+echo "  Headers:  Tools/$SDK_DIR/include/SDL2/"
 if [ -d "$SDK_DIR/lib" ]; then
     echo "  Library:  Tools/$SDK_DIR/lib/"
 fi
 echo ""
 echo "To build bifrost-emu with SDL2:"
 echo "  make USE_SDL2=1 \\"
-echo "       SDL2_CFLAGS=\"-Itools/$SDK_DIR/include\" \\"
-echo "       SDL2_LIBS=\"-Ltools/$SDK_DIR/lib -lSDL2\""
+echo "       SDL2_CFLAGS=\"-ITools/$SDK_DIR/include\" \\"
+echo "       SDL2_LIBS=\"-LTools/$SDK_DIR/lib -lSDL2\""
 echo ""
 echo "Or, if SDL2 is installed system-wide, just:"
 echo "  make USE_SDL2=1"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # check-rootfs-libs.sh — verify every ELF in the rootfs has its DT_NEEDED
 # libraries resolvable under the same search order as the emulator's
-# find_library() (Source/System/Loader/DynamicLinker.cpp).
+# find_library() (Source/System/Loader/DynamicLinker/Libraries.cpp).
 #
 # Catches the neverball-class failure (pc=0 from NULL-resolved symbols)
 # before you ever boot the game: a missing lib is one line of output

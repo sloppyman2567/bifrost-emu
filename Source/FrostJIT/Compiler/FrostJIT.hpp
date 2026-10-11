@@ -119,7 +119,7 @@ extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, i
 // Tier-2 in-code fire stub: called from generated block prologues (the
 // per-block hot-head counter, BIFROST_TIER2=1). A plain free function so the
 // prologue can take its address at codegen time; forwards to
-// emu->jit()->tier2_fire_region(). Implemented in Source/FrostJIT/Tier2/Tier2.cpp.
+// emu->jit()->tier2_fire_region(). Implemented in Tier2/Promotion.cpp.
 void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site);
 void bifrost_prof_init(class FrostJIT* jit);
 class FrostJIT {
@@ -620,7 +620,7 @@ public:
     // read-only membership checks, and resets g_alloc per block so it never
     // consumes the global regalloc. Call with the block table quiescent (the
     // hot-head fire site holds the exclusive lock). Implemented in
-    // Source/FrostJIT/Tier2/Tier2.cpp.
+    // Tier2/TraceCollector.cpp.
     Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
     // Tier-2 region compilation (ROADMAP #14, Phase 1 step 3 / M1). Compiles
     // a collected trace as ONE x86 function with ONE region-wide register
@@ -635,7 +635,7 @@ public:
     // region fn is written into code_buf_ alongside translate_block's).
     // Returns nullptr if the trace shape isn't region-qualified. The CALLER
     // replaces blocks_[head_pc].fn with the returned fn; publication is
-    // centralized in tier2_fire_region in Source/FrostJIT/Tier2/Tier2.cpp.
+    // centralized in tier2_fire_region in Tier2/Promotion.cpp.
     // chain_out (optional): receives the region's CHAIN-SKIP entry point
     // (code_buf_ + the post-frame-setup label, mirroring BlockEntry.
     // chain_entry for standalone blocks) when chain-skip is enabled. Chain
@@ -661,7 +661,7 @@ public:
     // W^X machinery (bails when wex_enabled_ — an in-code counter writes the
     // code page, which only exists in non-W^X shared-JIT mode), and takes the
     // exclusive lock only around the map mutations. Implemented in
-    // Source/FrostJIT/Tier2/Tier2.cpp.
+    // Tier2/Promotion.cpp.
     void tier2_fire_region(Emulator& emu, uint64_t pc, size_t site = 0);
     void tier2_region_feedback(CPU& cpu, void* monitor);
     uint64_t tier2_measure(CPU& cpu, Emulator& emu, void* trial);
@@ -676,7 +676,7 @@ public:
     // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
     // when no counter was emitted (off==0). Writes the code page directly —
     // callers hold the exclusive blocks_mutex_ (and tier-2 only runs in
-    // non-W^X mode, so the buffer is RWX). Implemented in Source/FrostJIT/Tier2/Tier2.cpp.
+    // non-W^X mode, so the buffer is RWX). Implemented in Tier2/Promotion.cpp.
     void tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition = false);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The

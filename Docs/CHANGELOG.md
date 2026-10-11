@@ -25,6 +25,9 @@ are historical records, and v2.0 remains planned.
   block compiler. This changes organization, not the supported guest ISA.
 - Repaired adapter/probe/downloader/audit paths and recursive headless header
   checks. Framework contract fixtures now install the required Activity JNI bridge.
+  A follow-up audit repaired SDL2 SDK directory capitalization and printed build
+  paths, verified with an isolated extraction/cache fixture, and refreshed stale
+  source navigation comments.
 - Source manifests trigger relinking after removals/renames; libraries are
   archived fresh so obsolete members cannot survive an incremental refactor.
 - Reduced root AGENTS.md to project-wide rules/navigation, with scoped subsystem
