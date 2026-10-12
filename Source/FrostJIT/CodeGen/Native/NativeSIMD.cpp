@@ -31,6 +31,19 @@ NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xBF3FFC00) == 0x0E200800 && ((w >> 22) & 3) < 3) return K::Reverse64;
     if ((w & 0xBF20FC00) == 0x0E209400 && ((w >> 22) & 3) < 3) return K::MultiplyAdd;
     if ((w & 0xBFC0F400) == 0x0F801000) return K::IndexedFma; // FP32 FMLA by element
+    // Across lanes: 64-bit elements and 32-bit lanes without Q are reserved.
+    const unsigned sz = (w >> 22) & 3;
+    const bool q = (w >> 30) & 1;
+    const bool across_size = sz < 2 || (sz == 2 && q);
+    if ((w & 0x9F3FFC00) == 0x0E303800 && across_size) return K::AcrossLong;   // S/UADDLV
+    if ((w & 0x9F3EFC00) == 0x0E30A800 && across_size) return K::AcrossMinMax; // S/U MAX/MIN V
+    // Widening three-different ops (8-bit to 32-bit sources).
+    const uint32_t three = w & 0x9F20FC00;
+    if (sz < 3 && (three == 0x0E200000 || three == 0x0E202000 || three == 0x0E201000 ||
+                   three == 0x0E203000 || three == 0x0E208000 || three == 0x0E20A000 ||
+                   three == 0x0E20C000)) return K::WidenThree;  // ADDL SUBL ADDW SUBW MLAL MLSL MULL
+    const uint32_t pair = w & 0x9F3FFC00;
+    if (sz < 3 && (pair == 0x0E202800 || pair == 0x0E206800)) return K::PairLong;  // ADDLP ADALP
     return K::None;
 }
 namespace {
@@ -153,6 +166,57 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
     } else if constexpr(K==NativeSimdKind::IndexedFma) {
         unsigned lane=((w>>21)&1)|(((w>>11)&1)<<1); float value=fp<float>(m,lane);
         for(unsigned i=0;i<bytes/4;i++) put_fp(out,i,arm_fp_muladd(fp<float>(d,i),fp<float>(n,i),value));
+    } else if constexpr(K==NativeSimdKind::AcrossLong || K==NativeSimdKind::AcrossMinMax) {
+        // Element `size`; SADDLV/UADDLV write a 2*size sum, MAX/MINV a size lane.
+        auto ext = [&](unsigned i) {
+            uint64_t x = get(n, i, size);
+            return u ? static_cast<int64_t>(x) : signed_lane(x, size * 8);
+        };
+        int64_t acc = ext(0);
+        const bool is_min = (w >> 16) & 1;
+        for (unsigned i = 1; i < bytes / size; i++) {
+            const int64_t x = ext(i);
+            if constexpr (K==NativeSimdKind::AcrossLong) acc += x;
+            else {
+                const bool less = u ? static_cast<uint64_t>(x) < static_cast<uint64_t>(acc) : x < acc;
+                const bool greater = u ? static_cast<uint64_t>(x) > static_cast<uint64_t>(acc) : x > acc;
+                if (is_min ? less : greater) acc = x;
+            }
+        }
+        put(out, 0, K==NativeSimdKind::AcrossLong ? size * 2 : size, static_cast<uint64_t>(acc));
+    } else if constexpr(K==NativeSimdKind::WidenThree) {
+        // Narrow lanes come from the upper halves for the "2" (Q=1) forms;
+        // ADDW/SUBW take Vn at full width.
+        const unsigned op = (w >> 12) & 15, count = 8 / size, half = q ? count : 0;
+        auto ext = [&](const Vec& v, unsigned i) {
+            uint64_t x = get(v, half + i, size);
+            return u ? x : static_cast<uint64_t>(signed_lane(x, size * 8));
+        };
+        for (unsigned i = 0; i < count; i++) {
+            const uint64_t a = ext(n, i), b = ext(m, i), wide = get(n, i, size * 2);
+            uint64_t r;
+            switch (op) {
+                case 0x0: r = a + b; break;                        // ADDL
+                case 0x2: r = a - b; break;                        // SUBL
+                case 0x1: r = wide + b; break;                     // ADDW
+                case 0x3: r = wide - b; break;                     // SUBW
+                case 0x8: r = get(d, i, size * 2) + a * b; break;  // MLAL
+                case 0xA: r = get(d, i, size * 2) - a * b; break;  // MLSL
+                default:  r = a * b; break;                        // MULL
+            }
+            put(out, i, size * 2, r);
+        }
+    } else if constexpr(K==NativeSimdKind::PairLong) {
+        // ADDLP sums adjacent pairs into double-width lanes; ADALP adds Vd.
+        const bool acc = (w >> 14) & 1;
+        for (unsigned i = 0; i < bytes / (size * 2); i++) {
+            uint64_t a = get(n, 2 * i, size), b = get(n, 2 * i + 1, size);
+            if (!u) {
+                a = static_cast<uint64_t>(signed_lane(a, size * 8));
+                b = static_cast<uint64_t>(signed_lane(b, size * 8));
+            }
+            put(out, i, size * 2, a + b + (acc ? get(d, i, size * 2) : 0));
+        }
     }
     write(cpu,rd,out);
 }
@@ -165,6 +229,7 @@ NativeSimdFn native_simd_helper(NativeSimdKind k) {
         CASE(CompareFp); CASE(CompareZeroFp); CASE(CompareZeroInt); CASE(ImmediateFp);
         CASE(VariableShift); CASE(RoundFp); CASE(Convert64); CASE(ScalarAdd);
         CASE(ReduceAdd); CASE(Reverse64); CASE(MultiplyAdd); CASE(IndexedFma);
+        CASE(AcrossLong); CASE(AcrossMinMax); CASE(WidenThree); CASE(PairLong);
         default: return nullptr;
     }
 #undef CASE

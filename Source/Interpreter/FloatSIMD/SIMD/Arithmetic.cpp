@@ -93,7 +93,8 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // zero for U*) and add/subtract them from the wide lanes
         // of Vn. Q selects which half of Vm is used: Q=0 → low
         // half (SADDW), Q=1 → high half (SADDW2). Vd/Vn are always
-        // full 128-bit (4S or 2D); the narrow source is 8H or 4S.
+        // full 128-bit (8H, 4S or 2D); the narrow source is 8B, 4H or 2S.
+        //   SADDW  v.8h ← v.8h + v.8b   (size=0 → src B)
         //   SADDW  v.4s ← v.4s + v.4h   (size=1 → src H)
         //   SADDW  v.2d ← v.2d + v.2s   (size=2 → src S)
         // Encoding sub3_noq values (bit13 = subtract):
@@ -119,14 +120,11 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                 memcpy(&wide, vn + i * esize_dst, esize_dst);
                 uint64_t narrow = 0;
                 memcpy(&narrow, vm + (src_off + i) * esize_src, esize_src);
-                uint64_t ext;
-                if (is_unsigned) {
-                    ext = narrow;
-                } else if (esize_src == 2) {
-                    ext = (uint64_t)(int64_t)(int16_t)narrow;
-                } else {
-                    ext = (uint64_t)(int64_t)(int32_t)narrow;
-                }
+                // Byte sources (.8h ← .8b) sign-extend too; they used to
+                // fall into the 32-bit case and stay positive.
+                const int shift = 64 - 8 * esize_src;
+                const uint64_t ext = is_unsigned ? narrow
+                    : static_cast<uint64_t>(static_cast<int64_t>(narrow << shift) >> shift);
                 uint64_t r = is_sub ? wide - ext : wide + ext;
                 memcpy(vd + i * esize_dst, &r, esize_dst);
             }

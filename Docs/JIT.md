@@ -1183,6 +1183,10 @@ state before helpers that read `cpu.regs`, disable incompatible pinning, and
 preserve `WIN_REG` across every SysV call: it is caller-saved R10, so an
 otherwise correct C++ helper can corrupt all later direct-window accesses.
 Tier-2 treats SIMD helpers as calls for GPR pinning and LICM purposes.
+The translator checks `classify_native_simd` before the interpreter
+fallback, so only classify encodings whose `run<K>` covers every size/Q form
+it accepts; across-lane reductions, widening three-different ops and
+pairwise long adds are covered by `jit_simd_widen_reduce`.
 
 `SIMD_NATIVE_STRUCT` terminates Tier-1 execution with the helper's dynamic
 next PC, so a memory fault returns to the guest signal handler rather than

@@ -850,6 +850,12 @@ Focused additions:
   checked against QEMU. The fixture is selected in both engine modes;
   `--mt` enters sticky multithreaded JIT mode. The old JIT fails 9 of the
   original 14 checks. Coverage excludes complete FPCR/FPSR and trap semantics.
+- `jit_simd_widen_reduce`: native `S/UADDLV`, `S/U MAX/MIN V`, widening
+  three-different ops (`ADDL`, `SUBL`, `ADDW`, `SUBW`, `MLAL`, `MLSL`,
+  `MULL`) and `S/UADDLP`/`S/UADALP` for every size, Q, signed/unsigned and
+  upper-half form against a C reference; 3312 checks pass under QEMU, both
+  engines, JIT verify and IR validation. The old interpreter sign-extended
+  `SADDW`/`SSUBW` byte lanes incorrectly.
 - `jit_msr_nzcv`: `msr nzcv, xN` followed in the same block by a write to
   xN, read back with `mrs` and with `cset` after a pending `cmp`; 64000
   checks. The old JIT fails 30005; qemu-aarch64 and both engines pass.

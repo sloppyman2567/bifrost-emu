@@ -6,7 +6,7 @@ enum class NativeSimdKind : uint8_t {
     None, Select, Dup, Insert, Extract, NarrowShift, WidenShift, WidenHigh,
     NarrowFp, WidenFp, CompareFp, CompareZeroFp, CompareZeroInt, ImmediateFp,
     VariableShift, RoundFp, Convert64, ScalarAdd, ReduceAdd, Reverse64,
-    MultiplyAdd, IndexedFma
+    MultiplyAdd, IndexedFma, AcrossLong, AcrossMinMax, WidenThree, PairLong
 };
 // Compile-time classification. Runtime helpers are specialized by kind and
 // execute only that operation: they never decode or step the interpreter.
