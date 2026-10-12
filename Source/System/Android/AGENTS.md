@@ -16,6 +16,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Framework service stubs are strict: add the exact observed method contract,
   not a blanket default. Preserve package query filtering/copy isolation and
   per-Activity manifest/requested orientation.
+- Windows beyond the launcher Activity's SurfaceView (dialogs, popups, stacked
+  Activities from `FrameworkActivities`) go through WindowManager and
+  `FrameworkWindows`; keep ActivityThread's lifecycle order. Only the session
+  process publishes device services (`sensorservice`, `SurfaceFlingerAIDL`).
 - Managed connectivity presents the host route as Wi-Fi. VALIDATED requires
   the launcher's HTTPS probe returning 204 or its explicit diagnostic override.
 - Keep Android's unmapped null page, real shared/private file mappings and

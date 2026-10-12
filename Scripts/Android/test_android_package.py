@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import importlib.util
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -423,6 +424,8 @@ class PackageTests(unittest.TestCase):
             component += f'<service android:name="{activity}$LifecycleDisabled" android:enabled="false" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleRemote" android:process=":remote" android:exported="false"/>'
             component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
+        if managed == "ManagedActivities" and not split:
+            component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
         required = ' android:isSplitRequired="true"' if not split else ""
         job_permission = '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>' if managed == "ManagedServices" else ""
         manifest.write_text(
@@ -558,13 +561,15 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(
                     result.returncode, 0, result.stdout + "\n" + result.stderr
                 )
-                self.assertIn("abi=42 1.25 guest 1234567890123 1 2 3 4 5 6 7 8", result.stderr)
-                self.assertIn("buffer=2.50 ok", result.stderr)
-                self.assertIn("apk_bionic_fixture: ALL PASS", result.stdout)
-                self.assertIn("apk_media_fixture: REAL FORMAT PASS", result.stdout)
-                self.assertIn("android_service_manager: ALL PASS", result.stdout)
+                # The session writes the app's stdout and stderr to its log.
+                log = Path(re.search(r"\(log: (.+)\)", result.stdout).group(1)).read_text()
+                self.assertIn("abi=42 1.25 guest 1234567890123 1 2 3 4 5 6 7 8", log)
+                self.assertIn("buffer=2.50 ok", log)
+                self.assertIn("apk_bionic_fixture: ALL PASS", log)
+                self.assertIn("apk_media_fixture: REAL FORMAT PASS", log)
+                self.assertIn("android_service_manager: ALL PASS", log)
                 self.assertNotRegex(
-                    result.stdout + result.stderr, r"Fatal signal|\[crash\]|CANNOT LINK"
+                    result.stdout + result.stderr + log, r"Fatal signal|\[crash\]|CANNOT LINK"
                 )
                 print(f"APK Bionic/Wayland: {mode} {backend} passed", flush=True)
         self.assertEqual(
@@ -879,6 +884,33 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(shown), 2, shown)
         self.assertEqual(shown[1][1], "[40,60][280,140]")
         self.assertEqual(text.count("APP_POPUP_REMOVED"), 2)
+
+    def test_managed_activity_stack(self):
+        state = self.work / "activities-state"
+        bundle = self.work / "activities.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("activities", managed="ManagedActivities"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        markers = ("MANAGED_ACTIVITIES_ROOT_RESUMED returned=false", "MANAGED_ACTIVITIES_UNRESOLVED_OK",
+                   "MANAGED_ACTIVITIES_ROOT_PAUSED", "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
+                   "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_SECOND_FOCUS true",
+                   "APP_POPUP_SHOWN", "MANAGED_ACTIVITIES_SECOND_WINDOW",
+                   "MANAGED_ACTIVITIES_SECOND_CLICKED", "MANAGED_ACTIVITIES_RESULT 42 -1 42",
+                   "MANAGED_ACTIVITIES_ROOT_RESUMED returned=true", "MANAGED_ACTIVITIES_SECOND_DESTROYED",
+                   "APP_POPUP_REMOVED", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
+        positions = [text.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions), text[-30000:])
+        # Started for a result: the caller is reported. The window covers
+        # the display, and its button text reached the host layer.
+        self.assertIn("caller=ComponentInfo{org.bifrost.fixture/org.bifrost.fixture.ManagedActivities}", text)
+        width, height = re.search(r"APP_WINDOW_OPEN (\d+)x(\d+)", text).groups()
+        self.assertIn(f"MANAGED_ACTIVITIES_SECOND_WINDOW {width}x{height}", text)
+        self.assertRegex(text, rf"APP_POPUP_SHOWN \d+ \[0,0\]\[{width},{height}\] text=.*Close second")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,22 @@
 # Tests
 
+## Managed Activity stack (2026-10-12)
+
+`PackageTests.test_managed_activity_stack` (`ManagedActivities`) starts a
+second Activity for a result above a SurfaceView Activity. It checks that an
+implicit browser Intent raises `ActivityNotFoundException`, then the order:
+root paused, second created (extra and caller delivered), resumed, focused,
+its display-sized window on the host layer with "Close second", the button
+click, second paused, `onActivityResult(42, RESULT_OK, answer=42)`, root
+resumed, second destroyed and its layer removed. The full Android package
+suite passes 26/26. That run also repaired two regressions from the
+session-owned device services commit (`FrameworkDisplayProbe` and
+`FrameworkPackagesProbe` reflected the old `installServices()` signature) and
+an older test defect: the NativeActivity launch test read the app's output
+from the CLI's stdout/stderr, which the session has written to its log since
+`df3a944`. A real ad has not yet been shown: Kidoz returned no fill during
+the SpongeBob session after the change.
+
 ## Session-owned device services and JIT perf map (2026-10-12)
 
 `PackageTests.test_managed_service_execution` now also requires the app's

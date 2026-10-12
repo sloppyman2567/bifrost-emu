@@ -64,6 +64,8 @@ event, not Android multitouch. The SDL3 adapter filters by its own window ID,
 converts mouse coordinates to pixels and preserves modifier state. Event work
 is bounded per pump. Invalid statuses, types, geometry, actions and nonfinite
 pointer values become `-EPROTO`; error/empty outputs discard poisoned data.
+Mouse back/forward buttons become `KEYCODE_BACK`/`KEYCODE_FORWARD` key events,
+as Android's InputReader synthesizes them.
 
 V2 descriptors may append optional `show_popup`/`remove_popup` callbacks.
 The required size is `BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE`, the original

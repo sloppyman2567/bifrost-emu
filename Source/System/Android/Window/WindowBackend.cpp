@@ -646,6 +646,16 @@ public:
         if (e.key.mod & SDL_KMOD_CAPS) out.meta_state |= 0x100000;
         return 1;
       }
+      // Android's InputReader synthesizes BACK/FORWARD key events from a
+      // mouse's back/forward buttons (synthesizeButtonKeys).
+      if ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+          e.button.windowID == id &&
+          (e.button.button == SDL_BUTTON_X1 || e.button.button == SDL_BUTTON_X2)) {
+        out.type = BIFROST_WINDOW_KEY;
+        out.key_code = e.button.button == SDL_BUTTON_X1 ? 4 : 125;  // AKEYCODE_BACK/FORWARD
+        out.action = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? 0 : 1;
+        return 1;
+      }
       bool pointer = false;
       int pixel_w = 0, pixel_h = 0, logical_w = 0, logical_h = 0;
       if (!sdl_.GetWindowSizeInPixels(window_, &pixel_w, &pixel_h) ||

@@ -1079,6 +1079,50 @@ X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
 that never redraws (no rendering SurfaceView) can keep stale dialog pixels
 after removal.
 
+### Activity stack (2026-10-12)
+
+Play mode starts further Activities of the installed package above the
+launcher Activity (full-screen ads, sign-in and web pages).
+`FrameworkActivities` implements `IActivityTaskManager.startActivity` and
+`startActivityAsUser` (argument layout checked against the Android 15
+framework.jar) and posts the launch to the main thread:
+- the current top Activity pauses (`performPause`), then the new one is
+  created like `ActivityThread.performLaunchActivity`: Activity context with
+  the display override configuration, `Instrumentation.newActivity`, the
+  ActivityThread as `mMainThread`, theme, `onCreate`/`onStart`/
+  `onPostCreate`/`onResume`;
+- `handleResumeActivity`'s `TYPE_BASE_APPLICATION` decor window is added
+  through `WindowManager`, so `FrameworkWindows` draws it full-display,
+  routes touches and keys to it and moves window focus to it;
+- `Activity.finish()` records the result through `finishActivity`; the UI loop
+  pauses the finished Activity, calls the caller's `dispatchActivityResult`
+  for `startActivityForResult`, resumes the Activity below, then stops and
+  destroys the finished one and removes its window.
+`getCallingActivity`/`getCallingPackage` report the caller of an Activity
+started for a result. A host window close destroys stacked Activities before
+the launcher Activity. The log records `APP_ACTIVITY_PAUSED`,
+`APP_ACTIVITY_STARTING`, `APP_ACTIVITY_RESUMED` and `APP_ACTIVITY_DESTROYED`.
+
+The launcher Activity, too, now receives the ActivityThread as `mMainThread`.
+Without it `Activity.startActivity` failed with a null
+`getApplicationThread()`: SpongeBob's Kidoz rewarded ad
+(`FullScreenAdManager`) reported `onAdFailedToShow` and the game stalled
+waiting for the ad.
+
+Only explicit components of the installed package resolve. Implicit Intents
+and other packages (browser, Play Store) return `START_INTENT_NOT_RESOLVED`
+and an unknown class `START_CLASS_NOT_FOUND` (Android 15 values -91 and -92),
+so apps receive `ActivityNotFoundException` as on a device without a handler.
+An Activity below a stacked one is paused but not stopped and keeps its
+surface, as under a translucent Activity. Stacked Activities draw only in
+software, keep the display size regardless of their requested orientation,
+and launch flags, task affinities and `onNewIntent` are not modelled.
+A mouse's back/forward buttons send `KEYCODE_BACK`/`KEYCODE_FORWARD`, as
+Android's InputReader synthesizes them; Escape remains `KEYCODE_ESCAPE`.
+`PackageTests.test_managed_activity_stack` (`ManagedActivities`) checks the
+ordering above, the unresolved implicit Intent, the result, the caller and a
+display-sized window with the button text on the host layer.
+
 Adding `--play` opens a host window, starts/resumes the Activity, reports
 SurfaceView holder callbacks and pumps host input. These callbacks use the
 managed graphics adapters; they are not a WindowManager attachment. The runner

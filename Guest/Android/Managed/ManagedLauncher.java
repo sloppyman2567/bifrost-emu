@@ -96,6 +96,8 @@ public final class ManagedLauncher {
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
     private static final FrameworkDisplay displays = new FrameworkDisplay();
     private static final FrameworkWindows windows = new FrameworkWindows(displays);
+    private static final FrameworkActivities activities =
+            new FrameworkActivities(orientations, displays);
     private static boolean play;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
@@ -783,14 +785,20 @@ public final class ManagedLauncher {
                             if (orientations.containsKey((IBinder) a[0]))
                                 fullyDrawn.putIfAbsent((IBinder) a[0], System.nanoTime());
                             return null;
-                        // The launcher Activity was not started for a result.
-                        case "getCallingPackage": return null;
+                        // Only an Activity started for a result has a caller.
+                        case "getCallingActivity":
+                            return activities.callingActivity((IBinder) a[0]);
+                        case "getCallingPackage": {
+                            android.content.ComponentName caller = activities.callingActivity((IBinder) a[0]);
+                            return caller == null ? null : caller.getPackageName();
+                        }
                         case "finishActivity":
-                            // This launcher owns one Activity, with no caller
-                            // awaiting a result. Activity.finish() marks it
-                            // finishing after this acknowledgement; the UI
-                            // pump delivers its teardown on the next turn.
-                            return orientations.containsKey((IBinder) a[0]);
+                            // Activity.finish() marks a known Activity finishing
+                            // after this acknowledgement; the UI pump delivers
+                            // its teardown and any result on the next turn.
+                            if (!orientations.containsKey((IBinder) a[0])) return false;
+                            activities.finishing((IBinder) a[0], (Integer) a[1], (Intent) a[2]);
+                            return true;
                         case "getRequestedOrientation":
                             return orientations.getOrDefault((IBinder) a[0],
                                     ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
@@ -803,6 +811,9 @@ public final class ManagedLauncher {
                 });
         services.register("activity_task", "android.app.IActivityTaskManager", (method, a) -> {
             if (method.equals("getActivityClientController")) return client;
+            // startActivityAsUser appends the user id to the same arguments.
+            if (method.equals("startActivity") || method.equals("startActivityAsUser"))
+                return activities.start(a);
             throw unsupported("activity_task", method);
         });
         Object provider = services.register("bifrost.settings", "android.content.IContentProvider",
@@ -1226,6 +1237,7 @@ public final class ManagedLauncher {
         Activity instance = instrumentation.newActivity(launcherClass, activityContext, token,
                 application, intent, activity, activity.loadLabel(system.getPackageManager()),
                 null, null, null);
+        FrameworkActivities.attachThread(instance, thread);
         activeActivity = instance;
         call(activityContext, "setOuterContext", new Class<?>[] {Context.class}, instance);
         if (activity.getThemeResource() != 0) instance.setTheme(activity.getThemeResource());
@@ -1236,6 +1248,7 @@ public final class ManagedLauncher {
         System.out.println("APP_ACTIVITY_CREATED");
         System.out.println("FRAMEWORK_OK");
         if (play) {
+            activities.attach(thread, loaded, instrumentation, application, instance, token);
             play(instrumentation, instance, width, height);
             return;
         }
@@ -1379,6 +1392,7 @@ public final class ManagedLauncher {
                             // (Process.killProcess); the session reports this
                             // marker plus SIGKILL as a user close.
                             if (hostClosed) System.out.println("APP_HOST_CLOSED");
+                            activities.closeAll();
                             closeActivity(activity);
                             jobs.close();
                             if (hostClosed) serviceRuntime.shutdown(() -> System.exit(0));
@@ -1401,6 +1415,7 @@ public final class ManagedLauncher {
                         if (event[0] == 0) break;
                         dispatch(activity, event);
                     }
+                    activities.update();
                     windows.render();
                 } catch (Exception error) {
                     error.printStackTrace();
