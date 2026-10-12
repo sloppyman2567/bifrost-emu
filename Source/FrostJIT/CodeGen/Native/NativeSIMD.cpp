@@ -20,11 +20,15 @@ NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xBFFFFC00) == 0x0E616800) return K::NarrowFp;
     if ((w & 0xBFFFFC00) == 0x0E617800) return K::WidenFp;
     if ((w & 0xBF20FC00) == 0x2E20E400 || (w & 0xBF20FC00) == 0x0E20E400) return K::CompareFp;
-    if ((w & 0xBFBFFC00) == 0x0EA0E800) return K::CompareZeroFp;
+    // FP vector forms with sz=1 need Q=1 (.1d is reserved).
+    const bool fp_lanes = !((w >> 22) & 1) || ((w >> 30) & 1);
+    const uint32_t fz = w & 0xBFBFFC00;  // FCMGT/FCMEQ/FCMLT/FCMGE/FCMLE #0
+    if (fp_lanes && (fz == 0x0EA0C800 || fz == 0x0EA0D800 || fz == 0x0EA0E800 ||
+                     fz == 0x2EA0C800 || fz == 0x2EA0D800)) return K::CompareZeroFp;
     if ((w & 0xBF3FFC00) == 0x0E209800) return K::CompareZeroInt;
     if ((w & 0x9F800C00) == 0x0F000400 && !h && ((w >> 12) & 15) == 15) return K::ImmediateFp;
     if ((w & 0x9F20FC00) == 0x0E204400) return K::VariableShift;
-    if ((w & 0xBFBFFC00) == 0x0E219800) return K::RoundFp;
+    if (fp_lanes && arm_frint_vector_mode(w) >= 0) return K::RoundFp;
     if ((w & 0xBFFFFC00) == 0x0E61D800 || (w & 0xBFFFFC00) == 0x0EE1B800) return K::Convert64;
     if ((w & 0xFFE0FC00) == 0x5EE08400) return K::ScalarAdd;
     if ((w & 0xBF3FFC00) == 0x0E31B800 && ((w >> 22) & 3) < 3) return K::ReduceAdd;
@@ -44,6 +48,11 @@ NativeSimdKind classify_native_simd(uint32_t w) {
                    three == 0x0E20C000)) return K::WidenThree;  // ADDL SUBL ADDW SUBW MLAL MLSL MULL
     const uint32_t pair = w & 0x9F3FFC00;
     if (sz < 3 && (pair == 0x0E202800 || pair == 0x0E206800)) return K::PairLong;  // ADDLP ADALP
+    const uint32_t fpair = w & 0xBFA0FC00;  // FMAXP FMINP FMAXNMP FMINNMP
+    if (fp_lanes && (fpair == 0x2E20F400 || fpair == 0x2EA0F400 ||
+                     fpair == 0x2E20C400 || fpair == 0x2EA0C400)) return K::PairFp;
+    const uint32_t half = w & 0xBFFFFC00;   // FCVTL/FCVTN with half lanes
+    if (half == 0x0E217800 || half == 0x0E216800) return K::HalfFp;
     return K::None;
 }
 namespace {
@@ -56,10 +65,11 @@ void write(CPU* cpu, unsigned reg, const Vec& v) {
     std::memcpy(&cpu->v_lo[reg], v.bytes, 8); std::memcpy(&cpu->v_hi[reg], v.bytes+8, 8);
 }
 uint64_t get(const Vec& v, unsigned lane, unsigned size) {
-    uint64_t x=0; std::memcpy(&x, v.bytes+lane*size, size); return x;
+    // Lanes are at most 8 bytes; the cap tells the compiler so.
+    uint64_t x=0; std::memcpy(&x, v.bytes+lane*size, size < 8 ? size : 8); return x;
 }
 void put(Vec& v, unsigned lane, unsigned size, uint64_t x) {
-    std::memcpy(v.bytes+lane*size, &x, size);
+    std::memcpy(v.bytes+lane*size, &x, size < 8 ? size : 8);
 }
 int64_t signed_lane(uint64_t x, unsigned bits) {
     return bits == 64 ? static_cast<int64_t>(x) : static_cast<int64_t>(x << (64-bits)) >> (64-bits);
@@ -114,7 +124,11 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
             double a=esize==8?fp<double>(n,i):fp<float>(n,i);
             double b=esize==8?fp<double>(m,i):fp<float>(m,i);
             bool match;
-            if constexpr(K==NativeSimdKind::CompareZeroFp) match=a<0;
+            if constexpr(K==NativeSimdKind::CompareZeroFp) {
+                // bits[13:12]: 0 GT/GE, 1 EQ/LE, 2 LT; U selects GE/LE.
+                const unsigned c=(w>>12)&3;
+                match = c==2 ? a<0 : c==1 ? (u ? a<=0 : a==0) : (u ? a>=0 : a>0);
+            }
             else if(!u) match=a==b;
             else match=(w&(1u<<23))?a>b:a>=b;
             put(out,i,esize,match?~uint64_t(0):0);
@@ -138,9 +152,10 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
         }
     } else if constexpr(K==NativeSimdKind::RoundFp) {
         unsigned esize=(w&(1u<<22))?8:4;
+        const int mode=arm_frint_vector_mode(w); const bool dn=(cpu->fpcr>>25)&1;
         for(unsigned i=0;i<bytes/esize;i++) {
-            if(esize==8) put_fp(out,i,std::floor(fp<double>(n,i)));
-            else put_fp(out,i,std::floor(fp<float>(n,i)));
+            if(esize==8) put_fp(out,i,arm_frint(mode,fp<double>(n,i),dn));
+            else put_fp(out,i,arm_frint(mode,fp<float>(n,i),dn));
         }
     } else if constexpr(K==NativeSimdKind::Convert64) {
         bool to_int=(w&(1u<<23))!=0;
@@ -217,6 +232,28 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
             }
             put(out, i, size * 2, a + b + (acc ? get(d, i, size * 2) : 0));
         }
+    } else if constexpr(K==NativeSimdKind::PairFp) {
+        // Lanes come from Vm:Vn pairs: Vn's pairs fill the low results.
+        const ArmFpOp op = (w & 0x2000) ? ((w >> 23) & 1 ? ArmFpOp::Min : ArmFpOp::Max)
+                                        : ((w >> 23) & 1 ? ArmFpOp::MinNum : ArmFpOp::MaxNum);
+        const unsigned esize = (w >> 22) & 1 ? 8 : 4, lanes = bytes / esize, half = lanes / 2;
+        for (unsigned e = 0; e < lanes; e++) {
+            const Vec& src = e < half ? n : m;
+            const unsigned idx = 2 * (e < half ? e : e - half);
+            if (esize == 8) put_fp(out, e, arm_fp_binop(op, fp<double>(src, idx), fp<double>(src, idx + 1)));
+            else put_fp(out, e, arm_fp_binop(op, fp<float>(src, idx), fp<float>(src, idx + 1)));
+        }
+    } else if constexpr(K==NativeSimdKind::HalfFp) {
+        // FCVTL widens the selected half's four halves; FCVTN narrows four
+        // singles into the low half (Q=0, top zeroed) or high half (Q=1).
+        const bool dn = (cpu->fpcr >> 25) & 1;
+        if ((w >> 12) & 1) {  // opcode 0x17 FCVTL, 0x16 FCVTN
+            for (unsigned i = 0; i < 4; i++)
+                put_fp(out, i, h2f(static_cast<uint16_t>(get(n, (q ? 4 : 0) + i, 2)), dn));
+        } else {
+            if (q) std::memcpy(out.bytes, d.bytes, 8);
+            for (unsigned i = 0; i < 4; i++) put(out, (q ? 4 : 0) + i, 2, f2h(fp<float>(n, i), dn));
+        }
     }
     write(cpu,rd,out);
 }
@@ -230,6 +267,7 @@ NativeSimdFn native_simd_helper(NativeSimdKind k) {
         CASE(VariableShift); CASE(RoundFp); CASE(Convert64); CASE(ScalarAdd);
         CASE(ReduceAdd); CASE(Reverse64); CASE(MultiplyAdd); CASE(IndexedFma);
         CASE(AcrossLong); CASE(AcrossMinMax); CASE(WidenThree); CASE(PairLong);
+        CASE(PairFp); CASE(HalfFp);
         default: return nullptr;
     }
 #undef CASE

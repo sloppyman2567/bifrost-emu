@@ -23,12 +23,13 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
             uint8_t shift = sp.shift;
             bool q = sp.q;
             // Fall back to CALL_INTERP for unsupported element sizes.
-            //  - esize=1 (8-bit): no PSLLB/PSRLB/PSRAB in SSE2.
             //  - esize=8 SSHR/SSRA/SRSRA: 64-bit arithmetic shifts need
             //    PSRAQ, which is AVX-512F only (NOT SSE2/AVX2 — a plain
             //    `66 0F 73 /4 ib` = PSRAQ SIGILLs the host).
             //  - Invalid esize: shouldn't happen, but be safe.
-            if (esize != 2 && esize != 4 && esize != 8) {
+            // Bytes have no PSLLB/PSRLB/PSRAB; emit_lane_shift composes them
+            // from word shifts on the SSE2 path.
+            if (esize != 1 && esize != 2 && esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
@@ -42,7 +43,8 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
             uint8_t subop = 0;
             uint8_t reg_field = 0;
             uint8_t padd_op = 0;
-            if (esize == 2)      { subop = 0x71; padd_op = 0xFD; }  // paddw
+            if (esize == 1)      { subop = 0x71; padd_op = 0xFC; }  // word shifts; paddb
+            else if (esize == 2) { subop = 0x71; padd_op = 0xFD; }  // paddw
             else if (esize == 4) { subop = 0x72; padd_op = 0xFE; }  // paddd
             else                 { subop = 0x73; padd_op = 0xD4; }  // paddq (esize == 8)
             if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_SLI) {
@@ -88,6 +90,33 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(subop);
                 emit_byte(0xC0 | (rf << 3) | x);
                 emit_byte(sh);
+            };
+            // Lane shift of xmm<x> on the SSE2 path. Bytes are built from
+            // word shifts: the low byte of each word is moved to the top,
+            // shifted and moved back in a temp; the high byte is shifted in
+            // place with its low byte cleared; then the halves are ORed.
+            // Word shift counts >= 16 give 0 (PSLLW/PSRLW) or the sign
+            // (PSRAW), which is the ARM result for a full-byte shift. The
+            // temp is XMM1, or XMM2 when shifting XMM1; callers keep it free.
+            auto emit_lane_shift = [&](int x, uint8_t rf, uint8_t sh) {
+                if (esize != 1) { emit_shift_imm(x, rf, sh); return; }
+                const int t = x == 1 ? 2 : 1;
+                const uint8_t wide = static_cast<uint8_t>(8 + sh);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6F);
+                emit_byte(0xC0 | (t << 3) | x);                     // movdqa t, x
+                if (rf == 6) {          // left
+                    emit_shift_imm(t, 6, wide); emit_shift_imm(t, 2, 8);
+                    emit_shift_imm(x, 2, 8);    emit_shift_imm(x, 6, wide);
+                } else if (rf == 2) {   // logical right
+                    emit_shift_imm(t, 6, 8);    emit_shift_imm(t, 2, wide);
+                    emit_shift_imm(x, 2, wide); emit_shift_imm(x, 6, 8);
+                } else {                // arithmetic right
+                    emit_shift_imm(t, 6, 8);    emit_shift_imm(t, 4, sh);
+                    emit_shift_imm(t, 2, 8);
+                    emit_shift_imm(x, 4, wide); emit_shift_imm(x, 6, 8);
+                }
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEB);
+                emit_byte(0xC0 | (x << 3) | t);                     // por x, t
             };
             auto emit_padd = [&](int d, int s) {
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(padd_op);
@@ -159,12 +188,12 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                 if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_USHR ||
                     inst.op == IROp::SIMD_SSHR) {
                     emit_load64(0, off1);
-                    emit_shift_imm(0, reg_field, shift);
+                    emit_lane_shift(0, reg_field, shift);
                     emit_store64(0, offd);
                 } else if (inst.op == IROp::SIMD_USRA ||
                            inst.op == IROp::SIMD_SSRA) {
                     emit_load64(0, off1);
-                    emit_shift_imm(0, reg_field, shift);
+                    emit_lane_shift(0, reg_field, shift);
                     emit_load64(1, offd);
                     emit_padd(1, 0);            // xmm1 = Vd + shifted Vn
                     emit_store64(1, offd);
@@ -177,32 +206,32 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                     // bit0), which avoids any per-element mask constant.
                     emit_load64(0, off1);                     // xmm0 = Vn
                     emit_load64(2, off1);                     // xmm2 = Vn (copy)
-                    emit_shift_imm(2, 2, shift - 1);          // xmm2 >> (shift-1)
-                    emit_shift_imm(2, 6, static_cast<uint8_t>(esize * 8) - 1);  // bit0 -> top
-                    emit_shift_imm(2, 2, static_cast<uint8_t>(esize * 8) - 1);  // top -> bit0
-                    emit_shift_imm(0, reg_field, shift);      // xmm0 = Vn >> shift
+                    emit_lane_shift(2, 2, shift - 1);          // xmm2 >> (shift-1)
+                    emit_lane_shift(2, 6, static_cast<uint8_t>(esize * 8) - 1);  // bit0 -> top
+                    emit_lane_shift(2, 2, static_cast<uint8_t>(esize * 8) - 1);  // top -> bit0
+                    emit_lane_shift(0, reg_field, shift);      // xmm0 = Vn >> shift
                     emit_padd(0, 2);                          // xmm0 = shifted + roundbit
                     emit_load64(1, offd);                     // xmm1 = Vd
                     emit_padd(1, 0);                          // xmm1 = Vd + rounded
                     emit_store64(1, offd);
                 } else {  // SIMD_SLI / SIMD_SRI
                     emit_load64(0, off1);
-                    emit_shift_imm(0, reg_field, shift);
+                    emit_lane_shift(0, reg_field, shift);
                     emit_load64(1, offd);
                     if (inst.op == IROp::SIMD_SLI) {
                         // Vd_keep = Vd & ((1<<shift)-1): shift left then right.
-                        emit_shift_imm(1, 6, insert_shift);
-                        emit_shift_imm(1, 2, insert_shift);
+                        emit_lane_shift(1, 6, insert_shift);
+                        emit_lane_shift(1, 2, insert_shift);
                     } else {
                         // Vd_keep = Vd & (top shift bits): shift right then left.
-                        emit_shift_imm(1, 2, insert_shift);
-                        emit_shift_imm(1, 6, insert_shift);
+                        emit_lane_shift(1, 2, insert_shift);
+                        emit_lane_shift(1, 6, insert_shift);
                     }
                     emit_por(1, 0);             // xmm1 = Vn_part | Vd_keep
                     emit_store64(1, offd);
                 }
             };
-            if (has_avx2() && q) {
+            if (has_avx2() && q && esize != 1) {
                 // ── AVX2 256-bit path (both halves in one instruction) ──
                 if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_USHR ||
                     inst.op == IROp::SIMD_SSHR) {

@@ -303,6 +303,7 @@ UNIT_TESTS=(
     # Vector FP NaN/zero rules, including native exceptional exits.
     "simd_fp_nan|Tests/Unit/jit_simd_fp_nan.elf||10|checks passed"
     "simd_widen_reduce|Tests/Unit/jit_simd_widen_reduce.elf||5|checks passed"
+    "simd_fp_lanes|Tests/Unit/jit_simd_fp_lanes.elf||10|forms passed"
     # msr nzcv reads its source vreg, not a cpu.regs slot the optimizer
     # skipped storing because the block overwrites the register next.
     "msr_nzcv|Tests/Unit/jit_msr_nzcv.elf||10|64000/64000 checks passed"

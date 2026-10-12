@@ -226,6 +226,29 @@ template <typename T> static inline bool arm_process_nans3(T a, T b, T c, T& out
 template <typename T> static inline T arm_fp_result(T r) {
     return std::isnan(r) ? fp_default_nan<T>() : r;
 }
+// Vector FRINT mode (0=N 1=A 2=M 3=X 4=Z 5=I 6=P) of an encoding with Q
+// and sz ignored, or -1 when it is not a vector FRINT.
+static inline int arm_frint_vector_mode(uint32_t op) {
+    switch (op & 0xBFBFFC00) {
+        case 0x0E218800: return 0; case 0x2E218800: return 1;
+        case 0x0E219800: return 2; case 0x2E219800: return 3;
+        case 0x0EA19800: return 4; case 0x2EA19800: return 5;
+        case 0x0EA18800: return 6; default: return -1;
+    }
+}
+// FPRoundInt for one lane. X and I use the host's round-to-nearest mode
+// (FPCR.RMode is not modelled); NaNs are quieted, or the default NaN when
+// FPCR.DN is set (libm passes signalling NaNs through).
+template <typename T> static inline T arm_frint(int mode, T a, bool dn) {
+    if (std::isnan(a)) return dn ? fp_default_nan<T>() : fp_quiet(a);
+    switch (mode) {
+        case 1: return std::round(a);
+        case 2: return std::floor(a);
+        case 4: return std::trunc(a);
+        case 6: return std::ceil(a);
+        default: return std::rint(a);
+    }
+}
 enum class ArmFpOp { Add, Sub, Mul, Div, Max, Min, MaxNum, MinNum, MulX, Abd };
 template <typename T> static inline T arm_fp_binop(ArmFpOp op, T a, T b) {
     if (op == ArmFpOp::MaxNum || op == ArmFpOp::MinNum) {

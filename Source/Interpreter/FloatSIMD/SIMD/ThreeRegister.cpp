@@ -142,80 +142,42 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     // Checked BEFORE the sub_noq switch: FRINTx shares sub_noq
     // with CMGT/CMGE/CMLE-vs-zero (they differ only in bit16,
     // which the sub mask drops), so switch cases cannot express
-    // it. Match on fr (keeps U/bit23/bit22/bit16/opc, drops Q
-    // and the register fields) instead. Width from bit22
+    // it. arm_frint_vector_mode matches U/bit23/bit16/opc (drops Q,
+    // sz and the register fields) instead. Width from bit22
     // (0=single .2s/.4s, 1=double .2d). All 12 verified against
     // the cross assembler, e.g. `frinta v31.2d` = 0x6E618BFF.
     // libmvec _ZGVnN2v_sin needs FRINTA .2d; without this it
     // threw DecodeError right after the facge fix.
     // Half-precision lives in a different slice — untouched.
-    {
-        uint32_t fr = op & 0xBFFFFC00;
-        // 0=N 1=A 2=M 3=X 4=Z 5=I 6=P, or -1 when not FRINT.
-        int frmode = -1;
-        bool frdbl = false;
-        switch (fr) {
-        case 0x0EA18800: frmode = 6; break;
-        case 0x0EE18800: frmode = 6; frdbl = true; break;
-        case 0x0E218800: frmode = 0; break;
-        case 0x0E618800: frmode = 0; frdbl = true; break;
-        case 0x2E218800: frmode = 1; break;
-        case 0x2E618800: frmode = 1; frdbl = true; break;
-        case 0x0E219800: frmode = 2; break;
-        case 0x0E619800: frmode = 2; frdbl = true; break;
-        case 0x2E219800: frmode = 3; break;
-        case 0x2E619800: frmode = 3; frdbl = true; break;
-        case 0x0EA19800: frmode = 4; break;
-        case 0x0EE19800: frmode = 4; frdbl = true; break;
-        case 0x2EA19800: frmode = 5; break;
-        case 0x2EE19800: frmode = 5; frdbl = true; break;
-        default: break;
+    if (const int frmode = arm_frint_vector_mode(op); frmode >= 0) {
+        const bool frdbl = (op >> 22) & 1;
+        // Q=0+double is scalar space (never SIMD_DP); reject
+        // like the old fallthrough did.
+        if (frdbl && !Q) {
+            dump_decode_error(cpu, mem_, op);
+            throw DecodeError(cpu.pc, op);
         }
-        if (frmode >= 0) {
-            // Q=0+double is scalar space (never SIMD_DP); reject
-            // like the old fallthrough did.
-            if (frdbl && !Q) {
-                dump_decode_error(cpu, mem_, op);
-                throw DecodeError(cpu.pc, op);
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        const int fesz = frdbl ? 8 : 4;
+        const int felems = (Q ? 16 : 8) / fesz;
+        uint8_t fbuf[16];
+        memcpy(fbuf, &cpu.v_lo[rn], 8);
+        if (Q) memcpy(fbuf + 8, &cpu.v_hi[rn], 8);
+        for (int i = 0; i < felems; i++) {
+            if (!frdbl) {
+                float a; memcpy(&a, fbuf + i * 4, 4);
+                const float r = arm_frint(frmode, a, dn);
+                memcpy(fbuf + i * 4, &r, 4);
+            } else {
+                double a; memcpy(&a, fbuf + i * 8, 8);
+                const double r = arm_frint(frmode, a, dn);
+                memcpy(fbuf + i * 8, &r, 8);
             }
-            const int fesz = frdbl ? 8 : 4;
-            const int felems = (Q ? 16 : 8) / fesz;
-            uint8_t fbuf[16];
-            memcpy(fbuf, &cpu.v_lo[rn], 8);
-            if (Q) memcpy(fbuf + 8, &cpu.v_hi[rn], 8);
-            for (int i = 0; i < felems; i++) {
-                if (!frdbl) {
-                    float a;
-                    memcpy(&a, fbuf + i * 4, 4);
-                    float r = (frmode == 0) ? std::rint(a)
-                            : (frmode == 1) ? std::round(a)
-                            : (frmode == 2) ? std::floor(a)
-                            : (frmode == 6) ? std::ceil(a)
-                            : (frmode == 4) ? std::trunc(a)
-                            : std::rint(a);  // X/I: rint
-                    // FPRoundInt quiets NaNs (libm passes SNaNs through).
-                    if (std::isnan(a))
-                        r = (cpu.fpcr >> 25) & 1 ? fp_default_nan<float>() : fp_quiet(a);
-                    memcpy(fbuf + i * 4, &r, 4);
-                } else {
-                    double a;
-                    memcpy(&a, fbuf + i * 8, 8);
-                    double r = (frmode == 0) ? std::rint(a)
-                             : (frmode == 1) ? std::round(a)
-                             : (frmode == 2) ? std::floor(a)
-                             : (frmode == 6) ? std::ceil(a)
-                            : (frmode == 4) ? std::trunc(a)
-                             : std::rint(a);  // X/I: rint
-                    if (std::isnan(a))
-                        r = (cpu.fpcr >> 25) & 1 ? fp_default_nan<double>() : fp_quiet(a);
-                    memcpy(fbuf + i * 8, &r, 8);
-                }
-            }
-            memcpy(&cpu.v_lo[rd], fbuf, 8);
-            if (Q) memcpy(&cpu.v_hi[rd], fbuf + 8, 8);
-            else cpu.v_hi[rd] = 0;
-            return true;
         }
+        memcpy(&cpu.v_lo[rd], fbuf, 8);
+        if (Q) memcpy(&cpu.v_hi[rd], fbuf + 8, 8);
+        else cpu.v_hi[rd] = 0;
+        return true;
     }
     // SADDLP/UADDLP/SADALP/UADALP: pair adjacent lanes, widen,
     // optionally accumulate. Keep bits[20:16] in the match: bit16
