@@ -32,6 +32,14 @@ struct ProfRunGuard {
     }
     ~ProfRunGuard() { if (active_) prof_in_run_block = saved_; }
 };
+void FrostJIT::bind_ibl(CPU& cpu) {
+    sync_dispatch_cache();
+    if (!tls_ibl_) {
+        tls_ibl_ = std::make_unique<IblTable>();
+        reset_ibl(tls_cache_generation_);
+    }
+    cpu.jit_ibl_table = tls_ibl_.get();
+}
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (!cpu.jit_call_depth) cpu.jit_dispatch_requested = false;
     FaultScope fault_scope(this);
@@ -61,8 +69,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // is a pure safety valve for codegen-bug infinite loops; a per-thread
     // count catches any thread spinning on a buggy translation. A thread
     // tripping it disables the (shared) JIT for everyone.
+    // Opt-in diagnostic (BIFROST_HANG_WATCHDOG), like the loop watchdog
+    // below: a long-running valid program must keep its JIT.
+    static const bool hang_watchdog = dbg().hang_watchdog;
     thread_local uint64_t tls_total_blocks_ = 0;
-    if (__builtin_expect(++tls_total_blocks_ > GLOBAL_BLOCK_LIMIT, 0)) {
+    if (__builtin_expect(hang_watchdog && ++tls_total_blocks_ > GLOBAL_BLOCK_LIMIT, 0)) {
         jit_disabled_.store(true, std::memory_order_relaxed);
         fprintf(stderr, "[JIT] global watchdog: %llu blocks executed by a thread — disabling JIT (likely codegen bug)\n",
                 static_cast<unsigned long long>(tls_total_blocks_));
@@ -70,7 +81,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         emu.step(cpu);
         return cpu.pc;
     }
-    sync_dispatch_cache();
+    bind_ibl(cpu);  // syncs the dispatch caches, then binds this thread's IBL
     uint64_t pc = cpu.pc;
     // ── single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
@@ -113,6 +124,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             return cpu.pc;
         }
         tls_stat_instr_ += tls_last_block_.instr_count;
+        ibl_note(pc, tls_last_block_.chain);
         if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
             return tls_last_block_.fn(&cpu, &emu);
         }
@@ -127,8 +139,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // lookup is inlined — a separate call would be most of its cost.
     {
         uint64_t (*cached_fn)(CPU*, Emulator*) = nullptr;
+        uint64_t (*cached_chain)(CPU*, Emulator*) = nullptr;
         int cached_count = 0;
-        if (inline_cache_lookup(pc, &cached_fn, cached_count)) {
+        if (inline_cache_lookup(pc, &cached_fn, cached_count, &cached_chain)) {
             if (!cached_fn) {
                 tls_stat_instr_++;
                 if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls();
@@ -136,6 +149,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 return cpu.pc;
             }
             tls_stat_instr_ += cached_count;
+            ibl_note(pc, cached_chain);
             if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
                 return cached_fn(&cpu, &emu);
             }
@@ -289,8 +303,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // interpreter (avoiding repeated watchdog triggers).
     //
     // State is thread-local so multiple threads sharing a single FrostJIT
-    // instance don't trample each other's counters.
-    if (pc == tls_watchdog_last_pc_) {
+    // instance don't trample each other's counters. Opt-in diagnostic
+    // (BIFROST_HANG_WATCHDOG): a valid hot loop must not be demoted.
+    if (hang_watchdog && pc == tls_watchdog_last_pc_) {
         tls_watchdog_count_++;
         if (tls_watchdog_count_ > WATCHDOG_LIMIT) {
             // Mark this block as interp_only permanently — needs exclusive.
@@ -309,7 +324,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             emu.step(cpu);
             return cpu.pc;
         }
-    } else {
+    } else if (hang_watchdog) {
         tls_watchdog_last_pc_ = pc;
         tls_watchdog_count_ = 0;
     }
@@ -322,8 +337,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_last_block_.pc = pc;
         tls_last_block_.fn = entry.fn;
         tls_last_block_.instr_count = entry.instr_count;
+        tls_last_block_.chain = entry.chain_entry;
         // Also populate the inline cache for block-to-block transitions.
-        inline_cache_insert(pc, entry.fn, entry.instr_count);
+        inline_cache_insert(pc, entry.fn, entry.instr_count, entry.chain_entry);
+        ibl_note(pc, entry.chain_entry);
     }
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);

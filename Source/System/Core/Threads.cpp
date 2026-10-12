@@ -81,6 +81,8 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     }
     bool use_jit = (thread_jit != nullptr);
     constexpr uint64_t HANG_LIMIT = 50'000'000;
+    // Opt-in diagnostic (BIFROST_HANG_WATCHDOG): never stop a valid thread.
+    static const bool hang_watchdog = dbg().hang_watchdog;
     uint64_t last_pc = static_cast<uint64_t>(-1);
     uint64_t same_pc_count = 0;
     uint64_t count = 0;
@@ -97,20 +99,22 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             }
             count++;
             // Same-PC hang watchdog.
-            if (cpu.pc == last_pc) {
-                same_pc_count++;
-                if (same_pc_count > HANG_LIMIT) {
-                    fprintf(stderr,
-                        "[%s] thread %d: hang watchdog: PC=0x%llx executed "
-                        "%llu times without progress; aborting\n",
-                        CODENAME, cpu.tid,
-                        static_cast<unsigned long long>(cpu.pc),
-                        static_cast<unsigned long long>(same_pc_count));
-                    break;
+            if (hang_watchdog) {
+                if (cpu.pc == last_pc) {
+                    same_pc_count++;
+                    if (same_pc_count > HANG_LIMIT) {
+                        fprintf(stderr,
+                            "[%s] thread %d: hang watchdog: PC=0x%llx executed "
+                            "%llu times without progress; aborting\n",
+                            CODENAME, cpu.tid,
+                            static_cast<unsigned long long>(cpu.pc),
+                            static_cast<unsigned long long>(same_pc_count));
+                        break;
+                    }
+                } else {
+                    last_pc = cpu.pc;
+                    same_pc_count = 0;
                 }
-            } else {
-                last_pc = cpu.pc;
-                same_pc_count = 0;
             }
             // Drain host-forwarded signals every ~4K instructions so
             // spawned threads can receive SIGINT/SIGTERM/etc. Without

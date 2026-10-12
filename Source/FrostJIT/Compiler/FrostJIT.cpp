@@ -564,6 +564,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (s != RAX) emit_mov_reg(RAX, s);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // indirect branch — target is dynamic
+            indirect_exit_ = true;    // ...but the IBL probe can still chain it
             return true;
         }
         case IROp::ADCS: case IROp::SBCS: {

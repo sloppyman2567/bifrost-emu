@@ -41,13 +41,18 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     // Never replay guest memory or restore architectural state: each arm runs
     // once on the live workload. Matched work/exit signatures make samples
     // comparable; CLOCK_THREAD_CPUTIME_ID excludes scheduler descheduling.
+    // Timed arms stay on their private sampling chains: unbind the indirect-
+    // branch table so a BR/RET cannot leave the sampled graph mid-window.
     struct Reset {
         CPU& cpu;
+        void* ibl;
         ~Reset() {
             cpu.jit_tier2_trial = nullptr;
             cpu.jit_tier2_trial_fn = cpu.jit_tier2_trial_chain_fn = nullptr;
+            cpu.jit_ibl_table = ibl;
         }
-    } reset{cpu};
+    } reset{cpu, cpu.jit_ibl_table};
+    cpu.jit_ibl_table = nullptr;
     cpu.jit_tier2_trial = &trial;
     cpu.jit_tier2_trial_fn = fn;
     cpu.jit_tier2_trial_chain_fn = candidate

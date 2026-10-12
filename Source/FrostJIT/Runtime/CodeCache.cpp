@@ -35,6 +35,7 @@ namespace arm64emu {
 std::atomic<uint64_t> FrostJIT::next_cache_generation_{1};
 thread_local const FrostJIT* FrostJIT::tls_cache_owner_ = nullptr;
 thread_local uint64_t FrostJIT::tls_cache_generation_ = 0;
+thread_local std::unique_ptr<FrostJIT::IblTable> FrostJIT::tls_ibl_;
 uint64_t (*FrostJIT::lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
     {
         std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
@@ -148,6 +149,49 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     for (size_t p : {stop, budget, empty})
         patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
     return off;
+}
+// Indirect-branch fast path for a chain-skip BR/BLR/RET exit. Entered with
+// RAX = guest target (already stored to cpu.pc), RDI = cpu, RSI = emu and
+// every vreg/flag committed; RCX, RDX and R11 are free. Falls through to the
+// caller's cold exit (dispatcher return) on any miss. Immutable code that
+// reads only data, so it is valid in ST and MT publication alike.
+void FrostJIT::emit_indirect_branch_probe() {
+    constexpr int32_t entries_off = offsetof(IblTable, entries);
+    std::vector<size_t> cold;
+    // RCX = this thread's table; none bound (trial, foreign entry) → cold.
+    emit_load(RCX, RDI, offsetof(CPU, jit_ibl_table));
+    emit_test_reg(RCX, RCX);
+    cold.push_back(emit_jcc_rel32_placeholder(0x4));             // jz
+    // Table generation must equal this JIT's live dispatch generation.
+    emit_load(R11, RCX, offsetof(IblTable, generation));
+    emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(&cache_generation_));
+    emit_byte(0x4C); emit_byte(0x3B); emit_byte(0x1A);          // cmp r11,[rdx]
+    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
+    // RCX = &entries[(pc >> 2) & (IBL_ENTRIES - 1)] - entries_off
+    emit_mov_reg(RDX, RAX);
+    emit_shift_imm8(RDX, 5, 2);                                  // shr rdx,2
+    emit_alu_imm(RDX, 4, IBL_ENTRIES - 1);                       // and rdx,mask
+    emit_shift_imm8(RDX, 4, 4);                                  // shl rdx,4
+    emit_add_reg(RCX, RDX);
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x81);          // cmp rax,[rcx+pc]
+    emit_u32(static_cast<uint32_t>(entries_off + offsetof(IblEntry, pc)));
+    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
+    // Host-managed return boundary (SDL thread sentinel) → dispatcher.
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);          // cmp rax,[rdi+stop]
+    emit_u32(offsetof(CPU, jit_stop_pc));
+    cold.push_back(emit_jcc_rel32_placeholder(0x4));             // je
+    // Inside a nested jit_call_helper the return PC must reach that loop.
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);          // cmp qword [rdi+depth],0
+    emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
+    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
+    // Shared 256-edge lease: return to dispatch (signals, exit) regularly.
+    emit_byte(0x83); emit_byte(0xAF);                            // sub dword [rdi+budget],1
+    emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+    cold.push_back(emit_jcc_rel32_placeholder(0x6));             // jbe
+    emit_byte(0xFF); emit_byte(0xA1);                            // jmp [rcx+entry]
+    emit_u32(static_cast<uint32_t>(entries_off + offsetof(IblEntry, entry)));
+    for (size_t p : cold)
+        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
 }
 void FrostJIT::refresh_mt_edges(uint64_t pc) {
     auto refs = mt_edge_refs_.find(pc);

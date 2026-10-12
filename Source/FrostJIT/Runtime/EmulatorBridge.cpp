@@ -403,7 +403,9 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     // with its static fall-through (0x400f38), main's tail block popped
     // the frame and ret'd through a stack-resident LR (pc=0x3efffbb8) →
     // DecodeError. A legit callee must never be cut off; like run_block's
-    // watchdog this is a pure codegen-bug safety valve.
+    // watchdog this is a pure codegen-bug safety valve, opt-in through
+    // BIFROST_HANG_WATCHDOG.
+    static const bool hang_watchdog = dbg().hang_watchdog;
     thread_local uint64_t tls_call_blocks_ = 0;
     static const bool dbg_call_trace_ = dbg().dbg_guard;
     // Keep nested tiny calls from turning batched counters into contended
@@ -420,7 +422,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     uint64_t dbg2_count = 0;
     while (cpu->running && !cpu->jit_dispatch_requested && cpu->pc != return_pc &&
            (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {
-        if (__builtin_expect(++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
+        if (__builtin_expect(hang_watchdog && ++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
             if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);
             fprintf(stderr, "[JIT] jit_call_helper watchdog: %llu blocks dispatched by a thread — disabling JIT (likely codegen bug)\n",
                     static_cast<unsigned long long>(tls_call_blocks_));
@@ -449,6 +451,8 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             auto fn = jit->lookup_call_target(*emu, cpu->pc, ic);
             if (fn) {
                 cpu->jit_chain_budget = 256;
+                // A cloned CPU may still carry another thread's table.
+                jit->bind_ibl(*cpu);
                 uint64_t pcbefore = cpu->pc;
                 // Bounded-staleness stats (2026-08-21): count BL_CALL
                 // callee blocks into the shared TLS (see run_block) and

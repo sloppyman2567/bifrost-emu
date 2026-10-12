@@ -311,6 +311,9 @@ public:
     uint64_t jit_call_depth = 0;
     bool jit_dispatch_requested = false;
     uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
+    // Host-only: the running host thread's FrostJIT::IblTable (indirect-
+    // branch targets), rebound at every native entry. Null = no fast path.
+    void* jit_ibl_table = nullptr;
     // Host-only Tier-2 observations. Generated hot completions deposit one
     // credit using a flag-neutral store; cold exits consume it in C++.
     // Slots are CPU-local. Collisions can only delay retirement, not create

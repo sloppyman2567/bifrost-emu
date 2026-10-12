@@ -372,6 +372,14 @@ struct FrostInputImpl {
     std::vector<void*> controllers;
     bool gc_subsystem_init = false;
     int controller_count = 0;  // cached for has_game_controller()
+    // Controllers open on first use (poll, joystick read, controller
+    // queries), not at construction: SDL's game-controller init enumerates
+    // every device through udev and starts HIDAPI/libusb threads, which cost
+    // every launch ~0.2 s even for programs without a window.
+    std::once_flag controllers_once;
+    void ensure_controllers() {
+        if (sdl_active) std::call_once(controllers_once, [this] { open_controllers(); });
+    }
     // Baseline timestamp for js_event.time (milliseconds since startup).
     std::chrono::steady_clock::time_point startup_time;
     // Last emitted event for deduplication. Linux only emits events when
@@ -758,10 +766,8 @@ FrostInput::FrostInput() {
     impl_ = std::make_unique<FrostInputImpl>();
 #if defined(BIFROST_USE_SDL2)
     impl_->sdl_active = true;
-    // Open any game controllers that are already connected. Controllers
-    // hot-plugged after construction are opened in poll() when we see
-    // SDL_CONTROLLERDEVICEADDED.
-    impl_->open_controllers();
+    // Already-connected controllers open on first use (ensure_controllers);
+    // later hot-plugs are opened in poll() on SDL_CONTROLLERDEVICEADDED.
 #else
     impl_->sdl_active = false;
 #endif
@@ -782,6 +788,7 @@ bool FrostInput::poll() {
     // a second SDL_PollEvent loop (second poller steals the first's events).
     if (!impl_ || !impl_->sdl_active) return true;
 #if defined(BIFROST_USE_SDL2)
+    impl_->ensure_controllers();
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         switch (ev.type) {
@@ -975,6 +982,7 @@ bool FrostInput::poll() {
 // ── read() — dequeue events into the guest buffer ──────────────────────
 ssize_t FrostInput::read(uint8_t* buf, size_t n, InputDevice dev, bool blocking) {
     if (!impl_) return -ENODEV;
+    if (dev == InputDevice::Js) impl_->ensure_controllers();
     // blocking guests get 0 when empty (we cannot sleep the emulator);
     // non-blocking guests get -EAGAIN so poll/select loops work.
     auto empty_rc = [&]() -> ssize_t { return blocking ? 0 : -EAGAIN; };
@@ -1046,11 +1054,13 @@ void FrostInput::key_bitmap(uint8_t* out, size_t n) const {
 }
 bool FrostInput::has_game_controller() const {
     if (!impl_) return false;
+    impl_->ensure_controllers();
     std::lock_guard<std::mutex> g(impl_->mu);
     return impl_->controller_count > 0;
 }
 int FrostInput::game_controller_count() const {
     if (!impl_) return 0;
+    impl_->ensure_controllers();
     std::lock_guard<std::mutex> g(impl_->mu);
     return impl_->controller_count;
 }

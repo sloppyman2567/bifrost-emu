@@ -306,6 +306,7 @@ public:
         uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
+        uint64_t (*chain)(CPU*, Emulator*) = nullptr;  // chain-skip entry, if any
     };
     static thread_local LastBlockCache tls_last_block_;
     static thread_local const FrostJIT* tls_cache_owner_;
@@ -325,7 +326,44 @@ public:
         for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
         tls_cache_owner_ = this;
         tls_cache_generation_ = generation;
+        if (tls_ibl_) reset_ibl(generation);
         bifrost_prof_init(this);
+    }
+    // ── Indirect-branch target table (IBL) ──────────────────────────
+    // Chain-skip BR/BLR/RET exits look their dynamic guest target up here
+    // and jump straight to its chain-skip entry instead of returning to the
+    // dispatcher (every guest return used to cost a full dispatcher round
+    // trip). One table per host thread: generated code reads it without
+    // locks, so cpu.jit_ibl_table is rebound at every native entry
+    // (run_block, jit_call_helper, Tier-2 trials). Its generation is this
+    // JIT's dispatch generation, so every invalidation revokes all entries;
+    // the probe also honors jit_stop_pc, nested helper calls and the shared
+    // 256-edge chain budget. See emit_indirect_branch_probe.
+    static constexpr uint32_t IBL_ENTRIES = 4096;  // power of two
+    struct IblEntry {
+        uint64_t pc;     // guest target; ~0ULL = empty
+        uint64_t entry;  // chain-skip entry address
+    };
+    struct IblTable {
+        uint64_t generation;
+        uint64_t reserved;
+        IblEntry entries[IBL_ENTRIES];
+    };
+    static thread_local std::unique_ptr<IblTable> tls_ibl_;
+    static size_t ibl_index(uint64_t pc) { return (pc >> 2) & (IBL_ENTRIES - 1); }
+    void reset_ibl(uint64_t generation) {
+        for (auto& e : tls_ibl_->entries) e = IblEntry{~0ULL, 0};
+        tls_ibl_->generation = generation;
+    }
+    // Allocate this thread's table (synced to this JIT) and bind it to cpu.
+    void bind_ibl(CPU& cpu);  // Dispatch.cpp
+    // Record a dispatched block's chain-skip entry. Only this thread reads
+    // the table, and only from generated code it runs itself.
+    void ibl_note(uint64_t pc, uint64_t (*chain)(CPU*, Emulator*)) {
+        if (!chain || !tls_ibl_) return;
+        IblEntry& e = tls_ibl_->entries[ibl_index(pc)];
+        e.entry = reinterpret_cast<uint64_t>(chain);
+        e.pc = pc;
     }
     // Stats TLS shared by run_block AND jit_call_helper (2026-08-21):
     // hot-path block/instruction counts, batch-flushed into the shared
@@ -366,6 +404,7 @@ public:
         uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
+        uint64_t (*chain)(CPU*, Emulator*) = nullptr;  // chain-skip entry, if any
     };
     struct InlineCacheSet {
         InlineCacheEntry ways[2];
@@ -387,7 +426,8 @@ public:
     void note_table_lookup() {
         if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.table;
     }
-    void inline_cache_insert(uint64_t pc, uint64_t (*fn)(CPU*, Emulator*), int count) {
+    void inline_cache_insert(uint64_t pc, uint64_t (*fn)(CPU*, Emulator*), int count,
+                             uint64_t (*chain)(CPU*, Emulator*) = nullptr) {
         auto& set = tls_inline_cache_[inline_cache_set(pc)];
         if (set.ways[0].pc != pc) {
             if (__builtin_expect(dispatch_stats_enabled_, 0) &&
@@ -395,7 +435,7 @@ public:
                 ++tls_dispatch_stats_.evictions;
             set.ways[1] = set.ways[0];
         }
-        set.ways[0] = InlineCacheEntry{pc, fn, count};
+        set.ways[0] = InlineCacheEntry{pc, fn, count, chain};
     }
     void inline_cache_erase(uint64_t pc) {
         auto& set = tls_inline_cache_[inline_cache_set(pc)];
@@ -412,12 +452,14 @@ public:
     // a valid entry (empty = ~0ULL sentinel, never a real guest PC) —
     // Null fn entries cache interpreter fallback decisions.
     inline bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
-                                    int& instr_count) {
+                                    int& instr_count,
+                                    uint64_t (**chain)(CPU*, Emulator*) = nullptr) {
         auto& set = tls_inline_cache_[inline_cache_set(pc)];
         if (set.ways[0].pc == pc) {
             if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.way0;
             *fn = set.ways[0].fn;
             instr_count = set.ways[0].instr_count;
+            if (chain) *chain = set.ways[0].chain;
             return true;
         }
         if (set.ways[1].pc == pc) {
@@ -425,6 +467,7 @@ public:
             std::swap(set.ways[0], set.ways[1]); // retain the most recently used target
             *fn = set.ways[0].fn;
             instr_count = set.ways[0].instr_count;
+            if (chain) *chain = set.ways[0].chain;
             return true;
         }
         return false;
@@ -512,6 +555,8 @@ public:
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false);
+    // Chain-skip BR/BLR/RET exit: jump through the IBL table on a hit.
+    void emit_indirect_branch_probe();
     bool emit_selfloop_backedge(uint64_t target_pc);
     void refresh_mt_edges(uint64_t target_pc);
     void retire_mt_source(uint64_t source_pc);
@@ -1600,6 +1645,9 @@ private:
     // so it cannot be chained even at fall-through.
     uint64_t chain_target_pc_ = 0;
     bool unchainable_end_ = false;
+    // Block ends in a register branch (BR/BLR/RET) with RAX = target: the
+    // chain-skip epilogue emits the IBL probe before its cold exit.
+    bool indirect_exit_ = false;
     // Self-loop chaining state (reset at translate_block start).
     // When a BRCOND's taken target == block start PC, a 5-byte jmp slot is
     // emitted on the taken path. translate_block patches it to jump directly

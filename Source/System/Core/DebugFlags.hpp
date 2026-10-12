@@ -63,6 +63,10 @@ struct DebugFlags {
     bool render_log = true;
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     bool cpu_profile = false;  // BIFROST_PROF — sampling on every guest thread
+    // BIFROST_HANG_WATCHDOG — abort same-PC/frozen tight loops and demote
+    // long-running blocks to the interpreter. A codegen-bug diagnostic:
+    // real Linux never stops a spinning program, so it is off by default.
+    bool hang_watchdog = false;
     bool jit_dispatch_stats = false; // BIFROST_JIT_DISPATCH_STATS — TLS cache telemetry
     bool no_code_page_filter = false; // BIFROST_NO_CODE_PAGE_FILTER — invalidation A/B control
     // ── crash / decode diagnostics ───────────────────────────────────
@@ -196,6 +200,7 @@ struct DebugFlags {
         f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         f.cpu_profile = env("BIFROST_PROF");
+        f.hang_watchdog = env("BIFROST_HANG_WATCHDOG");
         f.no_code_page_filter = env("BIFROST_NO_CODE_PAGE_FILTER");
         f.jit_dispatch_stats = env("BIFROST_JIT_DISPATCH_STATS");
         f.crash_dump = all || env("BIFROST_CRASH_DUMP");

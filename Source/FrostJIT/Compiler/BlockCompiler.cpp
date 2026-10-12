@@ -83,6 +83,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     flags_from_sub_ = false;
     chain_target_pc_ = 0;
     unchainable_end_ = false;
+    indirect_exit_ = false;
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
     tier2_counter_off_ = 0;
@@ -1103,6 +1104,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         chain_patch_off = code_buf_used_;
         if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
         else { emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop(); }
+        // A register branch's slot is never patched (dynamic target); try
+        // the indirect-branch table instead of returning to the dispatcher.
+        if (indirect_exit_ && !dbg().no_chain) emit_indirect_branch_probe();
         // Cold exit (only reached when the slot above is unpatched).
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
