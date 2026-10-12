@@ -1355,6 +1355,10 @@ public final class ManagedLauncher {
                         if (error != 0) throw new IllegalStateException("window poll: " + error);
                         if (event[1] != 0 || activity.isFinishing()) {
                             boolean hostClosed = event[1] != 0;
+                            // Apps may kill their own process during teardown
+                            // (Process.killProcess); the session reports this
+                            // marker plus SIGKILL as a user close.
+                            if (hostClosed) System.out.println("APP_HOST_CLOSED");
                             closeActivity(activity);
                             jobs.close();
                             if (hostClosed) serviceRuntime.shutdown(() -> System.exit(0));

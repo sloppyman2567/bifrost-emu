@@ -33,6 +33,18 @@ def terminate_group(child):
     child.wait()
 
 
+def host_closed(log):
+    # Android apps (Unity among them) may Process.killProcess themselves while
+    # the launcher destroys the Activity after the user closed the window.
+    # The marker is printed just before teardown, so the log tail suffices.
+    try:
+        with open(log.name, "rb") as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - 65536))
+            return b"\nAPP_HOST_CLOSED\n" in b"\n" + stream.read()
+    except (AttributeError, OSError):
+        return False
+
+
 def publish(path, value):
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
         pending = Path(stream.name)
@@ -177,7 +189,9 @@ class Session:
                     result = process_result(child.pid)
                     if result is not None:
                         code = result
-                        reason = "exited" if code == 0 else "failed"
+                        reason = ("exited" if code == 0 else
+                                  "closed" if code == 128 + signal.SIGKILL and host_closed(stdout) else
+                                  "failed")
                         break
                     if self.stop.wait(0.05):
                         code, reason = 143, "stopped"

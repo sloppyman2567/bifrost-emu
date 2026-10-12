@@ -1022,6 +1022,13 @@ The rest of that callback after the copy does not run; other callback failures
 still fail the launch. PixelCopy and other `isValid()` users at runtime remain
 unsupported.
 
+Apps may end their own process during that teardown: SpongeBob logs
+`Process: Sending signal. PID: ... SIG: 9` (Android's `Process.sendSignal`)
+right after `APP_STOPPED`, as a phone would. The launcher prints
+`APP_HOST_CLOSED` when the host window closes, and the session supervisor
+reports a SIGKILL exit (137) after that marker as state `closed`, keeping the
+real exit code. A SIGKILL without the marker remains `failed`.
+
 Adding `--play` opens a host window, starts/resumes the Activity, reports
 SurfaceView holder callbacks and pumps host input. These callbacks use the
 managed graphics adapters; they are not a WindowManager attachment. The runner

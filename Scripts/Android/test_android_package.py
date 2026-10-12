@@ -40,6 +40,25 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(inventory, original)
 
 
+class SessionResultTests(unittest.TestCase):
+    def run_session(self, script):
+        from android_sessions import Session
+        with tempfile.TemporaryDirectory(prefix="bifrost-session-test-") as temporary:
+            with Session(Path(temporary), "org.bifrost.fixture", 10000) as session:
+                stdout, _ = session.logs()
+                with stdout.open("w") as log:
+                    code = session.run(["sh", "-c", script], stdout=log)
+                return code, session.data["state"]
+
+    def test_self_kill_after_host_close_is_closed(self):
+        # Unity's Activity teardown calls Process.killProcess on itself.
+        self.assertEqual(self.run_session("echo APP_HOST_CLOSED; kill -9 $$"), (137, "closed"))
+
+    def test_self_kill_without_host_close_fails(self):
+        self.assertEqual(self.run_session("echo APP_HOST_CLOSED_LATER; kill -9 $$"), (137, "failed"))
+        self.assertEqual(self.run_session("echo APP_HOST_CLOSED; exit 1"), (1, "failed"))
+
+
 class FrameworkPackageContractTests(unittest.TestCase):
     probe_class = "FrameworkPackagesProbe"
     output_name = "android-framework-package-contract"
