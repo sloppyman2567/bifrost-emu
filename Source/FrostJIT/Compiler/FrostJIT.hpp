@@ -37,6 +37,7 @@
 #include "Interpreter/Decoder/Decoder.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/Backend/CpuFeatures.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
@@ -323,7 +324,8 @@ public:
         // Never attribute another JIT owner's pending diagnostic counts here.
         if (tls_cache_owner_ != this) tls_dispatch_stats_ = DispatchStats{};
         tls_last_block_ = LastBlockCache{};
-        for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
+        ensure_inline_cache();
+        clear_inline_cache();
         tls_cache_owner_ = this;
         tls_cache_generation_ = generation;
         if (tls_ibl_) reset_ibl(generation);
@@ -395,12 +397,15 @@ public:
     // and computed gotos don't pay the shared_mutex + unordered_map cost
     // on every dispatch.
     //
-    // 1024 two-way sets replace the former 256 direct-mapped slots.
-    // Aligned functions and library offsets can hash to the same set;
-    // retain both hot targets instead of paying the shared table lock on
-    // every alternating call. Way 0 is MRU. Metadata stays thread-local,
-    // and owner/generation checks revoke both ways before dispatch.
-    static constexpr int INLINE_CACHE_SETS = 1024;
+    // 8192 two-way sets (16,384 targets). Aligned functions and library
+    // offsets can hash to the same set; retain both hot targets instead of
+    // paying the shared table lock on every alternating call. Way 0 is MRU.
+    // With 1024 sets SpongeBob missed 32% of dispatches, nearly all by
+    // eviction, into a 900k-block table. The array is allocated on a
+    // thread's first dispatch (sync_dispatch_cache) and freed at thread
+    // exit, so threads that never run guest code do not carry it.
+    // Owner/generation checks revoke both ways before dispatch.
+    static constexpr int INLINE_CACHE_SETS = 8192;
     struct InlineCacheEntry {
         uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
@@ -410,7 +415,11 @@ public:
     struct InlineCacheSet {
         InlineCacheEntry ways[2];
     };
-    static thread_local InlineCacheSet tls_inline_cache_[INLINE_CACHE_SETS];
+    static thread_local InlineCacheSet* tls_inline_cache_;  // null until first dispatch
+    static void ensure_inline_cache();  // allocates this thread's sets
+    static void clear_inline_cache() {
+        if (tls_inline_cache_) std::fill_n(tls_inline_cache_, INLINE_CACHE_SETS, InlineCacheSet{});
+    }
     struct DispatchStats {
         uint64_t last = 0, way0 = 0, way1 = 0, table = 0, evictions = 0;
     };
@@ -429,6 +438,7 @@ public:
     }
     void inline_cache_insert(uint64_t pc, uint64_t (*fn)(CPU*, Emulator*), int count,
                              uint64_t (*chain)(CPU*, Emulator*) = nullptr) {
+        if (!tls_inline_cache_) return;
         auto& set = tls_inline_cache_[inline_cache_set(pc)];
         if (set.ways[0].pc != pc) {
             if (__builtin_expect(dispatch_stats_enabled_, 0) &&
@@ -439,6 +449,7 @@ public:
         set.ways[0] = InlineCacheEntry{pc, fn, count, chain};
     }
     void inline_cache_erase(uint64_t pc) {
+        if (!tls_inline_cache_) return;
         auto& set = tls_inline_cache_[inline_cache_set(pc)];
         if (set.ways[0].pc == pc) {
             set.ways[0] = set.ways[1];
@@ -455,7 +466,9 @@ public:
     inline bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
                                     int& instr_count,
                                     uint64_t (**chain)(CPU*, Emulator*) = nullptr) {
-        auto& set = tls_inline_cache_[inline_cache_set(pc)];
+        InlineCacheSet* sets = tls_inline_cache_;
+        if (__builtin_expect(!sets, 0)) return false;
+        auto& set = sets[inline_cache_set(pc)];
         if (set.ways[0].pc == pc) {
             if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.way0;
             *fn = set.ways[0].fn;

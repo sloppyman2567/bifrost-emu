@@ -41,6 +41,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unordered_map>
 #include <vector>
@@ -149,7 +150,18 @@ thread_local std::unordered_map<uint64_t, uint32_t> FrostJIT::tls_hot_pc_counts_
 thread_local FrostJIT::LastBlockCache FrostJIT::tls_last_block_;
 thread_local uint64_t FrostJIT::tls_stat_exec_ = 0;
 thread_local uint64_t FrostJIT::tls_stat_instr_ = 0;
-thread_local FrostJIT::InlineCacheSet FrostJIT::tls_inline_cache_[INLINE_CACHE_SETS];
+thread_local FrostJIT::InlineCacheSet* FrostJIT::tls_inline_cache_ = nullptr;
+// The hot path reads a plain TLS pointer (no TLS-init call); a pthread key
+// destructor frees the sets when a dispatching thread exits.
+void FrostJIT::ensure_inline_cache() {
+    if (tls_inline_cache_) return;
+    static pthread_key_t key;
+    static const int key_error = pthread_key_create(&key, [](void* sets) {
+        delete[] static_cast<InlineCacheSet*>(sets);
+    });
+    tls_inline_cache_ = new InlineCacheSet[INLINE_CACHE_SETS];
+    if (key_error == 0) pthread_setspecific(key, tls_inline_cache_);
+}
 thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in X86Emitter.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).

@@ -580,7 +580,7 @@ void FrostJIT::invalidate_all() {
         for (auto& counter : mt_hot_counters_) counter->enabled.store(0, std::memory_order_release);
         blocks_.clear(); back_refs_.clear();
         tls_last_block_ = LastBlockCache{};
-        for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
+        clear_inline_cache();
         return;
     }
     make_writable();
@@ -604,7 +604,7 @@ void FrostJIT::invalidate_all() {
     back_refs_.clear();
     // Keep pending_call_sites_ (see invalidate_range rationale).
     tls_last_block_ = LastBlockCache{};
-    for (auto& set : tls_inline_cache_) set = InlineCacheSet{};
+    clear_inline_cache();
     std::atomic_thread_fence(std::memory_order_release);
     make_executable();
 }

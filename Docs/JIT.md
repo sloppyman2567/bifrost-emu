@@ -1155,8 +1155,13 @@ is insufficient: check actual generated execution and host capability gates.
 
 ## Dispatch cache and worker profiling (2026-10-04)
 
-The thread-local dispatch cache uses 1,024 two-way sets (2,048 entries,
-48 KiB of metadata per host thread), replacing 256 direct-mapped entries.
+The thread-local dispatch cache uses 8,192 two-way sets (16,384 entries,
+512 KiB per dispatching thread). It is allocated on a thread's first
+dispatch and freed at thread exit (pthread key), so host threads that never
+run guest code carry none of it. With the previous 1,024 sets, SpongeBob
+gameplay sent 32% of dispatches (7.9M per 15 s, nearly all evictions) to the
+900k-entry shared table, whose bucket walk and lock made `run_block` about
+10% of sampled CPU; the larger cache's in-game effect is not yet measured.
 Way 0 is most recently used; second-way hits move their target to the front.
 Both native functions and null interpreter-fallback decisions are cached.
 Owner/invalidation-generation checks revoke both ways before reuse. Tier-2
