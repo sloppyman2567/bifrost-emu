@@ -98,8 +98,7 @@ uint32_t FrostJIT::tier2_hits_threshold() {
     return hits;
 }
 bool FrostJIT::tier2_trace_enabled() {
-    static const bool on = (getenv("BIFROST_TIER2_TRACE") != nullptr);
-    return on;
+    return dbg().tier2_trace;
 }
 // ── Compile-time layout checks ─────────────────────────────────────────
 // The JIT hardcodes offsets into the CPU struct (REGS_OFF, SP_OFF, etc.)

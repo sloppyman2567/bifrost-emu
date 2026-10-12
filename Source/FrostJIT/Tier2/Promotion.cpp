@@ -93,7 +93,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         if (!trace.fully_profiled || trace.path_probability < 0.75 ||
             (mt_active() && trace.blocks.size() < 2)) {
             tier2_profit_rejections.fetch_add(1, std::memory_order_relaxed);
-            if (tier2_trace_enabled())
+            if (dbg().tier2_trace_verbose)
                 std::fprintf(stderr, "[tier2] decline pc=0x%llx profiled=%d survival=%.3f blocks=%zu\n",
                     (unsigned long long)pc, trace.fully_profiled, trace.path_probability, trace.blocks.size());
             return;

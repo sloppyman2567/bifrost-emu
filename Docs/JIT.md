@@ -77,6 +77,14 @@ dependency tracking for every included code range. Tier-2 remains opt-in with
 `BIFROST_NO_WEX=1`, as before. MT uses immutable generated instructions and
 revocable data cells.
 
+`BIFROST_TIER2_TRACE=1` prints concise compiled-candidate and timing-decision
+lines. Discovery attempts, per-block paths, admission declines, SSA/allocation
+details and duplicate private-sampling code records require
+`BIFROST_TIER2_TRACE_VERBOSE=1`, which also enables the concise lines.
+`BIFROST_STATS_PERIOD=5` retains periodic compilation/payoff counters; the
+Tier-2 `regions` field is an interval count, while measured `keeps`/`rejects`
+are cumulative. A compiled candidate is not necessarily a selected region.
+
 Region codegen selects a vector or scalar-FP cache layout over its complete
 IR. Cold/chain entries preload that layout; internal edges and ST backedges
 retain XMM values. Every external exit, timing-quota exit and memory-fault

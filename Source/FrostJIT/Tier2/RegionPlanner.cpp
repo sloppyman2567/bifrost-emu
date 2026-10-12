@@ -189,7 +189,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
                 };
                 scan(ssa_preheader); scan(region_ir);
                 ssa_region = true;
-                if (tier2_trace_enabled()) {
+                if (dbg().tier2_trace_verbose) {
                     size_t phis = 0;
                     for (const auto& b : function.blocks) phis += b.phis.size();
                     fprintf(stderr, "[tier2] SSA head=%llx blocks=%zu values=%zu phis=%zu\n",
@@ -553,7 +553,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
             }
             renamed++;
         }
-        if (tier2_trace_enabled() && renamed) {
+        if (dbg().tier2_trace_verbose && renamed) {
             fprintf(stderr, "[tier2] destsrc: %d ops rewritten\n", renamed);
         }
     }

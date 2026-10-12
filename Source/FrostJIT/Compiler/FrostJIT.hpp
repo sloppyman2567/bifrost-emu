@@ -660,7 +660,8 @@ public:
     // Tier-2 (trace/region JIT) env gates (ROADMAP #14). Read once
     // at first use. Experimental and opt-in with BIFROST_TIER2=1.
     // BIFROST_TIER2_HITS = the "hot head" threshold (default 1000);
-    // BIFROST_TIER2_TRACE=1 logs each hot head as it fires.
+    // BIFROST_TIER2_TRACE=1 logs compiled candidates and timing decisions;
+    // BIFROST_TIER2_TRACE_VERBOSE=1 adds discovery and codegen details.
     static bool     tier2_enabled();
     static uint32_t tier2_hits_threshold();
     static bool     tier2_trace_enabled();

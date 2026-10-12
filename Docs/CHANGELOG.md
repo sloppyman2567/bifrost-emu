@@ -25,6 +25,9 @@ labels below are historical records.
 
 ### Bounded superblocks and region vector caching (2026-10-12)
 
+- Make `BIFROST_TIER2_TRACE=1` concise: compiled candidates and timing
+  decisions. Move discovery, per-block and compiler details to the cached
+  `BIFROST_TIER2_TRACE_VERBOSE=1` diagnostic switch.
 - Measured losing Tier-2 superblocks retry shorter prefixes (8 -> 4 -> 2)
   after fresh Tier-1 hotness and branch profiling. Work mismatches and
   inconclusive trials retain Tier-1. Existing compilation/phase budgets bound

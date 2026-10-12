@@ -1,5 +1,17 @@
 # Tests
 
+## Concise Tier-2 logging (2026-10-12)
+
+The existing discovery fixture passes in ST/MT with both frame layouts under
+compact and verbose tracing. Compact output contains only compiled-candidate
+and timing-decision Tier-2 records; verbose tracing alone also enables those
+records and restores discovery/compiler details. The fixture batch emits
+40 compact versus 1,064 verbose Tier-2 lines. Existing real-timing regressions
+pass with compact logging, and both SDL/GL and headless library builds pass.
+`make verify` passes 21,836 SSA checks, 75 differential fixtures and six
+threaded oracle runs. This is a logging change; no gameplay/FPS result is
+established by these checks.
+
 ## Planned codegen and CoreMark acceptance
 
 The [state-retention codegen plan](JIT.md#planned-codegen-retaining-guest-state-across-regions)

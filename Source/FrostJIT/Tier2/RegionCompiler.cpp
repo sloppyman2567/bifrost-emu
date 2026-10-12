@@ -397,7 +397,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                 pinned_host_regs_ |= (1u << r);
                 placed++;
             }
-            if (tier2_trace_enabled()) {
+            if (dbg().tier2_trace_verbose) {
                 fprintf(stderr, "[tier2] keepres: %d candidates, %d pinned\n",
                         static_cast<int>(cands.size()), placed);
             }
@@ -892,7 +892,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
         fprintf(stderr, "\n");
     }
-    if (tier2_trace_enabled()) {
+    if (dbg().tier2_trace_verbose) {
         fprintf(stderr,
                 "[tier2] region pc=0x%llx blocks=%zu insts=%llu bytes=%zu back_flags_carried=%d\n",
                 static_cast<unsigned long long>(trace.head_pc), nblk,

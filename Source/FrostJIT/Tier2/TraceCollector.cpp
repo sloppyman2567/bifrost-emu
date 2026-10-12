@@ -381,7 +381,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
         trace.stop_reason = "too_short";
     }
 
-    if (tier2_trace_enabled()) {
+    if (dbg().tier2_trace_verbose) {
         fprintf(stderr, "[tier2] trace pc=0x%llx blocks=%zu insts=%llu ok=%d stop=%s\n",
                 static_cast<unsigned long long>(head_pc), trace.blocks.size(),
                 static_cast<unsigned long long>(trace.total_insts), static_cast<int>(trace.ok),
