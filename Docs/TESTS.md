@@ -1,5 +1,15 @@
 # Tests
 
+## Register moves through XZR (2026-10-12)
+
+`jit_mov_alias` (registered as `mov_alias`) runs 77 checks over seven values:
+MOV X/W, ORR/EOR/ORN/AND with XZR/WZR, shifted and rotated sources, W-form
+upper-half clearing and destination aliasing. It passes under QEMU 11.1, the
+JIT, `BIFROST_JIT_VERIFY=1`, `BIFROST_IR_VALIDATE=1` and `--no-jit`. The strict
+suite passes 316/316 (JIT) and 307/307 (`--no-jit`, 9 JIT-only skips); `make
+verify` passes 78 differential fixtures and 6 threaded oracles. CoreMark's
+median rose from 8,565 to 8,763 iterations/s; game FPS was not measured.
+
 ## Half-precision conversions (2026-10-12)
 
 `jit_fp_half_convert` (registered as `fp_half_convert`) checks 12 fixed

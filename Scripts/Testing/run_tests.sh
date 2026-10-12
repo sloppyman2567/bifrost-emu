@@ -425,6 +425,7 @@ UNIT_TESTS=(
     # for both single and double precision.
     "jit_frint|Tests/Unit/jit_frint.elf||5|PASS"
     "fp_half_convert|Tests/Unit/jit_fp_half_convert.elf||5|checks passed"
+    "mov_alias|Tests/Unit/jit_mov_alias.elf||5|checks passed"
 
     # NEW (Turn 63): SCVTF/UCVTF/FCVTZS/FCVTZU with FP source/dest —
     # the "Advanced SIMD scalar two-register miscellaneous" group (0x5E...).

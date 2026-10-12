@@ -472,6 +472,13 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             case IROp::AND: case IROp::OR:  case IROp::XOR:
             case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR: {
                 uint64_t a, b;
+                // Commutative ops take their constant as src2, so the
+                // identities below also catch ARM's MOV (register), which
+                // is ORR Xd, XZR, Xm: zero arrives as the first operand.
+                const bool commutative = inst.op == IROp::ADD || inst.op == IROp::MUL ||
+                    inst.op == IROp::AND || inst.op == IROp::OR || inst.op == IROp::XOR;
+                if (commutative && consts.has(inst.src1) && !consts.has(inst.src2))
+                    std::swap(inst.src1, inst.src2);
                 bool ha = consts.has(inst.src1);
                 bool hb = consts.has(inst.src2);
                 if (ha && hb) {

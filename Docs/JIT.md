@@ -64,6 +64,19 @@ and LLVM's [runtime value-location maps](https://llvm.org/docs/StackMaps.html).
 These provide design precedents; performance acceptance depends on Bifrost's
 own tests and measurements.
 
+## Register moves through XZR (2026-10-12)
+
+ARM's `MOV Xd, Xm` is `ORR Xd, XZR, Xm`, so its zero constant is the first
+operand. The constant-folding pass only recognized identities (`x + 0`,
+`x | 0`, `x ^ 0`, `x & ~0`, `x * 1`, `x & 0`) with the constant second, and
+every register move compiled to a zero materialization plus an OR. Commutative
+operations now swap a lone constant into src2 first, so moves lower to a copy
+that later stores forward directly. W forms keep their separate `ZEXT`, which
+clears bits 63:32. CoreMark (110,000 iterations, three runs, CRCs valid) rose
+from a median of 8,565 to 8,763 iterations/s. `jit_mov_alias` checks MOV,
+ORR/EOR/ORN/AND with XZR/WZR, shifted and rotated sources, W-form clearing and
+destination aliasing against fixed results that also pass under QEMU.
+
 ## Integer ADDP for every element size (2026-10-12)
 
 A SpongeBob gameplay fallback profile recorded 17.2 million interpreted
