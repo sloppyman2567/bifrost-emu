@@ -283,6 +283,7 @@ UNIT_TESTS=(
     "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries and concurrent phases PASS|HOST_JIT"
     "jit_tier2_measure|Scripts/Testing/test_jit_tier2_measure.sh||180|jit_tier2_measure: real timing keeps faster code, rejects slower/mismatched samples PASS|HOST_JIT"
     "jit_cache_invalidation|Tests/Unit/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
+    "jit_selfloop_writeback|Tests/Unit/jit_selfloop_writeback.elf||15|jit_selfloop_writeback: ALL PASS"
     "jit_dispatch_cache|Tests/Unit/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
     "jit_call_helpers|Tests/Unit/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
     "jit_call_depth|Tests/Unit/jit_call_helpers.elf 20000 deep||15|jit_call_helpers: ALL PASS deep calls"

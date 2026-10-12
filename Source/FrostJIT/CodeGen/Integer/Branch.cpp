@@ -33,6 +33,12 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     if (target_pc != current_start_pc_ || no_selfloop ||
         (mt_active() && dbg().no_chain)) return false;
     has_selfloop_slot_ = true;
+    // The back-edge jumps to the body start, whose allocator state holds
+    // only the loop-carried pins. Any other dirty architectural register
+    // cached in a host register (e.g. x11 written by UMOV) must reach
+    // cpu.regs[] first, or the next iteration's LOAD_REG reads the previous
+    // iteration's value. Mapping and dirty state stay for the exits below.
+    store_dirty_unpinned_arch_regs();
     if (!mt_active()) {
         selfloop_patch_off_ = code_buf_used_;
         emit_byte(0xE9); emit_u32(0);

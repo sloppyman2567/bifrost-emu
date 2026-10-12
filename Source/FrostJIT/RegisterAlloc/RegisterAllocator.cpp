@@ -480,6 +480,20 @@ void FrostJIT::flush_all_vregs_keep() {
         }
     }
 }
+void FrostJIT::store_dirty_unpinned_arch_regs() {
+    // Self-loop back-edge writeback: like flush_all_vregs_keep, but only
+    // architectural vregs, and not the loop-carried pins the body start
+    // expects to find in their pin registers. Stores are flag-neutral.
+    uint16_t m = dirty_host_regs_;
+    while (m) {
+        int r = __builtin_ctz(m);
+        m &= m - 1;
+        int v = reg_vreg_[r];
+        if (v < 0 || v > 31 || !vreg_dirty_[v]) continue;
+        if (v <= 30 && arch_pin_[v] == r) continue;
+        emit_store_arm(v, r);
+    }
+}
 // ── Targeted flush/invalidate ────────────────────────
 // Walk only the host regs whose bits are set in `mask`, spilling any
 // dirty vreg cached there. This is the heart of the flush-penalty

@@ -1237,6 +1237,25 @@ integer loop was unchanged at approximately 286 ms. These are local loop
 measurements, not game FPS or general MT scaling guarantees. See
 [validation and measurement bounds](TESTS.md#bounded-mt-self-loops-2026-10-11).
 
+### Self-loop back-edge writeback (2026-10-12)
+
+The back-edge jumps to the body start, whose allocator state holds only the
+loop-carried pins. Any other dirty architectural register cached in a host
+register was previously written back only on the exits emitted after the
+self-loop slot, so the next iteration's `LOAD_REG` read the previous value.
+`emit_selfloop_backedge` now stores every dirty, unpinned architectural vreg
+(`store_dirty_unpinned_arch_regs`) before the slot in both ST and MT forms;
+pins stay in their registers and the exits keep their own writeback.
+
+Android 15 Bionic's `__strrchr_aarch64` exposed it: its scan loop writes x11
+with `UMOV` (a direct architectural write, never pinned) and reads it in the
+next iteration's `csel x7, x11, x7, ne`. Whether x11 stayed dirty in a host
+register depended on allocation, so the result depended on which path compiled
+the loop first. After unaligned scans, an aligned 104-byte path returned
+index 73 instead of 94. Unity's il2cpp first-launch extraction built
+destinations such as `il2cpp/ets/bin/.../ystem.Drawing...`, failed, and showed
+"Not enough storage space to install required resources." in SpongeBob 5.12.0.
+
 ### Region publication and execution
 
 Tier-1 and block chaining are the default. Tier-2 promotion is experimental

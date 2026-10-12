@@ -1343,6 +1343,7 @@ private:
     // x22/x19 read pre-branch values and died in a null call). Same
     // hazard class as vec_cache_writeback_all(false) above it.
     void flush_all_vregs_keep();
+    void store_dirty_unpinned_arch_regs();  // self-loop back-edge writeback
     void invalidate_all_vregs();
     // ── Targeted flush/invalidate ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any
