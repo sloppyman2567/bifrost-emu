@@ -203,7 +203,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // which raises the fault.
             //
             // Operations (atom_op in inst.cond):
-            //   CAS (≥0xC): lock cmpxchg       (32/64-bit only)
+            //   CAS (≥0xC): lock cmpxchg
             //   SWP (0x8):   lock xchg
             //   LDADD (0x0): lock xadd (LD) / lock add (ST)
             //   STSET (0x3): lock or   (ST only)
@@ -220,28 +220,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int w = ap.width;
             bool is_64 = (w == 8);
             bool is_16 = (w == 2);
-            // SMAX/SMIN/UMAX/UMIN and 8-bit/16-bit CAS need special handling
-            // that the fast path doesn't support. Fall back to CALL_INTERP.
-            // 8-bit CAS needs cmpxchg r/m8 (0x0F 0xB0); the fast path only
-            // emits cmpxchg r/m32/r64 (0x0F 0xB1). 16-bit CAS also works
-            // but let's be conservative and fall back for sub-32-bit CAS.
-            // Byte-wide atomics fall back too: the fast path below only
-            // knows 16/32/64-bit operand sizes, so a byte op was emitted as
-            // a 32-bit lock xchg/xadd/cmpxchg — SWPALB rewrote the three
-            // neighbouring bytes and every LD*B returned 4 bytes.
-            if ((atom_op >= 0x4 && atom_op <= 0x7) ||
-                (atom_op >= 0xC && w < 4) || w == 1) {
-                emit_call_interp(inst.arm_pc, false);
-                if (is_load && inst.dest != 0) {
-                    emit_load_arm(RAX, static_cast<int>(ap.reg_idx));
-                    store_reg_to_vreg(inst.dest, RAX);
-                }
-                constexpr uint16_t MEM_CLOBBER =
-                    (1u << RAX) | (1u << RCX) | (1u << RDX) |
-                    (1u << R8)  | (1u << R9)  | (1u << R11);
-                invalidate_host_regs(MEM_CLOBBER);
-                return false;
-            }
+            bool is_8 = (w == 1);
+            // Byte forms use the even x86 opcode (r/m8) of each odd r/m16/32/64
+            // opcode; a 32-bit op would rewrite the three neighbouring bytes.
+            // Results are zero-extended to 64 bits: ARM writes
+            // ZeroExtend(old), and a successful cmpxchg leaves RAX untouched
+            // (including bits above the operand size).
+            auto emit_zero_extend_rax = [&]() {
+                if (is_8)       { emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC0); } // movzx eax, al
+                else if (is_16) { emit_byte(0x0F); emit_byte(0xB7); emit_byte(0xC0); } // movzx eax, ax
+                else if (!is_64) { emit_byte(0x89); emit_byte(0xC0); }                 // mov eax, eax
+            };
             clobber_flags();
             constexpr uint16_t MEM_CLOBBER =
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
@@ -267,12 +256,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(0xF0);  // LOCK
                 if (is_64) emit_byte(0x48);
                 else if (is_16) emit_byte(0x66);
-                emit_byte(opcode);
+                emit_byte(is_8 ? opcode - 1 : opcode);
                 emit_byte(modrm(0, reg & 7, RAX & 7));  // [rax], reg
+            };
+            auto emit_zero_extend_rcx = [&]() {
+                if (is_8)       { emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC9); } // movzx ecx, cl
+                else if (is_16) { emit_byte(0x0F); emit_byte(0xB7); emit_byte(0xC9); } // movzx ecx, cx
             };
             if (atom_op >= 0xC) {
                 // CAS: lock cmpxchg [R9], RCX
-                // x86 cmpxchg: if RAX == [mem], [mem]=RCX; RAX = old always.
+                // x86 cmpxchg: if RAX == [mem], [mem]=RCX; else RAX = old.
                 // ARM CAS: old=[Xn]; if old==Ws, [Xn]=Wt; Ws=old.
                 // Map: RAX=Ws(expected from cpu.regs[imm]), [mem]=Wt(RCX=desired).
                 emit_mov_reg(R9, RAX);              // R9 = host addr
@@ -282,15 +275,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(0xF0);                    // LOCK
                 if (is_16) emit_byte(0x66);         // operand-size prefix
                 emit_byte(is_64 ? 0x49 : 0x41);     // REX must follow all legacy prefixes
-                emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
+                emit_byte(0x0F); emit_byte(is_8 ? 0xB0 : 0xB1);  // cmpxchg r/m, r
                 emit_byte(0x09);                    // modrm(0, rcx, r9)
+                emit_zero_extend_rax();
                 if (is_load) {
                     store_reg_to_vreg(inst.dest, RAX);
                 }
             } else if (atom_op == 0x8) {
                 // SWP: lock xchg [RAX], RCX (RCX gets old value)
                 emit_lock_op(0x87, RCX);
-                if (is_16) { emit_byte(0x0F); emit_byte(0xB7); emit_byte(0xC9); } // movzx ecx, cx
+                emit_zero_extend_rcx();
                 if (is_load) store_reg_to_vreg(inst.dest, RCX);
             } else if (atom_op == 0x0) {
                 // LDADD/STADD
@@ -301,9 +295,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     emit_byte(0xF0);  // LOCK
                     if (is_64) emit_byte(0x48);
                     else if (is_16) emit_byte(0x66);
-                    emit_byte(0x0F); emit_byte(0xC1);  // xadd r/m, r
+                    emit_byte(0x0F); emit_byte(is_8 ? 0xC0 : 0xC1);  // xadd r/m, r
                     emit_byte(modrm(0, RCX & 7, RAX & 7));
-                    if (is_16) { emit_byte(0x0F); emit_byte(0xB7); emit_byte(0xC9); } // movzx ecx, cx
+                    emit_zero_extend_rcx();
                     store_reg_to_vreg(inst.dest, RCX);
                 } else {
                     // STADD: lock add [RAX], RCX
@@ -355,13 +349,33 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     else       {                  emit_byte(0xF7); emit_byte(0xD2); }
                     invalidate_host_regs(1u << RDX);
                 }
+                // SMAX/SMIN/UMAX/UMIN compare 64-bit sign/zero extensions of
+                // both operands; cmpxchg then uses only the operand-size part.
+                const bool is_minmax = atom_op >= 0x4 && atom_op <= 0x7;
+                const bool is_signed = atom_op == 0x4 || atom_op == 0x5;
+                if (is_minmax) {
+                    if (is_signed) {
+                        if (is_8)       { emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBE); emit_byte(0xC9); } // movsx rcx, cl
+                        else if (is_16) { emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBF); emit_byte(0xC9); } // movsx rcx, cx
+                        else if (!is_64) { emit_byte(0x48); emit_byte(0x63); emit_byte(0xC9); }                // movsxd rcx, ecx
+                    } else if (!is_64) {
+                        emit_zero_extend_rcx();
+                        if (!is_8 && !is_16) { emit_byte(0x89); emit_byte(0xC9); }                             // mov ecx, ecx
+                    }
+                }
                 // CAS loop start: reload old value from memory.
                 size_t loop_start = code_buf_used_;
-                // RAX = [R9] (mov rax, [r9])
+                // RAX = [R9], extended to 64 bits.
                 register_memory_fault_site();
-                if (is_64)      { emit_byte(0x49); emit_byte(0x8B); emit_byte(0x01); }
-                else if (is_16) { emit_byte(0x41); emit_byte(0x0F); emit_byte(0xB7); emit_byte(0x01); }
-                else            { emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
+                if (is_64)            { emit_byte(0x49); emit_byte(0x8B); emit_byte(0x01); }               // mov rax, [r9]
+                else if (is_minmax && is_signed) {
+                    if (is_8)       { emit_byte(0x49); emit_byte(0x0F); emit_byte(0xBE); emit_byte(0x01); }  // movsx rax, byte [r9]
+                    else if (is_16) { emit_byte(0x49); emit_byte(0x0F); emit_byte(0xBF); emit_byte(0x01); }  // movsx rax, word [r9]
+                    else            { emit_byte(0x49); emit_byte(0x63); emit_byte(0x01); }                   // movsxd rax, [r9]
+                }
+                else if (is_8)        { emit_byte(0x41); emit_byte(0x0F); emit_byte(0xB6); emit_byte(0x01); } // movzx eax, byte [r9]
+                else if (is_16)       { emit_byte(0x41); emit_byte(0x0F); emit_byte(0xB7); emit_byte(0x01); } // movzx eax, word [r9]
+                else                  { emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }               // mov eax, [r9]
                 // R8 = RAX (mov r8, rax = 4C 8B C0)
                 emit_byte(0x4C); emit_byte(0x8B); emit_byte(0xC0);
                 // Compute new = R8 OP RCX (or R8 AND RDX for LDCLR).
@@ -385,6 +399,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                         if (is_64) emit_byte(0x49); else emit_byte(0x41);
                         emit_byte(0x09); emit_byte(0xC8);  // or r8, rcx
                         break;
+                    default: {  // SMAX/SMIN/UMAX/UMIN: r8 = src when it wins
+                        static constexpr uint8_t take_src[4] = {
+                            0x4C,   // SMAX: old <  src (cmovl)
+                            0x4F,   // SMIN: old >  src (cmovg)
+                            0x42,   // UMAX: old <  src (cmovb)
+                            0x47};  // UMIN: old >  src (cmova)
+                        emit_byte(0x49); emit_byte(0x39); emit_byte(0xC8);   // cmp r8, rcx
+                        emit_byte(0x4C); emit_byte(0x0F);
+                        emit_byte(take_src[atom_op - 0x4]); emit_byte(0xC1); // cmovcc r8, rcx
+                        break;
+                    }
                 }
                 // lock cmpxchg [R9], R8
                 // REX.WRB (0x4D) = W=1, R=1(reg→r8), B=1(rm→r9).
@@ -392,11 +417,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(0xF0);                    // LOCK
                 if (is_16) emit_byte(0x66);
                 emit_byte(is_64 ? 0x4D : 0x45);     // REX must follow all legacy prefixes
-                emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
+                emit_byte(0x0F); emit_byte(is_8 ? 0xB0 : 0xB1);  // cmpxchg r/m, r
                 emit_byte(0x01);                    // modrm(0, r8, r9) = 00 000 001
                 // jnz loop_start (retry if CAS failed)
                 int32_t loop_rel = static_cast<int32_t>(loop_start - (code_buf_used_ + 6));
                 emit_byte(0x0F); emit_byte(0x85); emit_u32(static_cast<uint32_t>(loop_rel));
+                if (is_minmax && is_signed) emit_zero_extend_rax();
                 if (is_load) {
                     store_reg_to_vreg(inst.dest, RAX);
                 }

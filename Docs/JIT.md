@@ -990,6 +990,17 @@ QEMU. `jit_host_fault` also checks halfword LDSET read/write fault recovery on
 four CPUs. These additions do not establish all LSE orderings or contention
 patterns.
 
+Every LSE operation and access size is native inside the reservation; only
+the out-of-window slow path calls the interpreter. Byte forms use the even
+r/m8 opcodes (`86`, `0F C0`, `0F B0`, `00`/`08`/`20`). LDSMAX/LDSMIN/LDUMAX/
+LDUMIN share the CAS loop and compare 64-bit sign or zero extensions with
+`cmp`+`cmovcc`. In the CMPXCHG pseudocode the accumulator is written only when
+the comparison fails, so CAS zero-extends RAX afterwards. Without that, a
+successful 32-bit CAS kept stale upper Ws bits. Verify mode records ATOMIC
+footprints like STORE_MEM, so replay does not see the JIT's write.
+`jit_lse_widths` covers all of this, with a `single` argument for differential
+replay.
+
 Ordinary scalar loads/stores, single 16-byte vector accesses and native LSE
 atomics use host page protection instead of consulting two guest page flags on
 every access. The reservation bounds check remains: adding an arbitrary guest

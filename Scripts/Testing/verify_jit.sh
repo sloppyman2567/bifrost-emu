@@ -48,7 +48,7 @@ for source in "${sources[@]}"; do
     limit=30
     case "$name" in
         jit_android_semantics) args=(no-trap) ;;
-        jit_cache_invalidation) args=(single) ;;
+        jit_cache_invalidation|jit_lse_widths) args=(single) ;;
         jit_cache_pressure) args=(single); limit=120 ;;
         jit_dispatch_cache|jit_call_helpers) args=(1000 single) ;;
     esac

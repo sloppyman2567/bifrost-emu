@@ -856,6 +856,13 @@ Focused additions:
   upper-half form against a C reference; 3312 checks pass under QEMU, both
   engines, JIT verify and IR validation. The old interpreter sign-extended
   `SADDW`/`SSUBW` byte lanes incorrectly.
+- `jit_lse_widths`: every LD/ST LSE op, SWP and plain/ordered CAS at all
+  four sizes with dirty upper register bits and guarded neighbouring bytes
+  (22848 checks against a C reference), then two threads running LDADDB on
+  adjacent bytes and STUMAXH on a shared halfword. `single` skips the threads
+  for `make verify`. Passes under QEMU and both engines. The old JIT kept
+  stale upper bits after a successful 32-bit CAS, and it interpreted byte
+  atomics, sub-word CAS and the MAX/MIN ops.
 - `jit_msr_nzcv`: `msr nzcv, xN` followed in the same block by a write to
   xN, read back with `mrs` and with `cset` after a pending `cmp`; 64000
   checks. The old JIT fails 30005; qemu-aarch64 and both engines pass.

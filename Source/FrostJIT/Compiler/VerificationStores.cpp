@@ -5,7 +5,7 @@
 namespace arm64emu {
 void FrostJIT::record_verification_stores(const IRBlock& ir_block, uint64_t start_pc, BlockEntry& entry) {
     // ── Verify-mode memory save/restore: populate store_infos ──────
-    // Walk the IR and record every STORE_MEM whose address operand can
+    // Walk the IR and record every STORE_MEM or ATOMIC whose address operand can
     // be statically resolved to (saved_arm_reg + offset). At verify
     // time, we use this list to snapshot the original memory values
     // before the JIT runs and restore them before the interpreter
@@ -85,14 +85,18 @@ void FrostJIT::record_verification_stores(const IRBlock& ir_block, uint64_t star
                 } else {
                     if (inst.dest < 4096) vreg_base[inst.dest] = 0xFF;
                 }
-            } else if (inst.op == IROp::STORE_MEM) {
-                // Record if src1 traces back to an ARM reg.
+            } else if (inst.op == IROp::STORE_MEM || inst.op == IROp::ATOMIC) {
+                // Record if src1 traces back to an ARM reg. An atomic's
+                // read-modify-write must be undone too, or the replay
+                // reads the value the JIT already wrote.
+                const bool atomic = inst.op == IROp::ATOMIC;
                 uint8_t b = (inst.src1 < 4096) ? vreg_base[inst.src1] : 0xFF;
                 if (b <= 31) {
                     BlockEntry::StoreInfo si;
                     si.arm_reg = b;
-                    si.offset  = vreg_off[inst.src1] + static_cast<int64_t>(inst.store_mem_params().offset);
-                    si.width   = inst.store_mem_params().width;
+                    si.offset  = vreg_off[inst.src1] +
+                        (atomic ? 0 : static_cast<int64_t>(inst.store_mem_params().offset));
+                    si.width   = atomic ? inst.atomic_params().width : inst.store_mem_params().width;
                     si.use_absolute = false;
                     if (!(modified_so_far & (1u << b))) {
                         // Base reg NOT modified — use saved.regs[b] + offset (original path).

@@ -411,6 +411,7 @@ UNIT_TESTS=(
     # LSE inline-asm test — forces CAS/LDADD/LDSET/LDCLR/LDEOR/SWP via
     # -march=armv8.1-a+lse, testing the JIT's native lock-prefixed codegen.
     "test_lse_inline|Tests/Unit/test_lse_inline.elf||10|ALL PASS"
+    "jit_lse_widths|Tests/Unit/jit_lse_widths.elf||20|checks passed"
     # NEW (Turn 56): CCMP 32-bit flag computation test. Validates the fix
     # for the JIT using 64-bit sub for 32-bit CCMP (wrong Sign Flag).
     "jit_ccmp|Tests/Unit/jit_ccmp.elf||5|ALL PASS"
