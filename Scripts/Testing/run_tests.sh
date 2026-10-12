@@ -424,6 +424,7 @@ UNIT_TESTS=(
     # instead of FP reg indices. Tests all 7 FRINT variants (N/P/M/Z/A/X/I)
     # for both single and double precision.
     "jit_frint|Tests/Unit/jit_frint.elf||5|PASS"
+    "fp_half_convert|Tests/Unit/jit_fp_half_convert.elf||5|checks passed"
 
     # NEW (Turn 63): SCVTF/UCVTF/FCVTZS/FCVTZU with FP source/dest —
     # the "Advanced SIMD scalar two-register miscellaneous" group (0x5E...).

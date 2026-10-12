@@ -1,5 +1,18 @@
 # Tests
 
+## Half-precision conversions (2026-10-12)
+
+`jit_fp_half_convert` (registered as `fp_half_convert`) checks 12 fixed
+results: FCVTL/FCVTL2 normals, subnormals, infinity and a quieted NaN payload;
+FCVTN/FCVTN2 ties-to-even, overflow, tiny values and NaN; scalar FCVT S/D<->H;
+FRINTN NaN quieting; scalar FADDP invalid-sum and NaN-order results. It passes
+under QEMU 11.1, the JIT and `--no-jit`; the pre-fix binary fails its first
+check and then raises SIGILL on FCVTN. The strict suite passes 315/315 (JIT)
+and 306/306 (`--no-jit`, 9 JIT-only skips); `make verify` passes with 77
+differential fixtures and 6 threaded oracles. The user confirmed SpongeBob's
+outfit, avatar portrait and lobby character after the fix. FPCR rounding
+modes other than nearest, `FPCR.AHP` and FPSR flags remain untested.
+
 ## Integer ADDP widths (2026-10-12)
 
 `jit_simd_addlv`'s existing ADDP oracle (all element sizes, both Q, Q=0 high

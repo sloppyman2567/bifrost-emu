@@ -49,45 +49,60 @@ static inline void write_fp_s(CPU& cpu, int r, float f) {
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }
 // ── Half-precision (FP16) helpers ──────────────────────────────────────
-// IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa.
-static inline float h2f(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
+// IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa. These follow Arm's
+// FPConvert with FPCR.AHP=0 and round-to-nearest-even (Linux defaults);
+// FPCR.RMode and FPSR exception flags are not modeled. `dn` is FPCR.DN.
+static inline float h2f(uint16_t h, bool dn = false) {
+    const uint32_t sign = static_cast<uint32_t>(h >> 15) << 31;
+    const uint32_t exp  = (h >> 10) & 0x1F;
     uint32_t mant = h & 0x3FF;
     uint32_t fbits;
     if (exp == 0) {
         if (mant == 0) {
-            fbits = sign << 31;
-        } else {
-            int e = -1;
+            fbits = sign;
+        } else {  // subnormal mant * 2^-24: exact as a normal single
+            int e = 0;
             while (!(mant & 0x400)) { mant <<= 1; e--; }
             mant &= 0x3FF;
-            fbits = (sign << 31) | ((127 + e - 14) << 23) | (mant << 13);
+            fbits = sign | static_cast<uint32_t>(127 + e - 14) << 23 | mant << 13;
         }
     } else if (exp == 0x1F) {
-        fbits = (sign << 31) | (0xFFu << 23) | (mant << 13);
+        // Infinity, or a NaN: quieted with its payload (FPConvertNaN).
+        if (mant == 0) fbits = sign | 0x7F800000u;
+        else fbits = dn ? 0x7FC00000u : sign | 0x7FC00000u | mant << 13;
     } else {
-        fbits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+        fbits = sign | (exp - 15 + 127) << 23 | mant << 13;
     }
     float f; memcpy(&f, &fbits, 4); return f;
 }
-static inline uint16_t f2h(float f) {
-    uint32_t fbits; memcpy(&fbits, &f, 4);
-    uint32_t sign = (fbits >> 31) & 1;
-    int32_t  exp  = static_cast<int32_t>((fbits >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = (fbits & 0x7FFFFF) >> 13;
-    if (exp <= 0) {
-        if (exp < -10) return static_cast<uint16_t>(sign << 15);
-        mant |= 0x400;
-        mant >>= (1 - exp);
-        return static_cast<uint16_t>((sign << 15) | mant);
-    } else if (exp >= 0x1F) {
-        return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
+// One correctly rounded step (a single's conversion to double is exact).
+static inline uint16_t d2h(double d, bool dn = false) {
+    uint64_t bits; memcpy(&bits, &d, 8);
+    const uint16_t sign = static_cast<uint16_t>(bits >> 48) & 0x8000;
+    const int exp = static_cast<int>(bits >> 52) & 0x7FF;
+    const uint64_t frac = bits & ((1ULL << 52) - 1);
+    if (exp == 0x7FF) {
+        if (frac == 0) return sign | 0x7C00;
+        // NaN: quiet bit plus the top payload bits.
+        return dn ? 0x7E00 : static_cast<uint16_t>(sign | 0x7E00 | (frac >> 42));
     }
-    return static_cast<uint16_t>((sign << 15) | (exp << 10) | mant);
+    // Doubles below 2^-25 (including subnormal doubles) round to zero.
+    const int e = exp - 1023;
+    if (exp == 0 || e < -25) return sign;
+    const uint64_t m = frac | (1ULL << 52);
+    int hexp = e + 15;
+    const int shift = hexp > 0 ? 42 : 42 + (1 - hexp);  // keep 11 / fewer bits
+    if (hexp <= 0) hexp = 0;
+    uint64_t q = m >> shift;
+    const uint64_t rem = m & ((1ULL << shift) - 1), halfway = 1ULL << (shift - 1);
+    if (rem > halfway || (rem == halfway && (q & 1))) ++q;
+    if (hexp == 0) return static_cast<uint16_t>(sign | q);  // 0x400 = smallest normal
+    if (q >> 11) { q >>= 1; ++hexp; }
+    if (hexp >= 0x1F) return sign | 0x7C00;  // overflow rounds to infinity
+    return static_cast<uint16_t>(sign | hexp << 10 | (q & 0x3FF));
 }
-static inline uint16_t d2h(double d) {
-    return f2h(static_cast<float>(d));
+static inline uint16_t f2h(float f, bool dn = false) {
+    return d2h(static_cast<double>(f), dn);
 }
 // ── FP→int conversion with ARM saturation semantics ──────────────────
 // A C++ static_cast<int64_t>/<uint64_t> of a double in [2^63, 2^64) (or

@@ -506,33 +506,35 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     if ((op & 0xFFFFFC00) == 0x1E22C000) { // FCVT Dd, Sn
         write_fp_d(cpu, rd, static_cast<double>(read_fp_s(cpu, rn))); return;
     }
-    // FCVT H — half-precision conversions. We don't model 16-bit FP
-    // natively, but we can route H↔S via host __gnu_f2h_ieee / __gnu_h2f_ieee
-    // (or std::floor of a manual conversion) so at least the value
-    // survives round-tripping. Common case is musl's printf path,
+    // FCVT H — half-precision conversions through the FPConvert helpers in
+    // FloatCommon.hpp (exact widening, round-to-nearest-even narrowing,
+    // quieted NaN payloads, FPCR.DN). Common case is musl's printf path,
     // which sometimes uses FCVT Hn, Dn for hex-float formatting.
     if ((op & 0xFFFFFC00) == 0x1E63C000) { // FCVT Hd, Dn (D → H)
         // Half is stored in low 16 bits of v_lo.
         double d = read_fp_d(cpu, rn);
-        uint16_t hbits = d2h(d);
+        uint16_t hbits = d2h(d, (cpu.fpcr >> 25) & 1);
         cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
         return;
     }
     if ((op & 0xFFFFFC00) == 0x1E23C000) { // FCVT Hn, Sn (S → H)
         float f = read_fp_s(cpu, rn);
-        uint16_t hbits = f2h(f);
+        uint16_t hbits = f2h(f, (cpu.fpcr >> 25) & 1);
         cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
         return;
     }
-    if ((op & 0xFFFFFC00) == 0x1E634000) { // FCVT Sn, Hn (H → S)
+    // FCVT encodes the source in ftype (11 = H) and the destination in opc.
+    // These two used to match unallocated encodings (0x1E634000 and
+    // 0x1E224000), leaving the real H → S/D forms to the FP-NOP fallback.
+    if ((op & 0xFFFFFC00) == 0x1EE24000) { // FCVT Sd, Hn (H → S)
         uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
-        float f = h2f(hbits);
+        float f = h2f(hbits, (cpu.fpcr >> 25) & 1);
         write_fp_s(cpu, rd, f);
         return;
     }
-    if ((op & 0xFFFFFC00) == 0x1E224000) { // FCVT Dd, Hn (H → D)
+    if ((op & 0xFFFFFC00) == 0x1EE2C000) { // FCVT Dd, Hn (H → D)
         uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
-        double d = static_cast<double>(h2f(hbits));
+        double d = static_cast<double>(h2f(hbits, (cpu.fpcr >> 25) & 1));
         write_fp_d(cpu, rd, d);
         return;
     }
@@ -858,32 +860,20 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             pw == 0x7EB0F800 || pw == 0x7EF0F800) {
             const bool is_add = ((op >> 12) & 0xF) == 0xD;
             const bool is_min = (op & 0x00800000) != 0;
+            // FMAXP/FMINP are the non-NM forms (FMAXNMP/FMINNMP are separate
+            // encodings). ARM NaN propagation and +qNaN default, not x86's.
+            const ArmFpOp kind = is_add ? ArmFpOp::Add : is_min ? ArmFpOp::Min : ArmFpOp::Max;
             if (op & 0x00400000) {  // double: lanes = Vn.2D
                 double a = read_fp_d(cpu, rn);
                 uint64_t hi_bits = cpu.v_hi[rn];
                 double b; memcpy(&b, &hi_bits, 8);
-                if (is_add)      write_fp_d(cpu, rd, a + b);
-                // FMAXP/FMINP propagate NaN like FMAX/FMIN (they are
-                // the non-NM forms; FMAXNMP/FMINNMP are separate
-                // encodings verified via cross-as).
-                else if (is_min) write_fp_d(cpu, rd, (std::isnan(a) || std::isnan(b))
-                                    ? std::numeric_limits<double>::quiet_NaN()
-                                    : std::fmin(a, b));
-                else             write_fp_d(cpu, rd, (std::isnan(a) || std::isnan(b))
-                                    ? std::numeric_limits<double>::quiet_NaN()
-                                    : std::fmax(a, b));
+                write_fp_d(cpu, rd, arm_fp_binop(kind, a, b));
             } else {                // single: both lanes in Vn low word
                 uint32_t lbits = static_cast<uint32_t>(cpu.v_lo[rn]);
                 float a; memcpy(&a, &lbits, 4);
                 uint32_t hbits = static_cast<uint32_t>(cpu.v_lo[rn] >> 32);
                 float b; memcpy(&b, &hbits, 4);
-                if (is_add)      write_fp_s(cpu, rd, a + b);
-                else if (is_min) write_fp_s(cpu, rd, (std::isnan(a) || std::isnan(b))
-                                    ? std::numeric_limits<float>::quiet_NaN()
-                                    : std::fmin(a, b));
-                else             write_fp_s(cpu, rd, (std::isnan(a) || std::isnan(b))
-                                    ? std::numeric_limits<float>::quiet_NaN()
-                                    : std::fmax(a, b));
+                write_fp_s(cpu, rd, arm_fp_binop(kind, a, b));
             }
             return;
         }
@@ -945,18 +935,10 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             return;
         }
     }
-    // Unknown FP_SCALAR — NOP + log (don't crash). NOTE: this diverges
-    // from the SIMD_DP policy above (DecodeError → SIGILL); unify
-    // to DecodeError if a missing scalar op ever hides here.
-    {
-        static uint64_t fp_nop_count_ = 0;
-        if (fp_nop_count_ < 20) {
-            fprintf(stderr, "[FP-NOP] op=0x%08x pc=0x%llx\n", op,
-                    (unsigned long long)cpu.pc);
-        }
-        fp_nop_count_++;
-    }
+    // Unknown FP_SCALAR raises the guest decode error (SIGILL), like the
+    // SIMD_DP groups. The former silent NOP hid the mis-encoded
+    // FCVT Sd/Dd, Hn handlers above.
     (void)sf_val; (void)rm;
-    return;
+    throw DecodeError(cpu.pc, op);
 }
 } // namespace arm64emu

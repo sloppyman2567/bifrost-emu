@@ -264,6 +264,41 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
 [FMLA](https://www.scs.stanford.edu/~zyedidia/arm64/fmla_advsimd_vec.html) and
 [FMLS](https://www.scs.stanford.edu/~zyedidia/arm64/fmls_advsimd_vec.html).
 
+## Half-precision conversions and ARM NaN results (2026-10-12)
+
+The JIT runs these through `CALL_INTERP`, so both engines shared each defect.
+SpongeBob's Spine outfit repack widens half-float pixels with vector `FCVTL`;
+the interpreter implemented only the single-to-double form and sent
+`FCVTL .4s, .4h` (`0x0E217800`) to an unrelated handler. Fixed in the
+interpreter, following Arm's FPConvert/FPRoundInt with FPCR defaults:
+
+- `FCVTL/FCVTL2` from halves and `FCVTN/FCVTN2` to halves (Q=0 zeroes the top
+  half, FCVTN2 keeps the low half). FCVTXN has no single-to-half form, so its
+  sz=0 encoding raises the decode error.
+- `h2f`/`d2h`/`f2h` (`FloatCommon.hpp`): exact widening including subnormals
+  (they had been half their value), one round-to-nearest-even step for
+  narrowing (they truncated, and double inputs rounded twice), overflow to
+  infinity, and quieted NaNs keeping their payload (NaN had become infinity).
+  `FPCR.DN` selects the default NaN; `FPCR.RMode`, `FPCR.AHP` and FPSR flags
+  are not modeled.
+- Scalar `FCVT Sd, Hn` and `FCVT Dd, Hn` were matched with unallocated
+  encodings (`0x1E634000`, `0x1E224000`); the real `0x1EE24000`/`0x1EE2C000`
+  ran as no-ops. Unknown scalar FP encodings now raise the decode error
+  instead of the former `[FP-NOP]` log-and-skip.
+- Vector `FRINT*` quiets signalling NaNs (host libm returned them unchanged);
+  scalar `FADDP/FMAXP/FMINP` use `arm_fp_binop`, so invalid sums give +qNaN
+  and NaN operands propagate in ARM order instead of x86's.
+
+The instructions came from a fallback profile diffed across one equip.
+`BIFROST_FALLBACK_PROFILE` now expands `%p` to the host PID: an Android app's
+game, WebView and service processes otherwise overwrite one file. A throwaway
+fixture covering every interpreted instruction in that window (FP min/max,
+pairwise, rounding, conversions, widening adds, byte atomics, CASAH) then
+matched QEMU 11.1 bit for bit in both engines. References: Arm
+[FCVTL](https://www.scs.stanford.edu/~zyedidia/arm64/fcvtl_advsimd.html),
+[FCVTN](https://www.scs.stanford.edu/~zyedidia/arm64/fcvtn_advsimd.html) and
+[FCVT](https://www.scs.stanford.edu/~zyedidia/arm64/fcvt_float.html).
+
 ## Android interpreter and generated-code contracts
 
 `BLR` must capture its target before updating X30. ART's nterp uses

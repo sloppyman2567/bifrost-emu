@@ -56,8 +56,8 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
   slow, and save compatibility depends on the game build; see
   [Doom 3 status](Docs/Apps/doom3.md).
 - Run the Android game SpongeBob - Krusty Cook-Off 5.12.0 (Unity/IL2CPP) with
-  user-played cooking levels at native display density. Its Spine character
-  draws incompletely after equipping an outfit; see [SpongeBob status](Docs/Apps/spongebob.md).
+  user-played cooking levels, outfits and menus at native display density;
+  see [SpongeBob status](Docs/Apps/spongebob.md).
 
 **Full-suite checkpoint (October 5, 2026, including ART foundations):**
 After the audio wake-up fix, strict full-suite reruns pass 275/275 in JIT

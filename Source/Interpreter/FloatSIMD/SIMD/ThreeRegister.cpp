@@ -16,6 +16,38 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     uint32_t sub_noq = f.sub_noq;
     (void)op; (void)Q; (void)U; (void)size; (void)rm; (void)rn; (void)rd;
     (void)sub; (void)sub_noq;
+    // FCVTL (sz=0) widens four halves from the selected half to singles.
+    // It used to fall through to an unrelated handler and return garbage
+    // (SpongeBob's half-float atlas repack). Keep bit16 here too.
+    if ((op & 0xBFFFFC00) == 0x0E217800) {
+        const uint64_t source = Q ? cpu.v_hi[rn] : cpu.v_lo[rn];
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        uint32_t out[4];
+        for (int i = 0; i < 4; ++i) {
+            const float value = h2f(static_cast<uint16_t>(source >> (16 * i)), dn);
+            memcpy(&out[i], &value, 4);
+        }
+        cpu.v_lo[rd] = out[0] | static_cast<uint64_t>(out[1]) << 32;
+        cpu.v_hi[rd] = out[2] | static_cast<uint64_t>(out[3]) << 32;
+        return true;
+    }
+    // FCVTN (sz=0) narrows four singles to halves: Q=0 writes the low half
+    // and zeroes the top, Q=1 (FCVTN2) writes the top and keeps the low.
+    // FCVTXN has no sz=0 form; its encoding stays undefined below.
+    if ((op & 0xBFFFFC00) == 0x0E216800) {
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        uint64_t result = 0;
+        for (int i = 0; i < 4; ++i) {
+            const uint64_t raw = i < 2 ? cpu.v_lo[rn] : cpu.v_hi[rn];
+            const uint32_t bits = static_cast<uint32_t>(raw >> (32 * (i & 1)));
+            float value; memcpy(&value, &bits, 4);
+            result |= static_cast<uint64_t>(f2h(value, dn)) << (16 * i);
+        }
+        if (Q) cpu.v_hi[rd] = result;
+        else { cpu.v_lo[rd] = result; cpu.v_hi[rd] = 0; }
+        return true;
+    }
+    if ((op & 0xBFFFFC00) == 0x2E216800) throw DecodeError(cpu.pc, op);  // FCVTXN sz=0
     // FCVTL widens two floats from the selected half to doubles.
     // Keep bit16 to avoid the integer two-register-misc handlers.
     if ((op & 0xBFFFFC00) == 0x0E617800) {
@@ -161,6 +193,9 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
                             : (frmode == 6) ? std::ceil(a)
                             : (frmode == 4) ? std::trunc(a)
                             : std::rint(a);  // X/I: rint
+                    // FPRoundInt quiets NaNs (libm passes SNaNs through).
+                    if (std::isnan(a))
+                        r = (cpu.fpcr >> 25) & 1 ? fp_default_nan<float>() : fp_quiet(a);
                     memcpy(fbuf + i * 4, &r, 4);
                 } else {
                     double a;
@@ -171,6 +206,8 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
                              : (frmode == 6) ? std::ceil(a)
                             : (frmode == 4) ? std::trunc(a)
                              : std::rint(a);  // X/I: rint
+                    if (std::isnan(a))
+                        r = (cpu.fpcr >> 25) & 1 ? fp_default_nan<double>() : fp_quiet(a);
                     memcpy(fbuf + i * 8, &r, 8);
                 }
             }
