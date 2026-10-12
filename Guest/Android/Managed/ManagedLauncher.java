@@ -785,6 +785,20 @@ public final class ManagedLauncher {
                             if (orientations.containsKey((IBinder) a[0]))
                                 fullyDrawn.putIfAbsent((IBinder) a[0], System.nanoTime());
                             return null;
+                        // ActivityClientController.onBackPressed: the launcher
+                        // root (a MAIN Intent started from home) moves its task to
+                        // the back instead of finishing; with no home screen here
+                        // it stays in front. Other Activities are asked to finish.
+                        case "onBackPressed":
+                            if (orientations.containsKey((IBinder) a[0]) && !activities.isRoot((IBinder) a[0]))
+                                Class.forName("android.app.IRequestFinishCallback")
+                                        .getMethod("requestFinish").invoke(a[1]);
+                            return null;
+                        // getTaskForActivity(token, onlyRoot): every Activity here
+                        // belongs to the one launcher task; -1 is INVALID_TASK_ID.
+                        case "getTaskForActivity":
+                            if (!orientations.containsKey((IBinder) a[0])) return -1;
+                            return (Boolean) a[1] && !activities.isRoot((IBinder) a[0]) ? -1 : 1;
                         // Only an Activity started for a result has a caller.
                         case "getCallingActivity":
                             return activities.callingActivity((IBinder) a[0]);

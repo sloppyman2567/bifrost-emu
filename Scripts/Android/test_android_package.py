@@ -896,13 +896,16 @@ class PackageTests(unittest.TestCase):
         text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
         self.assertEqual(status, 0, text[-30000:])
         self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
-        markers = ("MANAGED_ACTIVITIES_ROOT_RESUMED returned=false", "MANAGED_ACTIVITIES_UNRESOLVED_OK",
+        markers = ("MANAGED_ACTIVITIES_ROOT_RESUMED returned=0", "MANAGED_ACTIVITIES_UNRESOLVED_OK",
                    "MANAGED_ACTIVITIES_ROOT_PAUSED", "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
                    "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_SECOND_FOCUS true",
                    "APP_POPUP_SHOWN", "MANAGED_ACTIVITIES_SECOND_WINDOW",
                    "MANAGED_ACTIVITIES_SECOND_CLICKED", "MANAGED_ACTIVITIES_RESULT 42 -1 42",
-                   "MANAGED_ACTIVITIES_ROOT_RESUMED returned=true", "MANAGED_ACTIVITIES_SECOND_DESTROYED",
-                   "APP_POPUP_REMOVED", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
+                   "MANAGED_ACTIVITIES_ROOT_RESUMED returned=1", "MANAGED_ACTIVITIES_SECOND_DESTROYED",
+                   "APP_POPUP_REMOVED",
+                   # Second round: the Back key through the window's view tree.
+                   "MANAGED_ACTIVITIES_SECOND_BACK", "MANAGED_ACTIVITIES_RESULT 43 0 null",
+                   "MANAGED_ACTIVITIES_ROOT_RESUMED returned=2", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
         # Started for a result: the caller is reported. The window covers

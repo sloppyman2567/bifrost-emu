@@ -69,3 +69,13 @@ stats_interval = 0        # print guest stats every N instrs (0 = silent)
 verbose     = false       # -v — print execution stats on exit
 trace       = false       # -d — trace every instruction to stderr
 brk_verbose = true        # show BRK warnings (always on by default)
+
+# ── Android apps ──────────────────────────────────────────────────────
+[android]
+back_key = "escape"       # BIFROST_ANDROID_BACK_KEY — PC key sent as Android Back:
+                          # a-z, 0-9, f1-f12, escape, backspace, tab, enter, space,
+                          # delete, insert, home, end, pageup, pagedown, up, down,
+                          # left, right, lshift, rshift, lctrl, rctrl, lalt, ralt,
+                          # minus, equals, leftbracket, rightbracket, backslash,
+                          # semicolon, apostrophe, comma, period, slash, grave;
+                          # "none" disables. The mouse back button is always Back.

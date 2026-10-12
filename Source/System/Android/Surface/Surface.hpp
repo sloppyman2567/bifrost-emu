@@ -38,6 +38,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace arm64emu {
@@ -46,6 +47,14 @@ class CPU;
 }
 
 namespace frost {
+
+// Android keycode of a host key name ("escape", "f1", "a", "pageup", …: the
+// keys host window backends report), 0 for "none", -1 when unknown.
+int android_keycode_for_name(const std::string& name);
+// Host key delivered to apps as KEYCODE_BACK (an Android keycode from
+// android_keycode_for_name; 0 = none). Process-wide, set at startup:
+// Activity back handling (onBackPressed) responds to KEYCODE_BACK.
+void set_android_back_key(int android_keycode);
 
 class AndroidSurfaceManager {
 public:

@@ -243,6 +243,16 @@ int main(int argc, char** argv) {
     }
     // Apply env vars (they override the file).
     cfg.apply_env();
+    {
+        int back = frost::android_keycode_for_name(cfg.android_back_key);
+        if (back < 0) {
+            fprintf(stderr, "bifrost-emu: unknown [android] back_key '%s' "
+                    "(a key name such as escape, backspace, f1, or none)\n",
+                    cfg.android_back_key.c_str());
+            return 2;
+        }
+        frost::set_android_back_key(back);
+    }
     while (arg_i < argc) {
         std::string a = argv[arg_i];
         if (a == "-h" || a == "--help")     { print_banner();   return 0; }

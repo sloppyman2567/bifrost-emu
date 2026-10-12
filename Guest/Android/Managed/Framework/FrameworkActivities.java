@@ -174,6 +174,11 @@ final class FrameworkActivities {
         return true;
     }
 
+    // The launcher Activity (task root); before attach, every known token is.
+    synchronized boolean isRoot(IBinder token) {
+        return stack.isEmpty() || stack.get(0).token == token;
+    }
+
     // ActivityRecord.resultTo: the Activity awaiting this one's result.
     synchronized ComponentName callingActivity(IBinder token) {
         Record record = find(token);

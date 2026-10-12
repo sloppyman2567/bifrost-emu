@@ -24,6 +24,7 @@
 #include "System/Core/CPU.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <climits>
@@ -824,6 +825,36 @@ void AndroidSurfaceManager::inject_test_tap() {
     pending_.push_back(up);
 }
 
+namespace {
+std::atomic<int> g_back_key{0};
+}
+
+void set_android_back_key(int android_keycode) { g_back_key.store(android_keycode); }
+
+int android_keycode_for_name(const std::string& name) {
+    std::string key;
+    for (char c : name) key += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    if (key == "none") return 0;
+    // Android KeyEvent codes of the keys the window backends report.
+    if (key.size() == 1 && key[0] >= 'a' && key[0] <= 'z') return 29 + (key[0] - 'a');
+    if (key.size() == 1 && key[0] >= '0' && key[0] <= '9') return 7 + (key[0] - '0');
+    if (key.size() >= 2 && key.size() <= 3 && key[0] == 'f') {
+        int n = std::atoi(key.c_str() + 1);
+        if (n >= 1 && n <= 12 && key == "f" + std::to_string(n)) return 131 + n - 1;
+    }
+    static const struct { const char* name; int code; } kKeys[] = {
+        {"space", 62}, {"enter", 66}, {"backspace", 67}, {"escape", 111}, {"tab", 61},
+        {"delete", 112}, {"left", 21}, {"right", 22}, {"up", 19}, {"down", 20},
+        {"home", 122}, {"end", 123}, {"pageup", 92}, {"pagedown", 93}, {"insert", 124},
+        {"lshift", 59}, {"rshift", 60}, {"lctrl", 129}, {"rctrl", 130}, {"lalt", 57},
+        {"ralt", 58}, {"minus", 69}, {"equals", 70}, {"leftbracket", 71},
+        {"rightbracket", 72}, {"backslash", 73}, {"semicolon", 74}, {"apostrophe", 75},
+        {"comma", 55}, {"period", 56}, {"slash", 76}, {"grave", 68},
+    };
+    for (const auto& k : kKeys) if (key == k.name) return k.code;
+    return -1;
+}
+
 void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e) {
     if (e.type == BIFROST_WINDOW_CLOSE) { request_quit(); return; }
     if (e.type == BIFROST_WINDOW_RESIZE) {
@@ -837,7 +868,9 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
         ev.type = IE_TYPE_KEY;
         ev.source = SRC_KEYBOARD;
         ev.action = e.action;
-        ev.key_code = e.key_code;
+        // The configured back key is delivered as KEYCODE_BACK instead.
+        const int back = g_back_key.load(std::memory_order_relaxed);
+        ev.key_code = back != 0 && e.key_code == back ? 4 : e.key_code;
         ev.scan_code = e.scan_code;
         ev.meta_state = e.meta_state;
         ev.repeat_count = e.repeat_count;

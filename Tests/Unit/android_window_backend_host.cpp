@@ -14,6 +14,7 @@ struct State {
   void* display = nullptr;
   bool hidden = false;
   std::vector<std::shared_ptr<State>> children;
+  std::vector<frost::AndroidWindowEvent> events;  // returned by poll, in order
 };
 class TestBackend final : public frost::AndroidWindowBackend {
 public:
@@ -27,7 +28,13 @@ public:
     return 0;
   }
   void close() noexcept override { state_->opened = false; }
-  int poll(frost::AndroidWindowEvent &event) override { event = {}; return 0; }
+  int poll(frost::AndroidWindowEvent &event) override {
+    event = {};
+    if (state_->events.empty()) return 0;
+    event = state_->events.front();
+    state_->events.erase(state_->events.begin());
+    return 1;
+  }
   int resize(int32_t w, int32_t h, bool host) override {
     if (state_->fail_resize) return -ENOTSUP;
     state_->width = w;
@@ -146,5 +153,37 @@ int main() {
     CHECK(local.from_surface() != 0);
   }
   CHECK(!independent->opened);
+  // The configured back key ([android] back_key) arrives as KEYCODE_BACK;
+  // other keys keep their codes and "none" disables the mapping.
+  CHECK(frost::android_keycode_for_name("Escape") == 111);
+  CHECK(frost::android_keycode_for_name("f12") == 142);
+  CHECK(frost::android_keycode_for_name("a") == 29 && frost::android_keycode_for_name("0") == 7);
+  CHECK(frost::android_keycode_for_name("none") == 0);
+  CHECK(frost::android_keycode_for_name("f13") == -1 && frost::android_keycode_for_name("esc") == -1);
+  auto keys = std::make_shared<State>();
+  {
+    frost::AndroidSurfaceManager local(std::make_unique<TestBackend>(keys));
+    auto key = [&](int code) {
+      frost::AndroidWindowEvent event{};
+      event.type = BIFROST_WINDOW_KEY;
+      event.key_code = code;
+      keys->events.push_back(event);
+    };
+    auto next = [&]() {
+      uint64_t handle = 0;
+      if (local.queue_get_event(frost::AndroidSurfaceManager::kQueueBase | 1, &handle) != 0) return -1;
+      int code = local.key_code(handle);
+      local.queue_finish_event(frost::AndroidSurfaceManager::kQueueBase | 1, handle);
+      return code;
+    };
+    frost::set_android_back_key(frost::android_keycode_for_name("escape"));
+    key(111); key(29);
+    local.pump_host_events(nullptr);
+    CHECK(next() == 4 && next() == 29);
+    frost::set_android_back_key(0);
+    key(111);
+    local.pump_host_events(nullptr);
+    CHECK(next() == 111 && next() == -1);
+  }
   std::puts("android_window_backend_host: checks passed");
 }

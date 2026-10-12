@@ -1061,7 +1061,7 @@ op 9 to a host popup layer above every surface (op 10 removes it); see
 translucent full-display layer below its window. Input follows
 InputDispatcher: touches go to the topmost window containing them or to a
 modal window, popups with `FLAG_WATCH_OUTSIDE_TOUCH` receive `ACTION_OUTSIDE`,
-and keys go to the topmost focusable popup (Escape → Back cancels dialogs).
+and keys go to the topmost focusable popup (the back key cancels dialogs).
 The Activity loses window focus while a focusable popup is shown. The log
 records `APP_POPUP_ADDED`, `APP_POPUP_SHOWN … text=<visible text>` and
 `APP_POPUP_REMOVED`. View click sounds are accepted silently.
@@ -1118,9 +1118,20 @@ surface, as under a translucent Activity. Stacked Activities draw only in
 software, keep the display size regardless of their requested orientation,
 and launch flags, task affinities and `onNewIntent` are not modelled.
 A mouse's back/forward buttons send `KEYCODE_BACK`/`KEYCODE_FORWARD`, as
-Android's InputReader synthesizes them; Escape remains `KEYCODE_ESCAPE`.
+Android's InputReader synthesizes them. The configured back key
+(`[android] back_key`, `BIFROST_ANDROID_BACK_KEY`; default `escape`, `none`
+disables) is delivered as `KEYCODE_BACK` to NativeActivity and managed apps
+alike; that host key then no longer reaches apps under its own code.
+Back follows `ActivityClientController.onBackPressed` (android-15.0.0_r1):
+a stacked Activity is asked to finish through its `IRequestFinishCallback`,
+which posts `finishAfterTransition`. On the launcher root Android moves the
+task to the back; with no home screen here the root stays in front, so only
+the app's own key handling (Unity's view, for example) acts on it.
+`getTaskForActivity` reports the single launcher task.
 `PackageTests.test_managed_activity_stack` (`ManagedActivities`) checks the
-ordering above, the unresolved implicit Intent, the result, the caller and a
+ordering above, the unresolved implicit Intent, the result, the caller, a
+second round closed by a `KEYCODE_BACK` through the window's view tree
+(`RESULT_CANCELED`), and a
 display-sized window with the button text on the host layer.
 
 Adding `--play` opens a host window, starts/resumes the Activity, reports

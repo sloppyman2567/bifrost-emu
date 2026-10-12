@@ -58,6 +58,9 @@
 //   no_selfloop = false     # BIFROST_NO_SELFLOOP
 //   no_wex = false          # BIFROST_NO_WEX (security vs perf)
 //   no_fma3 = false         # BIFROST_NO_FMA3
+//
+//   [android]
+//   back_key = "escape"     # BIFROST_ANDROID_BACK_KEY; "none" disables
 #pragma once
 #include <cstdint>
 #include <string>
@@ -101,6 +104,10 @@ struct Config {
     bool     log_verbose       = false;
     bool     log_trace         = false;    // instruction trace (-d)
     bool     log_brk_verbose   = true;     // BRK warnings (always on)
+    // ── [android] ────────────────────────────────────────────────────
+    // Host key sent to Android apps as KEYCODE_BACK ("none" disables);
+    // names are those of frost::android_keycode_for_name.
+    std::string android_back_key = "escape";  // BIFROST_ANDROID_BACK_KEY
     // ── Methods ──────────────────────────────────────────────────────
     // Build a Config from the built-in defaults.
     static Config defaults();

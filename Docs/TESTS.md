@@ -1,5 +1,17 @@
 # Tests
 
+## Configurable Android back key (2026-10-12)
+
+`test-android-window-backend` checks key-name lookup (`escape`, `f12`, `a`,
+`0`, `none`, rejected `f13`/`esc`) and that host events through
+`pump_host_events` deliver the configured key as `KEYCODE_BACK` while other
+keys keep their codes, and unchanged with `none`. `bifrost-emu
+--print-config` shows `[android] back_key`, the environment override applies
+and an unknown name exits with status 2. `test_managed_activity_stack` adds a
+round closed by `KEYCODE_BACK` through the stacked window's view tree, which
+exercises `onBackPressed` and `getTaskForActivity`; the package suite passes
+26/26. Pressing Escape in a real game window was not exercised by a test.
+
 ## Managed Activity stack (2026-10-12)
 
 `PackageTests.test_managed_activity_stack` (`ManagedActivities`) starts a

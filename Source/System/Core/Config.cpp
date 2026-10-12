@@ -161,6 +161,10 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
             if (key == "trace")        { bool v; if (!parse_bool(raw_val, v)) return false; log_trace = v; return true; }
             if (key == "brk_verbose")  { bool v; if (!parse_bool(raw_val, v)) return false; log_brk_verbose = v; return true; }
         }
+        // [android]
+        if (section == "android") {
+            if (key == "back_key") { std::string v = raw_val; unquote(v); android_back_key = v; return true; }
+        }
         // Unknown section / key — silently ignored for forward compat.
         return true;
     };
@@ -267,6 +271,8 @@ void Config::apply_env() {
     // [log]
     env_bool("BIFROST_VERBOSE",        log_verbose);
     env_bool("BIFROST_TRACE",          log_trace);
+    // [android]
+    env_str ("BIFROST_ANDROID_BACK_KEY", android_back_key);
 }
 // ── Config::dump ───────────────────────────────────────────────────────
 void Config::dump(std::string& out) const {
@@ -310,6 +316,9 @@ void Config::dump(std::string& out) const {
     ss << "verbose     = " << (log_verbose     ? "true" : "false") << "\n";
     ss << "trace       = " << (log_trace       ? "true" : "false") << "\n";
     ss << "brk_verbose = " << (log_brk_verbose ? "true" : "false") << "\n";
+    ss << "\n";
+    ss << "[android]\n";
+    ss << "back_key = \"" << android_back_key << "\"\n";
     ss << "\n";
     out = ss.str();
 }

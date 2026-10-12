@@ -12,7 +12,8 @@ import android.widget.Button;
 /** A second Activity above a SurfaceView Activity: start for result, window, finish, resume. */
 public final class ManagedActivities extends Activity {
     private final Handler main = new Handler();
-    private boolean started, returned;
+    private boolean started;
+    private int returned;  // results received
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -22,7 +23,12 @@ public final class ManagedActivities extends Activity {
     @Override public void onResume() {
         super.onResume();
         System.out.println("MANAGED_ACTIVITIES_ROOT_RESUMED returned=" + returned);
-        if (returned) {
+        if (returned == 1) {
+            // Second round: closed with the Back key instead of a button.
+            startActivityForResult(new Intent(this, Second.class).putExtra("back", true), 43);
+            return;
+        }
+        if (returned == 2) {
             main.postDelayed(this::finish, 300);
             return;
         }
@@ -47,7 +53,7 @@ public final class ManagedActivities extends Activity {
         super.onActivityResult(request, result, data);
         System.out.println("MANAGED_ACTIVITIES_RESULT " + request + " " + result + " "
                 + (data == null ? "null" : data.getIntExtra("answer", -1)));
-        returned = true;
+        returned++;
     }
 
     @Override public void onDestroy() {
@@ -82,6 +88,15 @@ public final class ManagedActivities extends Activity {
                 if (!decor.isAttachedToWindow() || decor.getWidth() == 0)
                     throw new IllegalStateException("second Activity window was not laid out");
                 System.out.println("MANAGED_ACTIVITIES_SECOND_WINDOW " + decor.getWidth() + "x" + decor.getHeight());
+                if (getIntent().getBooleanExtra("back", false)) {
+                    // FrameworkWindows delivers host keys to the focused
+                    // window's view tree; BACK finishes with RESULT_CANCELED.
+                    for (int action : new int[] {android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP})
+                        decor.dispatchKeyEvent(new android.view.KeyEvent(action, android.view.KeyEvent.KEYCODE_BACK));
+                    // requestFinish posts finishAfterTransition, as in AOSP.
+                    System.out.println("MANAGED_ACTIVITIES_SECOND_BACK");
+                    return;
+                }
                 ((android.view.ViewGroup) decor.findViewById(android.R.id.content)).getChildAt(0).performClick();
             }, 1500);
         }
