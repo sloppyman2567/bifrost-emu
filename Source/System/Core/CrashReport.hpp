@@ -1,4 +1,4 @@
-// core/crash_report.h — one shared guest-crash reporter.
+// CrashReport.hpp — one shared guest-crash reporter.
 //
 // replaces per-app probes with a single short + detailed dump.
 #pragma once

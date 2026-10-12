@@ -1,4 +1,4 @@
-// jit/jit_profiler.cpp — FrostJIT lifecycle + statistics + watchdog.
+// Profiler.cpp — FrostJIT lifecycle + statistics + watchdog.
 //
 // Holds construction/destruction (mmap of the code buffer), cache flush,
 // and the per-instance watchdog state (reset on construction; checked

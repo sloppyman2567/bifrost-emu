@@ -1,6 +1,6 @@
-// yggdrasil/dir_node.hpp — synthetic directory entry.
+// DirectoryNode.hpp — synthetic directory entry.
 //
-// v1.4.5-alpha: NEW. Previously, `ls /proc` or `ls /dev` under the
+// Previously, `ls /proc` or `ls /dev` under the
 // guest returned nothing because there was no Node for the directory
 // itself — only for specific files under it. getdents64 fell through
 // to the host passthrough, which has no /proc or /dev entries to list.

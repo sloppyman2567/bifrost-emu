@@ -213,7 +213,7 @@ std::optional<int64_t> AudioDispatch::aaudio() {
     }
     // ── AAudio guest callback thread (Android libaaudio adapter) ────────
     // Real libaaudio runs the data callback on a pthread of its own. Under
-    // Bionic the pump has no guest TLS, so the adapter (Guest/Android/
+    // Bionic the pump has no guest TLS, so the adapter (Guest/Android/Adapters/
     // aaudio.c) creates that thread and drives it through these calls.
     if (name == "bifrost_aaudio_claim_callback") {  // (stream, uint64_t info[2])
         std::lock_guard<std::mutex> lock(I.pump_mu);

@@ -1,4 +1,4 @@
-// syscalls/mem.cpp — memory-management syscalls: mmap/munmap/mremap/
+// Memory.cpp — memory-management syscalls: mmap/munmap/mremap/
 // mprotect/madvise/msync/brk.
 //
 // All case bodies are extracted verbatim from the original Syscalls.cpp

@@ -1,4 +1,4 @@
-// jit/x86_regalloc.cpp — virtual-register allocator + spill/evict/flush.
+// RegisterAllocator.cpp — virtual-register allocator + spill/evict/flush.
 //
 // Maps IR vregs to host x86 registers. Each vreg has a "home" x86 reg
 // (or -1 if spilled to stack). The allocator tracks which vreg owns each
@@ -480,7 +480,7 @@ void FrostJIT::flush_all_vregs_keep() {
         }
     }
 }
-// ── Targeted flush/invalidate (v1.4.0-beta.2) ────────────────────────
+// ── Targeted flush/invalidate ────────────────────────
 // Walk only the host regs whose bits are set in `mask`, spilling any
 // dirty vreg cached there. This is the heart of the flush-penalty
 // reduction: FP JIT ops can flush just RAX/RCX/RDX in ~3 iterations

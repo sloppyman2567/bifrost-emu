@@ -257,7 +257,7 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
             }
             return true;
         }
-        // ── 1.5.4-alpha: AES / PMULL native codegen ──────────────────
+        // ── AES / PMULL native codegen ──────────────────
         // Uses AES-NI (aesenc/aesdec/aesimc/aesmc) and PCLMULQDQ
         // (pclmulqdq) when the host CPU supports them. Falls back to
         // CALL_INTERP on hosts without these extensions.

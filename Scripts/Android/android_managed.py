@@ -25,10 +25,13 @@ import android_framework
 from android_processes import ProcessHost
 
 PRIORITIES = "??VDIWEFS"
-LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "FrameworkServices.java",
-                    "FrameworkPackages.java", "FrameworkConnectivity.java", "FrameworkServiceRuntime.java",
-                    "FrameworkTrace.java", "FrameworkDisplay.java", "FrameworkInputMethod.java",
-                    "FrameworkProcessRuntime.java", "FrameworkJobs.java", "FrameworkContent.java")
+LAUNCHER_DIR = ROOT / "Guest/Android/Managed"
+LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/FrameworkServices.java",
+                    "Framework/FrameworkPackages.java", "Framework/FrameworkConnectivity.java",
+                    "Framework/FrameworkServiceRuntime.java", "Framework/FrameworkTrace.java",
+                    "Framework/FrameworkDisplay.java", "Framework/FrameworkInputMethod.java",
+                    "Framework/FrameworkProcessRuntime.java", "Framework/FrameworkJobs.java",
+                    "Framework/FrameworkContent.java", "Framework/FrameworkNativeServices.java")
 
 
 def add_trace_arguments(parser):
@@ -487,8 +490,7 @@ def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources
     """Explicit build step; ordinary app launches never invoke a compiler."""
     output.mkdir(parents=True, exist_ok=True)
     jar = ROOT / "Tools/android-tools/android.jar"
-    sources = [ROOT / "Guest/Android" / name for name in
-               LAUNCHER_SOURCES] + list(extra_sources)
+    sources = [LAUNCHER_DIR / name for name in LAUNCHER_SOURCES] + list(extra_sources)
     with tempfile.TemporaryDirectory(prefix=".launcher-", dir=output) as temporary:
         work = Path(temporary)
         classes = work / "classes"
@@ -505,7 +507,7 @@ def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources
 
 def launcher_dex(directory):
     dex = directory / "classes.dex"
-    sources = {name: file_hash(ROOT / "Guest/Android" / name)
+    sources = {Path(name).name: file_hash(LAUNCHER_DIR / name)
                for name in LAUNCHER_SOURCES}
     manifest = directory / "sources.json"
     saved = json.loads(manifest.read_text()) if manifest.is_file() else {}

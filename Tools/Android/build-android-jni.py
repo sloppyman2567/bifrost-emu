@@ -22,7 +22,7 @@ def build(runtime, output, javac):
     with tempfile.TemporaryDirectory(prefix=".android-jni-", dir=output.parent) as temporary:
         staging = Path(temporary)
         flags = ["clang", "--target=aarch64-linux-android35", "-fuse-ld=lld", "-nostdlib",
-                 "-ffreestanding", "-O2", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "Guest/Android"),
+                 "-ffreestanding", "-O2", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "Guest/Android/Include"),
                  "-Wl,-z,max-page-size=16384", "-Wl,-z,defs"]
         flags += prepare_headers(staging / "headers")
         subprocess.run(flags + ["-fPIC", "-shared", str(ROOT / "Tests/Unit/android_jni/bridge.c"), str(bionic / "libc.so"),
@@ -30,7 +30,7 @@ def build(runtime, output, javac):
                                 "-o", str(staging / "libbifrost-jni.so")], check=True)
         subprocess.run(flags + ["-fPIE", "-pie", "-Wl,--dynamic-linker=/system/bin/linker64",
                                 "-Wl,--allow-shlib-undefined", str(ROOT / "Tests/Unit/android_bionic_start.S"),
-                                str(ROOT / "Guest/Android/art_launcher.c"), str(bionic / "libc.so"),
+                                str(ROOT / "Guest/Android/Launchers/art_launcher.c"), str(bionic / "libc.so"),
                                 str(bionic / "libdl.so"), "-o", str(staging / "bifrost-art")], check=True)
         subprocess.run([javac, "--release", "8", "-encoding", "UTF-8", "-d", str(staging),
                         str(ROOT / "Tests/Unit/android_jni/Bootstrap.java")], check=True)

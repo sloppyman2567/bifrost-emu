@@ -1,4 +1,4 @@
-// yggdrasil/terminal_ioctls.hpp — shared terminal ioctl dispatch.
+// TerminalIoctls.hpp — shared terminal ioctl dispatch.
 //
 // Both HostNode and StdioNode implement ioctl() by forwarding terminal
 // ioctls (TIOCGWINSZ, TCGETS, TCSETS/TCSETSW/TCSETSF, FIONREAD) to the

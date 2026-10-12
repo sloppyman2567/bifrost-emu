@@ -1,4 +1,4 @@
-// core/memory.h — guest memory as one host reservation (thread-safe).
+// Memory.hpp — guest memory as one host reservation (thread-safe).
 //
 // The guest address space is a single host mapping reserved at startup:
 // guest VA x lives at host address window + x (the QEMU guest_base / FEX

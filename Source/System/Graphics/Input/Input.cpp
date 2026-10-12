@@ -1,10 +1,10 @@
-// frost_graphics/input.cpp — SDL2 → Linux input event translation.
+// Input.cpp — SDL2 → Linux input event translation.
 //
-// v1.4.5-alpha: NEW. Captures keyboard/mouse events from the
+// Captures keyboard/mouse events from the
 // host's SDL2 window and exposes them as Linux input_event records
 // (24 bytes each on AArch64). The guest reads them via /dev/input/eventX.
 //
-// v1.4.5-alpha: Added game controller support. SDL2's game
+// Added game controller support. SDL2's game
 // controller API (SDL_GameController*) provides a higher-level
 // abstraction than raw joysticks. We open all connected controllers
 // and translate their events to both EV_ABS/EV_KEY (for eventX) and
@@ -12,7 +12,7 @@
 // /dev/input/js0 returns the correct 8-byte JS_EVENT format instead
 // of the 24-byte input_event format.
 //
-// Robustness/security (1.5.4-alpha):
+// Robustness/security:
 //   - EV_SYN/SYN_DROPPED emitted on ring-buffer overflow, matching
 //     Linux evdev behavior. Guests can detect loss and resync.
 //   - Event deduplication: identical consecutive events are dropped,

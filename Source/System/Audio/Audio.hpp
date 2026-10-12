@@ -1,6 +1,6 @@
-// audio/audio.h — Audio backend for bifrost-emu.
+// Audio.hpp — Audio backend for bifrost-emu.
 //
-// Multi-stream mixer modeled on real SDL2/SDL3 (1.5.5-alpha rewrite):
+// Multi-stream mixer modeled on real SDL2/SDL3:
 // ONE physical host device (SDL2 callback / OSS /dev/dsp / headless) plus
 // N logical streams — one per guest audio device. Each stream has its own
 // ring of float frames at the DEVICE rate (input is format-converted and

@@ -1,4 +1,4 @@
-// interp/interp_simd_arith.cpp — SIMD_DP group 4: vector integer
+// Arithmetic.cpp — SIMD_DP group 4: vector integer
 // arithmetic (ADD/SUB/MUL, long/wide/narrow, absolute difference,
 // saturating and pairwise forms) matched on sub3.
 #include "Interpreter/FloatSIMD/FloatCommon.hpp"

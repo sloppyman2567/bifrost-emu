@@ -1,4 +1,4 @@
-// frontend/dynamic_linker.cpp — Dynamic linking support for bifrost-emu.
+// Link.cpp — Dynamic linking support for bifrost-emu.
 //
 // See DynamicLinker.hpp for the design overview.
 //

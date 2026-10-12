@@ -1,31 +1,20 @@
-// syscalls/misc_io.cpp — I/O syscalls extracted from Miscellaneous.cpp.
-// Handles:
-//   - eventfd2 (case 19)
-//   - epoll_create1 / epoll_ctl / epoll_pwait (case 20, 21, 22)
-//   - pselect6 / ppoll (case 72, 73)
-//   - timerfd_create / timerfd_settime / timerfd_gettime (case 85, 86, 87)
-//   - socket / socketpair / bind / listen / accept / connect (case 198-203)
+// EventIO.cpp — event and readiness descriptors:
+//   - eventfd2 (19), epoll_create1/epoll_ctl/epoll_pwait (20-22)
+//   - pselect6/ppoll (72, 73)
+//   - timerfd_create/settime/gettime (85-87)
+//   - inotify_init1/add_watch/rm_watch (26-28), signalfd4 (74)
+//   - memfd_create (279)
 //
-// All case bodies are extracted verbatim from the original Miscellaneous.cpp.
-//
-// NOTE: this file is NOT a friend of Emulator (unlike Miscellaneous.cpp). It accesses
-// private state via the public accessors emu.mem(), emu.fds(), etc.
-//
-// 1.5.4-alpha: network handling refinement.
-//   - All socket/pipe/eventfd/timerfd/epoll host fds are now wrapped in
-//     HostNode and registered in the FdTable. This fixes a long-standing
-//     bug where close() on a socket fd returned -EBADF (because the fd
-//     wasn't in FdTable), leaking the host fd.
-//   - Network syscalls (bind/connect/listen/accept/...) now resolve the
-//     guest fd via FdTable to get the host fd, so guest fds and host fds
-//     are properly decoupled.
-//   - accept() now properly returns the peer address (was passing NULL).
-//   - epoll_pwait now honors the sigmask (instead of ignoring it).
+// Host fds are wrapped in HostNode and registered in the FdTable, so
+// close() releases them and guest/host descriptor numbers stay
+// independent. epoll_pwait honors the guest sigmask.
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Syscalls/Syscalls.hpp"
+#include "System/Syscalls/Files/FilesInternal.hpp"
+#include "System/VFS/VFS.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/VFS/Nodes/AudioNode.hpp"
 #include <chrono>
@@ -36,73 +25,20 @@
 #include <vector>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/inotify.h>
 #include <sys/select.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 namespace arm64emu {
-// ── Guest-fd → host-fd resolution for socket-style fds ──────────────────
-// Returns the host fd backing a guest fd, or -1 if the fd is invalid or
-// not backed by a host fd. This is the network-syscall analogue of
-// FileSystem.cpp's resolve_dirfd — we look up the guest fd in the FdTable and
-// return the underlying host fd. For fds that were never registered in
-// the FdTable (e.g. stdin/stdout/stderr which are HostNode-wrapped but
-// owned by StdioNode, or fds created before this refactor that
-// bypassed the FdTable), we fall back to using the guest fd as the host
-// fd. This preserves backward compatibility for any code path that
-// somehow obtained a raw host fd.
-static inline int resolve_sock_fd(Emulator& emu, uint64_t guest_fd) {
-    int gfd = static_cast<int>(static_cast<int64_t>(guest_fd));
-    if (gfd < 0) return -1;
-    auto node = emu.fds().get(gfd);
-    if (node) {
-        int hfd = node->host_fd();
-        return hfd;  // may be -1 for virtual nodes
-    }
-    // Not in FdTable — fall back to using the guest fd as the host fd.
-    // This preserves backward compatibility for pre-Turn-102 callers that
-    // somehow obtained a raw host fd (e.g. via dup of stdin/stdout).
-    return gfd;
-}
-// Helper: register a freshly-created host fd in the FdTable and return
-// the guest fd. Uses O_RDWR as the default flags (sockets don't have a
-// meaningful "flags" field at creation time — they're full-duplex).
-static inline int register_host_fd(Emulator& emu, int hfd, int flags = O_RDWR) {
-    if (hfd < 0) return hfd;
-    return emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, flags));
-}
-// Helper: marshal a sockaddr from guest memory into a stack buffer.
-// Returns the actual length to pass to the host syscall (clamped to
-// sizeof(sockaddr_storage)) or 0 if no addr was provided.
-static inline socklen_t marshal_sockaddr_in(Memory& mem, uint64_t guest_addr,
-                                            uint64_t guest_len,
-                                            struct sockaddr_storage* ss) {
-    if (!guest_addr || !guest_len) return 0;
-    socklen_t len = static_cast<socklen_t>(guest_len);
-    if (len > sizeof(*ss)) len = sizeof(*ss);
-    mem.read(guest_addr, ss, len);
-    return len;
-}
-// Helper: write a host sockaddr back into guest memory.
-// Reads the guest's addrlen pointer, clamps it to the actual length,
-// writes the sockaddr, and writes back the (possibly clamped) length.
-static inline void marshal_sockaddr_out(Memory& mem, uint64_t guest_addr,
-                                        uint64_t guest_len_ptr,
-                                        const struct sockaddr_storage* ss,
-                                        socklen_t actual_len) {
-    if (!guest_addr || !guest_len_ptr) return;
-    socklen_t guest_len = static_cast<socklen_t>(mem.load<uint32_t>(guest_len_ptr));
-    if (guest_len > actual_len) guest_len = actual_len;
-    mem.write(guest_addr, ss, guest_len);
-    mem.store<uint32_t>(guest_len_ptr, guest_len);
-}
-int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
+int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a3; (void)a4; (void)a5;
     auto& mem_ = emu.mem();
+    auto& fds_ = emu.fds();
     switch (num) {
         case 19: { // eventfd2(count, flags) — aarch64 syscall 19
             int hfd = ::eventfd(static_cast<unsigned int>(a0), static_cast<int>(a1));
@@ -377,137 +313,66 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-        case 198: { // socket(domain, type, protocol) — aarch64 198
-            // Forward to host. The host kernel creates a real socket fd
-            // which we wrap in HostNode + FdTable.allocate so that:
-            //   - close(guest_fd) actually closes the host fd
-            //   - getsockopt/setsockopt/etc. can resolve the host fd
-            //   - read()/write() on the socket work via FileSystem.cpp's path
-            int hfd = ::socket(static_cast<int>(a0), static_cast<int>(a1),
-                               static_cast<int>(a2));
-            if (hfd < 0) { ret_errno(); return 0; }
-            int gfd = register_host_fd(emu, hfd, O_RDWR);
-            if (dbg().xtrace)
-                fprintf(stderr, "[FDLIFE] t%d socket dom=%llu type=%llu hfd=%d gfd=%d\n",
-                        cpu.tid, (unsigned long long)a0, (unsigned long long)a1, hfd, gfd);
-            ret_host(gfd);
+        // ── inotify_init1 (syscall 26) ───────────────────────────────
+        // BUGFIX: AArch64 syscall numbers 75/76/77 are vmsplice/splice/tee,
+        // NOT inotify. The real inotify numbers per asm-generic/unistd.h are:
+        //   26 = inotify_init1
+        //   27 = inotify_add_watch
+        //   28 = inotify_rm_watch
+        // inotify handlers (which would call host inotify with garbage
+        // args and fail). Real guest inotify_init1 (syscall 26) returned
+        // -ENOSYS. Fixed by renumbering to the correct AArch64 slots.
+        case 26: { // inotify_init1(flags)
+            int fd = ::inotify_init1(static_cast<int>(a0));
+            if (fd < 0) { ret_errno(); return 0; }
+            // Guest descriptors are allocated independently from host fds.
+            // Wrap this fd so later inotify calls resolve the guest number
+            // and close() releases the host descriptor through FdTable.
+            int guest_fd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(
+                fd, O_RDONLY | (static_cast<int>(a0) & O_NONBLOCK)));
+            ret_host(static_cast<uint64_t>(guest_fd));
             return 0;
         }
-        case 199: { // socketpair(domain, type, protocol, sv) — aarch64 199
-            int fds[2];
-            int r = ::socketpair(static_cast<int>(a0), static_cast<int>(a1),
-                                 static_cast<int>(a2), fds);
-            if (r < 0) { ret_errno(); return 0; }
-            // Register both ends in the FdTable.
-            int g0 = register_host_fd(emu, fds[0], O_RDWR);
-            int g1 = register_host_fd(emu, fds[1], O_RDWR);
-            if (dbg().xtrace)
-                fprintf(stderr, "[FDLIFE] t%d socketpair dom=%llu type=%llu hfd0=%d gfd0=%d hfd1=%d gfd1=%d\n",
-                        cpu.tid, (unsigned long long)a0, (unsigned long long)a1, fds[0], g0, fds[1], g1);
-            mem_.store<int>(a3, g0);
-            mem_.store<int>(a3 + 4, g1);
-            ret_host(0);
+        // ── inotify_add_watch (syscall 27) ───────────────────────────
+        case 27: { // inotify_add_watch(fd, pathname, mask)
+            auto node = fds_.get(static_cast<int>(a0));
+            int host_fd = node ? node->host_fd() : -1;
+            if (host_fd < 0) { ret_err(EBADF); return 0; }
+            std::string path = Yggdrasil::read_path(mem_, a1);
+            int wd = ::inotify_add_watch(host_fd, path.c_str(),
+                                         static_cast<uint32_t>(a2));
+            if (wd < 0) { ret_errno(); return 0; }
+            ret_host(static_cast<uint64_t>(wd));
             return 0;
         }
-        case 200: { // bind(sockfd, addr, addrlen) — aarch64 200
-            int hfd = resolve_sock_fd(emu, a0);
-            if (hfd < 0) { ret_err(EBADF); return 0; }
-            struct sockaddr_storage ss;
-            socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
-            if (len == 0) { ret_err(EINVAL); return 0; }
-            int r = ::bind(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0);
-            return 0;
-        }
-        case 201: { // listen(sockfd, backlog) — aarch64 201
-            int hfd = resolve_sock_fd(emu, a0);
-            if (hfd < 0) { ret_err(EBADF); return 0; }
-            int r = ::listen(hfd, static_cast<int>(a1));
+        // ── inotify_rm_watch (syscall 28) ────────────────────────────
+        case 28: { // inotify_rm_watch(fd, wd)
+            auto node = fds_.get(static_cast<int>(a0));
+            int host_fd = node ? node->host_fd() : -1;
+            if (host_fd < 0) { ret_err(EBADF); return 0; }
+            int r = ::inotify_rm_watch(host_fd, static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
-        case 202: { // accept(sockfd, addr, addrlen) — aarch64 202
-            // which discarded the peer address. Real accept(2) fills in the
-            // peer address (when addr != NULL) and writes the actual length
-            // back to *addrlen. Callers that pass NULL get NULL behavior.
-            int hfd = resolve_sock_fd(emu, a0);
-            if (hfd < 0) { ret_err(EBADF); return 0; }
-            struct sockaddr_storage ss;
-            socklen_t sslen = sizeof(ss);
-            int new_hfd = ::accept(hfd, reinterpret_cast<struct sockaddr*>(&ss),
-                                   &sslen);
-            if (new_hfd < 0) { ret_errno(); return 0; }
-            // Write peer address back to guest memory if requested.
-            if (a1 && a2) {
-                marshal_sockaddr_out(mem_, a1, a2, &ss, sslen);
+        // ── signalfd4 (syscall 74) ────────────────────────────────────
+        case 74: { // signalfd4(fd, mask, sizemask, flags)
+            // Copy sigset_t from guest memory — a1 is a guest address,
+            // NOT a host pointer. Using it directly would read garbage
+            // from the host process's memory.
+            if (!a1) { ret_err(EFAULT); return 0; }
+            sigset_t host_mask;
+            memset(&host_mask, 0, sizeof(host_mask));
+            try {
+                mem_.read(a1, &host_mask, sizeof(host_mask));
+            } catch (...) {
+                ret_err(EFAULT);
+                return 0;
             }
-            int gfd = register_host_fd(emu, new_hfd, O_RDWR);
-            if (dbg().xtrace)
-                fprintf(stderr, "[FDLIFE] t%d accept hfd=%d gfd=%d\n", cpu.tid, new_hfd, gfd);
-            ret_host(gfd);
-            return 0;
-        }
-        case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
-            int hfd = resolve_sock_fd(emu, a0);
-            if (hfd < 0) { ret_err(EBADF); return 0; }
-            struct sockaddr_storage ss;
-            socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
-            if (len == 0) { ret_err(EINVAL); return 0; }
-            if (dbg().xtrace) {
-                fprintf(stderr, "[XCONN] gfd=%llu hfd=%d fam=%d ", (unsigned long long)a0, hfd, ss.ss_family);
-                if (ss.ss_family == AF_UNIX) {
-                    const char* p = reinterpret_cast<const struct sockaddr_un*>(&ss)->sun_path;
-                    fprintf(stderr, "path='%.120s'", p);
-                }
-                fprintf(stderr, "\n");
-            }
-            // A pathname socket that exists inside BIFROST_ROOT (e.g. Android's
-            // /dev/socket/logdw provided by a test harness) is reached through
-            // the confined parent directory. Otherwise the guest path stays a
-            // host path: guest libX11 connects to the host's /tmp/.X11-unix.
-            struct sockaddr_un rooted = {};
-            const auto* un = reinterpret_cast<const struct sockaddr_un*>(&ss);
-            if (ss.ss_family == AF_UNIX && un->sun_path[0] == '/' &&
-                yggdrasil::Yggdrasil::sandbox_inside_root()) {
-                const std::string guest(un->sun_path,
-                    strnlen(un->sun_path, len - offsetof(struct sockaddr_un, sun_path)));
-                auto pd = yggdrasil::Yggdrasil::open_parent(-1, guest);
-                struct stat st;
-                if (pd.valid() &&
-                    ::fstatat(pd.fd, pd.base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 &&
-                    S_ISSOCK(st.st_mode)) {
-                    rooted.sun_family = AF_UNIX;
-                    const int n = snprintf(rooted.sun_path, sizeof(rooted.sun_path),
-                                           "/proc/self/fd/%d/%s", pd.fd, pd.base.c_str());
-                    if (n > 0 && static_cast<size_t>(n) < sizeof(rooted.sun_path)) {
-                        int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&rooted),
-                                          static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + n + 1));
-                        if (r < 0) { ret_errno(); return 0; }
-                        ret_host(0);
-                        return 0;
-                    }
-                }
-            }
-            int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
-            if (dbg().xtrace) {
-                fprintf(stderr, "[XCONN] gfd=%llu hfd=%d res=%d ", (unsigned long long)a0, hfd, r);
-                if (r == 0) {
-                    struct sockaddr_storage peer;
-                    socklen_t plen = sizeof(peer);
-                    if (::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&peer), &plen) == 0) {
-                        if (peer.ss_family == AF_UNIX) {
-                            const struct sockaddr_un* un = reinterpret_cast<const struct sockaddr_un*>(&peer);
-                            fprintf(stderr, "peer='" );
-                            for (unsigned k = 0; k < 32; ++k) fprintf(stderr, "%02x", (unsigned char)un->sun_path[k]);
-                            fprintf(stderr, "'\n");
-                        } else fprintf(stderr, "peer_fam=%d\n", peer.ss_family);
-                    } else fprintf(stderr, "getpeername-err\n");
-                } else fprintf(stderr, "\n");
-            }
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0);
+            int fd = ::signalfd(static_cast<int>(a0), &host_mask,
+                                static_cast<int>(a3));
+            if (fd < 0) { ret_errno(); return 0; }
+            ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
         case 279: { // memfd_create(name, flags) — AArch64 279
@@ -534,5 +399,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         default:
             return SYSCALL_NOT_HANDLED;
     }
+    return 0;
 }
 } // namespace arm64emu

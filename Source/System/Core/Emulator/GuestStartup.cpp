@@ -5,11 +5,11 @@
 #include "System/Core/CrashReport.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Loader/DynamicLinker.hpp"
-#include "System/Loader/VdsoBytes.h"      // embedded AArch64 vDSO (1.5.4-alpha)
+#include "System/Loader/VdsoBytes.h"      // embedded AArch64 vDSO
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
 #include "System/Android/Surface/Surface.hpp"// 2026-08: Android activity
-#include "System/Audio/AudioThunk.hpp"  // 1.5.4-alpha: AudioThunk
-#include "System/Graphics/Thunks/DisplayThunk.hpp"// 1.5.4-alpha: DisplayThunk
+#include "System/Audio/AudioThunk.hpp"  // AudioThunk
+#include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
 #include <fcntl.h>
 #include <unistd.h>
@@ -127,7 +127,7 @@ std::vector<std::string> Emulator::build_default_guest_env() {
     }
     return envs;
 }
-// ── vDSO loader (1.5.4-alpha) ───────────────────────────────────────
+// ── vDSO loader ───────────────────────────────────────
 // Maps the embedded AArch64 vDSO ELF into guest memory and returns the
 // base address (the ELF header location = AT_SYSINFO_EHDR). The vDSO
 // provides gettimeofday/clock_gettime/clock_getres/__kernel_rt_sigreturn

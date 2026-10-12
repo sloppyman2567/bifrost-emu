@@ -334,7 +334,7 @@ runs passed, so repeated vsync reliability remains unproven.
 ```bash
 python3 Tools/Android/android_framework.py
 mkdir -p build/framework-probe/classes
-javac --release 8 -d build/framework-probe/classes Guest/Android/FrameworkProbe.java
+javac --release 8 -d build/framework-probe/classes Guest/Android/Probes/FrameworkProbe.java
 java -cp Tools/android-tools/d8.jar com.android.tools.r8.D8 --min-api 26 \
   --output build/framework-probe build/framework-probe/classes/FrameworkProbe.class
 timeout -s KILL 165 python3 Scripts/Android/test_android_framework.py --mode jit --timeout 150
@@ -455,7 +455,7 @@ never compacts; the Activity probe does.
 
 ### Activity creation checkpoint
 
-`Guest/Android/ActivityProbe.java` creates a real Activity through `onCreate`.
+`Guest/Android/Managed/ActivityProbe.java` creates a real Activity through `onCreate`.
 It compiles against the checksum-pinned API-35 `android.jar` from
 `Tools/Android/fetch-android-package-tools.py`; hidden APIs use reflection.
 
@@ -590,10 +590,10 @@ and Firebase's
 ### Managed framework service modules (2026-10-09)
 
 The managed launcher separates the local Binder registration into
-[`FrameworkServices.java`](../../Guest/Android/FrameworkServices.java), manifest-backed
-package state into [`FrameworkPackages.java`](../../Guest/Android/FrameworkPackages.java),
+[`FrameworkServices.java`](../../Guest/Android/Managed/Framework/FrameworkServices.java), manifest-backed
+package state into [`FrameworkPackages.java`](../../Guest/Android/Managed/Framework/FrameworkPackages.java),
 and host-network state and callbacks into
-[`FrameworkConnectivity.java`](../../Guest/Android/FrameworkConnectivity.java).
+[`FrameworkConnectivity.java`](../../Guest/Android/Managed/Framework/FrameworkConnectivity.java).
 `ManagedLauncher` retains Activity lifecycle, windows, input and native wire services.
 The explicit launcher build and freshness check hash every module; after changing
 any of them, run `make android-managed-launcher` before launching an installed app.
@@ -655,7 +655,7 @@ and [ArrayUtils](https://github.com/aosp-mirror/platform_frameworks_base/blob/an
 
 ### Managed Android Service execution (2026-10-09)
 
-[`FrameworkServiceRuntime.java`](../../Guest/Android/FrameworkServiceRuntime.java)
+[`FrameworkServiceRuntime.java`](../../Guest/Android/Managed/Framework/FrameworkServiceRuntime.java)
 implements started and bound Services for explicit components in the installed
 APK's main process or a fresh remote ART VM. It manages service tokens, start IDs, intent-filter binding
 records and client connections. Android's real `ActivityThread` creates the app's
@@ -1096,7 +1096,7 @@ and frames per buffer come from Bifrost's host Audio engine
 (`APP_AUDIO_ROUTING_READY`). Playback itself never uses AudioFlinger: the
 managed `libaaudio.so` adapter sends AAudio to the AudioThunk. Like real
 libaaudio, the adapter runs each data callback stream on a Bionic pthread of
-its own (`Guest/Android/aaudio.c`), created at open and joined at close; the
+its own (`Guest/Android/Adapters/aaudio.c`), created at open and joined at close; the
 host callback pump cannot make Bionic TLS. That thread asks the thunk when the
 host ring has room for one more callback (`bifrost_aaudio_wait_callback`),
 calls the app, and hands the buffer back. `test_android_bionic.sh` checks

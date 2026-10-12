@@ -1,6 +1,6 @@
-// yggdrasil/stdio_node.cpp — StdioNode implementation.
+// StdioNode.cpp — StdioNode implementation.
 //
-// v1.4.5-alpha: added ioctl() handling (delegates to host fd for
+// added ioctl() handling (delegates to host fd for
 // TIOCGWINSZ / TCGETS / TCSETS / FIONREAD). Previously Ioctl.cpp
 // dispatched on the request code with a big if-else chain and guessed
 // the fd type — now the Node owns its ioctls.

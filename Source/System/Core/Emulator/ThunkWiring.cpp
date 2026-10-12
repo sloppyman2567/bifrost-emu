@@ -8,8 +8,8 @@
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
 #include "System/Android/Surface/Surface.hpp"// 2026-08: Android activity
-#include "System/Audio/AudioThunk.hpp"  // 1.5.4-alpha: AudioThunk
-#include "System/Graphics/Thunks/DisplayThunk.hpp"// 1.5.4-alpha: DisplayThunk
+#include "System/Audio/AudioThunk.hpp"  // AudioThunk
+#include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
 #include <fcntl.h>
 #include <unistd.h>
@@ -36,7 +36,7 @@ namespace arm64emu {
 // implemented in Source/System/Core/Signals.cpp — see that file for the full
 // disposition table.
 // ── wire_thunk_glfw_cb_runner_ — guest GLFW callback delivery ─────────
-// 1.5.4-alpha. glfwSetCursorPosCallback/glfwSetKeyCallback/… register
+// glfwSetCursorPosCallback/glfwSetKeyCallback/… register
 // guest AArch64 callbacks; host GLFW can't invoke them, so GraphicThunk
 // stores them and asks us to run them after each
 // glfwPollEvents/glfwWaitEvents. We borrow the CPU the same way the
@@ -357,7 +357,7 @@ void Emulator::ensure_thunk_linker_() {
     wire_thunk_android_runner_();
 }
 // ── call_guest_function — borrow-CPU guest function call (C API) ───────
-// 1.5.4-alpha. libbifrost's bifrost_call() lets embedders invoke an
+// libbifrost's bifrost_call() lets embedders invoke an
 // arbitrary guest function (e.g. a callback, an exported entry, or a
 // helper in a loaded library) and read back x0. Same borrow-CPU pattern
 // as wire_thunk_glfw_cb_runner_ / guest_call_args_: save/restore ALL
@@ -485,7 +485,7 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     return result;
 }
 // ── wire_thunk_sdl_thread_runner_ — SDL_CreateThread/WaitThread ──────
-// 1.5.4-alpha. SDL_CreateThread passes a guest AArch64 function pointer;
+// SDL_CreateThread passes a guest AArch64 function pointer;
 // host SDL_CreateThread would run it as x86-64 (SIGSEGV). Instead we
 // spawn a REAL guest thread (own CPU + host thread + fresh stack +
 // per-thread glibc TLS) running the guest function, and SDL_WaitThread

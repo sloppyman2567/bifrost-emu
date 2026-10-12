@@ -1,4 +1,4 @@
-// core/signal.h — guest signal delivery for bifrost-emu.
+// Signals.hpp — guest signal delivery for bifrost-emu.
 //
 // Provides production-quality signal delivery for guest programs.
 // The full Linux signal semantics (siginfo_t, ucontext_t, signal stacks,

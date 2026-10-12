@@ -1,6 +1,6 @@
-// jit/jit_translate.cpp — FrostJIT block translation.
+// BlockCompiler.cpp — FrostJIT block translation.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. Holds the
+// split out of FrostJIT.cpp. Holds the
 // translate_block() method, which translates one ARM64 basic block to
 // x86-64 code. The method:
 //   1. Decodes ARM64 instructions via the shared decoder.
@@ -119,7 +119,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // the dispatch-side counters (run_block slow path / lookup_call_target)
     // can never see. Gated on !wex_enabled_ only (the counter writes the code
     // page — a W^X buffer would fault on the `inc`). Chain-skip COMPOSES with
-    // tier-2 (1.5.4-alpha): the reservation MUST stay active there or the
+    // tier-2: the reservation MUST stay active there or the
     // counter's RIP-relative inc would read/write the PREVIOUS block's last
     // 8 code bytes (layout-dependent corruption → SIGSEGV). Self-loops are
     // naturally excluded: their loop-back jumps to block_body_start_off_
@@ -157,7 +157,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
     bool block_ended = false;
-    // 1.5.4-alpha: leaf inlining. When a BL targets a small leaf (no calls/
+    // leaf inlining. When a BL targets a small leaf (no calls/
     // memory/stack, ≤16 instrs), its body is translated inline instead of
     // emitting a BL_CALL — the caller block continues past the leaf's RET.
     // The inlined body may contain ONE forward conditional branch (flattened
@@ -374,7 +374,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // OVER-predicts (it fires for FP_SCALAR/SIMD_DP ops that the IR
     // translator actually handles natively, e.g. FMOV/FCVT/FADD), which
     // demoted tiny native FP blocks to the interpreter (~2x slower) and
-    // split FP-heavy blocks every 2 instructions. 1.5.4-alpha: base the
+    // split FP-heavy blocks every 2 instructions. base the
     // decision on the ACTUAL number of CALL_INTERP ops in the generated
     // IR instead — only blocks that genuinely run the interpreter get
     // demoted. Native FP blocks now stay in the JIT.
@@ -557,7 +557,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Stash the Emulator* into the frame slot (emu_slot_off(), below the
     // block's vreg slots / the chain-skip frame ceiling). R14 is then FREE
     // for vreg allocation in every block — all emu-consuming codegen sites
-    // load emu from this slot instead of R14 (1.5.4-alpha). RSI still holds
+    // load emu from this slot instead of R14. RSI still holds
     // emu at this point (entry arg), untouched since the prologue started.
     emit_store(RBP, emu_slot_off(), RSI);
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): recorded here, BEFORE the
@@ -570,7 +570,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // successor must pin the CURRENT guest vectors (the predecessor's
     // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX needs no
     // setup — it holds cpu persistently across the chain edge (reserved
-    // reg). R14 is allocatable (1.5.4-alpha), so emu does NOT flow through
+    // reg). R14 is allocatable, so emu does NOT flow through
     // a register: the predecessor's epilogue set RSI=emu from the shared
     // chain frame's fixed emu slot (emu_slot_off()), and a successor that
     // skips its own prologue still reads that slot. Disabled mode leaves
@@ -601,7 +601,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // participate in a bounded loop region. Calls and fault boundaries are
     // excluded from entry instrumentation; the collector validates the body.
     bool tier2_head_eligible = false;
-    // Chain-skip composes with tier-2 (1.5.4-alpha): the counter sits AFTER
+    // Chain-skip composes with tier-2: the counter sits AFTER
     // chain_entry_off_, so chain edges (bare jmps to chain_entry) count too.
     // Regions entered via a chain edge use the region's own chain-skip entry
     // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
@@ -689,7 +689,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             patch_jcc_rel32(mt_counter_disabled_patch, static_cast<int32_t>(code_buf_used_ - (mt_counter_disabled_patch + 6)));
         tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
     }
-    // 1.5.4-alpha: load the reservation base into R10 ONLY if the
+    // load the reservation base into R10 ONLY if the
     // block actually touches guest memory inline.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
     // prologue — pure overhead for the many tiny ALU/FP/vector blocks
@@ -1055,7 +1055,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // block / the dispatcher).
     vec_cache_writeback_all();
     if (!rax_holds_next_pc_) {
-        // 1.5.4-alpha: inline blocks' instr_count is not a contiguous
+        // inline blocks' instr_count is not a contiguous
         // guest-pc count (the inlined leaf body + implicit BL/RET break
         // the linear model), so the fall-through next_pc is the builder's
         // cur_pc — the first untranslated instruction (BL+4 or the cap

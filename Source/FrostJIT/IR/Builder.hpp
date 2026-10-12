@@ -1,4 +1,4 @@
-// ir/ir.h — internal IR helpers shared by the translator, lowerer, and
+// Builder.hpp — internal IR helpers shared by the translator, lowerer, and
 // optimizer. NOT a public header — only included from Source/FrostJIT/IR/*.cpp.
 //
 // Public IR types live in Source/FrostJIT/IR/IR.hpp.

@@ -7,11 +7,11 @@
 #include <atomic>
 #include "System/Graphics/Display/Graphics.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"
-#include "System/Audio/AudioThunk.hpp"    // 1.5.4-alpha: AudioThunk full def
-#include "System/Graphics/Thunks/DisplayThunk.hpp"  // 1.5.4-alpha: DisplayThunk full def
-#include "System/Graphics/Thunks/GLState.hpp"       // 1.5.4-alpha: GLStateTracker
+#include "System/Audio/AudioThunk.hpp"    // AudioThunk full def
+#include "System/Graphics/Thunks/DisplayThunk.hpp"  // DisplayThunk full def
+#include "System/Graphics/Thunks/GLState.hpp"       // GLStateTracker
 #include "System/Android/Surface/Surface.hpp" // Android NativeActivity surface layer
-#include "Generated/ThunkTable.hpp"          // 1.5.4-alpha: symbol signature table
+#include "Generated/ThunkTable.hpp"          // symbol signature table
 #include "System/Graphics/Display/SDLSurfaceBridge.hpp"
 #include "System/Graphics/Thunks/ThunkCommon.hpp"         // shared SymbolEntry + trampoline encodings
 #include "System/Core/DebugFlags.hpp"            // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
@@ -129,13 +129,13 @@ struct GraphicThunkImpl {
     // sync/UNMAP/wake sites already do. Separate from mu so registry
     // paths never interact with per-call state.
     std::mutex state_mu;
-    // 1.5.4-alpha: GL state tracker for consistent query results.
+    // GL state tracker for consistent query results.
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
-    // 1.5.4-alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
+    // SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
     // pixel buffer can be bounced at its full size (pitch * height)
     // instead of the 64 KiB default (which truncates larger frames).
     std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> sdl_tex_sizes_;
-    // 1.5.4-alpha: generic GLFW callback delivery. Each glfwSetXxxCallback
+    // generic GLFW callback delivery. Each glfwSetXxxCallback
     // is a *_CB-policy symbol: dispatch() stores the guest callback here
     // instead of handing it to host GLFW (host can't invoke guest AArch64
     // callbacks). After glfwPollEvents/glfwWaitEvents (GLFW_POLL policy),
@@ -179,7 +179,7 @@ struct GraphicThunkImpl {
     void* glfw_get_framebuffer_size_fn_ = nullptr;
     void* glfw_get_window_attrib_fn_ = nullptr;
     void* glfw_set_error_callback_fn_ = nullptr;
-    // 1.5.4-alpha: glfwCreateWindow HiDPI compensation. Resolved at init.
+    // glfwCreateWindow HiDPI compensation. Resolved at init.
     void* glfw_get_window_content_scale_fn_ = nullptr;
     void* glfw_set_window_size_fn_ = nullptr;
     // Last error captured from host GLFW's error callback (ERROR_CB

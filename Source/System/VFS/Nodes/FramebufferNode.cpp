@@ -1,6 +1,6 @@
-// yggdrasil/fb_node.cpp — FbNode implementation.
+// FramebufferNode.cpp — FbNode implementation.
 //
-// v1.4.5-alpha: moved framebuffer ioctl handling (FBIOGET_VSCREENINFO,
+// moved framebuffer ioctl handling (FBIOGET_VSCREENINFO,
 // FBIOGET_FSCREENINFO) from Ioctl.cpp into FbNode::ioctl(). The
 // syscall layer now dispatches via node->ioctl() instead of guessing
 // fd type from the request code.

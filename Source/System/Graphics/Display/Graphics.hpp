@@ -1,4 +1,4 @@
-// frost/graphics.hpp — FrostGraphics: graphics backend for bifrost-emu.
+// Graphics.hpp — FrostGraphics: graphics backend for bifrost-emu.
 //
 // Provides a virtual framebuffer device (/dev/fb0) that guest programs
 // can mmap and write pixels to. The framebuffer is backed by a memfd
@@ -15,14 +15,14 @@
 //      graphical guest programs interactively. SDL2 dev headers must
 //      be available on the build host.
 //
-// v1.4.5-alpha: renamed from `GraphicsBackend` to
+// renamed from `GraphicsBackend` to
 // `FrostGraphics` to match the FrostJIT naming convention. The class
 // is now in `Source/System/Graphics/Display/Graphics.hpp` and the implementation in
 // `Source/System/Graphics/`. `GraphicsBackend` is kept as a typedef alias
 // for backward compatibility with existing call sites — new code
 // should use `FrostGraphics`.
 //
-// v1.4.5-alpha: EXPERIMENTAL graphic API thunking. The
+// EXPERIMENTAL graphic API thunking. The
 // `FrostGraphics::thunk()` method returns a `GraphicThunk*` that the
 // emulator's dynamic linker uses to intercept guest `dlsym` calls for
 // `libGL.so` / `libEGL.so` / `libSDL2.so` / `libGLESv2.so` and forward
@@ -31,7 +31,7 @@
 // host's implementation — no GPU emulation, just marshalling. See
 // `GraphicThunk.cpp` and the `GraphicThunk` class below.
 //
-// v1.4.5-alpha: SMARTER SDL2 INIT + INPUT EVENTS.
+// SMARTER SDL2 INIT + INPUT EVENTS.
 //   - SDL2 is now initialized lazily on first init() or poll_events()
 //     call, not eagerly when the framebuffer is opened. Headless
 //     programs that never display the fb won't open an SDL2 window.
@@ -63,7 +63,7 @@
 namespace arm64emu {
 // Forward-declare GraphicThunk (defined in System/Graphics/Thunks/GraphicThunk.hpp).
 class GraphicThunk;
-// Forward-declare AudioThunk and DisplayThunk (1.5.4-alpha).
+// Forward-declare AudioThunk and DisplayThunk.
 class AudioThunk;
 class DisplayThunk;
 // Forward-declare FrostInput (defined in frost/input.hpp).
@@ -87,7 +87,7 @@ constexpr uint32_t FBIOGET_FSCREENINFO = 0x4602;
 //   - a memfd-backed framebuffer (always available)
 //   - an optional SDL2 window (build with USE_SDL2=1)
 //   - an optional GraphicThunk for forwarding guest GL/EGL/SDL2 calls
-//     to the host (experimental, v1.4.5-alpha)
+//     to the host (experimental)
 class FrostGraphics {
 public:
     // Default ctor and destructor must be out-of-line (defined in
@@ -171,7 +171,7 @@ public:
     //   FBIOGET_VSCREENINFO (0x4600) — write struct fb_var_screeninfo
     //   FBIOGET_FSCREENINFO (0x4602) — write struct fb_fix_screeninfo
     int ioctl(uint32_t request, void* guest_buf);
-    // ── EXPERIMENTAL: Graphic API thunking (v1.4.5-alpha) ──
+    // ── EXPERIMENTAL: Graphic API thunking ──
     //
     // Returns the GraphicThunk instance owned by this FrostGraphics.
     // The thunk intercepts guest dlsym calls for libGL/libEGL/libSDL2/
@@ -195,18 +195,18 @@ public:
     // See Source/System/Graphics/Thunks/GraphicThunk/ for the implementation and the
     // list of supported entry points.
     GraphicThunk* thunk();
-    // ── EXPERIMENTAL: Audio API thunking (1.5.4-alpha) ─────────────
+    // ── EXPERIMENTAL: Audio API thunking ─────────────
     // Returns the AudioThunk instance owned by this FrostGraphics.
     // The thunk intercepts guest dlsym calls for libasound/libpulse/
     // libSDL2 (audio)/libopenal and forwards them to the host.
     // Opt-in via BIFROST_THUNK_AUDIO=1 or [thunk] audio = true.
     AudioThunk* audio_thunk();
-    // ── EXPERIMENTAL: Display API thunking (1.5.4-alpha) ───────────
+    // ── EXPERIMENTAL: Display API thunking ───────────
     // Returns the DisplayThunk instance. Intercepts guest dlsym calls
     // for libvulkan/libwayland-client/libX11/libgbm.
     // Opt-in via BIFROST_THUNK_DISPLAY=1 or [thunk] display = true.
     DisplayThunk* display_thunk();
-    // ── Input events (v1.4.5-alpha) ──────────────────────
+    // ── Input events ──────────────────────
     // Returns the FrostInput instance owned by this FrostGraphics.
     // The input backend captures keyboard/mouse events from the SDL2
     // window and exposes them as Linux input_event records. The guest
@@ -216,7 +216,7 @@ public:
     // always empty — reads return 0 (EOF). This keeps the API uniform
     // regardless of build configuration.
     FrostInput* input();
-    // ── Window management (v1.4.5-alpha) ─────────────────
+    // ── Window management ─────────────────
     // Set the SDL2 window title. No-op in headless mode. Safe to call
     // before init() — the title is cached and applied when the window
     // is created.
@@ -246,7 +246,7 @@ private:
     // unique_ptr to avoid pulling the GraphicThunk definition into
     // this header.
     std::unique_ptr<GraphicThunk> thunk_;
-    // 1.5.4-alpha: AudioThunk and DisplayThunk instances.
+    // AudioThunk and DisplayThunk instances.
     std::unique_ptr<AudioThunk>   audio_thunk_;
     std::unique_ptr<DisplayThunk> display_thunk_;
     // FrostInput instance (created in the constructor, always present).

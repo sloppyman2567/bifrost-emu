@@ -184,7 +184,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // Each stub is 2 instructions (8 bytes), EXCEPT _dl_allocate_tls
     // which is 4 instructions (16 bytes) because it calls back into
     // the emulator via a bifrost-specific syscall to allocate a real
-    // per-thread TLS block (see syscall 0x1001 in Miscellaneous.cpp).
+    // per-thread TLS block (see syscall 0x1001 in Syscalls/HostCalls/DynamicLinker.cpp).
     //
     // Stubs that "abort" actually call abort() — we resolve abort via
     // the global symbol table at registration time (it's a libc symbol
@@ -234,7 +234,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // returned NULL, and glibc treated that as a zero-size allocation.
     // The real fix is to actually allocate a per-thread TLS block + TCB,
     // copy the static TLS template, and return the TCB pointer. The
-    // syscall handler (case 0x1001 in Miscellaneous.cpp) does this.
+    // syscall handler (case 0x1001 in Syscalls/HostCalls/DynamicLinker.cpp) does this.
     auto emit_tls_alloc_stub = [&](std::vector<uint8_t>& v) {
         // movz x8, #0x1001  →  0xD2820028
         // Encoding: D2800000 | (hw<<21) | (imm16<<5) | Rd
@@ -646,7 +646,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // which we bypass (we use our own dynamic linker). With that slot
     // NULL, allocate_dtv does `blr x2` with x2=0 -> decode error at
     // pc=0x0. Our shim's _dl_allocate_tls instead traps into the
-    // emulator via syscall 0x1001 (see Miscellaneous.cpp case 0x1001), which
+    // emulator via syscall 0x1001 (see Syscalls/HostCalls/DynamicLinker.cpp case 0x1001), which
     // allocates the per-thread TLS block + TCB, copies the static TLS
     // template, copies the TCB canary fields, and returns the TCB
     // pointer — all without touching ld-linux's uninitialized internal

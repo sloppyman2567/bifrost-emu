@@ -1,5 +1,5 @@
-// syscalls/misc_id.cpp — identity/system-info syscalls extracted from
-// Process.cpp . Handles:
+// Identity.cpp — identity/system-info syscalls, dispatched from
+// syscall_process() in Process.cpp. Handles:
 //   - getgroups / setgroups (case 158, 159)
 //   - uname (case 160)
 //   - getrlimit (case 163)
@@ -18,10 +18,9 @@
 //   - getrandom (case 278)
 //   - execveat (case 281)
 //   - rseq (case 293)
+//   - unshare (case 97)
 //
-// All case bodies are extracted verbatim from the original Process.cpp.
-//
-// NOTE: this file is NOT a friend of Emulator (unlike Miscellaneous.cpp). It accesses
+// NOTE: this file is not a friend of Emulator. It accesses
 // private state via the public accessors emu.mem(), emu.fds(), etc.
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
@@ -40,7 +39,7 @@
 #include <unistd.h>
 #include <vector>
 namespace arm64emu {
-int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
+int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;
@@ -771,6 +770,11 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             // the label was misleading.)
             ret_err(ENOSYS);
             return 0;
+        }
+        case 97: { // unshare(flags) — AArch64 97
+            int r = ::unshare(static_cast<int>(a0));
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0); return 0;
         }
         default:
             return SYSCALL_NOT_HANDLED;

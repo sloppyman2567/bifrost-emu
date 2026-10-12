@@ -1,7 +1,7 @@
-// frost_graphics/thunk_common.hpp — shared trampoline encoding + registry
+// ThunkCommon.hpp — shared trampoline encoding + registry
 // helpers for the GraphicThunk / AudioThunk / DisplayThunk family.
 //
-// 1.5.4-alpha: extracted from GraphicThunk to avoid duplication now
+// extracted from GraphicThunk to avoid duplication now
 // that we have three thunk classes.
 //
 // All three thunks:
@@ -11,7 +11,7 @@
 //        movz x8, #0x1000        ; load __NR_bifrost_thunk
 //        svc #0                  ; trap to host
 //        nop                     ; pad to 16 bytes
-//   3. The host's syscall dispatcher (case 0x1000 in Miscellaneous.cpp) calls
+//   3. The host's syscall dispatcher (case 0x1000 in Syscalls/HostCalls/Thunks.cpp) calls
 //      thunk->dispatch(cpu, sym_id), which:
 //        a. Looks up the host function pointer for sym_id.
 //        b. Reads the first 8 args from cpu.regs[0..7].
@@ -46,7 +46,7 @@ struct ThunkSymbolEntry {
     void*       host_fn;    // host function pointer (or null if stub)
     uint64_t    guest_addr; // trampoline address in guest memory
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
-    // 1.5.4-alpha: bitmask indicating which args (0-7) are
+    // bitmask indicating which args (0-7) are
     // pointers that need guest→host translation. Bit N set = arg N is
     // a pointer. 0 = no pointer args (all args passed verbatim).
     // This is populated per-symbol by the registration code using
@@ -208,7 +208,7 @@ inline ThunkLibTable* find_lib(std::vector<ThunkLibTable>& libs,
 }
 // Register a (lib, sym, host_fn) entry. Allocates a sym_id, writes the
 // trampoline into guest memory, stores the entry. Idempotent.
-// 1.5.4-alpha: added id_base parameter so each thunk type
+// added id_base parameter so each thunk type
 // (Graphic/Audio/Display) gets a non-overlapping symbol_id range.
 inline void thunk_register(Memory& mem,
                             std::vector<ThunkLibTable>& libs,

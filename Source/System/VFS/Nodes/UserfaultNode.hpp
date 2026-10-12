@@ -1,4 +1,4 @@
-// yggdrasil/uffd_node.hpp — userfaultfd(2) in SIGBUS mode.
+// UserfaultNode.hpp — userfaultfd(2) in SIGBUS mode.
 //
 // Implements the subset ART's concurrent mark-compact GC uses on Android
 // 15 (art/runtime/gc/collector/mark_compact.cc): the UFFDIO_API handshake

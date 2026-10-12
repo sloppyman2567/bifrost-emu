@@ -1,6 +1,6 @@
-// yggdrasil/memfd_node.cpp — MemfdNode implementation.
+// MemfdNode.cpp — MemfdNode implementation.
 //
-// v1.4.5-alpha: added lazy regeneration. A MemfdNode constructed via
+// added lazy regeneration. A MemfdNode constructed via
 // create_lazy() rewrites its memfd content from the regenerator
 // callback on construction AND whenever the guest seeks to offset 0.
 // This lets /proc/self/maps, /proc/self/status, etc. reflect live
@@ -71,7 +71,7 @@ ssize_t MemfdNode::write(uint64_t off, const void* buf, size_t n) {
     return r < 0 ? -errno : r;
 }
 ssize_t MemfdNode::lseek(int64_t off, int whence) {
-    // v1.4.5-alpha: lazy regeneration on SEEK_SET to 0. This makes
+    // lazy regeneration on SEEK_SET to 0. This makes
     // re-reads of /proc/self/maps etc. return fresh content without
     // the caller needing to close and re-open the fd. (Previously the
     // memfd's content was write-once at open time; re-reading returned

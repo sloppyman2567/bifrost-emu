@@ -1,4 +1,4 @@
-// yggdrasil/yggdrasil.hpp — the world-tree: guest path → Node resolver.
+// VFS.hpp — the world-tree: guest path → Node resolver.
 //
 // Yggdrasil is the VFS subsystem of bifrost-emu. In Norse cosmology,
 // Yggdrasil is the world-tree that connects the nine realms; here it
@@ -21,7 +21,7 @@
 // The FdTable owns the shared_ptr<Node> for each guest fd. close() drops
 // the refcount; dup()/dup2() create new fds pointing to the same Node.
 //
-// v1.4.5-alpha: renamed from `VFS` to `Yggdrasil` to give the subsystem
+// renamed from `VFS` to `Yggdrasil` to give the subsystem
 // an identity (matching the Norse theme of bifrost + FrostJIT). The
 // class names `VFS`, `VNode`, `HostVNode`, etc. were renamed to
 // `Yggdrasil`, `Node`, `HostNode`, etc. The file layout was split
@@ -56,7 +56,7 @@ namespace arm64emu::yggdrasil {
 struct BinderDomain;
 // ── Guest CPU topology: the single source of truth ─────────
 // Every guest-visible CPU-count source advertises this many
-// CPUs: sched_getaffinity (syscalls/misc_sched.cpp), the
+// CPUs: sched_getaffinity (Syscalls/Process/Scheduling.cpp), the
 // synthetic sysfs tree (yggdrasil/sysfs.cpp) and
 // /proc/cpuinfo (yggdrasil/procfs.cpp). Bionic's
 // sysconf(_SC_NPROCESSORS_ONLN) reads

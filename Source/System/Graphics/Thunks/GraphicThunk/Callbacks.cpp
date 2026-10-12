@@ -4,7 +4,7 @@
 namespace arm64emu {
 std::optional<int64_t> GraphicThunk::dispatch_guest_callbacks_(CPU& cpu, const SymbolEntry& entry) {
     // ── GLFW callback registration (CURSOR_CB/KEY_CB/MOUSE_CB/…) ─────
-    // 1.5.4-alpha: the guest callback is AArch64 code host GLFW cannot
+    // the guest callback is AArch64 code host GLFW cannot
     // invoke, so we store it keyed by window and deliver it from the
     // GLFW_POLL path. NEVER hand the guest address to host
     // glfwSetCursorPosCallback etc — the host would call it as x86-64

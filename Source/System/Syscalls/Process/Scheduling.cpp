@@ -1,5 +1,5 @@
-// syscalls/misc_sched.cpp — scheduling/priority syscalls extracted from
-// Process.cpp . Handles:
+// Scheduling.cpp — scheduling/priority syscalls, dispatched from
+// syscall_process() in Process.cpp. Handles:
 //   - ptrace (case 117)
 //   - sched_setaffinity / sched_getaffinity / sched_yield (case 122, 123, 124)
 //   - sched_get_priority_max / sched_get_priority_min (case 125, 126)
@@ -7,9 +7,7 @@
 //   - getpgid (case 155)
 //   - getcpu (case 168)
 //
-// All case bodies are extracted verbatim from the original Process.cpp.
-//
-// NOTE: this file is NOT a friend of Emulator (unlike Miscellaneous.cpp). It accesses
+// NOTE: this file is not a friend of Emulator. It accesses
 // private state via the public accessors emu.mem(), emu.fds(), etc.
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
@@ -22,7 +20,7 @@
 #include <unistd.h>
 #include <vector>
 namespace arm64emu {
-int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
+int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     auto& mem_ = emu.mem();
     switch (num) {

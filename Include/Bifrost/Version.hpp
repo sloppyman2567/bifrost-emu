@@ -1,4 +1,4 @@
-// bifrost/version.hpp — version constants for bifrost-emu.
+// Version.hpp — version constants for bifrost-emu.
 //
 // Public header: safe to include from any consumer (C++ or C-binding).
 #pragma once
@@ -222,6 +222,11 @@ namespace arm64emu {
 //     BRCOND_BIT tight self-loop slot (CBZ/CBNZ/TBZ/TBNZ while-loops)
 //     is the real win (~2.7x vs dispatcher).
 //   - Version bump: 1.5.5-alpha (vk.xml registry-driven marshalling).
-constexpr const char* VERSION  = "1.5.5";
+//
+// 2.0.0-alpha.1 (2026-10-12): first pre-release toward the v2.0 roadmap.
+//   Subsystem source layout, role-based guest folders and descriptive
+//   file names; see CHANGELOG.md. The v2.0 Android/performance goals in
+//   Docs/roadmap.md are not complete in this pre-release.
+constexpr const char* VERSION  = "2.0.0-alpha.1";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

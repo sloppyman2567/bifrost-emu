@@ -1,6 +1,6 @@
 // GraphicThunk.hpp — forward guest GL/EGL/SDL2 calls to host.
 //
-// v1.4.5-alpha: NEW. The GraphicThunk class is forward-
+// The GraphicThunk class is forward-
 // declared in System/Graphics/Display/Graphics.hpp (so it doesn't pull in dlfcn.h
 // / GL / EGL / SDL2 headers). This header provides the full class
 // definition, needed by:
@@ -8,7 +8,7 @@
 //     the unique_ptr<GraphicThunk> member)
 //   - System/Graphics/Thunks/GraphicThunk/ (the class implementation)
 //   - System/Loader/DynamicLinker/ (calls GraphicThunk::resolve)
-//   - System/Syscalls/Miscellaneous.cpp (calls GraphicThunk::dispatch)
+//   - System/Syscalls/HostCalls/Thunks.cpp (calls GraphicThunk::dispatch)
 //
 // External consumers (libbifrost users) do NOT need to include this
 // header — they use FrostGraphics::thunk() which returns a
@@ -47,7 +47,7 @@
 //   - Pointer args outside the 4 GiB direct window bounce through a
 //     host buffer (writeback). Nested structs of pointers may still
 //     need per-symbol handlers (see glShaderSource).
-//   - GL state tracking: 1.5.4-alpha adds GLStateTracker, a
+//   - GL state tracking: GLStateTracker is a
 //     software-side mirror of guest GL state (capabilities, blend,
 //     depth, stencil, viewport, texture bindings, program, pixel
 //     store, hints) so state queries (glIsEnabled, glGetIntegerv,
@@ -127,7 +127,7 @@ public:
     // value to cpu.regs[0]; on success it's already set by dispatch().
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
     // ── Guest callback delivery hook (GLFW callbacks) ──────────────────
-    // 1.5.4-alpha: GLFW callback setters (glfwSetCursorPosCallback /
+    // GLFW callback setters (glfwSetCursorPosCallback /
     // glfwSetKeyCallback / glfwSetMouseButtonCallback /
     // glfwSetFramebufferSizeCallback / glfwSetWindowSizeCallback /
     // glfwSetWindowFocusCallback / glfwSetErrorCallback) are *_CB-policy
@@ -162,7 +162,7 @@ public:
     using SdlFilterCpuFactory = std::function<std::unique_ptr<CPU>()>;
     void set_sdl_filter_cpu_factory(SdlFilterCpuFactory factory);
     // ── SDL thread runner (SDL_CreateThread / SDL_WaitThread) ──────────
-    // 1.5.4-alpha. The game spawns worker threads (a timer thread, a
+    // The game spawns worker threads (a timer thread, a
     // music/audio thread, an event thread) via SDL_CreateThread and
     // joins them with SDL_WaitThread. Host SDL_CreateThread would try to
     // run the guest AArch64 function pointer as x86-64 (SIGSEGV), so the
@@ -184,7 +184,7 @@ public:
         CPU& cpu, uint32_t op, uint64_t a0, uint64_t a1, uint64_t a2)>;
     void set_sdl_thread_runner(SdlThreadRunner runner);
     // ── SDL shutdown wakeup ────────────────────────────────────────────
-    // 1.5.4-alpha. SDL_CreateThread spawns REAL host threads that run the
+    // SDL_CreateThread spawns REAL host threads that run the
     // guest thread function. When the guest calls exit_group, only the
     // calling CPU stops; the SDL worker threads may still be blocked in
     // host SDL calls (SDL_SemWait, SDL_Delay). Teardown then destroys
@@ -206,7 +206,7 @@ public:
     //   ret                       ; return to guest caller (x30)
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
     static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
-    // 1.5.4-alpha: per-thunk ID base to avoid collisions.
+    // per-thunk ID base to avoid collisions.
     // Each thunk type gets a non-overlapping range of symbol_ids.
     // The dispatch handler checks the range to route to the correct
     // thunk without trying each one sequentially.
@@ -225,8 +225,8 @@ private:
     std::optional<int64_t> dispatch_special_policies_(CPU& cpu, const SymbolEntry& entry);
     std::optional<int64_t> dispatch_guest_callbacks_(CPU& cpu, const SymbolEntry& entry);
     std::optional<int64_t> dispatch_float_abi_(CPU& cpu, const SymbolEntry& entry);
-    // Per-library registration helpers (GraphicThunk/Core.cpp).
-    // 1.5.4-alpha: added pointer_args bitmask (bit N = arg N
+    // Per-library registration helpers (GraphicThunk/GraphicThunk.cpp).
+    // added pointer_args bitmask (bit N = arg N
     // is a pointer needing guest→host translation).
     void register_function_(const std::string& lib,
                             const std::string& sym,

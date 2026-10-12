@@ -1,6 +1,6 @@
-// audio/audio.cpp — Audio backend implementation.
+// Audio.cpp — Audio backend implementation.
 //
-// 1.5.5-alpha REWRITE: multi-stream mixer modeled on real SDL2/SDL3.
+// multi-stream mixer modeled on real SDL2/SDL3.
 // One physical host device; each guest audio device gets its own logical
 // stream with an independent float ring (converted + resampled at push
 // time). The device callback sums all non-paused streams — so a music

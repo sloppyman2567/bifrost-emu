@@ -1,4 +1,4 @@
-// interp/interp_simd_misc.cpp — SIMD_DP group 2: the two-register misc
+// TwoRegisterPermute.cpp — SIMD_DP group 2: the two-register misc
 // switch (sub2), EXT/INS, TBL/TBX and the other permutes that follow it.
 #include "Interpreter/FloatSIMD/FloatCommon.hpp"
 namespace arm64emu {

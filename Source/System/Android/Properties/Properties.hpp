@@ -1,4 +1,4 @@
-// yggdrasil/android_properties.hpp — read-only Android system properties.
+// Properties.hpp — read-only Android system properties.
 //
 // On Android, init publishes system properties through shared memory that
 // Bionic maps from /dev/__properties__. Bifrost plays init for Android

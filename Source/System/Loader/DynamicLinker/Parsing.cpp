@@ -260,7 +260,7 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
 // Locate PT_GNU_EH_FRAME (p_type 0x6474e550) and record the absolute
 // guest address of the .eh_frame_hdr. libgcc's _Unwind_Find_FDE reads
 // this from the dl_find_object result struct (see syscall 0x1008 in
-// Miscellaneous.cpp) to binary-search FDEs during C++ exception unwinding.
+// Syscalls/HostCalls/DynamicLinker.cpp) to binary-search FDEs during C++ exception unwinding.
 void DynamicLinker::parse_eh_frame(const std::vector<uint8_t>& data,
                                    uint64_t base, LoadedObject& obj) {
     if (data.size() < 64) return;

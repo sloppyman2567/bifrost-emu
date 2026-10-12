@@ -1,4 +1,4 @@
-// yggdrasil/sysfs.cpp — SysFS: synthetic /sys CPU topology.
+// SysFS.cpp — SysFS: synthetic /sys CPU topology.
 //
 // The emulator has no kernel, so there is no real sysfs.
 // Guests that ask for the CPU topology must still see a

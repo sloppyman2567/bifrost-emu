@@ -1,4 +1,4 @@
-// core/emulator.h — Emulator class definition (private header).
+// Emulator.hpp — Emulator class definition (private header).
 //
 // The Emulator ties everything together: it owns a Memory, a pool of vCPUs
 // (one main + N cloned via clone()), a futex table, signal table, graphics
@@ -45,12 +45,11 @@ namespace arm64emu { class FrostJIT; }
 // Forward-declare syscall handlers (defined in Source/System/Syscalls/*.cpp) so
 // they can be declared as friends of Emulator below.
 namespace arm64emu {
-    int64_t syscall_fs(Emulator&, CPU&, uint64_t);
     int64_t syscall_mem(Emulator&, CPU&, uint64_t);
     int64_t syscall_threads(Emulator&, CPU&, uint64_t);
     int64_t syscall_time(Emulator&, CPU&, uint64_t);
     int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
-    int64_t syscall_misc(Emulator&, CPU&, uint64_t);
+    int64_t syscall_exit(Emulator&, CPU&, uint64_t);
 }
 namespace arm64emu {
 // ── ELF loader (definition lives in Source/System/Loader/ElfLoader.cpp) ──────
@@ -462,7 +461,7 @@ private:
     std::atomic<int> next_tid_{2};
     std::atomic<int> alive_threads_{0};
     // ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ──────────
-    // 1.5.4-alpha. The game spawns worker threads (timer/music/event) via
+    // The game spawns worker threads (timer/music/event) via
     // SDL_CreateThread and joins them with SDL_WaitThread. These are real
     // concurrent guest threads: each gets its own GuestThread (own CPU +
     // host thread + optional per-thread JIT), a fresh guest stack, and a
@@ -597,7 +596,7 @@ private:
     // ── Yggdrasil VFS + fd table ────────────────────────────────────
     // Yggdrasil (the world-tree) resolves guest paths to Nodes; FdTable
     // maps guest fds to Nodes. Owned by Emulator so all vCPUs share the
-    // same view. (v1.4.5-alpha: renamed from VFS/VNode to Yggdrasil/Node.)
+    // same view. (renamed from VFS/VNode to Yggdrasil/Node.)
     Yggdrasil vfs_;
     FdTable   fds_;
     // ── Signal delivery ───────────────────────────────────────────────
@@ -705,15 +704,14 @@ private:
     // runs the guest thread function until it returns to the sentinel LR.
     friend void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st);
     // ── Syscall layer friends (so handlers can access private state) ──
-    // Each handler lives in Source/System/Syscalls/{fs,mem,threads,time,ioctls}.cpp
-    // and needs to read/write brk_, brk_mu_, phdr_addr_, etc. directly.
-    friend int64_t syscall_fs(Emulator&, CPU&, uint64_t);
+    // Memory.cpp, Process/Threads.cpp, Time.cpp, Files/Ioctl.cpp and Process/Exit.cpp
+    // use brk_, brk_mu_, thread state, etc. directly. Other families use accessors.
     friend int64_t syscall_mem(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_threads(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
-    friend int64_t syscall_misc(Emulator&, CPU&, uint64_t);
-    // 1.5.4-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
+    friend int64_t syscall_exit(Emulator&, CPU&, uint64_t);  // exit_group: kill_other_threads
+    // shared vDSO clock fast-path handler (Syscalls/Time.cpp),
     // also called from the syscall dispatcher and the JIT trampoline.
     friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
     // ── Internal helpers ──────────────────────────────────────────────
@@ -729,7 +727,7 @@ private:
                                  ElfLoader::Loaded& info);
     void execute(uint32_t inst, uint64_t& next_pc, CPU& cpu);
     // ── Interpreter dispatch helpers ───────────────────────────────────
-    // v1.4.5-alpha refactor: the giant switch in execute() was split into
+    // the giant switch in execute() was split into
     // per-category member functions, each handling a group of InstClass
     // cases. They live in Source/Interpreter/interp_{fp,branch}.cpp and have full
     // access to Emulator state (mem_, brk_verbose_, syscall(), etc.).
@@ -768,7 +766,7 @@ private:
     void kill_other_threads(CPU& caller);
     // Wake every futex waiter in every shard (execve kill assist).
     void wake_all_futexes();
-    // 1.5.4-alpha: stop + join every SDL worker thread. Real Linux
+    // stop + join every SDL worker thread. Real Linux
     // exit_group kills ALL threads; group_exit() stops the guest threads
     // but not these. SDL threads spawned via
     // SDL_CreateThread run in REAL host std::threads and may be blocked
@@ -780,7 +778,7 @@ private:
     // exception"). Called at the end of run() and again defensively in
     // ~Emulator (idempotent).
     void stop_sdl_threads();
-    // 1.5.4-alpha: wire the GraphicThunk's GLFW-callback runner to a
+    // wire the GraphicThunk's GLFW-callback runner to a
     // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
     // d0..=fargs, pc = callback, run step() to the sentinel LR).
     // Called after the thunk is initialized on both the dynamic-linker
@@ -789,7 +787,7 @@ private:
     void wire_thunk_wl_cb_runner_();
     void wire_thunk_wl_fd_publisher_();
     void wire_thunk_android_runner_();
-    // AudioThunk engine + borrow-CPU callback runner wiring (1.5.5-alpha).
+    // AudioThunk engine + borrow-CPU callback runner wiring.
     void wire_thunk_audio_runner_();
     void ensure_thunk_linker_();
     uint64_t android_on_create_ = 0;

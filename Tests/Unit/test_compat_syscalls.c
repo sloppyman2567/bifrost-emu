@@ -1,4 +1,4 @@
-// test_misc_extended.c — regression coverage for the compatibility
+// test_compat_syscalls.c — regression coverage for the compatibility
 // syscalls added to Source/System/Syscalls/Compatibility.cpp.
 //
 // Two categories are checked:
@@ -148,9 +148,9 @@ int main(void) {
     test_permissive();
     test_unsupported();
     if (failures == 0) {
-        printf("test_misc_extended: ALL TESTS PASSED (%d checks)\n", checks);
+        printf("test_compat_syscalls: ALL TESTS PASSED (%d checks)\n", checks);
         return 0;
     }
-    printf("test_misc_extended: %d/%d FAILED\n", failures, checks);
+    printf("test_compat_syscalls: %d/%d FAILED\n", failures, checks);
     return 1;
 }

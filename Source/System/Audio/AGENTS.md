@@ -7,7 +7,7 @@
   AAudio callbacks run on the Bionic adapter's own pthread, preserving Bionic TLS;
   the host pump skips streams claimed by that guest thread. Bounded callback
   waits must allow group exit to complete.
-- `AudioThunk/Core.cpp` owns export registration; the Android adapter builder
+- `AudioThunk/AudioThunk.cpp` owns export registration; the Android adapter builder
   reads its AAudio export list. Keep that tooling in sync when moving registration.
 - Native thunk return polarity must preserve the SVC dispatch convention:
   a handled host return is not permission to run a second syscall dispatcher.

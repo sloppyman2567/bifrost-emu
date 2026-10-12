@@ -112,19 +112,19 @@ static bool is_pure(IROp op) {
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
         case IROp::SIMD_MOVI: case IROp::SIMD_ORRIMM: // write to v_lo/v_hi
         case IROp::SIMD_LDST:                          // write to v_lo/v_hi
-        case IROp::SIMD_SHL: case IROp::SIMD_USHR: case IROp::SIMD_SSHR: // v1.4.5-alpha
+        case IROp::SIMD_SHL: case IROp::SIMD_USHR: case IROp::SIMD_SSHR:
         case IROp::FP_F2I: case IROp::FP_I2F:          // read/write v_lo/regs
         case IROp::FP_F2I_FIXED: case IROp::FP_I2F_FIXED:  // fixed-point variants
         case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
         case IROp::ATOMIC:                               // read/write memory
         case IROp::LDXR_FAST: case IROp::STXR_FAST:     // read/write + monitor
         case IROp::STLR_FAST:                            // write + monitor
-        case IROp::AES_CRYPTO:                           // 1.5.4-alpha: read/write v_lo/v_hi
-        case IROp::SIMD_2REG: case IROp::SIMD_CVTF:      // 1.5.4-alpha: write v_lo/v_hi
-        case IROp::SIMD_ADDP: case IROp::SIMD_XTN:       // 1.5.4-alpha: write v_lo/v_hi
-        case IROp::SIMD_TBL: case IROp::SIMD_INS:        // 1.5.4-alpha: write v_lo/v_hi
-        case IROp::SIMD_PERMUTE:                         // 1.5.4-alpha: write v_lo/v_hi
-        case IROp::SIMD_PAIRMIN:                         // 1.5.4-alpha: write v_lo/v_hi
+        case IROp::AES_CRYPTO:                           // read/write v_lo/v_hi
+        case IROp::SIMD_2REG: case IROp::SIMD_CVTF:      // write v_lo/v_hi
+        case IROp::SIMD_ADDP: case IROp::SIMD_XTN:       // write v_lo/v_hi
+        case IROp::SIMD_TBL: case IROp::SIMD_INS:        // write v_lo/v_hi
+        case IROp::SIMD_PERMUTE:                         // write v_lo/v_hi
+        case IROp::SIMD_PAIRMIN:                         // write v_lo/v_hi
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
         case IROp::TST_ZERO:

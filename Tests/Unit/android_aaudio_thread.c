@@ -1,5 +1,5 @@
 // AAudio data callbacks through the managed libaaudio adapter run on its own
-// Bionic thread (Guest/Android/aaudio.c), as real libaaudio's do. Freestanding
+// Bionic thread (Guest/Android/Adapters/aaudio.c), as real libaaudio's do. Freestanding
 // declarations, like android_bionic_bootstrap.c; constants follow Android 15
 // <aaudio/AAudio.h>.
 typedef unsigned long pthread_t;

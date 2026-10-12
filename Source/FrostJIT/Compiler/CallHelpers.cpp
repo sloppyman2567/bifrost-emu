@@ -1,6 +1,6 @@
-// jit/jit_helpers.cpp — FrostJIT codegen helpers.
+// CallHelpers.cpp — FrostJIT codegen helpers.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. Holds:
+// split out of FrostJIT.cpp. Holds:
 //   - emit_fmov_helper  — GPR↔FP register move helper (used by FMOV ops)
 //   - emit_call_interp  — emit a CALL_INTERP call site inside a block
 //     (used when the JIT can't codegen an op and falls back to the

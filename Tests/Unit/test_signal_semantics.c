@@ -1,6 +1,6 @@
 // test_signal_semantics.c — dedicated signal-delivery regression tests.
 //
-// Covers the 1.5.5-alpha fixes:
+// Covers these fixes:
 //   1. rt_sigaction aliasing: act == oldact must behave like a swap
 //      (the new action is read BEFORE the old one is written back).
 //   2. sigsuspend restores the PRE-suspend mask after a caught signal

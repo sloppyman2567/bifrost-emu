@@ -1,4 +1,4 @@
-// interp/interp_simd_three.cpp — SIMD_DP group 1: the early special cases
+// ThreeRegister.cpp — SIMD_DP group 1: the early special cases
 // (FCVTL, SHLL, FCVTN/FCVTXN, FRINT*, ...) and the three-same switch on
 // sub_noq. execute_fp runs the groups in order; the first that returns
 // true handled the instruction.

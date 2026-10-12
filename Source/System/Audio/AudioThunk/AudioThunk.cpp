@@ -5,7 +5,7 @@ namespace arm64emu {
 // ── AudioThunk lifecycle ───────────────────────────────────────────────
 AudioThunk::AudioThunk() {
     impl_ = std::make_unique<AudioThunkImpl>();
-    // Enabled by default since 1.5.4; BIFROST_NO_THUNK_AUDIO=1 opts out.
+    // Enabled by default; BIFROST_NO_THUNK_AUDIO=1 opts out.
     const char* disable = getenv("BIFROST_NO_THUNK_AUDIO");
     impl_->enabled = !(disable && disable[0] == '1');
     if (impl_->enabled) {

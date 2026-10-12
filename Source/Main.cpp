@@ -3,8 +3,6 @@
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
 //
-// Version: 1.5.5
-//
 // Usage:
 //   bifrost-emu [options] <elf-file> [args...]
 //
@@ -209,7 +207,7 @@ int main(int argc, char** argv) {
     std::string audio_dump_path;
     uint64_t jit_threshold = 0;  // 0 = use JIT from start
     int  arg_i   = 1;
-    // ── Config (1.5.5) ─────────────────────────────────────────
+    // ── Config ─────────────────────────────────────────
     // Resolution order: CLI > env var > config file > defaults.
     // We load the config file first, then env vars, then CLI flags
     // override on top.

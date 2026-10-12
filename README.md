@@ -13,14 +13,14 @@ guest tests does.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.5.5
+  bifrost-emu  v2.0.0-alpha.1
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.5.5](https://img.shields.io/badge/version-1.5.5-orange.svg)](Docs/CHANGELOG.md)
+[![Version: 2.0.0-alpha.1](https://img.shields.io/badge/version-2.0.0--alpha.1-orange.svg)](Docs/CHANGELOG.md)
 
 ## What is bifrost-emu?
 
@@ -300,7 +300,7 @@ complete Android runtime.
 | **IR Translator** | `Source/FrostJIT/IR/Translate/` | ARM64 → typed IR, scalar SSA and optimization passes |
 | **FrostJIT** | `Source/FrostJIT/Compiler/FrostJIT.cpp` | IR → x86_64 native codegen (AVX2/AVX-512) |
 | **Interpreter** | `Source/Interpreter/Core/Interpreter.cpp` | Switch-based interpreter (JIT verify mode) |
-| **Syscall Layer** | `Source/System/Syscalls/*.cpp` | 200+ Linux AArch64 syscalls |
+| **Syscall Layer** | `Source/System/Syscalls/` (`Files/`, `Process/`, `HostCalls/`) | 200+ Linux AArch64 syscalls by family |
 | **Yggdrasil VFS** | `Source/System/VFS/*.cpp` | Virtual /proc, /dev, /sys, framebuffer, audio, input |
 | **Signal/Thread** | `Source/System/Core/Signals.cpp`, `Threads.cpp` | rt_sigaction, clone, futex, per-thread JIT |
 | **Thunks** | `Source/System/Graphics/Thunks/`, `Source/System/Audio/AudioThunk/` | GL/EGL/Vulkan/SDL2/audio forwarding |
@@ -616,9 +616,10 @@ The JIT uses:
 
 ## Documentation
 
-The current runtime version is **1.5.5**. Older version numbers and test counts
-in dated changelog entries describe their original checkpoints; v2.0 is the
-planned roadmap. The changelog includes the 211-commit unpublished history
+The current runtime version is **2.0.0-alpha.1**, the first pre-release toward
+the [v2.0 roadmap](Docs/roadmap.md); the roadmap's goals are not complete yet.
+Older version numbers and test counts in dated changelog entries describe their
+original checkpoints. The changelog includes the 211-commit unpublished history
 through `aa5dcc7`.
 
 Game setup, screenshots, and current compatibility issues:

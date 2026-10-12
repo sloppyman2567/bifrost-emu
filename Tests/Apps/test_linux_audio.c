@@ -1,4 +1,4 @@
-/* test_linux_audio.c — exercises the 1.5.5-alpha audio thunk arms.
+/* test_linux_audio.c — exercises the audio thunk arms.
  *
  * Front doors covered (all funnel into the shared AudioEngine ring):
  *   1. ALSA subset: snd_pcm_open → hw_params setters → writei → drain/close

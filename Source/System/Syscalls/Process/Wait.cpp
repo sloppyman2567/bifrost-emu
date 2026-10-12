@@ -1,12 +1,11 @@
-// syscalls/misc_wait.cpp — wait/times syscalls extracted from
-// Process.cpp . Handles:
+// Wait.cpp — wait/times syscalls, dispatched from
+// syscall_process() in Process.cpp. Handles:
 //   - times (case 153)
 //   - waitpid (case 247)
 //   - wait4 (case 260)
+//   - waitid (case 95)
 //
-// All case bodies are extracted verbatim from the original Process.cpp.
-//
-// NOTE: this file is NOT a friend of Emulator (unlike Miscellaneous.cpp). It accesses
+// NOTE: this file is not a friend of Emulator. It accesses
 // private state via the public accessors emu.mem(), emu.fds(), etc.
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
@@ -20,7 +19,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 namespace arm64emu {
-int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num) {
+int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3];
     auto& mem_ = emu.mem();
@@ -110,6 +109,50 @@ int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ret_host(static_cast<uint64_t>(r));
             return 0;
+        }
+        case 95: { // waitid(idtype, id, infop, options) — AArch64 95
+            // written at offset 4 (where si_errno belongs) and si_pid at
+            // offset 8 (where si_code belongs). The correct AArch64
+            // siginfo_t layout is:
+            //   offset  0: si_signo  (4 bytes)
+            //   offset  4: si_errno  (4 bytes)
+            //   offset  8: si_code   (4 bytes)
+            //   offset 12: __pad     (4 bytes)
+            //   offset 16: _sigchld.si_pid    (4 bytes)
+            //   offset 20: _sigchld.si_uid    (4 bytes)
+            //   offset 24: _sigchld.si_status (4 bytes)
+            //   offset 28: __pad              (4 bytes)
+            //   offset 32: _sigchld.si_utime  (8 bytes)
+            //   offset 40: _sigchld.si_stime  (8 bytes)
+            // This matches build_siginfo() in Source/System/Core/Signals.cpp and the
+            // Linux kernel's struct siginfo for AArch64.
+            siginfo_t si;
+            memset(&si, 0, sizeof(si));
+            int r;
+            while (true) {
+                r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
+                if (r >= 0 || errno != EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
+            // ALWAYS write siginfo to guest, even on error.
+            if (a2) {
+                try {
+                    mem_.store<uint32_t>(a2 + 0,  static_cast<uint32_t>(si.si_signo));
+                    mem_.store<uint32_t>(a2 + 4,  0);  // si_errno (always 0)
+                    mem_.store<uint32_t>(a2 + 8,  static_cast<uint32_t>(si.si_code));
+                    mem_.store<uint32_t>(a2 + 12, 0);  // __pad
+                    mem_.store<uint32_t>(a2 + 16, static_cast<uint32_t>(si.si_pid));
+                    mem_.store<uint32_t>(a2 + 20, static_cast<uint32_t>(si.si_uid));
+                    mem_.store<uint32_t>(a2 + 24, static_cast<uint32_t>(si.si_status));
+                    mem_.store<uint32_t>(a2 + 28, 0);  // __pad
+                    // si_utime / si_stime (offset 32/40) — only valid when
+                    // si_code == CLD_TRAPPED with WUNTRACED; leave as 0.
+                } catch (...) {}
+            }
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0); return 0;
         }
         default:
             return SYSCALL_NOT_HANDLED;

@@ -224,7 +224,7 @@ inline std::string rd_cstr(AudioThunkImpl& I, uint64_t a) {
 }
 }  // namespace
 
-// Reentrancy guard for inline guest audio callbacks (DispatchHelpers.cpp).
+// Reentrancy guard for inline guest audio callbacks (Streams.cpp).
 inline thread_local bool audio_in_callbacks = false;
 
 // One dispatch() call: the resolved symbol plus the helpers its API

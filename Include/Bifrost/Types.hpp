@@ -1,4 +1,4 @@
-// bifrost/types.hpp — common types shared across the bifrost-emu public API.
+// Types.hpp — common types shared across the bifrost-emu public API.
 //
 // This header is the "root" of the public include tree. It provides:
 //   - Forward declarations of every major class (Memory, CPU, Emulator,

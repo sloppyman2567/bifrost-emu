@@ -222,7 +222,7 @@ AArch64 word
 |---|---|
 | Decode AArch64 encodings | `Source/Interpreter/Decoder/Decoder.hpp`, `Source/Interpreter/Decoder/Decoder.cpp` |
 | Translate decoded instructions to IR | `Source/FrostJIT/IR/Translate/Integer.cpp`, `FloatSIMD.cpp`, `Memory.cpp` |
-| Define typed IR parameters and factories | `Source/FrostJIT/IR/IR.hpp`, `Source/FrostJIT/IR/Builder.hpp` |
+| Define typed IR parameters and factories | `Source/FrostJIT/IR/IR.hpp`, `Parameters.hpp`, `Factories.hpp`, `Builder.hpp` |
 | Optimize and validate IR | `Source/FrostJIT/IR/Passes/Optimize.cpp`, `Source/FrostJIT/IR/Passes/Validate.cpp` |
 | Construct, verify, optimize and lower scalar SSA | `Source/FrostJIT/IR/SSA/SSA.hpp`, `Source/FrostJIT/IR/SSA/SSA.cpp` |
 | Analyze and compile Tier-1 blocks | `Source/FrostJIT/Compiler/BlockAnalysis.cpp`, `BlockCompiler.cpp`; replay footprints in `VerificationStores.cpp` |
@@ -430,7 +430,8 @@ scripts pass. Games were not run in this pass, so application FPS is unmeasured.
    field needed by both execution paths.
 2. Keep interpreter semantics correct. Unsupported operations must raise the
    normal guest decode error; they must not silently act as NOPs.
-3. Add or update a typed IR factory and reader in `Source/FrostJIT/IR/IR.hpp`, then
+3. Add the opcode in `Source/FrostJIT/IR/IR.hpp`, its parameter struct in `IR/Parameters.hpp`
+   and its factory/reader in `IR/Factories.hpp`, then
    validate the operation's parameter contract in `Source/FrostJIT/IR/Passes/Validate.cpp`.
    IR parameter fields are private: producers use factories, consumers use
    readers, and optimizers must preserve the operation's semantics.

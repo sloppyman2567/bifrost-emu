@@ -1,4 +1,4 @@
-// syscalls/time.cpp — time syscalls: nanosleep/clock_gettime/gettimeofday/
+// Time.cpp — time syscalls: nanosleep/clock_gettime/gettimeofday/
 // clock_getres/clock_nanosleep.
 //
 // Extracted from the original Syscalls.cpp. All handlers now:
@@ -12,7 +12,7 @@
 //   101 = nanosleep         (NOT 35 — that's unlinkat)
 //   113 = clock_gettime
 //   114 = clock_getres
-//   115 = clock_nanosleep   (NOT 206 — that's getsockname, handled in Miscellaneous.cpp)
+//   115 = clock_nanosleep   (NOT 206 — that's getsockname, handled in Files/Sockets.cpp)
 //   169 = gettimeofday
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
@@ -24,7 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 namespace arm64emu {
-// ── vDSO clock fast-path (1.5.4-alpha) ─────────────────────────────────
+// ── vDSO clock fast-path ─────────────────────────────────
 // Shared by three paths so the clock logic lives in one place:
 //   1. Emulator::syscall() — when a SVC's return PC is inside the vDSO
 //      range (interpreter + JIT-fallback call it through the dispatcher).

@@ -19,9 +19,13 @@ interpreter, Linux syscalls/VFS, dynamic linking and host graphics/audio adapter
 
 Implementation headers live beside their sources under `Source/`; public C++
 headers live in `Include/Bifrost/`, generated tables in `Include/Generated/`,
-and guest Android shims/services in `Guest/Android/`. Includes are relative to
-`Source/` or `Include/`. Keep downloaded SDK and guest-platform paths in their
-original spelling when moving repository files.
+and guest-side code in `Guest/` (Android adapters, launchers and managed
+framework; vDSO source). Includes are relative to `Source/` or `Include/`.
+Keep downloaded SDK and guest-platform paths in their original spelling when
+moving repository files. Name files after what they implement, not catch-alls
+such as "misc", "common" or "core". The current version lives in
+`Include/Bifrost/Version.hpp`; keep README, Makefile, sample config, rootfs
+`os-release` and the changelog in step with it.
 
 ## Working rules
 

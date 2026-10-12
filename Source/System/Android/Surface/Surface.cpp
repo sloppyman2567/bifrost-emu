@@ -1,4 +1,4 @@
-// frost_graphics/android_surface.cpp — Android NativeActivity layer
+// Surface.cpp — Android NativeActivity layer
 //
 // v1 (see Surface.hpp): ANativeWindow shims backed by the
 // backend-owned host window; EGL window-surface interception in

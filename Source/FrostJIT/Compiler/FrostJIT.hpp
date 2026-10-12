@@ -1,4 +1,4 @@
-// FrostJIT.hpp — IR → x86-64 JIT for bifrost-emu ()
+// FrostJIT.hpp — IR → x86-64 JIT for bifrost-emu.
 //
 // ── Architecture ──────────────────────────────────────────────────────
 //
@@ -184,10 +184,10 @@ public:
     // path even on FMA3-capable CPUs (debugging).
     const CpuFeatures& cpu_features() const { return cpu_features_; }
     bool has_fma3() const { return cpu_features_.has_fma3() && !no_fma3_; }
-    // 1.5.4-alpha: AVX2 (256-bit VEX SIMD) gating, mirroring has_fma3().
+    // AVX2 (256-bit VEX SIMD) gating, mirroring has_fma3().
     // Override via BIFROST_NO_AVX2=1 to force the 128-bit SSE2 path.
     bool has_avx2() const { return cpu_features_.has_avx2() && !no_avx2_; }
-    // 1.5.4-alpha: vDSO clock fast-path range (set by Emulator::enable_jit()).
+    // vDSO clock fast-path range (set by Emulator::enable_jit()).
     void set_vdso_range(uint64_t base, uint64_t size) { vdso_base_ = base; vdso_size_ = size; }
     bool in_vdso(uint64_t pc) const {
         return vdso_base_ != 0 && pc >= vdso_base_ && pc < vdso_base_ + vdso_size_;
@@ -200,11 +200,11 @@ public:
     // codegen sites. Now we do, falling back to CALL_INTERP on hosts
     // without SSE4.1.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
-    // 1.5.4-alpha: SSSE3 gating (pshufb for the native TBL/TBX table
+    // SSSE3 gating (pshufb for the native TBL/TBX table
     // lookup). Same runtime-guard pattern as has_sse41() — pshufb would
     // SIGILL on pre-Core2 hosts without the check.
     bool has_ssse3() const { return cpu_features_.has_ssse3(); }
-    // 1.5.4-alpha: SSE4.2 gating (pcmpgtq for esize=8 CMGT). Same
+    // SSE4.2 gating (pcmpgtq for esize=8 CMGT). Same
     // runtime-guard pattern as has_sse41() — pcmpgtq would SIGILL on
     // pre-Westmere hosts without the check.
     bool has_sse42() const { return cpu_features_.sse42; }
@@ -213,7 +213,7 @@ public:
     // input instead of returning the operand width, silently corrupting
     // clz-of-zero. Same runtime-guard pattern as has_sse41().
     bool has_lzcnt() const { return cpu_features_.lzcnt; }
-    // 1.5.4-alpha: crypto instruction set detection.
+    // crypto instruction set detection.
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
     bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }
     bool has_sha()       const { return cpu_features_.has_sha(); }
@@ -280,7 +280,7 @@ public:
     // share the main's FrostJIT in shared-JIT mode).
     static thread_local uint64_t tls_watchdog_last_pc_;
     static thread_local uint32_t tls_watchdog_count_;
-    // 1.5.4-alpha: Per-thread single-entry "last block" fast cache.
+    // Per-thread single-entry "last block" fast cache.
     // Bypasses the shared_mutex lookup for tight loops where the same
     // PC is dispatched repeatedly. Stores just the (pc, fn, instr_count)
     // tuple — the minimum needed to call the block. The fn pointer is
@@ -350,7 +350,7 @@ public:
             tls_dispatch_stats_ = DispatchStats{};
         }
     }
-    // 1.5.4-alpha: Per-thread inline cache for block transitions.
+    // Per-thread inline cache for block transitions.
     // This is the FEX-Emu pattern: cache the last N (PC→fn) mappings so
     // that multi-block cycles (A→B→A→B), virtual dispatch, switch tables,
     // and computed gotos don't pay the shared_mutex + unordered_map cost
@@ -429,7 +429,7 @@ public:
         }
         return false;
     }
-    // v1.4.0-beta.2: Per-PC hotness counter. Tracks how many times each
+    // Per-PC hotness counter. Tracks how many times each
     // PC has been dispatched (total, not consecutive). When a PC exceeds
     // HOT_PC_THRESHOLD, it's marked interp_only — the interpreter is
     // faster for tiny blocks because it skips the C dispatcher overhead
@@ -439,7 +439,7 @@ public:
     // unbounded memory growth; eviction is LRU-ish (clear on overflow).
     // Thread-local for the same reason as the watchdog.
     //
-    // 1.5.4-alpha: runtime promotion is DISABLED by default (BIFROST_HOT_INTERP
+    // runtime promotion is DISABLED by default (BIFROST_HOT_INTERP
     // opts back in). The translator already marks CALL_INTERP-heavy blocks
     // interp_only, and demoting hot mixed blocks (1-2 fallbacks + natives)
     // measured slower on the real game (~8-10%) because it drags native
@@ -453,7 +453,7 @@ public:
     // loops across multiple PCs. Set high enough that real workloads
     // (toybox, musl libc loops) never trip it — 10000 was way too low
     // and disabled the JIT mid-run on any non-trivial program.
-    // v1.4.0-beta.2: bumped from 50M to 1B. Soft-float-heavy programs
+    // bumped from 50M to 1B. Soft-float-heavy programs
     // (long double multiply, printf %Lf) can legitimately dispatch
     // 100M+ tiny interp_only blocks; 50M was too aggressive.
     static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000000;
@@ -722,7 +722,7 @@ private:
     CpuFeatures cpu_features_{};
     bool no_fma3_ = false;  // true if BIFROST_NO_FMA3=1 (force decomposed path)
     bool no_avx2_ = false;  // true if BIFROST_NO_AVX2=1 (force 128-bit SIMD path)
-    // ── vDSO range (1.5.4-alpha fast path) ──────────────────────────
+    // ── vDSO range (fast path) ──────────────────────────
     // Cached at enable_jit() time so the SVC codegen can recognize SVC
     // instructions translated from the vDSO clock stubs and emit a native
     // fast path (jit_vdso_clock_svc) that skips the interpreter entirely.
@@ -827,7 +827,7 @@ private:
         // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
         bool    has_selfloop_slot = false;
         size_t  selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
-        // Taken-path chaining (1.5.4-alpha): a second 5-byte chain slot at
+        // Taken-path chaining: a second 5-byte chain slot at
         // the end of the conditional-branch TAKEN path (ret + 4 NOPs). When
         // the taken target is translated, it's patched to `jmp rel32` so the
         // loop-back edge of a hot conditional loop skips the dispatcher.
@@ -1131,7 +1131,7 @@ private:
                                                  uint16_t next_vreg) {
         return count >= 32 && (next_vreg >= 256 || ir.insts.size() >= 512);
     }
-    // R14 is allocatable too (1.5.4-alpha): EMU_REG is no longer read from
+    // R14 is allocatable too: EMU_REG is no longer read from
     // the register — every emu-consuming codegen site loads it from the
     // frame slot (emu_slot_off(), written by the prologue), so R14 is free
     // for vregs in EVERY block. Measured NEUTRAL on the deterministic
@@ -1288,7 +1288,7 @@ private:
     // hazard class as vec_cache_writeback_all(false) above it.
     void flush_all_vregs_keep();
     void invalidate_all_vregs();
-    // ── Targeted flush/invalidate (v1.4.0-beta.2) ───────────────────
+    // ── Targeted flush/invalidate ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any
     // dirty vreg cached there. O(popcount(mask)) instead of O(max_vreg_).
     // Used by FP JIT codegen — FP ops only clobber XMM0/XMM1 plus a small
@@ -1391,7 +1391,7 @@ private:
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
     void emit_call_vdso_clock(uint64_t arm_pc);
     void emit_call_native_svc(uint64_t arm_pc);
-    // compile_ir_inst — the main IR-op→x86 switch. v1.4.5-alpha:
+    // compile_ir_inst — the main IR-op→x86 switch.
     // split into two files for readability. The dispatch stays in
     // FrostJIT.cpp; FP/SIMD cases are delegated to compile_ir_inst_fp_()
     // in Dispatch.cpp, and integer/memory/branch cases stay in
@@ -1459,7 +1459,7 @@ private:
     void store_vec(int xmm, int vreg, bool q);
     void emit_mask(int xmm, uint64_t c);
     void emit_mask16(int xmm, const uint8_t m[16]);
-    // ── ALU / memory / branch codegen (v1.4.5-alpha) ────────
+    // ── ALU / memory / branch codegen ────────
     // Three sub-dispatchers split out of compile_ir_inst() for
     // readability. Each is a member function so it has full access to
     // the JIT's emit_*, alloc_*, flush_*, etc. helpers.
@@ -1637,7 +1637,7 @@ private:
     // BlockEntry at registration. Cleared at translate_block start.
     std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
-    // ── XMM vector register cache (1.5.4-alpha) ───────────────────
+    // ── XMM vector register cache ───────────────────
     // Guest vector regs (0-31) pinned into host XMM3-15 across the whole
     // block. Only blocks whose vector-touching ops are all cache-aware
     // (SIMD_FP_FMA / SIMD_FP_ARITH) plus GPR-only ops activate the cache;
@@ -1659,7 +1659,7 @@ private:
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
-    // Scalar-FP cache (1.5.4-alpha): the same XMM3-15 pinning machinery
+    // Scalar-FP cache: the same XMM3-15 pinning machinery
     // reused for scalar FP regs (s0-s31 / d0-d31), which share cpu.v_lo[0..31]
     // with NEON vectors. A block is EITHER a vec-cache block OR an fp-cache
     // block (never both — the gates are exclusive), so the pinned XMMs and

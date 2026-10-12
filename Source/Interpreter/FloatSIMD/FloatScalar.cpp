@@ -1,4 +1,4 @@
-// interp/interp_fp_scalar.cpp — FP_SCALAR: the 0x1E/0x9E scalar FP group
+// FloatScalar.cpp — FP_SCALAR: the 0x1E/0x9E scalar FP group
 // and the AdvSIMD scalar forms the decoder routes there (FMOV, FADD..FDIV,
 // FCMP, FCSEL, FCVT*, SCVTF/UCVTF, FRINT*, FMADD family, crypto SHA1H/SU).
 #include "Interpreter/FloatSIMD/FloatCommon.hpp"

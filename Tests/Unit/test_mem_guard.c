@@ -1,6 +1,6 @@
 // test_mem_guard.c — memory range-safety regressions.
 //
-// Covers the 1.5.5-alpha fixes:
+// Covers these fixes:
 //   1. munmap with a wrapping length is rejected with EINVAL (it used to
 //      page-round into covering — and freeing — every live mapping).
 //   2. MAP_FIXED_NOREPLACE refuses to overlap the main stack.

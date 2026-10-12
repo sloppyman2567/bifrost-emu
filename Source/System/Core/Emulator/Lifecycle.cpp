@@ -7,8 +7,8 @@
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
 #include "System/Android/Surface/Surface.hpp"// 2026-08: Android activity
-#include "System/Audio/AudioThunk.hpp"  // 1.5.4-alpha: AudioThunk
-#include "System/Graphics/Thunks/DisplayThunk.hpp"// 1.5.4-alpha: DisplayThunk
+#include "System/Audio/AudioThunk.hpp"  // AudioThunk
+#include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
 #include <fcntl.h>
 #include <unistd.h>

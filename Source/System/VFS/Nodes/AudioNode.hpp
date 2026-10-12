@@ -1,4 +1,4 @@
-// yggdrasil/audio_node.hpp — /dev/dsp, /dev/snd, /dev/audio wrapper.
+// AudioNode.hpp — /dev/dsp, /dev/snd, /dev/audio wrapper.
 //
 // Negotiates OSS playback parameters and owns one independent mixer stream.
 // Recording is unsupported; reads return -EBADF.

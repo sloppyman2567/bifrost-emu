@@ -1,4 +1,4 @@
-// yggdrasil/devfs.cpp — DevFS: /dev/* device nodes.
+// DevFS.cpp — DevFS: /dev/* device nodes.
 //
 // Most device paths are passed through to the host (which already has
 // them). /dev/fb0 is special — it returns a memfd backed by the
@@ -7,7 +7,7 @@
 // /dev/stdin, /dev/stdout, /dev/stderr are dup()'d from the host's
 // 0/1/2 so close(guest_fd) doesn't close the host's stdio.
 //
-// v1.4.5-alpha improvements:
+// Behavior:
 //   - /dev is now a DirNode, so `ls /dev` works (previously returned
 //     nothing).
 //   - /dev/random and /dev/urandom pass through to the host devices:

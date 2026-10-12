@@ -1,4 +1,4 @@
-# bifrost-emu Makefile (1.5.5)
+# bifrost-emu Makefile (2.0.0-alpha.1)
 #
 # Auto-discovers all .cpp files under Source/ and compiles them into the
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the
@@ -322,7 +322,7 @@ check-fwd: $(TARGET)
 # by hand.
 test: $(TARGET)
 	@echo "--- Running test suite (JIT, default) ---"
-	@for f in test/*.elf Tests/Unit/*.elf Tests/Apps/*.elf; do \
+	@for f in Tests/Asm/*.elf Tests/Unit/*.elf Tests/Apps/*.elf; do \
 	case "$$f" in \
 	*/echo.elf|*/repl.elf|*/sh.elf|*/fgets_test.elf|*/yes.elf|*/cat.elf|*/tr.elf) \
 	echo "--- skipping interactive/infinite: $$f ---"; continue;; \

@@ -1,4 +1,4 @@
-// interp/interp_crypto.hpp — ARMv8 Crypto Extensions (1.5.4-alpha).
+// Crypto.hpp — ARMv8 Crypto Extensions.
 // Included by Dispatch.cpp, not a separate TU.
 //
 // Implements the AES, SHA1, SHA256, and PMULL/PMULL2 instructions from

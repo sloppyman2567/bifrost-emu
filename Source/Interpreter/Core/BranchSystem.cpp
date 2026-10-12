@@ -1,7 +1,7 @@
-// interp/interp_branch.cpp — branch/system instruction handlers, extracted
+// BranchSystem.cpp — branch/system instruction handlers, extracted
 // from Interpreter.cpp.
 //
-// v1.4.5-alpha refactor: split out of Interpreter.cpp. This file holds the
+// split out of Interpreter.cpp. This file holds the
 // B, BL, Bcond, CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET, SVC_IMM, BRK_IMM,
 // HLT_IMM, CLREX_INST, HINT, MRS_SYS, MSR_SYS cases of the dispatch
 // switch, extracted into a member function (execute_branch) for

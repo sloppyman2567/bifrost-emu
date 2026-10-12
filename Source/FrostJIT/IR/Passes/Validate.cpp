@@ -1,4 +1,4 @@
-// ir/ir_validate.cpp — per-op IR parameter contract checker.
+// Validate.cpp — per-op IR parameter contract checker.
 //
 // The raw IR parameter fields (width/cond/flags_op/imm/immr/imms/sf) carry
 // a different contract per op, and past miscompiles came from emit and

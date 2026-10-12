@@ -8,7 +8,7 @@
 #include "System/Graphics/Display/DisplayProxy.hpp"
 #include "System/Android/Surface/Surface.hpp"
 #include "System/Graphics/Thunks/ThunkCommon.hpp" // shared SymbolEntry (single definition — see header)
-#include "Generated/ThunkTable.hpp"  // 1.5.4-alpha: symbol signature table (single source of truth)
+#include "Generated/ThunkTable.hpp"  // symbol signature table (single source of truth)
 #include "Generated/WaylandTable.hpp"     // wayland protocol message signatures (wlgen)
 #include "Generated/VulkanMarshal.hpp" // VK_CMD_DEEP: generated deep-marshal descriptors
 #include "System/Core/DebugFlags.hpp"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
@@ -40,7 +40,7 @@ struct DisplayThunkImpl {
     };
     std::vector<LibTable> libs_;
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
-    // DisplayProxy for X11/Wayland fallback (1.5.4-alpha).
+    // DisplayProxy for X11/Wayland fallback.
     std::unique_ptr<DisplayProxy> proxy_;
     // Wayland guest listeners (wl_proxy_add_listener): proxy handle ->
     // {guest fn addrs per event, data}. Delivered after dispatch via

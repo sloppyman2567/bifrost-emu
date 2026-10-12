@@ -38,7 +38,7 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
                     break;
                 }
             };
-            // ── Vector cache fast path (1.5.4-alpha) ──────────────
+            // ── Vector cache fast path ──────────────
             // dest pinned: vmovq xd, gpr (zero upper) then vmovddup
             // (broadcast low qword to both halves) — no memory bounce.
             {

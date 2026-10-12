@@ -4,7 +4,7 @@
  * Resolves thunked libSDL2 via bifrost internal syscalls 0x1002/0x1003
  * (static musl binary; musl's dlopen is a stub).
  *
- * Covers the 1.5.5-alpha SDL lifecycle rework:
+ * Covers the SDL lifecycle rework:
  *   - create/wait returns the thread function's int (status out-param)
  *   - many concurrent create/wait pairs (join + guest-resource free)
  *   - detach (no waiter): the record must be reaped, not leaked, and the

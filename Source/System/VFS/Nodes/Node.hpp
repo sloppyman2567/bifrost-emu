@@ -1,4 +1,4 @@
-// yggdrasil/node.hpp — abstract file handle (the "node" of the world-tree).
+// Node.hpp — abstract file handle (the "node" of the world-tree).
 //
 // Yggdrasil is the VFS subsystem of bifrost-emu. In Norse cosmology,
 // Yggdrasil is the world-tree that connects the nine realms; here it
@@ -57,7 +57,7 @@ public:
     // for marshalling through the Memory if it needs to read/write
     // the argp struct.
     //
-    // Added in v1.4.5-alpha (Yggdrasil rename). Previously Ioctl.cpp
+    // Previously Ioctl.cpp
     // dispatched on the request code with a big if-else chain and
     // guessed the fd type (framebuffer? tty? something else?). Now
     // each Node subclass owns its own ioctl handling: FbNode handles
@@ -88,7 +88,7 @@ public:
     virtual int host_fd() const { return -1; }
     // Whether this Node represents a directory (for getdents64 dispatch).
     // DirNode overrides to return true; everything else returns false.
-    // Added in v1.4.5-alpha so getdents64 can call into the Node instead
+    // Lets getdents64 call into the Node instead
     // of requiring a host fd (synthetic /proc and /dev listings work
     // without a host fd).
     virtual bool is_dir() const { return false; }

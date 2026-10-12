@@ -1,6 +1,6 @@
-// jit/jit_codegen_alu.cpp — FrostJIT ALU/arithmetic IR-op codegen.
+// Arithmetic.cpp — FrostJIT ALU/arithmetic IR-op codegen.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. This file holds the
+// split out of FrostJIT.cpp. This file holds the
 // arithmetic / logic / bitfield case bodies of the IR-op switch,
 // extracted into a separate method (compile_ir_alu) for readability.
 // The main switch in FrostJIT.cpp dispatches to this method before its

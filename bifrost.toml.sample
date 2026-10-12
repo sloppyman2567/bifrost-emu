@@ -1,4 +1,4 @@
-# bifrost.toml — sample configuration file for bifrost-emu 1.5.5.
+# bifrost.toml — sample configuration file for bifrost-emu 2.0.0-alpha.1.
 #
 # Copy to one of these locations (searched in this order):
 #   1. $BIFROST_CONFIG (if set)

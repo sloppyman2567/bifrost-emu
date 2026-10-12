@@ -1,4 +1,4 @@
-// core/signal.cpp — Guest signal delivery for bifrost-emu.
+// Signals.cpp — Guest signal delivery for bifrost-emu.
 //
 // Implements the SignalTable and signal delivery logic declared in
 // signal.h. See that header for the high-level design.
@@ -33,7 +33,7 @@
 //   and at syscall boundaries. This unbreaks guest programs that poll a
 //   signal-pending flag (e.g., toybox sh's `sig_process_pending()`).
 #include "System/Core/Signals.hpp"
-#include "System/Core/Common.hpp"
+#include "System/Core/Emulator.hpp"
 #include "System/Core/CrashReport.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include <atomic>
@@ -218,7 +218,7 @@ bool SignalTable::pop_frame(CPU& cpu, SignalFrame& out) {
 // Per-CPU signal mask. SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK. SIGKILL and
 // SIGSTOP cannot be blocked.
 //
-// 1.5.4-alpha BUGFIX: the old code wrote the old mask to `old_set_addr`
+// BUGFIX: the old code wrote the old mask to `old_set_addr`
 // BEFORE reading the new mask from `new_set_addr`. If the caller passes
 // the same pointer for both (which is technically allowed by POSIX as a
 // "swap" pattern), the read of new_mask would read the OLD mask that we

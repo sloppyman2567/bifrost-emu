@@ -13,8 +13,9 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   A source split must preserve file-local callback state and initialization order.
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.
-- Android guest shims/services live in `Guest/Android/`; adapter provisioning
-  reads the audio registry in `Audio/AudioThunk/Core.cpp`. When moving registry
+- Android guest shims/services live in `Guest/Android/` (see the Android guide
+  for its subfolders); adapter provisioning
+  reads the audio registry in `Audio/AudioThunk/AudioThunk.cpp`. When moving registry
   definitions, update `Tools/Android/build-android-adapters.py` too.
 - Validate both engines and the affected host/guest boundary. Android AAudio
   needs the managed Bionic callback-thread test, not just host audio checks.

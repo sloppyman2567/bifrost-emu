@@ -1,4 +1,4 @@
-// syscalls/threads.cpp — thread/signal syscalls: clone/clone3/futex/
+// Threads.cpp — thread/signal syscalls: clone/clone3/futex/
 // set_tid_address/set_robust_list/get_robust_list/tgkill/tkill/kill.
 //
 // Extracted verbatim from the original Syscalls.cpp. References to

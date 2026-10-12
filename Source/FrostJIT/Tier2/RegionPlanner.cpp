@@ -31,7 +31,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // callee-completion guard's INCOMPLETE path (`mov rsp,rbp; pop×6; ret`)
     // correctly unwinds a mid-callee return to the C dispatcher.
     if (!code_buf_ || !trace.ok) return false;
-    // Chain-skip COMPOSITION (1.5.4-alpha): under BIFROST_CHAIN_SKIP=1 the
+    // Chain-skip COMPOSITION: under BIFROST_CHAIN_SKIP=1 the
     // region allocates the same unified kChainSkipFrameBytes frame as every
     // block, records a chain_entry label after the emu stash (before the R10
     // window load / pin preloads / preheader), and publishes it via

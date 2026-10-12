@@ -1,4 +1,4 @@
-// syscalls/misc_extended.cpp — extended Linux syscalls.
+// Compatibility.cpp — extended Linux syscalls.
 //
 // Coverage (numbers per asm-generic/unistd.h, which AArch64 follows):
 //   - Extended attributes (5-16): setxattr/lsetxattr/fsetxattr/getxattr/
@@ -32,9 +32,9 @@
 // "all unknown syscalls return -ENOSYS". Real semantics for the hot paths
 // (xattr, copy_file_range, pidfd_*) are implemented.
 //
-// Dispatch order in syscall_misc() (Miscellaneous.cpp):
-//   misc_signal → misc_io → misc_process → misc_wait → misc_extended
-// (this file). Each sub-handler returns SYSCALL_NOT_HANDLED if it
+// Dispatched from Emulator::syscall() (Syscalls.cpp) after the signal,
+// event-I/O, socket and process families. Families own disjoint numbers;
+// this handler returns SYSCALL_NOT_HANDLED if it
 // doesn't recognize `num`.
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
@@ -159,8 +159,8 @@ static int64_t do_listxattr(Memory& mem, CPU& cpu, int kind) {
     ret_host(static_cast<uint64_t>(r));
     return 0;
 }
-// ── misc_extended dispatcher ───────────────────────────────────────────
-int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
+// ── syscall_compatibility dispatcher ───────────────────────────────────────────
+int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& mem_ = emu.mem();
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];

@@ -1,4 +1,4 @@
-// frontend/elf_loader.cpp — ELF64 LE AArch64 static loader.
+// ElfLoader.cpp — ELF64 LE AArch64 static loader.
 //
 // Implements ElfLoader::load(). Reads an ELF64 little-endian AArch64
 // file from memory, maps its PT_LOAD segments into the guest address

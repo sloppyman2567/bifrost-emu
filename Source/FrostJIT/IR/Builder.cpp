@@ -1,4 +1,4 @@
-// ir/ir_builder.cpp — vreg allocator state + reset.
+// Builder.cpp — vreg allocator state + reset.
 //
 // The emit/load_imm/load_arm_reg helpers are inline in Builder.hpp. Only the
 // thread-local allocator instance and its reset function live here.

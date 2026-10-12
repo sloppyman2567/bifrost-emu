@@ -1,4 +1,4 @@
-// interp/interp_simd_imm.cpp — SIMD_DP group 3: modified immediate
+// Immediate.cpp — SIMD_DP group 3: modified immediate
 // (MOVI/MVNI/ORR/BIC/FMOV), shift by immediate, fixed-point conversions,
 // narrowing shifts and by-element operations.
 #include "Interpreter/FloatSIMD/FloatCommon.hpp"

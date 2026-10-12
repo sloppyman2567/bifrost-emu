@@ -13,7 +13,7 @@ namespace jit_analysis {
 // translate_block to decide where to split blocks — too many
 // CALL_INTERP fallbacks in one block causes register pressure issues.
 //
-// v1.4.5-alpha: moved here from Flags.cpp (where it was
+// moved here from Flags.cpp (where it was
 // extracted by accident — it's only used by translate_block).
 bool instr_will_call_interp(const DecodedInst& d) {
     if ((d.cls == InstClass::SIMD_DP || d.cls == InstClass::FP_SCALAR) &&
@@ -172,14 +172,14 @@ bool instr_will_call_interp(const DecodedInst& d) {
         default:
             break;
     }
-    // 1.5.4-alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
+    // SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
     // natively translated (Memory.cpp) — the old is_vec gate
     // here forced every one of them to CALL_INTERP, splitting FP-heavy
     // blocks every 1-2 instructions and killing the pinned-XMM vec cache
     // (each FP load/store cost ~18 interpreter steps in the voxel game).
     return false;
 }
-// ── Leaf inlining scan (1.5.4-alpha) ────────────────────────────────────
+// ── Leaf inlining scan ────────────────────────────────────
 // A small leaf function (no calls, no memory, no stack usage, straight-line
 // or with a single forward conditional branch) can be inlined into its
 // caller's block. Inlining replaces a BL_CALL — whose codegen flushes ALL

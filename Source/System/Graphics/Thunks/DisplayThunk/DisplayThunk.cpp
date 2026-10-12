@@ -1,17 +1,17 @@
 #include "System/Graphics/Display/WindowStats.hpp"
-// frost_graphics/display_thunk.cpp — DisplayThunk implementation (1.5.4-alpha).
+// frost_graphics/display_thunk.cpp — DisplayThunk implementation.
 //
 // See Source/System/Graphics/Thunks/DisplayThunk.hpp for the design overview. This file
 // implements the DisplayThunk class for Vulkan / Wayland / X11 / GBM.
 //
-// 1.5.4-alpha: DisplayThunk now uses the same full dispatch logic as
+// DisplayThunk now uses the same full dispatch logic as
 // GraphicThunk (stack args, float args, string returns, GetProcAddress,
 // mixed int+float) and integrates DisplayProxy for X11/Wayland fallback
 #include "System/Graphics/Thunks/DisplayThunk/DisplayThunkInternal.hpp"
 namespace arm64emu {
 DisplayThunk::DisplayThunk() {
     impl_ = std::make_unique<DisplayThunkImpl>();
-    // 1.5.4-alpha: display thunking enabled by default.
+    // display thunking enabled by default.
     // Set BIFROST_NO_THUNK_DISPLAY=1 to disable.
     const char* disable = getenv("BIFROST_NO_THUNK_DISPLAY");
     impl_->enabled = !(disable && disable[0] != '0');
@@ -40,7 +40,7 @@ bool DisplayThunk::init(Memory& mem) {
         return false;
     }
     impl_->string_cache_off = 0;
-    // 1.5.4-alpha: lazily create the DisplayProxy. It owns an SDL2 window
+    // lazily create the DisplayProxy. It owns an SDL2 window
     // and provides a software fallback for X11/Wayland calls when the host
     // libraries are unavailable or have no display.
     impl_->proxy_ = std::make_unique<DisplayProxy>();
@@ -166,7 +166,7 @@ uint64_t DisplayThunk::trampoline_base() const {
     return impl_->trampoline_base;
 }
 // ── register_known_symbols_ ────────────────────────────────────────────
-// 1.5.4-alpha: TABLE-DRIVEN. Tools/CodeGen/thunk_dp.txt (generated into
+// TABLE-DRIVEN. Tools/CodeGen/thunk_dp.txt (generated into
 // Include/Generated/ThunkTable.hpp) is now the single source of truth for which
 // (library, symbol) DisplayThunk thunks and how it marshals each one.
 // The former REG_VK*/REG_WL*/REG_X11*/REG_GBM*/REG_GLX*/REG_RANDR*/REG_XKB*

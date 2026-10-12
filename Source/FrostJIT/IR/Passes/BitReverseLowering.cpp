@@ -1,4 +1,4 @@
-// ir/ir_lower.cpp — SWAR lowering of RBIT/REV16/REV32 into IR primitives.
+// BitReverseLowering.cpp — SWAR lowering of RBIT/REV16/REV32 into IR primitives.
 //
 // These decompose the ARM64 bit-reversal / byte-swap ops into primitive
 // IR ops (AND, OR, SHL, SHR) that the JIT already compiles natively.

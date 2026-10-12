@@ -1,4 +1,4 @@
-// jit/jit_cache.cpp — block cache + chain patching.
+// CodeCache.cpp — block cache + chain patching.
 //
 // The block cache maps guest PC → BlockEntry (compiled native code +
 // metadata). Block chaining patches a 5-byte "chain slot" at the end

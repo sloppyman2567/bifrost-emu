@@ -1,9 +1,9 @@
-// yggdrasil/fb_node.hpp — /dev/fb0 wrapper.
+// FramebufferNode.hpp — /dev/fb0 wrapper.
 //
 // Delegates read/write/lseek/fstat to a memfd backed by the
 // GraphicsBackend's framebuffer memory. Owns the framebuffer ioctls
-// (FBIOGET_VSCREENINFO, FBIOGET_FSCREENINFO) — v1.4.5-alpha
-// improvement that moved ioctl dispatch from the syscall layer into
+// (FBIOGET_VSCREENINFO, FBIOGET_FSCREENINFO), keeping ioctl dispatch
+// out of the syscall layer and in
 // the Node itself.
 #pragma once
 #include "System/VFS/Nodes/Node.hpp"

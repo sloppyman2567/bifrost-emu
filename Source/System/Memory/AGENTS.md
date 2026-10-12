@@ -1,5 +1,10 @@
 # Guest memory
 
+`Memory.cpp` owns the reservation, mapping index, access checks, file backing
+and guest reads/writes; `Allocation.cpp` placement, mremap growth, unmapping
+and free ranges; `Discard.cpp` madvise, userfaultfd and MREMAP_DONTUNMAP.
+State shared between them goes in `MemoryInternal.hpp`.
+
 - Guest memory is one host reservation: translate through the actual
   `window_base`/`window_size`, never a hardcoded address limit. Keep bounds,
   permission and crossing-page checks, including host-address overflow checks.

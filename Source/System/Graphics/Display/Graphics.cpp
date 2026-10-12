@@ -1,5 +1,5 @@
 #include "System/Graphics/Display/WindowStats.hpp"
-// Graphics.cpp — Graphics backend for bifrost-emu (v1.4.5-alpha).
+// Graphics.cpp — Graphics backend for bifrost-emu.
 //
 // Provides a virtual /dev/fb0 backed by a memfd_create'd file
 // descriptor. The guest mmaps the fd and writes pixels directly into
@@ -13,8 +13,8 @@
 // every call, allowing graphical guest programs to run interactively.
 #include "System/Graphics/Display/Graphics.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"          // GraphicThunk full definition (for unique_ptr dtor)
-#include "System/Audio/AudioThunk.hpp"    // 1.5.4-alpha: AudioThunk
-#include "System/Graphics/Thunks/DisplayThunk.hpp"  // 1.5.4-alpha: DisplayThunk
+#include "System/Audio/AudioThunk.hpp"    // AudioThunk
+#include "System/Graphics/Thunks/DisplayThunk.hpp"  // DisplayThunk
 #include "System/Graphics/Input/Input.hpp"          // FrostInput full definition (for unique_ptr dtor)
 #include <cstdio>
 #include <cstring>
@@ -490,7 +490,7 @@ int FrostGraphics::ioctl(uint32_t request, void* guest_buf) {
             return 0;
     }
 }
-// ── thunk() — experimental graphic API thunking (v1.4.5-alpha) ─────────
+// ── thunk() — experimental graphic API thunking ─────────
 // The thunk() implementation lives in GraphicThunk.cpp (where the full
 // GraphicThunk type is visible). This file just declares the method
 // signature in the header; the body is in GraphicThunk.cpp.

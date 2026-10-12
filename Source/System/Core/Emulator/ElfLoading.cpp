@@ -1,4 +1,4 @@
-// core/emulator.cpp — Emulator lifecycle, ELF loading, run loop.
+// ElfLoading.cpp — Emulator lifecycle, ELF loading, run loop.
 //
 // This file implements the high-level "drive the emulator" logic:
 //   - Constructor / destructor
@@ -16,8 +16,8 @@
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
 #include "System/Android/Surface/Surface.hpp"// 2026-08: Android activity
-#include "System/Audio/AudioThunk.hpp"  // 1.5.4-alpha: AudioThunk
-#include "System/Graphics/Thunks/DisplayThunk.hpp"// 1.5.4-alpha: DisplayThunk
+#include "System/Audio/AudioThunk.hpp"  // AudioThunk
+#include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
 #include <fcntl.h>
 #include <unistd.h>
@@ -375,9 +375,9 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         return out;
                     });
             }
-            // 1.5.4-alpha: also init AudioThunk and DisplayThunk if
+            // also init AudioThunk and DisplayThunk if
             // enabled. They share the thunk syscall (0x1000) with
-            // GraphicThunk; the dispatcher in Miscellaneous.cpp tries each in
+            // GraphicThunk; the dispatcher in HostCalls/Thunks.cpp tries each in
             // order. The dynamic linker's thunk_resolver_ is set to
             // GraphicThunk's enumerate_symbols, so audio/display symbols
             // need a different wiring path — we extend the resolver to
@@ -928,7 +928,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     const uint64_t STACK_SIZE = Memory::STACK_SIZE;
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top
-    // 1.5.4-alpha: load the embedded vDSO before building the stack so
+    // load the embedded vDSO before building the stack so
     // AT_SYSINFO_EHDR can point to it. The vDSO provides
     // gettimeofday/clock_gettime/clock_getres/rt_sigreturn stubs.
     load_vdso();

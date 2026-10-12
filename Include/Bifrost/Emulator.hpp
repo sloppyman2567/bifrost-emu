@@ -1,4 +1,4 @@
-// bifrost/emulator.hpp — public Emulator API.
+// Emulator.hpp — public Emulator API.
 //
 // This header re-exports just the Emulator class definition from the
 // private core/emulator.h. External consumers (libbifrost users, test

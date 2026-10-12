@@ -1,4 +1,4 @@
-// yggdrasil/android_properties.cpp — Bionic prop_area serializer.
+// Properties.cpp — Bionic prop_area serializer.
 #include "System/Android/Properties/Properties.hpp"
 #include <cctype>
 #include <cstdint>

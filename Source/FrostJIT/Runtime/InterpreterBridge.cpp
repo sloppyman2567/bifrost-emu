@@ -1,6 +1,6 @@
-// jit/jit_interp.cpp — interpreter-step trampoline for JIT fallback.
+// InterpreterBridge.cpp — interpreter-step trampoline for JIT fallback.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. Holds the
+// split out of FrostJIT.cpp. Holds the
 // jit_interp_step() extern "C" trampoline, which is called from
 // JIT-compiled code (via CALL_INTERP) to fall back to the interpreter
 // for one instruction. This is used for:
@@ -127,7 +127,7 @@ extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
     }
 }
 // ── jit_thunk_svc — JIT native thunk fast path ─────────────────────────
-// Replicates syscalls/misc.cpp's case GraphicThunk::SYSCALL_NUMBER (try
+// Replicates Syscalls/HostCalls/Thunks.cpp's case GraphicThunk::SYSCALL_NUMBER (try
 // GraphicThunk → AudioThunk → DisplayThunk → ENOSYS), but is reached
 // DIRECTLY from jit_native_svc when the guest SVCs with num==0x1000, so
 // thunk calls skip Emulator::syscall() entirely (drain_host_signals,
@@ -203,7 +203,7 @@ extern "C" void jit_native_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
     // trampolines) take the direct jit_thunk_svc path — see above. The
     // guest trampolines load 0x1000 into x8 right before the SVC, and no
     // real Linux syscall number is anywhere near 4096, so this test is
-    // unambiguous (it matches the Miscellaneous.cpp dispatcher's case).
+    // unambiguous (it matches the HostCalls/Thunks.cpp dispatcher's case).
     if (cpu->regs[8] == arm64emu::GraphicThunk::SYSCALL_NUMBER) {
         jit_thunk_svc(emu, cpu);
         return;

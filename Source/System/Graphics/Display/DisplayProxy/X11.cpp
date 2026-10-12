@@ -188,7 +188,7 @@ int DisplayProxy::XFlush(uint64_t display_guest) {
     present();
     return 0;
 }
-// ── Additional X11 proxy methods (1.5.4-alpha) ────────────────────────
+// ── Additional X11 proxy methods ────────────────────────
 // These provide a SDL2-based software fallback for common X11 functions
 // used by desktop applications. They are called from DisplayThunk::dispatch
 // when the THUNK_PROXY flag is set and the host library is unavailable.

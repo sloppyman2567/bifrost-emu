@@ -2,7 +2,10 @@
 
 Read the [runtime](../../../Docs/Android/ANDROID_RUNTIME.md) and
 [Binder](../../../Docs/Android/ANDROID_BINDER.md) guides for service/ABI contracts.
-Guest Java services and native adapters live in `Guest/Android/`.
+Guest-side code lives in `Guest/Android/`: native adapters in `Adapters/`,
+launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
+(services in `Managed/Framework/`). JNI natives bind by class name
+(`Java_ManagedLauncher_*`), so keep native methods declared in `ManagedLauncher`.
 
 - Binder receive arenas use a free low-window hole after ART's high reservations.
   Preserve process/realm identity, fd ownership and registry transaction flags;

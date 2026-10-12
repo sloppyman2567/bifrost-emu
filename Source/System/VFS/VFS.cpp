@@ -1,4 +1,4 @@
-// yggdrasil/yggdrasil.cpp — top-level resolver + FdTable + read_path helper.
+// VFS.cpp — top-level resolver + FdTable + read_path helper.
 //
 // Yggdrasil::open() consults procfs, sysfs, devfs, and host
 // passthrough in order. Each sub-resolver lives in its own file:

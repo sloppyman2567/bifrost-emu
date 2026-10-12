@@ -6,11 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.5.5] — current development checkpoint (2026-10-04)
+## [2.0.0-alpha.1] — first v2.0 pre-release (2026-10-12)
 
-The runtime version remains **1.5.5**. This consolidates work on the current
-branch; it does not create a new release tag. Older version labels below
-are historical records, and v2.0 remains planned.
+The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
+[v2.0 roadmap](roadmap.md), not a completed v2.0. It includes all unreleased
+work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
+labels below are historical records.
+
+### Version, guest layout and descriptive names (2026-10-12)
+
+- Every current-version reference (`Version.hpp`, C API, CLI, window titles,
+  generated config, rootfs `os-release`, README, Makefile) reports
+  2.0.0-alpha.1. Inline release tags such as `(1.5.4-alpha)` were removed from
+  code comments; release history stays in this changelog and `Version.hpp`.
+- `Guest/` is grouped by role: Android `Include/`, `Adapters/`, `Launchers/`,
+  `Managed/` (with `Framework/`) and `Probes/`, plus `Guest/VDSO/` (moved from
+  `Tools/VDSO/`; a byte-identical copy of the embedded vDSO header was dropped).
+  Adapter, JNI and managed-launcher builders use the new paths.
+- The catch-all `Syscalls/Miscellaneous.cpp` (`syscall_misc*`) is gone. Calls
+  moved verbatim to their families: socket calls to `Files/Sockets.cpp`,
+  inotify/signalfd to `EventIO.cpp`, exit/waitid/unshare to `Process/`, file
+  calls into a split `Files/` (`Descriptors`, `Paths`, `Metadata`, `Transfer`),
+  and Bifrost-private 0x1000+ calls to `HostCalls/`. Every moved case body is
+  unchanged apart from public-accessor use; a dead duplicate `setresgid` case
+  (always shadowed by `Compatibility.cpp`) was removed. The 0x1000 thunk fast
+  path now calls the thunk handler directly.
+- Other generic names: thunk `Core.cpp` files are named after their classes,
+  `DispatchHelpers.cpp` is `Streams.cpp`, the interpreter's SIMD
+  `Miscellaneous.cpp` is `TwoRegisterPermute.cpp`, the legacy
+  `Core/Common.hpp` umbrella was removed and `test_misc_extended` is
+  `test_compat_syscalls`. First-line comments naming pre-restructure paths
+  (`jit/…`, `yggdrasil/…`, `syscalls/misc_…`) now name the actual files.
+- Large files split by responsibility: `Memory.cpp` (+`Allocation.cpp`,
+  `Discard.cpp`), `IR.hpp` (+`Parameters.hpp`, `Factories.hpp`; includers are
+  unchanged) and `ManagedLauncher.java` (native platform Binder services moved
+  to `Managed/Framework/FrameworkNativeServices.java`).
+- The Makefile `test` target and suite comments use `Tests/Asm/` instead of the
+  pre-restructure `test/` path.
+- Both builds, full JIT/interpreter suites, `make verify`, host API and Android
+  adapter/framework/Bionic/Asgard checks pass. The JNI fixture fails as it did
+  before this change (ART rejects its writable dex). See
+  [the validation record](TESTS.md#200-alpha1-layout-names-and-splits-2026-10-12).
 
 ### Bounded multithreaded JIT loops (2026-10-11)
 

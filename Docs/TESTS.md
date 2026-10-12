@@ -10,6 +10,43 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### 2.0.0-alpha.1 layout, names and splits (2026-10-12)
+
+Both SDL/GL and headless configurations build with no new warnings, and
+`make generated-check` reports no errors. Fixtures were rebuilt with `make
+setup-tests`. The GPU-enabled strict suite passes **311/311**; the interpreter
+suite passes **303/303**, with eight JIT-only skips (including the renamed
+`test_compat_syscalls`). The JIT gate passes **75 differential fixtures and six
+threaded oracle runs**, and the MT oracle passes. C API (**57/57**), native
+bridge (**61/61**), SSA (**21,836 checks**), audio frame counters, Android
+window/backend/plugin checks, twelve plugin CLI cases and 256 SDL3 teardown
+cycles pass. `--version` and `bifrost_version()` report 2.0.0-alpha.1.
+
+Moved code was checked separately from the tests. All 139 syscall case bodies
+moved out of `Miscellaneous.cpp`, `FileSystem.cpp` and `EventIO.cpp` are
+byte-identical to their originals after the private-member-to-accessor rewrite.
+The top-level case-number multiset across all handlers is unchanged except for
+the removed dead `setresgid` duplicate. Splitting `Memory.cpp` and `IR.hpp`
+preserved every original line; only boilerplate (headers, includes, namespace
+and an `extern` for the memstats counters) was added. All 155 library sources
+are present as archive members.
+
+On the guest side, `make android-runtime-adapters` builds every adapter and
+launcher from the new paths, and `make android-managed-launcher` builds and
+dexes the split launcher. Its manifest also satisfies the staleness check.
+Bionic bootstrap passes all twelve services/ASLR/engine combinations, and
+managed Bionic AAudio callback threads pass JIT, interpreter and Tier-2.
+Framework display and package contracts pass in both engines (four tests),
+including the moved SurfaceComposer/vsync services. Managed service execution,
+the five network/launcher-argument tests, Asgard (eight processes, 1,600 RPCs,
+broker restart), the three preflight tests and the JIT framework probe pass.
+
+`test_android_jni.py` fails before VM creation: Android 15 ART refuses the
+fixture's writable `/data/local/tmp/classes.dex` ("Writable dex file ... is not
+allowed"). A binary built from the previous commit fails the same way, so this
+is a pre-existing fixture issue, not a regression from this change. No game was
+run; these checks do not establish playability.
+
 ### Bounded MT self-loops (2026-10-11)
 
 The strict GPU-enabled JIT suite passes **311/311** with IR validation and

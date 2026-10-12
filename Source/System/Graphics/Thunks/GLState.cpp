@@ -1,6 +1,6 @@
-// frost_graphics/gl_state.cpp — GLStateTracker implementation.
+// GLState.cpp — GLStateTracker implementation.
 //
-// 1.5.4-alpha: NEW. Maintains a software-side mirror of guest OpenGL
+// Maintains a software-side mirror of guest OpenGL
 // state so that state queries return consistent results regardless of
 // host context state.
 #include "System/Graphics/Thunks/GLState.hpp"

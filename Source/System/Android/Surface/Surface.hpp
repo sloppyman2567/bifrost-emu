@@ -1,4 +1,4 @@
-// frost/android_surface.hpp — Android NativeActivity layer (v2).
+// Surface.hpp — Android NativeActivity layer (v2).
 //
 // v1 scope: ANativeWindow shims for NativeActivity-style guest apps. A
 // guest surface handle is a fake opaque pointer (0xA9xx… range) that the

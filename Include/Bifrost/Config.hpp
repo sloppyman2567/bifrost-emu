@@ -1,9 +1,9 @@
-// bifrost/config.hpp — bifrost-emu configuration system (1.5.5).
+// Config.hpp — bifrost-emu configuration system.
 //
 // bifrost-emu historically configured itself through CLI flags and a
 // growing pile of BIFROST_* env vars (BIFROST_NO_THREAD_JIT,
 // BIFROST_JIT_VERIFY, BIFROST_ENABLE_FWD, BIFROST_THUNK_GRAPHICS,
-// BIFROST_SYSCALL_TRACE, …). 1.5.4-alpha unifies all of these into a
+// BIFROST_SYSCALL_TRACE, …). The config system unifies all of these into a
 // single Config struct that can be loaded from a TOML-ish file, set
 // programmatically by C API consumers, or filled in from CLI flags by
 // Source/Main.cpp.

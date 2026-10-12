@@ -97,11 +97,11 @@ public final class ManagedLauncher {
     private static final FrameworkDisplay displays = new FrameworkDisplay();
     private static boolean play;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
-    // Guest/Android/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
+    // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
     private static native int pollWindow(long[] event);
-    private static native int audioConfig(long[] config);
+    static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
     private static native int activeAudioOutputs();
 
     // The launcher's JNI bridge; loading the same path again is a no-op.
@@ -166,319 +166,13 @@ public final class ManagedLauncher {
         return virtualKeyboard;
     }
 
-    // Native AudioSystem clients use Binder, not ServiceManager's Java cache.
-    // This profile has no Android HAL ports/patches; host audio is a separate backend.
-    private static final class AudioPolicy extends Binder {
-        private static final String DESCRIPTOR = "android.media.IAudioPolicyService";
-        private final List<IBinder> clients = new ArrayList<>();
-        private boolean portCallbacks, volumeCallbacks;
-        private void readCount(Parcel data) {
-            if (data.readInt() != 1) throw new IllegalArgumentException("null port count");
-            int start = data.dataPosition(), size = data.readInt();
-            if (size < 8 || size > data.dataSize() - start || data.readInt() < 0)
-                throw new IllegalArgumentException("invalid port count");
-            data.setDataPosition(start + size);
-        }
-        @Override protected synchronized boolean onTransact(int code, Parcel data,
-                Parcel reply, int flags) throws RemoteException {
-            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != 44 && code != 49 && code != 51 && code != 52 && code != 53)
-                return super.onTransact(code, data, reply, flags);
-            data.enforceInterface(DESCRIPTOR);
-            System.out.println("AUDIO_POLICY_TRANSACTION " + code);
-            if (code == 51) {
-                IBinder client = data.readStrongBinder();
-                if (client == null) throw new IllegalArgumentException("null audio client");
-                if (!clients.contains(client)) clients.add(client);
-            } else if (code == 52 || code == 53) {
-                boolean enabled = data.readBoolean();
-                if (code == 52) portCallbacks = enabled; else volumeCallbacks = enabled;
-            } else {
-                if (code == 44) {
-                    int role = data.readInt(), type = data.readInt();
-                    if (role < 0 || role > 2 || type < 0 || type > 3)
-                        throw new IllegalArgumentException("invalid audio port filter");
-                }
-                readCount(data);
-                // C++ AIDL sends the capacity of an out array after inout count.
-                int capacity = data.readInt();
-                if (capacity < 0 || capacity > 4096)
-                    throw new IllegalArgumentException("invalid audio array capacity");
-            }
-            data.enforceNoDataAvail();
-            reply.writeNoException();
-            if (code == 44 || code == 49) {
-                reply.writeInt(1); // stable generation for the empty topology
-                reply.writeInt(1); // nonnull android.media.audio.common.Int
-                reply.writeInt(8); // parcelable size, including size field
-                reply.writeInt(0); // count.value
-                reply.writeInt(0); // empty ports/patches vector
-            }
-            return true;
-        }
-    }
-    private static final Binder audioPolicy = new AudioPolicy();
-
-    // Android 15 IAudioFlingerService: only the queries used by this profile.
-    // Playback uses the managed AAudio adapter and Bifrost's host Audio engine.
-    private static final class AudioFlinger extends Binder {
-        private static final String DESCRIPTOR = "android.media.IAudioFlingerService";
-        private IBinder client;
-        @Override protected synchronized boolean onTransact(int code, Parcel data,
-                Parcel reply, int flags) throws RemoteException {
-            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != 23 && code != 45 && code != 46)
-                return super.onTransact(code, data, reply, flags);
-            data.enforceInterface(DESCRIPTOR);
-            System.out.println("AUDIO_FLINGER_TRANSACTION " + code);
-            if (code == 23) {
-                IBinder incoming = data.readStrongBinder();
-                if (incoming == null) throw new IllegalArgumentException("null audio client");
-                if (client == null) client = incoming; // AudioFlinger keeps the first per process.
-            }
-            data.enforceNoDataAvail();
-            long[] config = new long[3];
-            if (code != 23 && audioConfig(config) != 0)
-                throw new IllegalStateException("host audio configuration unavailable");
-            reply.writeNoException();
-            if (code == 45) reply.writeInt((int) config[0]);
-            if (code == 46) reply.writeLong(config[1]);
-            return true;
-        }
-    }
-    private static final Binder audioFlinger = new AudioFlinger();
-
-    // Native libsensor uses the hand-written ISensorServer protocol, not AIDL:
-    // replies start with the count/bool itself, with no exception header.
-    // This virtual device exposes no physical, dynamic or virtual-device sensors.
-    private static final class SensorService extends Binder {
-        private static final String DESCRIPTOR = "android.gui.SensorServer";
-        SensorService() { attachInterface(null, DESCRIPTOR); }
-        @Override protected boolean onTransact(int code, Parcel data,
-                Parcel reply, int flags) throws RemoteException {
-            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            switch (code) {
-                case 1: // GET_SENSOR_LIST
-                case 4: // GET_DYNAMIC_SENSOR_LIST
-                case 7: // GET_RUNTIME_SENSOR_LIST
-                case 3: // ENABLE_DATA_INJECTION (query, not a setter)
-                case 8: // ENABLE_REPLAY_DATA_INJECTION
-                case 9: // ENABLE_HAL_BYPASS_REPLAY_DATA_INJECTION
-                    break;
-                default: return super.onTransact(code, data, reply, flags);
-            }
-            data.enforceInterface(DESCRIPTOR);
-            if (code == 1 || code == 4 || code == 7) {
-                if (data.dataAvail() < 4 || data.readString() == null)
-                    throw new IllegalArgumentException("missing sensor package name");
-                if (code == 7) {
-                    if (data.dataAvail() < 4)
-                        throw new IllegalArgumentException("missing sensor device id");
-                    data.readInt();
-                }
-            }
-            data.enforceNoDataAvail();
-            System.out.println("SENSOR_SERVICE_TRANSACTION " + code);
-            reply.writeInt(0); // empty list, or injection disabled
-            return true;
-        }
-    }
-    private static final Binder sensorService = new SensorService();
+    // Native platform Binder services (audio policy/flinger, sensors and the
+    // SurfaceFlinger display-event channel): Framework/FrameworkNativeServices.java.
+    private static final Binder audioPolicy = new FrameworkNativeServices.AudioPolicy();
+    private static final Binder audioFlinger = new FrameworkNativeServices.AudioFlinger();
+    private static final Binder sensorService = new FrameworkNativeServices.SensorService();
     private static boolean sensorServiceRegistered;
-
-    // Android 15 ISurfaceComposer / IDisplayEventConnection and BitTube wire
-    // formats. This virtual display uses a monotonic 60 Hz clock, as does the
-    // NDK adapter. Real libgui/libandroid_runtime own the receiver and deliver
-    // callbacks on the client's MessageQueue; no Java Choreographer override.
-    private static final long DISPLAY_PERIOD_NS = 1000000000L / 60;
-    private static final long PHYSICAL_DISPLAY_ID = 1;
-    private static final class DisplayClock implements Runnable {
-        private final Handler handler;
-        private static final class ConnectionRef extends WeakReference<DisplayEventConnection> {
-            // Keep the resources alive until this clock observes client disposal,
-            // then close explicitly rather than leaving them to PFD finalizers.
-            private final ParcelFileDescriptor receive, send;
-            ConnectionRef(DisplayEventConnection connection) {
-                super(connection);
-                receive = connection.receive;
-                send = connection.send;
-            }
-            void close() {
-                for (ParcelFileDescriptor fd : new ParcelFileDescriptor[] {receive, send})
-                    try { fd.close(); } catch (IOException ignored) { }
-            }
-        }
-        private final List<ConnectionRef> connections = new ArrayList<>();
-        DisplayClock() {
-            HandlerThread thread = new HandlerThread("BifrostDisplayEvents");
-            thread.setDaemon(true);
-            thread.start();
-            handler = new Handler(thread.getLooper());
-            handler.post(this);
-        }
-        synchronized void add(DisplayEventConnection connection) {
-            connections.removeIf(ref -> {
-                if (ref.get() != null) return false;
-                ref.close();
-                return true;
-            });
-            if (connections.size() >= 256) throw new IllegalStateException("display connection limit");
-            connections.add(new ConnectionRef(connection));
-        }
-        @Override public synchronized void run() {
-            long now = System.nanoTime();
-            long tick = now / DISPLAY_PERIOD_NS;
-            for (int i = connections.size() - 1; i >= 0; i--) {
-                DisplayEventConnection connection = connections.get(i).get();
-                if (connection == null || !connection.tick(tick)) {
-                    connections.remove(i).close();
-                }
-            }
-            long delay = ((tick + 1) * DISPLAY_PERIOD_NS - System.nanoTime() + 999999) / 1000000;
-            handler.postAtTime(this, SystemClock.uptimeMillis() + Math.max(1, delay));
-        }
-    }
-    private static final class DisplayEventConnection extends Binder {
-        private static final String DESCRIPTOR = "android.gui.IDisplayEventConnection";
-        private ParcelFileDescriptor receive, send;
-        private boolean requested, closed;
-        private int rate;
-        private long lastTick = -1;
-        DisplayEventConnection() throws Exception {
-            attachInterface(null, DESCRIPTOR);
-            FileDescriptor read = new FileDescriptor(), write = new FileDescriptor();
-            Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0, read, write);
-            try {
-                Os.fcntlInt(read, OsConstants.F_SETFL, OsConstants.O_NONBLOCK);
-                Os.fcntlInt(write, OsConstants.F_SETFL, OsConstants.O_NONBLOCK);
-                receive = ParcelFileDescriptor.dup(read);
-                send = ParcelFileDescriptor.dup(write);
-            } catch (Exception error) {
-                close();
-                throw error;
-            } finally {
-                Os.close(read);
-                Os.close(write);
-            }
-        }
-        private synchronized void close() {
-            closed = true;
-            for (ParcelFileDescriptor fd : new ParcelFileDescriptor[] {receive, send}) {
-                if (fd != null) try { fd.close(); } catch (IOException ignored) { }
-            }
-            receive = send = null;
-        }
-        private boolean sendEvent(byte[] packet) {
-            try {
-                int size = Os.sendto(send.getFileDescriptor(), packet, 0, packet.length,
-                        0x40 | 0x4000, null, 0); // Linux MSG_DONTWAIT | MSG_NOSIGNAL (hidden SDK)
-                if (size != packet.length) throw new IllegalStateException("partial display event");
-                return true;
-            } catch (ErrnoException error) {
-                if (error.errno == OsConstants.EAGAIN || error.errno == OsConstants.EINTR) return false;
-                close(); // Peer gone: stop ticking and release the service's endpoint.
-                return false;
-            } catch (java.net.SocketException error) {
-                close();
-                return false;
-            }
-        }
-        private ByteBuffer event(int type, long timestamp) {
-            // DisplayEventReceiver::Event is 216 bytes on both Android ABIs;
-            // Header's displayId/timestamp and VSync::vsyncData are 8-aligned.
-            ByteBuffer packet = ByteBuffer.allocate(216).order(ByteOrder.LITTLE_ENDIAN);
-            packet.putInt(0, type);
-            packet.putLong(8, PHYSICAL_DISPLAY_ID);
-            packet.putLong(16, timestamp);
-            return packet;
-        }
-        synchronized boolean tick(long tick) {
-            if (closed) return false;
-            if (receive != null || tick == lastTick) return true;
-            lastTick = tick;
-            if (rate == 0 ? !requested : tick % rate != 0) return true;
-            long timestamp = tick * DISPLAY_PERIOD_NS;
-            ByteBuffer packet = event(0x7673796e, timestamp); // fourcc('v','s','y','n')
-            packet.putInt(24, (int) tick);
-            packet.putLong(32, DISPLAY_PERIOD_NS);
-            packet.putInt(40, 0); // preferred timeline
-            packet.putInt(44, 1); // one valid timeline, capacity seven
-            packet.putLong(48, tick);
-            packet.putLong(56, timestamp + DISPLAY_PERIOD_NS - 2000000);
-            packet.putLong(64, timestamp + DISPLAY_PERIOD_NS);
-            if (sendEvent(packet.array())) requested = false;
-            return !closed;
-        }
-        @Override protected synchronized boolean onTransact(int code, Parcel data,
-                Parcel reply, int flags) throws RemoteException {
-            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code < 1 || code > 4) return super.onTransact(code, data, reply, flags);
-            data.enforceInterface(DESCRIPTOR);
-            int count = code == 2 ? data.readInt() : 0;
-            data.enforceNoDataAvail();
-            if (closed) throw new IllegalStateException("display event connection closed");
-            if (code == 1) {
-                if (receive == null) throw new IllegalStateException("channel already stolen");
-                ByteBuffer hotplug = event(0x706c7567, System.nanoTime());
-                hotplug.put(24, (byte) 1);
-                if (!sendEvent(hotplug.array())) throw new IllegalStateException("initial hotplug failed");
-                reply.writeNoException();
-                reply.writeInt(1); // nonnull native BitTube parcelable
-                reply.writeFileDescriptor(receive.getFileDescriptor());
-                reply.writeFileDescriptor(send.getFileDescriptor());
-                try { receive.close(); } catch (IOException error) { throw new IllegalStateException(error); }
-                receive = null;
-            } else if (code == 2) {
-                if (count < 0) throw new IllegalArgumentException("negative vsync rate");
-                rate = count;
-                requested = false;
-                reply.writeNoException();
-            } else if (code == 3) {
-                if (rate == 0) requested = true; // oneway, repeated requests coalesce
-            } else {
-                long tick = System.nanoTime() / DISPLAY_PERIOD_NS;
-                long presentation = (tick + 1) * DISPLAY_PERIOD_NS;
-                reply.writeNoException();
-                reply.writeInt(1); // nonnull native ParcelableVsyncEventData
-                reply.writeLong(DISPLAY_PERIOD_NS);
-                reply.writeInt(0);
-                reply.writeInt(1);
-                reply.writeLong(tick);
-                reply.writeLong(presentation - 2000000);
-                reply.writeLong(presentation);
-            }
-            return true;
-        }
-    }
-    private static final class SurfaceComposer extends Binder {
-        private static final String DESCRIPTOR = "android.gui.ISurfaceComposer";
-        private DisplayClock clock;
-        SurfaceComposer() { attachInterface(null, DESCRIPTOR); }
-        @Override protected synchronized boolean onTransact(int code, Parcel data,
-                Parcel reply, int flags) throws RemoteException {
-            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != 2) return super.onTransact(code, data, reply, flags);
-            data.enforceInterface(DESCRIPTOR);
-            int source = data.readInt(), registration = data.readInt();
-            IBinder layer = data.readStrongBinder();
-            data.enforceNoDataAvail();
-            if (source < 0 || source > 1 || (registration & ~3) != 0 || layer != null)
-                throw new IllegalArgumentException("unsupported display connection options");
-            DisplayEventConnection connection = null;
-            try {
-                connection = new DisplayEventConnection();
-                if (clock == null) clock = new DisplayClock();
-                clock.add(connection);
-            } catch (Exception error) {
-                if (connection != null) connection.close();
-                throw new IllegalStateException("display channel creation failed", error);
-            }
-            reply.writeNoException();
-            reply.writeStrongBinder(connection);
-            return true;
-        }
-    }
-    private static final Binder surfaceComposer = new SurfaceComposer();
+    private static final Binder surfaceComposer = new FrameworkNativeServices.SurfaceComposer();
 
     private static ByteBuffer readDisplayEvent(ParcelFileDescriptor channel, boolean wait) throws Exception {
         long until = System.nanoTime() + 2000000000L;
@@ -499,32 +193,32 @@ public final class ManagedLauncher {
 
     private static void checkDisplayConnection() throws Exception {
         Parcel data = Parcel.obtain(), reply = Parcel.obtain();
-        DisplayEventConnection connection = null;
+        FrameworkNativeServices.DisplayEventConnection connection = null;
         ParcelFileDescriptor receive = null, send = null;
         try {
-            data.writeInterfaceToken(SurfaceComposer.DESCRIPTOR);
+            data.writeInterfaceToken(FrameworkNativeServices.SurfaceComposer.DESCRIPTOR);
             data.writeInt(0); data.writeInt(0); data.writeStrongBinder(null);
             if (!surfaceComposer.transact(2, data, reply, 0)) throw new AssertionError("no display connection");
             reply.readException();
-            connection = (DisplayEventConnection) reply.readStrongBinder();
+            connection = (FrameworkNativeServices.DisplayEventConnection) reply.readStrongBinder();
             data.setDataSize(0); reply.setDataSize(0);
             data.setDataPosition(0); reply.setDataPosition(0);
-            data.writeInterfaceToken(DisplayEventConnection.DESCRIPTOR);
+            data.writeInterfaceToken(FrameworkNativeServices.DisplayEventConnection.DESCRIPTOR);
             connection.transact(1, data, reply, 0);
             reply.readException();
             if (reply.readInt() != 1) throw new AssertionError("null BitTube");
             receive = reply.readFileDescriptor(); send = reply.readFileDescriptor();
             ByteBuffer hotplug = readDisplayEvent(receive, true);
-            if (hotplug.getInt(0) != 0x706c7567 || hotplug.getLong(8) != PHYSICAL_DISPLAY_ID || hotplug.get(24) != 1)
+            if (hotplug.getInt(0) != 0x706c7567 || hotplug.getLong(8) != FrameworkNativeServices.PHYSICAL_DISPLAY_ID || hotplug.get(24) != 1)
                 throw new AssertionError("missing initial hotplug");
             for (int step = 0; step < 4; step++) {
                 data.setDataSize(0); reply.setDataSize(0);
                 data.setDataPosition(0); reply.setDataPosition(0);
-                data.writeInterfaceToken(DisplayEventConnection.DESCRIPTOR);
+                data.writeInterfaceToken(FrameworkNativeServices.DisplayEventConnection.DESCRIPTOR);
                 if (step == 0) { // query future frame timeline
                     connection.transact(4, data, reply, 0);
                     reply.readException();
-                    if (reply.readInt() != 1 || reply.readLong() != DISPLAY_PERIOD_NS ||
+                    if (reply.readInt() != 1 || reply.readLong() != FrameworkNativeServices.DISPLAY_PERIOD_NS ||
                             reply.readInt() != 0 || reply.readInt() != 1)
                         throw new AssertionError("invalid vsync timeline");
                     long id = reply.readLong(), deadline = reply.readLong(), presentation = reply.readLong();
@@ -535,7 +229,7 @@ public final class ManagedLauncher {
                 } else if (step == 1) {
                     connection.transact(3, data, null, IBinder.FLAG_ONEWAY);
                     ByteBuffer frame = readDisplayEvent(receive, true);
-                    if (frame.getInt(0) != 0x7673796e || frame.getLong(32) != DISPLAY_PERIOD_NS || frame.getInt(44) != 1)
+                    if (frame.getInt(0) != 0x7673796e || frame.getLong(32) != FrameworkNativeServices.DISPLAY_PERIOD_NS || frame.getInt(44) != 1)
                         throw new AssertionError("invalid one-shot vsync");
                     Thread.sleep(40);
                     if (readDisplayEvent(receive, false) != null) throw new AssertionError("one-shot repeated");
@@ -621,13 +315,13 @@ public final class ManagedLauncher {
         if (!sensorServiceRegistered) return;
         IBinder binder = (IBinder) Class.forName("android.os.ServiceManager")
                 .getMethod("checkService", String.class).invoke(null, "sensorservice");
-        if (binder == null || !SensorService.DESCRIPTOR.equals(binder.getInterfaceDescriptor()))
+        if (binder == null || !FrameworkNativeServices.SensorService.DESCRIPTOR.equals(binder.getInterfaceDescriptor()))
             throw new AssertionError("native sensor service was not published");
         // Check the raw native reply layout, including non-default device ids.
         for (int code : new int[] {1, 4, 7, 3, 8, 9, 2}) {
             Parcel data = Parcel.obtain(), reply = Parcel.obtain();
             try {
-                data.writeInterfaceToken(SensorService.DESCRIPTOR);
+                data.writeInterfaceToken(FrameworkNativeServices.SensorService.DESCRIPTOR);
                 if (code == 1 || code == 4 || code == 7) data.writeString(context.getPackageName());
                 if (code == 7) data.writeInt(42);
                 boolean handled = binder.transact(code, data, reply, 0);
@@ -641,7 +335,7 @@ public final class ManagedLauncher {
         for (boolean badToken : new boolean[] {true, false}) {
             Parcel data = Parcel.obtain(), reply = Parcel.obtain();
             try {
-                data.writeInterfaceToken(badToken ? "invalid.sensor.interface" : SensorService.DESCRIPTOR);
+                data.writeInterfaceToken(badToken ? "invalid.sensor.interface" : FrameworkNativeServices.SensorService.DESCRIPTOR);
                 if (!badToken) data.writeInt(123); // injection queries have no arguments
                 try {
                     binder.transact(3, data, reply, 0);

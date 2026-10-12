@@ -51,7 +51,7 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            // ── Vector cache fast path (1.5.4-alpha) ──────────────
+            // ── Vector cache fast path ──────────────
             // Full-128-bit bitwise op on pinned XMM regs: one VEX op for
             // AND/ORR/EOR, VPANDN for BIC, and 2-3 VEX ops for ORN/EON
             // (using XMM0, which is scratch in cache-active blocks).
@@ -251,7 +251,7 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
             }
             return true;
         }
-        // ── SIMD FP lane-wise arithmetic (1.5.4-alpha) ─────────────
+        // ── SIMD FP lane-wise arithmetic ─────────────
         // Emits packed SSE: addps/subps/mulps/divps/minps/maxps (single,
         // 0F prefix) or addpd/... (double, 66 0F prefix). FABD = sub then
         // clear sign bit (andps). width = element bytes (4/8); flags_op

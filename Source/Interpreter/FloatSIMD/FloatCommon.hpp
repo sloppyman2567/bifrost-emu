@@ -1,4 +1,4 @@
-// interp/interp_fp_common.hpp — helpers shared by the FP/SIMD interpreter
+// FloatCommon.hpp — helpers shared by the FP/SIMD interpreter
 // files (Dispatch.cpp, interp_simd_*.cpp, FloatScalar.cpp).
 //
 // Also used by JIT native SIMD helpers for matching ARM FP special cases.

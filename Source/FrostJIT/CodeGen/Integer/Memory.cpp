@@ -1,6 +1,6 @@
-// jit/jit_codegen_mem.cpp — FrostJIT memory IR-op codegen.
+// Memory.cpp — FrostJIT memory IR-op codegen.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. This file holds the
+// split out of FrostJIT.cpp. This file holds the
 // LOAD_MEM / STORE_MEM / LOAD_REG / STORE_REG case bodies of the IR-op
 // switch, extracted into a separate method (compile_ir_mem) for
 // readability. The main switch in FrostJIT.cpp dispatches to this method

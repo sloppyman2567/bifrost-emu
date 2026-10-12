@@ -1,7 +1,7 @@
-// yggdrasil/dir_node.cpp — DirNode implementation.
+// DirectoryNode.cpp — DirNode implementation.
 //
 // Synthesizes linux_dirent64 records for virtual directories (/proc,
-// /proc/self, /dev). v1.4.5-alpha: NEW. Previously `ls /proc` and
+// /proc/self, /dev). NEW. Previously `ls /proc` and
 // `ls /dev` under the guest returned nothing because no Node existed
 // for the directories themselves — only for specific files under them.
 #include "System/VFS/Nodes/DirectoryNode.hpp"

@@ -503,7 +503,7 @@ int64_t DynamicLinker::tls_tp_offset(uint64_t mod_id) const {
 // Allocate a fresh per-thread TLS block (variant-I glibc layout) for a
 // new guest thread spawned outside clone() (e.g. SDL_CreateThread via the
 // thunk). Mirrors the a0==0 path of the 0x1001 _dl_allocate_tls syscall
-// (Source/System/Syscalls/Miscellaneous.cpp) — see that handler for the full layout
+// (Source/System/Syscalls/HostCalls/DynamicLinker.cpp) — see that handler for the full layout
 // description. Layout:
 //   [block .. block+lib_size)          = lib TLS (negative TP offsets)
 //   [block+lib_size .. block+lib_size+tcb_size) = TCB header

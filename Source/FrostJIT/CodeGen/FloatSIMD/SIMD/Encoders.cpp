@@ -28,7 +28,7 @@ void FrostJIT::store_fp_vector(int v, bool q) {
         emit_store(CPU_REG, V_HI_OFF + v * 8, RAX); emit_pop(RAX);
     }
 }
-// ── Local emit helpers for the memory-path SIMD ops (1.5.4-alpha) ──
+// ── Local emit helpers for the memory-path SIMD ops ──
 // The ops below (SIMD_2REG/CVTF/ADDP/XTN/TBL/INS) are NOT in
 // vec_cache_compatible_op, so the vec cache is never active in their
 // blocks and every XMM reg is free scratch. All emit helpers are

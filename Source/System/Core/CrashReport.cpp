@@ -1,4 +1,4 @@
-// core/crash_report.cpp — shared guest-crash reporter impl.
+// CrashReport.cpp — shared guest-crash reporter impl.
 #include "System/Core/CrashReport.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Memory/Memory.hpp"

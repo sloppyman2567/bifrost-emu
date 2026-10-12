@@ -972,7 +972,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // ── glfwCreateWindow HiDPI compensation ───────────────────────────
-    // 1.5.4-alpha: the game requests a LOGICAL window size (1280x720),
+    // the game requests a LOGICAL window size (1280x720),
     // but on HiDPI sessions (KDE Scale=2, Wayland/X11) host GLFW makes
     // the PHYSICAL framebuffer scale * the request (2560x1440), and
     // window.c then adopts the framebuffer size as window.size — the
@@ -1322,7 +1322,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.pointer_args, entry.n_stack);
     }
 
-    // 1.5.4-alpha: GL state query interception — after pointer translation
+    // GL state query interception — after pointer translation
     // so that pointer args in queries (glGetIntegerv, etc.) point to host
     // memory. Only intercept functions tagged QUERY in the spec.
     bool is_gl_query = (entry.spec &&
@@ -1668,7 +1668,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         ++frame_n;
     }
-    // 1.5.4-alpha: GLFW event pump — after the host poll/ wait returns,
+    // GLFW event pump — after the host poll/ wait returns,
     // deliver any registered guest cursor-position callbacks (the game
     // computes per-frame mouse deltas from them, which drives camera
     // look). The guest callback runs via the borrow-CPU runner.

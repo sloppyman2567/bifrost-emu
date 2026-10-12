@@ -1,4 +1,4 @@
-// core/cpu.h — ARM64 register file + PSTATE + per-vCPU state.
+// CPU.hpp — ARM64 register file + PSTATE + per-vCPU state.
 //
 // A CPU instance represents one virtual CPU (vCPU). The Emulator owns one
 // main_cpu_ plus N cloned vCPUs (one per guest thread spawned via clone()).

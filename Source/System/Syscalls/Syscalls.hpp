@@ -1,16 +1,17 @@
-// syscalls/syscalls.h — internal syscall handler declarations.
+// Syscalls.hpp — internal syscall handler declarations.
 //
-// Each subsystem (fs, mem, threads, time, ioctls) exports a handler that
-// takes the syscall number + args and returns a status:
+// Each syscall family exports a handler that takes the syscall number +
+// args and returns a status:
 //   - 0 if handled (result already in cpu.regs[0])
-//   - SYSCALL_NOT_HANDLED if this subsystem doesn't handle `num`
+//   - SYSCALL_NOT_HANDLED if this family doesn't handle `num`
 //
 // The main dispatcher in Syscalls.cpp calls each handler in turn; the
 // first one that handles the call wins. Unhandled syscalls fall through
 // to a stub that returns -ENOSYS.
 //
-// This split keeps each subsystem's logic in its own file (FileSystem.cpp for
-// file ops, Memory.cpp for mmap/brk, etc.) while sharing the dispatcher.
+// Each family keeps its logic in its own file (Files/, Process/, Memory.cpp,
+// HostCalls/, ...) while sharing the dispatcher. Families own disjoint
+// syscall numbers, so dispatch order affects only lookup cost.
 #pragma once
 #include "Bifrost/Types.hpp"
 #include <cstdint>
@@ -54,8 +55,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num);
-int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);
-// ── vDSO clock fast-path (1.5.4-alpha) ────────────────────────────
+// ── vDSO clock fast-path ────────────────────────────
 // Reads the host clock directly for clock_gettime(113)/clock_getres(114)/
 // gettimeofday(169) and writes the result to guest memory. Used by the
 // syscall dispatcher and the JIT native vDSO fast path. Returns true if
@@ -64,23 +64,26 @@ bool syscall_vdso_clock(Emulator& emu, CPU& cpu, uint64_t num);
 // Syscall histogram (BIFROST_STATS_PERIOD printout). Counts every syscall;
 // prints top-N with per-second rates. Defined in Syscalls.cpp.
 void dump_syscall_histogram(double dt);
-// ── Miscellaneous.cpp sub-handlers  ──────────────────────────
-// syscall_misc() dispatches to these in order. Each returns
+// ── Further Linux syscall families (dispatched after syscall_ioctls) ───
+int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num);  // Process/Signals.cpp: sigaction/sigreturn/...
+int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num); // Files/EventIO.cpp: epoll/eventfd/timerfd/poll/inotify
+int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num);  // Files/Sockets.cpp: socket/connect/sendmsg/...
+int64_t syscall_process(Emulator& emu, CPU& cpu, uint64_t num);  // Process/Process.cpp: dispatches the four below
+// syscall_process() dispatches to these in order. Each returns
 // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
-int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num);  // sigaction/sigreturn/etc
-int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num);      // epoll/eventfd/timerfd/socket/poll
-int64_t syscall_misc_process(Emulator& emu, CPU& cpu, uint64_t num); // getpid/wait/rlimit/prctl/etc
-// ── Process.cpp sub-handlers  ──────────────────
-// syscall_misc_process() dispatches to these in order. Each returns
-// SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
-int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num);  // ptrace/sched_*/priority/getpgid/getcpu
-int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num);     // getuid/getpid/uname/sysinfo/getrandom/etc
-int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num);   // times/waitpid/wait4
-// ── Compatibility.cpp (1.5.4-alpha) ────────────────────────────────
-// Extended syscalls: xattr, kcmp, membarrier, copy_file_range, pkey_*,
-// pidfd_*, io_uring stubs, mount-API stubs, capget/capset, personality,
-// fanotify stubs, landlock stubs, seccomp stub, mseal, etc.
-int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num);
+int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num); // ptrace/sched_*/priority/getpgid/getcpu
+int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num);   // getuid/getpid/uname/sysinfo/getrandom/unshare/etc
+int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num);       // times/waitpid/wait4/waitid
+int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num);       // exit/exit_group
+// Compatibility.cpp — extended syscalls: xattr, kcmp, membarrier,
+// copy_file_range, pkey_*, pidfd_*, io_uring stubs, mount-API stubs,
+// capget/capset, personality, fanotify stubs, landlock stubs, seccomp stub,
+// mseal, etc.
+int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num);
+// ── Bifrost-private host calls (numbers >= 0x1000, HostCalls/) ─────────
+int64_t syscall_host_thunks(Emulator& emu, CPU& cpu, uint64_t num);      // Thunks.cpp: 0x1000, 0x100D
+int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num); // Android.cpp: 0x100E
+int64_t syscall_linker_services(Emulator& emu, CPU& cpu, uint64_t num);  // DynamicLinker.cpp: 0x1001-0x100C
 // openat()/openat2() path resolution with GUEST flags and mode: flag
 // translation, umask, dirfd, and /proc/{self,thread-self,1}/fd/N[/rest]
 // through GUEST fd N; everything else goes through the VFS. Returns

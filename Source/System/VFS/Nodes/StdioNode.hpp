@@ -1,8 +1,8 @@
-// yggdrasil/stdio_node.hpp — stdin/stdout/stderr wrapper.
+// StdioNode.hpp — stdin/stdout/stderr wrapper.
 //
 // Backed by the host's fd 0/1/2. Doesn't own the fd (won't close it).
 // Not seekable (returns -ESPIPE). Handles O_NONBLOCK toggling via
-// fcntl F_SETFL — v1.4.5-alpha improvement (previously O_NONBLOCK was
+// fcntl F_SETFL (previously O_NONBLOCK was
 // silently ignored on stdio fds, breaking guest poll/select loops
 // that depended on non-blocking stdin).
 #pragma once

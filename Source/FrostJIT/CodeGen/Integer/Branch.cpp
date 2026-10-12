@@ -1,6 +1,6 @@
-// jit/jit_codegen_branch.cpp — FrostJIT branch/call IR-op codegen.
+// Branch.cpp — FrostJIT branch/call IR-op codegen.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. This file holds the
+// split out of FrostJIT.cpp. This file holds the
 // BRCOND_ZERO / BRCOND_BIT / BRCOND / BRCOND_FALLTHRU / CALL_INTERP /
 // SVC case bodies of the IR-op switch, extracted into a separate method
 // (compile_ir_branch) for readability. The main switch in FrostJIT.cpp
@@ -421,7 +421,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // branch block, but the code size increase is negligible (<1%
             // of the 64MB code buffer for typical programs).
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // 1.5.4-alpha: emit the taken-path epilogue with a SECOND chain
+            // emit the taken-path epilogue with a SECOND chain
             // slot so the taken edge (typically the loop-back of a hot
             // conditional loop) also skips the dispatcher. Skipped when a
             // self-loop slot was emitted — that jmp already goes straight
@@ -461,7 +461,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 0;
         case IROp::BRCOND_SKIP: {
             const BrCondSkipParams bp = inst.brcond_skip_params();
-            // 1.5.4-alpha: mid-block conditional skip (leaf inlining). If
+            // mid-block conditional skip (leaf inlining). If
             // cond(imm) holds, jump over the next `imm` IR ops (the skip
             // region). Unlike BRCOND this does NOT end the block and does
             // NOT touch PC or materialize flags — both paths stay inline.

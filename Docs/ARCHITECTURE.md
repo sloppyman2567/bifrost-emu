@@ -12,11 +12,12 @@ the emulator's memory, signal, syscall, loader and host-service implementations.
 | Emulator startup and lifetime | `Source/System/Core/Emulator/`: `Lifecycle.cpp`, `ElfLoading.cpp`, `GuestStartup.cpp`, `Android.cpp`, `ThunkWiring.cpp` |
 | Decode and reference execution | `Source/Interpreter/Decoder/`, `Core/`, `FloatSIMD/` |
 | JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/`, `Tier2/` |
-| Guest address space and mappings | `Source/System/Memory/Memory.hpp`, `Memory.cpp` |
+| Guest address space and mappings | `Source/System/Memory/`: `Memory.cpp` (mapping index, access, file backing), `Allocation.cpp`, `Discard.cpp` (madvise, userfaultfd) |
 | ELF and dynamic linking | `Source/System/Loader/ElfLoader.cpp`, `DynamicLinker/` |
-| Linux syscall dispatch | `Source/System/Syscalls/Syscalls.cpp`; `Files/` and `Process/` hold their respective syscall families |
+| Linux syscall dispatch | `Source/System/Syscalls/Syscalls.cpp`; families in `Files/`, `Process/`, `Memory.cpp`, `Time.cpp`, `Compatibility.cpp`; Bifrost-private calls in `HostCalls/` |
 | Guest filesystem and devices | `Source/System/VFS/`: `VFS.cpp`, `HostPaths.cpp`, `Nodes/`, `Pseudo/` |
-| Android runtime integration | `Source/System/Android/`: `Binder/`, `Properties/`, `Services/`, `Surface/`, `Window/`; guest adapters and Java services live in `Guest/Android/` |
+| Android runtime integration | `Source/System/Android/`: `Binder/`, `Properties/`, `Services/`, `Surface/`, `Window/`; guest-side code lives in `Guest/Android/` |
+| Guest-side code | `Guest/Android/` Bionic adapters, launchers and managed framework; `Guest/VDSO/` vDSO source |
 | Graphics and display | `Source/System/Graphics/`: `Display/`, `Input/`, `Thunks/` |
 | Host audio and API forwarding | `Source/System/Audio/Audio.cpp`, `AudioThunk/` |
 | Embedding interfaces | `Include/Bifrost/` C++ API, `Source/System/API/` C API and native bridge |
@@ -33,9 +34,10 @@ Read [the JIT guide](JIT.md) before changing the compiler or JIT-facing decoder.
 `Compiler/BlockAnalysis.cpp` predicts fallback boundaries and scans candidate
 inline leaves; `BlockCompiler.cpp` orchestrates Tier-1 translation, emission and
 publication. `VerificationStores.cpp` collects store footprints for differential
-replay. IR construction, typed parameters, scalar SSA and optimization are in
-`IR/Builder.*`, `IR/IR.hpp`, `IR/SSA/` and `IR/Passes/`; translation is in
-`IR/Translate/`.
+replay. IR construction, scalar SSA and optimization are in `IR/Builder.*`,
+`IR/SSA/` and `IR/Passes/`; translation is in `IR/Translate/`. `IR/IR.hpp`
+declares `IROp` and `IRInst` and includes the typed parameter structs
+(`IR/Parameters.hpp`) and their inline factories/readers (`IR/Factories.hpp`).
 
 `CodeGen/Integer/` and `CodeGen/FloatSIMD/` emit operation families, including
 the `FloatSIMD/SIMD/` subdirectory. `Backend/X86Emitter.cpp` encodes host
@@ -49,12 +51,15 @@ region compilation, promotion, feedback, profiling and trial measurement.
 
 Large host adapters are divided by the APIs or protocols they implement:
 
-- `Audio/AudioThunk/`: lifecycle and export registration in `Core.cpp`, dispatch
-  and common helpers, then SDL, ALSA, Pulse, OpenAL, OpenSL and AAudio backends.
-- `Graphics/Thunks/GraphicThunk/`: registration, generic dispatch, special
-  policies, floating-point ABI handling and callback bridges.
-- `Graphics/Thunks/DisplayThunk/`: registration, generic dispatch, proxy calls,
-  Wayland forwarding, Vulkan dispatch and Vulkan staging.
+- `Audio/AudioThunk/`: lifecycle and export registration in `AudioThunk.cpp`,
+  dispatch, stream queue/callback helpers in `Streams.cpp`, then SDL, ALSA,
+  Pulse, OpenAL, OpenSL and AAudio backends.
+- `Graphics/Thunks/GraphicThunk/`: lifecycle and registration in
+  `GraphicThunk.cpp`, generic dispatch, special policies, floating-point ABI
+  handling and callback bridges.
+- `Graphics/Thunks/DisplayThunk/`: lifecycle and registration in
+  `DisplayThunk.cpp`, generic dispatch, proxy calls, Wayland forwarding,
+  Vulkan dispatch and Vulkan staging.
 - `Graphics/Display/DisplayProxy/`: SDL window/handle ownership in
   `HostWindow.cpp`, X11 forwarding, Wayland object/lifecycle handling, Wayland
   marshalling and Wayland event listeners. These files implement one
@@ -62,6 +67,40 @@ Large host adapters are divided by the APIs or protocols they implement:
   display instances.
 - `Loader/DynamicLinker/`: parsing, library search/loading, symbol lookup,
   relocations, linking, dlopen, glibc patches, ld-linux shims and thread TLS.
+
+## Syscall families
+
+`Syscalls/Syscalls.cpp` tries each family handler in turn; families own
+disjoint syscall numbers, so order affects only lookup cost.
+
+- `Files/`: `FileSystem.cpp` dispatches `Descriptors.cpp` (fd I/O, dup,
+  fcntl, sync), `Paths.cpp` (open/mkdir/rename/link/chdir/mount), `Metadata.cpp`
+  (stat, getdents, chmod/chown, utimensat) and `Transfer.cpp` (splice,
+  sendfile); shared helpers are in `FilesInternal.hpp`. `EventIO.cpp` owns
+  epoll/eventfd/timerfd/poll/inotify/signalfd, `Sockets.cpp` the socket calls
+  and `Ioctl.cpp` ioctl.
+- `Process/`: `Process.cpp` dispatches scheduling, identity, wait and exit;
+  `Threads.cpp` (clone/futex) and `Signals.cpp` are separate families.
+- `Memory.cpp`, `Time.cpp`, `Compatibility.cpp` (newer or rarely used calls).
+- `HostCalls/`: Bifrost-private numbers from 0x1000 — API thunk dispatch and
+  adapter export lookup (`Thunks.cpp`), the Android launcher window/input/audio
+  ABI (`Android.cpp`) and dynamic-linker services (`DynamicLinker.cpp`).
+
+## Guest code
+
+Code under `Guest/` is compiled for, or runs inside, the guest:
+
+- `Guest/Android/Include/`: freestanding Bionic and NativeActivity headers.
+- `Guest/Android/Adapters/`: Bionic adapter libraries (EGL, surface, AAudio,
+  assets, log, Activity window, managed looper) built by
+  `Tools/Android/build-android-adapters.py`.
+- `Guest/Android/Launchers/`: native and ART launch executables.
+- `Guest/Android/Managed/`: the managed launcher dex (`ManagedLauncher.java`,
+  `ActivityProbe.java`) and its in-process framework services in
+  `Framework/`, built by `Scripts/Android/android_managed.py build`.
+- `Guest/Android/Probes/`: standalone framework probe classes.
+- `Guest/VDSO/`: AArch64 vDSO source; its linked image is embedded as
+  `Source/System/Loader/VdsoBytes.h`.
 
 Subsystem `*Internal.hpp` headers are private implementation details. Keep a
 protocol's callbacks and their file-local state together. Splits should follow

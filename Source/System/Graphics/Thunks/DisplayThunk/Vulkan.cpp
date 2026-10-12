@@ -1,7 +1,7 @@
 // Vulkan entry points that need deep marshalling (create/submit/present/map).
 #include "System/Graphics/Thunks/DisplayThunk/DisplayThunkInternal.hpp"
 namespace arm64emu {
-// ── Vulkan marshalling (1.5.4-alpha) ───────────────────────────────────
+// ── Vulkan marshalling ───────────────────────────────────
 // The generic bounce path copies pointer args byte-for-byte, which cannot
 // fix the NESTED guest pointers inside the instance/device create infos
 // (ppEnabledExtensionNames string arrays, pQueueCreateInfos struct array

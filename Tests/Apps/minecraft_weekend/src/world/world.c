@@ -241,7 +241,7 @@ void world_init(struct World *self) {
     self->unloaded_blocks.capacity = 64;
     self->unloaded_blocks.list = malloc(self->unloaded_blocks.capacity * sizeof(struct WorldUnloadedBlock));
 
-    // v1.5.x.alpha: tiny test world so a full CPU-emulated frame completes
+    // tiny test world so a full CPU-emulated frame completes
     // in seconds (4096 chunks was minutes of emulated world-gen per frame).
     self->chunks_size = 4;
     self->chunks = calloc(1, NUM_CHUNKS(self) * sizeof(struct Chunk *));

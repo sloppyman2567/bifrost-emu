@@ -371,9 +371,9 @@ inline uint64_t vfp_expand_imm(uint8_t imm8, uint8_t ftype) {
 }
 }  // namespace fp_decode
 // Sign-extend a value from `bits` width to 64 bits.
-// (Defined in Common.hpp — included here for reference.)
+// (Defined in Include/Bifrost/Types.hpp — shown here for reference.)
 // inline uint64_t sign_extend(uint64_t v, int bits) { ... }
 // Rotate right (used by immediate decode).
-// (Defined in Common.hpp — included here for reference.)
+// (Defined in Include/Bifrost/Types.hpp — shown here for reference.)
 // inline uint64_t ror64(uint64_t v, unsigned r) { ... }
 } // namespace arm64emu

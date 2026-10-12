@@ -1,7 +1,7 @@
-// jit/frostjit.cpp — FrostJIT: integer/memory/branch IR-op codegen + dispatch.
+// FrostJIT.cpp — FrostJIT: integer/memory/branch IR-op codegen + dispatch.
 //
-// v1.4.5-alpha: split into multiple files for readability.
-// v1.4.5-alpha: further split — ALU/memory/branch cases extracted
+// split into multiple files for readability.
+// further split — ALU/memory/branch cases extracted
 //   from compile_ir_inst()'s switch into three sub-dispatchers
 //   (compile_ir_{alu,mem,branch}) defined in jit_codegen_{alu,mem,branch}.cpp.
 //   This file holds:
@@ -132,7 +132,7 @@ static_assert(sizeof(((CPU*)0)->v_lo[0]) == 8, "CPU v_lo element must be 8 bytes
 // without name-mangling concerns. The CPU* arg is used for SIGSEGV
 // delivery when the memory access faults (UnmappedMemory).
 //
-// v1.4.5-alpha: jit_interp_step() was moved to InterpreterBridge.cpp.
+// jit_interp_step() was moved to InterpreterBridge.cpp.
 extern "C" {
     uint64_t jit_load_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, int width);
     void     jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
@@ -157,7 +157,7 @@ thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
     if (compile_guarded_mem(inst)) return false;
     emit_memory_guard(inst);
-    // v1.4.5-alpha: FP/SIMD ops are dispatched to
+    // FP/SIMD ops are dispatched to
     // compile_ir_inst_fp_() (defined in Dispatch.cpp) before the
     // integer/memory/branch switch below. The FP handler sets
     // fp_handled_ to true if it recognized the op (regardless of
@@ -167,7 +167,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
     fp_handled_ = false;
     bool ends_block = compile_ir_inst_fp_(inst);
     if (fp_handled_) return ends_block;
-    // v1.4.5-alpha: ALU / memory / branch cases are dispatched
+    // ALU / memory / branch cases are dispatched
     // to compile_ir_{alu,mem,branch}() (defined in jit_codegen_*.cpp)
     // before the residual switch below. Each sub-dispatcher returns:
     //   -1 = not handled here (fall through to the next dispatcher)

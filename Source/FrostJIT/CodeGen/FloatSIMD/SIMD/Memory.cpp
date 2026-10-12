@@ -252,8 +252,8 @@ bool FrostJIT::compile_simd_memory_(const IRInst& inst) {
             return true;
         }
         // ── SIMD SHL/USHR/SSHR/USRA/SSRA/SLI/SRI (vector, by immediate) ──
-        // v1.4.5-alpha: native SSE2 codegen via psllw/pslld/psllq (SHL),
-        // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR). 1.5.4-alpha:
+        // native SSE2 codegen via psllw/pslld/psllq (SHL),
+        // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR).
         // extended to USRA/SSRA/SLI/SRI (accumulate / insert-merge) and
         // added an AVX2 256-bit VEX path on capable hosts. Previously
         // these all fell back to CALL_INTERP (~20% overhead on SIMD-heavy

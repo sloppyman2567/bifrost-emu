@@ -1,4 +1,4 @@
-// syscalls/misc_signal.cpp — signal-related syscalls extracted from Miscellaneous.cpp.
+// Signals.cpp — signal-related syscalls, dispatched from Syscalls.cpp.
 // Handles: sigaltstack(132), rt_sigsuspend(133), rt_sigaction(134),
 // rt_sigprocmask(135), rt_sigpending(136), rt_sigtimedwait(137),
 // rt_sigqueueinfo(138), rt_sigreturn(139).
@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <cstring>
 namespace arm64emu {
-int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
+int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;

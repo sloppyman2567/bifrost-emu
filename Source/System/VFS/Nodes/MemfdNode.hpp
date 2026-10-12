@@ -1,10 +1,10 @@
-// yggdrasil/memfd_node.hpp — synthetic content served from a memfd.
+// MemfdNode.hpp — synthetic content served from a memfd.
 //
 // MemfdNode wraps a memfd_create'd host fd. The content is written
 // once at creation time and the guest reads/seeks through it like a
 // regular file.
 //
-// v1.4.5-alpha improvement: optional lazy regeneration. A MemfdNode
+// optional lazy regeneration. A MemfdNode
 // can be constructed with a "regenerator" callback instead of static
 // content. When the guest seeks to offset 0 (or opens the file fresh),
 // the regenerator is called to produce fresh content — useful for

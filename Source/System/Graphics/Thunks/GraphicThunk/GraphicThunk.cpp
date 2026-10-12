@@ -1,6 +1,6 @@
-// frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha).
+// GraphicThunk.cpp — graphic API thunking.
 //
-// 1.5.4-alpha: also hosts the FrostGraphics::audio_thunk() and
+// also hosts the FrostGraphics::audio_thunk() and
 // FrostGraphics::display_thunk() lazy-creator methods (the AudioThunk
 // and DisplayThunk implementations live in their own .cpp files).
 //
@@ -31,7 +31,7 @@ namespace arm64emu {
 // ── GraphicThunk method implementations ───────────────────────────────
 GraphicThunk::GraphicThunk() {
     impl_ = std::make_unique<GraphicThunkImpl>();
-    // 1.5.4-alpha: thunking is now ENABLED BY DEFAULT.
+    // thunking is now ENABLED BY DEFAULT.
     // Previously required BIFROST_THUNK_GRAPHICS=1. Now we always try
     // to thunk graphic calls; if the host doesn't have GL/EGL/SDL2
     // libraries, the symbols resolve to stubs that return 0 (safe
@@ -93,7 +93,7 @@ bool GraphicThunk::init(Memory& mem) {
     // Register the known GL/EGL/SDL2 entry points.
     register_known_symbols_();
     impl_->initialized = true;
-    // 1.5.4-alpha: initialize GL state tracker.
+    // initialize GL state tracker.
     impl_->gl_state_tracker_ = std::make_unique<GLStateTracker>();
     if (dbg().thunk_trace) {
         fprintf(stderr, "[thunk] init: %zu symbols registered, "
@@ -119,7 +119,7 @@ void GraphicThunk::register_function_(const std::string& lib,
     for (const auto& e : lt->entries) {
         if (e.name == sym) return;
     }
-    // 1.5.4-alpha: symbol_id includes ID_BASE_GRAPHICS to
+    // symbol_id includes ID_BASE_GRAPHICS to
     // avoid collisions with AudioThunk/DisplayThunk IDs.
     uint32_t local_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
     if (local_id >= GraphicThunk::MAX_SYMBOLS) {
@@ -265,7 +265,7 @@ void GraphicThunk::wake_sdl_semaphores() {
 // a null stub (when the host doesn't have the headers, but we still
 // want the symbol to resolve so the guest doesn't fail at dlsym time).
 //
-// 1.5.4-alpha: the symbol inventory is TABLE-DRIVEN. Tools/CodeGen/thunk_dp.txt
+// the symbol inventory is TABLE-DRIVEN. Tools/CodeGen/thunk_dp.txt
 // (generated into Include/Generated/ThunkTable.hpp) lists every (lib family, symbol)
 // with its AAPCS64 arg kinds, return kind, dispatch policy and bounce size.
 // This loop derives the legacy ABI-shape fields (pointer_args / n_stack /
@@ -409,7 +409,7 @@ void GraphicThunk::register_known_symbols_() {
     }
 
     for (const thunk::Spec& spec : thunk::specs) {
-        // 1.5.4-alpha: the table now also carries the DisplayThunk
+        // the table now also carries the DisplayThunk
         // families (VK/WL/X11/...). GraphicThunk only owns the graphic
         // families — skip the rest BEFORE indexing kFamilies (which is
         // sized for GL/GLES/EGL/SDL/GLFW only; display families have
@@ -509,7 +509,7 @@ GraphicThunk* FrostGraphics::thunk() {
     }
     return thunk_.get();
 }
-// 1.5.4-alpha: audio_thunk() and display_thunk() — same lazy pattern.
+// audio_thunk() and display_thunk() — same lazy pattern.
 // They live here for the same reason thunk() does: the FrostGraphics
 // header only forward-declares AudioThunk / DisplayThunk, so the
 // unique_ptr ctor needs the full type, which is only visible in this

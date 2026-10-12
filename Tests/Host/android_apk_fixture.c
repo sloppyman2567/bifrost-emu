@@ -1,4 +1,4 @@
-#include "../../Guest/Android/native_activity.h"
+#include "../../Guest/Android/Include/native_activity.h"
 #include <android/log.h>
 #include <zlib.h>
 #include <media/NdkMediaFormat.h>

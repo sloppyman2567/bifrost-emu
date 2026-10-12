@@ -1,4 +1,4 @@
-// core/thread_mgr.cpp — guest thread (vCPU) lifecycle.
+// Threads.cpp — guest thread (vCPU) lifecycle.
 //
 // Implements Emulator::spawn_thread / join_threads / find_cpu_by_tid and
 // the thread_entry trampoline that runs a cloned guest thread on a host
@@ -801,7 +801,7 @@ Emulator::ForkChild* Emulator::find_fork_child(int pid) {
     return nullptr;  // host fork() children are tracked by the kernel
 }
 int Emulator::reap_fork_child(int pid, int options, bool& found) {
-    // This is only called if the host wait4() path in Miscellaneous.cpp doesn't
+    // This is only called if the host wait4() path in Process/Wait.cpp doesn't
     // handle it. In practice, host fork() children are reaped via the
     // kernel's wait4(), so this should never be called.
     (void)pid; (void)options;
@@ -809,7 +809,7 @@ int Emulator::reap_fork_child(int pid, int options, bool& found) {
     return 0;
 }
 // ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ─────────────
-// 1.5.4-alpha. The game spawns worker threads (timer, music, event) via
+// The game spawns worker threads (timer, music, event) via
 // SDL_CreateThread and joins them with SDL_WaitThread. These are REAL
 // concurrent guest threads: the guest SDL_Thread* handle is a small
 // guest-addressable struct whose word 0 is a "done" futex flag and word 8

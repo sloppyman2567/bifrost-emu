@@ -1,6 +1,6 @@
-// jit/jit_dispatch.cpp — FrostJIT block dispatcher.
+// Dispatch.cpp — FrostJIT block dispatcher.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. Holds the
+// split out of FrostJIT.cpp. Holds the
 // run_block() method, which is the main JIT entry point: given a CPU
 // state, look up the block at cpu.pc in the block cache. On a hit,
 // call the cached x86 code directly. On a miss, translate the block
@@ -52,7 +52,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // Disable the JIT permanently and fall back to pure interpreter.
     // This is a safety valve; normal programs never hit it.
     //
-    // 1.5.4-alpha: the counter is THREAD-LOCAL. The old
+    // the counter is THREAD-LOCAL. The old
     // total_blocks_executed_.fetch_add(1) was a `lock xadd` on EVERY
     // dispatch (fast path included) — ~15-25 cycles of serializing
     // atomic traffic per block transition, which was a large fraction of
@@ -72,7 +72,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     }
     sync_dispatch_cache();
     uint64_t pc = cpu.pc;
-    // ── 1.5.4-alpha: single-entry "last block" fast cache ────────
+    // ── single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
     // Bypass the shared_mutex + unordered_map lookup entirely when the
     // PC matches the cached one. The cached fn pointer is stable across
@@ -80,7 +80,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // entries are revoked by the owner/generation check above whenever
     // code or mappings are invalidated.
     //
-    // 1.5.4-alpha: trimmed to the bare minimum. The per-PC watchdog is
+    // trimmed to the bare minimum. The per-PC watchdog is
     // gone from the fast path (the thread-local global watchdog above
     // still counts every dispatch, and a single-PC hot loop through the
     // dispatcher is the normal non-self-loopable case). The block's
@@ -119,7 +119,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         flush_stat_tls();
         return tls_last_block_.fn(&cpu, &emu);
     }
-    // 1.5.4-alpha: inline cache for block-to-block transitions.
+    // inline cache for block-to-block transitions.
     // Catches the common case of sequential block-to-block transitions
     // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the
     // shared_mutex. Indexed by a PC hash that mixes high and low
@@ -315,7 +315,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     }
     blocks_executed++;
     instructions_executed += entry.instr_count;
-    // 1.5.4-alpha: populate the single-entry last-block cache so the
+    // populate the single-entry last-block cache so the
     // next dispatch of the same PC can take the fast path. Only cache
     // non-interp_only blocks with a valid fn pointer.
     if (entry.fn && !entry.interp_only) {

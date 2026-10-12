@@ -1,4 +1,4 @@
-// yggdrasil/host_node.hpp — wraps a host file descriptor.
+// HostNode.hpp — wraps a host file descriptor.
 //
 // HostNode is the "passthrough" Node: every operation is forwarded to
 // the host kernel via the wrapped fd. Used for regular files, pipes,

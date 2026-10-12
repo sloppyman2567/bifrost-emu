@@ -1,11 +1,11 @@
-// jit/jit_codegen_fp.cpp — FrostJIT FP/SIMD IR-op codegen dispatcher.
+// Dispatch.cpp — FrostJIT FP/SIMD IR-op codegen dispatcher.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. This file held the
+// split out of FrostJIT.cpp. This file held the
 // FP_* and SIMD_* case bodies of the IR-op switch, extracted into a
 // separate method (compile_ir_inst_fp_) for readability. The main switch
 // in FrostJIT.cpp dispatches to this method for FP/SIMD ops.
 //
-// v1.4.5-alpha: split further into two sub-files:
+// split further into two sub-files:
 //   - FloatArithmetic.cpp (compile_ir_fparith): FMOV_*, FP_BINOP,
 //     FP_UNOP, FP_CMP, FP_MOVI, FP_F2I, FP_I2F, FP_F2I_FIXED,
 //     FP_I2F_FIXED, FCVT_S2D, FCVT_D2S
@@ -107,7 +107,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
     // it. The caller (compile_ir_inst) checks fp_handled_ after the
     // call to decide whether to fall through to the integer switch.
     fp_handled_ = true;
-    // v1.4.5-alpha: FP arithmetic/conversion/move ops and
+    // FP arithmetic/conversion/move ops and
     // SIMD/NEON ops are dispatched to compile_ir_fparith() and
     // compile_ir_simd() (defined in FloatArithmetic.cpp and
     // SIMD.cpp) before the residual switch below. Both

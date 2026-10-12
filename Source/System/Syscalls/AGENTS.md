@@ -15,3 +15,9 @@
   guides when changing their syscall entry points.
 - Compatibility families belong in `Compatibility.cpp`; unsupported semantics
   should fail deliberately rather than returning guessed successful values.
+- Each family handler (`Files/`, `Process/`, `HostCalls/`, ...; see the source
+  map) owns a disjoint set of syscall numbers. Add a case to the family that owns
+  that kind of operation and never duplicate a number in another handler: an
+  earlier handler would silently shadow it. Bifrost-private calls (>= 0x1000)
+  belong in `HostCalls/`. Families outside the `Emulator` friend list use its
+  public accessors.

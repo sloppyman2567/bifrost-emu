@@ -1,8 +1,8 @@
-// interp/interp_fp.cpp — FP/SIMD dispatcher (Emulator::execute_fp).
+// Dispatch.cpp — FP/SIMD dispatcher (Emulator::execute_fp).
 //
 // Handles FMOV_VD1/FMOV_RVD1 and SIMD_LD1/SIMD_ST1 here and hands the
 // rest to the group files:
-//   SIMD_DP   → ThreeRegister.cpp, Miscellaneous.cpp,
+//   SIMD_DP   → ThreeRegister.cpp, TwoRegisterPermute.cpp,
 //               Immediate.cpp, Arithmetic.cpp (in that order:
 //               encodings overlap, so the first group that returns true
 //               wins, exactly as in the old single if-chain)
@@ -269,7 +269,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             const SimdDpFields f(d.raw);
             uint32_t op = f.op;
             bool Q = f.Q;
-            // 1.5.4-alpha: ARMv8 Crypto Extensions (AES, SHA1, SHA256,
+            // ARMv8 Crypto Extensions (AES, SHA1, SHA256,
             // PMULL). These are checked first because their encodings
             // overlap with regular SIMD ops in the same major group
             // (bits[28:24]=0b01110) but have specific high-bit patterns

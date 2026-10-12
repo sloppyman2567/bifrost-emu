@@ -1,6 +1,6 @@
-// jit/jit_flags.cpp — FrostJIT flag materialization helpers.
+// Flags.cpp — FrostJIT flag materialization helpers.
 //
-// v1.4.5-alpha: split out of FrostJIT.cpp. Holds the
+// split out of FrostJIT.cpp. Holds the
 // clobber_flags() and materialize_flags_to_pstate() methods, which
 // manage the lazy materialization of guest NZCV flags from host RFLAGS
 // to cpu.pstate. These are called by compile_ir_inst (in FrostJIT.cpp
@@ -68,6 +68,6 @@ void FrostJIT::materialize_flags_to_pstate(bool preserve_flags) {
 // SIMD_LOGICAL falls back to CALL_INTERP only for unrecognized opcodes
 // (its `default:` case), but that's rare enough to accept the risk.
 //
-// v1.4.5-alpha: instr_will_call_interp() was moved to
+// instr_will_call_interp() was moved to
 // BlockCompiler.cpp (it's only used by translate_block).
 } // namespace arm64emu

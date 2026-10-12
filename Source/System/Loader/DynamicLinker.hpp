@@ -1,4 +1,4 @@
-// frontend/dynamic_linker.h — Dynamic linking support for bifrost-emu.
+// DynamicLinker.hpp — Dynamic linking support for bifrost-emu.
 //
 // Implements DT_NEEDED processing, GOT/PLT relocation, symbol
 // resolution, and TLS block allocation for dynamically-linked AArch64
@@ -41,7 +41,7 @@
 //   - Static TLSDESC descriptors use a precomputed TP offset; dynamic
 //     descriptors call a shim resolver that allocates/looks up the
 //     calling thread's DTV entry.
-//   - dladdr() is overridden (1.5.4-alpha): the dladdr@GLIBC_2.34 and
+//   - dladdr() is overridden: the dladdr@GLIBC_2.34 and
 //     dladdr@GLIBC_2.0 symbols are FORCE-overridden to point at our
 //     OFF_DLADDR stub, which calls DynamicLinker::dladdr() via syscall
 //     0x1005. This fills in Dl_info (dli_fname, dli_fbase, dli_sname,
@@ -268,7 +268,7 @@ public:
     const std::string& error() const { return error_; }
     // Loader-wide lock accessor (see loader_mu_ below). External code
     // that iterates objects() or reads TLS state directly (e.g. the
-    // syscall 0x1001 _dl_allocate_tls handler in Miscellaneous.cpp) must hold
+    // syscall 0x1001 _dl_allocate_tls handler in Syscalls/HostCalls/DynamicLinker.cpp) must hold
     // this lock around the whole iteration to avoid racing with a
     // concurrent dlopen() from another guest thread.
     std::recursive_mutex& loader_lock() const { return loader_mu_; }

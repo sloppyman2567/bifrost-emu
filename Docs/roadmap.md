@@ -1,8 +1,8 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress. Updated October 5, 2026. Except for checkpoints explicitly
-marked implemented below, these are development targets, not compatibility
-guarantees or a release date.
+Status: in progress; the current pre-release is 2.0.0-alpha.1. Updated
+October 12, 2026. Except for checkpoints explicitly marked implemented below,
+these are development targets, not compatibility guarantees or a release date.
 
 v2.0 aims to run selected ARM64 Android games through an integrated Android
 runtime, improve sustained Linux game performance, and make input reliable

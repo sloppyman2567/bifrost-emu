@@ -1,22 +1,28 @@
-// syscalls/syscalls.cpp — Linux AArch64 syscall dispatcher.
+// Syscalls.cpp — Linux AArch64 syscall dispatcher.
 //
 // Implements Emulator::syscall(), which is called when the guest executes
 // SVC #0. The dispatcher reads the syscall number from cpu.regs[8] and
-// delegates to one of the subsystem handlers:
+// delegates to the family handlers, in this order:
 //
-//   syscall_fs      (FileSystem.cpp)        — file ops: openat/close/read/write/dup/...
-//   syscall_mem     (Memory.cpp)       — mmap/munmap/mremap/mprotect/brk
-//   syscall_threads (Threads.cpp)   — clone/clone3/futex/set_tid_address
-//   syscall_time    (Time.cpp)      — clock_gettime/gettimeofday/nanosleep
-//   syscall_ioctls  (Ioctl.cpp)    — ioctl (fb, termios, etc.)
-//   syscall_misc    (this file)     — everything else (uname/getpid/prctl/...)
+//   syscall_fs               (Files/FileSystem.cpp) — descriptors, paths, metadata, splice
+//   syscall_mem              (Memory.cpp)           — mmap/munmap/mremap/mprotect/brk
+//   syscall_threads          (Process/Threads.cpp)  — clone/clone3/futex/set_tid_address
+//   syscall_time             (Time.cpp)             — clock_gettime/gettimeofday/nanosleep
+//   syscall_ioctls           (Files/Ioctl.cpp)      — ioctl (fb, termios, etc.)
+//   syscall_signals          (Process/Signals.cpp)  — sigaction/sigprocmask/sigreturn
+//   syscall_event_io         (Files/EventIO.cpp)    — epoll/eventfd/timerfd/poll/inotify
+//   syscall_sockets          (Files/Sockets.cpp)    — socket/connect/sendmsg/recvmsg
+//   syscall_process          (Process/Process.cpp)  — identity/scheduling/wait/exit
+//   syscall_compatibility    (Compatibility.cpp)    — newer and rarely used syscalls
+//   syscall_host_thunks, syscall_android_launcher, syscall_linker_services
+//                            (HostCalls/)           — Bifrost-private numbers >= 0x1000
 //
 // Each handler returns SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
-// The dispatcher tries them in order; the first one that handles the call
-// wins. Unhandled syscalls fall through to a -ENOSYS return.
+// Families own disjoint numbers; the first one that handles the call wins.
+// Unhandled syscalls fall through to a -ENOSYS return.
 //
 // When adding a new syscall:
-//   1. Pick the right subsystem file (fs/mem/threads/time/ioctls/misc).
+//   1. Pick the family file that owns that kind of operation.
 //   2. Add a case in that file's switch.
 //   3. Document the syscall number (AArch64 numbering).
 //   4. Add a test if possible.
@@ -140,7 +146,7 @@ void Emulator::syscall(CPU& cpu) try {
             return;
         }
     }
-    // 1.5.4-alpha: vDSO clock fast-path. The vDSO clock stubs
+    // vDSO clock fast-path. The vDSO clock stubs
     // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
     // return PC inside the vDSO mapping. Read the host clock directly and
     // skip the full syscall dispatch (drain_host_signals + six subsystem
@@ -289,7 +295,7 @@ void Emulator::syscall(CPU& cpu) try {
     // Hot-path pre-dispatch: jump straight to the owning subsystem for the
     // most frequent calls instead of walking the six-handler chain. The
     // game's per-frame mesh churn hammers mmap/munmap/brk (mem), and GL/SDL
-    // thunk calls ride misc on GraphicThunk::SYSCALL_NUMBER (0x1000).
+    // thunk calls use GraphicThunk::SYSCALL_NUMBER (0x1000).
     // Everything else falls through to the generic chain unchanged, so the
     // ownership is provably identical to before.
     switch (num) {
@@ -307,17 +313,24 @@ void Emulator::syscall(CPU& cpu) try {
             if (syscall_threads(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
             break;
         case 0x1000:  // GraphicThunk::SYSCALL_NUMBER (GL/SDL/EGL/Vulkan thunks)
-            if (syscall_misc(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
+            if (syscall_host_thunks(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
             break;
         default:
             break;
     }
-    if (syscall_fs(*this, cpu, num)      != SYSCALL_NOT_HANDLED) return;
-    if (syscall_mem(*this, cpu, num)     != SYSCALL_NOT_HANDLED) return;
-    if (syscall_threads(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
-    if (syscall_time(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
-    if (syscall_ioctls(*this, cpu, num)  != SYSCALL_NOT_HANDLED) return;
-    if (syscall_misc(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
+    if (syscall_fs(*this, cpu, num)               != SYSCALL_NOT_HANDLED) return;
+    if (syscall_mem(*this, cpu, num)              != SYSCALL_NOT_HANDLED) return;
+    if (syscall_threads(*this, cpu, num)          != SYSCALL_NOT_HANDLED) return;
+    if (syscall_time(*this, cpu, num)             != SYSCALL_NOT_HANDLED) return;
+    if (syscall_ioctls(*this, cpu, num)           != SYSCALL_NOT_HANDLED) return;
+    if (syscall_signals(*this, cpu, num)          != SYSCALL_NOT_HANDLED) return;
+    if (syscall_event_io(*this, cpu, num)         != SYSCALL_NOT_HANDLED) return;
+    if (syscall_sockets(*this, cpu, num)          != SYSCALL_NOT_HANDLED) return;
+    if (syscall_process(*this, cpu, num)          != SYSCALL_NOT_HANDLED) return;
+    if (syscall_compatibility(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
+    if (syscall_host_thunks(*this, cpu, num)      != SYSCALL_NOT_HANDLED) return;
+    if (syscall_android_launcher(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
+    if (syscall_linker_services(*this, cpu, num)  != SYSCALL_NOT_HANDLED) return;
     // Completely unknown syscall — return -ENOSYS.
     cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS));
 } catch (const UnmappedMemory&) {

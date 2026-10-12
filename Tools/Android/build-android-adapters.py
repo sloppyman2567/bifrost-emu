@@ -110,7 +110,7 @@ def build(runtime, output):
         "-O2",
         "-Wall",
         "-Wextra",
-        "-I" + str(ROOT / "Guest/Android"),
+        "-I" + str(ROOT / "Guest/Android/Include"),
         "-Wl,-z,max-page-size=16384",
         "-Wl,-z,defs",
     ]
@@ -149,11 +149,11 @@ def build(runtime, output):
             inputs = [str(assembly)]
             if library == "libandroid.so":
                 inputs += [
-                    str(ROOT / "Guest/Android/assets.c"),
+                    str(ROOT / "Guest/Android/Adapters/assets.c"),
                     str(bionic / "libc.so"),
                 ]
             if library == "liblog.so":
-                inputs += [str(ROOT / "Guest/Android/log.c"), str(bionic / "libc.so")]
+                inputs += [str(ROOT / "Guest/Android/Adapters/log.c"), str(bionic / "libc.so")]
             subprocess.run(
                 common
                 + ["-fPIC", "-shared", "-Wl,-soname," + library]
@@ -169,7 +169,7 @@ def build(runtime, output):
                 "-Wl,--dynamic-linker=/system/bin/linker64",
                 "-Wl,-rpath,/system/lib64:/apex/com.android.runtime/lib64/bionic",
                 str(ROOT / "Tests/Unit/android_bionic_start.S"),
-                str(ROOT / "Guest/Android/native_launcher.c"),
+                str(ROOT / "Guest/Android/Launchers/native_launcher.c"),
                 str(staging / "libandroid.so"),
                 str(bionic / "libc.so"),
                 str(bionic / "libdl.so"),
@@ -182,7 +182,7 @@ def build(runtime, output):
         )
         # ManagedLauncher and ActivityProbe share the window/identity JNI bridge.
         subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
-                                 str(ROOT / "Guest/Android/activity_window.c"),
+                                 str(ROOT / "Guest/Android/Adapters/activity_window.c"),
                                  str(staging / "libandroid.so"), str(bionic / "libc.so"),
                                  str(bionic / "libdl.so"), str(bionic / "libdl_android.so"),
                                  "-o", str(staging / "libbifrost-activity.so")], check=True)
@@ -204,7 +204,7 @@ def build(runtime, output):
         # Share the AudioThunk export registry. Managed AAudio streams must
         # stay on the host backend, rather than fall back to Android AudioTrack.
         aa_exports = re.findall(r"REG\(aa_libs,\s*(\w+)\)",
-                               (ROOT / "Source/System/Audio/AudioThunk/Core.cpp").read_text())
+                               (ROOT / "Source/System/Audio/AudioThunk/AudioThunk.cpp").read_text())
         # aaudio.c runs data callbacks on its own Bionic thread, like libaaudio;
         # it wraps open/close and drives the private bifrost_aaudio_* calls.
         aa_hidden = {"AAudioStreamBuilder_openStream", "AAudioStream_close"}
@@ -212,7 +212,7 @@ def build(runtime, output):
         assembly = staging / "managed-libaaudio.so.S"
         assembly.write_text(shim("libaaudio.so", aa_exports, aa_hidden))
         subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libaaudio.so",
-                                 str(assembly), str(ROOT / "Guest/Android/aaudio.c"),
+                                 str(assembly), str(ROOT / "Guest/Android/Adapters/aaudio.c"),
                                  str(bionic / "libc.so"), "-o", str(managed / "libaaudio.so")],
                        check=True)
         names.append("managed/libaaudio.so")
@@ -232,14 +232,14 @@ def build(runtime, output):
             hidden = {"ANativeWindow_fromSurface"} if soname == "libandroid.so" else set()
             if soname == "libEGL.so":
                 wrappers = set(re.findall(r"^\s+EGL_WRAPPER\((\w+)\)",
-                    (ROOT / "Guest/Android/egl.c").read_text(), re.MULTILINE))
+                    (ROOT / "Guest/Android/Adapters/egl.c").read_text(), re.MULTILINE))
                 hidden = wrappers.intersection(exports)
             assembly.write_text(shim(table, exports, hidden))
-            wrapper = [str(ROOT / "Guest/Android/surface.c"), str(bionic / "libc.so")] if hidden else []
+            wrapper = [str(ROOT / "Guest/Android/Adapters/surface.c"), str(bionic / "libc.so")] if hidden else []
             if soname == "libEGL.so":
-                wrapper = [str(ROOT / "Guest/Android/egl.c"), str(bionic / "libc.so")]
+                wrapper = [str(ROOT / "Guest/Android/Adapters/egl.c"), str(bionic / "libc.so")]
             if soname == "libandroid.so":
-                wrapper += [str(ROOT / "Guest/Android/managed_looper.c"),
+                wrapper += [str(ROOT / "Guest/Android/Adapters/managed_looper.c"),
                             str(bionic / "libdl.so"), str(bionic / "libdl_android.so")]
             subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + soname,
                                      "-Wl,--no-as-needed", str(assembly), *wrapper, str(stub),

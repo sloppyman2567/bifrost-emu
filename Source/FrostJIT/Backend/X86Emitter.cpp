@@ -1,4 +1,4 @@
-// jit/x86_backend.cpp — low-level x86-64 instruction emitters.
+// X86Emitter.cpp — low-level x86-64 instruction emitters.
 //
 // All emit_* primitives that produce raw x86 bytes into code_buf_.
 // Includes:
@@ -21,7 +21,7 @@
 // offsets. The regalloc and IR compiler layer on top.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Memory/Memory.hpp"
-#include "System/Core/Common.hpp"  // Emulator complete type (for slow-path helpers)
+#include "System/Core/Emulator.hpp"  // Emulator complete type (for slow-path helpers)
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -695,7 +695,7 @@ extern "C" {
 //   Caller-saved (clobbered by C calls): RAX, RCX, RDX, R8, R9, R11
 //   Callee-saved (preserved by C calls): R12, R13, R14, R15
 // Reserved: RBX=CPU, R10=window, RBP=frame, RSP=stack. Emu lives in the
-// frame slot, not R14 (1.5.4-alpha).
+// frame slot, not R14.
 // constexpr int FrostJIT::ALLOC_REGS[] = {RAX,RCX,RDX,R8,R9,R11,R12,R13,R15,R14};
 // (defined in FrostJIT.hpp; vregs cached in R12-R15 survive CALL_INTERP)
 // ── emit_load_mem / emit_store_mem ─────────────────────────────────────

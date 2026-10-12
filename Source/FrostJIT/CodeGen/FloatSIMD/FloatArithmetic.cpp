@@ -1,7 +1,7 @@
-// jit/jit_codegen_fparith.cpp — FrostJIT FP arithmetic / conversion IR-op
+// FloatArithmetic.cpp — FrostJIT FP arithmetic / conversion IR-op
 // codegen.
 //
-// v1.4.5-alpha: split out of Dispatch.cpp. This file holds
+// split out of Dispatch.cpp. This file holds
 // the FP arithmetic / conversion / move case bodies of the FP/SIMD IR-op
 // switch, extracted into a separate method (compile_ir_fparith) for
 // readability. The compile_ir_inst_fp_() dispatcher in Dispatch.cpp

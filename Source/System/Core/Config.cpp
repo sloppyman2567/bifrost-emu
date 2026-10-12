@@ -1,4 +1,4 @@
-// bifrost/config.cpp — Config system implementation (1.5.4-alpha).
+// Config.cpp — Config system implementation.
 //
 // Tiny TOML-subset parser (~200 LOC) + env-var bridge + validators.
 // See Include/Bifrost/Config.hpp for the format spec.

@@ -2,7 +2,7 @@
 // ── FrostJIT::compile_ir_simd ─────────────────────────────────────────
 // Handles all SIMD_* IR ops. Returns true if the op was handled, false if
 // not (caller falls through to the next dispatcher or residual switch).
-// The case bodies below are verbatim from Dispatch.cpp ()
+// The case bodies below are verbatim from Dispatch.cpp.
 // — no logic changes, just moved to a separate file/method.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 namespace arm64emu {

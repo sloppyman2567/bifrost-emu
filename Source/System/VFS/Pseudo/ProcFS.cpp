@@ -1,10 +1,10 @@
-// yggdrasil/procfs.cpp — ProcFS: synthetic /proc/* content.
+// ProcFS.cpp — ProcFS: synthetic /proc/* content.
 //
 // Each virtual file is served from a MemfdNode. Files that should
 // reflect live state (maps, status) use the lazy-regenerator form;
 // static files (version, cpuinfo) use the write-once form.
 //
-// v1.4.5-alpha improvements:
+// Behavior:
 //   - /proc and /proc/self directories are now DirNodes, so
 //     `ls /proc` and `ls /proc/self` work (previously returned nothing).
 //   - /proc/self/maps and /proc/self/status use lazy regeneration, so

@@ -1,6 +1,6 @@
-// syscalls/ioctls.cpp — ioctl() syscall.
+// Ioctl.cpp — ioctl() syscall.
 //
-// v1.4.5-alpha: rewritten to dispatch via Node::ioctl(). Previously
+// rewritten to dispatch via Node::ioctl(). Previously
 // this file had a big if-else chain on the request code (TIOCGWINSZ,
 // FBIOGET_*, TCGETS, etc.) and guessed the fd type. Now each Node
 // subclass owns its ioctls:
@@ -29,8 +29,8 @@
 namespace arm64emu {
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
-    auto& mem_ = emu.mem_;
-    auto& fds_ = emu.fds_;
+    auto& mem_ = emu.mem();
+    auto& fds_ = emu.fds();
     switch (num) {
         case 29: { // ioctl(fd, request, argp) — AArch64 syscall 29
             auto node = fds_.get(static_cast<int>(a0));
