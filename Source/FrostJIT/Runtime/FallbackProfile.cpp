@@ -72,8 +72,12 @@ void record_interpreted_instruction(int tid, uint64_t pc, uint32_t op, unsigned 
     entry->count.fetch_add(1, std::memory_order_relaxed);
 }
 void dump_interpreted_profile() {
-    const auto& path = dbg().fallback_profile;
+    // "%p" expands to the host PID: an Android app's processes (game, WebView,
+    // services) each run their own emulator and would overwrite one file.
+    std::string path = dbg().fallback_profile;
     if (path.empty()) return;
+    if (const auto at = path.find("%p"); at != std::string::npos)
+        path.replace(at, 2, std::to_string(::getpid()));
     auto& r = registry();
     std::lock_guard<std::mutex> writer(r.output_mutex);
     struct Row { Key key; long host; unsigned cls; uint64_t count; };

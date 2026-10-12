@@ -97,7 +97,7 @@ struct DebugFlags {
     std::string watch;  // BIFROST_WATCH — addr[:size] hex; log every
                         // Memory::write overlapping it with the current
                         // interp pc (heap wild-write hunt; --no-jit).
-    std::string fallback_profile; // BIFROST_FALLBACK_PROFILE=path: complete per-thread inventory
+    std::string fallback_profile; // BIFROST_FALLBACK_PROFILE=path: complete per-thread inventory ("%p" = host PID)
     std::string write_trace;  // BIFROST_WRITE_TRACE=path — complete guest
                               // store log (addr/size/tid/guest pc/value)
     std::string write_trace_range;  // BIFROST_WRITE_TRACE_RANGE=lo:hi hex
