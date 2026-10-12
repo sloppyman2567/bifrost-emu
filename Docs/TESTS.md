@@ -1,5 +1,15 @@
 # Tests
 
+## Ordered allocation overlap lookup (2026-10-12)
+
+A 60-second `perf` capture of SpongeBob gameplay attributed 4.2% of sampled CPU
+to `Memory::untrack_allocation`, which scanned every tracked allocation on each
+unmap. With the ordered overlap lookup, a throwaway guest benchmark (20,000
+live 8 KiB mappings, 20,000 partial and 20,000 remaining unmaps, contents
+verified) measured unmap-phase medians of 0.995 s before and 0.132 s after
+over three alternating runs (7.6x). The full strict suite passes 314/314.
+SpongeBob was not re-profiled after the change; its FPS gain is unmeasured.
+
 ## Native-density play windows (2026-10-12)
 
 `test-android-window-backend` checks that a backend reporting 1.5 pixels per

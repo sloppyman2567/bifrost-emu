@@ -342,7 +342,14 @@ private:
     // Restore anonymous storage over file mappings in [lo, hi).
     void detach_file_locked(uint64_t lo, uint64_t hi);
     std::map<uint64_t, Vma> vmas_;
-    std::unordered_map<uint64_t, uint64_t> allocations_;
+    // Tracked allocations (start → page-aligned size), ordered so munmap and
+    // MAP_FIXED find their overlaps without scanning every allocation. The
+    // ranges are disjoint: fixed maps evict overlaps, no-replace maps refuse
+    // them, and other paths take free-range or bump space.
+    std::map<uint64_t, uint64_t> allocations_;
+    // Allocations intersecting [lo, hi), in address order.
+    std::vector<std::pair<uint64_t, uint64_t>> allocation_overlaps_locked(uint64_t lo,
+                                                                          uint64_t hi) const;
     // Reclaimed (munmap'd) address ranges available for reuse, keyed by
     // start address → size. Kept coalesced so mmap_alloc can first-fit
     // and hand back the addresses the guest freed (a bump-only allocator

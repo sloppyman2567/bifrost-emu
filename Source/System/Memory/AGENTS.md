@@ -23,6 +23,10 @@ State shared between them goes in `MemoryInternal.hpp`.
   profiles retain their separate zero-page behavior.
 - Allocation reuses freed holes while respecting live mappings and tracked
   aliases. `brk` rounds to page boundaries and must not collide with mmap storage.
+- `allocations_` is an ordered map of disjoint ranges; munmap and MAP_FIXED find
+  overlaps with `allocation_overlaps_locked` (one predecessor plus a forward
+  walk), not a full scan. Every insertion must keep ranges disjoint: evict
+  (fixed), refuse (no-replace) or take free/bump space.
 - Relevant regressions: `test_shared_alias`, `test_madv_remove`,
   `test_userfaultfd`, `test_mem_guard`; rebuild fixtures before comparing modes.
   Known concurrent C++ copy versus mprotect/unmap limitations are documented in

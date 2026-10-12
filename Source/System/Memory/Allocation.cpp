@@ -210,13 +210,7 @@ uint64_t Memory::mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve
     const uint64_t lo = addr;
     const uint64_t hi = addr + aligned_size;
     // VMA-split eviction of overlapping live allocations.
-    std::vector<std::pair<uint64_t, uint64_t>> hits;
-    for (const auto& kv : allocations_) {
-        const uint64_t b = kv.first;
-        const uint64_t e = b + kv.second;
-        if (b < hi && e > lo) hits.push_back({b, kv.second});
-    }
-    for (const auto& h : hits) {
+    for (const auto& h : allocation_overlaps_locked(lo, hi)) {
         const uint64_t b = h.first;
         const uint64_t e = b + h.second;
         // BIFROST_MAPFIX_TRACE: log every live allocation a MAP_FIXED
@@ -491,13 +485,7 @@ void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
         hi &= ~PAGE_MASK;
     }
     if (hi <= lo) return;  // nothing after page rounding
-    std::vector<std::pair<uint64_t, uint64_t>> hits;  // [base, size)
-    for (const auto& kv : allocations_) {
-        const uint64_t b = kv.first;
-        const uint64_t e = b + kv.second;
-        if (b < hi && e > lo) hits.push_back({b, kv.second});
-    }
-    for (const auto& h : hits) {
+    for (const auto& h : allocation_overlaps_locked(lo, hi)) {
         const uint64_t b = h.first;
         const uint64_t e = b + h.second;
         allocations_.erase(b);
@@ -514,6 +502,19 @@ void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
     // map_range (ELF PT_LOAD, brk, stacks, vDSO) rather than mmap_alloc.
     detach_file_locked(lo, std::min(hi, window_size_));
     clear_mapping_locked(lo, hi);
+}
+std::vector<std::pair<uint64_t, uint64_t>> Memory::allocation_overlaps_locked(uint64_t lo,
+                                                                              uint64_t hi) const {
+    std::vector<std::pair<uint64_t, uint64_t>> hits;
+    auto it = allocations_.lower_bound(lo);
+    // Allocations are disjoint: only the last one starting below lo can
+    // still extend into the range.
+    if (it != allocations_.begin()) {
+        const auto prev = std::prev(it);
+        if (prev->first + prev->second > lo) hits.emplace_back(prev->first, prev->second);
+    }
+    for (; it != allocations_.end() && it->first < hi; ++it) hits.emplace_back(it->first, it->second);
+    return hits;
 }
 // ── Free-range bookkeeping ─────────────────────────────────────────────
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
