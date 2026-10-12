@@ -464,6 +464,8 @@ UNIT_TESTS=(
     "android_syscall_options|Tests/Unit/android_syscall_options.elf||10|checks passed"
     "android_service_manager|Tests/Unit/android_service_manager.elf||10|android_service_manager: ALL PASS"
     "test_compat_syscalls|Tests/Unit/test_compat_syscalls.elf||5|ALL TESTS PASSED"
+    # cwd/dirfd-relative path syscalls, chmod argument count, statx AT_EMPTY_PATH.
+    "test_path_syscalls|Tests/Unit/test_path_syscalls.elf||10|test_path_syscalls: ALL PASS"
 )
 
 # Integration tests (Tests/Apps/ — real-world test programs)
@@ -1161,12 +1163,20 @@ if [ "$RUN_INTEGRATION" = "1" ]; then
         if mkdir -p "$SBX/root/sub" "$SBX/outside" && \
                 printf 'hello\n' > "$SBX/root/sub/real.txt" && \
                 printf 'CANARY-DO-NOT-READ\n' > "$SBX/outside/secret" && \
+                chmod 644 "$SBX/outside/secret" && \
                 ln -sf "$SBX/outside/secret" "$SBX/root/sub/evil" && \
                 ln -sf "$SBX/outside" "$SBX/root/sub/outlink"; then
             OLD_RUN_ENV=("${RUN_ENV[@]}")
             RUN_ENV=("BIFROST_ROOT=$SBX/root" "${RUN_ENV[@]}")
             run_category "Sandbox" "test_sandbox|Tests/Unit/test_sandbox.elf||10|checks passed"
             RUN_ENV=("${OLD_RUN_ENV[@]}")
+            # The guest only sees its failures; confirm on the host that no
+            # escaping call modified, renamed or linked the outside canary.
+            if [ "$(cat "$SBX/outside/secret" 2>/dev/null)" != "CANARY-DO-NOT-READ" ] ||
+                    [ "$(stat -c '%a %h' "$SBX/outside/secret" 2>/dev/null)" != "644 1" ] ||
+                    [ "$(ls -A "$SBX/outside")" != "secret" ]; then
+                record_failure "test_sandbox" "outside canary was modified through the sandbox"
+            fi
         else
             record_failure "test_sandbox" "could not provision sandbox fixtures"
         fi

@@ -339,8 +339,26 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int host_fd = node ? node->host_fd() : -1;
             if (host_fd < 0) { ret_err(EBADF); return 0; }
             std::string path = Yggdrasil::read_path(mem_, a1);
-            int wd = ::inotify_add_watch(host_fd, path.c_str(),
-                                         static_cast<uint32_t>(a2));
+            const uint32_t mask = static_cast<uint32_t>(a2);
+            int wd;
+            if (Yggdrasil::path_confined(AT_FDCWD, path)) {
+                // Watch exactly the confined file: through its O_PATH fd's
+                // magic link, or (IN_DONT_FOLLOW) the name in its confined
+                // parent directory.
+                if (mask & IN_DONT_FOLLOW) {
+                    auto pd = Yggdrasil::open_parent(AT_FDCWD, path);
+                    if (!pd.valid()) { ret_errno(); return 0; }
+                    const std::string at = pd.fd == AT_FDCWD
+                        ? pd.base : Yggdrasil::proc_fd_path(pd.fd) + "/" + pd.base;
+                    wd = ::inotify_add_watch(host_fd, at.c_str(), mask);
+                } else {
+                    ScopedHostFd target(Yggdrasil::open_confined_path(AT_FDCWD, path, true));
+                    wd = target.fd < 0 ? -1
+                        : ::inotify_add_watch(host_fd, Yggdrasil::proc_fd_path(target.fd).c_str(), mask);
+                }
+            } else {
+                wd = ::inotify_add_watch(host_fd, Yggdrasil::remap_path(path).c_str(), mask);
+            }
             if (wd < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(wd));
             return 0;

@@ -139,10 +139,23 @@ public:
             o.fd = -1;
             o.owned = false;
         }
-        bool valid() const { return fd >= 0 && !base.empty(); }
+        // AT_FDCWD is a valid parent for a bare relative name.
+        bool valid() const { return (fd >= 0 || fd == AT_FDCWD) && !base.empty(); }
     };
     static ParentDir open_parent(int host_dirfd,
                                  const std::string& guest_path);
+    // True when BIFROST_ROOT confinement applies to (host_dirfd,
+    // guest_path): an absolute sandboxed path, or a relative path under a
+    // dirfd/cwd inside the root. Metadata and attribute syscalls then use
+    // open_confined_path; otherwise they keep their direct host call.
+    static bool path_confined(int host_dirfd, const std::string& guest_path);
+    // O_PATH|O_CLOEXEC fd for a confined path, resolved with
+    // RESOLVE_IN_ROOT (O_NOFOLLOW unless `follow`), or -1 with errno.
+    // Operate on it with AT_EMPTY_PATH calls or through proc_fd_path().
+    static int open_confined_path(int host_dirfd, const std::string& guest_path,
+                                  bool follow);
+    // "/proc/self/fd/N": the kernel magic link to exactly that open file.
+    static std::string proc_fd_path(int host_fd);
     // True when a BIFROST_ROOT sandbox is active.
     static bool sandbox_inside_root();
     // Canonical host path of the BIFROST_ROOT sandbox ("" when inactive).

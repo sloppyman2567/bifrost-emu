@@ -28,6 +28,22 @@
 #include <sys/types.h>
 #include <unistd.h>
 namespace arm64emu {
+// fstatat for a guest path. Under BIFROST_ROOT the path resolves once,
+// confined, to an O_PATH fd; otherwise the host resolves it directly.
+// Returns 0 or -errno.
+static int stat_guest_path(int hfd, const std::string& raw_path, int flags,
+                           struct stat* st) {
+    if (Yggdrasil::path_confined(hfd, raw_path)) {
+        ScopedHostFd target(Yggdrasil::open_confined_path(
+            hfd, raw_path, !(flags & AT_SYMLINK_NOFOLLOW)));
+        if (target.fd < 0) return -errno;
+        return ::fstatat(target.fd, "", st, AT_EMPTY_PATH) < 0 ? -errno : 0;
+    }
+    const std::string path = Yggdrasil::remap_path(raw_path);
+    // An absolute path ignores dirfd (POSIX).
+    const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;
+    return ::fstatat(dir, path.c_str(), st, flags) < 0 ? -errno : 0;
+}
 int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -140,22 +156,16 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
                 proc_exe_stat(elf_path_,
                               (static_cast<int>(a2) & AT_SYMLINK_NOFOLLOW) != 0, &st);
             } else {
-                std::string host_path = yggdrasil::Yggdrasil::remap_path(raw_path);
                 int hfd = resolve_dirfd(fds_, a0);
                 if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                     ret_err(EBADF); return 0;
                 }
-                int r;
-                int host_flags = static_cast<int>(a2);
                 // AT_SYMLINK_NOFOLLOW → don't follow symlinks
                 // AT_EMPTY_PATH → stat the fd itself
-                // If the path is absolute, the dirfd is ignored (per POSIX).
-                if (host_path.size() > 0 && host_path[0] == '/') {
-                    r = ::fstatat(AT_FDCWD, host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
-                } else {
-                    r = ::fstatat(hfd, host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
-                }
-                if (r < 0) { ret_host(-errno); return 0; }
+                // (the AT_STATX_SYNC_TYPE bits have no fstatat equivalent).
+                int r = stat_guest_path(hfd, raw_path,
+                    static_cast<int>(a2) & (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH), &st);
+                if (r < 0) { ret_host(r); return 0; }
             }
             // Build statx structure (256 bytes), zero-initialized so all
             // __reserved fields and padding are correctly zero.
@@ -222,21 +232,13 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
                 proc_exe_stat(elf_path_,
                               (static_cast<int>(a3) & AT_SYMLINK_NOFOLLOW) != 0, &st);
             } else {
-                std::string path = yggdrasil::Yggdrasil::remap_path(raw_path);
                 int hfd = resolve_dirfd(fds_, a0);
                 if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                     ret_err(EBADF); return 0;
                 }
-                int r;
-                // If the path is absolute, the dirfd is ignored (per POSIX).
-                // Pass AT_FDCWD to avoid issues with stale host dirfds.
-                if (path.size() > 0 && path[0] == '/') {
-                    r = ::fstatat(AT_FDCWD, path.c_str(), &st, static_cast<int>(a3));
-                } else {
-                    r = ::fstatat(hfd, path.c_str(), &st, static_cast<int>(a3));
-                }
+                int r = stat_guest_path(hfd, raw_path, static_cast<int>(a3), &st);
                 if (r < 0) {
-                    ret_host(-errno);
+                    ret_host(r);
                     return 0;
                 }
             }
@@ -318,10 +320,15 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             // Forward to host statfs for real paths. This gives correct
             // f_blocks/f_bfree/f_bavail so `df` shows real disk usage.
             // with f_blocks=0, making `df` show "0-block filesystem".
-            std::string path = yggdrasil::Yggdrasil::remap_path(
-                yggdrasil::Yggdrasil::read_path(mem_, a0));
+            std::string guest = yggdrasil::Yggdrasil::read_path(mem_, a0);
             struct statfs sfs{};
-            int r = ::statfs(path.c_str(), &sfs);
+            int r;
+            if (Yggdrasil::path_confined(AT_FDCWD, guest)) {
+                ScopedHostFd target(Yggdrasil::open_confined_path(AT_FDCWD, guest, true));
+                r = target.fd < 0 ? -1 : ::fstatfs(target.fd, &sfs);
+            } else {
+                r = ::statfs(yggdrasil::Yggdrasil::remap_path(guest).c_str(), &sfs);
+            }
             if (r < 0) {
                 // Fallback: synthesize a minimal ext4-like result.
                 sfs.f_type = 0xEF53;       // ext2/3/4 magic
@@ -351,16 +358,24 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-        case 53: { // fchmodat(dirfd, path, mode, flags) — AArch64 53
-            // BUGFIX: previously labeled "fchmod" but 53 is fchmodat.
-            // a fd. Fix: call ::fchmodat(dirfd, path, mode, flags).
+        case 53: { // fchmodat(dirfd, path, mode) — AArch64 53
+            // The raw syscall takes three arguments and always follows
+            // symlinks (Linux fs/open.c: SYSCALL_DEFINE3, flags 0); x3 is
+            // caller garbage. Flags exist only in fchmodat2 (452).
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
             }
-            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::fchmodat(hfd, path.c_str(),
-                               (mode_t)a2, static_cast<int>(a3));
+            std::string guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            int r;
+            if (Yggdrasil::path_confined(hfd, guest)) {
+                ScopedHostFd target(Yggdrasil::open_confined_path(hfd, guest, true));
+                r = target.fd < 0 ? -1
+                    : ::chmod(Yggdrasil::proc_fd_path(target.fd).c_str(), (mode_t)a2);
+            } else {
+                std::string path = yggdrasil::Yggdrasil::remap_path(guest);
+                r = ::fchmodat(hfd, path.c_str(), (mode_t)a2, 0);
+            }
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
@@ -374,7 +389,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
             }
-            std::string path = a1 ? yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1)) : std::string();
+            std::string guest = a1 ? yggdrasil::Yggdrasil::read_path(mem_, a1) : std::string();
             struct timespec times_buf[2];
             struct timespec* times_ptr = nullptr;
             if (a2 != 0) {
@@ -389,10 +404,28 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
             }
-            int r = ::utimensat(hfd,
-                                a1 ? path.c_str() : nullptr,
-                                times_ptr,
-                                static_cast<int>(a3));
+            const int flags = static_cast<int>(a3);
+            int r;
+            if (a1 && Yggdrasil::path_confined(hfd, guest)) {
+                if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) { ret_err(EINVAL); return 0; }
+                const bool follow = !(flags & AT_SYMLINK_NOFOLLOW);
+                ScopedHostFd target(Yggdrasil::open_confined_path(hfd, guest, follow));
+                if (target.fd < 0) { ret_errno(); return 0; }
+                struct stat st;
+                if (::fstatat(target.fd, "", &st, AT_EMPTY_PATH) < 0) { ret_errno(); return 0; }
+                if (!follow && S_ISLNK(st.st_mode)) {
+                    // A symlink's own times: its name in a confined parent.
+                    auto pd = Yggdrasil::open_parent(hfd, guest);
+                    if (!pd.valid()) { ret_errno(); return 0; }
+                    r = ::utimensat(pd.fd, pd.base.c_str(), times_ptr, AT_SYMLINK_NOFOLLOW);
+                } else {
+                    r = ::utimensat(AT_FDCWD, Yggdrasil::proc_fd_path(target.fd).c_str(),
+                                    times_ptr, 0);
+                }
+            } else {
+                std::string path = a1 ? yggdrasil::Yggdrasil::remap_path(guest) : std::string();
+                r = ::utimensat(hfd, a1 ? path.c_str() : nullptr, times_ptr, flags);
+            }
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
@@ -400,10 +433,26 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
         case 54: { // fchownat(dirfd, path, owner, group, flags) — AArch64 54
             // BUGFIX: was previously labeled "fchmodat" but fchmodat is
             // at 53 (handled in FileSystem.cpp). The real syscall at 54 is fchownat.
-            std::string path = Yggdrasil::remap_path(Yggdrasil::read_path(mem_, a1));
-            int r = ::fchownat(static_cast<int>(a0), path.c_str(),
-                               static_cast<uid_t>(a2), static_cast<gid_t>(a3),
-                               static_cast<int>(a4));
+            // The guest dirfd resolves through the FdTable (it was passed raw).
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
+            std::string guest = Yggdrasil::read_path(mem_, a1);
+            const int flags = static_cast<int>(a4);
+            int r;
+            if (Yggdrasil::path_confined(hfd, guest)) {
+                if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) { ret_err(EINVAL); return 0; }
+                ScopedHostFd target(Yggdrasil::open_confined_path(
+                    hfd, guest, !(flags & AT_SYMLINK_NOFOLLOW)));
+                r = target.fd < 0 ? -1
+                    : ::fchownat(target.fd, "", static_cast<uid_t>(a2),
+                                 static_cast<gid_t>(a3), AT_EMPTY_PATH);
+            } else {
+                std::string path = Yggdrasil::remap_path(guest);
+                r = ::fchownat(hfd, path.c_str(), static_cast<uid_t>(a2),
+                               static_cast<gid_t>(a3), flags);
+            }
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }

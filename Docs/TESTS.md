@@ -10,6 +10,32 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Yggdrasil sandbox and path syscall fixes (2026-10-12)
+
+Both configurations build and fixtures were rebuilt. The strict JIT suite passes
+**312/312** and the interpreter suite **304/304** (eight JIT-only skips). This
+includes the new `test_path_syscalls` and the extended `test_sandbox`
+(**84 checks**), followed by the host-side canary check. `make verify` passes 75
+differential fixtures and six threaded oracle runs, and the C API passes 57/57.
+Under `--rootfs` (the same sandbox), the twelve Bionic bootstrap and three
+AAudio callback combinations pass. The JNI fixture passes in JIT and
+interpreter modes, and the four framework display/package contracts, managed
+service execution, the five network/launcher tests, Asgard and the framework
+probe pass.
+
+Reference comparison: `test_path_syscalls` passes on qemu-aarch64 and on both
+engines, and fails 13 of 14 checks on the previous commit's binary. On the
+previous binary, `test_sandbox` failed 24 of 84 checks, and the guest emptied
+the outside canary, renamed a sandboxed file out next to it and hard-linked it
+into the root. The fixed binary leaves the canary's content, mode, link count
+and directory unchanged. ART's behavior was not re-derived beyond these runs.
+The kernel interfaces used (`openat2 RESOLVE_IN_ROOT`, O_PATH with
+`AT_EMPTY_PATH`, `/proc/self/fd` magic links) were checked against the man
+pages and kernel source; `utimensat AT_EMPTY_PATH` is avoided because older
+kernels reject it. Kernels without `openat2` keep the documented textual-only
+confinement, and that fallback was not exercised. Confined metadata calls cost
+an extra open/close per call under `BIFROST_ROOT` only; this was not timed.
+
 ### 2.0.0-alpha.1 layout, names and splits (2026-10-12)
 
 Both SDL/GL and headless configurations build with no new warnings, and

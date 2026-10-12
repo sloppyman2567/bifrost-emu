@@ -1,7 +1,10 @@
 # Linux syscall translation
 
 - Decode the AArch64 ABI's actual slots, widths, signed values, structures and
-  errno rules. Compare the concrete failing syscall with the native kernel or
+  errno rules. Read only the arguments the raw syscall defines: e.g. raw
+  `faccessat` and `fchmodat` take three, so x3 is caller garbage (the flags
+  forms are `faccessat2`/`fchmodat2`). Translate every guest dirfd through the
+  FdTable before a host call. Compare the concrete failing syscall with the native kernel or
   a trusted reference before adding compatibility behavior.
 - Preserve Linux fd/poll/epoll ownership and timeout semantics. A ready socket
   must not lose readiness when translating guest event structures or masks.

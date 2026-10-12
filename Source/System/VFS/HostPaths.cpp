@@ -488,6 +488,24 @@ Yggdrasil::ParentDir Yggdrasil::open_parent(int host_dirfd,
     pd.base = base;
     return pd;
 }
+bool Yggdrasil::path_confined(int host_dirfd, const std::string& guest_path) {
+    if (guest_path.empty()) return false;
+    if (guest_path[0] == '/') return uses_sandbox(sandbox_root_str(), guest_path);
+    return dirfd_confined(host_dirfd);
+}
+// Resolves the whole path (intermediate and, when following, trailing
+// symlinks) inside the root with the same policy as open(), so a symlink
+// cannot redirect a metadata or attribute change outside BIFROST_ROOT.
+int Yggdrasil::open_confined_path(int host_dirfd, const std::string& guest_path,
+                                  bool follow) {
+    const int flags = O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW);
+    if (guest_path.empty() || guest_path[0] == '/' || host_dirfd == AT_FDCWD)
+        return open_host_fd(guest_path, flags, 0);
+    return open_host_at(host_dirfd, guest_path, flags, 0);
+}
+std::string Yggdrasil::proc_fd_path(int host_fd) {
+    return "/proc/self/fd/" + std::to_string(host_fd);
+}
 bool Yggdrasil::sandbox_inside_root() {
     return !sandbox_root_str().empty();
 }

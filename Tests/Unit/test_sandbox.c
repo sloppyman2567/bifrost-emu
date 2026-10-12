@@ -11,7 +11,9 @@
 //
 // Checks: symlink escape via open/openat blocked; legit opens work;
 // explicit-dirfd openat; bogus dirfd EBADF; clone namespace rejection;
-// /proc PID denial; in-root mkdir/unlink/rename; chdir confinement.
+// /proc PID denial; in-root mkdir/unlink/rename; chdir confinement;
+// stat/access/readlink/chmod/chown/utimens/truncate/renameat2/linkat
+// through an escaping link fail while the same calls work in the root.
 // Results pattern: "checks passed" / "FAIL:" lines, exit 0/1.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -23,6 +25,9 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE 1
+#endif
 
 static int fails = 0;
 static int checks = 0;
@@ -275,6 +280,77 @@ int main(void) {
         CHECK(f < 0, "/proc/self/mem denied under root");
         CHECK(e == ENOENT, "/proc/self/mem denial is ENOENT");
         if (f >= 0) close(f);
+    }
+
+    // 14. Metadata/attribute syscalls resolve confined too. Through the
+    // escaping dir symlink each must fail (as under chroot); run_tests.sh
+    // also checks afterwards that the outside canary's content and mode
+    // are unchanged. The same calls inside the root keep working.
+    {
+        struct stat st;
+        struct timespec ts[2] = {{1, 0}, {1, 0}};
+        char buf[256];
+        const char* out = "/sub/outlink/secret";
+#define ESCAPE_FAILS(expr, msg) do { errno = 0; long r_ = (long)(expr); \
+        CHECK(r_ < 0 && errno == ENOENT, msg); } while (0)
+        ESCAPE_FAILS(stat(out, &st), "stat through escape fails");
+        ESCAPE_FAILS(lstat(out, &st), "lstat through escape fails");
+        ESCAPE_FAILS(access(out, F_OK), "access through escape fails");
+        ESCAPE_FAILS(syscall(SYS_faccessat2, AT_FDCWD, out, F_OK, 0), "faccessat2 through escape fails");
+        ESCAPE_FAILS(readlink("/sub/outlink/x", buf, sizeof(buf)), "readlink through escape fails");
+        ESCAPE_FAILS(chmod(out, 0600), "chmod through escape fails");
+        ESCAPE_FAILS(chown(out, (uid_t)-1, (gid_t)-1), "chown through escape fails");
+        ESCAPE_FAILS(utimensat(AT_FDCWD, out, ts, 0), "utimensat through escape fails");
+        ESCAPE_FAILS(truncate(out, 0), "truncate through escape fails");
+        ESCAPE_FAILS(truncate("/sub/evil", 0), "truncate via escaping file link fails");
+        ESCAPE_FAILS(syscall(SYS_renameat2, AT_FDCWD, "/sub/real.txt", AT_FDCWD,
+                             "/sub/outlink/moved.txt", 0), "renameat2 through escape fails");
+        ESCAPE_FAILS(linkat(AT_FDCWD, "/sub/evil", AT_FDCWD, "/sub/hard-evil",
+                            AT_SYMLINK_FOLLOW), "linkat following escaping link fails");
+#undef ESCAPE_FAILS
+        CHECK(stat("/sub/real.txt", &st) == 0 && st.st_size == 6, "stat in root works");
+        CHECK(lstat("/sub/evil", &st) == 0 && S_ISLNK(st.st_mode), "lstat of in-root link works");
+        ssize_t n = readlink("/sub/evil", buf, sizeof(buf));
+        CHECK(n > 0 && memmem(buf, (size_t)n, "outside/secret", 14) != NULL,
+              "readlink of in-root link works");
+        CHECK(access("/sub/real.txt", R_OK) == 0, "access in root works");
+        CHECK(chmod("/sub/real.txt", 0600) == 0 && stat("/sub/real.txt", &st) == 0 &&
+              (st.st_mode & 0777) == 0600, "chmod in root works");
+        chmod("/sub/real.txt", 0644);
+        CHECK(utimensat(AT_FDCWD, "/sub/real.txt", ts, 0) == 0 &&
+              stat("/sub/real.txt", &st) == 0 && st.st_mtim.tv_sec == 1, "utimensat in root works");
+        CHECK(utimensat(AT_FDCWD, "/sub/evil", ts, AT_SYMLINK_NOFOLLOW) == 0,
+              "lutimes on in-root link works");
+        CHECK(chown("/sub/real.txt", (uid_t)-1, (gid_t)-1) == 0, "chown in root works");
+        unlink("/sub/inlink");
+        unlink("/sub/hard");
+        CHECK(symlink("real.txt", "/sub/inlink") == 0 &&
+              linkat(AT_FDCWD, "/sub/inlink", AT_FDCWD, "/sub/hard", AT_SYMLINK_FOLLOW) == 0,
+              "linkat following in-root link works");
+        struct stat hard;
+        CHECK(stat("/sub/hard", &hard) == 0 && stat("/sub/real.txt", &st) == 0 &&
+              hard.st_ino == st.st_ino, "followed hard link targets the in-root file");
+        CHECK(syscall(SYS_renameat2, AT_FDCWD, "/sub/hard", AT_FDCWD, "/sub/hard2",
+                      RENAME_NOREPLACE) == 0, "renameat2 in root works");
+        CHECK(truncate("/sub/hard2", 2) == 0 && stat("/sub/real.txt", &st) == 0 &&
+              st.st_size == 2, "truncate in root works");
+        int f = open("/sub/real.txt", O_WRONLY | O_TRUNC);
+        CHECK(f >= 0 && write(f, "hello\n", 6) == 6, "restore real.txt");
+        if (f >= 0) close(f);
+        unlink("/sub/hard2");
+        unlink("/sub/inlink");
+        // cwd- and dirfd-relative forms inside the root.
+        CHECK(chdir("/sub") == 0, "chdir into sub for relative checks");
+        CHECK(stat("real.txt", &st) == 0 && access("real.txt", R_OK) == 0,
+              "cwd-relative stat/access in root works");
+        CHECK(mkdir("reldir", 0755) == 0 && rmdir("reldir") == 0,
+              "cwd-relative mkdir/rmdir in root works");
+        chdir("/");
+        int dfd = open("/sub", O_RDONLY | O_DIRECTORY);
+        CHECK(dfd >= 0 && fchownat(dfd, "real.txt", (uid_t)-1, (gid_t)-1, 0) == 0 &&
+              syscall(SYS_faccessat2, dfd, "real.txt", R_OK, 0) == 0,
+              "dirfd-relative fchownat/faccessat2 in root work");
+        if (dfd >= 0) close(dfd);
     }
 
     if (fails == 0) printf("checks passed: %d\n", checks);

@@ -13,6 +13,31 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Yggdrasil sandbox and path syscall fixes (2026-10-12)
+
+- **Sandbox escape fixed.** Under `BIFROST_ROOT` (including Android
+  `--rootfs` runs) several path syscalls rewrote the path lexically and let
+  the host follow symlinks. A guest symlink could make `truncate`,
+  `renameat2`, `utimensat`, `fchownat` and following `linkat` modify or
+  hard-link files outside the root, and the stat family, `statfs`,
+  `faccessat`/`faccessat2`, `readlinkat` and `inotify_add_watch` could
+  inspect them. These calls now resolve the path confined
+  (`openat2 RESOLVE_IN_ROOT`) to an O_PATH fd and act on that file; renames
+  use the confined parent. `umount2` returns EPERM like `mount`.
+  Unsandboxed runs keep their direct host calls.
+- `chmod()` failed with EINVAL for every guest: the raw `fchmodat` syscall
+  has three arguments, but x3 was forwarded as flags.
+- cwd-relative `mkdir`, `rmdir`, `unlink`, `rename`, `symlink`, `link` and
+  `mknod` failed with a stale errno since the sandbox hardening.
+  `ParentDir::valid()` rejected `AT_FDCWD`.
+- `fchownat` and `faccessat2` passed the raw guest dirfd to the host, and
+  `statx(fd, "", AT_EMPTY_PATH)` dropped `AT_EMPTY_PATH`.
+- New `test_path_syscalls` (qemu-aarch64 reference passes; the previous
+  binary fails 13 of 14 checks). `test_sandbox` now covers every confined
+  call (84 checks), and the runner confirms on the host that the outside
+  canary is untouched. The previous binary emptied, renamed next to and
+  hard-linked that canary.
+
 ### Version, guest layout and descriptive names (2026-10-12)
 
 - Every current-version reference (`Version.hpp`, C API, CLI, window titles,

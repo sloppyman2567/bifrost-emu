@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 namespace arm64emu {
 // ── File syscall families (dispatched in this order by syscall_fs) ──────
 int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num); // Descriptors.cpp
@@ -29,6 +30,14 @@ int resolve_dirfd(FdTable& fds, uint64_t guest_dirfd);
 bool is_proc_exe_path(const std::string& p);
 int proc_link_fd(const std::string& path, std::string* rest = nullptr);
 void proc_exe_stat(const std::string& elf_path, bool nofollow, struct stat* st);
+// Closes a host fd (e.g. a confined O_PATH lookup) when one syscall ends.
+struct ScopedHostFd {
+    int fd;
+    explicit ScopedHostFd(int f) : fd(f) {}
+    ~ScopedHostFd() { if (fd >= 0) ::close(fd); }
+    ScopedHostFd(const ScopedHostFd&) = delete;
+    ScopedHostFd& operator=(const ScopedHostFd&) = delete;
+};
 // ── Socket-style descriptor helpers (EventIO.cpp, Sockets.cpp) ─────────
 // Returns the host fd backing a guest fd, or -1 if the fd is invalid or
 // not backed by a host fd. For fds that were never registered in the

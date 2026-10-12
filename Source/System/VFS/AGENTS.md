@@ -4,6 +4,14 @@
   lexical `..` cleanup. Preserve the secure host-path resolution used by open,
   stat, access, readlink and mutation paths; do not replace it with string-prefix
   checks or host realpath followed by an unprotected open.
+- A path syscall must never hand a remapped path to a host call that resolves
+  it: `remap_path` is lexical only and host symlinks would escape. Name-level
+  operations (create, unlink, rename, link) use `open_parent`; calls that act
+  on the resolved file (stat, access, readlink, chmod, chown, utimens, truncate,
+  statfs, inotify, followed linkat) use `path_confined` + `open_confined_path`
+  and operate on the O_PATH fd (`AT_EMPTY_PATH`) or its `proc_fd_path`.
+  Unsandboxed paths keep their direct host call. `test_sandbox` and the
+  host-side canary check in `run_tests.sh` cover each call.
 - `/proc` mappings and main-stack views describe real guest mappings without
   overlaps. Report real process/thread identity and retain the existing fd-node
   ownership/lifetime rules.
