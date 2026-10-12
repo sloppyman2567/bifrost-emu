@@ -30,8 +30,17 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
             int xd = vec_xmm(inst.dest), xs = vec_xmm(inst.src1);
             if (xd >= 0 && xs >= 0) {
                 if (p.subop == 2) {
+                    // NaN lanes (Arm NaN processing, +qNaN for negative
+                    // inputs, FPCR.DN) take the ARM-semantic step.
+                    clobber_flags();
                     emit_vex3(1, false, 0, p.esize == 8 ? 1 : 0,
-                              xd, xs, true, 0x51); // vsqrtps/pd (reserved vvvv)
+                              0, xs, true, 0x51); // vsqrtps/pd xmm0 (reserved vvvv)
+                    const size_t special_done = emit_simd_fp_nan_guard(inst, p.esize, p.q);
+                    emit_vex3(1, false, 0, 0, xd, 0, true, 0x28); // vmovaps
+                    if (!p.q) emit_vec_zero_upper(xd);
+                    vec_cache_mark_dirty(inst.dest);
+                    patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+                    return true;
                 } else {
                     emit_vec_sign_mask(p.esize, p.subop == 0);
                     emit_vex_fp_binop(xd, xs, 0, p.subop == 0 ? 0x54 : 0x57,
@@ -52,9 +61,11 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 emit_modrm_disp(1,CPU_REG,V_HI_OFF + inst.src1*8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC1);
             }
+            size_t special_done = 0;
             if (p.subop == 2) {
                 if (p.esize == 8) emit_byte(0x66);
                 emit_byte(0x0F); emit_byte(0x51); emit_byte(0xC0); // sqrtps/pd
+                special_done = emit_simd_fp_nan_guard(inst, p.esize, p.q);
             } else {
                 uint64_t mask = p.esize == 8 ? 0x8000000000000000ULL : 0x8000000080000000ULL;
                 if (p.subop == 0) mask = ~mask;
@@ -72,6 +83,8 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
             } else {
                 emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,V_HI_OFF + inst.dest*8,RAX);
             }
+            if (p.subop == 2)
+                patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
             return true;
         }
         case IROp::SIMD_FP_ARITH: {

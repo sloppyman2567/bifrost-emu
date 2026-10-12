@@ -731,6 +731,7 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                 else if (size == 2) idx = (H << 1) | L;
                 else idx = (H << 2) | (L << 1) | M;
                 int opc = be == 0x2F009000 ? 13 : (op >> 12) & 0xF; // FMLA/FMLS/FMUL/FMULX
+                const bool dn = (cpu.fpcr >> 25) & 1;
                 uint8_t vn[16], vm[16];
                 memcpy(vn, &cpu.v_lo[rn], 8);
                 if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
@@ -747,9 +748,9 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                         double d;
                         memcpy(&d, (i == 0) ? &dlo0 : &dhi0, 8);
                         if (opc == 9 || opc == 13) {
-                            r = arm_fp_binop(opc == 13 ? ArmFpOp::MulX : ArmFpOp::Mul, a, sc);
+                            r = arm_fp_binop(opc == 13 ? ArmFpOp::MulX : ArmFpOp::Mul, a, sc, dn);
                         } else {
-                            r = arm_fp_muladd(d, opc == 1 ? a : fp_neg(a), sc);
+                            r = arm_fp_muladd(d, opc == 1 ? a : fp_neg(a), sc, dn);
                         }
                         if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
                         else memcpy(&cpu.v_hi[rd], &r, 8);
@@ -768,9 +769,9 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                         uint32_t db = (chunk >> sh) & 0xFFFFFFFF;
                         memcpy(&d, &db, 4);
                         if (opc == 9 || opc == 13) {
-                            r = arm_fp_binop(opc == 13 ? ArmFpOp::MulX : ArmFpOp::Mul, a, sc);
+                            r = arm_fp_binop(opc == 13 ? ArmFpOp::MulX : ArmFpOp::Mul, a, sc, dn);
                         } else {
-                            r = arm_fp_muladd(d, opc == 1 ? a : fp_neg(a), sc);
+                            r = arm_fp_muladd(d, opc == 1 ? a : fp_neg(a), sc, dn);
                         }
                         uint32_t rb;
                         memcpy(&rb, &r, 4);
@@ -806,12 +807,12 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                         if (esize == 8) {
                             double x, r;
                             memcpy(&x, &v, 8);
-                            r = x < 0.0 ? std::numeric_limits<double>::quiet_NaN() : std::sqrt(x);
+                            r = arm_fp_sqrt(x, (cpu.fpcr >> 25) & 1);
                             memcpy(&v, &r, 8);
                         } else {
                             float x, r;
                             memcpy(&x, &v, 4);
-                            r = x < 0.0f ? std::numeric_limits<float>::quiet_NaN() : std::sqrt(x);
+                            r = arm_fp_sqrt(x, (cpu.fpcr >> 25) & 1);
                             memcpy(&v, &r, 4);
                         }
                     } else if (is_neg) v ^= (1ULL << (esize * 8 - 1));

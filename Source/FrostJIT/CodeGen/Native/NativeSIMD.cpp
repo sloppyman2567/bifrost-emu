@@ -114,10 +114,12 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
             put(out,i,esize*2,value<<shift);
         }
     } else if constexpr(K==NativeSimdKind::NarrowFp) {
-        put_fp(out,0,static_cast<float>(fp<double>(n,0))); put_fp(out,1,static_cast<float>(fp<double>(n,1)));
+        const bool dn=(cpu->fpcr>>25)&1;
+        put_fp(out,0,arm_fp_convert<float>(fp<double>(n,0),dn)); put_fp(out,1,arm_fp_convert<float>(fp<double>(n,1),dn));
         if(q) { std::memcpy(out.bytes+8,out.bytes,8); std::memcpy(out.bytes,d.bytes,8); }
     } else if constexpr(K==NativeSimdKind::WidenFp) {
-        put_fp(out,0,static_cast<double>(fp<float>(n,q?2:0))); put_fp(out,1,static_cast<double>(fp<float>(n,q?3:1)));
+        const bool dn=(cpu->fpcr>>25)&1;
+        put_fp(out,0,arm_fp_convert<double>(fp<float>(n,q?2:0),dn)); put_fp(out,1,arm_fp_convert<double>(fp<float>(n,q?3:1),dn));
     } else if constexpr(K==NativeSimdKind::CompareFp || K==NativeSimdKind::CompareZeroFp) {
         unsigned esize=(w&(1u<<22))?8:4;
         for(unsigned i=0;i<bytes/esize;i++) {
@@ -180,7 +182,7 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
         for(unsigned i=0;i<bytes/size;i++) put(out,i,size,get(d,i,size)+get(n,i,size)*get(m,i,size));
     } else if constexpr(K==NativeSimdKind::IndexedFma) {
         unsigned lane=((w>>21)&1)|(((w>>11)&1)<<1); float value=fp<float>(m,lane);
-        for(unsigned i=0;i<bytes/4;i++) put_fp(out,i,arm_fp_muladd(fp<float>(d,i),fp<float>(n,i),value));
+        for(unsigned i=0;i<bytes/4;i++) put_fp(out,i,arm_fp_muladd(fp<float>(d,i),fp<float>(n,i),value,(cpu->fpcr>>25)&1));
     } else if constexpr(K==NativeSimdKind::AcrossLong || K==NativeSimdKind::AcrossMinMax) {
         // Element `size`; SADDLV/UADDLV write a 2*size sum, MAX/MINV a size lane.
         auto ext = [&](unsigned i) {
@@ -237,11 +239,12 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
         const ArmFpOp op = (w & 0x2000) ? ((w >> 23) & 1 ? ArmFpOp::Min : ArmFpOp::Max)
                                         : ((w >> 23) & 1 ? ArmFpOp::MinNum : ArmFpOp::MaxNum);
         const unsigned esize = (w >> 22) & 1 ? 8 : 4, lanes = bytes / esize, half = lanes / 2;
+        const bool dn = (cpu->fpcr >> 25) & 1;
         for (unsigned e = 0; e < lanes; e++) {
             const Vec& src = e < half ? n : m;
             const unsigned idx = 2 * (e < half ? e : e - half);
-            if (esize == 8) put_fp(out, e, arm_fp_binop(op, fp<double>(src, idx), fp<double>(src, idx + 1)));
-            else put_fp(out, e, arm_fp_binop(op, fp<float>(src, idx), fp<float>(src, idx + 1)));
+            if (esize == 8) put_fp(out, e, arm_fp_binop(op, fp<double>(src, idx), fp<double>(src, idx + 1), dn));
+            else put_fp(out, e, arm_fp_binop(op, fp<float>(src, idx), fp<float>(src, idx + 1), dn));
         }
     } else if constexpr(K==NativeSimdKind::HalfFp) {
         // FCVTL widens the selected half's four halves; FCVTN narrows four

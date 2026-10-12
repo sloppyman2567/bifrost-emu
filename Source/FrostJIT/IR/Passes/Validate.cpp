@@ -822,11 +822,11 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 break;
             }
             case IROp::FP_BINOP: {
-                // imm=opcode 0..8, width=ftype 0/1, flags_op always 0.
-                if (inst.imm > 8) {
+                // imm=opcode 0..8 or 0xD (FABD), width=ftype 0/1, flags_op 0.
+                if (inst.imm > 8 && inst.imm != 0xD) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_BINOP "
-                        "opcode=%lu out of range (want 0..8, arm_pc=0x%lx)\n",
+                        "opcode=%lu out of range (want 0..8/0xD, arm_pc=0x%lx)\n",
                         block.start_pc, i, (unsigned long)inst.imm,
                         inst.arm_pc);
                     ok = false;

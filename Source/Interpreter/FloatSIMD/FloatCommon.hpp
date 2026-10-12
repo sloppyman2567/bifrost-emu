@@ -250,7 +250,7 @@ template <typename T> static inline T arm_frint(int mode, T a, bool dn) {
     }
 }
 enum class ArmFpOp { Add, Sub, Mul, Div, Max, Min, MaxNum, MinNum, MulX, Abd };
-template <typename T> static inline T arm_fp_binop(ArmFpOp op, T a, T b) {
+template <typename T> static inline T arm_fp_binop_raw(ArmFpOp op, T a, T b) {
     if (op == ArmFpOp::MaxNum || op == ArmFpOp::MinNum) {
         // FPMaxNum/FPMinNum: a lone quiet NaN becomes -inf/+inf so the
         // number wins; signalling NaNs still propagate through FPMax/FPMin.
@@ -285,13 +285,35 @@ template <typename T> static inline T arm_fp_binop(ArmFpOp op, T a, T b) {
 }
 // FPMulAdd (FMLA/FMLS/FMADD): addend + a*b with a single rounding. A quiet
 // NaN addend does not mask an invalid inf*0, which gives the default NaN.
-template <typename T> static inline T arm_fp_muladd(T addend, T a, T b) {
+template <typename T> static inline T arm_fp_muladd_raw(T addend, T a, T b) {
     const bool inf_zero = (std::isinf(a) && b == 0) || (a == 0 && std::isinf(b));
     T nan;
     if (arm_process_nans3(addend, a, b, nan))
         return fp_is_qnan(addend) && inf_zero ? fp_default_nan<T>() : nan;
     if (inf_zero) return fp_default_nan<T>();
     return arm_fp_result(std::fma(a, b, addend));
+}
+// FPCR.DN: every NaN result of an arithmetic operation is the default NaN.
+template <typename T> static inline T arm_fp_dn(T r, bool dn) {
+    return dn && std::isnan(r) ? fp_default_nan<T>() : r;
+}
+template <typename T> static inline T arm_fp_binop(ArmFpOp op, T a, T b, bool dn = false) {
+    return arm_fp_dn(arm_fp_binop_raw(op, a, b), dn);
+}
+template <typename T> static inline T arm_fp_muladd(T addend, T a, T b, bool dn = false) {
+    return arm_fp_dn(arm_fp_muladd_raw(addend, a, b), dn);
+}
+// FPConvert between single and double: host conversion quiets a NaN and
+// keeps its sign and top payload bits, as Arm does; DN gives the default.
+template <typename To, typename From> static inline To arm_fp_convert(From a, bool dn) {
+    return dn && std::isnan(a) ? fp_default_nan<To>() : static_cast<To>(a);
+}
+// FPSqrt: a NaN operand is processed; a negative non-zero is invalid (+qNaN);
+// -0 stays -0.
+template <typename T> static inline T arm_fp_sqrt(T a, bool dn = false) {
+    if (std::isnan(a)) return arm_fp_dn(fp_is_snan(a) ? fp_quiet(a) : a, dn);
+    if (a < 0) return fp_default_nan<T>();
+    return std::sqrt(a);
 }
 // Reciprocal estimate/refinement instructions use FPCR, rather than the
 // ambient host rounding mode. Keep the host environment private to this

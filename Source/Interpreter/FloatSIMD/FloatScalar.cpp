@@ -212,45 +212,19 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1
         && ((op >> 10) & 0x3) == 0x2) {
         uint8_t opcode = (op >> 12) & 0xF;
-        if (ftype) {
-            double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm), r = 0;
-            switch (opcode) {
-                case 0x0: r = a * b; break;                      // FMUL
-                case 0x1: r = a / b; break;                      // FDIV
-                case 0x2: r = a + b; break;                      // FADD
-                case 0x3: r = a - b; break;                      // FSUB
-                case 0x4: r = (std::isnan(a) || std::isnan(b))   // FMAX
-                              ? std::numeric_limits<double>::quiet_NaN()
-                              : std::fmax(a, b); break;
-                case 0x5: r = (std::isnan(a) || std::isnan(b))   // FMIN
-                              ? std::numeric_limits<double>::quiet_NaN()
-                              : std::fmin(a, b); break;
-                case 0x6: r = std::fmax(a, b); break;            // FMAXNM
-                case 0x7: r = std::fmin(a, b); break;            // FMINNM
-                case 0x8: r = -(a * b); break;                   // FNMUL
-                default: r = 0; break;
-            }
-            write_fp_d(cpu, rd, r);
-        } else {
-            float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm), r = 0;
-            switch (opcode) {
-                case 0x0: r = a * b; break;                      // FMUL
-                case 0x1: r = a / b; break;                      // FDIV
-                case 0x2: r = a + b; break;                      // FADD
-                case 0x3: r = a - b; break;                      // FSUB
-                case 0x4: r = (std::isnan(a) || std::isnan(b))   // FMAX
-                              ? std::numeric_limits<float>::quiet_NaN()
-                              : std::fmax(a, b); break;
-                case 0x5: r = (std::isnan(a) || std::isnan(b))   // FMIN
-                              ? std::numeric_limits<float>::quiet_NaN()
-                              : std::fmin(a, b); break;
-                case 0x6: r = std::fmax(a, b); break;            // FMAXNM
-                case 0x7: r = std::fmin(a, b); break;            // FMINNM
-                case 0x8: r = -(a * b); break;                   // FNMUL
-                default: r = 0; break;
-            }
-            write_fp_s(cpu, rd, r);
-        }
+        // ARM NaN priority, +qNaN invalid results, signed zeros and
+        // FPCR.DN (FloatCommon.hpp). FNMUL negates the product, NaN too.
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        auto two_source = [opcode, dn](auto a, auto b) {
+            static constexpr ArmFpOp ops[] = {
+                ArmFpOp::Mul, ArmFpOp::Div, ArmFpOp::Add, ArmFpOp::Sub, ArmFpOp::Max,
+                ArmFpOp::Min, ArmFpOp::MaxNum, ArmFpOp::MinNum, ArmFpOp::Mul};
+            if (opcode > 8) return decltype(a)(0);
+            const auto r = arm_fp_binop(ops[opcode], a, b, dn);
+            return opcode == 8 ? fp_neg(r) : r;
+        };
+        if (ftype) write_fp_d(cpu, rd, two_source(read_fp_d(cpu, rn), read_fp_d(cpu, rm)));
+        else write_fp_s(cpu, rd, two_source(read_fp_s(cpu, rn), read_fp_s(cpu, rm)));
         return;
     }
     // SIMD scalar/vector 2-source FP (0x7E group): FABD.
@@ -264,10 +238,10 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         bool is_double = (op >> 22) & 1;
         if (is_double) {
             double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm);
-            write_fp_d(cpu, rd, std::fabs(a - b));
+            write_fp_d(cpu, rd, arm_fp_binop(ArmFpOp::Abd, a, b, (cpu.fpcr >> 25) & 1));
         } else {
             float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
-            write_fp_s(cpu, rd, std::fabs(a - b));
+            write_fp_s(cpu, rd, arm_fp_binop(ArmFpOp::Abd, a, b, (cpu.fpcr >> 25) & 1));
         }
         return;
     }
@@ -399,43 +373,23 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // bits[20:15] (= rmode:opcode in the ARM ARM).
     if (fp_decode::is_fp_1source(op)) {
         uint8_t opcode = fp_decode::fp_1source_opcode(op);
-        if (ftype) {
-            double a = read_fp_d(cpu, rn), r = 0;
+        // FMOV/FABS/FNEG are bit operations; FSQRT and FRINT* process
+        // NaNs and honour FPCR.DN. Opcodes 8-F map to the vector FRINT
+        // modes (N P M Z A - X I); 0xD is unallocated.
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        auto one_source = [opcode, dn](auto a) {
+            static constexpr int frint_mode[8] = {0, 6, 2, 4, 1, 0, 3, 5};
             switch (opcode) {
-                case 0x0: r = a; break;                        // FMOV
-                case 0x1: r = std::fabs(a); break;             // FABS
-                case 0x2: r = -a; break;                       // FNEG
-                case 0x3: r = std::sqrt(a); break;             // FSQRT
-                case 0x8: r = std::rint(a); break;             // FRINTN
-                case 0x9: r = std::ceil(a); break;             // FRINTP
-                case 0xA: r = std::floor(a); break;            // FRINTM
-                case 0xB: r = std::trunc(a); break;            // FRINTZ
-                case 0xC: r = std::round(a); break;            // FRINTA (ties-away)
-                // 0xD unused in A64
-                case 0xE: r = std::rint(a); break;             // FRINTX
-                case 0xF: r = std::rint(a); break;             // FRINTI
-                default: r = a; break;
+                case 0x1: return fp_abs(a);
+                case 0x2: return fp_neg(a);
+                case 0x3: return arm_fp_sqrt(a, dn);
+                default:
+                    return opcode >= 0x8 && opcode != 0xD
+                        ? arm_frint(frint_mode[opcode - 8], a, dn) : a;
             }
-            write_fp_d(cpu, rd, r);
-        } else {
-            float a = read_fp_s(cpu, rn), r = 0;
-            switch (opcode) {
-                case 0x0: r = a; break;
-                case 0x1: r = std::fabs(a); break;
-                case 0x2: r = -a; break;
-                case 0x3: r = std::sqrt(a); break;
-                case 0x8: r = std::rint(a); break;             // FRINTN
-                case 0x9: r = std::ceil(a); break;             // FRINTP
-                case 0xA: r = std::floor(a); break;            // FRINTM
-                case 0xB: r = std::trunc(a); break;            // FRINTZ
-                case 0xC: r = std::round(a); break;            // FRINTA (ties-away)
-                // 0xD unused in A64
-                case 0xE: r = std::rint(a); break;             // FRINTX
-                case 0xF: r = std::rint(a); break;             // FRINTI
-                default: r = a; break;
-            }
-            write_fp_s(cpu, rd, r);
-        }
+        };
+        if (ftype) write_fp_d(cpu, rd, one_source(read_fp_d(cpu, rn)));
+        else write_fp_s(cpu, rd, one_source(read_fp_s(cpu, rn)));
         return;
     }
     // FCVT{N,P,M,Z,A}{S,U} — FP to int with explicit rounding mode.
@@ -501,10 +455,10 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     }
     // FCVT (between FP precisions)
     if ((op & 0xFFFFFC00) == 0x1E624000) { // FCVT Sd, Dn
-        write_fp_s(cpu, rd, static_cast<float>(read_fp_d(cpu, rn))); return;
+        write_fp_s(cpu, rd, arm_fp_convert<float>(read_fp_d(cpu, rn), (cpu.fpcr >> 25) & 1)); return;
     }
     if ((op & 0xFFFFFC00) == 0x1E22C000) { // FCVT Dd, Sn
-        write_fp_d(cpu, rd, static_cast<double>(read_fp_s(cpu, rn))); return;
+        write_fp_d(cpu, rd, arm_fp_convert<double>(read_fp_s(cpu, rn), (cpu.fpcr >> 25) & 1)); return;
     }
     // FCVT H — half-precision conversions through the FPConvert helpers in
     // FloatCommon.hpp (exact widening, round-to-nearest-even narrowing,
@@ -780,25 +734,14 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         uint8_t ra = (op >> 10) & 0x1F;
         bool sub = (op >> 15) & 1;   // o1
         bool neg = (op >> 21) & 1;   // o2
-        if (ftype) {
-            double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm),
-                   c = read_fp_d(cpu, ra);
-            double r;
-            if      (!neg && !sub) r = std::fma(a, b, c);       // FMADD  = a*b + c
-            else if (!neg &&  sub) r = std::fma(-a, b, c);      // FMSUB  = c - a*b
-            else if ( neg && !sub) r = std::fma(-a, b, -c);     // FNMADD = -a*b - c
-            else                   r = std::fma(a, b, -c);      // FNMSUB = a*b - c
-            write_fp_d(cpu, rd, r);
-        } else {
-            float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm),
-                  c = read_fp_s(cpu, ra);
-            float r;
-            if      (!neg && !sub) r = std::fma(a, b, c);       // FMADD  = a*b + c
-            else if (!neg &&  sub) r = std::fma(-a, b, c);      // FMSUB  = c - a*b
-            else if ( neg && !sub) r = std::fma(-a, b, -c);     // FNMADD = -a*b - c
-            else                   r = std::fma(a, b, -c);      // FNMSUB = a*b - c
-            write_fp_s(cpu, rd, r);
-        }
+        // Arm negates the addend for o2 and Vn when o1 != o2, before
+        // FPMulAdd's NaN processing (FloatCommon.hpp, with FPCR.DN).
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        auto fused = [sub, neg, dn](auto a, auto b, auto c) {
+            return arm_fp_muladd(neg ? fp_neg(c) : c, sub != neg ? fp_neg(a) : a, b, dn);
+        };
+        if (ftype) write_fp_d(cpu, rd, fused(read_fp_d(cpu, rn), read_fp_d(cpu, rm), read_fp_d(cpu, ra)));
+        else write_fp_s(cpu, rd, fused(read_fp_s(cpu, rn), read_fp_s(cpu, rm), read_fp_s(cpu, ra)));
         return;
     }
     // ── SIMD scalar INTEGER ADD/SUB (add d / sub d) ───────────
@@ -863,17 +806,18 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             // FMAXP/FMINP are the non-NM forms (FMAXNMP/FMINNMP are separate
             // encodings). ARM NaN propagation and +qNaN default, not x86's.
             const ArmFpOp kind = is_add ? ArmFpOp::Add : is_min ? ArmFpOp::Min : ArmFpOp::Max;
+            const bool dn = (cpu.fpcr >> 25) & 1;
             if (op & 0x00400000) {  // double: lanes = Vn.2D
                 double a = read_fp_d(cpu, rn);
                 uint64_t hi_bits = cpu.v_hi[rn];
                 double b; memcpy(&b, &hi_bits, 8);
-                write_fp_d(cpu, rd, arm_fp_binop(kind, a, b));
+                write_fp_d(cpu, rd, arm_fp_binop(kind, a, b, dn));
             } else {                // single: both lanes in Vn low word
                 uint32_t lbits = static_cast<uint32_t>(cpu.v_lo[rn]);
                 float a; memcpy(&a, &lbits, 4);
                 uint32_t hbits = static_cast<uint32_t>(cpu.v_lo[rn] >> 32);
                 float b; memcpy(&b, &hbits, 4);
-                write_fp_s(cpu, rd, arm_fp_binop(kind, a, b));
+                write_fp_s(cpu, rd, arm_fp_binop(kind, a, b, dn));
             }
             return;
         }

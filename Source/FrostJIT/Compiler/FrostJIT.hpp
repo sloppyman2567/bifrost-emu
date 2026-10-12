@@ -41,6 +41,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -1784,6 +1785,12 @@ private:
     void emit_vec_sign_mask(int esize, bool clear_sign);
     void emit_vec_zero_upper(int xmm);
     size_t emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready = false);
+    // Scalar FP exceptional results: JCC sites (emit_fp_nan_check or other
+    // tests, taken before the commit) reach an interpreter step that
+    // emit_fp_cold_tail places after the commit.
+    size_t emit_fp_nan_check(bool is_double);
+    void emit_fp_cold_tail(const IRInst& inst, std::initializer_list<size_t> cold_sites);
+    void emit_fp_interp_step(const IRInst& inst);
     // FP-cache-aware operand load/store helpers. When the fp cache is
     // active and the FP reg is pinned, they use reg-reg moves (no memory);
     // otherwise they load/store cpu.v_lo[vreg] exactly as the non-cached

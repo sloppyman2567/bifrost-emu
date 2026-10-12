@@ -53,8 +53,9 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     if ((op & 0xBFFFFC00) == 0x0E617800) {
         uint64_t source = Q ? cpu.v_hi[rn] : cpu.v_lo[rn];
         float values[2]; memcpy(values, &source, 8);
-        double a = static_cast<double>(values[0]);
-        double b = static_cast<double>(values[1]);
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        double a = arm_fp_convert<double>(values[0], dn);
+        double b = arm_fp_convert<double>(values[1], dn);
         memcpy(&cpu.v_lo[rd], &a, 8); memcpy(&cpu.v_hi[rd], &b, 8);
         return true;
     }
@@ -94,13 +95,14 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     if ((op & 0xBFFFFC00) == 0x0E616800 ||
         (op & 0xBFFFFC00) == 0x2E616800) {
         const bool rto = ((op >> 29) & 1) != 0;
+        const bool dn = (cpu.fpcr >> 25) & 1;
         uint32_t out[2];
         for (int i = 0; i < 2; i++) {
             uint64_t raw = (i == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
             double dv;
             memcpy(&dv, &raw, 8);
-            float fv = rto ? fp_to_f32_rto(dv)
-                           : static_cast<float>(dv);
+            float fv = rto ? arm_fp_dn(fp_to_f32_rto(dv), dn)
+                           : arm_fp_convert<float>(dv, dn);
             memcpy(&out[i], &fv, 4);
         }
         const uint64_t res =
@@ -108,7 +110,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         if (Q) cpu.v_hi[rd] = res;
         else {
             cpu.v_lo[rd] = res;
-            if (!rto) cpu.v_hi[rd] = 0;
+            cpu.v_hi[rd] = 0;  // FCVTXN too: Q=0 clears the top half
         }
         return true;
     }
@@ -636,20 +638,21 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         int opcode = get_op(key);
         // ARM NaN/zero rules per lane (FloatCommon.hpp); FMLA/FMLS
         // are fused (FPMulAdd) and FMLS negates its multiplicand first.
-        auto lane_op = [opcode](auto a, auto b, auto acc) {
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        auto lane_op = [opcode, dn](auto a, auto b, auto acc) {
             switch (opcode) {
-                case 0x0: return arm_fp_binop(ArmFpOp::Add, a, b);
-                case 0x1: return arm_fp_binop(ArmFpOp::Sub, a, b);
-                case 0x2: return arm_fp_binop(ArmFpOp::Mul, a, b);
-                case 0x3: return arm_fp_binop(ArmFpOp::Div, a, b);
-                case 0x4: return arm_fp_binop(ArmFpOp::Max, a, b);
-                case 0x5: return arm_fp_binop(ArmFpOp::Min, a, b);
-                case 0x6: return arm_fp_binop(ArmFpOp::MaxNum, a, b);
-                case 0x7: return arm_fp_binop(ArmFpOp::MinNum, a, b);
-                case 0xB: return arm_fp_binop(ArmFpOp::MulX, a, b);
-                case 0xD: return arm_fp_binop(ArmFpOp::Abd, a, b);
-                case 0xE: return arm_fp_muladd(acc, a, b);
-                default:  return arm_fp_muladd(acc, fp_neg(a), b);  // FMLS
+                case 0x0: return arm_fp_binop(ArmFpOp::Add, a, b, dn);
+                case 0x1: return arm_fp_binop(ArmFpOp::Sub, a, b, dn);
+                case 0x2: return arm_fp_binop(ArmFpOp::Mul, a, b, dn);
+                case 0x3: return arm_fp_binop(ArmFpOp::Div, a, b, dn);
+                case 0x4: return arm_fp_binop(ArmFpOp::Max, a, b, dn);
+                case 0x5: return arm_fp_binop(ArmFpOp::Min, a, b, dn);
+                case 0x6: return arm_fp_binop(ArmFpOp::MaxNum, a, b, dn);
+                case 0x7: return arm_fp_binop(ArmFpOp::MinNum, a, b, dn);
+                case 0xB: return arm_fp_binop(ArmFpOp::MulX, a, b, dn);
+                case 0xD: return arm_fp_binop(ArmFpOp::Abd, a, b, dn);
+                case 0xE: return arm_fp_muladd(acc, a, b, dn);
+                default:  return arm_fp_muladd(acc, fp_neg(a), b, dn);  // FMLS
             }
         };
         if (is_double) {
@@ -710,13 +713,14 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
             dump_decode_error(cpu, mem_, op);
             throw DecodeError(cpu.pc, op);
         }
-        auto pair = [key](auto a, auto b) {
+        const bool dn = (cpu.fpcr >> 25) & 1;
+        auto pair = [key, dn](auto a, auto b) {
             switch (key) {
-                case 0x2e20d400: return arm_fp_binop(ArmFpOp::Add, a, b);     // FADDP
-                case 0x2e20f400: return arm_fp_binop(ArmFpOp::Max, a, b);     // FMAXP
-                case 0x2ea0f400: return arm_fp_binop(ArmFpOp::Min, a, b);     // FMINP
-                case 0x2e20c400: return arm_fp_binop(ArmFpOp::MaxNum, a, b);  // FMAXNMP
-                default:         return arm_fp_binop(ArmFpOp::MinNum, a, b);  // FMINNMP
+                case 0x2e20d400: return arm_fp_binop(ArmFpOp::Add, a, b, dn);     // FADDP
+                case 0x2e20f400: return arm_fp_binop(ArmFpOp::Max, a, b, dn);     // FMAXP
+                case 0x2ea0f400: return arm_fp_binop(ArmFpOp::Min, a, b, dn);     // FMINP
+                case 0x2e20c400: return arm_fp_binop(ArmFpOp::MaxNum, a, b, dn);  // FMAXNMP
+                default:         return arm_fp_binop(ArmFpOp::MinNum, a, b, dn);  // FMINNMP
             }
         };
         uint8_t src[32], out[16] = {};

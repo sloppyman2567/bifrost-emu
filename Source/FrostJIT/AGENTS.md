@@ -36,6 +36,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   convention. Keep cross-block NZCV observable through flag-neutral successors.
 - If codegen executes the interpreter, represent that effect as `CALL_INTERP`;
   fallback counts, verification, pinning and region admission depend on it.
+  The exception is the FP NaN cold step (`emit_fp_interp_step`), which runs
+  only for exceptional values. It commits, single-steps and reloads in place,
+  and an op that uses it writes Vd only after its guard.
   Changes of PC/stop state must return to the dispatcher through the proper exit.
 - Native BL/BLR calls honor exit-group, callback stop sentinels and bounded host
   call depth; unwind without restoring stale caller state.

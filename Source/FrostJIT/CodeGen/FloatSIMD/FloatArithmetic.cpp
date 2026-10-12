@@ -166,19 +166,23 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 case 1: sse_op = 0x5E; break;  // div (divsd)
                 case 2: sse_op = 0x58; break;  // add (addsd)
                 case 3: sse_op = 0x5C; break;  // sub (subsd)
-                // FMAX/FMIN propagate nan, but maxsd/minsd return the
-                // numeric operand (numnum semantics = FMAXNM). Route
-                // through interp so jit matches arm.
-                case 4: case 5:
-                    emit_call_interp(inst.arm_pc, false);
-                    return true;
-                case 6: sse_op = 0x5F; break;  // max (maxsd) — FMAXNM
-                case 7: sse_op = 0x5D; break;  // min (minsd) — FMINNM
+                // FMAX/FMIN/FMAXNM/FMINNM: maxsd/minsd agree with Arm
+                // only for non-NaN operands and non-zero results; the
+                // other cases take the cold ARM-semantic step below.
+                case 4: case 6: sse_op = 0x5F; break;  // maxsd
+                case 5: case 7: sse_op = 0x5D; break;  // minsd
                 case 8: sse_op = 0x59; break;  // mul (mulsd) — FNMUL (negate after)
                 case 0xD: sse_op = 0x5C; break; // sub (subsd) — FABD (abs after)
                 default:
                     emit_call_interp(inst.arm_pc, false);
                     return true;
+            }
+            const bool minmax = opc >= 4 && opc <= 7;
+            size_t unordered = 0;
+            if (minmax) {
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);  // ucomis xmm0, xmm1
+                unordered = emit_jcc_rel32_placeholder(0xA);         // JP: a NaN input
             }
             // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
             // BUGFIX: must use modrm(3, 0, 1) → reg=xmm0, rm=xmm1
@@ -186,6 +190,18 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(sse_op);
             emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
+            // Arm NaN priority, +qNaN invalid results and FPCR.DN differ
+            // from x86; a NaN result (or a min/max zero, where x86 ignores
+            // the zero's sign) takes the interpreter step.
+            size_t special;
+            if (minmax) {
+                emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9);  // xorps xmm1, xmm1
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);  // ucomis xmm0, xmm1
+                special = emit_jcc_rel32_placeholder(0x4);           // JE: zero result
+            } else {
+                special = emit_fp_nan_check(is_double);
+            }
             if (opc == 8) {  // FNMUL: negate the product
                 // Width-aware sign mask (same as FABD/FABS): single-
                 // precision flips bit 31, double flips bit 63. A hardcoded
@@ -215,6 +231,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             fp_store_operand(0, inst.dest, is_double);
             // Zero v_hi[dest]
             fp_zero_hi(inst.dest);
+            if (minmax) emit_fp_cold_tail(inst, {unordered, special});
+            else emit_fp_cold_tail(inst, {special});
             return true;
         }
         case IROp::FP_UNOP: {
@@ -248,16 +266,21 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_mov_imm64(RAX, smask);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
-            } else if (opc == 3) {
-                // FSQRT
+            }
+            size_t special = 0;
+            if (opc == 3) {
+                // FSQRT; NaN results (Arm NaN processing, +qNaN for a
+                // negative operand, FPCR.DN) take the interpreter step.
                 emit_byte(prefix);
                 emit_byte(0x0F); emit_byte(0x51);
                 emit_byte(modrm(3, 0, 0));
+                special = emit_fp_nan_check(is_double);
             }
             // Store result (fp_store_operand: pinned dest → reg-reg + dirty,
             // unpinned → memory) then zero v_hi.
             fp_store_operand(0, inst.dest, is_double);
             fp_zero_hi(inst.dest);
+            if (opc == 3) emit_fp_cold_tail(inst, {special});
             return true;
         }
         // ── FP↔FP register move (FMOV Dd,Dn / Sd,Sn) ────────────────
@@ -1013,10 +1036,13 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5A);
                 emit_byte(0xC0);
             }
+            // x86 quiets NaNs like Arm; FPCR.DN needs the interpreter step.
+            const size_t special = emit_fp_nan_check(dst_double);
             // Store result to v_lo[dest] (fp_store_operand: pinned dest →
             // reg-reg + dirty, else memory) and zero v_hi.
             fp_store_operand(0, inst.dest, dst_double);
             fp_zero_hi(inst.dest);
+            emit_fp_cold_tail(inst, {special});
             return true;
         }
         default:

@@ -203,6 +203,31 @@ size_t FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, b
         emit_pop(RAX); // POP leaves the TEST flags intact.
     }
     const size_t hot = emit_jcc_rel32_placeholder(4); // JE: no exceptional lanes
+    emit_fp_interp_step(inst);
+    const size_t done = emit_jmp_rel32_placeholder();
+    patch_jcc_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 6)));
+    return done;
+}
+// Scalar FP: each `cold_sites` JCC was taken before the result's commit,
+// which the caller has just emitted. Hot code jumps past the ARM-semantic
+// step; the cold sites land on it and rejoin after the commit.
+void FrostJIT::emit_fp_cold_tail(const IRInst& inst, std::initializer_list<size_t> cold_sites) {
+    const size_t done = emit_jmp_rel32_placeholder();
+    for (size_t site : cold_sites)
+        patch_jcc_rel32(site, static_cast<int32_t>(code_buf_used_ - (site + 6)));
+    emit_fp_interp_step(inst);
+    patch_jmp_rel32(done, static_cast<int32_t>(code_buf_used_ - (done + 5)));
+}
+// JP to the cold step when scalar XMM0 is a NaN (ucomiss/ucomisd sets PF).
+size_t FrostJIT::emit_fp_nan_check(bool is_double) {
+    if (is_double) emit_byte(0x66);
+    emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC0);  // ucomis xmm0, xmm0
+    return emit_jcc_rel32_placeholder(0xA);             // JP
+}
+// Commit GPRs and pinned vectors, step the interpreter over inst, then
+// reload pinned vectors and restore the saved GPRs. Compile-time mappings
+// and dirty flags are left untouched.
+void FrostJIT::emit_fp_interp_step(const IRInst& inst) {
     flush_all_vregs_keep();
     for (int v = 0; v < 32; ++v)
         if (vreg_home_[v] >= 0) emit_store_arm(v, vreg_home_[v]);
@@ -231,9 +256,6 @@ size_t FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, b
             vec_emit_load_lo_hi(vec_cache_[v], v);
         }
     for (int i = 8; i >= 0; --i) emit_pop(saved[i]);
-    const size_t done = emit_jmp_rel32_placeholder();
-    patch_jcc_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 6)));
-    return done;
 }
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,

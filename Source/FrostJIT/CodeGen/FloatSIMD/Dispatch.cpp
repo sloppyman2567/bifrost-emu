@@ -168,23 +168,26 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                 case 1: x86_mode = 2; break;  // P → +inf (ceil)
                 case 2: x86_mode = 1; break;  // M → -inf (floor)
                 case 3: x86_mode = 3; break;  // Z → truncate
-                case 6:
-                    emit_fp_round_away(is_double);
-                    fp_store_operand(0, inst.dest, is_double);
-                    fp_zero_hi(inst.dest);
-                    return false;
+                case 6: x86_mode = 0xFF; break; // A → round away (below)
                 default: x86_mode = 4; break; // I/X → current MXCSR
             }
-            // roundsd xmm0, xmm0, imm8:  66 0F 3A 0B C0 imm8
-            // roundss xmm0, xmm0, imm8:  66 0F 3A 0A C0 imm8
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
-            emit_byte(is_double ? 0x0B : 0x0A);
-            emit_byte(0xC0);  // xmm0, xmm0
-            emit_byte(x86_mode);
+            if (x86_mode == 0xFF) {
+                emit_fp_round_away(is_double);
+            } else {
+                // roundsd xmm0, xmm0, imm8:  66 0F 3A 0B C0 imm8
+                // roundss xmm0, xmm0, imm8:  66 0F 3A 0A C0 imm8
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
+                emit_byte(is_double ? 0x0B : 0x0A);
+                emit_byte(0xC0);  // xmm0, xmm0
+                emit_byte(x86_mode);
+            }
+            // NaNs are quieted like Arm; FPCR.DN needs the interpreter step.
+            const size_t special = emit_fp_nan_check(is_double);
             // Store result (fp_store_operand: pinned dest → reg-reg + dirty, else
             // memory) and zero v_hi.
             fp_store_operand(0, inst.dest, is_double);
             fp_zero_hi(inst.dest);
+            emit_fp_cold_tail(inst, {special});
             return false;
         }
         // ── FMADD / FMSUB / FNMADD / FNMSUB: FP fused multiply-add family
@@ -201,33 +204,20 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
         //   xmm0 = src1 * src2 OP xmm0   (xmm0 is both acc input and dest)
         //
         //   FMADD  → vfmadd231ss/sd   (xmm0 = +Vn*Vm + Va)
-        //   FMSUB  → vfnmadd231ss/sd  (xmm0 = -Vn*Vm + Va = Va - Vn*Vm)
-        //   FNMADD → vfnmadd231ss/sd  (same as FMSUB — single instruction,
-        //                               single-rounded, IEEE 754-correct)
-        //   FNMSUB → vfnmsub231ss/sd  (xmm0 = -Vn*Vm - Va)
+        //   FMSUB  → vfnmadd231ss/sd  (xmm0 = -Vn*Vm + Va)
+        //   FNMADD → vfnmsub231ss/sd  (xmm0 = -Vn*Vm - Va)
+        //   FNMSUB → vfmsub231ss/sd   (xmm0 = +Vn*Vm - Va)
         //
         // VEX 3-byte encoding (FMA3 uses 0F38 escape map):
         //   C4 [R~ X~ B~ mmmmm] [W vvvv~ L pp] [opcode] [modrm]
+        //   W selects sd (1) or ss (0); vvvv = Vn's XMM; L=0; pp=01.
         //
-        //   byte1 = 0x02  (R=X=B=1 inverted=0, mmmmm=00010 for 0F38)
-        //   byte2 = W<<7 | (~vvvv)<<3 | L<<2 | pp
-        //     W=1 for sd (double), W=0 for ss (single)
-        //     vvvv = NDS register (xmm1, index 1, inverted = 0b1110)
-        //     L=0 (128-bit XMM, not 256-bit YMM)
-        //     pp = 11 (F2 prefix, sd) or 10 (F3 prefix, ss)
+        // Opcodes (per Intel SDM Vol 2A, FMA3 231 forms):
+        //   vfmadd231ss/sd:  0xB9    vfmsub231ss/sd:  0xBB
+        //   vfnmadd231ss/sd: 0xBD    vfnmsub231ss/sd: 0xBF
         //
-        // Opcodes (per Intel SDM Vol 2A, FMA3 instruction table):
-        //   vfmadd231ss/sd:  0x99
-        //   vfmsub231ss/sd:  0x9B   (not used by ARM FMA mapping)
-        //   vfnmadd231ss/sd: 0xBD
-        //   vfnmsub231ss/sd: 0xBF
-        //
-        // ── Decomposed path (no FMA3) ────────────────────────────────
-        //
-        // We decompose into separate mulsd + addsd/subsd. This is
-        // double-rounded (NOT IEEE 754-correct for edge cases — a
-        // known limitation), but matches the interpreter's decomposition
-        // path so JIT/interpreter agree.
+        // Hosts without FMA3 step the interpreter: separate multiply and
+        // add would round twice.
         //
         // The clobber list (RAX, RCX, RDX) matches the existing FP
         // codegen convention — FP ops only touch XMM0/XMM1/XMM2 plus
@@ -236,158 +226,38 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
         case IROp::FMSUB:
         case IROp::FNMADD:
         case IROp::FNMSUB: {
+            // Without FMA3 there is no single-rounding host operation.
+            if (!has_fma3()) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // Width encoding: 64 = double (D), 32 = single (S).
-            // The IR translator emits `ftype ? 64 : 32` for FMADD/FRINT,
-            // which is inconsistent with FP_BINOP (uses ftype 0/1 directly).
-            // We use `width == 64` to handle this correctly. Using
-            // `width != 0` (as the old code did) treats BOTH 32 and 64 as
-            // double — silently breaking all single-precision FMA.
+            // Width encoding: 64 = double (D), 32 = single (S); the
+            // translator emits `ftype ? 64 : 32` for FMADD/FRINT.
             const FpFusedParams fp = inst.fp_fused_params();
-            bool is_double = (fp.bits == 64);
-            uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;  // Vn
-            int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;  // Vm
-            int32_t off_acc = V_LO_OFF + static_cast<int>(fp.acc) * 8; // Va
-            if (has_fma3()) {
-                // ── FMA3 native codegen (fp-cache aware) ──
-                // 231 form: dest = op(Vn*Vm, dest), where dest starts as Va
-                // (the accumulator). When the fp cache pins the operands,
-                // the pinned XMMs are used in place (no memory); unpinned
-                // operands load into the scratch XMMs 1/2 (XMM0 is the
-                // unpinned-dest result register and is never pinned).
-                uint8_t opcode;
-                switch (inst.op) {
-                    case IROp::FMADD:  opcode = 0xB9; break;  // vfmadd231   (acc + prod)
-                    case IROp::FMSUB:  opcode = 0xBD; break;  // vfnmadd231  (acc - prod)
-                    case IROp::FNMADD: opcode = 0xBF; break;  // vfnmsub231  (-acc - prod)
-                    case IROp::FNMSUB: opcode = 0xBB; break;  // vfmsub231   (prod - acc)
-                    default: return false;  // unreachable
-                }
-                int xd = vec_xmm(inst.dest);
-                int xacc = vec_xmm(fp.acc);
-                int dst_xmm;
-                bool copy_acc;
-                if (xd >= 0) {
-                    dst_xmm = xd;
-                    copy_acc = (xacc != xd);
-                } else {
-                    dst_xmm = 0;  // compute into XMM0 (unpinned dest)
-                    copy_acc = true;
-                }
-                // Resolve Vn/Vm BEFORE the acc copy: the acc copy overwrites
-                // the dest XMM, so any source pinned to that SAME XMM (dest
-                // aliases src1/src2 while acc is elsewhere — e.g. GCC's
-                // `fmsub d0, d0, d1, d2`) would have its value destroyed
-                // before the FMA reads it. Reload such a source from v_lo
-                // into its scratch instead of using the pinned XMM.
-                int xs1 = vec_xmm(inst.src1);
-                int xs2 = vec_xmm(inst.src2);
-                if (copy_acc && xd >= 0) {
-                    if (xs1 == xd) { fp_load_operand(1, inst.src1, is_double); xs1 = 1; }
-                    if (xs2 == xd) { fp_load_operand(2, inst.src2, is_double); xs2 = 2; }
-                }
-                if (xs1 < 0) { fp_load_operand(1, inst.src1, is_double); xs1 = 1; }
-                if (xs2 < 0) { fp_load_operand(2, inst.src2, is_double); xs2 = 2; }
-                // Copy Va (acc) into the dest XMM, LAST, so the source loads
-                // above are never clobbered by it.
-                if (xd >= 0) {
-                    if (xacc >= 0 && xacc != xd) {
-                        // movsd/movss xmm_d, xmm_acc (dest = acc)
-                        emit_byte(prefix);
-                        emit_byte(rex(false, xd >= 8, false, xacc >= 8));
-                        emit_byte(0x0F); emit_byte(0x10);
-                        emit_byte(modrm(3, xd & 7, xacc & 7));
-                    } else if (xacc < 0) {
-                        // acc unpinned: load from memory into XMM0, move to dest
-                        emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                        emit_modrm_disp(0, CPU_REG, off_acc);
-                        emit_byte(prefix);
-                        emit_byte(rex(false, xd >= 8, false, false));
-                        emit_byte(0x0F); emit_byte(0x10);
-                        emit_byte(modrm(3, xd & 7, 0));
-                    }
-                    // xacc == xd: dest already holds acc
-                } else {
-                    if (xacc >= 0) {
-                        emit_byte(prefix);
-                        emit_byte(rex(false, false, false, xacc >= 8));
-                        emit_byte(0x0F); emit_byte(0x10);
-                        emit_byte(modrm(3, 0, xacc & 7));
-                    } else {
-                        emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                        emit_modrm_disp(0, CPU_REG, off_acc);
-                    }
-                }
-                // VEX.128.66.0F38.W[is_double]: vfmadd231ss/sd xmmD, xmmS1, xmmS2
-                // (FMA3 uses pp=01 for BOTH ss and sd — the W bit selects width).
-                emit_vex3(2, is_double, xs1, 1, dst_xmm, xs2, true, opcode);
-                if (xd >= 0) {
-                    vec_cache_mark_dirty(inst.dest);
-                } else {
-                    fp_store_operand(0, inst.dest, is_double);
-                }
-                fp_zero_hi(inst.dest);
-                return false;
-            } else {
-                // ── Decomposed path (no FMA3) ──
-                // Load Vn into XMM0, Vm into XMM1, multiply → XMM0 = Vn*Vm
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, off1);
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1, CPU_REG, off2);
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x59);
-                emit_byte(0xC1);  // mulsd xmm0, xmm1
-                // Load Va (acc) into XMM2
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(2, CPU_REG, off_acc);
-                // Combine per operation (ARM FMA semantics):
-                //   FMADD:  r = acc + prod       → addsd xmm0, xmm2
-                //   FMSUB:  r = acc - prod       → subsd xmm2, xmm0; movaps xmm0, xmm2
-                //   FNMADD: r = -acc - prod      → addsd xmm0, xmm2; negate xmm0
-                //   FNMSUB: r = prod - acc       → subsd xmm0, xmm2
-                if (inst.op == IROp::FMADD) {
-                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
-                    emit_byte(0xC2);  // addsd xmm0, xmm2
-                } else if (inst.op == IROp::FMSUB) {
-                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C);
-                    emit_byte(0xD0);  // subsd xmm2, xmm0  (xmm2 = acc - prod)
-                    emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC2);  // movaps xmm0, xmm2
-                } else if (inst.op == IROp::FNMSUB) {
-                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C);
-                    emit_byte(0xC2);  // subsd xmm0, xmm2  (xmm0 = prod - acc)
-                } else {  // FNMADD
-                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
-                    emit_byte(0xC2);  // addsd xmm0, xmm2  (xmm0 = prod + acc)
-                    // Negate xmm0 by XORing with sign bit.
-                    // mov rax, sign_mask  (0x8000000000000000 for double,
-                    //                      0x80000000 for single, zero-extended)
-                    if (is_double) {
-                        emit_mov_imm64(RAX, 0x8000000000000000ULL);
-                    } else {
-                        emit_mov_imm32_zext(RAX, 0x80000000u);
-                    }
-                    // movq xmm1, rax  (REX.W + 66 0F 6E ModRM)
-                    // NOTE: the REX.W prefix (0x48) is REQUIRED — without
-                    // it, this is `movd xmm1, eax` which only moves the
-                    // low 32 bits. For the double-precision sign mask
-                    // 0x8000000000000000, the low 32 bits are 0, so the
-                    // xorpd would be a no-op and the negation is lost.
-                    // The mandatory prefix 66 comes first, then REX.
-                    emit_byte(0x66);
-                    emit_byte(0x48);  // REX.W
-                    emit_byte(0x0F); emit_byte(0x6E);
-                    emit_byte(0xC8);  // ModRM: xmm1, rax
-                    // xorpd xmm0, xmm1  (0x66 0x0F 0x57 0xC1)
-                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57);
-                    emit_byte(0xC1);
-                }
+            const bool is_double = (fp.bits == 64);
+            uint8_t opcode;
+            switch (inst.op) {
+                case IROp::FMADD:  opcode = 0xB9; break;  // vfmadd231   (acc + prod)
+                case IROp::FMSUB:  opcode = 0xBD; break;  // vfnmadd231  (acc - prod)
+                case IROp::FNMADD: opcode = 0xBF; break;  // vfnmsub231  (-acc - prod)
+                default:           opcode = 0xBB; break;  // vfmsub231   (prod - acc)
             }
-            // Store result (in XMM0) to v_lo[dest] (fp_store_operand: pinned
-            // dest → reg-reg + dirty, else memory) and zero v_hi.
+            // 231 form into scratch XMM0 = Va; pinned Vn/Vm are read in
+            // place. Vd is written only after the NaN check, so the
+            // interpreter step still sees every source, aliases included.
+            const int xs1 = fp_resolve_operand(inst.src1, 1, is_double);
+            const int xs2 = fp_resolve_operand(inst.src2, 2, is_double);
+            fp_load_operand(0, fp.acc, is_double);
+            // VEX.128.66.0F38.W[is_double]: vfm*231ss/sd xmm0, xmmS1, xmmS2
+            // (FMA3 uses pp=01 for BOTH ss and sd — the W bit selects width).
+            emit_vex3(2, is_double, xs1, 1, 0, xs2, true, opcode);
+            // Arm NaN priority, +qNaN for invalid operations and FPCR.DN.
+            const size_t special = emit_fp_nan_check(is_double);
             fp_store_operand(0, inst.dest, is_double);
             fp_zero_hi(inst.dest);
+            emit_fp_cold_tail(inst, {special});
             return false;
         }
         default:
