@@ -254,14 +254,48 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
             store_vec(0, static_cast<int>(inst.dest), sp.q);
             return true;
         }
-        // ── SIMD ADDP (pairwise byte add, 8B/16B) — native SSE2 ──────
-        // Vd[i]   = Vn[2i] + Vn[2i+1]  (wrapping 8-bit)
-        // Vd[8+i] = Vm[2i] + Vm[2i+1]  (Q=1);  8B form: Vd[4+i] = Vm pairs.
+        // ── SIMD ADDP (integer pairwise add) — native SSE2 ───────────
+        // Vd = Vn's pair sums, then Vm's (wrapping). Q=0 pairs only the low
+        // 64 bits of each source and zeroes v_hi.
         case IROp::SIMD_ADDP: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
             const SimdAddpParams ap = inst.addp_params();
             const bool q = ap.q;
             clobber_flags();
+            if (ap.esize != 1) {
+                // Load both sources before writing Vd: it may alias either.
+                load_vec(0, static_cast<int>(inst.src1));
+                load_vec(1, static_cast<int>(inst.src2));
+                if (!q) {
+                    // Pair within [Vn.lo, Vm.lo]; its low half is the result.
+                    sse2_op(0x6C, 0, 1);              // punpcklqdq xmm0, xmm1
+                    movdqa(1, 0);
+                }
+                if (ap.esize == 2) {
+                    // Each dword's low 16 bits become h0+h1 (wrapping); sign-
+                    // extending them lets PACKSSDW pack without saturating.
+                    for (int x = 0; x < 2; x++) {
+                        movdqa(2, x);
+                        sse2_imm(0x72, 2, 2, 16);     // psrld xmm2, 16 (h1)
+                        sse2_op(0xFE, x, 2);          // paddd: low 16 = h0+h1
+                        sse2_imm(0x72, x, 6, 16);     // pslld 16
+                        sse2_imm(0x72, x, 4, 16);     // psrad 16
+                    }
+                    sse2_op(0x6B, 0, 1);              // packssdw xmm0, xmm1
+                } else if (ap.esize == 4) {
+                    movdqa(2, 0);
+                    sse_fp(0xC6, 0, 1); emit_byte(0x88);  // shufps: [n0,n2,m0,m2]
+                    sse_fp(0xC6, 2, 1); emit_byte(0xDD);  // shufps: [n1,n3,m1,m3]
+                    sse2_op(0xFE, 0, 2);                  // paddd
+                } else {                                  // esize 8, Q=1
+                    movdqa(2, 0);
+                    sse2_op(0x6C, 0, 1);              // punpcklqdq: [n0, m0]
+                    sse2_op(0x6D, 2, 1);              // punpckhqdq: [n1, m1]
+                    sse2_op(0xD4, 0, 2);              // paddq
+                }
+                store_vec(0, static_cast<int>(inst.dest), q);
+                return true;
+            }
             emit_mask(2, 0x00FF00FF00FF00FFULL);   // 0x00FF per 16-bit lane
             auto reduce = [&](int x) {
                 movdqa(1, x);

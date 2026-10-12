@@ -1,5 +1,14 @@
 # Tests
 
+## Integer ADDP widths (2026-10-12)
+
+`jit_simd_addlv`'s existing ADDP oracle (all element sizes, both Q, Q=0 high
+halves filled with 0xFF, wrapping patterns, Vd aliasing Vn or Vm) now runs
+natively: 2,624 checks pass under the JIT, `BIFROST_IR_VALIDATE=1`,
+`BIFROST_JIT_VERIFY=1` and `--no-jit`, and its fallback profile contains no
+ADDP encodings. The JIT/SIMD/FP regression subset passes 65/65 and
+`make generated-check` reports no drift. SpongeBob was not re-profiled.
+
 ## Ordered allocation overlap lookup (2026-10-12)
 
 A 60-second `perf` capture of SpongeBob gameplay attributed 4.2% of sampled CPU

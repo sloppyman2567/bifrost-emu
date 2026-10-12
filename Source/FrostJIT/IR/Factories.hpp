@@ -137,9 +137,8 @@ inline SimdBinopParams IRInst::pairmin_params() const {
     return SimdBinopParams{static_cast<uint8_t>(imm), width,
                            (flags_op & 1) != 0};
 }
-// ADDP (byte-pair pairwise add) has no subop or esize: width is always 1,
-// imm is always 0, only Q varies. The factory hardcodes the constants so
-// no call site can get them wrong.
+// Integer ADDP (pairwise add): width = element size (1/2/4/8 bytes),
+// flags_op = Q, imm always 0 (no subop).
 inline IRInst IRInst::make_addp(uint16_t dest, uint16_t src1, uint16_t src2,
                                 const SimdAddpParams& p, uint64_t arm_pc) {
     IRInst inst{};
@@ -147,14 +146,14 @@ inline IRInst IRInst::make_addp(uint16_t dest, uint16_t src1, uint16_t src2,
     inst.dest = dest;
     inst.src1 = src1;
     inst.src2 = src2;
-    inst.width = 1;
+    inst.width = p.esize;
     inst.flags_op = p.q ? 1 : 0;
     inst.imm = 0;
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline SimdAddpParams IRInst::addp_params() const {
-    return SimdAddpParams{(flags_op & 1) != 0};
+    return SimdAddpParams{(flags_op & 1) != 0, width};
 }
 // Integer SIMD arithmetic: imm=subop, width=esize, flags_op=Q.
 inline IRInst IRInst::make_arith(uint16_t dest, uint16_t src1, uint16_t src2,

@@ -45,9 +45,10 @@ struct SimdBinopParams {
     uint8_t esize = 1;  // element size in bytes (packed into width)
     bool q = false;     // 0 = 64-bit operands, 1 = 128-bit (flags_op)
 };
-// ADDP's only varying parameter is Q (width=1, imm=0 always).
+// Integer ADDP (vector pairwise add): element size and Q (imm=0 always).
 struct SimdAddpParams {
     bool q = false;     // 0 = 64-bit operands, 1 = 128-bit (flags_op)
+    uint8_t esize = 1;  // element size in bytes: 1/2/4, or 8 with Q=1 (width)
 };
 // Integer SIMD arithmetic: subop + esize + Q (flags_op).
 struct SimdArithParams {

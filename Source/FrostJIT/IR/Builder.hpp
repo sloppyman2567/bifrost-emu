@@ -189,7 +189,7 @@ inline void emit_xtn(IRBlock& b, uint16_t dest, uint16_t src,
 }
 // Typed emits for the binary vector ops (PERMUTE/PAIRMIN/ADDP). PERMUTE
 // and PAIRMIN share the SimdBinopParams shape (imm=subop, width=esize,
-// flags_op=Q, real src2); ADDP only varies in Q (width=1, imm=0 fixed).
+// flags_op=Q, real src2); ADDP has width=esize and flags_op=Q (imm=0 fixed).
 inline void emit_permute(IRBlock& b, uint16_t dest, uint16_t src1,
                          uint16_t src2, SimdBinopParams p, uint64_t arm_pc) {
     b.insts.push_back(IRInst::make_permute(dest, src1, src2, p, arm_pc));

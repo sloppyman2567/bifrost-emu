@@ -254,13 +254,15 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 break;
             }
             case IROp::SIMD_ADDP: {
-                // ADDP has no subop/esize: width is always 1, imm is
-                // always 0, only Q varies.
-                if (inst.width != 1) {
+                // ADDP: width = esize (1/2/4/8; 8 requires Q=1, as the
+                // .1D form is reserved), imm always 0, flags_op = Q.
+                const bool addp_q = (inst.flags_op & 1) != 0;
+                if (!(inst.width == 1 || inst.width == 2 || inst.width == 4 ||
+                      (inst.width == 8 && addp_q))) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: SIMD_ADDP "
-                        "width=%u invalid (want 1, arm_pc=0x%lx)\n",
-                        block.start_pc, i, inst.width, inst.arm_pc);
+                        "width=%u invalid for Q=%d (arm_pc=0x%lx)\n",
+                        block.start_pc, i, inst.width, addp_q ? 1 : 0, inst.arm_pc);
                     ok = false;
                 }
                 if (inst.imm != 0) {

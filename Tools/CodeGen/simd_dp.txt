@@ -134,9 +134,9 @@ FCVTZS  0xBF21FC00   0x0E21B800   CVTF       2   size == 2
 FCVTZU  0xBF21FC00   0x2E21B800   CVTF       3   size == 2
 
 # ── ADDP (vector, pairwise add) ──────────────────────────────────────────
-# Native lowering is BYTE-pair only. H/S/D forms use the width-aware
-# interpreter implementation through the normal fallback.
-ADDP    0xBF20FC00   0x0E20BC00   ADDP       0   size == 0
+# Native for B/H/S and Q=1 D. The reserved .1D form (size 3, Q 0) stays on
+# the interpreter, which raises the decode error.
+ADDP    0xBF20FC00   0x0E20BC00   ADDP       0   !(size == 3 && !Q)
 
 # ── XTN family (vector narrowing) ────────────────────────────────────────
 # bits[15:10]: 001010 -> XTN (U=0) / SQXTUN (U=1); 010010 -> SQXTN (U=0) /

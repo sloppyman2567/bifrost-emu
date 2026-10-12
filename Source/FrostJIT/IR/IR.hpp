@@ -238,11 +238,11 @@ enum class IROp : uint8_t {
     //   flags_op = Q (0=64-bit operand: process v_lo only, ZERO v_hi;
     //                 1=128-bit: process v_lo AND v_hi)
     SIMD_CVTF,
-    // Native SIMD ADDP (vector pairwise add). Byte pairs only
-    // (esize=1, 8B/16B — the interp's size=0 path is the semantic ref).
-    //   width = 1
-    //   flags_op = Q (0=64-bit operand: 8B -> 4 results in v_lo, ZERO v_hi;
-    //                 1=128-bit: 16B -> 8 results in v_lo, v_hi = high 8)
+    // Native SIMD integer ADDP (vector pairwise add, wrapping). Results
+    // are Vn's pair sums followed by Vm's (the interpreter is the reference).
+    //   width = element size in bytes (1/2/4; 8 only with Q=1)
+    //   flags_op = Q (0=64-bit operands: results in v_lo, ZERO v_hi;
+    //                 1=128-bit: Vn pairs in v_lo, Vm pairs in v_hi)
     SIMD_ADDP,
     // Native SIMD narrowing (XTN/SQXTN/SQXTUN/UQXTN). Reads the
     // FULL 128-bit source (both 64-bit halves) and narrows each element to

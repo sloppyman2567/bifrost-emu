@@ -1094,10 +1094,11 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             case simd::Family::ADDP: {
-                // ADDP (vector, byte-pair). guard `size == 0` keeps the
-                // 8B/16B form here; H/S/D stay on the interpreter.
+                // ADDP (vector, integer). The classifier guard excludes the
+                // reserved .1D form (size == 3, Q == 0).
                 SimdAddpParams p;
                 p.q = Q;
+                p.esize = static_cast<uint8_t>(1u << size);
                 emit_addp(block, d.rd, d.rn, d.rm, p, cur_pc);
                 return true;
             }

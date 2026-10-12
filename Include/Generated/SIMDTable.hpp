@@ -110,7 +110,7 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF20FC00U) == 0x2E20D800U && (size == 0)) return Op{Family::CVTF, 50, 1, "UCVTF"};
     if ((op & 0xBF21FC00U) == 0x0E21B800U && (size == 2)) return Op{Family::CVTF, 51, 2, "FCVTZS"};
     if ((op & 0xBF21FC00U) == 0x2E21B800U && (size == 2)) return Op{Family::CVTF, 52, 3, "FCVTZU"};
-    if ((op & 0xBF20FC00U) == 0x0E20BC00U && (size == 0)) return Op{Family::ADDP, 53, 0, "ADDP"};
+    if ((op & 0xBF20FC00U) == 0x0E20BC00U && (!(size == 3 && !Q))) return Op{Family::ADDP, 53, 0, "ADDP"};
     if ((op & 0xBF3FFC00U) == 0x0E212800U && (size < 3)) return Op{Family::XTN, 54, 0, "XTN"};
     if ((op & 0xBF3FFC00U) == 0x2E212800U && (size < 3)) return Op{Family::XTN, 55, 1, "SQXTUN"};
     if ((op & 0xBF3FFC00U) == 0x0E214800U && (size < 3)) return Op{Family::XTN, 56, 2, "SQXTN"};

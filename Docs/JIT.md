@@ -64,6 +64,20 @@ and LLVM's [runtime value-location maps](https://llvm.org/docs/StackMaps.html).
 These provide design precedents; performance acceptance depends on Bifrost's
 own tests and measurements.
 
+## Integer ADDP for every element size (2026-10-12)
+
+A SpongeBob gameplay fallback profile recorded 17.2 million interpreted
+instructions in about six minutes; 10.5 million were one `ADDP v.2d`
+(`0x4ee6bcc6`). Native integer `ADDP` was byte-only. `SIMD_ADDP` now carries
+the element size in `width` and lowers every valid form with SSE2: halfword
+sums add each dword's halves, sign-extend the low 16 bits and pack with
+`PACKSSDW` (no saturation after sign extension); words use `SHUFPS 0x88/0xDD`
+plus `PADDD`; doublewords use `PUNPCKLQDQ/PUNPCKHQDQ` plus `PADDQ`. Q=0 forms
+first merge the low halves with `PUNPCKLQDQ`, then pair within that register
+and zero `v_hi`. Both sources are loaded before Vd is written. The classifier
+excludes the reserved `.1d` form, which keeps raising the interpreter's decode
+error. Reference: Arm [ADDP (vector)](https://www.scs.stanford.edu/~zyedidia/arm64/addp_advsimd_vec.html).
+
 ## Eight-block superblocks and region vector state (2026-10-12)
 
 Experimental Tier-2 now collects hot paths of at most eight blocks and 256
