@@ -11,6 +11,59 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Eight-block superblocks and region vector state (2026-10-12)
+
+Experimental Tier-2 now collects hot paths of at most eight blocks and 256
+guest instructions. `BIFROST_JIT_SUPERBLOCK_LIMIT=2..8` selects a smaller cap;
+the per-block IR/vreg budgets and region's 4,096-vreg ceiling also apply.
+Completed prefixes can end before an unsupported block. Non-head cycles and
+paths through an existing region remain excluded. Linear paths are eligible
+alongside closed loops, with cross-block scalar SSA, precise side exits and
+dependency tracking for every included code range. Tier-2 remains opt-in with
+`BIFROST_TIER2=1`; single-thread automatic promotion also requires
+`BIFROST_NO_WEX=1`, as before. MT uses immutable generated instructions and
+revocable data cells.
+
+Region codegen selects a vector or scalar-FP cache layout over its complete
+IR. Cold/chain entries preload that layout; internal edges and ST backedges
+retain XMM values. Every external exit, timing-quota exit and memory-fault
+recovery commits the region-wide pinned write set. A side exit before the
+current iteration's first write must also publish values carried from later
+writes on the preceding iteration. Deferred exit emission leaves compile-time
+vector dirtiness intact. Existing NaN helper calls reload the pinned layout.
+Cache-incompatible mixes and paths using more than thirteen distinct vectors
+retain the memory implementation; scalar FP retains its existing partial
+pinning policy. This change does not unify scalar/vector caches or extend
+the native FPCR/FPSR contract.
+
+Closed-loop timing still measures whole-iteration windows. Linear superblocks
+accumulate time from 256 completed live traversals per arm, excluding unrelated
+guest execution between visits. Both private sampling graphs have matching
+work probes and timer overhead. Work counts, block fingerprints and exit PCs
+must match; eight pairs need a median ratio below 0.97 and six winning pairs.
+Invalid/short samples retain Tier-1. Linear sampling is additionally bounded
+to 524,288 entries per trial, including CPU-local observation-slot collisions.
+Per-traversal timer overhead can hide gains in very short paths, so these
+decisions remain conservative rather than guaranteeing application speedup.
+
+Region destination reuse now preserves virtual homes defined in a loop's
+preheader. A value's last use in one body is not its last use across iterations:
+destructively redefining its virtual register can overwrite its invariant
+spill slot or pinned register. The saved pre-change binary reproduced a
+single-thread zstd crash with Tier-2 enabled; excluding these homes repairs
+that workload. The discovery oracle checks the immutable-home contract and
+twelve invariant/accumulator pairs under register pressure.
+
+Five interleaved cache-on/off runs of two-million-iteration generated regions
+measured median throughput gains of 4.05x (2D vector ADD), 1.96x (2S vector
+ADD), 2.45x (scalar D ADD), and 2.40x (scalar S ADD), with independent final
+value checks. Fixed-iteration CoreMark medians were 15.8101 s for the saved
+baseline, 15.8224 s with an eight-block cap, and 15.5748 s with four blocks.
+Each used one warm-up and three measured 110,000-iteration runs with all CRCs
+validated. Eight blocks were approximately neutral on CoreMark; the small
+four-block difference is not a general performance guarantee. These results
+do not establish game FPS. See [validation](TESTS.md#eight-block-superblocks-and-region-vector-state-2026-10-12).
+
 ## Indirect branches and host return boundaries (2026-10-12)
 
 With the default chain-skip frame layout, Tier-1 register-branch exits
@@ -355,9 +408,10 @@ The legacy forwarding cache does not run again on an SSA-lowered block.
 existing pipeline until their operand and state effects are modeled explicitly.
 This is scalar value SSA, not MemorySSA or a complete FP/vector conversion.
 
-Experimental Tier-2 single-thread loop regions build one SSA graph across
-all their blocks, with a separate entry, the actual loop backedge, and
-conditional side exits. Cross-block value numbering runs on this graph before
+Experimental Tier-2 superblocks build one scalar SSA graph across all their
+blocks, with a separate entry and distinct conditional side exits. Retained
+single-thread loops include the actual backedge; linear and MT paths use an
+acyclic graph. Cross-block value numbering runs on this graph before
 lowering. Architectural phis lower to guest-state reads at the join: retained
 STORE_REG operations commit incoming values, pinned registers carry their
 current value, and non-pinned deferred stores commit on the backedge. This
@@ -1117,9 +1171,9 @@ The collector follows direct `B` targets as well as conditional fall-through
 edges. Internal direct edges become inline boundaries, retaining register and
 flag state without a host jump. A body exceeding the 32-instruction block cap
 gets an explicit IR continuation with no additional guest instruction count.
-The existing 64-block/2,048-instruction bounds and loop-only compilation gate
-remain in force. Non-head cycles and unsupported terminators do not become
-loop regions. Collection stops at another published region head to avoid
+The eight-block/256-instruction bounds apply to loops and linear superblocks.
+Non-head cycles are excluded, and unsupported terminators remain outside the
+collected prefix. Collection stops at another published region head to avoid
 compiling rotated copies of an already optimized loop.
 
 Eligible native conditional, direct-branch and capped straight-line blocks

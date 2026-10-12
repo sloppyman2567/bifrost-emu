@@ -324,6 +324,10 @@ public:
         uint64_t baseline_ns = 0, baseline_exit = 0;
         uint32_t baseline_work = 0, sample_quota = 256;
         uint64_t baseline_hash = 0;
+        // Linear superblocks return to unrelated guest work between samples.
+        // Accumulate only time spent inside the private sampled path.
+        uint64_t window_ns = 0, window_hash = 0;
+        uint32_t window_work = 0, window_count = 0;
     };
     static constexpr unsigned TIER2_FEEDBACK_SLOTS = 16;
     Tier2FeedbackSlot jit_tier2_feedback[TIER2_FEEDBACK_SLOTS]{};

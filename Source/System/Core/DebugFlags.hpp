@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <algorithm>
 #include <string>
 #include <cstdint>
 #include <utility>
@@ -43,6 +44,7 @@ struct DebugFlags {
     // ── JIT codegen diagnostics ──────────────────────────────────────
     bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
     bool tier2 = false; // BIFROST_TIER2=1 — opt in to experimental region promotion
+    unsigned jit_superblock_limit = 8; // BIFROST_JIT_SUPERBLOCK_LIMIT=2..8
     bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
     bool jit_verify = false;  // BIFROST_JIT_VERIFY: presence enables differential replay
     bool no_ssa = false; // BIFROST_NO_SSA — compare with the legacy scalar IR pipeline
@@ -194,6 +196,8 @@ struct DebugFlags {
             return v ? std::string(v) != "0" && std::string(v) != "false" : fallback;
         };
         f.tier2 = toggle("BIFROST_TIER2", false);
+        if (const char* value = std::getenv("BIFROST_JIT_SUPERBLOCK_LIMIT"))
+            f.jit_superblock_limit = std::clamp(std::strtoul(value, nullptr, 10), 2UL, 8UL);
         f.window_stats_title = toggle("BIFROST_WINDOW_STATS_TITLE", toggle("BIFROST_WINDOW_STATS", true));
         f.window_stats_window = toggle("BIFROST_WINDOW_STATS_WINDOW", false);
         f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", false);

@@ -194,6 +194,12 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             trial->baseline.tier2_hot_logged = true;
             trial->candidate = rfn; trial->candidate_chain = chain_fn;
             trial->lo = trial_lo; trial->hi = trial_hi;
+            trial->linear = trace.blocks.back().side_exits[0].first != trace.head_pc;
+            const auto& last = trace.blocks.back();
+            const auto& term = last.ir.insts.back();
+            trial->linear_exit = term.op == IROp::BRCOND_FALLTHRU
+                ? term.fallthru_params().target
+                : (last.follows_taken ? last.hot_successor : last.pc + last.ir.count * 4ull);
             trial->baseline_blocks = std::move(baseline_graph);
             trial->baseline_edges = old_source_edges;
             for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)

@@ -58,7 +58,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     cpu.jit_tier2_trial_chain_fn = candidate
         ? (trial.candidate_chain_sample ? trial.candidate_chain_sample : trial.candidate_chain)
         : (trial.baseline_chain_sample ? trial.baseline_chain_sample : trial.baseline.chain_entry);
-    cpu.jit_tier2_trial_remaining = slot.sample_quota;
+    cpu.jit_tier2_trial_remaining = trial.linear ? 1 : slot.sample_quota;
     cpu.jit_tier2_trial_work = cpu.jit_tier2_trial_hash = 0;
     const uint64_t start = thread_cpu_ns();
     for (unsigned dispatches = 0; dispatches < 2048; ++dispatches) {
@@ -80,19 +80,41 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         if (!fn) break;
     }
     const uint64_t end = thread_cpu_ns();
-    const uint64_t ns = end > start && start ? end - start : 0;
-    const uint32_t work = cpu.jit_tier2_trial_work;
-    const uint64_t hash = cpu.jit_tier2_trial_hash;
+    uint64_t ns = end > start && start ? end - start : 0;
+    uint32_t work = cpu.jit_tier2_trial_work;
+    uint64_t hash = cpu.jit_tier2_trial_hash;
     const uint64_t exit = cpu.pc;
     cpu.jit_tier2_trial = nullptr;
     bool finish = false, keep = false;
     {
         std::lock_guard<std::mutex> sample_lock(trial.mutex);
         if (trial.decision.load(std::memory_order_relaxed)) return exit;
+        bool complete = !cpu.jit_tier2_trial_remaining && exit == monitor->head;
+        bool exhausted = false;
+        if (trial.linear) {
+            complete = false;
+            // A linear path cannot repeat inside one timed call without
+            // executing unrelated work or replaying side effects. Pool only
+            // completed live traversals; both arms pay identical timer/probe
+            // overhead. This is conservative for very short superblocks.
+            exhausted = ++trial.linear_entries >= 128 * 4096;
+            if (ns && work && cpu.running && exit == trial.linear_exit &&
+                monitor->enabled.load(std::memory_order_acquire)) {
+                slot.window_ns += ns;
+                slot.window_work += work;
+                slot.window_hash += hash;
+                if (++slot.window_count < slot.sample_quota && !exhausted) return exit;
+                complete = slot.window_count == slot.sample_quota;
+                ns = slot.window_ns; work = slot.window_work; hash = slot.window_hash;
+            }
+            slot.window_ns = slot.window_hash = 0;
+            slot.window_work = slot.window_count = 0;
+        }
         ++trial.attempts;
         // A pair belongs to one vCPU. Reject short, different-path and
         // different-work samples instead of comparing unrelated executions.
-        if (monitor->enabled.load(std::memory_order_acquire) && ns && (candidate || ns >= 10000) && !cpu.jit_tier2_trial_remaining && exit == monitor->head && work >= 128) {
+        if (monitor->enabled.load(std::memory_order_acquire) && ns &&
+            (candidate || ns >= 10000) && complete && work >= 128) {
             if (!candidate) {
                 slot.baseline_ns = ns; slot.baseline_exit = exit;
                 slot.baseline_work = work; slot.baseline_hash = hash;
@@ -102,7 +124,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             }
         }
         if (candidate) slot.baseline_ns = 0;
-        else if (ns && ns < 10000 && !cpu.jit_tier2_trial_remaining && slot.sample_quota < 4096)
+        else if (ns && ns < 10000 && complete && slot.sample_quota < 4096)
             slot.sample_quota *= 2; // amortize timer cost on very fast loops
         if (trial.ratios.size() >= 8) {
             auto ratios = trial.ratios;
@@ -114,7 +136,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             if (tier2_trace_enabled())
                 fprintf(stderr, "[tier2] measured head=%llx pairs=%zu candidate/baseline=%.4f wins=%u keep=%d\n",
                     (unsigned long long)monitor->head, ratios.size(), median, wins, keep);
-        } else if (trial.attempts >= 128) finish = true; // insufficient proof keeps Tier-1
+        } else if (trial.attempts >= 128 || exhausted) finish = true; // insufficient proof keeps Tier-1
         if (finish) trial.decision.store(keep ? 1 : 2, std::memory_order_release);
     }
     if (finish) finish_tier2_trial(trial, keep);

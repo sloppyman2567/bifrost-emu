@@ -1,7 +1,8 @@
 // Tier-2 bounded loop discovery, region optimization and publication.
 // Conditional branches follow measured hot successors; direct jumps and capped
 // straight-line blocks continue inline. Collection emits no host code.
-// Unsupported instructions abort rather than crossing a fault/call boundary.
+// Unsupported instructions stop before their block; complete prefixes remain
+// eligible without crossing a fault/call boundary.
 //
 // Regalloc contract (IMPORTANT): translate_to_ir allocates scratch vregs from
 // the thread_local g_alloc (vregs 0-32 = arch regs, scratch >= 33).
@@ -31,9 +32,9 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     Tier2Trace trace;
     trace.head_pc = head_pc;
 
-    // Trace caps (ROADMAP #14: "start 64 blocks or ~2048 guest instructions").
-    constexpr int       MAX_TRACE_BLOCKS = 64;
-    constexpr uint64_t  MAX_TRACE_INSTS  = 2048;
+    // Small hot superblocks bound compilation latency and spill pressure.
+    const unsigned MAX_TRACE_BLOCKS = dbg().jit_superblock_limit;
+    constexpr uint64_t MAX_TRACE_INSTS = 256;
     // Vreg ceiling: guard before allocating (the per-block scratch space is
     // bounded by the 4095-entry uint16_t vreg table).
     constexpr uint16_t  VREG_LIMIT = 4000;
@@ -356,13 +357,21 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     // SELF-LOOP (its cond branch targets itself, stop=b_backedge): it gains
     // the LICM preheader + DCE + const-prop that a plain block can't have,
     // which is Phase 2's "fuse the self-loop". A 1-block LINEAR trace is
-    // just the existing block JIT and stays rejected. An aborted trace is
-    // never compiled regardless of length.
+    // just the existing block JIT and stays rejected.
     bool self_loop_trace = (trace.blocks.size() == 1 &&
                             !trace.blocks.empty() &&
                             trace.blocks[0].side_exits.size() == 1 &&
                             trace.blocks[0].side_exits[0].first == head_pc);
-    trace.ok = (!aborted && (trace.blocks.size() >= 2 || self_loop_trace));
+    // An unsupported next block does not invalidate an already collected
+    // prefix: its last edge exits before that instruction. Never fuse a
+    // non-head cycle or overlap an existing region through this shortcut.
+    const bool prefix = aborted && trace.blocks.size() >= 2 &&
+        trace.stop_reason && std::strcmp(trace.stop_reason, "revisit") != 0 &&
+        std::strcmp(trace.stop_reason, "region_entry") != 0;
+    const bool non_head_cycle = trace.stop_reason &&
+        std::strcmp(trace.stop_reason, "revisit") == 0;
+    trace.ok = (!non_head_cycle && (!aborted || prefix) &&
+        (trace.blocks.size() >= 2 || self_loop_trace));
     if (trace.ok) {
         tier2_traces.fetch_add(1, std::memory_order_relaxed);
     } else if (!aborted && trace.stop_reason == nullptr) {

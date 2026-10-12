@@ -8,14 +8,239 @@
 #include <vector>
 #include <string>
 #include <chrono>
+#include <cstring>
+#include <cstdlib>
 using namespace arm64emu;
 namespace arm64emu { extern "C" uint64_t jit_call_helper(CPU*, Emulator*, uint64_t); }
+
+static bool check_region_invariant(bool mt) {
+    constexpr uint64_t head=0x60000;
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(head,4096); e->mem().mprotect_guest(head,4096,7);
+    // Twelve invariants exceed the available keep registers. Each one's last
+    // body use is a destructive-add candidate, but its spill home is live on
+    // the next trip. This reproduces zstd's overwritten preheader values.
+    std::vector<uint32_t> code;
+    for (unsigned a=1;a<=12;++a) {
+        code.push_back(0x91000000u | (a<<10) | (15<<5) | 16); // add x16,x15,#a
+        code.push_back(0x8b000000u | (a<<16) | (16<<5) | a); // add xa,x16,xa
+    }
+    code.push_back(0xd1000400);
+    code.push_back(0xb5000000u | ((uint32_t(-int(code.size()))&0x7ffff)<<5));
+    e->mem().write(head,code.data(),code.size()*4); e->enable_jit();
+    auto* j=e->jit(); if (mt) j->enter_multithreaded();
+    const auto trace=j->collect_tier2_trace(*e,head);
+    auto fn=j->compile_tier2_region(*e,trace);
+    if (!fn) return false;
+    for (uint64_t count : {1ULL,2ULL,7ULL,257ULL}) {
+        CPU c; c.pc=head; c.regs[0]=count; c.regs[15]=5;
+        unsigned entries=0;
+        while (c.pc==head && ++entries<=count+1) {
+            c.jit_chain_budget=256; c.pc=fn(&c,e.get());
+        }
+        if (c.pc!=head+code.size()*4 || c.regs[15]!=5) return false;
+        for (unsigned a=1;a<=12;++a)
+            if (c.regs[a]!=count*(5+a)) {
+                std::fprintf(stderr,"region invariant overwritten: n=%llu x%u=%llu want=%llu\n",
+                    (unsigned long long)count,a,(unsigned long long)c.regs[a],
+                    (unsigned long long)(count*(5+a))); return false;
+            }
+    }
+    if (!Tier2TestAccess::region_invariants_preserved(*j,trace)) {
+        std::fputs("region body redefines a preheader home\n",stderr); return false;
+    }
+    return true;
+}
+
+// The first exit precedes all vector writes. After a backedge it must commit
+// values carried from the previous trip, even though that exit is statically
+// clean. The scalar-FP variant shares the cache but keeps v_hi in memory.
+static bool check_region_vectors(bool mt, bool benchmark) {
+    constexpr uint64_t head=0x10000, body=0x11000, exit=0x12000, data=0x30000;
+    for (uint32_t arithmetic : {0x4e61d400u, 0x0e21d400u, 0x1e612800u, 0x1e212800u}) {
+        auto e=std::make_unique<Emulator>();
+        e->mem().map_range(head,0x3000);
+        e->mem().mprotect_guest(head,0x3000,7);
+        const uint32_t entry[]={0xb4010000,0x140003ff}; // cbz x0,exit; b body
+        const uint32_t loop[]={arithmetic,0xd1000400,0x17fffbfe}; // sub x0,#1; b head
+        e->mem().write(head,entry,sizeof(entry));
+        e->mem().write(body,loop,sizeof(loop));
+        e->enable_jit();
+        auto* j=e->jit();
+        if (mt) j->enter_multithreaded();
+        auto trace=j->collect_tier2_trace(*e,head);
+        auto fn=j->compile_tier2_region(*e,trace);
+        const bool scalar=arithmetic==0x1e612800u || arithmetic==0x1e212800u;
+        const bool expect_cache=Tier2TestAccess::supports_vector_cache(*j) &&
+            !std::getenv(scalar ? "BIFROST_NO_FP_CACHE" : "BIFROST_NO_VEC_CACHE");
+        if (!fn || Tier2TestAccess::vector_cache_active(*j)!=expect_cache) {
+            std::fprintf(stderr,"region vector cache inactive: op=%08x\n",arithmetic);
+            return false;
+        }
+        auto init=[&](CPU& c,uint64_t count,bool nan) {
+            c.pc=head; c.regs[0]=count;
+            if (arithmetic==0x4e61d400u || arithmetic==0x1e612800u) {
+                const double one=1.0,two=2.0;
+                std::memcpy(&c.v_lo[1],&one,8); std::memcpy(&c.v_hi[1],&two,8);
+                if (nan) c.v_lo[1]=UINT64_C(0x7ff8000000001234);
+            } else {
+                c.v_lo[1]=UINT64_C(0x400000003f800000);
+                c.v_hi[1]=UINT64_C(0x4080000040400000);
+                if (nan) c.v_lo[1]=UINT64_C(0x400000007fc01234);
+            }
+            c.v_hi[0]=UINT64_C(0x3ff000003f800000);
+        };
+        for (uint64_t count : {0ULL,1ULL,7ULL,257ULL}) for (bool nan : {false,true}) {
+            CPU actual,reference; init(actual,count,nan); init(reference,count,nan);
+            unsigned entries=0;
+            FrostJIT::FaultScope scope(j);
+            while (actual.pc==head && ++entries<=count+2) {
+                actual.jit_chain_budget=256;
+                actual.pc=fn(&actual,e.get());
+            }
+            while (reference.pc!=exit) e->step(reference);
+            if (actual.pc!=exit || actual.regs[0]!=reference.regs[0] ||
+                actual.v_lo[0]!=reference.v_lo[0] || actual.v_hi[0]!=reference.v_hi[0]) {
+                std::fprintf(stderr,"region vector mismatch: op=%08x n=%llu nan=%d lo=%llx/%llx hi=%llx/%llx\n",
+                    arithmetic,(unsigned long long)count,nan,
+                    (unsigned long long)actual.v_lo[0],(unsigned long long)reference.v_lo[0],
+                    (unsigned long long)actual.v_hi[0],(unsigned long long)reference.v_hi[0]);
+                return false;
+            }
+        }
+        if (benchmark) {
+            CPU c; init(c,2000000,false);
+            c.v_hi[0]=0;
+            const auto begin=std::chrono::steady_clock::now();
+            FrostJIT::FaultScope scope(j);
+            while (c.pc==head) { c.jit_chain_budget=256; c.pc=fn(&c,e.get()); }
+            const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+            uint64_t lo=0,hi=0;
+            if (arithmetic==0x4e61d400u || arithmetic==0x1e612800u) {
+                const double low=2000000.0,high=4000000.0;
+                std::memcpy(&lo,&low,8);
+                if (!scalar) std::memcpy(&hi,&high,8);
+            } else {
+                const float low=2000000.0f,high=4000000.0f;
+                uint32_t low_bits,high_bits;
+                std::memcpy(&low_bits,&low,4); std::memcpy(&high_bits,&high,4);
+                lo=low_bits;
+                if (!scalar) lo|=uint64_t(high_bits)<<32;
+            }
+            if (c.pc!=exit || c.regs[0] || c.v_lo[0]!=lo || c.v_hi[0]!=hi) {
+                std::fputs("region vector benchmark oracle failed\n",stderr); return false;
+            }
+            std::printf("region vector op=%08x: %.3f ms\n",arithmetic,ms);
+        }
+        // Fault at the head on the second trip, before any new FP write.
+        // Recovery must publish the carried XMM state before stepping LDR.
+        j->invalidate_all();
+        e->mem().map_range(data,4096);
+        const uint32_t fault_head[]={0xf9400085,0xb400ffe0,0x140003fe};
+        const uint32_t fault_body[]={arithmetic,0x91400484,0xd1000400,0x17fffbfd};
+        e->mem().write(head,fault_head,sizeof(fault_head));
+        e->mem().write(body,fault_body,sizeof(fault_body));
+        trace=j->collect_tier2_trace(*e,head);
+        fn=j->compile_tier2_region(*e,trace);
+        if (!fn) return false;
+        CPU c,reference; init(c,2,false); init(reference,1,false);
+        c.regs[4]=data; reference.regs[4]=data;
+        while (reference.pc!=head || reference.regs[0]) e->step(reference);
+        {
+            FrostJIT::FaultScope scope(j);
+            unsigned entries=0;
+            while (c.running && c.pc==head && ++entries<4) {
+                c.jit_chain_budget=256; c.pc=fn(&c,e.get());
+            }
+        }
+        if (c.running || c.exit_code!=139 || c.v_lo[0]!=reference.v_lo[0] ||
+            c.v_hi[0]!=reference.v_hi[0]) {
+            std::fprintf(stderr,"region vector fault-state mismatch: op=%08x\n",arithmetic);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool check_superblocks(bool mt) {
+    constexpr uint64_t head=0x40000,cold=0x41000,stop=0x50000;
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(head,8192); e->mem().mprotect_guest(head,8192,7);
+    std::vector<uint32_t> code;
+    for (unsigned b=0;b<8;++b) {
+        code.push_back(0x4e61d400); // fadd v0.2d,v0.2d,v1.2d
+        code.push_back(0x91000421); // add x1,x1,#1
+        const uint64_t pc=head+code.size()*4;
+        code.push_back(0xb5000000u | ((uint32_t((cold-pc)/4)&0x7ffff)<<5) | (b+2));
+    }
+    code.push_back(0xd65f03c0);
+    const uint32_t ret=0xd65f03c0;
+    e->mem().write(head,code.data(),code.size()*4); e->mem().write(cold,&ret,4);
+    e->enable_jit(); auto* j=e->jit(); if (mt) j->enter_multithreaded();
+    const auto trace=j->collect_tier2_trace(*e,head);
+    if (!trace.ok || trace.blocks.size()!=8 || trace.total_insts!=24 ||
+        std::string(trace.stop_reason)!="block_cap") {
+        std::fputs("eight-block superblock cap failed\n",stderr); return false;
+    }
+    auto run=[&](unsigned side) {
+        CPU c; c.pc=head; c.regs[30]=stop; c.jit_stop_pc=stop;
+        c.v_lo[1]=c.v_hi[1]=UINT64_C(0x3ff0000000000000);
+        if (side<8) c.regs[side+2]=1;
+        unsigned dispatches=0;
+        while (c.pc!=stop && ++dispatches<100) c.pc=j->run_block(c,*e);
+        const double expected=side<8 ? side+1 : 8;
+        uint64_t bits; std::memcpy(&bits,&expected,8);
+        return c.pc==stop && c.regs[1]==uint64_t(expected) &&
+            c.v_lo[0]==bits && c.v_hi[0]==bits;
+    };
+    for (unsigned k=0;k<96;++k) if (!run(8)) return false;
+    if (!j->tier2_regions.load()) {
+        std::fputs("linear superblock did not promote\n",stderr); return false;
+    }
+    Tier2TestAccess::keep_candidates(*j);
+    for (unsigned side=0;side<=8;++side) if (!run(side)) {
+        std::fprintf(stderr,"superblock side-exit %u mismatch\n",side); return false;
+    }
+    // Changing an interior instruction revokes the entire fused path.
+    j->invalidate_range(head+5*12,4);
+    if (j->lookup_only(head)) {
+        std::fputs("superblock interior invalidation failed\n",stderr); return false;
+    }
+    return true;
+}
+
+static bool check_region_fp_memory(bool mt) {
+    constexpr uint64_t head=0x70000,body=0x71000,exit=0x72000,data=0x80000;
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(head,0x3000); e->mem().mprotect_guest(head,0x3000,7);
+    e->mem().map_range(data,4096);
+    const uint32_t entry[]={0xb4010002,0x140003ff};
+    // d0 and a GPR updated before its FP store share index zero.
+    const uint32_t loop[]={0x91000400,0x1e612800,0xfd000060,0xd1000442,0x17fffbfc};
+    e->mem().write(head,entry,sizeof(entry)); e->mem().write(body,loop,sizeof(loop));
+    e->enable_jit(); auto* j=e->jit(); if (mt) j->enter_multithreaded();
+    auto trace=j->collect_tier2_trace(*e,head); auto fn=j->compile_tier2_region(*e,trace);
+    if (!fn) return false;
+    CPU c; c.pc=head; c.regs[0]=10; c.regs[2]=3; c.regs[3]=data; c.v_lo[1]=UINT64_C(0x3ff0000000000000);
+    FrostJIT::FaultScope scope(j);
+    unsigned entries=0;
+    while (c.pc==head && ++entries<8) { c.jit_chain_budget=256; c.pc=fn(&c,e.get()); }
+    uint64_t stored=0; e->mem().read(data,&stored,sizeof(stored));
+    if (c.pc!=exit || c.regs[0]!=13 || c.regs[2] || stored!=UINT64_C(0x4008000000000000)) {
+        std::fprintf(stderr,"FP/GPR namespace collision: stored=%llx counter=%llu\n",
+            (unsigned long long)stored,(unsigned long long)c.regs[0]); return false;
+    }
+    return true;
+}
 int main(int argc, char** argv) {
     bool mt = false, benchmark = false;
     for (int k = 1; k < argc; ++k) {
         mt |= std::string(argv[k]) == "mt";
         benchmark |= std::string(argv[k]) == "benchmark";
     }
+    if (!check_region_invariant(mt) || !check_region_vectors(mt,benchmark)) return 1;
+    if (!check_region_fp_memory(mt)) return 1;
+    if (!benchmark && !check_superblocks(mt)) return 1;
     constexpr uint64_t head = 0x10000, body = 0x11000, exit = 0x12000, stop = 0x20000;
     auto e = std::make_unique<Emulator>();
     e->mem().map_range(head, 0x3000);

@@ -13,6 +13,21 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Bounded superblocks and region vector caching (2026-10-12)
+
+- Experimental Tier-2 fuses hot paths of up to eight blocks/256 instructions,
+  including linear prefixes, with cross-block scalar SSA and measured live-work
+  admission. `BIFROST_JIT_SUPERBLOCK_LIMIT=2..8` bounds smaller comparisons.
+- Region codegen retains compatible vector/scalar-FP cache layouts across
+  internal edges. Side exits, timing exits and fault recovery preserve
+  loop-carried XMM state, including writes later on a previous iteration.
+- Preserve invariant preheader homes during destructive destination reuse,
+  repairing a pre-existing Tier-2 single-thread zstd crash.
+- Add eight-block exit/invalidation, vector state, invariant lifetime and
+  linear timing regressions. Synthetic FP ADD regions improve by roughly
+  2–4x with caching; eight-block CoreMark is approximately neutral. Tier-2
+  remains opt-in and no game-FPS improvement is claimed.
+
 ### Indirect branches, watchdogs and lazy controllers (2026-10-12)
 
 - Chain-skip register branches use a per-host-thread IBL cache, with generation

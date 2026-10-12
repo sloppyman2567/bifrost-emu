@@ -84,18 +84,9 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     }
     // The last block's taken edge → the loop back-edge iff it targets the head.
     bool last_is_backedge = (blocks[nblk - 1].side_exits[0].first == trace.head_pc);
-    // LOOP REGIONS ONLY (default, 2026-08-20): a LINEAR region over a
-    // walked-out loop body re-pays a full region entry (prologue + cold-exit
-    // ret to the dispatcher) every iteration — strictly worse than the
-    // chained standalone blocks it replaces. Measured on CoreMark: tier2
-    // all-regions 3239 iters/s vs plain 3479 (-7%); loops-only 3602 (+3.5%).
-    // Genuine loops whose back-edge is a TAKEN conditional or an
-    // unconditional `b head` end their trace with stop=b_backedge and still
-    // fuse; only truly linear runs (and walks that exit a loop through an
-    // outer edge) are declined. BIFROST_T2_LINEAR=1 restores all-region
-    // behavior for bisection.
-    static const bool t2_linear_ = (getenv("BIFROST_T2_LINEAR") != nullptr);
-    if (!last_is_backedge && !t2_linear_) return false;
+    // Linear superblocks use the same precise exits and revocable chains as
+    // loop regions. Publication requires measured gain over their original
+    // Tier-1 graph; a block-count heuristic alone never selects a candidate.
     tier2_current_monitor_ = monitor_override;
     if (!monitor_override && tier2_retrains_[trace.head_pc] < 2) {
         auto monitor = std::make_unique<Tier2RegionMonitor>();
@@ -153,27 +144,28 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
                       blocks[i].pc, static_cast<size_t>(blocks[i].ir.count)};
     }
 
-    // Scalar loop SSA spans the entire region, including the backedge and
-    // each conditional side exit. Architectural stores remain observable;
+    // Scalar SSA spans the entire path, including a backedge when retained
+    // and distinct conditional side exits. Architectural stores remain observable;
     // joins read that canonical state rather than depending on scratch homes
     // surviving the backend's loop boundary. Cross-block value numbering is
     // performed before destruction, with dominator-scoped availability.
     std::vector<IRInst> ssa_preheader;
     bool ssa_region = false;
-    if (last_is_backedge && !dbg().no_ssa && !getenv("BIFROST_NO_OPT")) {
-        bool conditional = false;
+    if (!dbg().no_ssa && !getenv("BIFROST_NO_OPT")) {
+        size_t conditional = 0;
         for (const auto& b : rblocks)
-            conditional |= region_ir[b.term].op != IROp::BRCOND_FALLTHRU;
+            conditional += region_ir[b.term].op != IROp::BRCOND_FALLTHRU;
         const size_t exit = nblk + 1;
-        std::vector<SSASourceBlock> source(nblk + 1 + (conditional ? 1 : 0));
+        size_t side_exit = exit + (last_is_backedge ? 0 : 1);
+        std::vector<SSASourceBlock> source(side_exit + conditional);
         source[0].successors = {1}; // distinct entry, outside the loop
         for (size_t b = 0; b < nblk; ++b) {
             auto& input = source[b + 1];
             input.ir.insts.assign(region_ir.begin() + rblocks[b].start,
                                   region_ir.begin() + rblocks[b].term + 1);
-            input.successors = {b + 1 == nblk ? 1 : b + 2};
+            input.successors = {b + 1 == nblk ? (last_is_backedge ? 1 : exit) : b + 2};
             if (region_ir[rblocks[b].term].op != IROp::BRCOND_FALLTHRU)
-                input.successors.push_back(exit);
+                input.successors.push_back(side_exit++);
         }
         SSAFunction function;
         std::vector<SSASourceBlock> lowered;
@@ -255,7 +247,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // back-edge (Lback) NO LONGER flushes all vregs, so the pinned values
     // survive the loop in registers — no store→cpu.regs[]→load round trip per
     // iteration. The flush removal is safe because regions write arch GPRs
-    // eagerly (STORE_REG) and FP/vector regs eagerly (no fp/vec cache), and
+    // eagerly (STORE_REG), cached FP/vector regs keep fixed XMM homes, and
     // every block's scratch vregs are remapped to DISJOINT ranges
     // (compile_tier2_region above), so at the back-edge the only live state
     // is arch GPRs + FP regs — the flush only ever stored dead scratch vregs.
@@ -493,6 +485,9 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // against LOAD_REG's arch-index src1.
     if (!getenv("BIFROST_NO_DESTSRC")) {
         const size_t n = region_ir.size();
+        std::vector<bool> invariant(4096, false);
+        for (const auto& inst : preheader)
+            if (inst.dest > 32 && inst.dest < 4096) invariant[inst.dest] = true;
         auto is_destsrc_op = [](IROp op) -> bool {
             switch (op) {
                 case IROp::ADD: case IROp::SUB: case IROp::AND:
@@ -527,6 +522,10 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
             if (!is_destsrc_op(inst.op)) continue;
             if (!(inst.dest > 32 && inst.dest < 4096)) continue;
             if (!(inst.src1 > 32 && inst.src1 < 4096)) continue;
+            // A preheader value is read again on the next loop trip. Reusing
+            // its virtual home destructively can overwrite its spill slot or
+            // its reserved host register, even at its last use in this body.
+            if (last_is_backedge && invariant[inst.src1]) continue;
             if (inst.dest == inst.src1) continue;
             if (inst.dest == inst.src2 || inst.dest == inst.aux) continue;
             // dest: uniquely defined here, never read before its def.

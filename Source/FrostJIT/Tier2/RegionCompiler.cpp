@@ -97,7 +97,13 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     taken_chain_target_pc_ = 0;
     chain_entry_off_ = 0;
     num_stack_slots_ = 0;
-    vec_cache_reset();  // regions never use the vec/fp cache (memory paths)
+    vec_cache_reset();
+    // Select one register layout for the complete fused path. Internal edges
+    // retain XMM state; cold entries reload it and every external exit commits
+    // the region-wide write set, including writes from a previous loop trip.
+    IRBlock cache_ir;
+    cache_ir.insts = region_ir;
+    if (!vec_cache_may_enable(cache_ir)) fp_cache_may_enable(cache_ir);
     regalloc_stats_reset();
     size_t block_start = code_buf_used_;
     // A region can be smaller than the preceding Tier-1 block. Clearing
@@ -263,7 +269,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         if (window_base_ && uses_window)
             emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
     }
-    // No vec/fp-cache prologue loads (regions never activate the caches).
+    vec_emit_prologue_loads();
     // Phase 2 pin preloads (cpu.regs[a] → pin reg). Emitted after the R10
     // window load but before body_start: every region entry runs the full
     // prologue (there is no chain-entry shortcut for regions), while the
@@ -430,6 +436,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         emit_byte(0x9D); emit_pop(RCX);
         materialize_flags_to_pstate();
         flush_all_vregs_keep();
+        vec_cache_writeback_all_pinned(false);
         for (int a = 0; a <= 30; ++a)
             if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
         emit_mov_imm_to_rax(trace.head_pc);
@@ -662,6 +669,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // wrong list navigation → wrong CRC). Over-flushing is safe — pins always
     // hold the current arch value at runtime.
     auto emit_flush_all_pins = [&]() {
+        // A side exit before this iteration's first vector write can still
+        // observe a value carried from a later block on the previous trip.
+        // Keep codegen dirtiness intact for the remaining deferred exits.
+        vec_cache_writeback_all_pinned(false);
         for (int a = 0; a <= 30; a++) {
             if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
         }
@@ -833,7 +844,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             materialize_flags_to_pstate();
         }
         // NO flush_all_vregs() here (Phase 2): regions write arch GPRs
-        // eagerly (STORE_REG) and FP/vector regs eagerly (no fp/vec cache),
+        // eagerly (STORE_REG); cached FP/vector regs retain their fixed homes,
         // and each block's scratch vregs occupy DISJOINT remapped ranges, so
         // at the back-edge the only live values are the arch GPRs (pins +
         // cpu.regs[] always current) — the flush only ever stored dead

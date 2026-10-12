@@ -13,20 +13,21 @@ using Fn=uint64_t (*)(CPU*,Emulator*);
 static Fn baseline_native,baseline_chain,candidate_native,candidate_chain;
 static volatile uint64_t burner=1;
 static unsigned candidate_delay=0;
+static bool linear_measure=false;
 static std::atomic<bool> armed{false},ready{false},release_trial{false};
 static void burn(unsigned count) {
     for(unsigned k=0;k<count;++k) burner=burner*1664525+1013904223;
 }
 static uint64_t slow_baseline(CPU* c,Emulator* e) {
-    if(c->jit_tier2_trial_remaining==256) burn(200000);
+    if(linear_measure || c->jit_tier2_trial_remaining==256) burn(200000);
     return baseline_native(c,e);
 }
 static uint64_t slow_baseline_chain(CPU* c,Emulator* e) {
-    if(c->jit_tier2_trial_remaining==256) burn(200000);
+    if(linear_measure || c->jit_tier2_trial_remaining==256) burn(200000);
     return baseline_chain(c,e);
 }
 static uint64_t slow_candidate(CPU* c,Emulator* e) {
-    if(c->jit_tier2_trial_remaining==256) {
+    if(linear_measure || c->jit_tier2_trial_remaining==256) {
         if(armed.load(std::memory_order_acquire)) {
             ready.store(true,std::memory_order_release);
             while(!release_trial.load(std::memory_order_acquire)) std::this_thread::yield();
@@ -36,7 +37,7 @@ static uint64_t slow_candidate(CPU* c,Emulator* e) {
     return candidate_native(c,e);
 }
 static uint64_t slow_candidate_chain(CPU* c,Emulator* e) {
-    if(c->jit_tier2_trial_remaining==256) burn(candidate_delay);
+    if(linear_measure || c->jit_tier2_trial_remaining==256) burn(candidate_delay);
     return candidate_chain(c,e);
 }
 namespace arm64emu {
@@ -66,6 +67,12 @@ struct Tier2TestAccess {
         ++c.jit_tier2_feedback[t->monitor->slot].baseline_work;
     }
     static unsigned decision(void* ptr) { return static_cast<FrostJIT::Tier2Trial*>(ptr)->decision.load(); }
+    static bool linear_window(CPU& c,void* ptr) {
+        auto* t=static_cast<FrostJIT::Tier2Trial*>(ptr);
+        auto& slot=c.jit_tier2_feedback[t->monitor->slot];
+        slot.owner=t->monitor->identity; slot.sample_quota=8;
+        return t->linear;
+    }
 };
 }
 constexpr uint64_t HEAD=0x10000,STOP=0x20000;
@@ -175,8 +182,52 @@ static bool invalidated_trial() {
     while(fresh.pc!=STOP) fresh.pc=j->run_block(fresh,*e);
     return fresh.regs[1]==200;
 }
+static bool linear_scenario(bool mt,bool keep,bool mismatch=false) {
+    linear_measure=true;
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(HEAD,4096); e->mem().mprotect_guest(HEAD,4096,7);
+    std::vector<uint32_t> code;
+    for (unsigned k=0;k<8;++k) {
+        code.push_back(0x91000421); // add x1,x1,#1
+        code.push_back(0x14000001); // b next block
+    }
+    code.push_back(0xd65f03c0);
+    e->mem().write(HEAD,code.data(),code.size()*4); e->enable_jit();
+    auto* j=e->jit(); if(mt) j->enter_multithreaded();
+    for(unsigned k=0;k<40;++k) {
+        CPU warm; warm.pc=HEAD; warm.regs[30]=STOP; warm.jit_stop_pc=STOP;
+        while(warm.pc!=STOP) warm.pc=j->run_block(warm,*e);
+        if(warm.regs[1]!=8) return false;
+    }
+    void* trial=Tier2TestAccess::prepare(*j,HEAD);
+    CPU c;
+    if(!trial || !Tier2TestAccess::linear_window(c,trial)) return false;
+    candidate_delay=keep ? 20000 : 400000;
+    const size_t prefix=j->code_buf_used();
+    std::vector<uint8_t> bytes(j->code_buf(),j->code_buf()+prefix);
+    for(unsigned k=0;k<2048 && !Tier2TestAccess::decision(trial);++k) {
+        c.pc=HEAD; c.regs[1]=0; c.regs[30]=STOP; c.jit_stop_pc=STOP;
+        if(j->tier2_measure(c,*e,trial)!=HEAD+64 || c.regs[1]!=8 || c.jit_tier2_trial)
+            return false;
+        if(mismatch && k%16==7) Tier2TestAccess::mismatch(c,trial);
+    }
+    const unsigned expected=keep&&!mismatch ? 1 : 2;
+    if(Tier2TestAccess::decision(trial)!=expected ||
+        j->tier2_measured_pairs.load()!=(mismatch ? 0 : 8) ||
+        (mt && std::memcmp(bytes.data(),j->code_buf(),prefix))) {
+        std::fprintf(stderr,"linear timing decision mismatch: decision=%u expected=%u pairs=%llu\n",
+            Tier2TestAccess::decision(trial),expected,(unsigned long long)j->tier2_measured_pairs.load());
+        return false;
+    }
+    c.pc=HEAD; c.regs[1]=0;
+    c.jit_tier2_trial_work=123; c.jit_tier2_trial_hash=456;
+    while(c.pc!=STOP) c.pc=j->run_block(c,*e);
+    linear_measure=false;
+    return c.regs[1]==8 && c.jit_tier2_trial_work==123 && c.jit_tier2_trial_hash==456;
+}
 int main(int argc,char**argv) {
     const bool mt=argc>1 && std::string(argv[1])=="mt";
     if(!cold_and_transition(mt)||!scenario(mt,true)||!scenario(mt,false)||!scenario(mt,true,true)||(mt&&!invalidated_trial())) return 1;
+    if(!linear_scenario(mt,true)||!linear_scenario(mt,false)||!linear_scenario(mt,true,true)) return 1;
     std::puts("jit_tier2_measure: real timing keeps faster code, rejects slower/mismatched samples PASS");
 }

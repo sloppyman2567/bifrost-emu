@@ -73,7 +73,7 @@ struct Tier2Trace {
     uint64_t total_insts = 0;   // sum of block instruction counts
     double path_probability = 1.0; // measured probability of completing the path
     bool fully_profiled = true;
-    bool ok = false;            // false = trace aborted (never compile)
+    bool ok = false;            // complete path/prefix is safe to compile
     const char* stop_reason = nullptr;  // why collection stopped (debug)
 };
 // Output of plan_tier2_region(): the trace's IR concatenated, SSA-optimized
@@ -951,6 +951,8 @@ private:
         uint64_t (*baseline_chain_sample)(CPU*, Emulator*) = nullptr;
         uint64_t (*candidate_chain_sample)(CPU*, Emulator*) = nullptr;
         uint64_t lo = 0, hi = 0;
+        bool linear = false;
+        uint64_t linear_exit = 0;
         std::vector<std::pair<uint64_t, uint64_t (*)(CPU*, Emulator*)>> baseline_blocks;
         std::vector<MtEdge*> baseline_edges, candidate_edges, sampling_edges;
         std::vector<std::pair<uint64_t, BlockEntry>> sampling_blocks;
@@ -958,6 +960,7 @@ private:
         std::vector<double> ratios;
         bool sampling_revoked = false; // compiler lock only
         unsigned attempts = 0;
+        unsigned linear_entries = 0;
         std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
     };
     std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;

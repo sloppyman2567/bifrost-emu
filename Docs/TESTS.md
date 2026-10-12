@@ -1,5 +1,48 @@
 # Tests
 
+## Eight-block superblocks and region vector state (2026-10-12)
+
+`test_jit_tier2_discovery.sh` now checks eight-block linear promotion, all eight
+conditional side exits, interior-code invalidation, scalar/vector cached
+regions, Q=0 clearing, aliased arithmetic and NaN helper recovery. A fault at
+the head on the second iteration verifies that state written later on the
+preceding trip is committed before guest fault delivery. FP memory transfers
+also check independent GPR/FP registers sharing the same index. Twelve
+invariant/accumulator pairs check preheader-home preservation under pressure.
+The pre-fix planner redefined an invariant home; the saved original emulator
+also crashed on single-thread zstd with Tier-2 enabled. Both checks pass after
+the preheader-home repair.
+
+`test_jit_tier2_measure.sh` covers pooled linear windows with real controlled
+CPU work: faster candidates are selected, slower and mismatched-work candidates
+are rejected, and MT code bytes stay unchanged. Discovery, measurement and
+feedback pass in ST/MT with ordinary and chain-skip frames. MT publication,
+eight-CPU arithmetic/invalidation, opt-out checks and twenty mutex promotion
+stress runs pass. Cache-disabled, forced-software-guard and no-FMA3 discovery
+paths pass as additional compatibility checks.
+
+The SDL/GL and headless library builds pass, along with the C API (57/57)
+and native bridge (61/61) checks. `make generated-check` and
+`make verify` pass (21,836 SSA assertions, 75 differential fixtures and six
+threaded oracles). With host GPU access, the strict suite passes 313/313 in
+JIT and 304/304 in the interpreter, with nine intentional JIT-only skips.
+The sandbox hid `/dev/dri`; its seven graphics initialization failures were
+resolved by rerunning with real GPU access. A separate Tier-2-enabled run
+passes 56 selected SIMD/fault/atomic and real-world utility checks, including
+host-validated zstd compression/decompression and BusyBox/toybox workloads.
+These tests establish neither arbitrary game stability nor game FPS.
+
+The discovery executable's `benchmark` mode validates exact final lane values
+for two million ADD iterations. Five alternating cache-on/off measurements
+gave uncached/cached medians of 7.240/1.789 ms (2D vector), 5.428/2.767 ms
+(2S vector), 5.536/2.261 ms (scalar D), and 5.433/2.263 ms (scalar S).
+Fixed 110,000-iteration CoreMark runs validated every labelled CRC and the
+ten-second minimum: three-run wall-time medians were 15.8101 s before,
+15.8224 s with eight-block superblocks, and 15.5748 s with four blocks.
+Promotion was enabled and W^X disabled consistently in those comparisons.
+The vector measurements isolate caching; CoreMark shows no material gain
+from the eight-block setting in this batch.
+
 The test runner is [`Scripts/Testing/run_tests.sh`](../Scripts/Testing/run_tests.sh). It does
 not build guest fixtures; use `make setup-tests` for the C and assembly
 fixtures, or `make cross SRC=... OUT=...` for one C test. Missing fixtures are
