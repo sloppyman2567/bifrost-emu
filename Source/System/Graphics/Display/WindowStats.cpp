@@ -471,7 +471,12 @@ static void publish(void *key, const char *backend, bool sdl,
       SDL_GetWindowPosition(static_cast<SDL_Window *>(w), x, y);
     };
     get_size = [](void *w, int *x, int *y) {
+      // Physical pixels: logical size is smaller on scaled displays.
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+      SDL_GetWindowSizeInPixels(static_cast<SDL_Window *>(w), x, y);
+#else
       SDL_GetWindowSize(static_cast<SDL_Window *>(w), x, y);
+#endif
     };
     packet.visible = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) &&
                      !(SDL_GetWindowFlags(window) &
@@ -485,7 +490,7 @@ static void publish(void *key, const char *backend, bool sdl,
     if (glfw) {
       set_title = reinterpret_cast<SetTitle>(dlsym(glfw, "glfwSetWindowTitle"));
       get_pos = reinterpret_cast<GetPair>(dlsym(glfw, "glfwGetWindowPos"));
-      get_size = reinterpret_cast<GetPair>(dlsym(glfw, "glfwGetWindowSize"));
+      get_size = reinterpret_cast<GetPair>(dlsym(glfw, "glfwGetFramebufferSize"));
       using GetX = unsigned long (*)(void *);
       auto get_x = reinterpret_cast<GetX>(dlsym(glfw, "glfwGetX11Window"));
       if (get_x)

@@ -214,7 +214,7 @@ public:
     if (!window_) return false;
     info.title = sdl_.GetWindowTitle(window_);
     sdl_.GetWindowPosition(window_, &info.x, &info.y);
-    sdl_.GetWindowSize(window_, &info.w, &info.h);
+    sdl_.GetWindowSizeInPixels(window_, &info.w, &info.h);
     auto flags = sdl_.GetWindowFlags(window_);
     info.visible = (flags & SDL_WINDOW_INPUT_FOCUS) &&
                    !(flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED));

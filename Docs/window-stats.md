@@ -4,8 +4,9 @@ Statistics appear in the game window **title** by default.
 `--window-stats` (alias `--window_stats`) explicitly enables title statistics.
 The separate stats window and overlay remain opt-in. The emulator name and
 version come from `bifrost/version.hpp`.
-The display includes the presentation backend, FPS, logical window dimensions
-and total presented frames. The original game title is retained.
+The display includes the presentation backend, FPS, window size in physical
+pixels and total presented frames. On a scaled (HiDPI) display this is the
+drawable size, not the smaller logical size the desktop reports. The original game title is retained.
 Experimental hardware fields show the full host CPU and current GL renderer names
 without CPU/GPU prefixes, emulator resident RAM / total system RAM, and emulator
 resident VRAM / total dedicated GPU VRAM when available. Both memory fields use

@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 EMU=${EMU:-./bifrost-emu}
 TASK_TMP=$(mktemp -d)
 trap 'rm -rf "$TASK_TMP"' EXIT
-${CXX:-g++} -std=c++17 -pthread -IInclude -Itools/vulkan-headers/include Tests/Unit/window_stats_clock.cpp \
+${CXX:-g++} -std=c++17 -pthread -IInclude -ISource -IThirdParty/VulkanHeaders/include Tests/Unit/window_stats_clock.cpp \
     Source/System/Graphics/Display/WindowStats.cpp -ldl -o "$TASK_TMP/clock"
 "$TASK_TMP/clock"
 make cross SRC=Tests/Apps/test_window_stats.c OUT=Tests/Apps/test_window_stats.elf > "$TASK_TMP/build.log" 2>&1
