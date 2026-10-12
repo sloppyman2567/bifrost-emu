@@ -1,5 +1,6 @@
 #ifndef BIFROST_ANDROID_WINDOW_PLUGIN_H
 #define BIFROST_ANDROID_WINDOW_PLUGIN_H
+#include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -46,7 +47,19 @@ typedef struct bifrost_android_window_plugin_v2 {
     int32_t (*binding)(void *instance, bifrost_android_window_binding_v2 *out);
     /* Nonblocking; 1=event, 0=empty, negative errno=failure. */
     int32_t (*poll)(void *instance, bifrost_android_window_event_v2 *out);
+    /* Optional: present when struct_size covers both and both are non-null.
+     * Framework popup windows (dialogs, menus) drawn by the guest: width x
+     * height unpremultiplied 0xAARRGGBB words at window-pixel x/y, above
+     * every surface in creation order. Popups never take input; the primary
+     * window keeps receiving it. The pixels are valid only during the call.
+     * Return -EAGAIN to have the guest retry on its next frame. */
+    int32_t (*show_popup)(void *instance, uint32_t id, int32_t x, int32_t y,
+                          int32_t width, int32_t height, const uint32_t *argb);
+    void (*remove_popup)(void *instance, uint32_t id);
 } bifrost_android_window_plugin_v2;
+/* Smallest valid v2 descriptor: every required callback, no optional ones. */
+#define BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE \
+    offsetof(bifrost_android_window_plugin_v2, show_popup)
 /* Immutable descriptor lives until module unload. V1 is incompatible and
  * deliberately rejected: an SDL2 pointer cannot become a native/v2 window. */
 typedef const bifrost_android_window_plugin_v2 *

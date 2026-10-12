@@ -66,12 +66,29 @@ static int32_t poll_window(void *instance, bifrost_android_window_event_v2 *out)
     if (mode("poll-key-invalid")) { out->type = BIFROST_WINDOW_KEY; out->action = 9; return 1; }
     return 0;
 }
+static int32_t show_popup(void *instance, uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,
+                          const uint32_t *argb) {
+    (void)instance;
+    char line[96];
+    snprintf(line, sizeof(line), "popup %u %d,%d %dx%d %08x", id, x, y, w, h, argb[0]);
+    record(line);
+    return 0;
+}
+static void remove_popup(void *instance, uint32_t id) {
+    (void)instance;
+    char line[32];
+    snprintf(line, sizeof(line), "unpopup %u", id);
+    record(line);
+}
 #ifndef BIFROST_TEST_NO_ENTRY
 const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {
     static bifrost_android_window_plugin_v2 api;
     if (host_abi != BIFROST_ANDROID_WINDOW_ABI_V2 || mode("null-api")) return NULL;
     api = (bifrost_android_window_plugin_v2){2, sizeof(api), "c-fixture",
-        create, destroy, open_window, close_window, resize, binding, poll_window};
+        create, destroy, open_window, close_window, resize, binding, poll_window,
+        show_popup, remove_popup};
+    // A descriptor from before the optional popup callbacks were appended.
+    if (mode("old-size")) api.struct_size = BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE;
     if (mode("bad-version")) api.abi_version = 99;
     if (mode("legacy-version")) api.abi_version = 1;
     if (mode("bad-size")) api.struct_size = 8;

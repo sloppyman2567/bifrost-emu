@@ -56,6 +56,10 @@ final class FrameworkDisplay {
         return false;
     }
 
+    synchronized Rect bounds() {
+        return new Rect(0, 0, width, height);
+    }
+
     private Object windowContextInfo() throws Exception {
         Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
         config.densityDpi = 160;
@@ -63,13 +67,27 @@ final class FrameworkDisplay {
         config.screenHeightDp = height;
         config.smallestScreenWidthDp = Math.min(width, height);
         config.orientation = width > height ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
+        setWindowBounds(config);
+        return Class.forName("android.window.WindowContextInfo")
+                .getConstructor(Configuration.class, int.class).newInstance(config, 0);
+    }
+
+    // The Activity override configuration WMS supplies: only its window
+    // bounds. ViewRootImpl measures new windows (dialogs) and WindowMetrics
+    // reports sizes from these; other fields stay undefined to inherit.
+    synchronized Configuration activityOverride() throws Exception {
+        Configuration config = new Configuration();
+        Configuration.class.getMethod("unset").invoke(config);
+        setWindowBounds(config);
+        return config;
+    }
+
+    private void setWindowBounds(Configuration config) throws Exception {
         Object window = Configuration.class.getField("windowConfiguration").get(config);
         Rect bounds = new Rect(0, 0, width, height);
         window.getClass().getMethod("setBounds", Rect.class).invoke(window, bounds);
         window.getClass().getMethod("setMaxBounds", Rect.class).invoke(window, bounds);
         window.getClass().getMethod("setAppBounds", Rect.class).invoke(window, bounds);
-        return Class.forName("android.window.WindowContextInfo")
-                .getConstructor(Configuration.class, int.class).newInstance(config, 0);
     }
 
     private void dispatchWindowContexts() throws Exception {

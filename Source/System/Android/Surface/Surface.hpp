@@ -111,6 +111,9 @@ public:
     void destroy_egl_surface(uint64_t egl_surface);
     bool present_egl_surface(uint64_t egl_surface);
     int set_surface_opaque(uint64_t handle, bool opaque);
+    // Managed framework popup windows, software-drawn by the guest (op 9/10).
+    int show_popup(uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* argb);
+    void remove_popup(uint32_t id);
     bool surface_opaque(uint64_t handle) const;
 
     int32_t width(uint64_t handle = 0) const;

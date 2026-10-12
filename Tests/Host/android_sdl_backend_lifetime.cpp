@@ -27,7 +27,8 @@ int main() {
   CHECK(second->open("second", 800, 600) == 0);
   arm64emu::window_stats::WindowInfo info;
   first->set_title("APK name");
-  CHECK(first->window_info(info) && info.title == "APK name" && info.w == 400 && info.h == 300);
+  // Window stats report the drawable pixel size, not the 2x-scaled logical size.
+  CHECK(first->window_info(info) && info.title == "APK name" && info.w == 800 && info.h == 600);
   unsigned char icon[128 * 128 * 4]{};
   CHECK(first->set_icon(icon, 128, 128));
   setenv("BIFROST_TEST_SDL_BINDING_FAIL", "1", 1);

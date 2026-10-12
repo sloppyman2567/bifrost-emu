@@ -164,6 +164,18 @@ int AndroidSurfaceManager::set_surface_opaque(uint64_t handle, bool opaque) {
     return 0;
 }
 
+int AndroidSurfaceManager::show_popup(uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,
+                                      const uint32_t* argb) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!window_open_) return -ENODEV;
+    return window_backend_->show_popup(id, x, y, w, h, argb);
+}
+
+void AndroidSurfaceManager::remove_popup(uint32_t id) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (window_open_) window_backend_->remove_popup(id);
+}
+
 bool AndroidSurfaceManager::surface_opaque(uint64_t handle) const {
     std::lock_guard<std::mutex> lock(surface_mu_);
     auto it = surfaces_.find(handle);

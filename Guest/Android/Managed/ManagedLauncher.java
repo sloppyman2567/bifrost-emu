@@ -95,6 +95,7 @@ public final class ManagedLauncher {
     // ActivityRecord's requested orientation is initialized from its manifest.
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
     private static final FrameworkDisplay displays = new FrameworkDisplay();
+    private static final FrameworkWindows windows = new FrameworkWindows(displays);
     private static boolean play;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
@@ -683,6 +684,11 @@ public final class ManagedLauncher {
                 case "isSpeakerphoneOn": return false;
                 case "getRingerModeExternal": return AudioManager.RINGER_MODE_NORMAL;
                 case "isStreamMute": return false;
+                // View click/navigation feedback: AudioService plays these in
+                // system_server; there is no system sound pool here.
+                case "areNavigationRepeatSoundEffectsEnabled": return false;
+                case "playSoundEffect":
+                case "playSoundEffectVolume": return null;
                 case "getStreamMinVolume": return minVolumes[(Integer) a[0]];
                 case "isMusicActive": {
                     // AudioSystem.isStreamActive(STREAM_MUSIC): a started output.
@@ -707,6 +713,8 @@ public final class ManagedLauncher {
                 case "detachWindowContext":
                     displays.detachWindowContext((IBinder) a[0]);
                     return null;
+                // Dialogs and popup windows (WindowManagerGlobal.getWindowSession).
+                case "openSession": return windows.openSession(services);
                 default: throw unsupported("window", method);
             }
         });
@@ -897,6 +905,8 @@ public final class ManagedLauncher {
             // Nothing broadcasts here: no sticky Intent matches a new receiver.
             if (method.equals("registerReceiverWithFeature")) return null;
             if (method.equals("unregisterReceiver")) return null;
+            // Scheduling hint for HardwareRenderer's thread; no priority policy here.
+            if (method.equals("setRenderThread")) return null;
             throw unsupported("activity", method);
         });
     }
@@ -1206,7 +1216,7 @@ public final class ManagedLauncher {
         Context activityContext = (Context) call(Class.forName("android.app.ContextImpl"),
                 "createActivityContext", new Class<?>[] {thread.getClass(), loaded.getClass(),
                         ActivityInfo.class, IBinder.class, int.class, Configuration.class},
-                thread, loaded, activity, token, 0, null);
+                thread, loaded, activity, token, 0, displays.activityOverride());
         Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
                 .setClassName(packageName, launcher);
         Activity instance = instrumentation.newActivity(launcherClass, activityContext, token,
@@ -1276,20 +1286,25 @@ public final class ManagedLauncher {
 
     // Converts one op-3 event record (activity_window.c) into a framework
     // input event and dispatches it like ViewRootImpl's input stages.
-    private static void dispatch(Activity activity, long[] e) {
+    // Popup windows (FrameworkWindows) above the Activity receive input first.
+    private static void dispatch(Activity activity, long[] e) throws Exception {
         final long ms = 1000000;
         if (e[0] == 1) {  // AINPUT_EVENT_TYPE_KEY
-            activity.dispatchKeyEvent(new KeyEvent(e[11] / ms, e[12] / ms, (int) e[4],
+            KeyEvent event = new KeyEvent(e[11] / ms, e[12] / ms, (int) e[4],
                     (int) e[8], (int) e[10], (int) e[7], (int) e[6], (int) e[9],
-                    (int) e[19], (int) e[5]));
+                    (int) e[19], (int) e[5]);
+            if (!windows.dispatchKey(event)) activity.dispatchKeyEvent(event);
         } else if (e[0] == 2) {  // AINPUT_EVENT_TYPE_MOTION, first pointer only
             MotionEvent event = MotionEvent.obtain(e[11] / ms, e[12] / ms, (int) e[4],
                     Float.intBitsToFloat((int) e[14]), Float.intBitsToFloat((int) e[15]),
                     Float.intBitsToFloat((int) e[16]), Float.intBitsToFloat((int) e[17]),
                     0, 1f, 1f, (int) e[6], 0);
             event.setSource((int) e[5]);
-            if ((e[5] & InputDevice.SOURCE_CLASS_POINTER) != 0) activity.dispatchTouchEvent(event);
-            else activity.dispatchGenericMotionEvent(event);
+            if ((e[5] & InputDevice.SOURCE_CLASS_POINTER) != 0) {
+                if (!windows.dispatchPointer(event)) activity.dispatchTouchEvent(event);
+            } else {
+                activity.dispatchGenericMotionEvent(event);
+            }
             event.recycle();
         }
     }
@@ -1341,7 +1356,8 @@ public final class ManagedLauncher {
         if (diagnostic) checkRuntimeServices(activity, true);
         System.out.println("APP_RESUMED");
         layoutAndReportSurfaces(activity, width, height, true);
-        activity.onWindowFocusChanged(true);
+        // Focused unless a dialog shown during creation already holds focus.
+        windows.setActivityFocus(activity::onWindowFocusChanged);
         System.out.println("APP_SURFACE_READY");
         Handler handler = new Handler(Looper.getMainLooper());
         long[] event = new long[20];
@@ -1369,11 +1385,19 @@ public final class ManagedLauncher {
                             size[0] = (int) event[2];
                             size[1] = (int) event[3];
                             displays.setSize(size[0], size[1]);
+                            // ActivityThread applies a WMS bounds change this way.
+                            Object resources = Class.forName("android.app.ResourcesManager")
+                                    .getMethod("getInstance").invoke(null);
+                            call(resources, "updateResourcesForActivity",
+                                    new Class<?>[] {IBinder.class, Configuration.class, int.class},
+                                    call(activity, "getActivityToken", new Class<?>[0]),
+                                    displays.activityOverride(), 0);
                             layoutAndReportSurfaces(activity, size[0], size[1], false);
                         }
                         if (event[0] == 0) break;
                         dispatch(activity, event);
                     }
+                    windows.render();
                 } catch (Exception error) {
                     error.printStackTrace();
                     System.exit(1);

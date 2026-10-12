@@ -76,7 +76,24 @@ int main(int argc, char **argv) {
   CHECK(polling->poll(event) == 1 && event.width == 640 && event.height == 480);
   mode("");
   CHECK(polling->poll(event) == 0 && event.type == 0);
+  // Optional popup callbacks receive the guest's pixels unchanged.
+  std::ofstream(log, std::ios::trunc).close();
+  const uint32_t pixels[] = {0x80ff0000, 0xff00ff00};
+  CHECK(polling->show_popup(3, 10, -4, 2, 1, pixels) == 0);
+  CHECK(polling->show_popup(3, 0, 0, 0, 1, pixels) == -EINVAL);
+  polling->remove_popup(3);
+  CHECK(contents(log) == "popup 3 10,-4 2x1 80ff0000\nunpopup 3\n");
   polling.reset();
+  // An original-size v2 descriptor still loads; its trailing fields are ignored.
+  mode("old-size");
+  auto old = frost::load_android_window_backend(argv[1], error);
+  CHECK(old && error.empty());
+  std::ofstream(log, std::ios::trunc).close();
+  CHECK(old->show_popup(1, 0, 0, 1, 1, pixels) == -ENOTSUP);
+  old->remove_popup(1);
+  CHECK(contents(log).find("popup") == std::string::npos);
+  old.reset();
+  mode("");
   // Multiple instances must retain independent geometry and module references.
   std::ofstream(log, std::ios::trunc).close();
   auto first = std::make_unique<frost::AndroidSurfaceManager>(

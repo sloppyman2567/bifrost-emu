@@ -1029,6 +1029,46 @@ right after `APP_STOPPED`, as a phone would. The launcher prints
 reports a SIGKILL exit (137) after that marker as state `closed`, keeping the
 real exit code. A SIGKILL without the marker remains `failed`.
 
+### Framework popup windows (2026-10-12)
+
+Play mode supports `WindowManager.addView` windows other than the Activity's
+SurfaceView content: `Dialog`/`AlertDialog`, `PopupWindow` and similar.
+`IWindowManager.openSession` returns `FrameworkWindows`' `IWindowSession`:
+- `addToDisplay*` registers the window, initializes its input channel pair
+  (ViewRootImpl's receiver requires one), reports size-compat scale 1, display
+  insets and, for sub-windows, the full-screen parent frame, and returns
+  `ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE`.
+- `relayout`/`relayoutLegacy`/`relayoutAsync` compute frames like
+  `WindowLayout.computeFrames` without insets (explicit or MATCH_PARENT size,
+  else the measured size, then `Gravity.apply`) and report the window's
+  current configuration, so no configuration change is invented.
+- `remove` drops the host layer and returns focus.
+
+Android composes these windows in SurfaceFlinger. Here the UI loop draws each
+view tree in software when it is dirty and sends the pixels through private
+op 9 to a host popup layer above every surface (op 10 removes it); see
+[window plugins](ANDROID_WINDOW_PLUGINS.md). `FLAG_DIM_BEHIND` adds a
+translucent full-display layer below its window. Input follows
+InputDispatcher: touches go to the topmost window containing them or to a
+modal window, popups with `FLAG_WATCH_OUTSIDE_TOUCH` receive `ACTION_OUTSIDE`,
+and keys go to the topmost focusable popup (Escape → Back cancels dialogs).
+The Activity loses window focus while a focusable popup is shown. The log
+records `APP_POPUP_ADDED`, `APP_POPUP_SHOWN … text=<visible text>` and
+`APP_POPUP_REMOVED`. View click sounds are accepted silently.
+
+The Activity context now receives the override configuration WMS supplies:
+window bounds, app bounds and max bounds equal to the virtual display, updated
+on host resize through `ResourcesManager.updateResourcesForActivity`. Without
+them, ViewRootImpl measured new dialogs to 0×0 and
+`WindowManager.getCurrentWindowMetrics()` reported an empty window.
+
+Limits: windows draw only through software `View.draw` (no hardware layers,
+`TextureView` or SurfaceView inside popups), window animations are not
+played, and system windows (toasts, system alerts) are not composited. On
+X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
+that never redraws (no rendering SurfaceView) can keep stale dialog pixels
+after removal.
+
 Adding `--play` opens a host window, starts/resumes the Activity, reports
 SurfaceView holder callbacks and pumps host input. These callbacks use the
 managed graphics adapters; they are not a WindowManager attachment. The runner

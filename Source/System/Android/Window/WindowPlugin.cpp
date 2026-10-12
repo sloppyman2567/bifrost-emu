@@ -1,5 +1,6 @@
 #include "System/Android/Window/WindowBackend.hpp"
 #include "Bifrost/AndroidWindowPlugin.h"
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -19,8 +20,15 @@ int status(int32_t result) {
 
 class PluginWindowBackend final : public AndroidWindowBackend {
 public:
+  // Copies only the bytes the plugin declared; absent optional callbacks stay null.
   PluginWindowBackend(Module module, const bifrost_android_window_plugin_v2 &api)
-      : module_(std::move(module)), api_(api), name_(api.name) {}
+      : module_(std::move(module)), name_(api.name) {
+    std::memcpy(&api_, &api, std::min<size_t>(api.struct_size, sizeof(api_)));
+    if (!api_.show_popup || !api_.remove_popup) {
+      api_.show_popup = nullptr;
+      api_.remove_popup = nullptr;
+    }
+  }
   ~PluginWindowBackend() override {
     if (instance_) {
       if (created_) api_.close(instance_);
@@ -50,6 +58,16 @@ public:
     return {out.window, out.display};
   }
 
+  int show_popup(uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,
+                 const uint32_t *argb) override {
+    if (!api_.show_popup) return -ENOTSUP;
+    if (w <= 0 || h <= 0 || !argb) return -EINVAL;
+    return status(api_.show_popup(instance_, id, x, y, w, h, argb));
+  }
+  void remove_popup(uint32_t id) override {
+    if (api_.remove_popup) api_.remove_popup(instance_, id);
+  }
+
   int poll(AndroidWindowEvent &event) override {
     event = {};
     int32_t result = api_.poll(instance_, &event);
@@ -75,7 +93,7 @@ public:
 private:
   Module module_;
   // Copy the validated v2 prefix: callbacks cannot change under the host.
-  bifrost_android_window_plugin_v2 api_;
+  bifrost_android_window_plugin_v2 api_{};
   std::string name_;
   void *instance_ = nullptr;
   bool created_ = false;
@@ -105,7 +123,7 @@ load_android_window_backend(const std::string &path, std::string &error) {
   }
   const auto *api = entry(BIFROST_ANDROID_WINDOW_ABI_V2);
   if (!api || api->abi_version != BIFROST_ANDROID_WINDOW_ABI_V2 ||
-      api->struct_size < sizeof(bifrost_android_window_plugin_v2)) {
+      api->struct_size < BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE) {
     error = "window plugin has an incompatible ABI version or descriptor size";
     return nullptr;
   }

@@ -11,6 +11,8 @@
 #include "System/Audio/Audio.hpp"
 #include "System/Android/Surface/Surface.hpp"
 #include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -116,6 +118,25 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             else if (cpu.regs[0] == 8) { // Managed audio: started host output streams.
                 ret_host(static_cast<int64_t>(emu.audio().active_streams()));
+            }
+            else if (cpu.regs[0] == 9) { // Framework popup window: id, x, y, w, h, ARGB rows.
+                try {
+                    int64_t record[6];
+                    emu.mem().read(cpu.regs[1], record, sizeof(record));
+                    const int64_t w = record[3], h = record[4];
+                    if (record[0] < 0 || record[0] > UINT32_MAX || w <= 0 || h <= 0 ||
+                        w > 8192 || h > 8192 || std::abs(record[1]) > 65536 || std::abs(record[2]) > 65536) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    std::vector<uint32_t> pixels(static_cast<size_t>(w * h));
+                    emu.mem().read(static_cast<uint64_t>(record[5]), pixels.data(), pixels.size() * 4);
+                    ret_host(manager.show_popup(static_cast<uint32_t>(record[0]), int32_t(record[1]),
+                                                int32_t(record[2]), int32_t(w), int32_t(h), pixels.data()));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
+            }
+            else if (cpu.regs[0] == 10) { // Framework popup window removed.
+                if (cpu.regs[1] > UINT32_MAX) ret_host(-EINVAL);
+                else { manager.remove_popup(static_cast<uint32_t>(cpu.regs[1])); ret_host(0); }
             }
             else ret_host(-EINVAL);
             return 0;

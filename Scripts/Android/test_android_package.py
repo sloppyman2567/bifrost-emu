@@ -852,6 +852,34 @@ class PackageTests(unittest.TestCase):
             self.assertNotIn("bifrost.registration_probe", text)
         self.assertTrue((app / "managed/rootfs/data/user/0/org.bifrost.fixture/shared_prefs/fixture.xml").is_file())
 
+    def test_managed_dialog_and_popup_windows(self):
+        state = self.work / "dialog-state"
+        bundle = self.work / "dialog.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("dialog", managed="ManagedDialog"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        markers = ("MANAGED_DIALOG_SHOWN", "APP_POPUP_SHOWN", "MANAGED_DIALOG_POSITIVE",
+                   "MANAGED_DIALOG_DISMISSED", "MANAGED_DIALOG_POPUP_SHOWN",
+                   "MANAGED_DIALOG_POPUP_DISMISSED", "MANAGED_DIALOG_DESTROYED")
+        positions = [text.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions), text[-30000:])
+        self.assertLess(text.index("MANAGED_DIALOG_ACTIVITY_FOCUS false"), text.index("APP_POPUP_SHOWN"))
+        # The modal dialog takes focus; removal returns it before the
+        # non-focusable PopupWindow, which leaves the Activity focused.
+        regained = text.index("MANAGED_DIALOG_ACTIVITY_FOCUS true")
+        self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)
+        self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
+        # Both the dialog and the PopupWindow reached the host layer, at
+        # framework-computed frames, and were removed again.
+        shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
+        self.assertEqual(len(shown), 2, shown)
+        self.assertEqual(shown[1][1], "[40,60][280,140]")
+        self.assertEqual(text.count("APP_POPUP_REMOVED"), 2)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)

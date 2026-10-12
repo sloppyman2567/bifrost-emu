@@ -1,5 +1,32 @@
 # Tests
 
+## Self-loop writeback and framework popup windows (2026-10-12)
+
+`jit_selfloop_writeback` runs Android 15 Bionic's `__strrchr_aarch64`
+instruction words unchanged: unaligned scans first, then 896 checks across
+offsets, path lengths and slash/non-slash surroundings against a C reference.
+Before the fix 168 checks failed (aligned 104-byte path: index 73, expected
+94, the value captured from SpongeBob); after it all pass, as under QEMU. With
+the fix, SpongeBob 5.12.0's first launch extracts `il2cpp/Resources/*.dat` and
+`il2cpp/Metadata/global-metadata.dat` correctly and no longer shows "Not
+enough storage space to install required resources."
+
+`PackageTests.test_managed_dialog_and_popup_windows` (`ManagedDialog`) checks
+an `AlertDialog` over a SurfaceView: layout at the framework-computed frame,
+the host layer being shown, focus moving to the dialog and back, a button
+click through the dialog's view tree, then a `PopupWindow` at `[40,60][280,140]`
+and removal of both layers. It passes with `SDL_VIDEODRIVER=wayland` and
+`x11`. The plugin host test accepts an original-size v2 descriptor (popups
+`-ENOTSUP`) and forwards popup pixels unchanged when the callbacks are present.
+
+The strict JIT suite passes 314/314 and `--no-jit --strict` 305/305 with nine
+JIT-only skips. `make verify` (21,836 SSA checks, 76 differential fixtures,
+six threaded oracles), `make generated-check`, the headless build,
+`test-android-window-plugin`, `test-android-window-backend`,
+`test-android-sdl-backend` and the Android session/launcher package tests
+pass. Not covered: dialog visuals were confirmed by the user on one desktop
+only, and long gameplay sessions were not run.
+
 ## Per-page code invalidation index (2026-10-12)
 
 `jit_cache_invalidation churn` adds a code-page phase: 4,096 rewrites of one

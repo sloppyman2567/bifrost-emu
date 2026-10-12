@@ -65,6 +65,19 @@ converts mouse coordinates to pixels and preserves modifier state. Event work
 is bounded per pump. Invalid statuses, types, geometry, actions and nonfinite
 pointer values become `-EPROTO`; error/empty outputs discard poisoned data.
 
+V2 descriptors may append optional `show_popup`/`remove_popup` callbacks.
+The required size is `BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE`, the original
+v2 layout, so existing plugins keep loading; the host copies only the declared
+`struct_size` bytes and uses the popup pair only when both are present. A popup
+is a software-drawn framework window (dialog, menu, dim layer): width × height
+unpremultiplied `0xAARRGGBB` words at window-pixel x/y, stacked above every
+surface in creation order, valid only during the call. Popups never take
+input; the guest routes events from the primary window. Without the
+callbacks, framework dialogs still function but are not displayed. The SDL3
+backend implements them as a Wayland subsurface with `wl_shm` buffers and an
+empty input region, or an X11 child window (a 32-bit ARGB visual when the
+server has one, otherwise opaque on black).
+
 The loader validates the descriptor before instance creation. Plugins must
 preserve geometry on failed resize, leave a failed open closed, avoid reentry
 and never throw across the C boundary. Partial create failures are destroyed.

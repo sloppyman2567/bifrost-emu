@@ -39,9 +39,19 @@ int32_t poll(void *instance, bifrost_android_window_event_v2 *out) {
   try { return static_cast<AndroidWindowBackend *>(instance)->poll(*out); }
   catch (...) { *out = {}; return -EIO; }
 }
+int32_t show_popup(void *instance, uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,
+                   const uint32_t *argb) {
+  try { return static_cast<AndroidWindowBackend *>(instance)->show_popup(id, x, y, w, h, argb); }
+  catch (const std::bad_alloc &) { return -ENOMEM; }
+  catch (...) { return -EIO; }
+}
+void remove_popup(void *instance, uint32_t id) {
+  try { static_cast<AndroidWindowBackend *>(instance)->remove_popup(id); }
+  catch (...) {}
+}
 const bifrost_android_window_plugin_v2 api = {
     BIFROST_ANDROID_WINDOW_ABI_V2, sizeof(api), "sdl3-egl-plugin",
-    create, destroy, open, close, resize, binding, poll};
+    create, destroy, open, close, resize, binding, poll, show_popup, remove_popup};
 }
 extern "C" __attribute__((visibility("default")))
 const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {

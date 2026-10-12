@@ -182,6 +182,28 @@ JNIEXPORT void JNICALL Java_ActivityProbe_releaseSurface(JNIEnv *env, jclass typ
     ANativeWindow_release((void *)(uintptr_t)window);
 }
 
+// Framework popup windows (dialogs, popup menus): ops 9/10 copy straight-alpha
+// ARGB rows drawn by FrameworkWindows into a host layer above every surface.
+JNIEXPORT jint JNICALL Java_FrameworkWindows_showPopup(JNIEnv *env, jclass type, jint id, jint x,
+        jint y, jint width, jint height, jintArray pixels) {
+    (void)type;
+    if (width <= 0 || height <= 0 ||
+        (*env)->GetArrayLength(env, pixels) < (jsize)((int64_t)width * height))
+        return -22; // EINVAL
+    jint *argb = (*env)->GetPrimitiveArrayCritical(env, pixels, NULL);
+    if (!argb) return -12; // ENOMEM
+    int64_t record[6] = {id, x, y, width, height, (int64_t)(uintptr_t)argb};
+    long result = bifrost_window(9, (long)record, 0);
+    (*env)->ReleasePrimitiveArrayCritical(env, pixels, argb, JNI_ABORT);
+    return (jint)result;
+}
+
+JNIEXPORT jint JNICALL Java_FrameworkWindows_removePopup(JNIEnv *env, jclass type, jint id) {
+    (void)env;
+    (void)type;
+    return (jint)bifrost_window(10, id, 0);
+}
+
 // The diagnostic entry point and the managed launcher share the bridge.
 JNIEXPORT jint JNICALL Java_ManagedLauncher_openWindow(JNIEnv *e, jclass c, jint w, jint h) {
     return Java_ActivityProbe_openWindow(e, c, w, h);

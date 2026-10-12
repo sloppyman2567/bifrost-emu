@@ -1,6 +1,7 @@
 #pragma once
 #include "Bifrost/AndroidWindowPlugin.h"
 #include "System/Graphics/Display/WindowStats.hpp"
+#include <cerrno>
 #include <memory>
 #include <string>
 namespace frost {
@@ -20,6 +21,14 @@ public:
   // Additional independently backed layers on the same native display.
   // Unsupported backends fail closed rather than aliasing the primary window.
   virtual std::unique_ptr<AndroidWindowBackend> create_surface(int32_t, int32_t) { return {}; }
+  // Software-drawn framework windows (dialogs, popup menus) above every
+  // surface, in creation order. Pixels are unpremultiplied 0xAARRGGBB words
+  // at window-pixel x/y. Popups never take host input: the primary window
+  // keeps receiving it and the guest routes events to the focused popup.
+  virtual int show_popup(uint32_t, int32_t, int32_t, int32_t, int32_t, const uint32_t *) {
+    return -ENOTSUP;
+  }
+  virtual void remove_popup(uint32_t) {}
   virtual void set_visible(bool) {}
   virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
   virtual void set_title(const char *) {}

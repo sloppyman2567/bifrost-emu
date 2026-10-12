@@ -3,12 +3,18 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <climits>
 #include <cstring>
 #include <dlfcn.h>
+#include <map>
+#include <vector>
 #if defined(BIFROST_USE_SDL3)
 #include <SDL3/SDL.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <wayland-client.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 #endif
 namespace frost {
 namespace {
@@ -206,6 +212,195 @@ private:
   Display* display_;
   Window window_ = 0;
 };
+// Popup layers receive straight-alpha 0xAARRGGBB rows from the guest renderer.
+inline uint32_t premultiply(uint32_t p) {
+  const uint32_t a = p >> 24;
+  if (a == 255) return p;
+  if (a == 0) return 0;
+  auto channel = [a](uint32_t c) { return (c * a + 127) / 255; };
+  return (a << 24) | (channel((p >> 16) & 255) << 16) | (channel((p >> 8) & 255) << 8) |
+         channel(p & 255);
+}
+class PopupLayer {
+public:
+  virtual ~PopupLayer() = default;
+  virtual int show(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) = 0;
+};
+// A desynchronized subsurface with shared-memory buffers. Its empty input
+// region leaves pointer focus on the primary surface.
+class WaylandPopup final : public PopupLayer {
+public:
+  WaylandPopup(wl_display *display, wl_surface *parent) : display_(display), parent_(parent) {
+    queue_ = wl_display_create_queue(display_);
+    if (!queue_) return;
+    auto wrapper = static_cast<wl_display *>(wl_proxy_create_wrapper(display_));
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(wrapper), queue_);
+    registry_ = wl_display_get_registry(wrapper);
+    wl_proxy_wrapper_destroy(wrapper);
+    static const wl_registry_listener listener = {
+      [](void *data, wl_registry *registry, uint32_t id, const char *name, uint32_t version) {
+        auto &self = *static_cast<WaylandPopup *>(data);
+        if (!std::strcmp(name, "wl_compositor"))
+          self.compositor_ = static_cast<wl_compositor *>(
+              wl_registry_bind(registry, id, &wl_compositor_interface, version < 3 ? version : 3));
+        else if (!std::strcmp(name, "wl_subcompositor"))
+          self.subcompositor_ = static_cast<wl_subcompositor *>(
+              wl_registry_bind(registry, id, &wl_subcompositor_interface, 1));
+        else if (!std::strcmp(name, "wl_shm"))
+          self.shm_ = static_cast<wl_shm *>(wl_registry_bind(registry, id, &wl_shm_interface, 1));
+      }, [](void *, wl_registry *, uint32_t) {}};
+    wl_registry_add_listener(registry_, &listener, this);
+    if (wl_display_roundtrip_queue(display_, queue_) < 0 || !compositor_ || !subcompositor_ || !shm_)
+      return;
+    surface_ = wl_compositor_create_surface(compositor_);
+    subsurface_ = wl_subcompositor_get_subsurface(subcompositor_, surface_, parent_);
+    wl_subsurface_set_desync(subsurface_);
+    wl_region *none = wl_compositor_create_region(compositor_);
+    wl_surface_set_input_region(surface_, none);
+    wl_region_destroy(none);
+  }
+  ~WaylandPopup() override {
+    for (auto &buffer : buffers_) release(buffer);
+    if (subsurface_) wl_subsurface_destroy(subsurface_);
+    if (surface_) wl_surface_destroy(surface_);
+    if (parent_ && surface_) wl_surface_commit(parent_);
+    if (shm_) wl_shm_destroy(shm_);
+    if (subcompositor_) wl_subcompositor_destroy(subcompositor_);
+    if (compositor_) wl_compositor_destroy(compositor_);
+    if (registry_) wl_registry_destroy(registry_);
+    if (display_) wl_display_flush(display_);
+    if (queue_) wl_event_queue_destroy(queue_);
+  }
+  bool ready() const { return surface_ != nullptr; }
+  int show(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) override {
+    wl_display_dispatch_queue_pending(display_, queue_);  // buffer releases
+    Buffer *target = nullptr;
+    for (auto &buffer : buffers_)
+      if (!buffer.busy && buffer.w == w && buffer.h == h) { target = &buffer; break; }
+    if (!target)
+      for (auto &buffer : buffers_)
+        if (!buffer.busy) { release(buffer); if (!allocate(buffer, w, h)) return -ENOMEM; target = &buffer; break; }
+    if (!target) return -EAGAIN;  // both buffers are still on screen; redraw next frame
+    auto *out = static_cast<uint32_t *>(target->data);
+    for (size_t i = 0, n = size_t(w) * h; i < n; ++i) out[i] = premultiply(argb[i]);
+    target->busy = true;
+    wl_surface_attach(surface_, target->buffer, 0, 0);
+    wl_surface_damage(surface_, 0, 0, w, h);
+    wl_surface_commit(surface_);
+    if (x != x_ || y != y_) {
+      // Subsurface position is parent state: apply it with a parent commit.
+      wl_subsurface_set_position(subsurface_, x, y);
+      wl_surface_commit(parent_);
+      x_ = x; y_ = y;
+    }
+    wl_display_flush(display_);
+    return 0;
+  }
+private:
+  struct Buffer { wl_buffer *buffer = nullptr; void *data = nullptr; size_t size = 0; int32_t w = 0, h = 0; bool busy = false; };
+  bool allocate(Buffer &buffer, int32_t w, int32_t h) {
+    const size_t size = size_t(w) * h * 4;
+    int fd = memfd_create("bifrost-popup", MFD_CLOEXEC);
+    if (fd < 0) return false;
+    void *data = ftruncate(fd, off_t(size)) ? MAP_FAILED
+        : mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) { ::close(fd); return false; }
+    wl_shm_pool *pool = wl_shm_create_pool(shm_, fd, int32_t(size));
+    buffer.buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    ::close(fd);
+    static const wl_buffer_listener listener = {
+      [](void *data, wl_buffer *) { static_cast<Buffer *>(data)->busy = false; }};
+    wl_buffer_add_listener(buffer.buffer, &listener, &buffer);
+    buffer.data = data; buffer.size = size; buffer.w = w; buffer.h = h; buffer.busy = false;
+    return true;
+  }
+  static void release(Buffer &buffer) {
+    if (buffer.buffer) wl_buffer_destroy(buffer.buffer);
+    if (buffer.data) munmap(buffer.data, buffer.size);
+    buffer = Buffer{};
+  }
+  wl_display *display_;
+  wl_surface *parent_;
+  wl_event_queue *queue_ = nullptr;
+  wl_registry *registry_ = nullptr;
+  wl_compositor *compositor_ = nullptr;
+  wl_subcompositor *subcompositor_ = nullptr;
+  wl_shm *shm_ = nullptr;
+  wl_surface *surface_ = nullptr;
+  wl_subsurface *subsurface_ = nullptr;
+  Buffer buffers_[2];
+  int32_t x_ = INT32_MIN, y_ = INT32_MIN;
+};
+// An unselected child window: its input events propagate to the SDL parent.
+// A 32-bit ARGB visual differs from the parent's, so the Composite extension
+// implicitly redirects the child and blends its premultiplied alpha. Without
+// one, the parent's visual is used and translucent pixels blend on black.
+class X11Popup final : public PopupLayer {
+public:
+  X11Popup(Display *display, Window parent) : display_(display), parent_(parent) {
+    XWindowAttributes attrs{};
+    if (!XGetWindowAttributes(display_, parent_, &attrs) || !attrs.visual) return;
+    XVisualInfo argb{};
+    if (XMatchVisualInfo(display_, XScreenNumberOfScreen(attrs.screen), 32, TrueColor, &argb) &&
+        rgb_masks(argb.visual)) {
+      visual_ = argb.visual; depth_ = 32; alpha_ = true;
+      colormap_ = owned_colormap_ = XCreateColormap(display_, parent_, visual_, AllocNone);
+    } else if (rgb_masks(attrs.visual) && attrs.depth >= 24) {
+      visual_ = attrs.visual; depth_ = attrs.depth; colormap_ = attrs.colormap;
+    }
+  }
+  ~X11Popup() override {
+    if (gc_) XFreeGC(display_, gc_);
+    if (window_) XDestroyWindow(display_, window_);
+    if (owned_colormap_) XFreeColormap(display_, owned_colormap_);
+    XFlush(display_);
+  }
+  bool ready() const { return visual_ != nullptr; }
+  int show(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) override {
+    if (!window_) {
+      XSetWindowAttributes settings{};
+      settings.colormap = colormap_;
+      settings.background_pixel = 0;
+      settings.border_pixel = 0;  // required when the depth differs from the parent's
+      window_ = XCreateWindow(display_, parent_, x, y, unsigned(w), unsigned(h), 0, depth_,
+                              InputOutput, visual_, CWColormap | CWBackPixel | CWBorderPixel,
+                              &settings);
+      if (!window_) return -ENODEV;
+      gc_ = XCreateGC(display_, window_, 0, nullptr);
+      XMapRaised(display_, window_);
+    } else if (x != x_ || y != y_ || w != w_ || h != h_) {
+      XMoveResizeWindow(display_, window_, x, y, unsigned(w), unsigned(h));
+    }
+    x_ = x; y_ = y; w_ = w; h_ = h;
+    pixels_.resize(size_t(w) * h);
+    const uint32_t keep = alpha_ ? 0xffffffffu : 0xffffffu;
+    for (size_t i = 0; i < pixels_.size(); ++i) pixels_[i] = premultiply(argb[i]) & keep;
+    XImage *image = XCreateImage(display_, visual_, unsigned(depth_), ZPixmap, 0,
+                                 reinterpret_cast<char *>(pixels_.data()), unsigned(w), unsigned(h), 32, w * 4);
+    if (!image) return -ENOMEM;
+    XPutImage(display_, window_, gc_, image, 0, 0, 0, 0, unsigned(w), unsigned(h));
+    image->data = nullptr;  // owned by pixels_
+    XDestroyImage(image);
+    XFlush(display_);
+    return 0;
+  }
+private:
+  static bool rgb_masks(const Visual *visual) {
+    return visual && visual->red_mask == 0xff0000 && visual->green_mask == 0xff00 &&
+           visual->blue_mask == 0xff;
+  }
+  Display *display_;
+  Window parent_;
+  Visual *visual_ = nullptr;
+  int depth_ = 0;
+  bool alpha_ = false;
+  Colormap colormap_ = 0, owned_colormap_ = 0;
+  Window window_ = 0;
+  GC gc_ = nullptr;
+  int32_t x_ = 0, y_ = 0, w_ = 0, h_ = 0;
+  std::vector<uint32_t> pixels_;
+};
 #endif
 class SdlAndroidWindowBackend final : public AndroidWindowBackend {
 public:
@@ -276,6 +471,7 @@ public:
   }
   void close() noexcept override {
 #if defined(BIFROST_USE_SDL3)
+    popups_.clear();
     clear_binding();
     if (window_) {
       sdl_.DestroyWindow(window_);
@@ -350,6 +546,44 @@ public:
     }
 #endif
     return {};
+  }
+  int show_popup(uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,
+                 const uint32_t *argb) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return -ENODEV;
+    auto &layer = popups_[id];
+    if (!layer) {
+      auto props = sdl_.GetWindowProperties(window_);
+      auto display = static_cast<wl_display *>(
+          sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr));
+      auto parent = static_cast<wl_surface *>(
+          sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr));
+      if (display && parent) {
+        auto popup = std::make_unique<WaylandPopup>(display, parent);
+        if (popup->ready()) layer = std::move(popup);
+      } else {
+        auto xdisplay = static_cast<Display *>(
+            sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
+        auto xparent = sdl_.GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+        if (xdisplay && xparent) {
+          auto popup = std::make_unique<X11Popup>(xdisplay, Window(xparent));
+          if (popup->ready()) layer = std::move(popup);
+        }
+      }
+      if (!layer) { popups_.erase(id); return -ENOTSUP; }
+    }
+    return layer->show(x, y, w, h, argb);
+#else
+    (void)id; (void)x; (void)y; (void)w; (void)h; (void)argb;
+    return -ENOTSUP;
+#endif
+  }
+  void remove_popup(uint32_t id) override {
+#if defined(BIFROST_USE_SDL3)
+    popups_.erase(id);
+#else
+    (void)id;
+#endif
   }
   int poll(AndroidWindowEvent &out) override {
     out = {};
@@ -463,6 +697,7 @@ private:
   std::unique_ptr<WlEglFns> wl_fns_;
   void *wl_window_ = nullptr;
   AndroidWindowBinding binding_;
+  std::map<uint32_t, std::unique_ptr<PopupLayer>> popups_;
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;
 #endif
