@@ -1079,6 +1079,23 @@ X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
 that never redraws (no rendering SurfaceView) can keep stale dialog pixels
 after removal.
 
+### Notification enablement (2026-10-12)
+
+A strict local `notification` service (`android.app.INotificationManager`)
+implements only `areNotificationsEnabled(pkg)`, following Android 15's
+[NotificationManagerService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/notification/NotificationManagerService.java)
+and [PermissionHelper](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/notification/PermissionHelper.java):
+a foreign package gets `SecurityException`, and the answer is the package's
+`POST_NOTIFICATIONS` grant. This profile grants no runtime permissions, so it
+reports false, as on a device where the user has not allowed notifications.
+Posting, channels and listeners still throw.
+
+Without the service, `NotificationManager.areNotificationsEnabled()` threw
+inside SpongeBob's `NotificationSettings` helper on every game state change.
+Unity surfaced the exception in the game's state-change event, which then
+skipped `MainHudHandler` re-enabling the main HUD after Settings closed: the
+scene kept drawing without its buttons. The user confirmed the HUD now stays.
+
 ### Activity stack (2026-10-12)
 
 Play mode starts further Activities of the installed package above the

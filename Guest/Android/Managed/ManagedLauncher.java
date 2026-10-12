@@ -555,6 +555,10 @@ public final class ManagedLauncher {
                     || !Arrays.equals(process.pkgList, new String[] {installed.packageName}))
                 throw new AssertionError("process list differs from launcher state");
             System.out.println("APP_PROCESS_LIST_OK " + process.processName);
+            boolean notify = context.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    == PackageManager.PERMISSION_GRANTED;
+            if (context.getSystemService(android.app.NotificationManager.class).areNotificationsEnabled() != notify)
+                throw new AssertionError("notification enablement differs from POST_NOTIFICATIONS grant");
             File cache = context.getExternalCacheDir();
             if (cache == null || !cache.isDirectory())
                 throw new AssertionError("external app cache was not created");
@@ -737,6 +741,19 @@ public final class ManagedLauncher {
                 case "isLowPowerStandbySupported":
                 case "isLowPowerStandbyEnabled": return false;
                 default: throw unsupported("power", method);
+            }
+        });
+        // NotificationManagerService: same-package callers only; enablement is
+        // the POST_NOTIFICATIONS grant, which this profile never makes at runtime.
+        services.register("notification", "android.app.INotificationManager", (method, a) -> {
+            switch (method) {
+                case "areNotificationsEnabled":
+                    if (installed == null || !installed.packageName.equals(a[0]))
+                        throw new SecurityException("Caller not system or systemui or same package");
+                    return packages.checkPermission("android.permission.POST_NOTIFICATIONS",
+                            installed.applicationInfo.uid, Context.DEVICE_ID_DEFAULT)
+                            == PackageManager.PERMISSION_GRANTED;
+                default: throw unsupported("notification", method);
             }
         });
         Map<IBinder, Object> thermalEvents = new ConcurrentHashMap<>();

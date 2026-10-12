@@ -1,5 +1,24 @@
 # Tests
 
+## Notification enablement (2026-10-12)
+
+ActivityProbe's resumed installed-app service check now requires
+`NotificationManager.areNotificationsEnabled()` to answer, and to match the
+package's `POST_NOTIFICATIONS` grant (false in this profile). It runs only in
+play mode, where the installed package is known:
+
+```bash
+python3 Scripts/Android/test_android_framework.py --probe build/android-managed-launcher/classes.dex \
+    --main-class ActivityProbe --services --installed-app android-state/com.tiltingpoint.spongebob \
+    --play --timeout 90
+```
+
+With SpongeBob 5.12.0 this passes in JIT (1,995 frames, `APP_RUNTIME_SERVICES_OK
+resumed=true`). The game's log now shows `Called Notification enabled from
+Native : false` after each check, and the user confirmed the main HUD stays
+after closing Settings. The foreign-package `SecurityException` path is not
+exercised by a test.
+
 ## Configurable Android back key (2026-10-12)
 
 `test-android-window-backend` checks key-name lookup (`escape`, `f12`, `a`,
