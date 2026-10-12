@@ -377,6 +377,11 @@ public:
     uint64_t next_surface_ = 0;
     int32_t width_ = kBaseWidth;
     int32_t height_ = kBaseHeight;
+    // The host window's own pixel size, which zero buffer geometry restores
+    // (ANativeWindow_setBuffersGeometry): the base until a window opens, then
+    // its native buffer, updated by host resizes.
+    int32_t natural_width_ = kBaseWidth;
+    int32_t natural_height_ = kBaseHeight;
     int32_t format_ = kFormatRGBA8888;
 
     // ── Activity state (v2) ────────────────────────────────────────────

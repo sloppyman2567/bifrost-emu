@@ -1095,6 +1095,9 @@ like Android 15's `TaskFragment.computeConfigResourceOverrides`
 display with another scale, change the pixel size; the density stays at its
 startup value, since a density change would need an Activity configuration
 change, which is not implemented. Loadable window plugins keep 160 dpi.
+`BIFROST_ANDROID_LOGICAL_PIXELS=1` is an A/B control that opens the window at
+its desktop size and 160 dpi (compositor-upscaled), as before this change.
+Zero `ANativeWindow_setBuffersGeometry` restores the window's own pixel size.
 
 SpongeBob 5.12.0 on a 3440x1440 monitor at 200% scale opens at 2560x1384 px,
 320 dpi (Unity's surface follows to 3440x1384 when maximized). The user

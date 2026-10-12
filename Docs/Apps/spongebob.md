@@ -12,22 +12,31 @@ still stalls at 73% on Firebase/Google Play services.
 
 ## Open issues
 
-### SpongeBob character drawn incompletely (2026-10-12, uninvestigated)
+### SpongeBob character drawn incompletely after equipping (2026-10-12)
 
-The Spine-animated SpongeBob character on the avatar platform draws partially:
+Reproduction (user, reliable): open the outfit screen. SpongeBob draws
+correctly until any item is equipped; afterwards his square sponge body, base
+and nose are missing and yellow sponge pieces float beside his head. The
+outfit thumbnails (Default Outfit, Santa, Spongicus) stay complete. The
+equipped character is also missing from the main screen's top-left avatar
+portrait and from the "Lv. 1 SpongeBob" platform on the new-item screen.
 
-- On the level-failed "You received a new item!" screen the platform under
-  "Lv. 1 SpongeBob" is empty; only the small head icon draws.
-- On the outfit screen his eyes, nose, shirt, pants, arms and legs draw, but
-  the square sponge body is missing and several yellow sponge pieces float to
-  the left of his head.
+- Not caused by native-density rendering: it reproduces with
+  `BIFROST_ANDROID_LOGICAL_PIXELS=1` (1280x692, 160 dpi).
+- No GL, framebuffer or Unity render warnings are logged.
+- Hypothesis (unverified): equipping changes the Spine skin, which Spine-Unity
+  typically repacks into a runtime atlas copied on the GPU (`CopyTexture`,
+  `glCopyImageSubData` or framebuffer blits); the missing parts would be the
+  repacked regions. The GLES thunks implement `glCopyImageSubData` (15
+  arguments) and `glBlitFramebuffer`; their AAPCS64 stack-argument reads look
+  correct.
 
-No GL, framebuffer or Unity render warnings were logged. Region attachments
-appear intact while deformable (mesh) attachments do not, which points at the
-CPU-side vertex/skinning math run by the JIT rather than at resolution, but
-this is a hypothesis: no A/B run has been made. Not yet known whether it
-predates native-density rendering (aac7c5b). Next steps, in order: compare
-against a pre-aac7c5b binary or 1280x720 rendering, then bisect single JIT
-switches (`BIFROST_NO_SSA`, `BIFROST_NO_CHAIN`, `BIFROST_JIT_BLOCK_LIMIT`)
-one at a time. The user asked not to run with every optimization disabled:
+Next step: a `BIFROST_THUNK_TRACE=1` capture of the GL calls made while
+equipping one item, then compare copy/blit arguments and texture formats with
+a reference. The user asked not to run with every JIT optimization disabled:
 that configuration is too slow to play.
+
+### No mail/news (2026-10-12, uninvestigated)
+
+The phone shows mail in the news envelope; Bifrost shows none. Likely a
+failed news fetch or service gap; no log evidence collected yet.

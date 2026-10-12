@@ -116,8 +116,10 @@ int main() {
   CHECK(manager.set_buffers_geometry(320, 0, 0) == -EINVAL);
   CHECK(manager.set_buffers_geometry(320, 240, -1) == -EINVAL);
   CHECK(manager.set_buffers_geometry(320, 240, 1) == 0);
+  // Zero geometry drops the app's override and returns to the window's own
+  // size, which the host resize above set to 640x480.
   CHECK(manager.set_buffers_geometry(0, 0, 0) == 0);
-  CHECK(manager.width() == 800 && manager.height() == 600 && manager.format() == 1);
+  CHECK(manager.width() == 640 && manager.height() == 480 && manager.format() == 1);
   CHECK(manager.set_buffers_geometry(320, 240, 0) == 0);
   auto primary = manager.from_surface(100);
   CHECK(primary != 0 && manager.from_surface(100) == primary);

@@ -53,7 +53,9 @@ the vendored stable `ThirdParty/WaylandXML/viewporter.xml` (wayland-protocols
 1.36), committed under `Include/Generated/` and checked by `make generated-check`.
 Loadable plugins keep the default (one pixel per desktop unit).
 Negative geometry is rejected; both dimensions must be zero or both positive.
-Zeros restore the adapter's base 800×600 settings. The adapter supports only
+Zeros restore the window's own pixel size, as Android's default buffer size
+follows its window: 800×600 before a window opens, then the native size it
+opened at, updated by host resizes. The adapter supports only
 RGBA8888: other positive formats now return `-ENOTSUP` instead of reporting
 an unsupported format as successful. Separate Android buffer queues, format
 negotiation and independent physical/buffer sizing are still absent.

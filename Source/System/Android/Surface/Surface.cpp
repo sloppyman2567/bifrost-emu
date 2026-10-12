@@ -75,6 +75,8 @@ bool AndroidSurfaceManager::open_host_window() {
         width_ = pixel_w;
         height_ = pixel_h;
     }
+    natural_width_ = width_;
+    natural_height_ = height_;
     window_open_ = true;
     return true;
 }
@@ -106,8 +108,8 @@ int AndroidSurfaceManager::handle_host_resize(int32_t width, int32_t height) {
     if (width <= 0 || height <= 0) return -EINVAL;
     int error = window_backend_->resize(width, height, false);
     if (error) return error;
-    width_ = width;
-    height_ = height;
+    width_ = natural_width_ = width;
+    height_ = natural_height_ = height;
     return 0;
 }
 
@@ -227,7 +229,7 @@ int32_t AndroidSurfaceManager::set_buffers_geometry(int32_t w, int32_t h,
     std::lock_guard<std::mutex> lock(surface_mu_);
     if (w < 0 || h < 0 || fmt < 0 || (w == 0) != (h == 0)) return -EINVAL;
     if (fmt && fmt != kFormatRGBA8888) return -ENOTSUP;
-    int32_t width = w ? w : kBaseWidth, height = h ? h : kBaseHeight;
+    int32_t width = w ? w : natural_width_, height = h ? h : natural_height_;
     if (handle && handle != surface_handle_) {
         auto it = surfaces_.find(handle);
         if (it == surfaces_.end() || !it->second.backend) return -EINVAL;

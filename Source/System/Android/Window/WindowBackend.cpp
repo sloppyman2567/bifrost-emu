@@ -565,7 +565,8 @@ public:
         // Buffers at the display's native pixel density; SDL scales the
         // surface back to the requested desktop size (Wayland viewport or
         // buffer scale). Without it a scaled compositor upsamples the window.
-        sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
+        sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN,
+                                !dbg().android_logical_pixels);
     window_ = configured ? sdl_.CreateWindowWithProperties(props) : nullptr;
     sdl_.DestroyProperties(props);
     if (!window_) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window creation"); }
