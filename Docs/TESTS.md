@@ -10,6 +10,47 @@ require SDL2, a display, or a configured guest rootfs.
 
 ## Latest full validation
 
+### Indirect branches, watchdogs and lazy controllers (2026-10-12)
+
+This follows commit `1878b2b` and includes the IBL differential-replay fix.
+Both SDL/GL and headless executable/library configurations build, fixtures
+were rebuilt, and `make generated-check` passes. With GPU access, the strict
+default JIT suite passes **313/313** and interpreter **304/304** with nine
+JIT-only skips. The strict ordinary-frame JIT suite also passes **313/313**.
+This includes BusyBox/Toybox, zstd round trips, input/gamepad
+probes, signal-context restoration and the main/worker long-call regression.
+`make verify` passes **75 differential fixtures and six threaded oracle runs**,
+plus the SSA gate. MT opt-out/publication and Tier-2 discovery, measurement,
+feedback and twenty mutex promotion-stress runs pass.
+
+The concrete verifier failure was reproduced with
+`BIFROST_JIT_VERIFY=1 BIFROST_NO_DIRECT_CALL=1` on `jit_bitfield_regalloc.elf`:
+14 divergence messages before the fix, none with ordinary frames, and none
+after unbinding IBL only during the measured native block. The gate previously
+failed despite that fixture's arithmetic oracle returning success. The fix
+preserves normal IBL execution outside the replay scope.
+
+The extended `jit_mt_publication.cpp` fixture warms both the real signal-return
+trampoline and its continuation. Repeated signal deliveries prove that RET
+can take an IBL hit into the trampoline, while its SVC returns with restored
+PC, SP, LR, NZCV and mask before the continuation increments a register.
+Executable host stop PCs and nested helper depth also prevent a warmed target
+from executing. These checks pass in ST/MT and chain-skip/ordinary layouts.
+The existing signal-context guest test covers nested alternate stacks,
+handler-edited context and malformed frames in both guest engines.
+
+Source verification: Linux v6.12's
+[AArch64 signal implementation](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kernel/signal.c)
+and [vDSO trampoline](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kernel/vdso/sigreturn.S)
+confirm the handler LR/trampoline and saved-PC restoration contract. The
+dispatch/SVC boundary and callback-runner audit are Bifrost source inspection
+and host-test observations, not Linux ABI claims. The installed unpatched
+QEMU passes 46 of the signal fixture's 48 checks but fails the two unblockable
+mask checks described [below](#memory-and-signal-regressions); it is not a
+passing reference run. Physical controller hot-plug, startup/branch timings
+from the commit message and game playability were not revalidated here.
+Initial sandbox graphics failures disappear when rerun with GPU device access.
+
 ### Yggdrasil sandbox and path syscall fixes (2026-10-12)
 
 Both configurations build and fixtures were rebuilt. The strict JIT suite passes
@@ -873,23 +914,24 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](Apps/vkquake.md).
 
-The fully provisioned suite contains 275 configured test runs:
+The fully provisioned suite contains 313 configured test runs:
 
 | Category | Runs | Notes |
 |---|---:|---|
-| Unit | 97 | Focused guest instruction/JIT regressions and registered host JIT gates |
-| Integration | 86 | Guest programs and subsystem checks in `Tests/Apps/` and `test/` |
+| Unit | 132 | Focused guest instruction/JIT regressions and registered host JIT gates |
+| Integration | 87 | Guest programs and subsystem checks in `Tests/Apps/` and `Tests/Asm/` |
 | Sandbox | 1 | `BIFROST_ROOT` path-boundary regression |
+| Per-thread JIT | 1 | Cross-thread invalidation with separate JIT instances |
 | Toybox | 9 | Commands run through the committed AArch64 Toybox binary |
 | Real-world static | 49 | BusyBox and Toybox command checks; BusyBox may be fetched by the runner |
 | Real-world dynamic (glibc) | 7 | Part of the real-world fixture set; requires rootfs libraries |
-| Dynamic | 16 | Dynamically linked musl/glibc and XWayland tests; requires rootfs and built fixtures |
+| Dynamic | 17 | Dynamically linked musl/glibc and XWayland tests; requires rootfs and built fixtures |
 | Benchmarks | 5 | Performance smoke benchmarks; omitted by `--quick` |
 | Interactive | 5 | Stdin-driven programs run with scripted input |
-| **Full configured suite** | **275** | Includes the sandbox and rootfs-dependent dynamic runs |
+| **Full configured suite** | **313** | Includes the sandbox and rootfs-dependent dynamic runs |
 
-Without a configured rootfs, the 7 dynamic real-world runs and 16 dynamic
-tests are not selected, for 252 configured runs (247 with `--quick`). These
+Without a configured rootfs, the 7 dynamic real-world runs and 17 dynamic
+tests are not selected, for 289 configured runs (284 with `--quick`). These
 figures describe test definitions selected by the runner; missing guest
 fixtures and unavailable display/SDL support can result in skips.
 

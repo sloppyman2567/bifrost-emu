@@ -17,6 +17,12 @@
 #
 # All keys are optional; missing keys fall back to defaults. Unknown
 # sections / keys are silently ignored for forward-compat.
+#
+# Environment-only JIT diagnostics (no TOML keys):
+#   BIFROST_HANG_WATCHDOG=1  Enable same-PC/frozen-loop and JIT dispatch
+#                            watchdogs; off by default because valid loops
+#                            can reach their limits.
+#   BIFROST_NO_CHAIN_SKIP=1  Use ordinary frames instead of chain-skip/IBL.
 
 # ── JIT / interpreter ─────────────────────────────────────────────────
 [jit]

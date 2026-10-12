@@ -1,6 +1,8 @@
 // Host-side invariants that a guest result oracle cannot observe:
 // published instruction bytes remain immutable, and chains have bounded leases.
 #include "System/Core/Emulator.hpp"
+#include "System/Core/DebugFlags.hpp"
+#include "System/Core/Signals.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include <atomic>
 #include <cstdio>
@@ -9,6 +11,54 @@
 #include <thread>
 #include <vector>
 using namespace arm64emu;
+static bool check_signal_return(bool mt) {
+    auto e = std::make_unique<Emulator>();
+    constexpr uint64_t handler = 0x50100, resume = handler + 64;
+    constexpr uint64_t stack = 0x60000, top = stack + 16384, stop = 0x80000;
+    if (!e->mem().map_range(handler & ~4095ULL, 4096) || !e->mem().map_range(stack, 16384))
+        return false;
+    const uint32_t ret = 0xd65f03c0;
+    const uint32_t continuation[] = {0x91000673, ret}; // add x19,x19,#1; ret
+    e->mem().write(handler, &ret, sizeof(ret));
+    e->mem().write(resume, continuation, sizeof(continuation));
+    if (!e->mem().mprotect_guest(handler & ~4095ULL, 4096, 5)) return false;
+    const uint64_t action[] = {handler, SA_SIGINFO_EMU, 0, 0};
+    e->mem().write(stack, action, sizeof(action));
+    if (e->signals().install(e->mem(), BIFROST_SIGUSR1, stack, 0)) return false;
+    e->enable_jit();
+    auto* j = e->jit();
+    if (mt) j->enter_multithreaded();
+    // Warm the continuation too: sigreturn must leave through the SVC's
+    // cold exit even when both its trampoline and restored PC have IBL hits.
+    CPU warm;
+    warm.pc = resume; warm.regs[30] = stop;
+    if (j->run_block(warm, *e) != stop || warm.regs[19] != 1) return false;
+    for (unsigned repeat = 0; repeat < 3; ++repeat) {
+        CPU cpu;
+        cpu.pc = resume; cpu.sp = top; cpu.regs[30] = stop;
+        cpu.regs[19] = 41; cpu.pstate = 0xa0000000;
+        if (!deliver_signal(*e, cpu, e->signals(), BIFROST_SIGUSR1)) return false;
+        const uint64_t next = j->run_block(cpu, *e);
+        const bool chained = repeat && FrostJIT::chain_skip_enabled() && !dbg().no_chain;
+        if (next != (chained ? resume : TRAMPOLINE_ADDR)) return false;
+        if (!chained && j->run_block(cpu, *e) != resume) return false;
+        if (!cpu.sig_frames.empty() || cpu.sp != top || cpu.regs[19] != 41 ||
+            cpu.regs[30] != stop || cpu.sigmask || (cpu.pstate & 0xf0000000) != 0xa0000000)
+            return false;
+    }
+    // Executable host stop addresses and nested helper return boundaries
+    // must still exit before running a warmed target's first instruction.
+    for (unsigned boundary = 0; boundary < 2; ++boundary) {
+        CPU cpu;
+        cpu.pc = handler; cpu.regs[30] = resume; cpu.regs[19] = 41;
+        cpu.jit_stop_pc = boundary == 0 ? resume : 0;
+        cpu.jit_call_depth = boundary == 1 ? 1 : 0;
+        if (j->run_block(cpu, *e) != resume || cpu.regs[19] != 41) return false;
+    }
+    std::printf("jit_mt_publication: %s warmed signal return and host boundaries PASS\n",
+                mt ? "MT" : "ST");
+    return true;
+}
 static bool check_selfloops() {
     auto e = std::make_unique<Emulator>();
     constexpr uint64_t head = 0x30000, stop = 0x40000;
@@ -149,6 +199,6 @@ int main() {
     j->invalidate_all();
     if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
-    if (!check_selfloops()) return 1;
+    if (!check_signal_return(false) || !check_signal_return(true) || !check_selfloops()) return 1;
     std::puts("jit_mt_publication: immutable bytes and bounded leases PASS");
 }

@@ -24,13 +24,13 @@
 #   ./Scripts/Testing/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./Scripts/Testing/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (303 selected test runs):
-#   Unit        122  — focused guest and host JIT regressions
+# Fully provisioned suite (313 selected test runs):
+#   Unit        132  — focused guest and host JIT regressions
 #   Integration  87  — Tests/Apps/*.elf + Tests/Asm/*.elf
 #   Sandbox       1  — BIFROST_ROOT path-boundary regression
 #   Per-thread JIT 1 — cross-thread invalidation without the shared JIT
 #   Toybox        9  — Tests/Apps/toybox subcommands
-#   Real-world   56  — static BusyBox/Toybox commands
+#   Real-world   49  — static BusyBox/Toybox commands
 #   Real-world dynamic 7 — glibc binaries; rootfs required
 #   Dynamic      17  — musl/glibc and XWayland tests; rootfs required
 #   Benchmarks    5  — omitted with --quick

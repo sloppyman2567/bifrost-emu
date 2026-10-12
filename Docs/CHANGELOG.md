@@ -13,6 +13,27 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Indirect branches, watchdogs and lazy controllers (2026-10-12)
+
+- Chain-skip register branches use a per-host-thread IBL cache, with generation
+  revocation, callback stop/depth guards and the existing 256-edge lease.
+  Ordinary frames and `BIFROST_NO_CHAIN=1` retain dispatcher exits. Tier-2
+  timing trials keep their private graph by unbinding the table.
+- Differential replay now unbinds IBL while executing the measured block.
+  Static-edge unpatching alone let warmed indirect targets escape the replay
+  boundary and caused false PC/register divergences in the verification gate.
+- Audited signal return: the handler may chain into the executable trampoline;
+  its unchainable SVC returns the restored PC to dispatch. Added warmed
+  trampoline and executable host-boundary checks to the existing publication
+  fixture for ST/MT and both frame layouts.
+- Same-PC/frozen-loop and JIT dispatch watchdogs are disabled by default;
+  `BIFROST_HANG_WATCHDOG=1` enables these diagnostics. A valid main/worker
+  60-million-call loop is covered by `test_long_call_loop`.
+- SDL controllers initialize on first input poll, joystick read or controller
+  query, avoiding device enumeration during construction for programs that
+  never use input. Already-connected and later hot-plugged devices retain
+  the existing event path. See [validation and limits](TESTS.md#indirect-branches-watchdogs-and-lazy-controllers-2026-10-12).
+
 ### Yggdrasil sandbox and path syscall fixes (2026-10-12)
 
 - **Sandbox escape fixed.** Under `BIFROST_ROOT` (including Android

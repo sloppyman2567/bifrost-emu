@@ -616,7 +616,19 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             }
         }
         mode_t saved_umask = emu.guest_umask();
-        uint64_t jit_next = entry.fn(&cpu, &emu);
+        uint64_t jit_next;
+        {
+            // Unpatching static edges does not stop a warmed BR/RET from
+            // chaining through the IBL. Replay must execute only this block:
+            // its instruction count and store snapshot exclude successors.
+            struct IblGuard {
+                CPU& cpu;
+                void* saved;
+                ~IblGuard() { cpu.jit_ibl_table = saved; }
+            } guard{cpu, cpu.jit_ibl_table};
+            cpu.jit_ibl_table = nullptr;
+            jit_next = entry.fn(&cpu, &emu);
+        }
         cpu.pc = jit_next;
         // Save the JIT's umask value, restore pre-JIT for the interpreter.
         mode_t jit_umask = emu.guest_umask();

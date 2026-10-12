@@ -335,7 +335,8 @@ public:
     // dispatcher (every guest return used to cost a full dispatcher round
     // trip). One table per host thread: generated code reads it without
     // locks, so cpu.jit_ibl_table is rebound at every native entry
-    // (run_block, jit_call_helper, Tier-2 trials). Its generation is this
+    // (run_block, jit_call_helper); Tier-2 trials and differential replay
+    // unbind it to preserve their execution boundaries. Its generation is this
     // JIT's dispatch generation, so every invalidation revokes all entries;
     // the probe also honors jit_stop_pc, nested helper calls and the shared
     // 256-edge chain budget. See emit_indirect_branch_probe.

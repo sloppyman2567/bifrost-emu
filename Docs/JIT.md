@@ -11,6 +11,51 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Indirect branches and host return boundaries (2026-10-12)
+
+With the default chain-skip frame layout, Tier-1 register-branch exits
+(`BR`, `BLR`, `RET`) probe a per-host-thread indirect-branch lookup table
+(IBL). Its 4,096 direct-mapped entries hold a guest PC and the cached block's
+chain-skip entry. Dispatch populates entries; a cold target or hash collision
+returns to dispatch. Ordinary frames (`BIFROST_NO_CHAIN_SKIP=1`) and
+`BIFROST_NO_CHAIN=1` retain the previous indirect exits.
+
+Generated probes check the JIT's dispatch generation, `jit_stop_pc`, nested
+`jit_call_depth` and the shared 256-edge execution lease before jumping.
+Invalidation and Tier-2 publication advance the generation, revoking stale
+entries. The table belongs to the host thread and is rebound at native dispatch
+and helper entry, including for cloned CPUs. Timed Tier-2 trials unbind it to
+keep execution inside their private sampling graph. Differential replay also
+unbinds it for the measured block: unpatching static edges alone cannot prevent
+a warmed indirect target from executing extra instructions or stores outside
+the reference instruction count and memory snapshot.
+
+The signal-return trampoline in `Source/System/Core/Signals.cpp` is executable
+guest code (`mov x8,#139; svc #0` at `TRAMPOLINE_ADDR`), rather than a host
+callback exit sentinel. `deliver_signal` installs the handler's PC and LR and
+returns; the normal guest dispatcher runs it. A handler's RET may therefore
+chain into a warmed trampoline. Its SVC terminates the block through an
+unchainable exit, reloads the PC restored by `rt_sigreturn` and returns to
+dispatch before executing that continuation. This matches Linux's
+[AArch64 signal restoration](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kernel/signal.c)
+and [vDSO trampoline](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kernel/vdso/sigreturn.S).
+Host thunk and loader callback loops in `ThunkWiring.cpp` and `ElfLoading.cpp`
+use interpreter `step()` with LR `0x1000`; the JIT SDL thread runner explicitly
+sets `jit_stop_pc`. A future host runner returning to real guest code must set
+that stop boundary rather than rely on the target being absent from the IBL.
+
+`jit_mt_publication.cpp` checks warmed trampoline hits and SVC cold exits in
+ST/MT, plus executable stop PCs and nested helper boundaries, in both frame
+layouts. `jit_bitfield_regalloc` reproduces the verifier escape when IBL remains
+bound. See [the validation record](TESTS.md#indirect-branches-watchdogs-and-lazy-controllers-2026-10-12).
+
+Hang detection is now an opt-in diagnostic (`BIFROST_HANG_WATCHDOG=1`): it
+enables the main/worker same-PC limits, main frozen-loop detection and JIT
+dispatch/call-helper limits that can stop or demote valid long-running code.
+This does not disable the chain execution lease, host call-depth limit, guest
+memory checks or explicit instruction limits. `test_long_call_loop` checks
+60 million calls on each of the main and worker CPUs against an inline oracle.
+
 ## Native vector FP special cases
 
 Packed arithmetic computes a tentative result in scratch XMM0 before writing
