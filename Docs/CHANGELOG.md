@@ -13,6 +13,17 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Acquire-load and trial-timing overhead (2026-10-12)
+
+- Emit aligned acquire loads through the guarded native memory path, avoiding
+  the exclusive-monitor helper/mutex while retaining atomic IR ordering,
+  permissions, userfaultfd and precise faults. Initialize the direct-window
+  base in acquire-only blocks; keep existing exclusive and fallback paths.
+- Start linear timing trials with a guest-work-based quota and cap them at
+  8,192 entries. Keep CPU-time clocks and the existing evidence thresholds.
+  Add width/alias/reservation/fault and bounded-timing regressions. An isolated
+  acquire loop improves 13.43x; post-change game FPS remains unmeasured.
+
 ### Codegen roadmap documentation (2026-10-12)
 
 - Record the planned v2 compiler direction: explicit guest state, mixed

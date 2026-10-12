@@ -25,6 +25,13 @@ namespace arm64emu {
 // cold exit spills live state for a C call; successful accesses retain all
 // other mappings. Paired instructions still use the whole-footprint guard.
 bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
+    if (inst.op == IROp::LDXR_FAST && !inst.llsc_exclusive()) {
+        // LDAR is an acquire load, not a reservation. Keep the original
+        // atomic IR as an optimizer barrier; reuse only the guarded emitter.
+        IRInst load = IRInst::make_load_mem(inst.dest, inst.src1,
+            MemParams{inst.llsc_width(), 0}, inst.arm_pc);
+        return compile_guarded_mem(load);
+    }
     const bool load = inst.op == IROp::LOAD_MEM;
     if ((!load && inst.op != IROp::STORE_MEM) || !fault_sites_ ||
         !guest_memory_ || !window_base_ || !inst.arm_pc) return false;
@@ -62,6 +69,14 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     emit_cmp_reg(effective, temp);
     std::vector<size_t> cold;
     cold.push_back(emit_jcc_rel32_placeholder(7)); // JA: full-width bounds
+    if (decoded.cls == InstClass::LDAR && mp.width > 1) {
+        // Aligned x86 loads are atomic and acquire ordered. Leave unaligned
+        // accesses on the existing interpreter path instead of allowing a
+        // native access to tear across a cache-line/page boundary.
+        emit_mov_reg(temp, effective);
+        emit_alu_imm(temp, 4, mp.width - 1);
+        cold.push_back(emit_jcc_rel32_placeholder(5));
+    }
     // Activation is sticky and visible to already compiled code. Never hoist
     // this check out of a loop: another CPU can enable userfaultfd tracking.
     emit_test_software_checks();

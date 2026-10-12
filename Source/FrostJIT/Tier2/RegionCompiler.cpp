@@ -261,6 +261,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                 case IROp::SIMD_ST16:
                     uses_window = true;
                     break;
+                case IROp::LDXR_FAST:
+                    uses_window = !inst.llsc_exclusive();
+                    break;
                 default:
                     break;
             }

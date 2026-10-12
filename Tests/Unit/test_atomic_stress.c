@@ -175,6 +175,46 @@ static int test_mixed_exclusive(void) {
  return seen==0 && expected==0 && status==1 && value==2;
 }
 
+// This block has no ordinary loads/stores to implicitly request the JIT's
+// direct-window base. Its native acquire access must initialize that base.
+__attribute__((noinline)) static uint64_t acquire_only(uint64_t *p) {
+    uint64_t value;
+    __asm__ volatile("ldar %x[v], [%[p]]" : [v]"=r"(value) : [p]"r"(p) : "memory");
+    return value;
+}
+static int test_acquire_loads(void) {
+    uint64_t source = UINT64_C(0xfedcba9876543210), other = 123;
+    uint64_t byte, half, word, full, alias, flags, old, status;
+    __asm__ volatile(
+        "cmp %x[p], #0\n\t"
+        "ldarb %w[b], [%[p]]\n\tldarh %w[h], [%[p]]\n\t"
+        "ldar %w[w], [%[p]]\n\tldar %x[x], [%[p]]\n\t"
+        "mov %x[a], %x[p]\n\tldar %x[a], [%[a]]\n\t"
+        "ldar xzr, [%[p]]\n\tmrs %x[f], nzcv"
+        : [b]"=&r"(byte), [h]"=&r"(half), [w]"=&r"(word),
+          [x]"=&r"(full), [a]"=&r"(alias), [f]"=r"(flags)
+        : [p]"r"(&source) : "cc", "memory");
+    int ok = acquire_only(&source) == source &&
+        byte == 0x10 && half == 0x3210 && word == 0x76543210 &&
+        full == source && alias == source && flags == UINT64_C(0x20000000);
+    // A normal acquire load neither creates nor replaces a reservation.
+    __asm__ volatile(
+        "clrex\n\tldar %x[v], [%[p]]\n\tstlxr %w[s], %x[v], [%[p]]"
+        : [v]"=&r"(old), [s]"=&r"(status) : [p]"r"(&source) : "memory");
+    ok &= status == 1 && old == source;
+    unsigned attempts = 0;
+    do {
+        __asm__ volatile(
+            "ldaxr %x[v], [%[p]]\n\tldar %x[t], [%[q]]\n\t"
+            "stlxr %w[s], %x[v], [%[p]]"
+            : [v]"=&r"(old), [t]"=&r"(full), [s]"=&r"(status)
+            : [p]"r"(&source), [q]"r"(&other) : "memory");
+    } while (status && ++attempts < 1000);
+    ok &= !status && full == other && old == source;
+    printf("Acquire widths, aliases, NZCV and reservations: %s\n", ok ? "OK" : "FAIL");
+    return ok;
+}
+
 int main(void) {
     printf("=== atomic stress test: %d threads ===\n", NTHREADS);
     int all_ok = 1;
@@ -230,6 +270,7 @@ int main(void) {
     all_ok &= test_barrier("DSB SY", dsb_sy_worker);
     all_ok &= test_barrier_state();
     all_ok &= test_mixed_exclusive();
+    all_ok &= test_acquire_loads();
 
     printf("test_atomic_stress: %s\n", all_ok ? "ALL PASS" : "FAIL");
     return all_ok ? 0 : 1;

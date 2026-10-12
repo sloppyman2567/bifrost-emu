@@ -202,7 +202,7 @@ static bool invalidated_trial() {
     while(fresh.pc!=STOP) fresh.pc=j->run_block(fresh,*e);
     return fresh.regs[1]==200;
 }
-static bool linear_scenario(bool mt,bool keep,bool mismatch=false) {
+static bool linear_scenario(bool mt,bool keep,bool mismatch=false,bool collisions=false) {
     linear_measure=true;
     auto e=std::make_unique<Emulator>();
     e->mem().map_range(HEAD,4096); e->mem().mprotect_guest(HEAD,4096,7);
@@ -221,25 +221,30 @@ static bool linear_scenario(bool mt,bool keep,bool mismatch=false) {
     }
     void* trial=Tier2TestAccess::prepare(*j,HEAD);
     CPU c;
-    if(!trial || !Tier2TestAccess::linear_window(c,trial)) return false;
+    if(!trial) return false;
     candidate_delay=keep ? 20000 : 400000;
     const size_t prefix=j->code_buf_used();
     std::vector<uint8_t> bytes(j->code_buf(),j->code_buf()+prefix);
-    for(unsigned k=0;k<2048 && !Tier2TestAccess::decision(trial);++k) {
+    unsigned visits=0;
+    for(;visits<8192 && !Tier2TestAccess::decision(trial);++visits) {
         c.pc=HEAD; c.regs[1]=0; c.regs[30]=STOP; c.jit_stop_pc=STOP;
+        // A colliding owner between every visit prevents a pooled window
+        // from completing; the global timer-call budget must still terminate.
+        if(collisions) for(auto& slot:c.jit_tier2_feedback) slot.owner=0;
         if(j->tier2_measure(c,*e,trial)!=HEAD+64 || c.regs[1]!=8 || c.jit_tier2_trial)
             return false;
-        if(mismatch && k%16==7) Tier2TestAccess::mismatch(c,trial);
+        if(mismatch && visits%16==7) Tier2TestAccess::mismatch(c,trial);
     }
-    const unsigned expected=keep&&!mismatch ? 1 : 2;
+    const unsigned expected=keep&&!mismatch&&!collisions ? 1 : 2;
     if(Tier2TestAccess::decision(trial)!=expected ||
-        j->tier2_measured_pairs.load()!=(mismatch ? 0 : 8) ||
+        j->tier2_measured_pairs.load()!=((mismatch||collisions) ? 0 : 8) ||
+        (!mismatch&&!collisions&&visits>128) ||
         (mt && std::memcmp(bytes.data(),j->code_buf(),prefix))) {
         std::fprintf(stderr,"linear timing decision mismatch: decision=%u expected=%u pairs=%llu\n",
             Tier2TestAccess::decision(trial),expected,(unsigned long long)j->tier2_measured_pairs.load());
         return false;
     }
-    if(!keep && !mismatch && j->lookup_only(HEAD)) {
+    if(!keep && !mismatch && !collisions && j->lookup_only(HEAD)) {
         std::fputs("losing eight-block trial did not rearm a shorter candidate\n",stderr);
         return false;
     }
@@ -323,6 +328,7 @@ int main(int argc,char**argv) {
     const bool mt=argc>1 && std::string(argv[1])=="mt";
     if(!cold_and_transition(mt)||!scenario(mt,true)||!scenario(mt,false)||!scenario(mt,true,true)||(mt&&!invalidated_trial())) return 1;
     if(!linear_scenario(mt,true)||!linear_scenario(mt,false)||!linear_scenario(mt,true,true)) return 1;
+    if(!linear_scenario(mt,true,false,true)) return 1;
     if(!shorter_candidates(mt,false)||!shorter_candidates(mt,true)||
        !shorter_candidates(mt,false,true)||!shorter_candidates(mt,false,false,true)) return 1;
     std::puts("jit_tier2_measure: real timing keeps faster code, rejects slower/mismatched samples PASS");

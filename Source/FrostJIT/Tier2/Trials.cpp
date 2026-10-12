@@ -34,6 +34,12 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     if (slot.owner != monitor->identity) {
         slot = CPU::Tier2FeedbackSlot{};
         slot.owner = monitor->identity;
+        // Linear paths pay two CPU-clock reads per traversal. Start with
+        // enough guest work to qualify, then grow only when the measured
+        // baseline is below 10 us, instead of timing 256 visits unconditionally.
+        if (trial.linear)
+            slot.sample_quota = std::max(1u, (128u + trial.candidate_entry.instr_count - 1) /
+                static_cast<unsigned>(trial.candidate_entry.instr_count));
     }
     const bool candidate = slot.baseline_ns != 0;
     auto fn = candidate ? (trial.candidate_sample ? trial.candidate_sample : trial.candidate)
@@ -97,7 +103,10 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             // executing unrelated work or replaying side effects. Pool only
             // completed live traversals; both arms pay identical timer/probe
             // overhead. This is conservative for very short superblocks.
-            exhausted = ++trial.linear_entries >= 128 * 4096;
+            // Bound total timer calls even when CPU-local slots collide or
+            // complete, comparable windows never arrive. Unproven code stays
+            // in Tier-1; eight matched pairs are still required to keep it.
+            exhausted = ++trial.linear_entries >= 8192;
             if (ns && work && cpu.running && exit == trial.linear_exit &&
                 monitor->enabled.load(std::memory_order_acquire)) {
                 slot.window_ns += ns;

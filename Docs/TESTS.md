@@ -1,5 +1,38 @@
 # Tests
 
+## Native acquire loads and trial timing (2026-10-12)
+
+The atomic-stress fixture now checks acquire-load byte/halfword/word/doubleword
+results, source/destination aliasing, NZCV, XZR and preservation/non-creation
+of exclusive reservations. An acquire-only function exercises direct-window
+initialization without an ordinary load/store. Initial native-path stress
+exposed a missing window-base preload; baseline and software-guard paths
+passed the same fixture, and the corrected native entry passes too.
+
+The fault fixture checks all four acquire widths at warmed protected-page
+sites on four CPUs and at a shared-file EOF boundary. JIT and QEMU pass the
+SIGSEGV and optional native SIGBUS probes. The existing software/interpreter
+EOF coverage limitation remains. Atomic results also pass in QEMU and the
+reference interpreter, with forced software guards checked separately.
+
+The real-timing oracle checks that eight-block linear candidates finish
+sixteen controlled windows within 128 live visits, and that slot collisions
+still terminate within the new 8,192-entry budget. Its timing clocks remain
+real. The saved baseline fails the new visit-bound regression; ST/MT and both
+frame layouts pass after the change. Discovery, feedback and MT publication
+oracles also pass. Both build configurations, `make generated-check` and
+`make verify` pass (21,836 SSA checks, 75 differential fixtures, six threaded
+oracles). The strict JIT suite passes 313/313; 56 Tier-2-enabled utility,
+SIMD/fault/atomic checks and three selected interpreter checks pass.
+
+One warm-up and five interleaved before/after samples of a temporary
+two-million-load probe give 32.4066/2.4128 ms median times (13.43x throughput).
+Tier-2 is disabled, W^X disabled and guard settings matched; every sample
+checks the final sum. This is an isolated acquire-loop result. The repeat
+Doom 3 profile was stopped at the user's request before loading completed;
+there is no post-change gameplay capture, frame-time comparison or new
+CoreMark result. Local artifacts are in `/tmp/bifrost-atomic-trials/`.
+
 ## Concise Tier-2 logging (2026-10-12)
 
 The existing discovery fixture passes in ST/MT with both frame layouts under

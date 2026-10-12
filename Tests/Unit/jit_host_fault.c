@@ -59,6 +59,10 @@ static void *worker(void *unused) {
     int lse = (getauxval(AT_HWCAP) & (1UL << 8)) != 0;
     for (int i = 0; i < 128; ++i) {
         PROBE("ldr x11, [%0]", p + page_size);
+        PROBE("ldarb w11, [%0]", p + page_size);
+        PROBE("ldarh w11, [%0]", p + page_size);
+        PROBE("ldar w11, [%0]", p + page_size);
+        PROBE("ldar x11, [%0]", p + page_size);
         PROBE("str x11, [%0]", p + page_size);
         PROBE("ldr q0, [%0]", p + page_size - 8);
         PROBE("str q0, [%0]", p + page_size - 8);
@@ -91,10 +95,14 @@ static int bus_probe(void) {
     expected_signal = SIGBUS;
     expected_addr = (uintptr_t)p + page_size;
     PROBE("ldr x11, [%0]", (char *)p + page_size);
+    PROBE("ldarb w11, [%0]", (char *)p + page_size);
+    PROBE("ldarh w11, [%0]", (char *)p + page_size);
+    PROBE("ldar w11, [%0]", (char *)p + page_size);
+    PROBE("ldar x11, [%0]", (char *)p + page_size);
     PROBE("str x11, [%0]", (char *)p + page_size);
     PROBE("ldr q0, [%0]", (char *)p + page_size);
     PROBE("str q0, [%0]", (char *)p + page_size);
-    int failed = bad || faults != 4;
+    int failed = bad || faults != 8;
     munmap(p, 2 * page_size);
     return failed;
 }

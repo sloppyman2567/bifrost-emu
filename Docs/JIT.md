@@ -98,12 +98,13 @@ pinning policy. This change does not unify scalar/vector caches or extend
 the native FPCR/FPSR contract.
 
 Closed-loop timing still measures whole-iteration windows. Linear superblocks
-accumulate time from 256 completed live traversals per arm, excluding unrelated
-guest execution between visits. Both private sampling graphs have matching
+start each arm with enough completed live traversals for at least 128 guest
+instructions, growing the quota when baseline time is below 10 us. They exclude
+unrelated guest execution between visits. Both private sampling graphs have matching
 work probes and timer overhead. Work counts, block fingerprints and exit PCs
 must match; eight pairs need a median ratio below 0.97 and six winning pairs.
 Invalid/short samples retain Tier-1. Linear sampling is additionally bounded
-to 524,288 entries per trial, including CPU-local observation-slot collisions.
+to 8,192 entries per trial, including CPU-local observation-slot collisions.
 Per-traversal timer overhead can hide gains in very short paths, so these
 decisions remain conservative rather than guaranteeing application speedup.
 
@@ -136,6 +137,40 @@ Each used one warm-up and three measured 110,000-iteration runs with all CRCs
 validated. Eight blocks were approximately neutral on CoreMark; the small
 four-block difference is not a general performance guarantee. These results
 do not establish game FPS. See [validation](TESTS.md#eight-block-superblocks-and-region-vector-state-2026-10-12).
+
+## Native acquire loads and bounded trial timing (2026-10-12)
+
+Aligned `LDARB/LDARH/LDAR W/LDAR X` now reuse the guarded native-load emitter.
+The optimizer retains their original LL/SC IR operation as a memory-effect
+barrier; only code generation lowers the non-exclusive load to an x86 load.
+Acquire-only blocks initialize the direct-window base at cold and chain
+entries. Bounds, sticky permission/userfaultfd checks, fault-site registration
+and precise architectural recovery use the existing memory path. Unaligned
+accesses exit to the existing interpreter implementation; forced-software
+guard/no-fault-recovery configurations retain the helper implementation.
+Exclusive loads/stores retain the shared reservation monitor.
+
+The mapping follows Linux's reference implementations of
+[arm64 acquire loads](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/asm/barrier.h)
+and [x86 acquire ordering](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/asm/barrier.h).
+This source check supports the aligned acquire mapping; it does not extend
+the existing unaligned atomic contract or prove arbitrary concurrent access
+patterns correct. Widths, aliases, NZCV, XZR, reservation preservation and
+precise SIGSEGV/SIGBUS state have focused executable checks against QEMU.
+
+Linear trial quotas now begin at `ceil(128 / guest_instructions)` traversals
+(at least one). The existing short-baseline rule doubles the quota up to
+4,096; CPU-time clocks, matched work/fingerprints/exits, eight pairs and six
+wins remain required. The global linear-entry ceiling is 8,192 instead of
+524,288, limiting timer calls when profiles or CPU-local slots do not produce
+comparable windows. Inconclusive trials retain Tier-1. Closed-loop sampling
+retains its initial 256-iteration windows.
+
+Five alternating before/after runs of a two-million-iteration aligned acquire
+loop, with Tier-2 disabled and identical guard settings, reduce median loop
+time from 32.4066 ms to 2.4128 ms (13.43x). Each run validates its independent
+final sum. This isolates native acquire-load overhead; it is not a CoreMark
+or FPS result. See [validation and remaining gaps](TESTS.md#native-acquire-loads-and-trial-timing-2026-10-12).
 
 ## Indirect branches and host return boundaries (2026-10-12)
 

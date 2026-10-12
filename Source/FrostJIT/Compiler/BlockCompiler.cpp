@@ -712,6 +712,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 case IROp::SIMD_ST16:
                     uses_window = true;
                     break;
+                case IROp::LDXR_FAST:
+                    uses_window = !inst.llsc_exclusive(); // native LDAR
+                    break;
                 default:
                     break;
             }
