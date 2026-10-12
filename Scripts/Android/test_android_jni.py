@@ -40,6 +40,9 @@ def run(emu, runtime, fixture, mode, output, timeout):
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
         for name in ("bifrost-art", "libbifrost-jni.so", "classes.dex"):
             shutil.copy2(fixture / name, files / name)
+        # The guest runs as an app UID, and API 35 ART rejects writable DEX
+        # files for non-root/system/shell UIDs.
+        (files / "classes.dex").chmod(0o444)
         if mode == "qemu":
             # QEMU's AT_EXECFN contains the host-prefixed executable path.
             # Select the same ART section in this temporary copy only.

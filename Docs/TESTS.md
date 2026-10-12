@@ -41,11 +41,17 @@ including the moved SurfaceComposer/vsync services. Managed service execution,
 the five network/launcher-argument tests, Asgard (eight processes, 1,600 RPCs,
 broker restart), the three preflight tests and the JIT framework probe pass.
 
-`test_android_jni.py` fails before VM creation: Android 15 ART refuses the
-fixture's writable `/data/local/tmp/classes.dex` ("Writable dex file ... is not
-allowed"). A binary built from the previous commit fails the same way, so this
-is a pre-existing fixture issue, not a regression from this change. No game was
-run; these checks do not establish playability.
+`test_android_jni.py` had failed before VM creation, both on this change and on
+a binary built from the previous commit. Android-runtime guests run as app UID
+10000, and API 35 ART's `DexFile_openDexFileNative` rejects a DEX for which
+`access(W_OK)` succeeds unless the UID is root, system or shell ("Writable dex
+file ... is not allowed"). The runner copied `classes.dex` writable. It now
+stages the file 0444, as the managed launcher already does, and the fixture
+passes in JIT, interpreter, `BIFROST_NO_ASLR=1` and qemu-aarch64 reference
+modes. When the host runs as root, `faccessat` passthrough reports even 0444
+files as writable, so both this fixture and the managed launcher would still be
+rejected; that case is untested. No game was run; these checks do not establish
+playability.
 
 ### Bounded MT self-loops (2026-10-11)
 

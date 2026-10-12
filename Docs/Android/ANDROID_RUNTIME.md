@@ -1195,8 +1195,9 @@ The DEX compiler is checksum-pinned D8 from AOSP `android-15.0.0_r1`.
 Generated runtime files and fixtures stay under ignored `build/` directories.
 
 The runner copies the verified runtime into a temporary root, adds writable
-data and fixtures, enforces a timeout, and saves logs plus JSON results in
-`build/android-jni-results/`. The launcher calls the real `JNI_CreateJavaVM`
+data and fixtures (the DEX read-only: the guest runs as an app UID, for which
+ART rejects writable DEX files), enforces a timeout, and saves logs plus JSON
+results in `build/android-jni-results/`. The launcher calls the real `JNI_CreateJavaVM`
 with ART JIT disabled, CheckJNI enabled and a small 16/64 MiB heap. The fixture
 is intended to load an ARM64 JNI library, register a native method, access an
 array/string, call back into Java and shut down cleanly. Success requires

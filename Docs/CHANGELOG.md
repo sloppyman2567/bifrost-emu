@@ -44,8 +44,10 @@ labels below are historical records.
 - The Makefile `test` target and suite comments use `Tests/Asm/` instead of the
   pre-restructure `test/` path.
 - Both builds, full JIT/interpreter suites, `make verify`, host API and Android
-  adapter/framework/Bionic/Asgard checks pass. The JNI fixture fails as it did
-  before this change (ART rejects its writable dex). See
+  adapter/framework/Bionic/Asgard checks pass. The JNI fixture runner now
+  stages its DEX read-only: API 35 ART rejects writable DEX files for the app
+  UID that Android-runtime guests use, which had failed the fixture since app
+  identities were added. See
   [the validation record](TESTS.md#200-alpha1-layout-names-and-splits-2026-10-12).
 
 ### Bounded multithreaded JIT loops (2026-10-11)
