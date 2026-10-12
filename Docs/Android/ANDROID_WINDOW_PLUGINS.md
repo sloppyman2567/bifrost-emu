@@ -39,6 +39,19 @@ including host resize notifications. Failed notifications are logged and preserv
 the manager's previous geometry; the backend must likewise preserve its buffer
 geometry. SDL3 resize failure is checked before modifying its EGL wrapper. Pixel geometry
 is converted to SDL logical window dimensions on scaled displays.
+
+The SDL3 window is created with `SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN`.
+`open()` takes the window's desktop (logical) size; on a scaled display its
+buffer has more pixels, and `pixel_size()`/`pixel_density()` report them. The
+surface manager adopts that pixel size as the Android display, so the game
+renders at the monitor's native resolution instead of being upsampled by the
+compositor. SDL scales its own surface; Bifrost's Wayland subsurfaces (extra
+SurfaceViews and popup layers) map their pixel buffers to desktop coordinates
+with `wp_viewporter.set_destination`, or the core integer buffer scale when the
+compositor lacks the viewporter. Client glue is `wayland-scanner` output from
+the vendored stable `ThirdParty/WaylandXML/viewporter.xml` (wayland-protocols
+1.36), committed under `Include/Generated/` and checked by `make generated-check`.
+Loadable plugins keep the default (one pixel per desktop unit).
 Negative geometry is rejected; both dimensions must be zero or both positive.
 Zeros restore the adapter's base 800×600 settings. The adapter supports only
 RGBA8888: other positive formats now return `-ENOTSUP` instead of reporting

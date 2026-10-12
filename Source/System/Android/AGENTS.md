@@ -16,6 +16,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Framework service stubs are strict: add the exact observed method contract,
   not a blanket default. Preserve package query filtering/copy isolation and
   per-Activity manifest/requested orientation.
+- Play windows open in desktop units; the Android display is the window's
+  native pixel buffer and density (op 11). Layers created by Bifrost on Wayland
+  must scale their pixel buffers to the parent's desktop coordinates
+  (`SurfaceScale`, generated `wp_viewporter` glue; regenerate, don't hand-edit).
 - Windows beyond the launcher Activity's SurfaceView (dialogs, popups, stacked
   Activities from `FrameworkActivities`) go through WindowManager and
   `FrameworkWindows`; keep ActivityThread's lifecycle order. Only the session

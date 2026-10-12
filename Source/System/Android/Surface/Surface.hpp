@@ -98,6 +98,8 @@ public:
 
     // Backend owns its host window; no SDL pointer crosses this interface.
     bool open_host_window();
+    // Android density for the window: 160 dpi per host pixel per desktop unit.
+    int32_t density_dpi() const;
     int set_window_identity(const std::string& title, const uint8_t* rgba, int32_t width, int32_t height);
     void close_host_window();
     bool ready() const { return window_open_; }

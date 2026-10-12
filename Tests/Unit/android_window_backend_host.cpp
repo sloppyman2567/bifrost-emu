@@ -13,6 +13,8 @@ struct State {
   uint64_t binding = 0x123;
   void* display = nullptr;
   bool hidden = false;
+  double pixel_density = 0;  // nonzero: open() reports a scaled pixel buffer
+  int open_width = 0, open_height = 0;
   std::vector<std::shared_ptr<State>> children;
   std::vector<frost::AndroidWindowEvent> events;  // returned by poll, in order
 };
@@ -22,11 +24,19 @@ public:
       : state_(std::move(state)) {}
   ~TestBackend() override { close(); }
   const char *name() const noexcept override { return "test-window"; }
-  int open(const char *, int32_t, int32_t) override {
+  int open(const char *, int32_t w, int32_t h) override {
     if (state_->fail_open) return -EIO;
     state_->opened = true;
+    state_->open_width = w; state_->open_height = h;
     return 0;
   }
+  bool pixel_size(int32_t &w, int32_t &h) override {
+    if (!state_->pixel_density) return false;
+    w = int32_t(state_->open_width * state_->pixel_density);
+    h = int32_t(state_->open_height * state_->pixel_density);
+    return true;
+  }
+  double pixel_density() override { return state_->pixel_density ? state_->pixel_density : 1.0; }
   void close() noexcept override { state_->opened = false; }
   int poll(frost::AndroidWindowEvent &event) override {
     event = {};
@@ -153,6 +163,19 @@ int main() {
     CHECK(local.from_surface() != 0);
   }
   CHECK(!independent->opened);
+  // On a scaled host display the window opens at its desktop size and the
+  // Android display adopts the native pixel buffer and its density.
+  auto scaled = std::make_shared<State>();
+  scaled->pixel_density = 1.5;
+  {
+    frost::AndroidSurfaceManager local(std::make_unique<TestBackend>(scaled));
+    CHECK(local.set_buffers_geometry(1280, 720, 1) == 0);
+    CHECK(local.open_host_window());
+    CHECK(scaled->open_width == 1280 && scaled->open_height == 720);
+    CHECK(local.width() == 1920 && local.height() == 1080 && local.density_dpi() == 240);
+    CHECK(scaled->width == 1920 && scaled->height == 1080 && !scaled->host_resize);
+  }
+  CHECK(manager.density_dpi() == 160);
   // The configured back key ([android] back_key) arrives as KEYCODE_BACK;
   // other keys keep their codes and "none" disables the mapping.
   CHECK(frost::android_keycode_for_name("Escape") == 111);

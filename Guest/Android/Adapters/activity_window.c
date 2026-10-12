@@ -211,6 +211,16 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_openWindow(JNIEnv *e, jclass c, jint
 JNIEXPORT jint JNICALL Java_ManagedLauncher_pollWindow(JNIEnv *e, jclass c, jlongArray a) {
     return Java_ActivityProbe_pollWindow(e, c, a);
 }
+// The open window's display: pixel width, pixel height and density dpi.
+JNIEXPORT jint JNICALL Java_ManagedLauncher_windowMetrics(JNIEnv *env, jclass type, jlongArray out) {
+    (void)type;
+    uint64_t data[3];
+    if ((*env)->GetArrayLength(env, out) != 3) return -22; // EINVAL
+    long result = bifrost_window(11, (long)data, 0);
+    if (result == 0)
+        (*env)->SetLongArrayRegion(env, out, 0, 3, (const jlong *)data);
+    return (jint)result;
+}
 JNIEXPORT jint JNICALL Java_ManagedLauncher_audioConfig(JNIEnv *e, jclass c, jlongArray a) {
     return Java_ActivityProbe_audioConfig(e, c, a);
 }

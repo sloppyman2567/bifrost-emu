@@ -138,6 +138,16 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (cpu.regs[1] > UINT32_MAX) ret_host(-EINVAL);
                 else { manager.remove_popup(static_cast<uint32_t>(cpu.regs[1])); ret_host(0); }
             }
+            else if (cpu.regs[0] == 11) { // Managed display: pixel width, height, density dpi.
+                if (!manager.ready()) { ret_host(-ENODEV); return 0; }
+                const uint64_t data[3] = {static_cast<uint64_t>(manager.width()),
+                                          static_cast<uint64_t>(manager.height()),
+                                          static_cast<uint64_t>(manager.density_dpi())};
+                try { emu.mem().check_access(cpu.regs[1], sizeof(data), Memory::GUEST_PROT_WRITE); }
+                catch (const EmuError&) { ret_host(-EFAULT); return 0; }
+                emu.mem().write(cpu.regs[1], data, sizeof(data));
+                ret_host(0);
+            }
             else ret_host(-EINVAL);
             return 0;
         }

@@ -1,5 +1,20 @@
 # Tests
 
+## Native-density play windows (2026-10-12)
+
+`test-android-window-backend` checks that a backend reporting 1.5 pixels per
+desktop unit opens at 1280x720 desktop units, the manager adopts 1920x1080 px and
+240 dpi without a host resize, and an unscaled backend reports 160 dpi.
+`test-android-sdl-backend`'s SDL3 fixture now doubles pixels only for windows
+created with high pixel density; the backend requests it, reports 1600x1200 px
+and ratio 2.0 for an 800x600 window, and no longer resizes on open (256 teardown
+cycles pass). `make generated-check` regenerates the viewporter glue. The
+package suite passes 26/26 and the headless (`USE_SDL2=0 USE_THUNK_GL=0`) build
+compiles. SpongeBob runs at 2560x1384/3440x1384 px, 320 dpi, on the user's 2x
+monitor and at 1920x1038 px on a 1.5x monitor. No test drives a real compositor's
+viewporter: subsurface and popup scaling were checked only by the user's view of
+the running game, and the integer buffer-scale fallback is untested.
+
 ## Notification enablement (2026-10-12)
 
 ActivityProbe's resumed installed-app service check now requires

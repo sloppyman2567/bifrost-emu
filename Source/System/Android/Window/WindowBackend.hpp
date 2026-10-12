@@ -31,6 +31,11 @@ public:
   virtual void remove_popup(uint32_t) {}
   virtual void set_visible(bool) {}
   virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
+  // An open window's buffer size in host pixels. open() takes the window's
+  // size in desktop coordinates; on a scaled display the two differ.
+  virtual bool pixel_size(int32_t &, int32_t &) { return false; }
+  // Host pixels per desktop coordinate unit (the display's scale factor).
+  virtual double pixel_density() { return 1.0; }
   virtual void set_title(const char *) {}
   virtual bool set_icon(const uint8_t *, int32_t, int32_t) { return false; }
 };

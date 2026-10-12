@@ -3,7 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-struct fake_window { int width, height; unsigned id; char title[512]; };
+/* Pixel size doubles only for high-density windows, as on a 2x Wayland output. */
+struct fake_window { int width, height, scale; unsigned id; char title[512]; };
 const char *SDL_GetWindowTitle(SDL_Window *window) { return ((struct fake_window *)window)->title; }
 bool SDL_SetWindowTitle(SDL_Window *window, const char *title) {
     snprintf(((struct fake_window *)window)->title, 512, "%s", title);
@@ -24,8 +25,8 @@ void SDL_QuitSubSystem(SDL_InitFlags flags) { (void)flags; record("video-quit");
 bool SDL_SetHint(const char *name, const char *value) { (void)name; (void)value; return true; }
 const char *SDL_GetError(void) { return "injected SDL3 failure"; }
 static int requested_width, requested_height;
-static bool external_context;
-SDL_PropertiesID SDL_CreateProperties(void) { external_context = false; return 100; }
+static bool external_context, high_density;
+SDL_PropertiesID SDL_CreateProperties(void) { external_context = high_density = false; return 100; }
 void SDL_DestroyProperties(SDL_PropertiesID props) { (void)props; }
 bool SDL_SetStringProperty(SDL_PropertiesID props, const char *name, const char *value) {
     (void)props; (void)name; (void)value; return true;
@@ -39,6 +40,7 @@ bool SDL_SetNumberProperty(SDL_PropertiesID props, const char *name, Sint64 valu
 bool SDL_SetBooleanProperty(SDL_PropertiesID props, const char *name, bool value) {
     (void)props;
     if (!strcmp(name, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN)) external_context = value;
+    if (!strcmp(name, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN)) high_density = value;
     return true;
 }
 SDL_Window *SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
@@ -49,7 +51,8 @@ SDL_Window *SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
     for (unsigned i = 0; i < 16; ++i) if (!windows[i]) {
         struct fake_window *w = calloc(1, sizeof(*w));
         if (!w) return NULL;
-        w->width = width; w->height = height; w->id = i + 1; windows[i] = w;
+        w->width = width; w->height = height; w->scale = high_density ? 2 : 1;
+        w->id = i + 1; windows[i] = w;
         record("window-create"); return (SDL_Window *)w;
     }
     return NULL;
@@ -80,7 +83,8 @@ bool SDL_GetWindowSize(SDL_Window *window, int *width, int *height) {
 }
 bool SDL_GetWindowSizeInPixels(SDL_Window *window, int *width, int *height) {
     bool result = SDL_GetWindowSize(window, width, height);
-    *width *= 2; *height *= 2; return result;
+    int scale = ((struct fake_window *)window)->scale;
+    *width *= scale; *height *= scale; return result;
 }
 bool SDL_PollEvent(SDL_Event *event) {
     const char *mode = getenv("BIFROST_TEST_SDL_EVENT");

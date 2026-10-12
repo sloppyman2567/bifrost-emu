@@ -61,8 +61,28 @@ bool AndroidSurfaceManager::open_host_window() {
                      window_backend_->name(), error);
         return false;
     }
+    // open() sized the window in desktop coordinates. The Android display is
+    // its native pixel buffer, which differs on a scaled host display.
+    int32_t pixel_w = 0, pixel_h = 0;
+    if (window_backend_->pixel_size(pixel_w, pixel_h) &&
+            (pixel_w != width_ || pixel_h != height_)) {
+        if (int error = window_backend_->resize(pixel_w, pixel_h, false)) {
+            std::fprintf(stderr, "[android] window backend %s pixel size failed (%d)\n",
+                         window_backend_->name(), error);
+            window_backend_->close();
+            return false;
+        }
+        width_ = pixel_w;
+        height_ = pixel_h;
+    }
     window_open_ = true;
     return true;
+}
+
+int32_t AndroidSurfaceManager::density_dpi() const {
+    // Android's baseline is 160 dpi at one pixel per desktop unit.
+    const double ratio = window_backend_->pixel_density();
+    return ratio > 0 ? static_cast<int32_t>(std::lround(160.0 * ratio)) : 160;
 }
 
 int AndroidSurfaceManager::set_window_identity(const std::string& title, const uint8_t* rgba,

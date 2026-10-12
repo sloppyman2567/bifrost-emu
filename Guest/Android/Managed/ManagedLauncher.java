@@ -104,6 +104,7 @@ public final class ManagedLauncher {
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
     private static native int pollWindow(long[] event);
+    private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
     static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
     private static native int activeAudioOutputs();
 
@@ -1177,14 +1178,26 @@ public final class ManagedLauncher {
                     ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
                     ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE)
                     .contains(activity.screenOrientation);
-            width = landscape ? 1280 : 720;
-            height = landscape ? 720 : 1280;
-            displays.setSize(width, height);
+            // The window opens at 1280x720 desktop units; on a scaled host
+            // display its native buffer has more pixels at a higher density.
             loadActivityLibrary();
-            int error = openWindow(width, height);
+            int error = openWindow(landscape ? 1280 : 720, landscape ? 720 : 1280);
             if (error != 0) throw new IllegalStateException("host window: " + error);
+            long[] metrics = new long[3];
+            error = windowMetrics(metrics);
+            if (error != 0) throw new IllegalStateException("host window metrics: " + error);
+            width = (int) metrics[0];
+            height = (int) metrics[1];
+            displays.setMetrics(width, height, (int) metrics[2]);
+            // What ActivityThread.handleConfigurationChanged applies: the
+            // process and system resources use the display's density before
+            // the Application and Activity contexts are created.
+            Object resources = Class.forName("android.app.ResourcesManager").getMethod("getInstance").invoke(null);
+            call(resources, "applyConfigurationToResources",
+                    new Class<?>[] {Configuration.class, Class.forName("android.content.res.CompatibilityInfo")},
+                    displays.processConfiguration(), null);
             windowOpen = true;
-            System.out.println("APP_WINDOW_OPEN " + width + "x" + height);
+            System.out.println("APP_WINDOW_OPEN " + width + "x" + height + " density=" + metrics[2]);
         }
 
         Class<?> compatibility = Class.forName("android.content.res.CompatibilityInfo");

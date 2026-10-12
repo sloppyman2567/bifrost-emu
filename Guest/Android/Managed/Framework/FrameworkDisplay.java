@@ -16,6 +16,7 @@ final class FrameworkDisplay {
     private static final int CHANGED_EVENT = 2; // DisplayManagerGlobal.EVENT_DISPLAY_CHANGED
     private Object info;
     private int width, height;
+    private int densityDpi = 160; // DisplayMetrics.DENSITY_DEFAULT until play mode sizes the display
     private IInterface callback;
     private long eventsMask;
     private Handler main;
@@ -62,24 +63,41 @@ final class FrameworkDisplay {
 
     private Object windowContextInfo() throws Exception {
         Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
-        config.densityDpi = 160;
-        config.screenWidthDp = width;
-        config.screenHeightDp = height;
-        config.smallestScreenWidthDp = Math.min(width, height);
-        config.orientation = width > height ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
+        setScreen(config);
         setWindowBounds(config);
         return Class.forName("android.window.WindowContextInfo")
                 .getConstructor(Configuration.class, int.class).newInstance(config, 0);
     }
 
-    // The Activity override configuration WMS supplies: only its window
-    // bounds. ViewRootImpl measures new windows (dialogs) and WindowMetrics
-    // reports sizes from these; other fields stay undefined to inherit.
+    // The Activity override configuration WMS supplies: its window bounds
+    // and the screen size and density resolved from them (TaskFragment.
+    // computeConfigResourceOverrides). ViewRootImpl measures new windows
+    // (dialogs) and WindowMetrics reports sizes from these; other fields stay
+    // undefined to inherit.
     synchronized Configuration activityOverride() throws Exception {
         Configuration config = new Configuration();
         Configuration.class.getMethod("unset").invoke(config);
+        setScreen(config);
         setWindowBounds(config);
         return config;
+    }
+
+    // The process-wide configuration ResourcesManager applies: the system
+    // configuration with this display's screen size and density.
+    synchronized Configuration processConfiguration() {
+        Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
+        setScreen(config);
+        return config;
+    }
+
+    // TaskFragment rounds pixel sizes to dp as (int) (px / density + 0.5f).
+    private void setScreen(Configuration config) {
+        float density = densityDpi / 160f; // DisplayMetrics.DENSITY_DEFAULT
+        config.densityDpi = densityDpi;
+        config.screenWidthDp = (int) (width / density + 0.5f);
+        config.screenHeightDp = (int) (height / density + 0.5f);
+        config.smallestScreenWidthDp = Math.min(config.screenWidthDp, config.screenHeightDp);
+        config.orientation = width > height ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
     }
 
     private void setWindowBounds(Configuration config) throws Exception {
@@ -110,7 +128,7 @@ final class FrameworkDisplay {
 
     void install(FrameworkServices services) throws Exception {
         main = new Handler(Looper.getMainLooper());
-        info = displayInfo(width = 480, height = 800);
+        info = displayInfo(width = 480, height = 800, densityDpi);
         services.register("display", "android.hardware.display.IDisplayManager", (method, args) -> {
             switch (method) {
                 case "getDisplayInfo": return ((Integer) args[0]) == 0 ? snapshot() : null;
@@ -148,13 +166,22 @@ final class FrameworkDisplay {
     }
 
     void setSize(int newWidth, int newHeight) throws Exception {
-        if (newWidth <= 0 || newHeight <= 0) throw new IllegalArgumentException("Invalid display dimensions");
+        int density;
+        synchronized (this) { density = densityDpi; }
+        setMetrics(newWidth, newHeight, density);
+    }
+
+    // Pixel size and density of the host window's native buffer.
+    void setMetrics(int newWidth, int newHeight, int newDensityDpi) throws Exception {
+        if (newWidth <= 0 || newHeight <= 0 || newDensityDpi <= 0)
+            throw new IllegalArgumentException("Invalid display metrics");
         synchronized (this) {
-            if (width == newWidth && height == newHeight) return;
-            Object next = displayInfo(newWidth, newHeight);
+            if (width == newWidth && height == newHeight && densityDpi == newDensityDpi) return;
+            Object next = displayInfo(newWidth, newHeight, newDensityDpi);
             info = next;
             width = newWidth;
             height = newHeight;
+            densityDpi = newDensityDpi;
         }
         // Publish the new info before notifying, and never call clients under our lock.
         main.post(() -> {
@@ -181,9 +208,10 @@ final class FrameworkDisplay {
         });
     }
 
-    // One 160 dpi, 60 Hz display with id 0: 480x800 unless play mode sizes
-    // it to the host window before the app first queries it.
-    private static Object displayInfo(int width, int height) throws Exception {
+    // One 60 Hz display with id 0: 480x800 at 160 dpi unless play mode sizes
+    // it to the host window's native pixels and scale before the app first
+    // queries it.
+    private static Object displayInfo(int width, int height, int densityDpi) throws Exception {
         Class<?> type = Class.forName("android.view.DisplayInfo");
         Object info = type.getConstructor().newInstance();
         type.getField("name").set(info, "Bifrost");
@@ -194,9 +222,9 @@ final class FrameworkDisplay {
             type.getField(field).setInt(info, height);
         type.getField("smallestNominalAppWidth").setInt(info, Math.min(width, height));
         type.getField("smallestNominalAppHeight").setInt(info, Math.min(width, height));
-        type.getField("logicalDensityDpi").setInt(info, 160);
-        type.getField("physicalXDpi").setFloat(info, 160);
-        type.getField("physicalYDpi").setFloat(info, 160);
+        type.getField("logicalDensityDpi").setInt(info, densityDpi);
+        type.getField("physicalXDpi").setFloat(info, densityDpi);
+        type.getField("physicalYDpi").setFloat(info, densityDpi);
         type.getField("state").setInt(info, 2);  // Display.STATE_ON
         type.getField("type").setInt(info, 1);   // Display.TYPE_INTERNAL
         Class<?> modeType = Class.forName("android.view.Display$Mode");

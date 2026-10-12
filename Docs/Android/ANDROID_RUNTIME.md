@@ -846,7 +846,8 @@ The focused APK gate is `PackageTests.test_managed_service_trace` in
 and `registerCallbackWithEventMask`. The first callback for the guest process is
 retained, and subsequent registrations update its event mask, matching AOSP's
 per-PID callback record. A zero mask disables events; a null callback is rejected.
-Display 0 is enabled, internal, 160 dpi and nominally 60 Hz. Unknown display IDs
+Display 0 is enabled, internal and nominally 60 Hz; it reports 160 dpi until play
+mode sets the host window's density (see below). Unknown display IDs
 return null. DisplayInfo replies cross a Parcel boundary, so client mutation
 cannot corrupt the service's state.
 
@@ -1078,6 +1079,28 @@ played, and system windows (toasts, system alerts) are not composited. On
 X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
 that never redraws (no rendering SurfaceView) can keep stale dialog pixels
 after removal.
+
+### Native-density play windows (2026-10-12)
+
+Play mode opens the host window at 1280x720 desktop units (720x1280 for
+portrait Activities), then reads its native pixel size and density through
+private op 11 (`windowMetrics`). On a 2x display the Android display is
+2560x1440 at 320 dpi; density is `160 × pixels per desktop unit`. Before the
+Application and Activity contexts exist, the launcher publishes these metrics to
+`DisplayInfo` and applies them with `ResourcesManager.applyConfigurationToResources`,
+as `ActivityThread.handleConfigurationChanged` does. The Activity and window-context
+override configurations carry the density and the screen size in dp, rounded
+like Android 15's `TaskFragment.computeConfigResourceOverrides`
+(`(int) (px / density + 0.5f)`). Later host resizes, including a move to a
+display with another scale, change the pixel size; the density stays at its
+startup value, since a density change would need an Activity configuration
+change, which is not implemented. Loadable window plugins keep 160 dpi.
+
+SpongeBob 5.12.0 on a 3440x1440 monitor at 200% scale opens at 2560x1384 px,
+320 dpi (Unity's surface follows to 3440x1384 when maximized). The user
+confirmed high-resolution rendering and correct pointer mapping at 2x.
+The game's loading art is cropped
+on 16:9 windows by its own layout, as on 16:9 phones.
 
 ### Notification enablement (2026-10-12)
 

@@ -27,8 +27,12 @@ int main() {
   CHECK(second->open("second", 800, 600) == 0);
   arm64emu::window_stats::WindowInfo info;
   first->set_title("APK name");
-  // Window stats report the drawable pixel size, not the 2x-scaled logical size.
-  CHECK(first->window_info(info) && info.title == "APK name" && info.w == 800 && info.h == 600);
+  // open() takes desktop units; a high-density window on the 2x output has
+  // twice as many pixels, which window stats and the Android display use.
+  CHECK(first->window_info(info) && info.title == "APK name" && info.w == 1600 && info.h == 1200);
+  int32_t pixel_w = 0, pixel_h = 0;
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
+  CHECK(first->pixel_density() == 2.0);
   unsigned char icon[128 * 128 * 4]{};
   CHECK(first->set_icon(icon, 128, 128));
   setenv("BIFROST_TEST_SDL_BINDING_FAIL", "1", 1);
@@ -50,7 +54,8 @@ int main() {
   CHECK(first->poll(event) == 0 && event.type == 0);
   unsetenv("BIFROST_TEST_SDL_EVENT");
   first->close(); first.reset();
-  CHECK(contents(log) == "video-init\nwindow-create\nhost-resize\nvideo-init\nwindow-create\nhost-resize\nwindow-icon\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
+  // Opening keeps the requested desktop size: no host resize follows creation.
+  CHECK(contents(log) == "video-init\nwindow-create\nvideo-init\nwindow-create\nwindow-icon\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
   CHECK(second->resize(320, 240, false) == 0);
   second.reset();
   CHECK(contents(log).find("resize\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);
