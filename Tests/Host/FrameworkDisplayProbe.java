@@ -32,9 +32,9 @@ public final class FrameworkDisplayProbe {
     private static void run() throws Exception {
         Looper.prepareMainLooper();
         main = new Handler(Looper.getMainLooper());
-        Method install = ManagedLauncher.class.getDeclaredMethod("installServices");
+        Method install = ManagedLauncher.class.getDeclaredMethod("installServices", boolean.class);
         install.setAccessible(true);
-        install.invoke(null);
+        install.invoke(null, false);  // the session process, not a service child
         Field field = ManagedLauncher.class.getDeclaredField("displays");
         field.setAccessible(true);
         FrameworkDisplay service = (FrameworkDisplay) field.get(null);

@@ -52,9 +52,9 @@ public final class FrameworkPackagesProbe {
 
     private static void run() throws Exception {
         Looper.prepareMainLooper();
-        Method install = ManagedLauncher.class.getDeclaredMethod("installServices");
+        Method install = ManagedLauncher.class.getDeclaredMethod("installServices", boolean.class);
         install.setAccessible(true);
-        install.invoke(null);
+        install.invoke(null, false);  // the session process, not a service child
         Object thread = Class.forName("android.app.ActivityThread").getMethod("systemMain").invoke(null);
         Context context = (Context) thread.getClass().getMethod("getSystemContext").invoke(thread);
         Field field = ManagedLauncher.class.getDeclaredField("packages");
