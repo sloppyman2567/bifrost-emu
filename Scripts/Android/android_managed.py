@@ -537,6 +537,13 @@ def remove_runtime(root):
     shutil.rmtree(root)
 
 
+def ensure_app_data(root, package):
+    # installd creates CE/DE app data at every start; ContextImpl only creates
+    # subdirectories and fails with ENOENT when the package directory is gone.
+    for relative in ("data/user/0", "data/user_de/0"):
+        (root / relative / package).mkdir(parents=True, exist_ok=True)
+
+
 def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex):
     """Rebuild only the runtime; retain app data across starts and upgrades.
 
@@ -576,6 +583,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
                 if not valid: raise ValueError("Modified managed runtime file: " + relative)
             backup = managed / "previous-rootfs"
             if backup.exists(): remove_runtime(backup)
+            ensure_app_data(root, metadata["package"])
             return root, environment
     backup = managed / "previous-rootfs"
     if backup.exists() and not root.exists(): backup.rename(root)
@@ -599,8 +607,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
             target = fresh / relative
             if source.is_dir():
                 shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
-        for relative in ("data/user/0", "data/user_de/0"):
-            (fresh / relative / metadata["package"]).mkdir(parents=True, exist_ok=True)
+        ensure_app_data(fresh, metadata["package"])
         (fresh / "data/data").symlink_to("user/0")
         (fresh / "data/dalvik-cache/arm64").mkdir(parents=True, exist_ok=True)
         (fresh / "storage/emulated/0").mkdir(parents=True, exist_ok=True)

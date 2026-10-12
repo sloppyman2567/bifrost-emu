@@ -1424,6 +1424,10 @@ cached by code, framework, adapter and launcher hashes; immutable runtime files
 are checked before reuse. Replacement copies `data/user`, `data/user_de` and
 `storage` before publishing the new root, preserving saves across runs and
 runtime upgrades. The installed package's verified root is kept separate.
+Every launch recreates the package's CE/DE data directories
+(`data/user/0/<package>`, `data/user_de/0/<package>`) if absent, as `installd`
+does on Android; `ContextImpl` creates only their subdirectories and otherwise
+fails with `ENOENT`, losing early shared preferences and databases.
 A temporary short root alias avoids Linux's Unix-socket pathname limit without
 making app data temporary. A per-package lock covers preparation and the entire
 session. The supervisor forwards interruption, terminates owned descendants,
