@@ -1304,8 +1304,20 @@ public final class ManagedLauncher {
             Field callbacks = SurfaceView.class.getDeclaredField("mCallbacks");
             callbacks.setAccessible(true);
             for (SurfaceHolder.Callback callback :
-                    new ArrayList<>((List<SurfaceHolder.Callback>) callbacks.get(view)))
-                callback.surfaceDestroyed(view.getHolder());
+                    new ArrayList<>((List<SurfaceHolder.Callback>) callbacks.get(view))) {
+                try {
+                    callback.surfaceDestroyed(view.getHolder());
+                } catch (IllegalArgumentException e) {
+                    // Play-mode Java Surfaces have no native libgui Surface, so
+                    // Surface.isValid() is false and PixelCopy rejects the final
+                    // snapshot some apps (Unity) take here. Finish teardown;
+                    // every other callback failure still propagates.
+                    StackTraceElement[] trace = e.getStackTrace();
+                    if (trace.length == 0 || !"android.view.PixelCopy".equals(trace[0].getClassName()))
+                        throw e;
+                    System.out.println("APP_SURFACE_SNAPSHOT_SKIPPED " + callback.getClass().getName());
+                }
+            }
         }
         call(activity, "performStop", new Class<?>[] {boolean.class, String.class}, false, "bifrost");
         System.out.println("APP_STOPPED");

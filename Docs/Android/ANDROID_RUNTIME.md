@@ -1010,6 +1010,18 @@ the desktop. Changing opacity on a live EGL surface requires recreation and is
 rejected with EBUSY. Dynamic SurfaceView replacement remains unsupported by the
 play-mode traversal adapter.
 
+The Java `Surface` is an identity key for the host window, not a real libgui
+Surface: its native object stays null, so `Surface.isValid()` is false. Android
+delivers `surfaceDestroyed` while the surface is still valid, and Unity copies
+the last frame there with
+[PixelCopy](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/graphics/java/android/view/PixelCopy.java),
+which rejects invalid sources. Window-close teardown therefore skips only an
+`IllegalArgumentException` thrown by `PixelCopy` itself, logs
+`APP_SURFACE_SNAPSHOT_SKIPPED`, and finishes stop/destroy with a zero exit.
+The rest of that callback after the copy does not run; other callback failures
+still fail the launch. PixelCopy and other `isValid()` users at runtime remain
+unsupported.
+
 Adding `--play` opens a host window, starts/resumes the Activity, reports
 SurfaceView holder callbacks and pumps host input. These callbacks use the
 managed graphics adapters; they are not a WindowManager attachment. The runner
