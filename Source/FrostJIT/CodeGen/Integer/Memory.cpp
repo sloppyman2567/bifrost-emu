@@ -65,8 +65,10 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     const int page = alloc_reg();
     pinned_host_regs_ |= (1u << page);
 
-    emit_window_limit(temp, mp.width);
-    emit_cmp_reg(effective, temp);
+    if (!emit_window_limit_cmp(effective, mp.width)) {
+        emit_window_limit(temp, mp.width);
+        emit_cmp_reg(effective, temp);
+    }
     std::vector<size_t> cold;
     cold.push_back(emit_jcc_rel32_placeholder(7)); // JA: full-width bounds
     if (decoded.cls == InstClass::LDAR && mp.width > 1) {

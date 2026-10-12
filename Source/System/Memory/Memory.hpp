@@ -208,6 +208,16 @@ public:
     // header page in front of the reservation), so generated code tests it
     // with one `cmp byte [window_base + off], 0` through its window register.
     static constexpr int32_t JIT_SOFTWARE_CHECKS_OFF = -8;
+    // Window limits (window_size - width) for access widths 1..64 sit below
+    // the flag in the same header page, so generated code bounds-checks an
+    // address with one `cmp reg, [window_base + off]` instead of loading a
+    // 64-bit immediate into a scratch register.
+    static constexpr uint64_t JIT_WINDOW_LIMIT_MAX_WIDTH = 64;
+    static constexpr int32_t JIT_WINDOW_LIMITS_OFF =
+        JIT_SOFTWARE_CHECKS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
+    static constexpr int32_t jit_window_limit_off(uint64_t width) {
+        return JIT_WINDOW_LIMITS_OFF + 8 * static_cast<int32_t>(width - 1);
+    }
     const std::atomic<bool>* jit_software_checks() const { return jit_software_checks_; }
     // UFFDIO_REGISTER/UNREGISTER of [addr, addr+len): the range is already
     // validated by the caller. Only mapped private anonymous pages are covered;

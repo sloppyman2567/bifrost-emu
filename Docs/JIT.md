@@ -64,6 +64,20 @@ and LLVM's [runtime value-location maps](https://llvm.org/docs/StackMaps.html).
 These provide design precedents; performance acceptance depends on Bifrost's
 own tests and measurements.
 
+## Window limits in the header page (2026-10-12)
+
+Every native load/store bounds-checked its address with `movabs $limit, %reg`
+(10 bytes and a scratch register) plus `cmp`. `Memory` now writes
+`window_size - width` for widths 1..64 into the readable header page below the
+guest window, next to the sticky software-check flag, and
+`emit_window_limit_cmp` emits `cmp %idx, disp32(%r10)` instead. Scalar loads and
+stores and the guarded native path use it; widths without an entry, and callers
+whose `R10` is not the window base, keep `emit_window_limit`. The window size is
+fixed when the reservation is created, so the table never changes. CoreMark's
+median rose from 8,885 to 9,039 iterations/s (110,000 iterations, three runs,
+CRCs valid). `jit_window_bounds` checks that accesses past the window, including
+offsets wrapping past zero, still fault with the right `si_addr` for every width.
+
 ## Single-instruction extensions (2026-10-12)
 
 `SEXT` 8/16/32 now emits `MOVSX`/`MOVSXD` and `ZEXT` 8/16 emits `MOVZX`

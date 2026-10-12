@@ -1038,6 +1038,9 @@ private:
     // reservation can exceed 4 GiB, so this may be a 64-bit immediate (and
     // the compare must then stay register-register: imm32 sign-extends).
     void emit_window_limit(int dst, uint64_t width);
+    // cmp idx, [WIN_REG + window limit for width]; false when the width has no
+    // header-page entry (the caller then uses emit_window_limit + cmp).
+    bool emit_window_limit_cmp(int idx, uint64_t width);
     void emit_mov_reg(int dst, int src);
     void emit_load(int dst, int base, int32_t off);
     void emit_store(int base, int32_t off, int src);

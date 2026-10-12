@@ -153,6 +153,10 @@ Memory::Memory(bool start_reporter) {
             std::atomic<bool>(false);
         direct_page_flags_ = static_cast<std::atomic<uint8_t>*>(flags);
         window_size_ = size;
+        for (uint64_t width = 1; width <= JIT_WINDOW_LIMIT_MAX_WIDTH; ++width) {
+            const uint64_t limit = size - width;  // size is at least 512 GiB
+            std::memcpy(direct_window_ + jit_window_limit_off(width), &limit, sizeof(limit));
+        }
         break;
     }
     if (!direct_window_)

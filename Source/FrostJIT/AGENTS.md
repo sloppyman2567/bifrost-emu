@@ -39,7 +39,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   Changes of PC/stop state must return to the dispatcher through the proper exit.
 - Native BL/BLR calls honor exit-group, callback stop sentinels and bounded host
   call depth; unwind without restoring stale caller state.
-- Use actual reservation bounds via the shared window-limit helper. Missing-page
+- Use actual reservation bounds via the shared window-limit helpers
+  (`emit_window_limit_cmp` reads the header-page table through `WIN_REG`;
+  `emit_window_limit` where `WIN_REG` is not the window base). Missing-page
   tracking and W/X-only mappings can enable sticky software guards while already
   compiled code executes; preserve their runtime observation.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation

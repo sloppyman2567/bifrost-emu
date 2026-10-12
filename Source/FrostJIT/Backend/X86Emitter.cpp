@@ -717,6 +717,14 @@ void FrostJIT::emit_window_limit(int dst, uint64_t width) {
     if (limit <= 0xFFFFFFFFULL) emit_mov_imm32_zext(dst, static_cast<uint32_t>(limit));
     else emit_mov_imm64(dst, limit);
 }
+bool FrostJIT::emit_window_limit_cmp(int idx, uint64_t width) {
+    if (!guest_memory_ || width == 0 || width > Memory::JIT_WINDOW_LIMIT_MAX_WIDTH) return false;
+    // cmp r64, r/m64 (REX.W 3B /r): flags of idx - limit, as emit_cmp_reg.
+    emit_byte(rex(true, idx >= 8, false, WIN_REG >= 8));
+    emit_byte(0x3B);
+    emit_modrm_disp(idx, WIN_REG, Memory::jit_window_limit_off(width));
+    return true;
+}
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
                              bool sign_ext) {
     // Indexed window addressing (2026-08-21): the guest address is used
@@ -741,9 +749,11 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     }
     size_t jmp_past = 0;
     if (!memory_fault_stub_) {
-        int lim = (idx != R9) ? R9 : ((idx != R8) ? R8 : RCX);
-        emit_window_limit(lim, w);
-        emit_cmp_reg(idx, lim);
+        if (!emit_window_limit_cmp(idx, w)) {
+            int lim = (idx != R9) ? R9 : ((idx != R8) ? R8 : RCX);
+            emit_window_limit(lim, w);
+            emit_cmp_reg(idx, lim);
+        }
         size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
         // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
         // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
@@ -809,10 +819,12 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     static const bool slow_stores_ = getenv("BIFROST_JIT_SLOW_STORES") != nullptr;
     size_t jbe_patch = 0;
     if (!slow_stores_ && !memory_fault_stub_) {
-        // Limit check: lim = window_size - w.
-        int lim = (idx != R9) ? R9 : R8;
-        emit_window_limit(lim, w);
-        emit_cmp_reg(idx, lim);
+        // Limit check: idx <= window_size - w.
+        if (!emit_window_limit_cmp(idx, w)) {
+            int lim = (idx != R9) ? R9 : R8;
+            emit_window_limit(lim, w);
+            emit_cmp_reg(idx, lim);
+        }
         jbe_patch = emit_jcc_rel32_placeholder(6);
     }
     size_t jmp_past = 0;

@@ -1,5 +1,19 @@
 # Tests
 
+## Window limits in the header page (2026-10-12)
+
+`jit_window_bounds` (registered as `window_bounds`) runs 72 checks: byte, half,
+word and doubleword loads and stores, with and without immediate offsets, at
+two bases in the top page of the address space and at negative offsets that
+wrap past zero, three warm-up rounds each. Every access must raise SIGSEGV with
+the access address in `si_addr` and resume through the handler. It passes under
+QEMU 11.1, the JIT, `BIFROST_JIT_VERIFY=1`, `--no-jit` and
+`BIFROST_JIT_SOFTWARE_GUARD=1`. Addresses from 2^47 to 2^56 were left out: QEMU
+reports `si_addr` 0 for them, and tagged addresses expose a separate, pre-existing
+`si_addr` tag difference (see the Android runtime's pointer-tag notes). Strict
+suites pass 318/318 (JIT) and 309/309 (`--no-jit`); `make verify` passes 80
+differential fixtures and 6 threaded oracles.
+
 ## Single-instruction extensions (2026-10-12)
 
 `jit_extend_width` (registered as `extend_width`) runs 442 checks over 13

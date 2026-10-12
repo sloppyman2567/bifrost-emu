@@ -8,6 +8,10 @@ State shared between them goes in `MemoryInternal.hpp`.
 - Guest memory is one host reservation: translate through the actual
   `window_base`/`window_size`, never a hardcoded address limit. Keep bounds,
   permission and crossing-page checks, including host-address overflow checks.
+- The readable page before the window holds the JIT's sticky software-check
+  flag and per-width window limits (`JIT_WINDOW_LIMITS_OFF`); generated code
+  reads both through the window register, so keep their offsets and contents
+  in step with `window_size_`.
 - File-backed MAP_SHARED and MAP_PRIVATE mappings retain their host backing
   and file identity. Never preload them into anonymous copies. Detach partial
   replaced/unmapped aliases before zeroing anonymous storage. Preserve identity

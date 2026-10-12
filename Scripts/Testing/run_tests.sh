@@ -427,6 +427,7 @@ UNIT_TESTS=(
     "fp_half_convert|Tests/Unit/jit_fp_half_convert.elf||5|checks passed"
     "mov_alias|Tests/Unit/jit_mov_alias.elf||5|checks passed"
     "extend_width|Tests/Unit/jit_extend_width.elf||5|checks passed"
+    "window_bounds|Tests/Unit/jit_window_bounds.elf||10|checks passed"
 
     # NEW (Turn 63): SCVTF/UCVTF/FCVTZS/FCVTZU with FP source/dest —
     # the "Advanced SIMD scalar two-register miscellaneous" group (0x5E...).

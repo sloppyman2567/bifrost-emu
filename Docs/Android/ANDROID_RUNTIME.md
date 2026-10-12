@@ -1407,6 +1407,9 @@ pointer's register value, and keeps mapping/protection checks on the resolved
 address. It covers direct/sparse memory, atomics, thunk pointer translation and
 forked memory state. Instruction addresses are not untagged. This is data TBI,
 not MTE support or permission to claim memory-tag checking works.
+Open gap (found 2026-10-12, not fixed): a faulting tagged access reports
+`si_addr` with its tag (e.g. `1 << 56`). Linux 5.11+ clears the tag bits unless
+the handler sets `SA_EXPOSE_TAGBITS`, and QEMU 11.1 reports the untagged address.
 
 Runtime pages remain 4096 bytes. The fixture uses 16384-byte ELF alignment;
 the real Android linker, pthreads and dlopen work with this combination in
