@@ -1128,6 +1128,14 @@ still includes native helpers called inside dispatch, and the sampled-PC
 histogram remains local to the thread that reports it; this is not complete
 helper/contention attribution.
 
+A [native Doom 3 capture](Apps/doom3.md#native-dispatch-profile-2026-10-12)
+on October 12 resolves this distinction: native stacks in `jit_ldxr` account
+for 11.1% of sampled user CPU, and Tier-2 trial timing for 6.57%, while
+`run_block` itself accounts for 2.09% leaf time. The broad SIGPROF dispatch
+percentage therefore must not be treated as pure block-lookup overhead.
+These are loaded-save profile observations, not an FPS comparison; kernel
+time and generated descendants are excluded from the native stack shares.
+
 `Tests/Unit/jit_dispatch_cache.c` checks indirect calls on three guest threads,
 synchronized executable-code replacement and data mmap/munmap churn against
 an arithmetic oracle. `bash Scripts/Testing/test_jit_profiler.sh` deterministically

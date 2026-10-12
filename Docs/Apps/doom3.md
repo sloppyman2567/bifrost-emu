@@ -1,5 +1,48 @@
 # Doom 3 (dhewm3)
 
+## Native dispatch profile (2026-10-12)
+
+Revision `c3a26b2`, SDL/GL build, Tier-2 enabled, W^X disabled, profiling and
+dispatch-cache counters enabled, per-candidate tracing disabled. The existing
+`AutoSave__game_demo_mc_underground` restored in 48,850 ms. The controlled run
+used windowed `r_mode 3` and the host RX 7600/radeonsi renderer. After loading
+and an additional five-second wait, `perf 7.2.9` captured 30 seconds at 199 Hz
+with `cpu-clock:u` and `--call-graph dwarf,8192`: 9,238 samples, no reported
+lost samples. Other existing emulator processes were left running.
+
+Observed shares are of sampled user CPU across this process's threads:
+
+- Generated JIT code: 69.3% of leaf samples.
+- Native stacks containing `jit_ldxr`: 11.1%, including its memory-read,
+  access-check and mutex work. The helper itself accounts for 4.49% leaf
+  time; `Memory::check_access` and `Memory::read` account for 2.34% and 1.21%
+  across all callers, and pthread mutex lock/unlock for 2.67% combined.
+- Native stacks containing `tier2_measure`: 6.57%. Clock reads are visible
+  beneath it; `__vdso_clock_gettime` accounts for 5.38% leaf time overall.
+- `FrostJIT::run_block`: 2.09% leaf/self time; this excludes work in callees.
+  `bind_ibl` accounts for a further 0.18% leaf time.
+
+Source inspection confirms that the broad SIGPROF dispatch flag remains set
+through native helpers. `jit_ldxr` serves exclusive/acquire loads, takes an
+exclusive-monitor shard mutex and calls guarded `Memory::read`; exclusive
+loads also maintain reservations. `tier2_measure` takes thread-CPU clock
+timestamps around its sampling windows, including each linear traversal.
+Prioritize measuring reductions in atomic-helper and trial-timing overhead
+before assuming that the whole dispatch bucket is block lookup.
+
+The SIGPROF log remains near 33–34% dispatch, but that bucket and the perf
+percentages have different attribution and sampling scopes. Kernel execution
+is excluded from this perf event. JIT frames lack unwind metadata, so stack
+shares describe resolved native samples and do not include all generated-code
+descendants. This is a loaded-save capture without a scripted combat route,
+not a matched FPS comparison or proof of gameplay stability. The profiling
+process was stopped after capture; no runtime code changed.
+
+Local artifacts: `/tmp/bifrost-dispatch-profile/underground.data`,
+`underground-leaves.txt`, `underground-samples.txt`, `summary.json` and
+`doom3.log`. The capture supports investigating helper/timer costs; a separate
+matched experiment is required to establish any optimization's payoff.
+
 ## Current status (2026-10-11)
 
 After the scalar JIT flag/guard optimizations and SSA integration, the user
