@@ -1171,6 +1171,15 @@ still includes native helpers called inside dispatch, and the sampled-PC
 histogram remains local to the thread that reports it; this is not complete
 helper/contention attribution.
 
+`BIFROST_PERF_MAP=1` appends each published Tier-1 block to
+`/tmp/perf-<pid>.map` (perf's JIT symbol-file format) as
+`aarch64:<guest pc> @<host window address>`. The size runs to the emission
+end at publication; Tier-2 regions are not listed, and a reused address after
+a cache flush is named by its latest line. `perf record -p <pid>` then names
+generated code, and the host-window address resolves through
+`/proc/<pid>/maps` to the guest library and file offset. The file is not
+removed at exit.
+
 A [native Doom 3 capture](Apps/doom3.md#native-dispatch-profile-2026-10-12)
 on October 12 resolves this distinction: native stacks in `jit_ldxr` account
 for 11.1% of sampled user CPU, and Tier-2 trial timing for 6.57%, while

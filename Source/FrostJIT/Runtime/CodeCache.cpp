@@ -25,6 +25,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"  // CODENAME
 #include <sys/mman.h>
+#include <unistd.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -402,8 +403,35 @@ void FrostJIT::remember_code_pages(uint64_t pc, const BlockEntry& entry) {
     for (const auto& range : entry.inlined_ranges_) remember(range.first, range.second);
 }
 
+// perf's JIT symbol file (tools/perf/Documentation/jit-interface.txt):
+// "START SIZE name" per line. The block occupies [fn, current emission end);
+// later lines win when a flushed cache reuses an address. The name gives the
+// guest PC and its host-window address, which /proc/<pid>/maps resolves to
+// the guest library.
+void FrostJIT::write_perf_map(uint64_t pc, const BlockEntry& entry) {
+    static std::mutex mu;
+    static FILE* file;
+    const auto* start = reinterpret_cast<const uint8_t*>(entry.fn);
+    const uint8_t* end = code_buf_ + code_buf_used_;
+    if (!start || start < code_buf_ || start >= end) return;
+    std::lock_guard<std::mutex> lock(mu);
+    if (!file) {
+        char path[64];
+        snprintf(path, sizeof(path), "/tmp/perf-%d.map", static_cast<int>(getpid()));
+        file = fopen(path, "a");
+        if (!file) return;
+    }
+    fprintf(file, "%llx %llx aarch64:%llx @%llx\n",
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(start)),
+            static_cast<unsigned long long>(end - start),
+            static_cast<unsigned long long>(pc),
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(window_base_) + pc));
+    fflush(file);
+}
+
 void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
     remember_code_pages(pc, entry);
+    if (dbg().jit_perf_map) write_perf_map(pc, entry);
     blocks_[pc] = entry;
 }
 

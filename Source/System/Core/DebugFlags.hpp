@@ -73,6 +73,7 @@ struct DebugFlags {
     bool hang_watchdog = false;
     bool jit_dispatch_stats = false; // BIFROST_JIT_DISPATCH_STATS — TLS cache telemetry
     bool no_code_page_filter = false; // BIFROST_NO_CODE_PAGE_FILTER — invalidation A/B control
+    bool jit_perf_map = false; // BIFROST_PERF_MAP — /tmp/perf-<pid>.map guest block names
     // ── crash / decode diagnostics ───────────────────────────────────
     bool crash_dump = false;  // BIFROST_CRASH_DUMP  — detailed crash report
     bool dbg_guard  = false;  // BIFROST_DBG_GUARD   — decode-error backtraces
@@ -210,6 +211,7 @@ struct DebugFlags {
         f.cpu_profile = env("BIFROST_PROF");
         f.hang_watchdog = env("BIFROST_HANG_WATCHDOG");
         f.no_code_page_filter = env("BIFROST_NO_CODE_PAGE_FILTER");
+        f.jit_perf_map = env("BIFROST_PERF_MAP");
         f.jit_dispatch_stats = env("BIFROST_JIT_DISPATCH_STATS");
         f.crash_dump = all || env("BIFROST_CRASH_DUMP");
         f.dbg_guard  = all || env("BIFROST_DBG_GUARD");

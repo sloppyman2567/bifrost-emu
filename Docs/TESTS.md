@@ -1,5 +1,22 @@
 # Tests
 
+## Session-owned device services and JIT perf map (2026-10-12)
+
+`PackageTests.test_managed_service_execution` now also requires the app's
+`sensorservice` entry to remain a local Binder while its `:remote` service
+child runs. With service children publishing again it fails with
+`service child replaced sensorservice: android.os.BinderProxy`; with the fix
+it passes. SpongeBob 5.12.0 no longer freezes after its WebView ad process
+exits (no `sensorservice died` or service waits in the log).
+
+A 25-second `perf` capture of SpongeBob's main restaurant screen with
+`BIFROST_PERF_MAP=1` shows a single guest thread at ~98% of one core:
+~24% of its samples in `libil2cpp.so`, ~20% in `libunity.so`, ~19% emulator
+side (`run_block` ~9%) and the remainder spread over blocks too small to
+rank. The hottest block is a two-instruction il2cpp float getter (~3%), so
+call/return cost dominates rather than one hot loop. This is one capture on
+one screen, not an FPS benchmark.
+
 ## Self-loop writeback and framework popup windows (2026-10-12)
 
 `jit_selfloop_writeback` runs Android 15 Bionic's `__strrchr_aarch64`

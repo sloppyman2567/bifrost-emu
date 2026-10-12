@@ -978,6 +978,7 @@ private:
     std::map<uint64_t, std::vector<uint64_t>> code_pages_;
     void remember_code_pages(uint64_t pc, const BlockEntry& entry);
     void publish_block(uint64_t pc, const BlockEntry& entry);
+    void write_perf_map(uint64_t pc, const BlockEntry& entry);  // BIFROST_PERF_MAP
     // Back-reference index: maps target_pc → list of source_pcs whose
     // chain_target_pc equals target_pc. Maintained incrementally at
     // translate-time (each block adds itself to its target's back-ref
