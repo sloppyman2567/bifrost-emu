@@ -64,6 +64,19 @@ and LLVM's [runtime value-location maps](https://llvm.org/docs/StackMaps.html).
 These provide design precedents; performance acceptance depends on Bifrost's
 own tests and measurements.
 
+## Single-instruction extensions (2026-10-12)
+
+`SEXT` 8/16/32 now emits `MOVSX`/`MOVSXD` and `ZEXT` 8/16 emits `MOVZX`
+(32 stays `MOV r32`), each straight from source to destination. They replace
+a copy plus a `SHL`/`SAR` pair or an `AND` with an immediate and, unlike those,
+leave RFLAGS intact, so lazy NZCV no longer has to be materialized around
+them. Byte sources always carry a REX prefix, so registers 4-7 encode as
+SPL..DIL rather than AH..BH. Other widths keep the shift/mask forms. The
+folding pass also turns `AND` with `0xFF`, `0xFFFF` or `0xFFFFFFFF` (UXTB,
+UXTH and UXTW operands) into `ZEXT`. A signed 16-bit load into a W register
+went from four host instructions to two. CoreMark's median rose from 8,763 to
+8,885 iterations/s (110,000 iterations, three runs, CRCs valid).
+
 ## Register moves through XZR (2026-10-12)
 
 ARM's `MOV Xd, Xm` is `ORR Xd, XZR, Xm`, so its zero constant is the first

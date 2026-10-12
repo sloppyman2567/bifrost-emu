@@ -1,5 +1,17 @@
 # Tests
 
+## Single-instruction extensions (2026-10-12)
+
+`jit_extend_width` (registered as `extend_width`) runs 442 checks over 13
+values: SXTB/SXTH/SXTW and UXTB/UXTH to X and W, AND with byte/half/word masks,
+extended-register ADD/SUB operands, LDRSB/LDRSH/LDRSW, NZCV consumed across an
+extension or mask, and a block with twelve live values. It passes under QEMU
+11.1, the JIT, `BIFROST_JIT_VERIFY=1`, `BIFROST_IR_VALIDATE=1` and `--no-jit`.
+A disassembly of its emitted code shows MOVSX/MOVZX on R8-R15 sources and no
+AH..DH operands; RSI/RDI byte sources were not exercised (not allocated for
+guest values). Strict suites pass 317/317 (JIT) and 308/308 (`--no-jit`);
+`make verify` passes 79 differential fixtures and 6 threaded oracles.
+
 ## Register moves through XZR (2026-10-12)
 
 `jit_mov_alias` (registered as `mov_alias`) runs 77 checks over seven values:

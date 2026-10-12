@@ -362,44 +362,53 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::SEXT: {
-            clobber_flags();  // shifts clobber RFLAGS
+            int bits = inst.sext_bits();
+            // MOVSX/MOVSXD extend in one instruction and keep RFLAGS (lazy
+            // NZCV survives); other widths use the shift pair.
+            const bool movsx = bits == 8 || bits == 16 || bits == 32;
+            if (!movsx) clobber_flags();  // shifts clobber RFLAGS
             int s = ensure_vreg(inst.src1);
             int d = result_reg(inst.src1, s);
-            if (d != s) emit_mov_reg(d, s);
-            int bits = inst.sext_bits();
-            if (bits < 64) {
-                int sh = 64 - bits;
-                emit_shift_imm8(d, 4, sh);
-                emit_shift_imm8(d, 7, sh);
+            if (movsx) {
+                // REX.W is always present, so byte sources 4-7 are SPL..DIL.
+                emit_byte(rex(true, d >= 8, false, s >= 8));
+                if (bits == 32) {
+                    emit_byte(0x63);                           // movsxd r64, r/m32
+                } else {
+                    emit_byte(0x0F); emit_byte(bits == 8 ? 0xBE : 0xBF);  // movsx r64, r/m8|16
+                }
+                emit_byte(modrm(3, d & 7, s & 7));
+            } else {
+                if (d != s) emit_mov_reg(d, s);
+                if (bits < 64) {
+                    int sh = 64 - bits;
+                    emit_shift_imm8(d, 4, sh);
+                    emit_shift_imm8(d, 7, sh);
+                }
             }
             set_vreg_reg(inst.dest, d);
             return 0;
         }
         case IROp::ZEXT: {
             int bits = inst.zext_bits();
-            if (bits < 64 && bits != 32) clobber_flags();
+            // MOV r32 and MOVZX zero-extend without touching RFLAGS.
+            if (bits < 64 && bits != 32 && bits != 16 && bits != 8) clobber_flags();
             int s = ensure_vreg(inst.src1);
             int d = result_reg(inst.src1, s);
-            if (d != s) emit_mov_reg(d, s);
-            if (bits < 64) {
-                if (bits == 32) {
-                    // mov e_d, e_d (zero-extends to 64 bits).
-                    // MUST emit REX prefix if d >= R8 (R8-R15 need REX.B
-                    // for both reg and rm fields, since they share the
-                    // same register).
-                    // NOTE: mov r32, r32 does NOT clobber RFLAGS.
-                    if (d >= 8) {
-                        emit_byte(0x45);
-                    }
-                    emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
-                } else if (bits == 16) {
-                    emit_byte(rex(true,false,false,d>=8));
-                    emit_byte(0x81); emit_byte(modrm(3,4,d&7)); emit_u32(0x0000FFFF);
-                } else if (bits == 8) {
-                    emit_byte(rex(true,false,false,d>=8));
-                    emit_byte(0x81); emit_byte(modrm(3,4,d&7)); emit_u32(0x000000FF);
-                } else {
-                    // Use RCX as scratch for the mask.
+            if (bits == 32) {
+                // mov e_d, e_s zero-extends to 64 bits.
+                if (d >= 8 || s >= 8) emit_byte(rex(false, s >= 8, false, d >= 8));
+                emit_byte(0x89); emit_byte(modrm(3, s & 7, d & 7));
+            } else if (bits == 16 || bits == 8) {
+                // movzx r32, r/m16|8; a REX prefix (even 0x40) makes byte
+                // sources 4-7 SPL..DIL rather than AH..BH.
+                emit_byte(rex(false, d >= 8, false, s >= 8));
+                emit_byte(0x0F); emit_byte(bits == 8 ? 0xB6 : 0xB7);
+                emit_byte(modrm(3, d & 7, s & 7));
+            } else {
+                if (d != s) emit_mov_reg(d, s);
+                if (bits < 64) {
+                    // Other widths: AND with a mask in a scratch register.
                     int tmp = alloc_reg_excluding(-1, d);
                     emit_mov_imm64(tmp, (1ULL << bits) - 1);
                     emit_and_reg(d, tmp);

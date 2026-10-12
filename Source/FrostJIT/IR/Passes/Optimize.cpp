@@ -563,6 +563,19 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                             copies.set(inst.dest, inst.src1);
                         }
                     }
+                    // AND x, 0xFF / 0xFFFF / 0xFFFFFFFF → ZEXT (a single
+                    // flag-preserving MOVZX / MOV r32 instead of a constant
+                    // and an AND); UXTW/UXTH/UXTB operands lower to these.
+                    else if (inst.op == IROp::AND && hb &&
+                             (consts.get(inst.src2) == 0xFFull ||
+                              consts.get(inst.src2) == 0xFFFFull ||
+                              consts.get(inst.src2) == 0xFFFFFFFFull)) {
+                        const uint64_t mask = consts.get(inst.src2);
+                        const uint8_t bits = mask == 0xFFull ? 8 : mask == 0xFFFFull ? 16 : 32;
+                        inst = IRInst::make_zext(inst.dest, inst.src1, bits, inst.arm_pc);
+                        consts.clear(inst.dest);
+                        copies.clear(inst.dest);
+                    }
                     else {
                         consts.clear(inst.dest);
                         copies.clear(inst.dest);
