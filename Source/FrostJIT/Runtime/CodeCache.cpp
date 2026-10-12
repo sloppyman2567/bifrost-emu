@@ -393,7 +393,8 @@ void FrostJIT::remember_code_pages(uint64_t pc, const BlockEntry& entry) {
         if (__builtin_add_overflow(start, bytes - 1, &last)) last = UINT64_MAX;
         last &= ~Memory::PAGE_MASK;
         for (uint64_t page = start & ~Memory::PAGE_MASK;; page += Memory::PAGE_SIZE) {
-            code_pages_.insert(page);
+            auto& pcs = code_pages_[page];
+            if (std::find(pcs.begin(), pcs.end(), pc) == pcs.end()) pcs.push_back(pc);
             if (page == last) break;
         }
     };
@@ -418,29 +419,42 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
         hi &= ~Memory::PAGE_MASK;
     if (hi <= lo) { invalidate_all(); return; }
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
-    // mmap/munmap/mprotect and ART GC change data mappings much more often
-    // than code mappings. A range with no published code cannot have victims.
-    // lower_bound also handles enormous ranges without walking every page.
-    if (!dbg().no_code_page_filter) {
-        const auto page = code_pages_.lower_bound(lo);
-        if (page == code_pages_.end() || *page >= hi) return;
-    }
-    // 1. Collect victims: blocks whose [pc, pc+instr_count*4) overlaps [lo, hi).
+    // 1. Collect victims: blocks whose [pc, pc+instr_count*4) or an inlined
+    // BL-leaf/Tier-2 dependency range overlaps [lo, hi).
     std::vector<uint64_t> victims;
     victims.reserve(4);
     auto ranges_overlap = [&](uint64_t b, uint64_t e) { return b < hi && e > lo; };
-    for (const auto& kv : blocks_) {
-        const uint64_t b = kv.first;
-        const uint64_t e = b + static_cast<uint64_t>(kv.second.instr_count) * 4;
-        if (ranges_overlap(b, e)) { victims.push_back(b); continue; }
-        // Inlined BL-leaf callees live outside the caller's contiguous
-        // range — check those too.
-        for (const auto& r : kv.second.inlined_ranges_) {
-            if (ranges_overlap(r.first, r.first + static_cast<uint64_t>(r.second) * 4)) {
-                victims.push_back(b);
-                break;
+    auto overlaps = [&](uint64_t b, const BlockEntry& entry) {
+        if (ranges_overlap(b, b + static_cast<uint64_t>(entry.instr_count) * 4)) return true;
+        for (const auto& r : entry.inlined_ranges_)
+            if (ranges_overlap(r.first, r.first + static_cast<uint64_t>(r.second) * 4)) return true;
+        return false;
+    };
+    if (dbg().no_code_page_filter) {
+        for (const auto& kv : blocks_)
+            if (overlaps(kv.first, kv.second)) victims.push_back(kv.first);
+    } else {
+        // mmap/munmap/mprotect and ART GC change data mappings much more often
+        // than code mappings, and guest JITs issue IC IVAU per cache line.
+        // Visit only blocks indexed on these pages instead of the whole table.
+        // The map walk also handles enormous ranges without visiting every page.
+        auto page = code_pages_.lower_bound(lo);
+        if (page == code_pages_.end() || page->first >= hi) return;
+        for (; page != code_pages_.end() && page->first < hi;) {
+            auto& pcs = page->second;
+            size_t kept = 0;
+            for (uint64_t pc : pcs) {
+                auto it = blocks_.find(pc);
+                if (it == blocks_.end()) continue;  // retired: prune
+                pcs[kept++] = pc;
+                if (overlaps(pc, it->second)) victims.push_back(pc);
             }
+            pcs.resize(kept);
+            page = pcs.empty() ? code_pages_.erase(page) : std::next(page);
         }
+        // A block spanning several pages in the range is listed on each.
+        std::sort(victims.begin(), victims.end());
+        victims.erase(std::unique(victims.begin(), victims.end()), victims.end());
     }
     for (auto it = tier2_block_limits_.begin(); it != tier2_block_limits_.end();) {
         if (it->first >= lo && it->first < hi) it = tier2_block_limits_.erase(it);

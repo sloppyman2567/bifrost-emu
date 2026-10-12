@@ -1,5 +1,30 @@
 # Tests
 
+## Per-page code invalidation index (2026-10-12)
+
+`jit_cache_invalidation churn` adds a code-page phase: 4,096 rewrites of one
+warm function among 32,768, each published with IC maintenance and checked,
+followed by same-page neighbour checks. Three runs per binary measured 1.11 s
+before and 0.057 s after; the data-only phase stays near 0.007 s. All runs
+pass, as does `BIFROST_NO_CODE_PAGE_FILTER=1` (full-scan control).
+
+The strict JIT suite passes 312/313 and `--no-jit --strict` 304/304 with nine
+JIT-only skips. The one JIT failure, `xwayland_wire` (X `BadMatch` on
+`GetImage`), is intermittent and predates this change: ten alternating runs
+failed 4/10 on the new build and 5/10 on the previous one, with other emulator
+windows open. `make verify` (21,836 SSA checks, 75 differential fixtures, six
+threaded oracles), `make generated-check` and the headless build pass.
+
+SpongeBob 5.11.5 `perf` captures (`cpu-clock:u`, 199 Hz, 30 s) attributed
+54.3% of user samples to `invalidate_range` before the change, 90 s into
+loading. A capture on the new build about 3.5 minutes in, under a lighter
+load (1,973 versus 5,670 samples), contains no `invalidate_range` samples and
+70% generated code. The captures are not phase-matched; this is not an FPS or
+load-time measurement.
+
+The managed launcher's PixelCopy teardown handling was rebuilt into the DEX.
+Its clean window-close exit has not yet been observed in a live session.
+
 ## Native acquire loads and trial timing (2026-10-12)
 
 The atomic-stress fixture now checks acquire-load byte/halfword/word/doubleword

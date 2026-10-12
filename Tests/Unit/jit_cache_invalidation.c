@@ -39,6 +39,24 @@ static int data_mapping_churn(void) {
  __builtin___clear_cache((char*)(functions+2*(count-1)),(char*)(functions+2*count));
  uint64_t (*fn)(void)=(void*)(functions+2*(count-1));
  if(fn()!=42)return 5;
+ // Guest JITs publish code with IC IVAU per line on pages holding live code.
+ // Each rewrite must take effect without scanning every cached block.
+ uint32_t *patched=functions+2*(count/2);
+ uint64_t (*patched_fn)(void)=(void*)patched;
+ clock_gettime(CLOCK_MONOTONIC,&begin);
+ for(unsigned i=0;i<4096;i++) {
+  patched[0]=0xd2800000|((i&0xffff)<<5); // mov x0,#i
+  __builtin___clear_cache((char*)patched,(char*)(patched+2));
+  if(patched_fn()!=i)return 7;
+ }
+ clock_gettime(CLOCK_MONOTONIC,&end);
+ printf("code-page invalidation churn: %.6f seconds\n",
+        end.tv_sec-begin.tv_sec+(end.tv_nsec-begin.tv_nsec)*1e-9);
+ // Same-page neighbours were retired with the page; they must retranslate.
+ for(unsigned i=count/2-4;i<count/2+4;i++) {
+  uint64_t (*neighbour)(void)=(void*)(functions+2*i);
+  if(i!=count/2 && neighbour()!=1)return 8;
+ }
  if(munmap(data,4096) || munmap(functions,length))return 6;
  puts("jit_cache_invalidation: ALL PASS");return 0;
 }

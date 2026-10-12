@@ -974,18 +974,26 @@ checks a three-thread guest with a forced 1 MiB budget and a growth run,
 including repeated interpreter-only calls, exact results, one bounded
 overflow and no repeated translation of cached fallback targets.
 
-Range invalidation first queries an ordered, conservative index of guest pages
-covered by published blocks and their inlined/Tier-2 dependencies. Data-only
-ranges with no indexed page skip the full block-table scan. Publication and the
-query share the compiler lock; individual retirement deliberately leaves stale
-positive pages, and whole-cache clears reset the index. A possible hit still
-uses the existing exact victim scan and retirement machinery. The index does
-not suppress required code invalidation or reclaim live code.
-`BIFROST_NO_CODE_PAGE_FILTER=1` restores the scan for A/B measurement.
+Range invalidation queries an ordered, conservative index from guest page to
+the PCs of published blocks whose own or inlined/Tier-2 dependency ranges touch
+that page. Data-only ranges with no indexed page return immediately; code-page
+hits check only the listed blocks with the exact overlap test, instead of the
+whole block table. Publication and the query share the compiler lock. Lists may
+hold retired PCs; a query prunes PCs no longer in the table from the pages it
+visits, and whole-cache clears reset the index. Victims and retirement are
+unchanged: the index does not suppress required code invalidation or reclaim
+live code. `BIFROST_NO_CODE_PAGE_FILTER=1` restores the full scan for A/B
+measurement.
+
 `jit_cache_invalidation.elf churn` warms 32,768 executable functions, times
-4,096 data-page protection changes, then checks a rewritten executable function.
-Two same-binary runs measured approximately 0.49 s without the filter and
-0.0066 s with it. This is mapping-churn throughput, not an application speedup.
+4,096 data-page protection changes, then rewrites one function 4,096 times with
+IC maintenance (a guest JIT publishing onto a page with live code) and checks
+each result and the retranslated same-page neighbours. Three same-machine runs
+each measured the data-only phase at about 0.007 s (0.58 s without the filter)
+and the code-page phase at 1.11 s before the per-page lists and 0.057 s after.
+These are invalidation microbenchmarks, not application speedups. A 30-second
+`perf` capture of SpongeBob loading under ART had attributed 54% of sampled user
+CPU to the old whole-table scan, reached through per-line `IC IVAU`/`DC CVAU`.
 
 ## Vector unary FP decode distinction
 

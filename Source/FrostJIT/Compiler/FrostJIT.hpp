@@ -43,7 +43,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <set>
+#include <map>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -970,10 +970,12 @@ private:
     };
     std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;
     std::unordered_map<uint64_t, BlockEntry> blocks_;
-    // Conservative page-presence index, protected by blocks_mutex_. Individual
-    // retirement leaves pages present; only whole-cache clears reset it. False
-    // positives use the exact victim scan, but data-only ranges skip that scan.
-    std::set<uint64_t> code_pages_;
+    // Conservative guest page -> block PC index, protected by blocks_mutex_.
+    // A block is listed on every page of its own and inlined/Tier-2 ranges.
+    // Lists may hold retired or non-overlapping PCs; range invalidation checks
+    // each candidate exactly and prunes absent ones from the pages it visits.
+    // Whole-cache clears reset it.
+    std::map<uint64_t, std::vector<uint64_t>> code_pages_;
     void remember_code_pages(uint64_t pc, const BlockEntry& entry);
     void publish_block(uint64_t pc, const BlockEntry& entry);
     // Back-reference index: maps target_pc → list of source_pcs whose
