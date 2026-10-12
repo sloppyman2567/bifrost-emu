@@ -43,12 +43,23 @@ void FrostJIT::tier2_region_feedback(CPU& cpu, void* opaque) {
     auto head = blocks_.find(monitor->head);
     if (head == blocks_.end() || head->second.tier2_monitor != monitor ||
         !monitor->enabled.load(std::memory_order_relaxed)) return;
+    tier2_block_limits_.erase(monitor->head); // new phase may favor a longer path
+    ++tier2_retrains_[monitor->head];
+    tier2_phase_retirements.fetch_add(1, std::memory_order_relaxed);
+    // Version check, selection and revocation share one critical section:
+    // a concurrent replacement cannot be accidentally retired afterward.
+    retire_tier2_region_locked(monitor->head);
+}
+
+void FrostJIT::retire_tier2_region_locked(uint64_t pc) {
+    const auto head = blocks_.find(pc);
+    if (head == blocks_.end()) return;
     // Select the region and its Tier-1 constituents precisely. Instruction
     // bytes did not change, so neighboring regions need not be discarded.
     std::vector<uint64_t> victims;
     const auto& ranges = head->second.inlined_ranges_;
     for (const auto& kv : blocks_) {
-        if (kv.first == monitor->head) { victims.push_back(kv.first); continue; }
+        if (kv.first == pc) { victims.push_back(kv.first); continue; }
         if (kv.second.is_region) continue;
         const uint64_t end = kv.first + kv.second.instr_count * 4ull;
         for (const auto& range : ranges)
@@ -58,11 +69,6 @@ void FrostJIT::tier2_region_feedback(CPU& cpu, void* opaque) {
     }
     for (const auto& range : ranges)
         invalidate_tier2_profiles(range.first, range.first + range.second * 4ull);
-    monitor->enabled.store(0, std::memory_order_release);
-    ++tier2_retrains_[monitor->head];
-    tier2_phase_retirements.fetch_add(1, std::memory_order_relaxed);
-    // Version check, selection and revocation share one critical section:
-    // a concurrent replacement cannot be accidentally retired afterward.
     retire_blocks_locked(victims);
 }
 }  // namespace arm64emu

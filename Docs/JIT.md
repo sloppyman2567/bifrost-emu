@@ -46,6 +46,18 @@ to 524,288 entries per trial, including CPU-local observation-slot collisions.
 Per-traversal timer overhead can hide gains in very short paths, so these
 decisions remain conservative rather than guaranteeing application speedup.
 
+A measured losing candidate now re-arms a smaller prefix at the same head:
+five-to-eight blocks retry at four, and three-to-four retry at two. A losing
+two-block candidate stays in Tier-1. Each retry retires the old head and its
+Tier-1 constituents, revokes their sample graph and clears their branch
+profiles; fresh translations must warm their entry counters before another
+trial. This bounds one search to at most three sizes (normally 8 -> 4 -> 2).
+Insufficient or mismatched samples do not trigger size retries. The existing
+32 MiB code and two-second compiler budgets apply to every size. A selected
+region's phase retirement resets the size preference, while the existing
+per-head phase/terminal-rejection budget remains in force. Head invalidation
+and full cache clears also discard the size preference.
+
 Region destination reuse now preserves virtual homes defined in a loop's
 preheader. A value's last use in one body is not its last use across iterations:
 destructively redefining its virtual register can overwrite its invariant
@@ -1207,8 +1219,9 @@ Retirement holds one compiler-lock critical section for version validation,
 exact victim selection and revocation. It retires the head and overlapping
 Tier-1 constituents and resets their profiles, preserving unrelated regions
 on the same page. Mapping changes still use page-granular invalidation. At
-most two retirements per head are allowed in a full code-cache epoch;
-exhausted heads stay in Tier-1. Full invalidation resets that budget.
+most two phase retirements or terminal trial rejections per head are allowed
+in a full code-cache epoch; exhausted heads stay in Tier-1. Full invalidation
+resets that budget.
 Published MT instructions remain immutable throughout retraining. Both ST and
 MT region exits use tracked, revocable target cells, so a rewritten target on
 the next page cannot leave the region executing stale guest instructions. ST
@@ -1252,8 +1265,10 @@ ending at the head are sampled. A baseline must consume at least 10 us; a
 candidate must match its vCPU's instruction count, fingerprint and exit PC.
 Eight comparable pairs must show a median candidate/baseline ratio below 0.97,
 with at least six pairs below 0.97, to select the region. Slower or noisy
-candidates restore Tier-1. A trial with insufficient evidence after 128
-attempts also restores Tier-1. Version checks and normal revocation protect
+candidates restore Tier-1; a measured loss can schedule a smaller prefix after
+fresh profiling, following the bounded size search described above. A trial
+with insufficient evidence after 128 attempts also restores Tier-1. Version
+checks and normal revocation protect
 in-flight references across mapping changes and ST-to-MT transition.
 
 The decision measures instrumented execution gain, not lifetime amortization

@@ -15,6 +15,11 @@ labels below are historical records.
 
 ### Bounded superblocks and region vector caching (2026-10-12)
 
+- Measured losing Tier-2 superblocks retry shorter prefixes (8 -> 4 -> 2)
+  after fresh Tier-1 hotness and branch profiling. Work mismatches and
+  inconclusive trials retain Tier-1. Existing compilation/phase budgets bound
+  search; phase changes can reconsider longer paths. Timing regressions cover
+  shorter winners, terminal fallback, invalidation and immutable MT code.
 - Experimental Tier-2 fuses hot paths of up to eight blocks/256 instructions,
   including linear prefixes, with cross-block scalar SSA and measured live-work
   admission. `BIFROST_JIT_SUPERBLOCK_LIMIT=2..8` bounds smaller comparisons.

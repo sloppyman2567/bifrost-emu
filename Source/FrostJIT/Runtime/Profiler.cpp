@@ -159,6 +159,7 @@ void FrostJIT::flush_cache() {
     // the buffer RX whenever JIT code might run.
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     blocks_.clear();
+    tier2_block_limits_.clear();
     code_pages_.clear();
     back_refs_.clear();
     invalidate_dispatch_cache();

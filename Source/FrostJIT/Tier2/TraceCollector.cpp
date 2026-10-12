@@ -33,7 +33,9 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     trace.head_pc = head_pc;
 
     // Small hot superblocks bound compilation latency and spill pressure.
-    const unsigned MAX_TRACE_BLOCKS = dbg().jit_superblock_limit;
+    const auto limit = tier2_block_limits_.find(head_pc);
+    const unsigned MAX_TRACE_BLOCKS = limit == tier2_block_limits_.end()
+        ? dbg().jit_superblock_limit : std::min(dbg().jit_superblock_limit, limit->second);
     constexpr uint64_t MAX_TRACE_INSTS = 256;
     // Vreg ceiling: guard before allocating (the per-block scratch space is
     // bounded by the 4095-entry uint16_t vreg table).

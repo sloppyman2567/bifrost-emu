@@ -442,6 +442,11 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
             }
         }
     }
+    for (auto it = tier2_block_limits_.begin(); it != tier2_block_limits_.end();) {
+        if (it->first >= lo && it->first < hi) it = tier2_block_limits_.erase(it);
+        else ++it;
+    }
+    for (uint64_t pc : victims) tier2_block_limits_.erase(pc);
     if (victims.empty()) return;
     invalidate_tier2_profiles(lo, hi);
     retire_blocks_locked(victims);
@@ -519,6 +524,7 @@ void FrostJIT::invalidate_all() {
     code_pages_.clear();
     clear_tier2_profiles();
     tier2_retrains_.clear(); // a full code epoch can reuse addresses for different loops
+    tier2_block_limits_.clear();
     for (auto& monitor : tier2_region_monitors_)
         monitor->enabled.store(0, std::memory_order_release);
     for (auto& edge : mt_edges_) {

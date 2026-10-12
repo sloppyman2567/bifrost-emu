@@ -70,8 +70,28 @@ struct Tier2TestAccess {
     static bool linear_window(CPU& c,void* ptr) {
         auto* t=static_cast<FrostJIT::Tier2Trial*>(ptr);
         auto& slot=c.jit_tier2_feedback[t->monitor->slot];
-        slot.owner=t->monitor->identity; slot.sample_quota=8;
+        slot.owner=t->monitor->identity;
+        slot.sample_quota=(128+t->candidate_entry.instr_count-1)/t->candidate_entry.instr_count;
         return t->linear;
+    }
+    static unsigned block_count(void* ptr) {
+        return static_cast<FrostJIT::Tier2Trial*>(ptr)->baseline_blocks.size();
+    }
+    static unsigned limit(FrostJIT& j) {
+        auto it=j.tier2_block_limits_.find(0x10000);
+        return it==j.tier2_block_limits_.end()?0:it->second;
+    }
+    static size_t trials(FrostJIT& j) { return j.tier2_trials_.size(); }
+    static void exhaust_budget(FrostJIT& j) { j.tier2_code_bytes.store(32ull*1024*1024); }
+    static bool profiles_reset(FrostJIT& j,unsigned blocks) {
+        for(unsigned k=0;k<blocks;++k)
+            if(j.tier2_profiles_by_pc_.count(0x10000+k*8+4)) return false;
+        return true;
+    }
+    static void change_phase(FrostJIT& j) {
+        auto* monitor=j.blocks_.at(0x10000).tier2_monitor;
+        CPU c;
+        for(unsigned k=0;k<64;++k) j.tier2_region_feedback(c,monitor);
     }
 };
 }
@@ -219,15 +239,91 @@ static bool linear_scenario(bool mt,bool keep,bool mismatch=false) {
             Tier2TestAccess::decision(trial),expected,(unsigned long long)j->tier2_measured_pairs.load());
         return false;
     }
+    if(!keep && !mismatch && j->lookup_only(HEAD)) {
+        std::fputs("losing eight-block trial did not rearm a shorter candidate\n",stderr);
+        return false;
+    }
     c.pc=HEAD; c.regs[1]=0;
     c.jit_tier2_trial_work=123; c.jit_tier2_trial_hash=456;
     while(c.pc!=STOP) c.pc=j->run_block(c,*e);
     linear_measure=false;
     return c.regs[1]==8 && c.jit_tier2_trial_work==123 && c.jit_tier2_trial_hash==456;
 }
+
+// Real timing rejects 8 -> 4 -> 2, or selects the shorter winner. Retired
+// wrappers must become inert; new translations need another hotness window.
+static bool shorter_candidates(bool mt,bool keep_four,bool exhaust=false,bool invalidate=false) {
+    linear_measure=true;
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(HEAD,4096); e->mem().mprotect_guest(HEAD,4096,7);
+    std::vector<uint32_t> code;
+    for(unsigned k=0;k<8;++k) {
+        code.push_back(0x91000421);
+        code.push_back(0xb5000022); // cbnz x2,next (both paths continue; profiles still warm)
+    }
+    code.push_back(0xd65f03c0);
+    e->mem().write(HEAD,code.data(),code.size()*4); e->enable_jit();
+    auto* j=e->jit(); if(mt) j->enter_multithreaded();
+    auto visit=[&]() {
+        CPU c; c.pc=HEAD; c.regs[30]=STOP; c.jit_stop_pc=STOP;
+        for(unsigned n=0;c.pc!=STOP && n<1000;++n) c.pc=j->run_block(c,*e);
+        return c.pc==STOP && c.regs[1]==8;
+    };
+    for(unsigned size=8;size>=2;size/=2) {
+        for(unsigned k=0;k<40;++k) if(!visit()) return false;
+        void* trial=Tier2TestAccess::prepare(*j,HEAD);
+        if(!trial || Tier2TestAccess::block_count(trial)!=size) {
+            std::fprintf(stderr,"missing %u-block retry\n",size); return false;
+        }
+        if(exhaust) Tier2TestAccess::exhaust_budget(*j);
+        const bool keep=keep_four && size==4;
+        candidate_delay=keep?20000:400000;
+        const size_t prefix=j->code_buf_used();
+        std::vector<uint8_t> bytes(j->code_buf(),j->code_buf()+prefix);
+        CPU c; Tier2TestAccess::linear_window(c,trial);
+        for(unsigned k=0;k<2048 && !Tier2TestAccess::decision(trial);++k) {
+            c.pc=HEAD; c.regs[1]=0; c.regs[30]=STOP; c.jit_stop_pc=STOP;
+            if(j->tier2_measure(c,*e,trial)!=HEAD+size*8 || c.regs[1]!=size) return false;
+        }
+        if(Tier2TestAccess::decision(trial)!=(keep?1u:2u) ||
+            (mt && std::memcmp(bytes.data(),j->code_buf(),prefix))) return false;
+        if(keep || size==2 || exhaust) {
+            const auto trials=Tier2TestAccess::trials(*j);
+            for(unsigned k=0;k<80;++k) if(!visit()) return false;
+            linear_measure=false;
+            if(!j->lookup_only(HEAD) || Tier2TestAccess::trials(*j)!=trials ||
+                (exhaust && Tier2TestAccess::limit(*j)!=0)) return false;
+            if(keep) {
+                Tier2TestAccess::change_phase(*j);
+                if(j->lookup_only(HEAD) || Tier2TestAccess::limit(*j)) return false;
+                for(unsigned k=0;k<40;++k) if(!visit()) return false;
+                void* fresh=Tier2TestAccess::prepare(*j,HEAD);
+                if(!fresh || Tier2TestAccess::block_count(fresh)!=8) return false;
+            }
+            return true;
+        }
+        if(j->lookup_only(HEAD) || Tier2TestAccess::limit(*j)!=size/2 ||
+            !Tier2TestAccess::profiles_reset(*j,size)) return false;
+        c.pc=HEAD; c.regs[1]=0;
+        if(j->tier2_measure(c,*e,trial)!=HEAD || c.regs[1]) return false;
+        if(invalidate) {
+            // Even between retirement and retranslation, an address reuse
+            // must discard the old size preference.
+            j->invalidate_range(HEAD,4);
+            linear_measure=false;
+            return Tier2TestAccess::limit(*j)==0;
+        }
+        // The next visit translates fresh counters, without immediate retrial.
+        const auto trials=Tier2TestAccess::trials(*j);
+        if(!visit() || Tier2TestAccess::trials(*j)!=trials) return false;
+    }
+    return false;
+}
 int main(int argc,char**argv) {
     const bool mt=argc>1 && std::string(argv[1])=="mt";
     if(!cold_and_transition(mt)||!scenario(mt,true)||!scenario(mt,false)||!scenario(mt,true,true)||(mt&&!invalidated_trial())) return 1;
     if(!linear_scenario(mt,true)||!linear_scenario(mt,false)||!linear_scenario(mt,true,true)) return 1;
+    if(!shorter_candidates(mt,false)||!shorter_candidates(mt,true)||
+       !shorter_candidates(mt,false,true)||!shorter_candidates(mt,false,false,true)) return 1;
     std::puts("jit_tier2_measure: real timing keeps faster code, rejects slower/mismatched samples PASS");
 }

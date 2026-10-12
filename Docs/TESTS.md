@@ -1,5 +1,34 @@
 # Tests
 
+## Adaptive superblock size retries (2026-10-12)
+
+The measurement oracle reproduces the previous permanent rejection of an
+eight-block candidate, then exercises real CPU-time losses through 8 -> 4 -> 2
+and selection of a faster four-block candidate. It checks fresh counters and
+branch profiles between trials, inert retired wrappers, terminal fallback,
+the 32 MiB compilation stop, head invalidation between translations and
+reopening the eight-block search after a selected region changes phase.
+The controlled delays exercise policy rather than predicting application
+speedup. All cases pass in ST/MT with ordinary and chain-skip frames; MT
+publication bytes remain unchanged.
+
+Both SDL/GL and headless library builds, generated-code checking and
+`make verify` pass (21,836 SSA assertions, 75 differential fixtures and six
+threaded oracles). Discovery, feedback, MT publication, MT execution and
+twenty mutex promotion stress runs pass. With Tier-2 enabled and W^X disabled,
+56 selected SIMD/fault/atomic and utility tests pass, including host-validated
+zstd round trips and BusyBox/toybox. These are local source and executable
+checks, with GPU access for emulator runs; no new instruction semantics or
+external specification claims are involved.
+
+The strict default JIT suite passes 313/313 with GPU access. Fixed
+110,000-iteration CoreMark passes every labelled CRC and the ten-second
+minimum: one warm-up and three runs give 16.0753 s median wall time
+(16.0606–16.0850 s). Tier-2 is enabled and W^X disabled. The earlier eight-block
+batch was 15.8224 s; these separate batches do not establish a throughput gain
+or isolate the cause of the roughly 1.6% difference. The controlled timing
+tests establish candidate selection, not game FPS or universal speedup.
+
 ## Eight-block superblocks and region vector state (2026-10-12)
 
 `test_jit_tier2_discovery.sh` now checks eight-block linear promotion, all eight

@@ -204,6 +204,21 @@ void FrostJIT::finish_tier2_trial(Tier2Trial& trial, bool keep) {
         for (auto* edge : trial.baseline_edges) { edge->live = false; edge->target.store(0, std::memory_order_release); }
         tier2_measured_keeps.fetch_add(1, std::memory_order_relaxed);
     } else {
+        tier2_measured_rejections.fetch_add(1, std::memory_order_relaxed);
+        const size_t count = trial.baseline_blocks.size();
+        const unsigned shorter = count > 4 ? 4 : (count > 2 ? 2 : 0);
+        // Retry only an observed loss, not a path/work mismatch or timeout.
+        // Recompile later, outside the measured interval, after fresh Tier-1
+        // counters and branch profiles warm up. Strictly descending caps bound
+        // search without consuming the selected-region phase-change budget.
+        if (shorter && trial.ratios.size() >= 8 &&
+            tier2_retrains_[trial.monitor->head] < 2 &&
+            tier2_code_bytes.load(std::memory_order_relaxed) < 32ull * 1024 * 1024 &&
+            tier2_compile_ns.load(std::memory_order_relaxed) < 2000000000ull) {
+            tier2_block_limits_[trial.monitor->head] = shorter;
+            retire_tier2_region_locked(trial.monitor->head);
+            return;
+        }
         // Preserve the monitor on the restored baseline so in-flight trial
         // wrappers are revoked by subsequent mapping invalidation too.
         const auto dependencies = head->second.inlined_ranges_;
@@ -212,7 +227,6 @@ void FrostJIT::finish_tier2_trial(Tier2Trial& trial, bool keep) {
         head->second.tier2_monitor = trial.monitor;
         for (auto* edge : trial.candidate_edges) { edge->live = false; edge->target.store(0, std::memory_order_release); }
         ++tier2_retrains_[trial.monitor->head];
-        tier2_measured_rejections.fetch_add(1, std::memory_order_relaxed);
     }
     redirect_tier2_head_locked(trial.monitor->head);
 }

@@ -542,6 +542,9 @@ public:
     std::vector<std::unique_ptr<Tier2RegionMonitor>> tier2_region_monitors_;
     Tier2RegionMonitor* tier2_current_monitor_ = nullptr;
     std::unordered_map<uint64_t, unsigned> tier2_retrains_; // compiler lock; lifetime budget
+    // A measured loss retries a strictly smaller prefix, at most 8 -> 4 -> 2.
+    // Kept until code invalidation or a selected region changes phase.
+    std::unordered_map<uint64_t, unsigned> tier2_block_limits_; // compiler lock
     struct MtHotCounter {
         std::atomic<uint32_t> enabled{1}, hits{0};
     };
@@ -716,6 +719,7 @@ public:
 private:
     void emit_tier2_work_probe(uint64_t pc, unsigned count);
     void finish_tier2_trial(Tier2Trial& trial, bool keep);
+    void retire_tier2_region_locked(uint64_t pc);
     void redirect_tier2_head_locked(uint64_t pc);
     void revoke_tier2_samples_locked(Tier2Trial& trial);
 public:
