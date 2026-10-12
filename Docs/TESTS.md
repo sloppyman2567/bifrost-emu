@@ -1,5 +1,47 @@
 # Tests
 
+## Planned codegen and CoreMark acceptance
+
+The [state-retention codegen plan](JIT.md#planned-codegen-retaining-guest-state-across-regions)
+and [roadmap milestones](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions)
+are future work. Use these acceptance gates as each stage is implemented:
+
+- Add focused result/reference checks for mixed scalar/vector aliases,
+  partial writes, Q=0 clearing, NZCV preservation, register-copy cycles,
+  spills and loop-carried values. Exercise helper read/write/clobber effects
+  and full-synchronization fallback for unclassified helpers.
+- Verify precise state at faulting instructions and signal/host boundaries,
+  including writes carried from earlier iterations. Cover interpreter
+  fallback, userfaultfd, mapping changes and non-contiguous region dependency
+  invalidation. Recovery metadata and adapter targets must outlive execution.
+- Check canonical and specialized entries in ST/MT and both frame layouts,
+  concurrent publication/revocation, bounded leases and stale variant calls.
+  Snapshot published MT bytes to verify instruction immutability.
+- Run `make verify`, relevant JIT/interpreter suites and real applications.
+  Report coverage exclusions explicitly; the current differential replay
+  gate disables Tier-2 and cannot independently validate region handoffs.
+- Measure eliminated state loads/stores and spills, code/metadata growth,
+  compile time and equivalent live-work trials. Follow with matched cold/warm
+  gameplay routes reporting frame times, demanding-scene minimums and stutter.
+  Use representative Linux hosts and available guard/ISA fallback modes.
+
+CoreMark acceptance uses the existing benchmark runner and validates every
+labelled CRC, seed and minimum ten-second duration under the
+[upstream reporting rules](https://github.com/eembc/coremark/blob/main/README.md).
+Record the binary/revision, compiler flags, host, thread count, Tier-2/W^X
+settings, warm-ups and all measured runs. Preserve the fixed 110,000-iteration
+guest comparison while it meets the duration rule; report guest-timer
+iterations/s and process wall time separately. The roadmap target is at least
+10,000 reported iterations/s. The current 16.0753 s median wall time is a
+recorded baseline, not a prediction for the planned compiler.
+
+The 26%-of-native target is conditional on a validated native reference near
+38,460 iterations/s. Match source, seeds, workload and thread count, document
+the native build settings, and choose enough iterations for each mode to meet
+the duration rule. Compare normalized iterations/s, retaining CRC validation
+for both modes. No new native baseline or architecture-performance result is
+established by this documentation update.
+
 ## Adaptive superblock size retries (2026-10-12)
 
 The measurement oracle reproduces the previous permanent rejection of an

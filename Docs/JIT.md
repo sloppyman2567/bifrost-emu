@@ -11,6 +11,59 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Planned codegen: retaining guest state across regions
+
+This is the proposed v2 compiler direction, with milestones and performance
+targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
+Current region caching retains compatible XMM layouts internally; region
+entries still preload their layout. Scalar SSA does not yet model complete
+vector/FP architectural state. The proposal extends those foundations in
+stages rather than assuming cross-region state is already supported.
+
+- **Explicit guest values.** Track GPR widths, vector lanes and scalar FP
+  aliases, including partial writes and upper-lane clearing, together with
+  lazy NZCV. Start with mixed FP/vector allocation within current regions.
+  Keep FPCR/FPSR, NaN, helper and fallback behavior observable under the
+  existing instruction contracts. Extend integer allocation and flags based
+  on the measured CoreMark hot path.
+- **Recovery descriptions.** Before deferring architectural stores across
+  regions, define metadata that maps host PCs and value locations to the
+  precise guest PC, GPR/FP state and NZCV. Handle completed memory effects,
+  faulting accesses, asynchronous signal delivery and interpreter/host-call
+  boundaries. Metadata lifetime must cover in-flight code. Safe fallback
+  commits state through the existing memory representation; memory guards
+  remain intact.
+- **Helper effects.** Record each classified helper's guest reads/writes,
+  host-register clobbers and possible fault/control-flow effects. Save and
+  reload only the state proven necessary. Unknown helpers retain full
+  synchronization, and exceptions must not unwind through generated frames.
+- **Entry/exit layouts.** Begin with two connected regions and a canonical
+  entry that loads architectural memory state. A specialized entry accepts
+  a specified host-register layout. Compatible edges pass values directly;
+  adapters implement parallel copies, including cycles, or use the canonical
+  path. Register/spill ownership, frame compatibility, lazy flags, helper
+  scratch registers and per-vCPU state must be explicit.
+- **Bounded adaptation.** Evaluate at most two layout variants per head per
+  search, sharing the existing compilation, code and phase budgets. Count
+  adapters and recovery metadata, and measure compile amortization separately
+  from instrumented execution gain. Preserve work/exit matching in trials;
+  evaluate layouts over equivalent guest paths. Publish and revoke variants
+  through immutable MT code and tracked target cells. Invalidation must cover
+  every constituent guest range and stale entry/adapter dependency.
+
+The first milestones are mixed FP/vector allocation and validated recovery
+contracts, followed by handoff between two regions. Expanding the scope
+requires measurable benefit and the
+[planned correctness/performance gates](TESTS.md#planned-codegen-and-coremark-acceptance).
+CoreMark's integer/control workload requires its own profile; FP throughput
+alone does not predict progress toward 10,000 iterations/s.
+
+Primary design references: QEMU's
+[block chaining and exception recovery](https://www.qemu.org/docs/master/devel/tcg.html)
+and LLVM's [runtime value-location maps](https://llvm.org/docs/StackMaps.html).
+These provide design precedents; performance acceptance depends on Bifrost's
+own tests and measurements.
+
 ## Eight-block superblocks and region vector state (2026-10-12)
 
 Experimental Tier-2 now collects hot paths of at most eight blocks and 256

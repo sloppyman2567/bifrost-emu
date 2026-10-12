@@ -13,6 +13,16 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Codegen roadmap documentation (2026-10-12)
+
+- Record the planned v2 compiler direction: explicit guest state, mixed
+  FP/vector allocation, precise recovery/helper contracts, region register
+  layouts and bounded layout selection. Separate these targets from the
+  implemented superblock and adaptive-size checkpoints.
+- Define a 10,000-iterations/s CoreMark target and conditional 26%-of-native
+  comparison, with correctness, duration, native-baseline and gameplay gates.
+  This update changes documentation only and establishes no new speedup.
+
 ### Bounded superblocks and region vector caching (2026-10-12)
 
 - Measured losing Tier-2 superblocks retry shorter prefixes (8 -> 4 -> 2)

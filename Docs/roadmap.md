@@ -115,6 +115,70 @@ Acceptance: matched cold/warm scene runs demonstrate improvements in frame
 times and demanding-scene minimums, with no new correctness regressions.
 Publish host, settings, scene and measurement duration with each result.
 
+## JIT codegen: retain guest state across hot regions
+
+Planned v2 direction: keep guest integer registers, vector/FP values and
+NZCV in host registers across compatible hot paths, with explicit state
+reconstruction at observable boundaries. Extend the existing compiler in
+measured stages. The detailed contracts are in
+[the JIT design plan](JIT.md#planned-codegen-retaining-guest-state-across-regions).
+
+Implemented foundation (October 12): experimental Tier-2 collects up to
+eight blocks/256 instructions, retains compatible vector or scalar-FP cache
+layouts inside regions, and uses live-work timing to select candidates.
+Measured losses can retry smaller prefixes (8 -> 4 -> 2) after fresh profiling.
+MT publication uses revocable data cells. Mixed FP/vector allocation,
+register-layout handoff between regions and general state-recovery maps
+remain planned; Tier-2 remains opt-in.
+
+1. **Establish the cost breakdown.** Profile CoreMark and repeatable game
+   scenes, separating generated integer code, spills/reloads, flag handling,
+   region boundaries, helpers, memory guards and compilation. Record code
+   size, compile time and cold/warm frame times before choosing optimizations.
+2. **Model guest state explicitly.** Extend IR value/state tracking for GPRs,
+   vector lanes, scalar FP aliases and NZCV. The first allocation prototype
+   supports mixed FP/vector operations inside existing superblocks, preserving
+   partial writes and upper-lane clearing. Integer allocation and flags are
+   the priority for the separate CoreMark target.
+3. **Define recovery and helper contracts.** Describe where architectural
+   values live and how to restore precise guest state for faults, signals,
+   interpreter fallback and host calls. Classify helper reads, writes and
+   clobbers; unclassified helpers retain full state synchronization. Validate
+   these contracts before allowing dirty state to cross region boundaries.
+4. **Prototype handoff between two regions.** Give each region an explicit
+   entry/exit register layout. Compatible hot edges transfer values directly;
+   other layouts use bounded parallel-copy adapters or the canonical memory
+   entry. Preserve copy cycles, aliases, flags, frame layout, stop sentinels,
+   execution leases and concurrent invalidation in ST/MT.
+5. **Select layouts by measured benefit.** Try at most two layouts per head
+   per search, within the existing region-size, code-growth, compiler-time
+   and phase budgets. Include adapters and recovery metadata in growth
+   accounting. Keep cold entries reliable and retire stale variants through
+   the existing publication/invalidation protocol.
+
+CoreMark target: at least **10,000 reported iterations/s** with valid CRCs and
+the benchmark's minimum ten-second duration. The latest recorded fixed
+110,000-iteration run has a 16.0753 s median process wall time (about 6,843
+iterations/s as a wall-time proxy). Reaching the target implies roughly 46%
+higher throughput and 32% less execution time, or about 11 s for that workload.
+This is a target, not a demonstrated gain or a prediction from the FP tests.
+
+The proposed **26% of native** milestone assumes a native reference near
+38,460 iterations/s. Confirm that reference with matched source, seeds,
+workload, thread count and documented compiler/host settings. Native and guest
+runs may require different iteration counts to satisfy the ten-second rule;
+compare normalized throughput, not their total wall times. This percentage
+describes CoreMark only. See [the benchmark acceptance plan](TESTS.md#planned-codegen-and-coremark-acceptance).
+
+Acceptance: each stage passes focused architectural regressions, independent
+reference checks and real applications. Demonstrate reduced spills/state
+transfers without excessive compilation or code growth, then measure matched
+gameplay frame times and demanding-scene minimums. Mixed FP/vector speedups
+alone do not establish CoreMark or game-FPS gains. Preserve memory bounds,
+permissions, precise faults and immutable published MT instructions on all
+supported hosts; retain the current block/region budgets until measurements
+justify a change.
+
 ## JIT and graphics caching
 
 Implemented first checkpoint (October 4): a larger two-way per-thread
