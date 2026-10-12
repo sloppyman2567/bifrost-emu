@@ -240,10 +240,10 @@ CoreMark, 110,000 iterations, three runs each, CRCs validated, on a Ryzen 7
 
 | Emulator | Median iterations/s |
 |---|---|
-| bifrost-emu 2.0.0-alpha.1 (JIT, Tier-1) | 8,565 |
-| QEMU 11.1.1 user mode (TCG) | 7,910 |
+| bifrost-emu 2.0.0-alpha.1 (JIT, Tier-1) | 9,062 |
+| QEMU 11.1.1 user mode (TCG) | 7,898 |
 
-That is about 8% faster on this integer/control-flow benchmark; it does not
+That is about 15% faster on this integer/control-flow benchmark; it does not
 predict game FPS. Earlier development measurements from the `bench_*` programs
 (Ryzen 7 5800X3D, GCC -O3, not rerun for this update):
 
