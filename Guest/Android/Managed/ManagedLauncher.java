@@ -567,7 +567,7 @@ public final class ManagedLauncher {
         System.out.println("APP_RUNTIME_SERVICES_OK resumed=" + resumed);
     }
 
-    private static void installServices() throws Exception {
+    private static void installServices(boolean serviceChild) throws Exception {
         jobs.install(services);
         services.diagnostic = diagnostic;
         connectivity.install(services);
@@ -652,7 +652,11 @@ public final class ManagedLauncher {
                 .getField("DEFAULT_STREAM_VOLUME").get(null);
         int[] maxVolumes = {5, 7, 7, 15, 7, 7, 15, 7, 15, 15, 15, 15};
         int[] minVolumes = {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0}; // AudioService.MIN_STREAM_VOLUME
-        if ((Boolean) Class.forName("android.os.SystemProperties")
+        // Service children share the session's Binder registry. These are
+        // device services (system_server/surfaceflinger on Android): a child
+        // must not replace the session's entries, or their clients see a
+        // death notification and an empty registry when the child exits.
+        if (!serviceChild && (Boolean) Class.forName("android.os.SystemProperties")
                 .getMethod("getBoolean", String.class, boolean.class)
                 .invoke(null, "servicemanager.ready", false)) {
             // Register the VM before publishing Java-backed native services:
@@ -1424,8 +1428,9 @@ public final class ManagedLauncher {
         // systemMain() alone does not initialize their per-process service managers.
         threadType.getMethod("initializeMainlineModules").invoke(null);
         Looper.prepareMainLooper();
+        boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
         if (diagnostic) checkServiceRegistration();
-        installServices();
+        installServices(serviceChild);
         if (nativeChoreographer) {
             loadActivityLibrary();
             ActivityProbe.NativeLooperProbe.checkNativeFrames();
@@ -1438,7 +1443,6 @@ public final class ManagedLauncher {
         Object thread = threadType.getMethod("systemMain").invoke(null);
         Context context = (Context) threadType.getMethod("getSystemContext").invoke(thread);
         System.out.println("ACTIVITY_CONTEXT_OK " + context);
-        boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
         FrameworkProcessRuntime.Remote parent = serviceChild
                 ? new FrameworkProcessRuntime.Remote(args[1], args[2]) : null;
         PackageInfo childPackage = parent == null ? null : parent.bootstrap();

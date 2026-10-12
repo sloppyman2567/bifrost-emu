@@ -44,6 +44,16 @@ before using the new executable. Transaction and arena limits of the local
 Binder implementation still apply. This is a same-host-user compatibility
 mechanism; virtual Android UIDs do not provide host DAC or SELinux isolation.
 
+Managed service children (`ManagedLauncher --service-child`, including
+WebView's `webview_service` and sandboxed renderers) share the session's
+`/dev/binder` registry. Only the session process publishes the device services
+`sensorservice` and `SurfaceFlingerAIDL`; children use the session's objects.
+Previously a child re-registered both, and its exit delivered a death
+notification to the app's libsensor client: SpongeBob's Unity main thread
+then waited for `sensorservice` indefinitely after a WebView ad process
+stopped. `ManagedServices` checks that the entry stays a local Binder while a
+`:remote` child runs; it reports a `BinderProxy` without the fix.
+
 `python3 Scripts/Android/test_asgard.py` builds a Bionic fixture and checks all four
 JIT/interpreter server/client combinations, distinct sender identities,
 leader PID/TID equality, worker-thread identity and main-thread signal delivery,

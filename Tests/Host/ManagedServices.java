@@ -251,8 +251,15 @@ public final class ManagedServices extends Activity {
                 check(reply.readInt() != android.os.Process.myPid(), "remote service ran in the app process");
                 check(reply.readInt() == android.os.Process.myUid() && reply.readInt() == 42,
                         "remote UID or Binder result incorrect");
+                // The started child shares the Binder registry; the session's
+                // device services must still be this process's local objects.
+                Object sensors = Class.forName("android.os.ServiceManager")
+                        .getMethod("checkService", String.class).invoke(null, "sensorservice");
+                check(sensors instanceof android.os.Binder, "service child replaced sensorservice: " + sensors);
                 System.out.println("SERVICE_PROCESS_OK");
-            } catch (android.os.RemoteException error) { throw new AssertionError(error); }
+            } catch (ReflectiveOperationException | android.os.RemoteException error) {
+                throw new AssertionError(error);
+            }
             finally { data.recycle(); reply.recycle(); }
             unbindService(remote);
             begin();
