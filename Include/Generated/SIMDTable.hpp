@@ -96,7 +96,7 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF00FC00U) == 0x2F004400U) return Op{Family::SHIFT, 36, 6, "SRI"};
     if ((op & 0xBF00FC00U) == 0x2F003400U) return Op{Family::SHIFT, 37, 7, "URSRA"};
     if ((op & 0xBF00FC00U) == 0x0F003400U) return Op{Family::SHIFT, 38, 8, "SRSRA"};
-    if ((op & 0xBFE0FC00U) == 0x0E000C00U && ((((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4 || ((op >> 16) & 0x1F) == 8))) return Op{Family::DUP, 39, 0, "DUP"};
+    if ((op & 0xBFE0FC00U) == 0x0E000C00U && (((op >> 16) & 0xF) != 0 && (((op >> 16) & 0xF) != 8 || Q))) return Op{Family::DUP, 39, 0, "DUP"};
     if ((op & 0xBFE0FC00U) == 0x0E003C00U) return Op{Family::UMOV, 40, 0, "UMOV"};
     if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 41, 0, "AESE"};
     if ((op & 0xFFE0FC00U) == 0x0EE0E000U) return Op{Family::CRYPTO, 42, 4, "PMULL"};

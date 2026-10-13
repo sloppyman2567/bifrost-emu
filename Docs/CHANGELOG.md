@@ -13,6 +13,25 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Generated native SIMD table and coverage sweep (2026-10-12)
+
+- FrostJIT's native SIMD classifier, kind enum and dispatch list are
+  generated from `Tools/CodeGen/native_simd.txt` (`make nativegen`). They
+  are identical to the hand-written classifier over all 2^32 words. A
+  generated test runs every accepted encoding against QEMU hashes
+  (`make nativegen-expect`). It found 605 unallocated encodings that ran
+  natively: shift-by-immediate rows missing bit 23, `.1d` FP/integer
+  compares and conversions, double FMOV (immediate) without Q, and ADDV
+  `.2s`.
+- `Scripts/Testing/simd_coverage.py` sweeps the FP/SIMD data-processing
+  space under QEMU and Bifrost. Reserved DUP (element) and INS (general)
+  encodings crashed both engines with a host SIGFPE (a zero element size
+  used as a divisor); they now raise SIGILL. DUP (general) accepts the
+  ignored high imm5 bits and rejects `.1d` without Q.
+- Vector FCVTZS/FCVTZU saturate ±infinity (only NaN gives 0) in both
+  engines, and `.1d` raises SIGILL. `jit_simd_misc` had encoded the old
+  result, which QEMU rejects.
+
 ### App ops service (2026-10-12)
 
 - `getSystemService(APP_OPS_SERVICE)` returns an `AppOpsManager`. The new

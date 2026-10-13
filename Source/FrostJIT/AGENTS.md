@@ -19,7 +19,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   state needed while emitting the fall-through path. Keep bounds, permissions
   and userfaultfd guards intact.
 - Keep generated decode/signature tables in `Include/Generated/` synchronized
-  through `Tools/CodeGen/`, never manual generated-header edits.
+  through `Tools/CodeGen/`, never manual generated-header edits. Native SIMD
+  helper encodings live in `native_simd.txt`. After changing it or a helper,
+  run `make nativegen-expect` (QEMU) and commit the spec, generated header,
+  generated test and expectations together.
 - Run `make verify` and relevant guest regressions after behavior changes. A
   file split also needs a complete link/library build: missing definitions and
   old archive members can evade per-file compilation checks.

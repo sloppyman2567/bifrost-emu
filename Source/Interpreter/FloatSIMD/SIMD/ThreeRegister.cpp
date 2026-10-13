@@ -248,16 +248,14 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).
     // Fixed: strip Q, match both forms.
     case 0x0E000C00: {
+        // The lowest set bit of imm5 selects the size; higher bits are
+        // ignored. imm5 = x0000 and the 64-bit form without Q are reserved.
         uint8_t imm5 = (op >> 16) & 0x1F;
-        int esize;
-        switch (imm5) {
-            case 0x01: esize = 1; break;
-            case 0x02: esize = 2; break;
-            case 0x04: esize = 4; break;
-            case 0x08: esize = 8; break;
-            default: dump_decode_error(cpu, mem_, op);
-        throw DecodeError(cpu.pc, op);
+        if ((imm5 & 0xF) == 0 || ((imm5 & 0xF) == 8 && !Q)) {
+            dump_decode_error(cpu, mem_, op);
+            throw DecodeError(cpu.pc, op);
         }
+        int esize = 1 << __builtin_ctz(static_cast<unsigned>(imm5));
         int elems = (Q ? 16 : 8) / esize;
         uint64_t src = cpu.regs[rn];
         uint8_t bytes[16] = {0};
@@ -288,10 +286,14 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         // so `dup v23.2s, v1.s[1]` (imm5=12 = (1<<3)|4) threw
         // DecodeError inside sha256_finish.
         uint8_t imm5 = (op >> 16) & 0x1F;
-        int esize = 0, idx = 0;
-        for (int b = 0; b < 5; b++) {
-            if (imm5 & (1 << b)) { esize = 1 << b; break; }
+        // imm5 = x0000 is reserved, as is a 64-bit element without Q. The
+        // old loop left esize 0 (a host divide-by-zero) or 16 (an
+        // overflowing copy) for these.
+        if ((imm5 & 0xF) == 0 || ((imm5 & 0xF) == 8 && !Q)) {
+            dump_decode_error(cpu, mem_, op);
+            throw DecodeError(cpu.pc, op);
         }
+        int esize = 1 << __builtin_ctz(static_cast<unsigned>(imm5)), idx = 0;
         idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
         // Read the source element from Vn.
         uint64_t src_val;
@@ -322,10 +324,13 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     // Real INS has bits[23:22]=10, giving sub_noq=0x0E001C00.
     case 0x0E001C00: {
         uint8_t imm5 = (op >> 16) & 0x1F;
-        int esize = 0, idx = 0;
-        for (int b = 0; b < 5; b++) {
-            if (imm5 & (1 << b)) { esize = 1 << b; break; }
+        // INS (general) exists only with Q = 1; imm5 = x0000 is reserved
+        // (the old loop left esize 0, a host divide-by-zero).
+        if ((imm5 & 0xF) == 0 || !Q) {
+            dump_decode_error(cpu, mem_, op);
+            throw DecodeError(cpu.pc, op);
         }
+        int esize = 1 << __builtin_ctz(static_cast<unsigned>(imm5)), idx = 0;
         idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
         uint64_t src = cpu.regs[rn];
         // (8/esize) must write to v_hi, not v_lo. The old code

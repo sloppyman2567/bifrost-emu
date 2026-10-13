@@ -83,8 +83,8 @@ SRI     0xBF00FC00   0x2F004400   SHIFT     6   -
 URSRA   0xBF00FC00   0x2F003400   SHIFT     7   -
 SRSRA   0xBF00FC00   0x0F003400   SHIFT     8   -
 
-# ── GPR->vector DUP (native for all element sizes 1/2/4/8, Q=0 and Q=1) ──
-DUP     0xBFE0FC00   0x0E000C00   DUP       0   (((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4 || ((op >> 16) & 0x1F) == 8)
+# ── GPR->vector DUP: lowest set imm5 bit = size (higher bits ignored); imm5 = x0000 and .1d (Q=0) are reserved ──
+DUP     0xBFE0FC00   0x0E000C00   DUP       0   ((op >> 16) & 0xF) != 0 && (((op >> 16) & 0xF) != 8 || Q)
 
 # ── UMOV (vector element -> GPR) ─────────────────────────────────────────
 # Encoding: Q 0 0 01110 size 1 imm5 0 0 1 1 Rn Rd. Element size/index come

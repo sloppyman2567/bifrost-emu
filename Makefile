@@ -110,7 +110,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check wlviewporter wlviewporter-check vkmarshal vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb generated-check ci FORCE
+.PHONY: all opgen opgen-check nativegen nativegen-check nativegen-expect opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check wlviewporter wlviewporter-check vkmarshal vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb generated-check ci FORCE
 
 all: $(TARGET)
 ifeq ($(BUILD_PROFILE),release)
@@ -135,6 +135,24 @@ $(OPGEN_OUTS): $(OPGEN_SPECS) $(OPGEN_GEN)
 # from the spec (i.e. someone edited the spec but forgot `make opgen`).
 opgen-check:
 	python3 Tools/CodeGen/opgen.py --check $(OPGEN_SPECS) $(OPGEN_OUTS)
+
+# Native SIMD helper encodings: one spec drives FrostJIT's classifier and a
+# generated guest test checked against QEMU hashes (nativegen-expect needs
+# qemu-aarch64 and the cross toolchain; commit the refreshed expectations).
+NATIVEGEN_ARGS := Tools/CodeGen/native_simd.txt Tools/CodeGen/native_simd_expected.txt \
+	Include/Generated/NativeSimdTable.hpp Tests/Unit/jit_native_simd_gen.c
+
+nativegen:
+	python3 Tools/CodeGen/nativegen.py $(NATIVEGEN_ARGS)
+
+nativegen-check:
+	python3 Tools/CodeGen/nativegen.py --check $(NATIVEGEN_ARGS)
+
+nativegen-expect: nativegen
+	$(MAKE) cross SRC=Tests/Unit/jit_native_simd_gen.c OUT=Tests/Unit/jit_native_simd_gen.elf
+	qemu-aarch64 Tests/Unit/jit_native_simd_gen.elf gen > Tools/CodeGen/native_simd_expected.txt
+	python3 Tools/CodeGen/nativegen.py $(NATIVEGEN_ARGS)
+	$(MAKE) cross SRC=Tests/Unit/jit_native_simd_gen.c OUT=Tests/Unit/jit_native_simd_gen.elf
 
 # GraphicThunk symbol-signature table (same pattern as the SIMD_DP decode
 # tables above): Tools/CodeGen/thunk_dp.txt is the single source of truth
@@ -502,7 +520,7 @@ setup-tests:
 	echo "Cross-compiled $$count glibc-dynamic variant binaries."
 
 # Generated source checks share one entry point for CI and local reviews.
-generated-check: opgen-check opgen-thunk-check wlgen-check wlviewporter-check vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check
+generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlviewporter-check vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check
 
 # Local guest-correctness gate: generator drift, host APIs, JIT/interpreter
 # regressions, sandbox coverage, and a focused dynamic-glibc run.

@@ -551,9 +551,11 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         //   FCVTZS Vd.4S, Vn.4S = 0x4EA1B800  (signed, U=0)
         //   FCVTZU Vd.4S, Vn.4S = 0x6EA1B800  (unsigned, U=1)
         //   size=2 → 32-bit (4S/2S), size=3 → 64-bit (2D/1D)
-        // Truncate toward zero (rmode=3). NaN → 0.
+        // Truncate toward zero (rmode=3). NaN → 0; ±inf and out-of-range
+        // values saturate (the helpers implement FPToFixed's clamp).
         if ((sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) &&
             (op & 0x10000) && size >= 2) {
+            if (size == 3 && !Q) throw DecodeError(cpu.pc, op);  // .1d is reserved
             bool is_unsigned = sub3_noq == 0x2E20B800;
             int esize = 1 << size;
             int elems = (Q ? 16 : 8) / esize;
@@ -565,27 +567,13 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                 if (esize == 4) {
                     float f;
                     memcpy(&f, vn + i * esize, 4);
-                    if (std::isfinite(f)) {
-                        if (is_unsigned) {
-                            r = fp_to_unsigned_sat(f, false);
-                        } else {
-                            r = static_cast<uint32_t>(static_cast<int32_t>(fp_to_signed_sat(f, false)));
-                        }
-                    } else {
-                        r = 0;  // NaN/±inf → 0
-                    }
+                    r = is_unsigned ? fp_to_unsigned_sat(f, false)
+                        : static_cast<uint32_t>(static_cast<int32_t>(fp_to_signed_sat(f, false)));
                 } else {
                     double d;
                     memcpy(&d, vn + i * esize, 8);
-                    if (std::isfinite(d)) {
-                        if (is_unsigned) {
-                            r = fp_to_unsigned_sat(d, true);
-                        } else {
-                            r = static_cast<uint64_t>(fp_to_signed_sat(d, true));
-                        }
-                    } else {
-                        r = 0;
-                    }
+                    r = is_unsigned ? fp_to_unsigned_sat(d, true)
+                        : static_cast<uint64_t>(fp_to_signed_sat(d, true));
                 }
                 memcpy(out + i * esize, &r, esize);
             }

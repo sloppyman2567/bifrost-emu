@@ -180,23 +180,16 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
                     movdqa(0, 2);
                     break;
                 }
-                case 2: {  // FCVTZS — truncate; NaN/±inf → 0 (matches interp)
-                    // Finite out-of-range saturates per ARM (matches
-                    // fp_to_signed_sat in Dispatch.cpp): values >= 2^31 →
-                    // INT32_MAX, values < -2^31 → INT32_MIN. cvttps2dq alone
-                    // returns the 0x80000000 indefinite value for ANY
-                    // out-of-range input, so pre-clamp first. The finite
-                    // mask above is computed from the ORIGINAL x (NaN/inf
-                    // must still → 0), hence the save in xmm12.
+                case 2: {  // FCVTZS — truncate; NaN → 0; ±inf and range saturate
+                    // FPToFixed (fp_to_signed_sat in the interpreter): x >= 2^31
+                    // and +inf → INT32_MAX, x < -2^31 and -inf → INT32_MIN.
+                    // cvttps2dq alone returns the 0x80000000 indefinite value
+                    // for ANY out-of-range input, so pre-clamp first. The
+                    // not-NaN mask comes from the ORIGINAL x, hence the save
+                    // in xmm12.
                     emit_mask(5, 0x7FFFFFFF7FFFFFFFULL);
-                    emit_mask(7, 0x7F8000007F800000ULL);
                     movdqa(3, 0);
-                    sse_fp(0xC2, 3, 0); emit_byte(0);  // cmpps xmm3, xmm0, 0 (x==x)
-                    movdqa(4, 0);
-                    sse_fp(0x54, 4, 5);              // andps xmm4, 0x7FFFFFFF → |x|
-                    movdqa(6, 4);
-                    sse_fp(0xC2, 6, 7); emit_byte(0); // cmpps xmm6, +inf, 0 (|x|==inf)
-                    sse_fp(0x55, 6, 3);              // andnps xmm6, xmm3 → finite
+                    sse_fp(0xC2, 3, 0); emit_byte(0);  // cmpps xmm3, xmm0, 0 (x==x: not NaN)
                     movdqa(12, 0);                   // save original x (saturation test)
                     emit_mask(1, 0xCF000000CF000000ULL);  // -2147483648.0f (exact)
                     sse_fp(0x5F, 0, 1);              // maxps xmm0, lo
@@ -209,27 +202,19 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
                     sse_fp(0xC2, 12, 2); emit_byte(5); // cmpps xmm12, 2^31, 5 (>=)
                     sse2_op(0xDB, 12, 5);            // xmm12 &= 0x7FFFFFFF → INT32_MAX/0
                     sse2_op(0xEB, 0, 12);            // xmm0 |= saturate
-                    sse2_op(0xDB, 0, 6);             // xmm0 &= finite
+                    sse2_op(0xDB, 0, 3);             // xmm0 &= not-NaN
                     break;
                 }
-                default: {  // FCVTZU — truncate; negatives → 0; NaN/±inf → 0
-                    // Finite values >= 2^32 saturate to UINT32_MAX per ARM
-                    // (matches fp_to_unsigned_sat in Dispatch.cpp). The
-                    // sub+OR hi-path alone yields 0x80000000 there (cvtt of
-                    // x-2^31 is indefinite), so OR the saturation mask in.
-                    // The finite mask (from the ORIGINAL x) is applied last,
-                    // so NaN/±inf still → 0.
-                    emit_mask(5, 0x7FFFFFFF7FFFFFFFULL);
-                    emit_mask(7, 0x7F8000007F800000ULL);
+                default: {  // FCVTZU — truncate; NaN and negatives → 0; saturate
+                    // x >= 2^32 and +inf saturate to UINT32_MAX (FPToFixed,
+                    // fp_to_unsigned_sat in the interpreter). The sub+OR
+                    // hi-path alone yields 0x80000000 there (cvtt of x-2^31
+                    // is indefinite), so OR the saturation mask in. The
+                    // not-NaN mask (from the ORIGINAL x) is applied last.
                     emit_mask(8, 0x4F0000004F000000ULL);  // 2^31
                     emit_mask(9, 0x8000000080000000ULL);  // sign bit
                     movdqa(3, 0);
-                    sse_fp(0xC2, 3, 0); emit_byte(0);  // x==x
-                    movdqa(4, 0);
-                    sse_fp(0x54, 4, 5);                // |x|
-                    movdqa(6, 4);
-                    sse_fp(0xC2, 6, 7); emit_byte(0);  // |x|==inf
-                    sse_fp(0x55, 6, 3);                // finite
+                    sse_fp(0xC2, 3, 0); emit_byte(0);  // x==x: not NaN
                     sse2_op(0xEF, 10, 10);             // pxor xmm10, xmm10 (0.0)
                     sse_fp(0x5F, 0, 10);               // maxps xmm0, 0 (negatives → 0)
                     movdqa(12, 0);                     // save x>=0 (saturation test)
@@ -246,7 +231,7 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
                     emit_mask(2, 0x4F8000004F800000ULL);  // 4294967296.0f (2^32)
                     sse_fp(0xC2, 12, 2); emit_byte(5); // cmpps xmm12, 2^32, 5 (>=)
                     sse2_op(0xEB, 1, 12);              // saturate: xmm1 |= mask
-                    sse2_op(0xDB, 1, 6);               // xmm1 &= finite
+                    sse2_op(0xDB, 1, 3);               // xmm1 &= not-NaN
                     movdqa(0, 1);
                     break;
                 }

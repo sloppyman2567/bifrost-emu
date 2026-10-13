@@ -4,57 +4,6 @@
 #include <cmath>
 #include <cstring>
 namespace arm64emu {
-NativeSimdKind classify_native_simd(uint32_t w) {
-    using K = NativeSimdKind;
-    uint32_t b = w & 0xBFE0FC00;
-    if (b == 0x2E601C00 || b == 0x2EA01C00 || b == 0x2EE01C00) return K::Select;
-    unsigned imm5 = (w >> 16) & 31;
-    if (b == 0x0E000400 && imm5 && imm5 != 16 &&
-        ((imm5 & 7) || (w & (1u << 30)))) return K::Dup;
-    if ((w & 0xFFE0FC00) == 0x4E001C00 && imm5 && imm5 != 16) return K::Insert;
-    if ((w & 0xBFE08400) == 0x2E000000 && (((w >> 11) & 15) < ((w & (1u<<30)) ? 16u : 8u))) return K::Extract;
-    unsigned h = (w >> 19) & 15;
-    if ((w & 0xBF00FC00) == 0x0F008400 && h && h < 8) return K::NarrowShift;
-    if ((w & 0x9F00FC00) == 0x0F00A400 && h && h < 8) return K::WidenShift;
-    if ((w & 0xBF3FFC00) == 0x2E213800 && ((w >> 22) & 3) < 3) return K::WidenHigh;
-    if ((w & 0xBFFFFC00) == 0x0E616800) return K::NarrowFp;
-    if ((w & 0xBFFFFC00) == 0x0E617800) return K::WidenFp;
-    if ((w & 0xBF20FC00) == 0x2E20E400 || (w & 0xBF20FC00) == 0x0E20E400) return K::CompareFp;
-    // FP vector forms with sz=1 need Q=1 (.1d is reserved).
-    const bool fp_lanes = !((w >> 22) & 1) || ((w >> 30) & 1);
-    const uint32_t fz = w & 0xBFBFFC00;  // FCMGT/FCMEQ/FCMLT/FCMGE/FCMLE #0
-    if (fp_lanes && (fz == 0x0EA0C800 || fz == 0x0EA0D800 || fz == 0x0EA0E800 ||
-                     fz == 0x2EA0C800 || fz == 0x2EA0D800)) return K::CompareZeroFp;
-    if ((w & 0xBF3FFC00) == 0x0E209800) return K::CompareZeroInt;
-    if ((w & 0x9F800C00) == 0x0F000400 && !h && ((w >> 12) & 15) == 15) return K::ImmediateFp;
-    if ((w & 0x9F20FC00) == 0x0E204400) return K::VariableShift;
-    if (fp_lanes && arm_frint_vector_mode(w) >= 0) return K::RoundFp;
-    if ((w & 0xBFFFFC00) == 0x0E61D800 || (w & 0xBFFFFC00) == 0x0EE1B800) return K::Convert64;
-    if ((w & 0xFFE0FC00) == 0x5EE08400) return K::ScalarAdd;
-    if ((w & 0xBF3FFC00) == 0x0E31B800 && ((w >> 22) & 3) < 3) return K::ReduceAdd;
-    if ((w & 0xBF3FFC00) == 0x0E200800 && ((w >> 22) & 3) < 3) return K::Reverse64;
-    if ((w & 0xBF20FC00) == 0x0E209400 && ((w >> 22) & 3) < 3) return K::MultiplyAdd;
-    if ((w & 0xBFC0F400) == 0x0F801000) return K::IndexedFma; // FP32 FMLA by element
-    // Across lanes: 64-bit elements and 32-bit lanes without Q are reserved.
-    const unsigned sz = (w >> 22) & 3;
-    const bool q = (w >> 30) & 1;
-    const bool across_size = sz < 2 || (sz == 2 && q);
-    if ((w & 0x9F3FFC00) == 0x0E303800 && across_size) return K::AcrossLong;   // S/UADDLV
-    if ((w & 0x9F3EFC00) == 0x0E30A800 && across_size) return K::AcrossMinMax; // S/U MAX/MIN V
-    // Widening three-different ops (8-bit to 32-bit sources).
-    const uint32_t three = w & 0x9F20FC00;
-    if (sz < 3 && (three == 0x0E200000 || three == 0x0E202000 || three == 0x0E201000 ||
-                   three == 0x0E203000 || three == 0x0E208000 || three == 0x0E20A000 ||
-                   three == 0x0E20C000)) return K::WidenThree;  // ADDL SUBL ADDW SUBW MLAL MLSL MULL
-    const uint32_t pair = w & 0x9F3FFC00;
-    if (sz < 3 && (pair == 0x0E202800 || pair == 0x0E206800)) return K::PairLong;  // ADDLP ADALP
-    const uint32_t fpair = w & 0xBFA0FC00;  // FMAXP FMINP FMAXNMP FMINNMP
-    if (fp_lanes && (fpair == 0x2E20F400 || fpair == 0x2EA0F400 ||
-                     fpair == 0x2E20C400 || fpair == 0x2EA0C400)) return K::PairFp;
-    const uint32_t half = w & 0xBFFFFC00;   // FCVTL/FCVTN with half lanes
-    if (half == 0x0E217800 || half == 0x0E216800) return K::HalfFp;
-    return K::None;
-}
 namespace {
 struct Vec { uint8_t bytes[16]{}; };
 Vec read(const CPU* cpu, unsigned reg) {
@@ -78,6 +27,7 @@ template<class T> T fp(const Vec& v, unsigned lane) {
     T x; std::memcpy(&x, v.bytes+lane*sizeof(T), sizeof(T)); return x;
 }
 template<class T> void put_fp(Vec& v, unsigned lane, T x) { std::memcpy(v.bytes+lane*sizeof(T), &x, sizeof(T)); }
+template<NativeSimdKind> constexpr bool kind_without_body = false;
 template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
     unsigned rd=w&31, rn=(w>>5)&31, rm=(w>>16)&31;
     bool q=(w>>30)&1, u=(w>>29)&1;
@@ -257,20 +207,17 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
             if (q) std::memcpy(out.bytes, d.bytes, 8);
             for (unsigned i = 0; i < 4; i++) put(out, (q ? 4 : 0) + i, 2, f2h(fp<float>(n, i), dn));
         }
+    } else {
+        // A kind added to native_simd.txt needs a body above.
+        static_assert(kind_without_body<K>, "native SIMD kind without a run<K> body");
     }
     write(cpu,rd,out);
 }
 }
 NativeSimdFn native_simd_helper(NativeSimdKind k) {
-#define CASE(kind) case NativeSimdKind::kind: return &run<NativeSimdKind::kind>
+#define CASE(kind) case NativeSimdKind::kind: return &run<NativeSimdKind::kind>;
     switch(k) {
-        CASE(Select); CASE(Dup); CASE(Insert); CASE(Extract); CASE(NarrowShift);
-        CASE(WidenShift); CASE(WidenHigh); CASE(NarrowFp); CASE(WidenFp);
-        CASE(CompareFp); CASE(CompareZeroFp); CASE(CompareZeroInt); CASE(ImmediateFp);
-        CASE(VariableShift); CASE(RoundFp); CASE(Convert64); CASE(ScalarAdd);
-        CASE(ReduceAdd); CASE(Reverse64); CASE(MultiplyAdd); CASE(IndexedFma);
-        CASE(AcrossLong); CASE(AcrossMinMax); CASE(WidenThree); CASE(PairLong);
-        CASE(PairFp); CASE(HalfFp);
+        BIFROST_NATIVE_SIMD_KINDS(CASE)
         default: return nullptr;
     }
 #undef CASE

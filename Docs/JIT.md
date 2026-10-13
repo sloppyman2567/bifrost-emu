@@ -1212,8 +1212,49 @@ preserve `WIN_REG` across every SysV call: it is caller-saved R10, so an
 otherwise correct C++ helper can corrupt all later direct-window accesses.
 Tier-2 treats SIMD helpers as calls for GPR pinning and LICM purposes.
 The translator checks `classify_native_simd` before the interpreter
-fallback, so only classify encodings whose `run<K>` covers every size/Q form
-it accepts; across-lane reductions, widening three-different ops and
+fallback, so a classified encoding must be one its `run<K>` implements.
+The classifier, the kind enum and the dispatch list are generated from
+`Tools/CodeGen/native_simd.txt` (`make nativegen`). A kind without a
+`run<K>` body fails to compile. The same spec generates
+`Tests/Unit/jit_native_simd_gen.c`, which runs every enumerated encoding
+the classifier accepts against hashes recorded under QEMU
+(`make nativegen-expect`). An encoding QEMU rejects with SIGILL fails the
+test, so the classifier cannot accept unallocated forms unnoticed.
+
+Its first run found 605 classified encodings that QEMU rejects:
+- shift-by-immediate rows missing bit 23;
+- `.1d` forms of FCMEQ/FCMGE/SSHL/CMEQ #0/SCVTF/FCVTZS;
+- double FMOV (immediate) without Q;
+- ADDV `.2s`.
+
+All 1,480 remaining encodings match QEMU in both engines. A
+generated-versus-hand-written check over all 2^32 words showed no
+classification change before the spec was corrected.
+`Scripts/Testing/simd_coverage.py` sweeps the whole FP/SIMD
+data-processing group (2^19 words, Rd/Rn pinned) under QEMU and Bifrost in
+about 20 seconds. It reports instructions Bifrost is missing, unallocated
+encodings it accepts, differing results, and interpreted encodings, grouped
+by mnemonic. Its first full run found a host SIGFPE: reserved DUP (element)
+and INS (general) encodings divided by a zero element size in the
+interpreter, crashing both engines.
+
+Baseline after those fixes (2026-10-12):
+- **Valid words:** 77,672 of 524,288 under QEMU.
+- **Missing:** 23,806 words. Most are features Bifrost does not advertise
+  in AT_HWCAP (FP16 arithmetic, dot products, SHA3/SM3/SM4, RDM, FCMA, FHM,
+  BF16, I8MM). Base-ARMv8.0 gaps: SQDMLAL/SQDMLSL/SQDMULL/SQDMULH (vector,
+  by element, scalar), 64-bit scalar SSRA/USRA/SRSHR/URSHR/SRSRA/URSRA/
+  SRI/SLI/SQSHL/UQSHL/SQSHLU `#imm`, SABA/UABA and PMUL.
+- **Accepted unallocated:** 38,403 words, from interpreter decode masks
+  that ignore reserved size/Q combinations.
+- **Differing results:** 12,448 words. Base-ARMv8.0 cases are integer
+  by-element ops on 32-bit elements with M set (Rm = v16-v31),
+  single-register TBL/TBX, rounding and saturating shifts, ADDHN2 and some
+  scalar FMLA by element.
+- **Interpreted:** 13,688 words, led by scalar FMADD-family forms and FP
+  multiply by element.
+
+Across-lane reductions, widening three-different ops and
 pairwise long adds are covered by `jit_simd_widen_reduce`. FP lane helpers
 (FMAXP/FMINP/FMAXNMP/FMINNMP, FCMxx #0, all seven vector FRINT modes, and
 half-precision FCVTL/FCVTN) call the shared `FloatCommon.hpp` semantics

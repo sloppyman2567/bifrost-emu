@@ -299,7 +299,8 @@ static void test_fcvtzs(void) {
 }
 
 static void test_fcvtzs_special(void) {
-    // NaN/±inf → 0 (matches interp). NAN/INFINITY via bit patterns.
+    // FPToFixed: NaN → 0, ±inf saturate to INT32_MAX/INT32_MIN (as
+    // under QEMU; the old interpreter returned 0 for infinities).
     uint32_t src_bits[4] = {0x7FC00000u /*NaN*/, 0x7F800000u /*+inf*/,
                             0xFF800000u /*-inf*/, 0x3F800000u /*1.0f*/};
     uint32_t out[4];
@@ -309,8 +310,8 @@ static void test_fcvtzs_special(void) {
         "str q1, [%[o]]\n"
         :: [s]"r"(src_bits), [o]"r"(out) : "v0","v1","memory"
     );
-    CHECK(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 1,
-          "fcvtzs NaN/±inf → 0");
+    CHECK(out[0] == 0 && out[1] == 0x7FFFFFFFu && out[2] == 0x80000000u && out[3] == 1,
+          "fcvtzs NaN → 0, ±inf saturate");
 }
 
 static void test_fcvtzu(void) {

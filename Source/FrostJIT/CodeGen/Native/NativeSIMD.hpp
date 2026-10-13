@@ -1,17 +1,12 @@
 #pragma once
 #include <cstdint>
+// NativeSimdKind and classify_native_simd (compile-time classification) are
+// generated from Tools/CodeGen/native_simd.txt.
+#include "Generated/NativeSimdTable.hpp"
 namespace arm64emu {
 class CPU;
-enum class NativeSimdKind : uint8_t {
-    None, Select, Dup, Insert, Extract, NarrowShift, WidenShift, WidenHigh,
-    NarrowFp, WidenFp, CompareFp, CompareZeroFp, CompareZeroInt, ImmediateFp,
-    VariableShift, RoundFp, Convert64, ScalarAdd, ReduceAdd, Reverse64,
-    MultiplyAdd, IndexedFma, AcrossLong, AcrossMinMax, WidenThree, PairLong,
-    PairFp, HalfFp
-};
-// Compile-time classification. Runtime helpers are specialized by kind and
-// execute only that operation: they never decode or step the interpreter.
-NativeSimdKind classify_native_simd(uint32_t word);
+// Runtime helpers are specialized by kind and execute only that operation:
+// they never decode or step the interpreter.
 using NativeSimdFn = void (*)(CPU*, uint32_t);
 NativeSimdFn native_simd_helper(NativeSimdKind kind);
 }

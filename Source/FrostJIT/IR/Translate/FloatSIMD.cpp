@@ -838,12 +838,13 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             case simd::Family::DUP:
-                // GPR->vector broadcast, native for all element sizes
-                // (table guard: imm5 = esize in {1,2,4,8}). width = esize,
+                // GPR->vector broadcast, native for all element sizes. The
+                // lowest set imm5 bit is the size; the table guard rejects
+                // the reserved x0000 and Q=0 .1d forms. width = esize,
                 // flags_op = Q.
                 {
                     uint16_t val = load_arm_reg(block, d.rn);
-                    uint8_t esize = static_cast<uint8_t>((op >> 16) & 0x1F);
+                    uint8_t esize = static_cast<uint8_t>(1u << __builtin_ctz((op >> 16) & 0xF));
                     uint8_t q = static_cast<uint8_t>((op >> 30) & 1);
                     SimdDupParams dp;
                     dp.esize = esize;

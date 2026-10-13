@@ -1,0 +1,69 @@
+# native_simd.txt — encodings FrostJIT runs through specialized native SIMD
+# helpers (Source/FrostJIT/CodeGen/Native/NativeSIMD.cpp, one run<KIND> body
+# per KIND). GENERATOR INPUT: Tools/CodeGen/nativegen.py emits
+# Include/Generated/NativeSimdTable.hpp and Tests/Unit/jit_native_simd_gen.c.
+# Run `make nativegen` after editing; `make nativegen-expect` refreshes the
+# QEMU expectations the generated test checks.
+#
+# Format:  NAME  KIND  MASK  MATCH  PINS  [GUARD...]
+#   (w & MASK) == MATCH and GUARD (a C expression) must hold. Rows are tried
+#   in file order and the first match wins; KIND enumerators follow first
+#   appearance. GUARD sees w, sz (23:22), q (30), u (29), imm5 (20:16),
+#   h (22:19), fp_lanes (sz bit 22 set needs Q) and across_size (sz < 2, or
+#   sz == 2 with Q). PINS lists register fields the generated test fixes:
+#   d (4:0) = v2, n (9:5) = v0/x0, m (20:16) = v1. Every other unmasked bit
+#   is enumerated. The translator consults this table before the interpreter
+#   fallback, so a row may only accept forms its helper implements.
+
+BSL        Select         0xBFE0FC00 0x2E601C00 d,n,m  -
+BIT        Select         0xBFE0FC00 0x2EA01C00 d,n,m  -
+BIF        Select         0xBFE0FC00 0x2EE01C00 d,n,m  -
+DUP_ELEM   Dup            0xBFE0FC00 0x0E000400 d,n    imm5 && imm5 != 16 && ((imm5 & 7) || q)
+INS_GPR    Insert         0xFFE0FC00 0x4E001C00 d,n    imm5 && imm5 != 16
+EXT        Extract        0xBFE08400 0x2E000000 d,n,m  ((w >> 11) & 15) < (q ? 16u : 8u)
+SHRN       NarrowShift    0xBF80FC00 0x0F008400 d,n    h && h < 8
+SSHLL      WidenShift     0x9F80FC00 0x0F00A400 d,n    h && h < 8
+SHLL       WidenHigh      0xBF3FFC00 0x2E213800 d,n    sz < 3
+FCVTN_D    NarrowFp       0xBFFFFC00 0x0E616800 d,n    -
+FCVTL_S    WidenFp        0xBFFFFC00 0x0E617800 d,n    -
+FCMGE      CompareFp      0xBF20FC00 0x2E20E400 d,n,m  fp_lanes
+FCMEQ      CompareFp      0xBFA0FC00 0x0E20E400 d,n,m  fp_lanes
+FCMGT_Z    CompareZeroFp  0xBFBFFC00 0x0EA0C800 d,n    fp_lanes
+FCMEQ_Z    CompareZeroFp  0xBFBFFC00 0x0EA0D800 d,n    fp_lanes
+FCMLT_Z    CompareZeroFp  0xBFBFFC00 0x0EA0E800 d,n    fp_lanes
+FCMGE_Z    CompareZeroFp  0xBFBFFC00 0x2EA0C800 d,n    fp_lanes
+FCMLE_Z    CompareZeroFp  0xBFBFFC00 0x2EA0D800 d,n    fp_lanes
+CMEQ_Z     CompareZeroInt 0xBF3FFC00 0x0E209800 d,n    sz < 3 || q
+FMOV_IMM   ImmediateFp    0x9FF8FC00 0x0F00F400 d      !u || q
+SSHL       VariableShift  0x9F20FC00 0x0E204400 d,n,m  sz < 3 || q
+FRINTN     RoundFp        0xBFBFFC00 0x0E218800 d,n    fp_lanes
+FRINTA     RoundFp        0xBFBFFC00 0x2E218800 d,n    fp_lanes
+FRINTM     RoundFp        0xBFBFFC00 0x0E219800 d,n    fp_lanes
+FRINTX     RoundFp        0xBFBFFC00 0x2E219800 d,n    fp_lanes
+FRINTZ     RoundFp        0xBFBFFC00 0x0EA19800 d,n    fp_lanes
+FRINTI     RoundFp        0xBFBFFC00 0x2EA19800 d,n    fp_lanes
+FRINTP     RoundFp        0xBFBFFC00 0x0EA18800 d,n    fp_lanes
+SCVTF_2D   Convert64      0xBFFFFC00 0x0E61D800 d,n    q
+FCVTZS_2D  Convert64      0xBFFFFC00 0x0EE1B800 d,n    q
+ADD_D      ScalarAdd      0xFFE0FC00 0x5EE08400 d,n,m  -
+ADDV       ReduceAdd      0xBF3FFC00 0x0E31B800 d,n    across_size
+REV64      Reverse64      0xBF3FFC00 0x0E200800 d,n    sz < 3
+MLA        MultiplyAdd    0xBF20FC00 0x0E209400 d,n,m  sz < 3
+FMLA_ELEM  IndexedFma     0xBFC0F400 0x0F801000 d,n,m  -
+SADDLV     AcrossLong     0x9F3FFC00 0x0E303800 d,n    across_size
+SMAXV      AcrossMinMax   0x9F3EFC00 0x0E30A800 d,n    across_size
+SADDL      WidenThree     0x9F20FC00 0x0E200000 d,n,m  sz < 3
+SSUBL      WidenThree     0x9F20FC00 0x0E202000 d,n,m  sz < 3
+SADDW      WidenThree     0x9F20FC00 0x0E201000 d,n,m  sz < 3
+SSUBW      WidenThree     0x9F20FC00 0x0E203000 d,n,m  sz < 3
+SMLAL      WidenThree     0x9F20FC00 0x0E208000 d,n,m  sz < 3
+SMLSL      WidenThree     0x9F20FC00 0x0E20A000 d,n,m  sz < 3
+SMULL      WidenThree     0x9F20FC00 0x0E20C000 d,n,m  sz < 3
+SADDLP     PairLong       0x9F3FFC00 0x0E202800 d,n    sz < 3
+SADALP     PairLong       0x9F3FFC00 0x0E206800 d,n    sz < 3
+FMAXP      PairFp         0xBFA0FC00 0x2E20F400 d,n,m  fp_lanes
+FMINP      PairFp         0xBFA0FC00 0x2EA0F400 d,n,m  fp_lanes
+FMAXNMP    PairFp         0xBFA0FC00 0x2E20C400 d,n,m  fp_lanes
+FMINNMP    PairFp         0xBFA0FC00 0x2EA0C400 d,n,m  fp_lanes
+FCVTL_H    HalfFp         0xBFFFFC00 0x0E217800 d,n    -
+FCVTN_H    HalfFp         0xBFFFFC00 0x0E216800 d,n    -
