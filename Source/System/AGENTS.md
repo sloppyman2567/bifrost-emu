@@ -32,5 +32,7 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - [VFS](VFS/AGENTS.md): host confinement and synthetic device/proc/sys views.
 
 `Emulator::group_exit` stops every guest CPU, wakes blocking operations and
-preserves the requested exit status. Crash handling must use the shared reporter
+preserves the requested exit status. Fatal signals go through
+`Emulator::signal_exit`. SIGKILL is not cooperative: it flushes stdio and
+quick-exits with 137 (terminal restore via `at_quick_exit`). Crash handling must use the shared reporter
 and terminate coherently; a worker failure must not leave the main CPU running.

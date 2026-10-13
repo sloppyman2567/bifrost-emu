@@ -9,7 +9,9 @@
 - Preserve Linux fd/poll/epoll ownership and timeout semantics. A ready socket
   must not lose readiness when translating guest event structures or masks.
 - `exit_group` uses Emulator::group_exit, waking blocked CPUs and preserving
-  the successful exit code through native JIT callers. Signal delivery uses
+  the successful exit code through native JIT callers. kill/tkill/tgkill
+  default-fatal signals use Emulator::signal_exit, never `group_exit(128+n)`
+  directly. Signal delivery uses
   the shared reporter/recovery path, not uncaught worker exceptions.
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
