@@ -210,10 +210,17 @@ correctness coverage.
   interpreter (`BIFROST_CLASS_PROF=1`, `BIFROST_FALLBACK_PROFILE`) and give
   the hottest ones native IR, then measure block length and chaining before
   touching dispatch. Measure with `BIFROST_PROF=1 BIFROST_STATS_PERIOD=10`.
-- Instrument per-thread cache hits/misses, compile time, retranslation,
-  invalidation reasons, code bytes, growth, eviction and fallback decisions.
-- Confirm revisited unchanged code reuses its translation. Distinguish JIT
-  warm-up from shader compilation, asset loading and ordinary CPU caches.
+- Implemented (October 13): Tier-1 compile time and maximum, recompiles,
+  contended lock wait and invalidation reasons (calls/retired/kept) in
+  `BIFROST_STATS_PERIOD`; line-exact cache maintenance; unchanged code kept
+  across cache maintenance and `mprotect`; MT compiles under the shared table
+  lock. Remaining: per-thread cache counters, eviction and fallback decisions.
+- Measure gameplay compile bursts with those counters before choosing between
+  a background compiler (interpret first, publish asynchronously) and a
+  persistent warm-up list keyed by file identity, offset and code contents.
+  Retranslation after the one-time ST-to-MT purge is a separate startup cost.
+  Distinguish JIT warm-up from shader compilation, asset loading and ordinary
+  CPU caches.
 - Improve cache capacity management and hot-block retention without
   unbounded memory growth or unsafe eviction of executing code.
 - Evaluate persistent translated-code caching with executable identity,

@@ -182,7 +182,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // needed.
     // Use a SHARED lock for block lookup (concurrent reads OK). Release
     // before execution — entry is a local copy, no lock needed to run it.
-    blocks_mutex_.lock_shared();
+    lock_table_shared();
     note_table_lookup();
     auto it = blocks_.find(pc);
     BlockEntry entry;
@@ -268,17 +268,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             blocks_mutex_.unlock_shared();
         }
     } else {
-        // Cache miss — need exclusive lock for translation.
+        // Cache miss — translate_entry compiles and publishes, returning
+        // with no table lock held (MT compiles hold it only shared).
         cache_misses++;
         blocks_mutex_.unlock_shared();
-        blocks_mutex_.lock();
-        auto existing = blocks_.find(pc);
-        auto fn = existing != blocks_.end() ? existing->second.fn : translate_block(emu, pc);
-        if (!fn) {
-            auto it2 = blocks_.find(pc);
-            if (it2 != blocks_.end() && it2->second.interp_only) {
-                entry = it2->second;
-                blocks_mutex_.unlock();
+        const bool found = translate_entry(emu, pc, entry);
+        if (!found || !entry.fn) {
+            if (found && entry.interp_only) {
                 blocks_executed++;
                 instructions_executed += entry.interp_only_count;
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
@@ -286,14 +282,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 }
                 return cpu.pc;
             }
-            blocks_mutex_.unlock();
             interpreter_fallbacks++;
             instructions_executed++;
             emu.step(cpu);
             return cpu.pc;
         }
-        entry = blocks_[pc];
-        blocks_mutex_.unlock();
     }
     // ── Lock is released. Execution below does NOT hold any lock. ──
     // Loop watchdog — if the same block runs > WATCHDOG_LIMIT times

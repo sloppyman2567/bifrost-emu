@@ -21,6 +21,7 @@
 #include "Generated/SIMDTable.hpp"
 #include "Generated/FixedPointTable.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -43,13 +44,29 @@ extern thread_local bool blr_call_disabled_;
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
+    // Public Tier-1 compile time; private Tier-2 sampling copies count as
+    // Tier-2 compilation instead.
+    struct CompileTimer {
+        FrostJIT* jit;
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        ~CompileTimer() {
+            if (!jit) return;
+            const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - start).count());
+            jit->tier1_compile_ns.fetch_add(ns, std::memory_order_relaxed);
+            uint64_t max = jit->tier1_compile_max_ns.load(std::memory_order_relaxed);
+            while (ns > max && !jit->tier1_compile_max_ns.compare_exchange_weak(
+                       max, ns, std::memory_order_relaxed)) {}
+        }
+    } compile_timer{private_entry ? nullptr : this};
+    block_words_.clear();
     if (!code_buf_) return nullptr;
     if (code_budget_exhausted_) {
         BlockEntry fallback;
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) publish_block(start_pc, fallback);
+        if (!private_entry) publish_or_stage(start_pc, fallback);
         code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
@@ -296,6 +313,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         // Track BL_CALL count for block splitting (BLR_CALL too — both
         // keep the block alive past the call and grow register pressure).
         if (d.cls == InstClass::BL || d.cls == InstClass::BLR) bl_call_count++;
+        block_words_.push_back(inst);
         instr_count++;
         ir_block.count = instr_count;
         if (ends) {
@@ -339,7 +357,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                 entry.chained = false;
                 entry.instr_count = instr_count;
                 entry.verified_once = true;  // interp-only: no verify
-                if (!private_entry) publish_block(start_pc, entry);
+                attach_code_words(entry, !has_inlined_leaf);
+                if (!private_entry) publish_or_stage(start_pc, entry);
                 blocks_translated++;
                 block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
@@ -427,7 +446,10 @@ if (demote_interp) {
         entry.chained = false;
         entry.instr_count = instr_count;
         entry.verified_once = true;  // skip verify for interp-only
-        if (!private_entry) publish_block(start_pc, entry);
+        if (!private_entry) {
+            attach_code_words(entry, !has_inlined_leaf);
+            publish_or_stage(start_pc, entry);
+        }
         blocks_translated++;
         block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
@@ -1164,7 +1186,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fallback.interp_only_count = 1;
         fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) publish_block(start_pc, fallback);
+        if (!private_entry) publish_or_stage(start_pc, fallback);
         code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
         code_budget_exhausted_ = true;
         // W^X: make the buffer executable again before returning (we may
@@ -1253,37 +1275,52 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         return fn;
     }
     record_verification_stores(ir_block, start_pc, entry);
-    if (!private_entry) publish_block(start_pc, entry);
+    attach_code_words(entry, !has_inlined_leaf);
+    // Save max_vreg_ so the next translate_block only clears what's needed.
+    prev_max_vreg_ = max_vreg_;
+    // Verify dirty_host_regs_ invariant (active in debug or with
+    // BIFROST_REGALLOC_CHECK=1 — catches regalloc maintenance bugs).
+    verify_dirty_host_regs_();
+    if (staging_) {
+        staged_entry_ = std::move(entry);
+        staged_ = staged_linked_ = true;
+    } else {
+        publish_translation(start_pc, entry);
+    }
+    // W^X: toggle the code buffer back to executable before returning.
+    // The block is fully emitted and patched; execution will read from it.
+    make_executable();
+    return fn;
+}
+// Publishes a native Tier-1 translation and links it with the table: back
+// references, chaining in both directions and pending direct calls. The
+// caller holds blocks_mutex_ exclusively.
+void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
+    publish_block(start_pc, entry);
     blocks_translated++;
     // Maintain the back-reference index: this block's fall-through and
     // taken slots target T, so chain_back_references(T) finds it in O(k)
     // when T is translated later (e.g. a loop whose back-edge target is
     // only translated on the second iteration).
-    if (chain_target_pc_ != 0) add_back_ref(chain_target_pc_, start_pc);
-    if (taken_chain_target_pc_ != 0 && taken_chain_target_pc_ != chain_target_pc_)
-        add_back_ref(taken_chain_target_pc_, start_pc);
+    const uint64_t target = entry.chain_target_pc, taken = entry.taken_chain_target_pc;
+    if (target != 0) add_back_ref(target, start_pc);
+    if (taken != 0 && taken != target) add_back_ref(taken, start_pc);
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.
     // BIFROST_NO_CHAIN disables chaining for debugging.
-    const bool no_chain_ = dbg().no_chain;
-    if (!no_chain_) {
+    if (!dbg().no_chain) {
         try_chain_block(start_pc, blocks_[start_pc]);
         chain_back_references(start_pc);
     }
-    // Save max_vreg_ so the next translate_block only clears what's needed.
-    prev_max_vreg_ = max_vreg_;
     // Patch any direct BL call slots (from already-translated callers)
-    // that target this block to call `fn` directly. Runs under the
-    // exclusive blocks_mutex_ (all translate_block callers hold it).
-    if (direct_call_enabled()) {
-        patch_pending_calls(start_pc, reinterpret_cast<const uint8_t*>(fn));
-    }
-    // Verify dirty_host_regs_ invariant (active in debug or with
-    // BIFROST_REGALLOC_CHECK=1 — catches regalloc maintenance bugs).
-    verify_dirty_host_regs_();
-    // W^X: toggle the code buffer back to executable before returning.
-    // The block is fully emitted and patched; execution will read from it.
-    make_executable();
-    return fn;
+    // that target this block to call `fn` directly.
+    if (direct_call_enabled())
+        patch_pending_calls(start_pc, reinterpret_cast<const uint8_t*>(entry.fn));
+}
+void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
+    if (!staging_) { publish_block(pc, entry); return; }
+    staged_entry_ = entry;
+    staged_ = true;
+    staged_linked_ = false;
 }
 } // namespace arm64emu

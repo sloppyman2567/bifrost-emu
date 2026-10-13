@@ -225,7 +225,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 emu.fds().invalidate_device_mappings(addr, length);
                 mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve,
                     true, Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
-                if (mapped != 0) emu.invalidate_jit_range(addr, length);
+                if (mapped != 0) emu.invalidate_jit_range(addr, length, CodeInvalidation::Map);
             } else {
                 // An ordinary hint never replaces live memory. ART probes
                 // the low address space for its compressed-reference heap;
@@ -271,7 +271,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     resolve_host_fd(emu, static_cast<int>(a4)), a5, prot, flags & 1);
                 if (error) {
                     mem_.untrack_allocation(mapped, length);
-                    emu.invalidate_jit_range(mapped, length);
+                    emu.invalidate_jit_range(mapped, length, CodeInvalidation::Unmap);
                     ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
                     return 0;
                 }
@@ -280,7 +280,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             if (!mem_.mprotect_guest(mapped, length, static_cast<uint8_t>(prot))) {
                 mem_.untrack_allocation(mapped, length);
-                emu.invalidate_jit_range(mapped, length);
+                emu.invalidate_jit_range(mapped, length, CodeInvalidation::Unmap);
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
@@ -320,7 +320,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             mem_.untrack_allocation(a0, a1);
             // Unmapped bytes are gone — drop JIT translations of the range
             // so a later reuse of these addresses can't run stale code.
-            emu.invalidate_jit_range(a0, a1);
+            emu.invalidate_jit_range(a0, a1, CodeInvalidation::Unmap);
             ret_host(0);
             return 0;
         }
@@ -336,7 +336,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
                 return 0;
             }
-            if (a1) emu.invalidate_jit_range(a0, a1);
+            if (a1) emu.invalidate_jit_range(a0, a1, CodeInvalidation::Protect);
             ret_host(0);
             return 0;
         }
@@ -413,8 +413,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // (zero, or userfaultfd-missing). Used by ART's CMC GC.
                 const int64_t moved = mem_.mremap_dontunmap(old_addr, old_len, fixed ? a4 : 0);
                 if (moved > 0) {
-                    emu.invalidate_jit_range(old_addr, old_len);
-                    emu.invalidate_jit_range(static_cast<uint64_t>(moved), old_len);
+                    emu.invalidate_jit_range(old_addr, old_len, CodeInvalidation::Remap);
+                    emu.invalidate_jit_range(static_cast<uint64_t>(moved), old_len, CodeInvalidation::Remap);
                 }
                 ret_host(static_cast<uint64_t>(moved));
                 return 0;
@@ -427,8 +427,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             // A move leaves stale bytes at the old range and fresh copies
             // at the new one — invalidate both so neither runs stale code.
-            emu.invalidate_jit_range(old_addr, old_size);
-            if (result != old_addr) emu.invalidate_jit_range(result, new_size);
+            emu.invalidate_jit_range(old_addr, old_size, CodeInvalidation::Remap);
+            if (result != old_addr) emu.invalidate_jit_range(result, new_size, CodeInvalidation::Remap);
             if (dbg().trace_mmap) {
                 fprintf(stderr, "[mremap(0x%llx, %lu → %lu) → 0x%llx]\n",
                         (unsigned long long)old_addr,
@@ -469,10 +469,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // see Memory::madvise_remove. Other advices stay no-op.
             if ((int64_t)a2 == 4 /* MADV_DONTNEED */) {
                 mem_.madvise_dontneed(a0, a1);
-                emu.invalidate_jit_range(a0, a1);
+                emu.invalidate_jit_range(a0, a1, CodeInvalidation::Discard);
             } else if ((int64_t)a2 == 9 /* MADV_REMOVE */) {
                 const int error = mem_.madvise_remove(a0, madvise_len);
-                emu.invalidate_jit_range(a0, madvise_len);
+                emu.invalidate_jit_range(a0, madvise_len, CodeInvalidation::Discard);
                 ret_host(static_cast<uint64_t>(-static_cast<int64_t>(error)));
                 return 0;
             }
@@ -531,7 +531,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
             } else if (new_brk < brk_) {
                 mem_.untrack_allocation(new_brk, brk_ - new_brk);
-                emu.invalidate_jit_range(new_brk, brk_ - new_brk);
+                emu.invalidate_jit_range(new_brk, brk_ - new_brk, CodeInvalidation::Unmap);
             }
             brk_ = new_brk;
             ret_host(brk_);

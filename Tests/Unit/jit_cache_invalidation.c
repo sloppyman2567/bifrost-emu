@@ -60,6 +60,38 @@ static int data_mapping_churn(void) {
  if(munmap(data,4096) || munmap(functions,length))return 6;
  puts("jit_cache_invalidation: ALL PASS");return 0;
 }
+// Single-threaded: a caller on page 0 BLs a callee on page 1, so the JIT
+// patches a direct call into the callee's translation. Rewriting only the
+// callee (cache maintenance by line, or mprotect without maintenance) must
+// reach the surviving caller; unchanged code and neighbours keep working.
+static int retained_callers(void) {
+ uint32_t *page=mmap(NULL,8192,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+ if(page==MAP_FAILED)return 2;
+ // same_line shares the callee's 64-byte cache line; neighbour does not.
+ uint32_t *caller=page,*callee=page+1024,*same_line=callee+2,*neighbour=page+1024+16;
+ caller[0]=0xa9bf7bfd;                     // stp x29,x30,[sp,#-16]!
+ caller[1]=0x94000000|(uint32_t)(callee-(caller+1)); // bl callee
+ caller[2]=0xa8c17bfd;                     // ldp x29,x30,[sp],#16
+ caller[3]=0xd65f03c0;                     // ret
+ callee[0]=0xd2800020;callee[1]=0xd65f03c0; // mov x0,#1; ret
+ neighbour[0]=0xd2800120;neighbour[1]=0xd65f03c0; // mov x0,#9; ret
+ same_line[0]=0xd28000a0;same_line[1]=0xd65f03c0; // mov x0,#5; ret
+ __builtin___clear_cache((char*)page,(char*)page+8192);
+ uint64_t (*call)(void)=(void*)caller,(*near)(void)=(void*)neighbour,(*line)(void)=(void*)same_line;
+ for(int i=0;i<1000;i++) if(call()!=1 || near()!=9 || line()!=5)return 3;
+ callee[0]=0xd2800040;                     // mov x0,#2
+ __builtin___clear_cache((char*)callee,(char*)(callee+2));
+ for(int i=0;i<1000;i++) if(call()!=2)return 4;
+ if(near()!=9 || line()!=5)return 5;
+ if(mprotect(page+1024,4096,PROT_READ|PROT_WRITE))return 6;
+ callee[0]=0xd2800060;                     // mov x0,#3, published by mprotect
+ if(mprotect(page+1024,4096,PROT_READ|PROT_EXEC))return 6;
+ for(int i=0;i<1000;i++) if(call()!=3)return 7;
+ if(mprotect(page,4096,PROT_READ|PROT_EXEC))return 6; // unchanged bytes
+ for(int i=0;i<1000;i++) if(call()!=3 || near()!=9)return 8;
+ if(munmap(page,8192))return 6;
+ puts("jit_cache_invalidation: ALL PASS");return 0;
+}
 static void *worker(void *arg) {
  (void)arg;
  uint64_t (*fn)(void)=(void*)code;
@@ -79,6 +111,7 @@ static void *worker(void *arg) {
 }
 int main(int argc, char **argv) {
  if(argc>1 && strcmp(argv[1],"churn")==0)return data_mapping_churn();
+ if(argc>1 && strcmp(argv[1],"retain")==0)return retained_callers();
  code=mmap(NULL,4096,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
  if(code==MAP_FAILED)return 2;
  code[0]=0xd2800020;code[1]=0xd65f03c0;

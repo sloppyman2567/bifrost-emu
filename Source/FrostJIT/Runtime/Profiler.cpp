@@ -160,7 +160,7 @@ void FrostJIT::flush_cache() {
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     blocks_.clear();
     tier2_block_limits_.clear();
-    code_pages_.clear();
+    code_index_.clear();
     back_refs_.clear();
     invalidate_dispatch_cache();
     tls_hot_pc_counts_.clear();  // clear hotness tracker (thread-local)

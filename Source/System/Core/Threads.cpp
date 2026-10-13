@@ -38,7 +38,7 @@ namespace arm64emu {
 // so holding threads_mu_ across invalidate_range risks lock-order issues
 // with paths that take threads_mu_ while holding a blocks lock (none
 // today — this ordering keeps it that way).
-void Emulator::invalidate_jit_range(uint64_t addr, uint64_t size) {
+void Emulator::invalidate_jit_range(uint64_t addr, uint64_t size, CodeInvalidation reason) {
     std::vector<std::shared_ptr<GuestThread>> per_thread;
     FrostJIT* main_jit = nullptr;
     {
@@ -48,8 +48,8 @@ void Emulator::invalidate_jit_range(uint64_t addr, uint64_t size) {
             if (gt && gt->jit) per_thread.push_back(gt);
         }
     }
-    if (main_jit) main_jit->invalidate_range(addr, size);
-    for (auto& gt : per_thread) gt->jit->invalidate_range(addr, size);
+    if (main_jit) main_jit->invalidate_range(addr, size, reason);
+    for (auto& gt : per_thread) gt->jit->invalidate_range(addr, size, reason);
 }
 void Emulator::invalidate_jit_all() {
     std::vector<std::shared_ptr<GuestThread>> per_thread;

@@ -214,6 +214,7 @@ void Emulator::print_jit_stats() {
                 static_cast<unsigned long long>(bp.interp_only.load()));
     }
     dump_prof_snapshot();
+    jit_->dump_compile_stats();
     jit_->dump_code_cache_stats();
 }
 // Periodic (or exit-time) SIGPROF bucket snapshot. Shared by print_jit_stats
@@ -373,6 +374,7 @@ void Emulator::dump_periodic_stats(double dt) {
     // dump, so the jit/dispatch/translate/interp split was unobservable
     // without a clean exit. Inert unless BIFROST_PROF=1.
     dump_prof_snapshot();
+    jit_->dump_compile_stats();
     jit_->dump_code_cache_stats();
     // Syscall histogram (attributes the SIGPROF "other" bucket). Always
     // counted; printed whenever this periodic reporter runs.

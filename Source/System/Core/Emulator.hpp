@@ -19,6 +19,7 @@
 #include "System/Graphics/Display/Graphics.hpp"
 #include "System/Audio/Audio.hpp"
 #include "System/VFS/VFS.hpp"
+#include "FrostJIT/Runtime/CodeInvalidation.hpp"
 // Bring Yggdrasil and FdTable into the arm64emu namespace so existing
 // callers (Emulator::vfs(), Emulator::fds(), syscall handlers) can refer
 // to them unqualified. The yggdrasil:: prefix is still required in the
@@ -247,9 +248,10 @@ public:
     // on the main JIT and every per-thread JIT. Collects JIT pointers
     // under threads_mu_ first, then invalidates without holding it (each
     // FrostJIT takes its own blocks_mutex_). No-op when the JIT is off.
-    // Defined in Source/System/Core/Threads.cpp. Called for IC cache maintenance
-    // (interp MSR_SYS CRn==7), munmap, and MAP_FIXED-replace mmap.
-    void invalidate_jit_range(uint64_t addr, uint64_t size);
+    // Defined in Source/System/Core/Threads.cpp. The reason selects whether
+    // translations with unchanged executable bytes survive (cache
+    // maintenance, mprotect) or every overlap is retired (mapping changes).
+    void invalidate_jit_range(uint64_t addr, uint64_t size, CodeInvalidation reason);
     void invalidate_jit_all();
     // Defined in Source/FrostJIT/Runtime/EmulatorBridge.cpp so the FrostJIT definition is visible.
     void jit_step(CPU& cpu);

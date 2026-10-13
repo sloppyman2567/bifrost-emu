@@ -1,5 +1,26 @@
 # Tests
 
+## Selective invalidation and shared MT compiles (2026-10-13)
+
+`Scripts/Testing/test_jit_cache.sh` adds `jit_cache_invalidation retain` in
+default and `BIFROST_NO_CHAIN_SKIP=1` modes: a caller on one page BLs a callee
+on the next; the callee is rewritten by a line publish, then by mprotect
+without cache maintenance, and an unchanged page is re-protected. Results and
+`[JIT] invalidate` counters must show rewritten code retired and unchanged
+same-line/same-page code kept. The pre-change binary fails the direct-call
+mode with exit 4 (stale callee); the default mode passed before too, because
+chain-skip disables native `BL_CALL`.
+
+On the final binary: strict JIT suite 326/326, `--no-jit --strict` 317/317
+with nine JIT-only skips, `make verify` (87 differential fixtures, seven
+threaded oracles), `make generated-check`, the headless build, `test_jit_mt`,
+`test_jit_mt_publication` and the Tier-2 discovery/feedback/measure scripts
+pass. CoreMark (110,000 iterations, CRC 0x33ff) executed identical user-space
+instruction counts (77.70 G) with overlapping cycle counts; eight interleaved
+wall-clock pairs on a loaded desktop varied by about 2%. The ART framework
+probe passed 5/5 per binary at about 3.05 s. Not covered: gameplay stutter,
+ART JIT publication under load and Tier-2 enabled in Android games.
+
 ## Provider startup and Activity API reports (2026-10-13)
 
 `PackageTests.test_managed_launcher_persists_data_and_finishes_activity` now

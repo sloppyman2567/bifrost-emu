@@ -37,6 +37,7 @@
 #include "Interpreter/Decoder/Decoder.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/Backend/CpuFeatures.hpp"
+#include "FrostJIT/Runtime/CodeInvalidation.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -47,6 +48,7 @@
 #include <shared_mutex>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 namespace arm64emu {
@@ -251,6 +253,16 @@ public:
     std::atomic<uint64_t> tier2_profit_rejections{0}, tier2_profile_retries{0};
     std::atomic<uint64_t> tier2_measured_pairs{0}, tier2_measured_keeps{0}, tier2_measured_rejections{0};
     std::atomic<uint64_t> tier2_phase_retirements{0}, tier2_compile_ns{0}, tier2_code_bytes{0};
+    // Tier-1 compile cost and churn (BIFROST_STATS_PERIOD). The max is an
+    // interval value that the periodic reporter resets. Lock waits count
+    // only contended table/compiler lock acquisitions on dispatch paths.
+    std::atomic<uint64_t> tier1_compile_ns{0}, tier1_compile_max_ns{0}, tier1_recompiles{0};
+    std::atomic<uint64_t> tier1_shared_compiles{0}, tier1_compile_retries{0};
+    std::atomic<uint64_t> table_lock_wait_ns{0};
+    struct InvalidationStats {
+        std::atomic<uint64_t> calls{0}, retired{0}, kept{0};
+    };
+    InvalidationStats invalidation_stats[static_cast<size_t>(CodeInvalidation::Count)];
 
     // Block-end reason profile (BIFROST_BLOCK_PROF=1): why translated
     // blocks stop early. avg instructions/block is the JIT's #1 dispatch
@@ -592,6 +604,8 @@ public:
     std::atomic<uint64_t> code_cache_overflows{0};
     std::atomic<uint64_t> code_cache_budget_fallbacks{0};
     void dump_code_cache_stats();
+    // Interval Tier-1 compile time/stalls and invalidations by reason.
+    void dump_compile_stats();
     // ── SMC / mapping invalidation ──────────────────────────────────
     // Erase every cached block whose guest range [pc, pc+instr_count*4)
     // overlaps [addr, addr+size), and unpatch any predecessor chain slot
@@ -603,13 +617,19 @@ public:
     // caches. A generation change revokes other threads' TLS entries at
     // their next dispatch; already executing code remains allocated.
     // Guests must synchronize SMC with IC maintenance and barriers.
-    // Takes blocks_mutex_ exclusive. Called for IC cache maintenance
-    // (interp MSR_SYS CRn==7), munmap, and MAP_FIXED-replace mmap.
+    // Ranges with no indexed code page return under the shared lock;
+    // otherwise takes blocks_mutex_ exclusive. Called for DC/IC cache
+    // maintenance (interp MSR_SYS CRn==7) and guest mapping changes.
     // Raw guest stores without IC maintenance are NOT hooked (the JIT
     // fast path bypasses Memory::write) — on real ARM their visibility
     // is UNPREDICTABLE without IC+ISB, so stale execution there matches
     // the architecture instead of diverging from it.
-    void invalidate_range(uint64_t addr, uint64_t size);
+    // CacheMaintenance overlaps exact lines; other reasons cover whole pages.
+    // The page index only finds candidates. CacheMaintenance/Protect keep
+    // blocks whose recorded words still match executable guest memory. The
+    // default retires every overlap.
+    void invalidate_range(uint64_t addr, uint64_t size,
+                          CodeInvalidation reason = CodeInvalidation::Unmap);
     // Erase the whole block cache (IC IALLU, Xt==XZR form). Same
     // slot-unpatch/TLS-drop discipline as invalidate_range, applied to
     // every block. Rare — full O(N) scan.
@@ -957,6 +977,13 @@ private:
         // caller). invalidate_range checks these too — an SMC on an
         // inlined leaf must drop its inliner.
         std::vector<std::pair<uint64_t, int>> inlined_ranges_;
+        // The instruction words this translation fetched, as a span of
+        // code_words_. Recorded only for contiguous Tier-1 blocks (no
+        // inlined leaf, no region). Cache maintenance and mprotect keep a
+        // block whose words still match and remain executable; a zero
+        // count always retires it.
+        uint32_t code_words_off = 0;
+        uint32_t code_words_count = 0;
     };
     struct Tier2Trial {
         Tier2RegionMonitor* monitor = nullptr;
@@ -984,13 +1011,16 @@ private:
     };
     std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;
     std::unordered_map<uint64_t, BlockEntry> blocks_;
-    // Conservative guest page -> block PC index, protected by blocks_mutex_.
-    // A block is listed on every page of its own and inlined/Tier-2 ranges.
-    // Lists may hold retired or non-overlapping PCs; range invalidation checks
-    // each candidate exactly and prunes absent ones from the pages it visits.
-    // Whole-cache clears reset it.
-    std::map<uint64_t, std::vector<uint64_t>> code_pages_;
-    void remember_code_pages(uint64_t pc, const BlockEntry& entry);
+    // Conservative 256-byte guest granule -> block PC index, protected by
+    // blocks_mutex_. A block is listed on every granule of its own and
+    // inlined/Tier-2 ranges. Lists may hold retired or non-overlapping PCs;
+    // range invalidation checks each candidate exactly and prunes absent ones
+    // from the granules it visits. A granule smaller than a page keeps a
+    // cache-line publish from scanning every live block on its page. Whole-
+    // cache clears reset it.
+    static constexpr uint64_t CODE_INDEX_GRANULE = 256;
+    std::map<uint64_t, std::vector<uint64_t>> code_index_;
+    void remember_code_granules(uint64_t pc, const BlockEntry& entry);
     void publish_block(uint64_t pc, const BlockEntry& entry);
     void write_perf_map(uint64_t pc, const BlockEntry& entry);  // BIFROST_PERF_MAP
     // Back-reference index: maps target_pc → list of source_pcs whose
@@ -1008,6 +1038,48 @@ private:
     // blocks_mutex_). Grows only for BL targets not yet translated at
     // caller-codegen time.
     std::unordered_map<uint64_t, std::vector<size_t>> pending_call_sites_;
+    // Every ST direct-BL call slot per target, with its slow-path offset.
+    // Retiring a target points its slots back at the slow path and queues
+    // them in pending_call_sites_, so callers that survive an invalidation
+    // never call a stale translation.
+    std::unordered_map<uint64_t, std::vector<std::pair<size_t, size_t>>> direct_call_sites_;
+    void unpatch_direct_calls(uint64_t target_pc);
+    // Instruction words recorded per translation (BlockEntry::code_words_off).
+    // Append-only like code_buf_. The compiler writes and invalidation reads
+    // it under the compiler lock; block_words_ collects the current compile.
+    std::vector<uint32_t> code_words_;
+    std::vector<uint32_t> block_words_;
+    bool block_code_unchanged(const BlockEntry& entry, uint64_t pc) const;
+    void attach_code_words(BlockEntry& entry, bool contiguous);
+    // One past the highest recorded call slot; rewind_codegen purges records
+    // in a discarded tail only when this lies beyond the rewind point.
+    size_t call_site_end_ = 0;
+    // Retired Tier-1 PCs, so a later publication counts as a recompile.
+    std::unordered_set<uint64_t> retired_pcs_;
+    // MT Tier-1 compiles run under the shared table lock, serialized by
+    // compile_mutex_, and publish under the exclusive lock. Invalidations
+    // in that window are logged and checked before publication.
+    std::mutex compile_mutex_;
+    std::atomic<bool> shared_compile_active_{false};
+    std::mutex compile_invalidations_mu_;
+    std::vector<std::pair<uint64_t, uint64_t>> compile_invalidations_;
+    bool compile_invalidations_overflow_ = false;
+    void log_invalidation_for_compiles(uint64_t lo, uint64_t hi);
+    // Staged compilation: translate_block records its publication instead
+    // of applying it. staged_linked_ selects publish_translation (native
+    // code) over a plain publish_block (interpreter decisions).
+    bool staging_ = false, staged_ = false, staged_linked_ = false;
+    BlockEntry staged_entry_;
+    void publish_translation(uint64_t start_pc, const BlockEntry& entry);
+    void publish_or_stage(uint64_t pc, const BlockEntry& entry);
+    bool staged_entry_invalidated(uint64_t pc);
+    // Finds or compiles pc and copies its published entry. Returns false when
+    // translation produced no entry. Never returns holding blocks_mutex_.
+    // MT compiles run under the shared lock; ST keeps the exclusive path.
+    bool translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out);
+    // Contended acquisitions add their wait to table_lock_wait_ns.
+    void lock_table_shared();
+    void lock_table();
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
     bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);

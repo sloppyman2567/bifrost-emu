@@ -13,6 +13,24 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Fewer JIT recompiles and compile stalls (2026-10-13)
+
+- A 64-byte `DC`/`IC` publish (one per line from ART's `__clear_cache`) now
+  drops only translations overlapping that line, not every block on its page.
+  Cache maintenance and `mprotect` keep a translation whose recorded
+  instruction words are unchanged and still executable. Mapping replacement,
+  unmap, `mremap` and discard still retire every overlap.
+- In multithreaded guests, Tier-1 compiles hold the block table only shared;
+  other CPUs keep finding and running published code. Invalidations that race
+  a compile are logged, and the block is retranslated before publication.
+- Single-thread direct `BL` calls fall back to their slow path when the callee
+  is retired. A caller that survived its callee's rewrite had called the
+  stale translation (only reachable with `BIFROST_NO_CHAIN_SKIP=1`).
+- `BIFROST_STATS_PERIOD` and `--verbose` report Tier-1 compile time,
+  per-block maximum, recompiles, contended lock wait and invalidations by
+  reason (calls/retired/kept). A cold ART startup compiled about 40,000 blocks
+  in 0.48 s of its first second; gameplay stutter has not been measured.
+
 ### Covered Activities stop (2026-10-13)
 
 - An Activity started over another one that is opaque (theme neither

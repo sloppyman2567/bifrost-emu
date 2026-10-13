@@ -323,7 +323,7 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
                     // full flush; otherwise invalidate one 64-byte line
                     // (CTR_EL0 IminLine=4 → 64-byte lines).
                     if (rt == 31) invalidate_jit_all();
-                    else invalidate_jit_range(v & ~63ULL, 64);
+                    else invalidate_jit_range(v & ~63ULL, 64, CodeInvalidation::CacheMaintenance);
                     return;
                 }
                 if (crn == 4 && crm == 2 && op2 == 0) {
@@ -353,7 +353,7 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             // same invalidation as the EL0 forms above. rt==31 → full.
             if (crn == 7) {
                 if (rt == 31) invalidate_jit_all();
-                else invalidate_jit_range(v & ~63ULL, 64);
+                else invalidate_jit_range(v & ~63ULL, 64, CodeInvalidation::CacheMaintenance);
             }
             // EL1+ sysregs: NOP in user mode.
             return;

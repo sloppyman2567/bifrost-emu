@@ -1201,16 +1201,64 @@ checks a three-thread guest with a forced 1 MiB budget and a growth run,
 including repeated interpreter-only calls, exact results, one bounded
 overflow and no repeated translation of cached fallback targets.
 
-Range invalidation queries an ordered, conservative index from guest page to
-the PCs of published blocks whose own or inlined/Tier-2 dependency ranges touch
-that page. Data-only ranges with no indexed page return immediately; code-page
-hits check only the listed blocks with the exact overlap test, instead of the
-whole block table. Publication and the query share the compiler lock. Lists may
-hold retired PCs; a query prunes PCs no longer in the table from the pages it
-visits, and whole-cache clears reset the index. Victims and retirement are
-unchanged: the index does not suppress required code invalidation or reclaim
-live code. `BIFROST_NO_CODE_PAGE_FILTER=1` restores the full scan for A/B
-measurement.
+Range invalidation queries an ordered, conservative index from 256-byte guest
+granules to the PCs of published blocks whose own or inlined/Tier-2 dependency
+ranges touch that granule. Data-only ranges with no indexed granule return
+under the shared lock, without blocking table readers; code hits take the
+exclusive lock and check only the listed blocks, instead of the whole block
+table. Lists may hold retired PCs; a query prunes PCs no longer in the table
+from the granules it visits, and whole-cache clears reset the index. The index
+does not reclaim live code. The granule is smaller than a page because
+retained neighbours would otherwise make every line publish scan all live
+blocks on its page. `BIFROST_NO_CODE_PAGE_FILTER=1` restores the full scan for
+A/B measurement.
+
+Every `Emulator::invalidate_jit_range` caller names a `CodeInvalidation`
+reason (`Runtime/CodeInvalidation.hpp`). Cache maintenance by VA (`DC`/`IC`,
+one 64-byte line per instruction) overlaps exact lines; mapping, protection
+and discard reasons cover whole pages, as the kernel applies them. Bifrost
+reports `CTR_EL0.DIC=1`, so compiler-rt's `__clear_cache` (used by ART) issues
+only `DC CVAU` per line; previously each line retired every block on its
+page, including hot translations next to newly published methods.
+
+A Tier-1 translation depends only on the instruction words it fetched.
+`translate_block` records them in an append-only `code_words_` array (four
+bytes per guest instruction; leaf-inlined blocks and Tier-2 regions record
+none). Cache maintenance and `mprotect`/`pkey_mprotect` keep a block whose
+pages are still mapped executable, not userfaultfd-missing, and whose words
+compare equal; anything else retires it. Unmap, `MAP_FIXED` replacement,
+`mremap` and discard always retire. The check reads page flags and the window
+directly, because `check_access` would clear an unregistered missing-page
+flag. Unit-test calls without a reason keep the retire-everything default.
+
+Single-thread direct `BL` slots record their slow-path offset per target.
+Retiring a target points its slots back at the slow path and queues them for
+re-patching. Before this, a caller that survived its callee's invalidation
+called the stale translation; chain-skip (the default) disables native
+`BL_CALL`, so only `BIFROST_NO_CHAIN_SKIP=1` exposed it. `rewind_codegen`
+drops pending/direct call records in a discarded tail.
+
+In multithreaded mode, Tier-1 compiles no longer hold `blocks_mutex_`
+exclusively. `translate_entry` serializes compilers with `compile_mutex_`,
+compiles under the shared lock while other CPUs keep looking up and running
+published code, and takes the exclusive lock only to publish. In staging
+mode `translate_block` records its publication (`publish_or_stage`,
+`publish_translation`) instead of applying it. Codegen only reads `blocks_`;
+the MT edge and counter metadata it appends are read by exclusive-lock
+holders, which cannot run during the compile. An invalidation that returns
+early (no indexed page yet) can run concurrently, so `invalidate_range` and
+`invalidate_all` log their range while a shared compile is active; sequentially
+consistent fences on both sides guarantee that either the compile observes
+the change or the range is logged. A logged overlap (or a full flush) discards
+the staged result, revokes only the edges that compile created, and
+retranslates under the exclusive lock. ST execution keeps the exclusive
+compile: it patches published instructions and may toggle W^X.
+
+`BIFROST_STATS_PERIOD` and `--verbose` print `[JIT] compile:` (Tier-1 blocks,
+recompiles of previously retired PCs, total/average/maximum compile time,
+shared compiles, retries and contended table/compiler lock wait) and
+`[JIT] invalidate (calls/retired/kept):` per reason. Recompiles include the
+one-time purge when a second CPU starts.
 
 `jit_cache_invalidation.elf churn` warms 32,768 executable functions, times
 4,096 data-page protection changes, then rewrites one function 4,096 times with
@@ -1221,6 +1269,17 @@ and the code-page phase at 1.11 s before the per-page lists and 0.057 s after.
 These are invalidation microbenchmarks, not application speedups. A 30-second
 `perf` capture of SpongeBob loading under ART had attributed 54% of sampled user
 CPU to the old whole-table scan, reached through per-line `IC IVAU`/`DC CVAU`.
+
+With line-exact invalidation, retained neighbours and the 256-byte index,
+three alternating runs measured the code-page phase at 0.064-0.068 s against
+0.062-0.068 s for the previous binary; a page-granular index had measured
+0.079-0.082 s. A cold ART framework startup (`test_android_framework.py --mode
+jit`, five interleaved runs per binary) was unchanged at about 3.05 s. Its first
+second compiled 39,975 Tier-1 blocks in 484 ms (12 us average, 1.1 ms maximum)
+and kept 368 blocks across `mprotect`; the next second ran 4,182 compiles under
+the shared lock with no retries and 35 ms of contended waiting. Its 3,063
+recompiles came from the purge when the second CPU starts. The probe issued no
+cache maintenance, so it does not measure ART JIT publication during gameplay.
 
 ## Vector unary FP decode distinction
 

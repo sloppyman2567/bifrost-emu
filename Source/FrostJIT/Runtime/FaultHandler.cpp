@@ -105,6 +105,20 @@ void FrostJIT::rewind_codegen(size_t offset) {
     fault_site_count_.store(n, std::memory_order_release);
     // Only an unpublished tail is reused. Readers with an older count can
     // see old/new atomic tail entries, all above every executable prefix site.
+    // Direct-call records in the tail would later rewrite reused bytes.
+    if (call_site_end_ > offset) {
+        auto purge = [offset](auto& sites, auto slot_of) {
+            for (auto it = sites.begin(); it != sites.end();) {
+                auto& v = it->second;
+                v.erase(std::remove_if(v.begin(), v.end(),
+                    [&](const auto& s) { return slot_of(s) >= offset; }), v.end());
+                it = v.empty() ? sites.erase(it) : std::next(it);
+            }
+        };
+        purge(pending_call_sites_, [](size_t s) { return s; });
+        purge(direct_call_sites_, [](const std::pair<size_t, size_t>& s) { return s.first; });
+        call_site_end_ = offset;
+    }
     code_buf_used_ = offset;
 }
 

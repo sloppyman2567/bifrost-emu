@@ -20,6 +20,9 @@
   PID, including after execve.
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
+- JIT invalidation calls name their `CodeInvalidation` reason. Only cache
+  maintenance and mprotect may keep translations with unchanged bytes;
+  mapping replacement, unmap, remap and discard always retire them.
 - Memory operations retain alias/file identity and userfaultfd registration;
   TLS allocation stays consistent with the loader's layout. Follow those scoped
   guides when changing their syscall entry points.

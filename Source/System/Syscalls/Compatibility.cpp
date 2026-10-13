@@ -929,7 +929,7 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
-            if (a1) emu.invalidate_jit_range(a0, a1);
+            if (a1) emu.invalidate_jit_range(a0, a1, CodeInvalidation::Protect);
             ret_host(0); return 0;
         }
         case 289: { // pkey_alloc(flags, access_rights)

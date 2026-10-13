@@ -59,3 +59,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
   locking, invalidation generations and target revocation for Tier-1/Tier-2.
+- MT Tier-1 compiles run under the shared table lock (`translate_entry`).
+  Codegen may read `blocks_` but must not change state that shared-lock
+  readers use; route publication through `publish_or_stage` /
+  `publish_translation`. Invalidation paths that skip the exclusive lock must
+  log their range for in-flight compiles.
+- Cache maintenance and mprotect keep a Tier-1 block whose recorded
+  instruction words (`code_words_`) are unchanged. A translation must depend
+  on no other guest bytes: a new compile-time guest read must be recorded or
+  must leave `code_words_count` zero. Callers pass a `CodeInvalidation` reason.

@@ -992,6 +992,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // when already translated, else record for later patching
                 // (end of the target's translate_block).
                 patch_call_rel32(call_slot, code_buf_ + slow_off);
+                direct_call_sites_[bp.target].emplace_back(call_slot, slow_off);
+                call_site_end_ = std::max(call_site_end_, call_slot + 1);
                 uint64_t (*tfn)(CPU*, Emulator*) = lookup_only_locked(bp.target);
                 if (tfn) {
                     patch_call_rel32(call_slot, reinterpret_cast<const uint8_t*>(tfn));

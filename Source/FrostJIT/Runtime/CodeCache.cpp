@@ -30,8 +30,10 @@
 #include <cerrno>
 #include <cstdio>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <string>
 namespace arm64emu {
 std::atomic<uint64_t> FrostJIT::next_cache_generation_{1};
 thread_local const FrostJIT* FrostJIT::tls_cache_owner_ = nullptr;
@@ -54,16 +56,120 @@ uint64_t (*FrostJIT::lookup_only_locked(uint64_t pc))(CPU*, Emulator*) {
     return it == blocks_.end() ? nullptr : it->second.fn;
 }
 uint64_t (*FrostJIT::translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
-    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
-    auto it = blocks_.find(pc);
-    if (it != blocks_.end()) return it->second.fn;
-    return translate_block(emu, pc);
+    BlockEntry entry;
+    return translate_entry(emu, pc, entry) ? entry.fn : nullptr;
+}
+static uint64_t elapsed_ns(std::chrono::steady_clock::time_point start) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - start).count());
+}
+void FrostJIT::lock_table_shared() {
+    if (blocks_mutex_.try_lock_shared()) return;
+    const auto start = std::chrono::steady_clock::now();
+    blocks_mutex_.lock_shared();
+    table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+}
+void FrostJIT::lock_table() {
+    if (blocks_mutex_.try_lock()) return;
+    const auto start = std::chrono::steady_clock::now();
+    blocks_mutex_.lock();
+    table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+}
+// Caller holds blocks_mutex_ exclusively after a shared-lock compile.
+bool FrostJIT::staged_entry_invalidated(uint64_t pc) {
+    std::lock_guard<std::mutex> g(compile_invalidations_mu_);
+    if (compile_invalidations_overflow_) return true;
+    auto touched = [&](uint64_t b, uint64_t e) {
+        for (const auto& [lo, hi] : compile_invalidations_)
+            if (b < hi && e > lo) return true;
+        return false;
+    };
+    if (touched(pc, pc + static_cast<uint64_t>(staged_entry_.instr_count) * 4)) return true;
+    for (const auto& r : staged_entry_.inlined_ranges_)
+        if (touched(r.first, r.first + static_cast<uint64_t>(r.second) * 4)) return true;
+    return false;
+}
+bool FrostJIT::translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
+    auto copy_locked = [&] {
+        auto it = blocks_.find(pc);
+        if (it == blocks_.end()) return false;
+        out = it->second;
+        return true;
+    };
+    if (!mt_active()) {
+        // ST code patches published instructions and toggles W^X; keep the
+        // whole compile under the exclusive lock.
+        lock_table();
+        if (!copy_locked()) translate_block(emu, pc);
+        const bool found = copy_locked();
+        blocks_mutex_.unlock();
+        return found;
+    }
+    // MT: one compiler at a time, while other CPUs keep reading the table.
+    // Codegen only reads blocks_; the edge/counter metadata it appends is
+    // read by exclusive-lock holders, which cannot run until it finishes.
+    std::unique_lock<std::mutex> compiling(compile_mutex_, std::defer_lock);
+    if (!compiling.try_lock()) {
+        const auto start = std::chrono::steady_clock::now();
+        compiling.lock();
+        table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+    }
+    lock_table_shared();
+    if (copy_locked()) { blocks_mutex_.unlock_shared(); return true; }
+    {
+        std::lock_guard<std::mutex> g(compile_invalidations_mu_);
+        compile_invalidations_.clear();
+        compile_invalidations_overflow_ = false;
+    }
+    shared_compile_active_.store(true, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);  // pairs with log_invalidation_for_compiles
+    const size_t edge_mark = mt_edges_.size();
+    staging_ = true;
+    staged_ = false;
+    translate_block(emu, pc);
+    staging_ = false;
+    const size_t edge_end = mt_edges_.size();
+    blocks_mutex_.unlock_shared();
+    tier1_shared_compiles.fetch_add(1, std::memory_order_relaxed);
+    lock_table();
+    shared_compile_active_.store(false, std::memory_order_relaxed);
+    const bool raced = blocks_.count(pc) != 0;
+    const bool stale = staged_ && staged_entry_invalidated(pc);
+    if (staged_ && !raced && !stale) {
+        if (staged_linked_) publish_translation(pc, staged_entry_);
+        else publish_block(pc, staged_entry_);
+    } else if (staged_) {
+        // Never published, so nothing can reach this code except its own
+        // edges; revoke them. Another translation's edges stay intact.
+        auto refs = mt_source_refs_.find(pc);
+        for (size_t i = edge_mark; i < edge_end; ++i) {
+            MtEdge* edge = mt_edges_[i].get();
+            edge->live = false;
+            edge->target.store(0, std::memory_order_release);
+            if (refs != mt_source_refs_.end()) {
+                auto& v = refs->second;
+                v.erase(std::remove(v.begin(), v.end(), edge), v.end());
+            }
+        }
+        // Guest code changed while compiling: translate the current bytes
+        // with the table held, which no invalidation can interleave.
+        if (stale && !raced) {
+            tier1_compile_retries.fetch_add(1, std::memory_order_relaxed);
+            translate_block(emu, pc);
+        }
+    }
+    staged_entry_ = BlockEntry{};
+    const bool found = copy_locked();
+    blocks_mutex_.unlock();
+    return found;
 }
 uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
                                            int& instr_count))(CPU*, Emulator*) {
     note_table_lookup();
     // MT promotion is driven by atomic entry counters. Read-only table hits
-    // need only a shared lock; compilation still rechecks exclusively.
+    // need only a shared lock; a miss compiles through translate_entry.
+    // The dispatch generation was synced before this lookup, so a later
+    // invalidation still revokes the thread-local entries inserted below.
     if (mt_active()) {
         std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
         const auto it = blocks_.find(pc);
@@ -75,14 +181,9 @@ uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
             return fn;
         }
     }
-    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
-    auto it = blocks_.find(pc);
-    if (it == blocks_.end()) {
-        translate_block(emu, pc);
-        it = blocks_.find(pc);
-    }
-    auto fn = it == blocks_.end() ? nullptr : it->second.fn;
-    int cnt = fn ? it->second.instr_count : 1;
+    BlockEntry entry;
+    auto fn = translate_entry(emu, pc, entry) ? entry.fn : nullptr;
+    int cnt = fn ? entry.instr_count : 1;
     // The generated entry counter owns hotness for eligible heads. Keep
     // publication in tier2_fire_region so all entries retain constituent
     // ranges, revoke dispatch caches and redirect incoming chains together.
@@ -90,6 +191,40 @@ uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
     inline_cache_insert(pc, fn, cnt);
     instr_count = cnt;
     return fn;
+}
+void FrostJIT::dump_compile_stats() {
+    // One periodic reporter thread owns these interval baselines.
+    static uint64_t last_blocks, last_ns, last_recompiles, last_shared, last_retries, last_wait;
+    static uint64_t last_inv[static_cast<size_t>(CodeInvalidation::Count)][3];
+    const uint64_t blocks = blocks_translated.load(std::memory_order_relaxed);
+    const uint64_t ns = tier1_compile_ns.load(std::memory_order_relaxed);
+    const uint64_t recompiles = tier1_recompiles.load(std::memory_order_relaxed);
+    const uint64_t shared = tier1_shared_compiles.load(std::memory_order_relaxed);
+    const uint64_t retries = tier1_compile_retries.load(std::memory_order_relaxed);
+    const uint64_t wait = table_lock_wait_ns.load(std::memory_order_relaxed);
+    const uint64_t max_ns = tier1_compile_max_ns.exchange(0, std::memory_order_relaxed);
+    const uint64_t d_blocks = blocks - last_blocks, d_ns = ns - last_ns;
+    fprintf(stderr, "[JIT] compile: blocks=%llu recompiles=%llu ms=%.2f avg_us=%.1f max_us=%.1f "
+            "shared=%llu retries=%llu lock_wait_ms=%.2f\n",
+            (unsigned long long)d_blocks, (unsigned long long)(recompiles - last_recompiles),
+            d_ns / 1e6, d_blocks ? d_ns / 1e3 / d_blocks : 0.0, max_ns / 1e3,
+            (unsigned long long)(shared - last_shared), (unsigned long long)(retries - last_retries),
+            (wait - last_wait) / 1e6);
+    last_blocks = blocks; last_ns = ns; last_recompiles = recompiles;
+    last_shared = shared; last_retries = retries; last_wait = wait;
+    std::string line;
+    for (size_t r = 0; r < static_cast<size_t>(CodeInvalidation::Count); ++r) {
+        const uint64_t now[3] = {invalidation_stats[r].calls.load(std::memory_order_relaxed),
+                                 invalidation_stats[r].retired.load(std::memory_order_relaxed),
+                                 invalidation_stats[r].kept.load(std::memory_order_relaxed)};
+        char buf[96];
+        snprintf(buf, sizeof(buf), " %s=%llu/%llu/%llu", invalidation_name(static_cast<CodeInvalidation>(r)),
+                 (unsigned long long)(now[0] - last_inv[r][0]), (unsigned long long)(now[1] - last_inv[r][1]),
+                 (unsigned long long)(now[2] - last_inv[r][2]));
+        line += buf;
+        for (int k = 0; k < 3; ++k) last_inv[r][k] = now[k];
+    }
+    fprintf(stderr, "[JIT] invalidate (calls/retired/kept):%s\n", line.c_str());
 }
 void FrostJIT::dump_code_cache_stats() {
     flush_stat_tls();
@@ -287,6 +422,22 @@ void FrostJIT::patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn)
     std::atomic_thread_fence(std::memory_order_release);
     make_executable();
 }
+// Single-thread only (MT never patches direct calls). The caller holds the
+// compiler lock with the buffer writable. Every slot that may target this
+// PC's translation returns to its slow path and waits for re-patching.
+void FrostJIT::unpatch_direct_calls(uint64_t target_pc) {
+    auto it = direct_call_sites_.find(target_pc);
+    if (it == direct_call_sites_.end()) return;
+    auto& pending = pending_call_sites_[target_pc];
+    pending.clear();
+    for (const auto& [slot, slow] : it->second) {
+        if (slot + 5 > CODE_BUF_SIZE || code_buf_[slot] != 0xE8) continue;
+        int32_t rel = static_cast<int32_t>(slow - (slot + 5));
+        memcpy(code_buf_ + slot + 1, &rel, 4);
+        pending.push_back(slot);
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+}
 void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     // Fall-through chain slot.
     if (!entry.chained && entry.chain_target_pc != 0) {
@@ -386,17 +537,17 @@ void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
     }
     back_refs_[target_pc].push_back(src_pc);
 }
-void FrostJIT::remember_code_pages(uint64_t pc, const BlockEntry& entry) {
+void FrostJIT::remember_code_granules(uint64_t pc, const BlockEntry& entry) {
     // Called under the compiler lock before publishing any public entry.
     auto remember = [&](uint64_t start, int count) {
         const uint64_t bytes = static_cast<uint64_t>(std::max(count, 1)) * 4;
         uint64_t last;
         if (__builtin_add_overflow(start, bytes - 1, &last)) last = UINT64_MAX;
-        last &= ~Memory::PAGE_MASK;
-        for (uint64_t page = start & ~Memory::PAGE_MASK;; page += Memory::PAGE_SIZE) {
-            auto& pcs = code_pages_[page];
+        last &= ~(CODE_INDEX_GRANULE - 1);
+        for (uint64_t granule = start & ~(CODE_INDEX_GRANULE - 1);; granule += CODE_INDEX_GRANULE) {
+            auto& pcs = code_index_[granule];
             if (std::find(pcs.begin(), pcs.end(), pc) == pcs.end()) pcs.push_back(pc);
-            if (page == last) break;
+            if (granule == last) break;
         }
     };
     remember(pc, entry.instr_count);
@@ -430,12 +581,57 @@ void FrostJIT::write_perf_map(uint64_t pc, const BlockEntry& entry) {
 }
 
 void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
-    remember_code_pages(pc, entry);
+    remember_code_granules(pc, entry);
     if (dbg().jit_perf_map) write_perf_map(pc, entry);
+    if (!entry.is_region && retired_pcs_.erase(pc))
+        tier1_recompiles.fetch_add(1, std::memory_order_relaxed);
     blocks_[pc] = entry;
 }
 
-void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
+// Appends the words fetched by the current compile when they are exactly
+// the block's contiguous instruction range.
+void FrostJIT::attach_code_words(BlockEntry& entry, bool contiguous) {
+    const size_t count = block_words_.size();
+    if (!contiguous || count == 0 || count != static_cast<size_t>(entry.instr_count) ||
+        code_words_.size() > UINT32_MAX - count) return;
+    entry.code_words_off = static_cast<uint32_t>(code_words_.size());
+    entry.code_words_count = static_cast<uint32_t>(count);
+    code_words_.insert(code_words_.end(), block_words_.begin(), block_words_.end());
+}
+
+// A translation depends only on its fetched instruction words. It stays
+// valid while every word matches and its pages remain mapped executable.
+// Reads page flags and the window directly: check_access would clear an
+// unregistered userfaultfd-missing flag, which invalidation must not do.
+bool FrostJIT::block_code_unchanged(const BlockEntry& entry, uint64_t pc) const {
+    const uint64_t bytes = static_cast<uint64_t>(entry.code_words_count) * 4;
+    if (!bytes || !guest_memory_ || !window_base_ || entry.is_region ||
+        !entry.inlined_ranges_.empty() ||
+        entry.code_words_count != static_cast<uint32_t>(entry.instr_count) ||
+        pc > guest_memory_->window_size() || bytes > guest_memory_->window_size() - pc)
+        return false;
+    const auto* flags = guest_memory_->direct_page_flags();
+    constexpr uint8_t need = Memory::GUEST_PAGE_MAPPED | Memory::GUEST_PROT_EXEC;
+    for (uint64_t p = pc / Memory::PAGE_SIZE; p <= (pc + bytes - 1) / Memory::PAGE_SIZE; ++p) {
+        const uint8_t f = flags[p].load(std::memory_order_acquire);
+        if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return false;
+    }
+    return std::memcmp(window_base_ + pc, code_words_.data() + entry.code_words_off, bytes) == 0;
+}
+
+// Compiles that run under the shared table lock cannot be seen by the
+// early-out below. They log every range that changes meanwhile and check it
+// before publication. The fences pair with translate_entry: either the
+// compile observes the change, or the change is logged.
+void FrostJIT::log_invalidation_for_compiles(uint64_t lo, uint64_t hi) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (!shared_compile_active_.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> g(compile_invalidations_mu_);
+    if (compile_invalidations_.size() >= 64) compile_invalidations_overflow_ = true;
+    else compile_invalidations_.emplace_back(lo, hi);
+}
+
+void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation reason) {
     if (size == 0) return;
     const uint64_t lo = addr & ~Memory::PAGE_MASK;
     uint64_t end;
@@ -446,12 +642,32 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     else
         hi &= ~Memory::PAGE_MASK;
     if (hi <= lo) { invalidate_all(); return; }
+    // Cache maintenance names exact lines. Mapping and protection changes
+    // apply to whole pages even when the guest length is not page-aligned.
+    const bool by_line = reason == CodeInvalidation::CacheMaintenance;
+    const uint64_t first = by_line ? addr : lo, last = by_line ? end : hi;
+    log_invalidation_for_compiles(first, last);
+    auto& stats = invalidation_stats[static_cast<size_t>(reason)];
+    stats.calls.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t glo = first & ~(CODE_INDEX_GRANULE - 1);
+    uint64_t ghi;
+    if (__builtin_add_overflow(last, CODE_INDEX_GRANULE - 1, &ghi)) ghi = UINT64_MAX;
+    ghi &= ~(CODE_INDEX_GRANULE - 1);
+    // Data-only ranges (most mappings, data-cache maintenance) touch no
+    // indexed granule; answer them without blocking table readers.
+    if (!dbg().no_code_page_filter) {
+        std::shared_lock<std::shared_mutex> g(blocks_mutex_);
+        auto granule = code_index_.lower_bound(glo);
+        if (granule == code_index_.end() || granule->first >= ghi) return;
+    }
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) or an inlined
-    // BL-leaf/Tier-2 dependency range overlaps [lo, hi).
+    // BL-leaf/Tier-2 dependency range overlaps [first, last). Granules only
+    // locate candidates: a 64-byte cache-line publish must neither drop nor
+    // scan unrelated translations elsewhere on its page.
     std::vector<uint64_t> victims;
     victims.reserve(4);
-    auto ranges_overlap = [&](uint64_t b, uint64_t e) { return b < hi && e > lo; };
+    auto ranges_overlap = [&](uint64_t b, uint64_t e) { return b < last && e > first; };
     auto overlaps = [&](uint64_t b, const BlockEntry& entry) {
         if (ranges_overlap(b, b + static_cast<uint64_t>(entry.instr_count) * 4)) return true;
         for (const auto& r : entry.inlined_ranges_)
@@ -464,12 +680,13 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
     } else {
         // mmap/munmap/mprotect and ART GC change data mappings much more often
         // than code mappings, and guest JITs issue IC IVAU per cache line.
-        // Visit only blocks indexed on these pages instead of the whole table.
-        // The map walk also handles enormous ranges without visiting every page.
-        auto page = code_pages_.lower_bound(lo);
-        if (page == code_pages_.end() || page->first >= hi) return;
-        for (; page != code_pages_.end() && page->first < hi;) {
-            auto& pcs = page->second;
+        // Visit only blocks indexed on these granules instead of the whole
+        // table. The map walk handles enormous ranges without visiting every
+        // granule.
+        auto granule = code_index_.lower_bound(glo);
+        if (granule == code_index_.end() || granule->first >= ghi) return;
+        for (; granule != code_index_.end() && granule->first < ghi;) {
+            auto& pcs = granule->second;
             size_t kept = 0;
             for (uint64_t pc : pcs) {
                 auto it = blocks_.find(pc);
@@ -478,12 +695,25 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
                 if (overlaps(pc, it->second)) victims.push_back(pc);
             }
             pcs.resize(kept);
-            page = pcs.empty() ? code_pages_.erase(page) : std::next(page);
+            granule = pcs.empty() ? code_index_.erase(granule) : std::next(granule);
         }
-        // A block spanning several pages in the range is listed on each.
+        // A block spanning several granules in the range is listed on each.
         std::sort(victims.begin(), victims.end());
         victims.erase(std::unique(victims.begin(), victims.end()), victims.end());
     }
+    // Cache maintenance and mprotect leave the bytes in place: a block whose
+    // words are unchanged and still executable is as valid as a retranslation.
+    if (invalidation_keeps_unchanged(reason)) {
+        size_t kept = 0;
+        for (uint64_t pc : victims) {
+            auto it = blocks_.find(pc);
+            if (it != blocks_.end() && block_code_unchanged(it->second, pc)) continue;
+            victims[kept++] = pc;
+        }
+        stats.kept.fetch_add(victims.size() - kept, std::memory_order_relaxed);
+        victims.resize(kept);
+    }
+    stats.retired.fetch_add(victims.size(), std::memory_order_relaxed);
     for (auto it = tier2_block_limits_.begin(); it != tier2_block_limits_.end();) {
         if (it->first >= lo && it->first < hi) it = tier2_block_limits_.erase(it);
         else ++it;
@@ -549,8 +779,10 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
             back_refs_.erase(bref);
         }
         // 3. Erase the victim (code bytes leak — never reused, see header).
-        // Keep pending_call_sites_ so a later retranslate re-patches
-        // still-slow-path callers to the fresh fn.
+        // Direct calls into it return to their slow path and are queued in
+        // pending_call_sites_, so a retranslation re-patches them.
+        if (!mt_active()) unpatch_direct_calls(vpc);
+        if (victim_entry != blocks_.end() && !victim_entry->second.is_region) retired_pcs_.insert(vpc);
         blocks_.erase(vpc);
         // 4. Drop this thread's fast-path entries for the victim.
         if (tls_last_block_.pc == vpc) tls_last_block_ = LastBlockCache{};
@@ -561,9 +793,10 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
 }
 void FrostJIT::invalidate_all() {
     const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
+    log_invalidation_for_compiles(0, UINT64_MAX);
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
-    code_pages_.clear();
+    code_index_.clear();
     clear_tier2_profiles();
     tier2_retrains_.clear(); // a full code epoch can reuse addresses for different loops
     tier2_block_limits_.clear();
@@ -576,6 +809,8 @@ void FrostJIT::invalidate_all() {
     mt_source_refs_.clear();
     for (auto& trial : tier2_trials_) revoke_tier2_samples_locked(*trial);
     if (blocks_.empty()) return;
+    for (const auto& kv : blocks_)
+        if (!kv.second.is_region) retired_pcs_.insert(kv.first);
     if (mt_active()) {
         for (auto& counter : mt_hot_counters_) counter->enabled.store(0, std::memory_order_release);
         blocks_.clear(); back_refs_.clear();
@@ -584,6 +819,7 @@ void FrostJIT::invalidate_all() {
         return;
     }
     make_writable();
+    for (const auto& kv : blocks_) unpatch_direct_calls(kv.first);
     for (auto& kv : blocks_) {
         BlockEntry& e = kv.second;
         if (e.chained && e.chain_patch_off + 5 <= CODE_BUF_SIZE
@@ -654,7 +890,9 @@ void FrostJIT::enter_multithreaded() {
         }
     }
     invalidate_dispatch_cache();
+    for (const auto& kv : blocks_)
+        if (!kv.second.is_region) retired_pcs_.insert(kv.first);
     blocks_.clear(); back_refs_.clear();
-    code_pages_.clear();
+    code_index_.clear();
 }
 } // namespace arm64emu
