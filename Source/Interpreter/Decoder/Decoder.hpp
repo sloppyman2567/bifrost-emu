@@ -123,6 +123,8 @@ enum class InstClass : uint16_t {
     STLXR,          // store release exclusive
     STLR,           // store release
     LDAR,           // load acquire
+    LDXP,           // load exclusive pair (LDXP/LDAXP; d.acquire = o0)
+    STXP,           // store exclusive pair (STXP/STLXP; d.acquire = o0)
     LSE_ATOMIC,     // LSE atomic (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS — sub-dispatched on atom_op)
     // SIMD/FP (subset)
     SIMD_LD1,       // vector load single structure

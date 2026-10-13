@@ -416,6 +416,7 @@ UNIT_TESTS=(
     # High-contention atomic stress test (8 threads). Validates CAS, LL/SC
     # (mutex), and LDADD atomics under game-scale contention.
     "test_atomic_stress|Tests/Unit/test_atomic_stress.elf||30|ALL PASS"
+    "test_exclusive_pair|Tests/Unit/test_exclusive_pair.elf||30|test_exclusive_pair: ALL PASS"
     # LSE inline-asm test — forces CAS/LDADD/LDSET/LDCLR/LDEOR/SWP via
     # -march=armv8.1-a+lse, testing the JIT's native lock-prefixed codegen.
     "test_lse_inline|Tests/Unit/test_lse_inline.elf||10|ALL PASS"

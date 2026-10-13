@@ -290,6 +290,7 @@ public:
     uint64_t excl_tag_addr  = 0;
     uint32_t excl_tag_size  = 0;
     uint64_t excl_value = 0;
+    uint64_t excl_value_hi = 0;  // second word of an LDXP/LDAXP X pair
     void excl_mark(uint64_t addr, uint32_t size, uint64_t value) {
         excl_tag_valid = true;
         excl_tag_addr  = addr;

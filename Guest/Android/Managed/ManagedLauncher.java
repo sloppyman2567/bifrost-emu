@@ -1271,11 +1271,14 @@ public final class ManagedLauncher {
         if (instance.getRequestedOrientation() != activity.screenOrientation)
             throw new IllegalStateException("Activity orientation differs from its manifest");
         System.out.println("APP_ACTIVITY_ATTACHED");
+        // An Activity may start another from onCreate (a splash opening the
+        // game Activity). The launch is posted to the main looper, so it runs
+        // after this Activity is created, started and resumed, as on Android.
+        if (play) activities.attach(thread, loaded, instrumentation, application, instance, token);
         instrumentation.callActivityOnCreate(instance, null);
         System.out.println("APP_ACTIVITY_CREATED");
         System.out.println("FRAMEWORK_OK");
         if (play) {
-            activities.attach(thread, loaded, instrumentation, application, instance, token);
             play(instrumentation, instance, width, height);
             return;
         }

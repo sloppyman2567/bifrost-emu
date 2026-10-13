@@ -1404,6 +1404,55 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
+            // ── Load/store exclusive pair (LDXP/LDAXP/STXP/STLXP) ──────
+            // One reservation covers both elements: 8 bytes for W pairs, 16
+            // for X pairs. Rt holds the lower address, Rt2 the higher. The
+            // store compares the whole reserved value in one host CAS, like
+            // the single-register forms; the shard lock is stronger ordering
+            // than the acquire/release (o0) variants require.
+            case InstClass::LDXP:
+            case InstClass::STXP: {
+                const bool x_pair = d.size & 1;
+                const int bytes = x_pair ? 16 : 8;
+                const uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
+                auto reg = [&](uint8_t r) { return r == 31 ? 0 : cpu.regs[r]; };
+                auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
+                std::lock_guard<std::mutex> gmon(shard.mu);
+                if (d.is_load) {
+                    uint64_t words[2] = {0, 0};
+                    mem_.read(base, words, bytes);
+                    const uint64_t first = x_pair ? words[0] : (words[0] & 0xFFFFFFFFULL);
+                    const uint64_t second = x_pair ? words[1] : (words[0] >> 32);
+                    if (d.rt != 31) cpu.regs[d.rt] = first;
+                    if (d.rt2 != 31) cpu.regs[d.rt2] = second;
+                    cpu.excl_mark(base, bytes, words[0]);
+                    cpu.excl_value_hi = x_pair ? words[1] : 0;
+                    auto& vec = shard.reservations[base];
+                    if (std::find(vec.begin(), vec.end(), &cpu) == vec.end()) vec.push_back(&cpu);
+                    return;
+                }
+                bool ok = cpu.excl_check(base, bytes);
+                if (ok) {
+                    if (x_pair) {
+                        ok = mem_.compare_exchange_16(base, cpu.excl_value, cpu.excl_value_hi,
+                                                      reg(d.rt), reg(d.rt2));
+                    } else {
+                        const uint64_t v = (reg(d.rt) & 0xFFFFFFFFULL) | (reg(d.rt2) << 32);
+                        ok = mem_.compare_exchange(base, cpu.excl_value, v, 8);
+                    }
+                    auto it = shard.reservations.find(base);
+                    if (it != shard.reservations.end()) {
+                        for (CPU* p : it->second)
+                            if (p != &cpu && p->excl_tag_valid) p->excl_tag_valid = false;
+                        it->second.erase(std::remove(it->second.begin(), it->second.end(), &cpu),
+                                         it->second.end());
+                        if (it->second.empty()) shard.reservations.erase(it);
+                    }
+                }
+                if (d.rs != 31) cpu.regs[d.rs] = ok ? 0 : 1;
+                cpu.excl_clear();
+                return;
+            }
             // ── SIMD load/store multiple structures (LD1/ST1) ─────────
             // (Moved to Source/Interpreter/FloatSIMD/Dispatch.cpp — execute_fp().)
             case InstClass::SIMD_LD1:

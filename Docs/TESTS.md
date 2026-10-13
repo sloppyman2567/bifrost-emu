@@ -1,5 +1,19 @@
 # Tests
 
+## Azur Lane startup: exclusive pairs, onCreate launches, libandroid (2026-10-13)
+
+`test_exclusive_pair` (registered in `run_tests.sh`) passes under QEMU 11.1
+user mode and in Bifrost's JIT and interpreter; the previous build raises
+SIGILL at the first LDXP. JIT suite 326/326, interpreter 317/317 (9 skipped),
+`make verify` and `test_android_bionic.sh` pass after all three changes.
+Azur Lane 9.3.7 (APKM base APK; OBB placed by hand, as the installer has no
+OBB support) previously exited at 14 s (`activity_task.startActivity`), then
+raised SIGILL on `LDXP x10, x11, [x0]`. It now runs to the 180 s session
+limit: Unity renders, CRIWARE loads, and the game reaches its version gateway
+and CDN update check. Title screen, login and gameplay were not verified from
+the logs. No dedicated regression covers the onCreate launch or the libandroid
+forwarders beyond the Bionic and package checks above.
+
 ## Consistent process identity (2026-10-13)
 
 `test_proc_exe` checks, in the parent (PID-1 model) and a fork child (host

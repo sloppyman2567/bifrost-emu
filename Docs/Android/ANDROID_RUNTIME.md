@@ -448,6 +448,16 @@ share the same thread-local libutils Looper, following
 in JIT and interpreter modes (`ANDROID_JAVA_NATIVE_LOOPER_OK`). Standalone native
 adapters retain the host looper implementation.
 
+An app library resolves imports only through libraries its classloader
+namespace can access: the managed `libandroid.so`, not its private
+`re_android.so` dependency (Bionic `find_libraries` skips inaccessible
+libraries). The adapter therefore exports every other public `LIBANDROID`
+function from AOSP's pinned `libandroid.map.txt` (android-15.0.0_r1) as a
+generated forwarder resolved through `re_android.so`. Azur Lane's CRIWARE
+`libcri_ware_unity.so` needed `AAsset_seek`. Window-handle functions
+(`ANativeWindow_*`, `ASurfaceControl_createFromWindow`) keep their thunked or
+wrapped behaviour; `ANativeWindow_toSurface` remains unexported.
+
 Unix `sendmsg`/`recvmsg` SCM_RIGHTS now translate guest descriptors into referenced
 host descriptors and register newly received descriptors in the guest table.
 Receive copyback failures close transferred descriptors. `socket_msg_layout`
@@ -1434,7 +1444,10 @@ framework.jar) and posts the launch to the main thread:
   for `startActivityForResult`, resumes the Activity below, then stops and
   destroys the finished one and removes its window.
 `getCallingActivity`/`getCallingPackage` report the caller of an Activity
-started for a result. A host window close destroys stacked Activities before
+started for a result. The launcher Activity is registered before its
+`onCreate`, so a splash Activity may start the game Activity there (Azur
+Lane's `PrePermissionActivity`); the launch is posted and runs after the
+launcher Activity has resumed. A host window close destroys stacked Activities before
 the launcher Activity. The log records `APP_ACTIVITY_PAUSED`,
 `APP_ACTIVITY_STARTING`, `APP_ACTIVITY_RESUMED` and `APP_ACTIVITY_DESTROYED`.
 

@@ -167,6 +167,8 @@ bool instr_will_call_interp(const DecodedInst& d) {
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
             return false;
+        case InstClass::LDXP: case InstClass::STXP:
+            return true;  // exclusive pairs run in the interpreter (shared monitor)
         default:
             break;
     }
@@ -234,6 +236,7 @@ LeafScanResult leaf_scan(Emulator& emu, uint64_t target) {
             case InstClass::LDXR: case InstClass::STXR:
             case InstClass::LDAXR: case InstClass::STLXR:
             case InstClass::STLR: case InstClass::LDAR:
+            case InstClass::LDXP: case InstClass::STXP:
             case InstClass::LSE_ATOMIC:
             case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
             case InstClass::ADR: case InstClass::ADRP:

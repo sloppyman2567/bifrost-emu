@@ -192,10 +192,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // (Rt2 in bits[14:10]) and corrupting 16-byte atomics
         // (std::atomic<__int128>, lock-free queues, some mutex impls).
         // Fix: require bit[23]=1 for CAS. Pair-exclusive ops (bit[23]=0,
-        // bit[21]=1) fall through to the exclusive decoder below, which
-        // already handles them via excl_low6 (0x1F for STXP/LDXP, 0x3F
-        // for STLXP/LDAXP). The interpreter's LDP/STP path handles the
-        // 16-byte pair access.
+        // bit[21]=1) are LDXP/STXP below.
         bool is_cas = ((inst >> 21) & 1) && ((inst >> 23) & 1);
         if (is_cas) {
             d.size    = (inst >> 30) & 3;
@@ -218,6 +215,14 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rt        = inst & 0x1F;
         d.rt2       = (inst >> 10) & 0x1F;  // Rt2 (pair-exclusive second register)
         d.excl_low6 = (inst >> 10) & 0x3F;
+        // o2=0, o1=1: LDXP/LDAXP/STXP/STLXP. o1 separates pairs from
+        // LDXR/STXR whatever Rt2 holds. Only 32- and 64-bit elements exist.
+        if (!((inst >> 23) & 1) && ((inst >> 21) & 1)) {
+            if (!((inst >> 31) & 1)) return false;
+            d.acquire = (inst >> 15) & 1;  // o0: LDAXP/STLXP
+            d.cls = d.is_load ? InstClass::LDXP : InstClass::STXP;
+            return true;
+        }
             switch (d.excl_low6) {
             // excl_low6 0x1F: LDXR/STXR (acquire=0) or LDAXR/STLXR
             // (acquire=1); 0x3F: LDAR/STLR (acquire=1) or LDAXR/STLXR

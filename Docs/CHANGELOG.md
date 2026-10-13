@@ -13,6 +13,19 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Azur Lane startup fixes (2026-10-13)
+
+- LDXP/LDAXP/STXP/STLXP are decoded and executed (interpreter, shared
+  exclusive monitor, 16-byte host compare-exchange for X pairs) instead of
+  raising SIGILL; pairs with an XZR second register are no longer misdecoded
+  as LDXR/STXR. Azur Lane's Unity code uses them for 128-bit atomics.
+- An Activity started from the launcher Activity's `onCreate` now launches
+  instead of failing with `activity_task.startActivity`.
+- The managed `libandroid.so` exports the remaining public NDK functions
+  (forwarded to the platform library), so app libraries such as CRIWARE that
+  import `AAsset_*` load.
+- `android_package.py install` accepts the Gralloc mapper adapter.
+
 ### Consistent process identity (2026-10-13)
 
 - `/proc/self/stat` and `/proc/self/status` report the process's real PID,

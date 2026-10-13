@@ -12,6 +12,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cpuid.h>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
@@ -818,6 +819,41 @@ bool Memory::compare_exchange(uint64_t addr, uint64_t expected, uint64_t desired
     }
 #undef CAS_WIDTH
     if (stored) record_write(addr, &desired, width);
+    return stored;
+}
+bool Memory::compare_exchange_16(uint64_t addr, uint64_t expected_lo, uint64_t expected_hi,
+                                 uint64_t desired_lo, uint64_t desired_hi) {
+    addr = data_address(addr);
+    check_access(addr, 16, GUEST_PROT_READ | GUEST_PROT_WRITE);
+    // CMPXCHG16B is CPUID.01H:ECX[13]; the first x86-64 CPUs lack it.
+    static const bool cx16 = [] {
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        return __get_cpuid(1, &a, &b, &c, &d) && (c & bit_CMPXCHG16B);
+    }();
+    uint8_t* host = direct_window_ + addr;
+    bool stored = false;
+    if (cx16 && (addr & 15) == 0) {
+        uint64_t lo = expected_lo, hi = expected_hi;
+        __asm__ __volatile__("lock cmpxchg16b %0"
+            : "+m"(*reinterpret_cast<unsigned __int128*>(host)), "+a"(lo), "+d"(hi), "=@ccz"(stored)
+            : "b"(desired_lo), "c"(desired_hi)
+            : "memory");
+    } else {
+        // No CMPXCHG16B, or a misaligned pair (its alignment fault is not
+        // modelled): atomic only against other exclusive pairs.
+        std::unique_lock<std::shared_mutex> g(mu_);
+        auto* words = reinterpret_cast<uint64_t*>(host);
+        stored = __atomic_load_n(&words[0], __ATOMIC_ACQUIRE) == expected_lo &&
+                 __atomic_load_n(&words[1], __ATOMIC_ACQUIRE) == expected_hi;
+        if (stored) {
+            __atomic_store_n(&words[0], desired_lo, __ATOMIC_RELEASE);
+            __atomic_store_n(&words[1], desired_hi, __ATOMIC_RELEASE);
+        }
+    }
+    if (stored) {
+        const uint64_t desired[2] = {desired_lo, desired_hi};
+        record_write(addr, desired, 16);
+    }
     return stored;
 }
 void Memory::read(uint64_t addr, void* dst, size_t n) const {

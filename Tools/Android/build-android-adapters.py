@@ -10,14 +10,21 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
-from android_guest_dependencies import build_zlib, prepare_headers
+from android_guest_dependencies import build_zlib, extract, prepare_headers
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def shim(library, names, hidden=()):
+def shim(library, names, hidden=(), resolver=None):
     """Assembly for lazy thunk exports; `library` names the thunk table.
-    Names in `hidden` get the local-only label thunk_<name>, for C wrappers."""
+    Names in `hidden` get the local-only label thunk_<name>, for C wrappers.
+    With `resolver`, each export instead calls that C function with its name
+    and jumps to the returned guest address."""
+    if resolver:
+        resolve = ["adrp x0,.Lname_{name}", "add x0,x0,:lo12:.Lname_{name}", f"bl {resolver}"]
+    else:
+        resolve = ["adrp x0,.Llibrary", "add x0,x0,:lo12:.Llibrary", "adrp x1,.Lname_{name}",
+                   "add x1,x1,:lo12:.Lname_{name}", "mov x8,#0x100d", "svc #0"]
     lines = [".text"]
     for name in sorted(set(names)):
         label = "thunk_" + name if name in hidden else name
@@ -42,12 +49,7 @@ def shim(library, names, hidden=()):
             "stp q2,q3,[sp,#112]",
             "stp q4,q5,[sp,#144]",
             "stp q6,q7,[sp,#176]",
-            "adrp x0,.Llibrary",
-            "add x0,x0,:lo12:.Llibrary",
-            f"adrp x1,.Lname_{name}",
-            f"add x1,x1,:lo12:.Lname_{name}",
-            "mov x8,#0x100d",
-            "svc #0",
+            *[line.format(name=name) for line in resolve],
             "cmp x0,#0",
             f"b.le .Lmissing_{name}",
             "mov x17,x0",
@@ -91,6 +93,26 @@ def shim(library, names, hidden=()):
         lines += [f".Lptr_{name}: .quad 0"]
     lines += ['.section .note.GNU-stack,"",%progbits']
     return "\n".join(lines) + "\n"
+
+
+def platform_forwards(staging, thunked):
+    """Public LIBANDROID exports the managed libandroid forwards to the image's
+    real library. A linked public-library namespace exposes only libandroid.so
+    itself, not its re_android.so dependency, so an app library importing
+    e.g. AAsset_seek needs its own export here. Window-handle functions keep
+    their thunked/wrapped behaviour: the real ones would receive host handles."""
+    map_file = "libandroid.map.txt"
+    extract("libandroid", staging / "libandroid", {map_file})
+    text = (staging / "libandroid" / map_file).read_text()
+    block = re.search(r"^LIBANDROID \{\s*global:(.*?)^\s*local:", text, re.MULTILINE | re.DOTALL)
+    public = re.findall(r"^\s*(\w+);", block.group(1), re.MULTILINE)
+    adapters = ROOT / "Guest/Android/Adapters"
+    provided = set(thunked)
+    provided.update(re.findall(r"^[\w ]+[ *](A\w+)\(", (adapters / "surface.c").read_text(), re.MULTILINE))
+    provided.update(re.findall(r"^PLATFORM\w*\([^,]+,\s*(\w+)",
+                               (adapters / "managed_looper.c").read_text(), re.MULTILINE))
+    window = {n for n in public if n.startswith("ANativeWindow_") or n == "ASurfaceControl_createFromWindow"}
+    return sorted(n for n in public if n not in provided and n not in window)
 
 
 def build(runtime, output):
@@ -248,6 +270,10 @@ def build(runtime, output):
             if soname == "libandroid.so":
                 wrapper += [str(ROOT / "Guest/Android/Adapters/managed_looper.c"),
                             str(bionic / "libdl.so"), str(bionic / "libdl_android.so")]
+                forwards = staging / "managed-libandroid-platform.S"
+                forwards.write_text(shim("re_android.so", platform_forwards(staging, exports),
+                                         resolver="bifrost_platform_symbol"))
+                wrapper.append(str(forwards))
             subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + soname,
                                      "-Wl,--no-as-needed", str(assembly), *wrapper, str(stub),
                                      "-o", str(managed / soname)], check=True)

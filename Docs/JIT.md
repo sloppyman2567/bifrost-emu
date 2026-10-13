@@ -458,8 +458,16 @@ same shared file. Interpreter LSE RMW operations also use native CAS loops.
 `test_atomic_stress` includes a deterministic LDAXR / competing CAS / STLXR
 regression: the conditional store must fail and preserve the competing value.
 This is value-based exclusive emulation; an ABA sequence that changes the word
-and restores its original value is not detected across processes. Pair-exclusive
-operations and full reservation-granule semantics need separate coverage.
+and restores its original value is not detected across processes. Full
+reservation-granule semantics need separate coverage.
+
+LDXP/LDAXP/STXP/STLXP (bit 21, o1, separates them from LDXR/STXR whatever
+Rt2 holds) run in the interpreter through `CALL_INTERP` on the same shard
+monitor. One reservation covers the 8- or 16-byte pair; STXP of X registers
+uses one host `CMPXCHG16B` (`Memory::compare_exchange_16`). Hosts without
+CMPXCHG16B, and misaligned pairs whose alignment fault is not modelled, use a
+compare-and-write under the memory lock instead. `test_exclusive_pair` checks
+both element orders, W pairs, XZR operands and a contended 128-bit counter.
 
 Helper and interpreter stores (`Memory::write`, used by STLR, slow-path
 stores and every interpreter store) must reach the host exactly once per

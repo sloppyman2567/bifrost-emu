@@ -80,7 +80,8 @@ final class FrameworkActivities {
         field.set(activity, thread);
     }
 
-    // The launcher Activity, already resumed with its SurfaceView content.
+    // The launcher Activity, registered before its onCreate: launches it
+    // requests are posted and run once it has been resumed.
     synchronized void attach(Object thread, Object loaded, Instrumentation instrumentation,
             Application application, Activity root, IBinder token) {
         this.thread = thread;

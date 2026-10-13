@@ -15,8 +15,14 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 BIONIC_REVISION = "361ba86734fb2821a6adcfdf775db8abd04e0de0" # android-15.0.0_r1
 MEDIA_REVISION = "1863cb0ea5a9e1340f11a435618ff863e017da29" # android-15.0.0_r1
+FRAMEWORKS_REVISION = "4e43ad12e1b211f15152e9c5b16b0fe88e6b93f3" # android-15.0.0_r1
 ZLIB_VERSION = "1.3.2"
 ARCHIVES = {
+    # libandroid.map.txt: the public LIBANDROID export list.
+    "libandroid": (
+        f"https://android.googlesource.com/platform/frameworks/base/+archive/{FRAMEWORKS_REVISION}/native/android.tar.gz",
+        "8997e9c5501ba01c03a617914d557f09a89f2306b9bd35ed011a44c0130542e2",
+    ),
     "mapper": (
         "https://android.googlesource.com/platform/hardware/interfaces/+archive/488942f82bd1bc9ad1cb65a02c71421dc3a6a3d6/graphics/mapper/stable-c/include.tar.gz",
         "4075578f9212f4295f07faa90c79ed28270a53d170c3c59b1e47174fb2c33c83",

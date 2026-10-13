@@ -55,6 +55,17 @@ static void open_platform(void) {
         abort();
     }
 }
+// Also resolves the generated forwarders for the other public LIBANDROID
+// exports (build-android-adapters.py), which cache the result lazily.
+__attribute__((visibility("hidden"))) void *bifrost_platform_symbol(const char *name) {
+    pthread_once(&platform_once, open_platform);
+    void *target = dlsym(platform, name);
+    if (!target) {
+        fprintf(stderr, "Managed libandroid: missing %s\n", name);
+        abort();
+    }
+    return target;
+}
 #define PLATFORM_WITH_SETUP(result, name, parameters, arguments, setup) \
     result name parameters { \
         setup; \
@@ -62,9 +73,7 @@ static void open_platform(void) {
         static _Atomic(Function) cached; \
         Function target = atomic_load_explicit(&cached, memory_order_acquire); \
         if (!target) { \
-            pthread_once(&platform_once, open_platform); \
-            target = (Function)dlsym(platform, #name); \
-            if (!target) { fprintf(stderr, "Managed looper: missing %s\n", #name); abort(); } \
+            target = (Function)bifrost_platform_symbol(#name); \
             atomic_store_explicit(&cached, target, memory_order_release); \
         } \
         return target arguments; \

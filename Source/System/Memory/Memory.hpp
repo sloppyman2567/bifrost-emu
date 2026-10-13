@@ -120,6 +120,10 @@ public:
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n);
     bool compare_exchange(uint64_t addr, uint64_t expected, uint64_t desired, unsigned width, uint64_t* observed = nullptr);
+    // 16-byte compare-exchange for STXP/STLXP of two X registers (low word
+    // at addr). One host CMPXCHG16B where available and aligned.
+    bool compare_exchange_16(uint64_t addr, uint64_t expected_lo, uint64_t expected_hi,
+                             uint64_t desired_lo, uint64_t desired_hi);
     // Validate a whole thunk output range before a host call has side effects.
     void check_access(uint64_t addr, size_t size, uint8_t access) const;
     void read(uint64_t addr, void* dst, size_t n) const;
