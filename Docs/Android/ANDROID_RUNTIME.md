@@ -1109,6 +1109,25 @@ change, which is not implemented. Loadable window plugins keep 160 dpi.
 its desktop size and 160 dpi (compositor-upscaled), as before this change.
 Zero `ANativeWindow_setBuffersGeometry` restores the window's own pixel size.
 
+Max bounds (2026-10-13): `windowConfiguration` max bounds are the pixel size
+of the host display holding the window (private op 12, `displaySize`: SDL3
+display bounds times the window's pixel density, never smaller than the
+window). Both the Activity override and the process configuration carry
+them, as WMS's global configuration does
+([DisplayContent.computeScreenConfiguration](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/wm/DisplayContent.java)).
+[ViewConfiguration](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/java/android/view/ViewConfiguration.java)
+caches `4 * maxBounds` as the software drawing-cache limit per density,
+built from whichever context asks first. The launcher resets that cache
+when the window grows. Before this change the process configuration had no
+bounds, so an application-context rebuild set the limit to 0: SpongeBob's
+Kidoz ad WebView logged "too large to fit into a software layer, needs
+19043840 bytes, only 0 available" every two seconds. Window-sized bounds
+would still be too small after maximizing, since the process configuration
+is not reapplied on resize. That warning is gone, but the ad still does not
+get past its loading screen (see [SpongeBob](../Apps/spongebob.md#kidoz-ad-stuck-on-its-loading-screen-2026-10-13)).
+Moving the window to another monitor does not update max bounds.
+Loadable window plugins do not report a display, so they keep window-sized bounds.
+
 SpongeBob 5.12.0 on a 3440x1440 monitor at 200% scale opens at 2560x1384 px,
 320 dpi (Unity's surface follows to 3440x1384 when maximized). The user
 confirmed high-resolution rendering and correct pointer mapping at 2x.

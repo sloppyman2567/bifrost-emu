@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <climits>
+#include <cmath>
 #include <cstring>
 #include <dlfcn.h>
 #include <map>
@@ -39,7 +40,8 @@ namespace {
   X(GetPointerProperty) X(GetNumberProperty) X(SetWindowSize) \
   X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
-  X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface)
+  X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
+  X(GetDisplayForWindow) X(GetDisplayBounds)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -512,6 +514,24 @@ public:
   bool pixel_size(int32_t &w, int32_t &h) override {
 #if defined(BIFROST_USE_SDL3)
     return window_ && update_ratio(w, h);
+#else
+    (void)w; (void)h;
+    return false;
+#endif
+  }
+  bool display_pixel_size(int32_t &w, int32_t &h) override {
+#if defined(BIFROST_USE_SDL3)
+    // Display bounds are in desktop units; the window's pixel density
+    // converts them as it does the window's own size.
+    SDL_Rect bounds{};
+    const SDL_DisplayID display = window_ ? sdl_.GetDisplayForWindow(window_) : 0;
+    const double ratio = ratio_->load();
+    if (!display || !sdl_.GetDisplayBounds(display, &bounds) || bounds.w <= 0 || bounds.h <= 0 ||
+        ratio <= 0)
+      return false;
+    w = static_cast<int32_t>(std::lround(bounds.w * ratio));
+    h = static_cast<int32_t>(std::lround(bounds.h * ratio));
+    return true;
 #else
     (void)w; (void)h;
     return false;

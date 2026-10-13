@@ -27,6 +27,29 @@ Native-density rendering was ruled out first with `BIFROST_ANDROID_LOGICAL_PIXEL
 
 ## Open issues
 
+### Kidoz ad stuck on its loading screen (2026-10-13)
+
+The One Piece rewarded ad (Kidoz, MRAID/VAST player in a WebView, stacked
+Activity) shows its "SpongeBob x One Piece" loading screen with an empty
+progress bar and never reaches the ad itself. Observed by the user in two
+sessions, before and after the max-bounds fix:
+
+- The loading screen draws in the upper-left part of the 3440x1384 window
+  rather than filling it. The player reports `screenWidth 1720,
+  screenHeight 720` (the 3440x1440 monitor in dp at 2x).
+- Right after the player's `getParams` call, a guest thread does
+  `unmapped read at 0x0` (thread 157, then thread 155); the game keeps
+  running but the ad stays on its loading screen.
+- The main thread skips 120-190 frames every 2-3 seconds while the ad is
+  up (`Choreographer: Skipped N frames`).
+- Before the max-bounds fix it also logged "too large to fit into a
+  software layer ... only 0 available"; that warning is gone and nothing
+  visible changed.
+
+Next steps: find the faulting PC and library for the null read, then compare
+the WebView's layout size with the Activity window. Logs:
+`android-state/com.tiltingpoint.spongebob/managed/sessions/0766a3a30f904fcaa889e32cefc16b94/`.
+
 ### No mail/news (2026-10-12, uninvestigated)
 
 The phone shows mail in the news envelope; Bifrost shows none. Likely a

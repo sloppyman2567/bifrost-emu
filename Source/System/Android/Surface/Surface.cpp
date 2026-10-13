@@ -87,6 +87,14 @@ int32_t AndroidSurfaceManager::density_dpi() const {
     return ratio > 0 ? static_cast<int32_t>(std::lround(160.0 * ratio)) : 160;
 }
 
+void AndroidSurfaceManager::display_size(int32_t& width, int32_t& height) const {
+    int32_t display_w = 0, display_h = 0;
+    const bool known = window_backend_->display_pixel_size(display_w, display_h);
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    width = known ? std::max(display_w, width_) : width_;
+    height = known ? std::max(display_h, height_) : height_;
+}
+
 int AndroidSurfaceManager::set_window_identity(const std::string& title, const uint8_t* rgba,
                                                int32_t width, int32_t height) {
     if (!window_open_) return -ENODEV;

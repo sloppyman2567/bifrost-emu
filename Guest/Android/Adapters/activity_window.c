@@ -221,6 +221,16 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_windowMetrics(JNIEnv *env, jclass ty
         (*env)->SetLongArrayRegion(env, out, 0, 3, (const jlong *)data);
     return (jint)result;
 }
+// The display holding the open window: pixel width and height (max bounds).
+JNIEXPORT jint JNICALL Java_ManagedLauncher_displaySize(JNIEnv *env, jclass type, jlongArray out) {
+    (void)type;
+    uint64_t data[2];
+    if ((*env)->GetArrayLength(env, out) != 2) return -22; // EINVAL
+    long result = bifrost_window(12, (long)data, 0);
+    if (result == 0)
+        (*env)->SetLongArrayRegion(env, out, 0, 2, (const jlong *)data);
+    return (jint)result;
+}
 JNIEXPORT jint JNICALL Java_ManagedLauncher_audioConfig(JNIEnv *e, jclass c, jlongArray a) {
     return Java_ActivityProbe_audioConfig(e, c, a);
 }

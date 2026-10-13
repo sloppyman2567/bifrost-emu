@@ -106,6 +106,7 @@ public final class ManagedLauncher {
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
     private static native int pollWindow(long[] event);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
+    private static native int displaySize(long[] size); // host display pixel width, height
     static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
     private static native int activeAudioOutputs();
 
@@ -1212,6 +1213,10 @@ public final class ManagedLauncher {
             width = (int) metrics[0];
             height = (int) metrics[1];
             displays.setMetrics(width, height, (int) metrics[2]);
+            long[] display = new long[2];
+            error = displaySize(display);
+            if (error != 0) throw new IllegalStateException("host display size: " + error);
+            displays.setMaxBounds((int) display[0], (int) display[1]);
             // What ActivityThread.handleConfigurationChanged applies: the
             // process and system resources use the display's density before
             // the Application and Activity contexts are created.
@@ -1220,7 +1225,8 @@ public final class ManagedLauncher {
                     new Class<?>[] {Configuration.class, Class.forName("android.content.res.CompatibilityInfo")},
                     displays.processConfiguration(), null);
             windowOpen = true;
-            System.out.println("APP_WINDOW_OPEN " + width + "x" + height + " density=" + metrics[2]);
+            System.out.println("APP_WINDOW_OPEN " + width + "x" + height + " density=" + metrics[2]
+                    + " max=" + display[0] + "x" + display[1]);
         }
 
         Class<?> compatibility = Class.forName("android.content.res.CompatibilityInfo");

@@ -34,6 +34,9 @@ public:
   // An open window's buffer size in host pixels. open() takes the window's
   // size in desktop coordinates; on a scaled display the two differ.
   virtual bool pixel_size(int32_t &, int32_t &) { return false; }
+  // Pixel size of the display currently holding the open window: the largest
+  // the window can become, Android's windowConfiguration max bounds.
+  virtual bool display_pixel_size(int32_t &, int32_t &) { return false; }
   // Host pixels per desktop coordinate unit (the display's scale factor).
   virtual double pixel_density() { return 1.0; }
   virtual void set_title(const char *) {}

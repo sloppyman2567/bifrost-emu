@@ -16,6 +16,7 @@ final class FrameworkDisplay {
     private static final int CHANGED_EVENT = 2; // DisplayManagerGlobal.EVENT_DISPLAY_CHANGED
     private Object info;
     private int width, height;
+    private int maxWidth, maxHeight; // host display holding the window; 0 until play mode sizes it
     private int densityDpi = 160; // DisplayMetrics.DENSITY_DEFAULT until play mode sizes the display
     private IInterface callback;
     private long eventsMask;
@@ -83,11 +84,25 @@ final class FrameworkDisplay {
     }
 
     // The process-wide configuration ResourcesManager applies: the system
-    // configuration with this display's screen size and density.
-    synchronized Configuration processConfiguration() {
+    // configuration with this display's screen size, density and window
+    // bounds, as WMS's global configuration carries them
+    // (DisplayContent.computeScreenConfiguration). ViewConfiguration caches
+    // its drawing-cache limit (4 * max bounds) per density from whichever
+    // context asks first; empty bounds there made the limit 0, so software
+    // layers, such as WebView ads in stacked Activities, never drew.
+    synchronized Configuration processConfiguration() throws Exception {
         Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
         setScreen(config);
+        setWindowBounds(config);
         return config;
+    }
+
+    // The host display's pixel size: windowConfiguration max bounds, the
+    // largest the window can become (maximized or fullscreen).
+    synchronized void setMaxBounds(int newWidth, int newHeight) {
+        if (newWidth <= 0 || newHeight <= 0) throw new IllegalArgumentException("Invalid display bounds");
+        maxWidth = newWidth;
+        maxHeight = newHeight;
     }
 
     // TaskFragment rounds pixel sizes to dp as (int) (px / density + 0.5f).
@@ -103,8 +118,9 @@ final class FrameworkDisplay {
     private void setWindowBounds(Configuration config) throws Exception {
         Object window = Configuration.class.getField("windowConfiguration").get(config);
         Rect bounds = new Rect(0, 0, width, height);
+        Rect max = new Rect(0, 0, Math.max(maxWidth, width), Math.max(maxHeight, height));
         window.getClass().getMethod("setBounds", Rect.class).invoke(window, bounds);
-        window.getClass().getMethod("setMaxBounds", Rect.class).invoke(window, bounds);
+        window.getClass().getMethod("setMaxBounds", Rect.class).invoke(window, max);
         window.getClass().getMethod("setAppBounds", Rect.class).invoke(window, bounds);
     }
 

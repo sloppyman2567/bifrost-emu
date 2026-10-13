@@ -17,7 +17,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   not a blanket default. Preserve package query filtering/copy isolation and
   per-Activity manifest/requested orientation.
 - Play windows open in desktop units; the Android display is the window's
-  native pixel buffer and density (op 11). Layers created by Bifrost on Wayland
+  native pixel buffer and density (op 11); windowConfiguration max bounds are
+  the pixel size of the host display holding it (op 12), never smaller than
+  the window, in both the process and Activity configurations. Layers created by Bifrost on Wayland
   must scale their pixel buffers to the parent's desktop coordinates
   (`SurfaceScale`, generated `wp_viewporter` glue; regenerate, don't hand-edit).
 - Windows beyond the launcher Activity's SurfaceView (dialogs, popups, stacked

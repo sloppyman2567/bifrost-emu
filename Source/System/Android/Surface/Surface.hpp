@@ -100,6 +100,10 @@ public:
     bool open_host_window();
     // Android density for the window: 160 dpi per host pixel per desktop unit.
     int32_t density_dpi() const;
+    // Pixel size of the display holding the window (Android's max bounds),
+    // never smaller than the window; the window's own size when the backend
+    // cannot report its display.
+    void display_size(int32_t& width, int32_t& height) const;
     int set_window_identity(const std::string& title, const uint8_t* rgba, int32_t width, int32_t height);
     void close_host_window();
     bool ready() const { return window_open_; }

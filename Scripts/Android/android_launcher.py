@@ -62,6 +62,7 @@ def show(state):
             self.folder = QPushButton("Open session folder"); self.folder.clicked.connect(self.open_folder)
             self.interpreter = QCheckBox("Interpreter")
             self.trace = QCheckBox("Trace calls")
+            self.trace.setToolTip("Records Java framework calls; only for apps with a managed (Java) Activity")
             for widget in (self.start, self.stop, self.folder, self.interpreter, self.trace): actions.addWidget(widget)
             actions.addStretch(); panel.addLayout(actions)
             self.info = QLabel("Select an app to see its session and logs.")
@@ -134,6 +135,10 @@ def show(state):
             self.start.setEnabled(bool(selected) and any(not active(a) and a.get("launcher") in ("managed_activity", "native_activity") for a in selected))
             self.stop.setEnabled(any(active(a) for a in selected))
             self.folder.setEnabled(len(selected) == 1 and bool(selected[0]["session"].get("log")))
+            # Call tracing follows ART methods, so NativeActivity apps cannot use it.
+            traceable = bool(selected) and all(a.get("launcher") == "managed_activity" for a in selected)
+            self.trace.setEnabled(traceable)
+            if not traceable: self.trace.setChecked(False)
             if len(selected) != 1:
                 self.info.setText(f"{len(selected)} apps selected" if selected else "Select an app to see its session and logs.")
                 self.log.clear(); self.log_stamp = None; return

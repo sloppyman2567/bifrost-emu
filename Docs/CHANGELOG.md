@@ -13,6 +13,18 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Android window max bounds and launcher tracing (2026-10-13)
+
+- Android's `windowConfiguration` max bounds are now the host display's
+  pixel size (new window op 12), in the process configuration as well as the
+  Activity's. The process configuration had none, so ViewConfiguration's
+  software drawing-cache limit could be 0 and full-window software layers,
+  such as SpongeBob's ad WebView, refused to draw. The ad still stops at its
+  loading screen (open issue).
+- The desktop launcher enables "Trace calls" only when every selected app
+  has a managed Activity; NativeActivity apps failed with "APK
+  framework/method tracing requires a managed Activity".
+
 ### JIT compile time and inline SIMD (2026-10-13)
 
 - Tier-1 and Tier-2 compiles no longer rebuild all 4,096 per-vreg use lists
