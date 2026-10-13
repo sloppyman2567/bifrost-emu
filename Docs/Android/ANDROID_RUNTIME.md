@@ -1221,6 +1221,12 @@ It is answered as `GrantPermissionsActivity` would: the caller pauses, receives
 `dispatchActivityResult` (so `onRequestPermissionsResult` runs), then resumes.
 With no permission UI, each grant is the install-time `checkPermission`
 result, so runtime permissions come back denied, as if the user declined.
+`requestPermissions` marks its request pending only after
+`startActivityForResult` returns, and Unity calls it off the main thread; an
+Activity's own result is therefore delivered once that mark is set (bounded
+to about a second). An earlier result would leave the mark set and cancel
+every later request, as on a device it never could, since the result
+arrives from another process.
 Previously `getPermissionControllerPackageName` threw, so Trickcal's Unity
 permission request failed and its callback never ran.
 An Activity below a stacked one is paused but not stopped and keeps its

@@ -908,6 +908,8 @@ class PackageTests(unittest.TestCase):
                    # The permission controller's result arrives while the caller is paused.
                    "MANAGED_ACTIVITIES_ROOT_PAUSED",
                    "MANAGED_ACTIVITIES_PERMISSIONS 7 [android.permission.INTERNET, android.permission.CAMERA] [0, -1]",
+                   # A second request from the first result's callback is answered, not cancelled.
+                   "MANAGED_ACTIVITIES_PERMISSIONS 8 [android.permission.CAMERA] [-1]",
                    "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
                    "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_SECOND_FOCUS true",
                    "APP_POPUP_SHOWN", "MANAGED_ACTIVITIES_SECOND_WINDOW",

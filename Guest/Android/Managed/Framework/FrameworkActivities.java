@@ -38,6 +38,8 @@ final class FrameworkActivities {
             "android.content.pm.extra.REQUEST_PERMISSIONS_NAMES";
     private static final String EXTRA_REQUEST_PERMISSIONS_RESULTS =
             "android.content.pm.extra.REQUEST_PERMISSIONS_RESULTS";
+    // Activity.REQUEST_PERMISSIONS_WHO_PREFIX alone: the Activity's own request.
+    private static final String ACTIVITY_PERMISSIONS_WHO = "@android:requestPermissions:";
 
     private static final class Record {
         final Activity activity;
@@ -105,13 +107,7 @@ final class FrameworkActivities {
                 && FrameworkPackages.PERMISSION_CONTROLLER.equals(intent.getPackage())) {
             String[] requested = intent.getStringArrayExtra(EXTRA_REQUEST_PERMISSIONS_NAMES);
             String[] names = requested == null ? new String[0] : requested;
-            main.post(() -> {
-                try {
-                    grantResult(names, resultTo, resultWho, requestCode);
-                } catch (Exception error) {
-                    throw new RuntimeException("Unable to deliver permission result", error);
-                }
-            });
+            postGrantResult(names, resultTo, resultWho, requestCode, 0);
             return START_SUCCESS;
         }
         if (component == null) {
@@ -144,9 +140,34 @@ final class FrameworkActivities {
     // at install time stays denied, as when the user declines. Like the
     // controller's translucent Activity, the caller pauses, receives the
     // result, then resumes.
-    private void grantResult(String[] names, IBinder resultTo, String resultWho, int requestCode)
+    // Activity.requestPermissions records its request (mHasCurrentPermissionsRequest)
+    // only after startActivityForResult returns; on Android the result
+    // arrives later from another process. A request made off the main thread
+    // (Unity's) may still be returning, and an earlier result would leave the
+    // flag set, cancelling every later request. Wait for the record, at most
+    // about a second; fragment requests (a longer who) do not use it.
+    private void postGrantResult(String[] names, IBinder resultTo, String resultWho, int requestCode,
+            int attempt) {
+        main.postDelayed(() -> {
+            try {
+                Record caller = resultTo != null && requestCode >= 0 ? find(resultTo) : null;
+                if (caller != null && ACTIVITY_PERMISSIONS_WHO.equals(resultWho) && attempt < 1000) {
+                    Field pending = Activity.class.getDeclaredField("mHasCurrentPermissionsRequest");
+                    pending.setAccessible(true);
+                    if (!pending.getBoolean(caller.activity)) {
+                        postGrantResult(names, resultTo, resultWho, requestCode, attempt + 1);
+                        return;
+                    }
+                }
+                grantResult(names, caller, resultWho, requestCode);
+            } catch (Exception error) {
+                throw new RuntimeException("Unable to deliver permission result", error);
+            }
+        }, attempt == 0 ? 0 : 1);
+    }
+
+    private void grantResult(String[] names, Record caller, String resultWho, int requestCode)
             throws Exception {
-        Record caller = resultTo != null && requestCode >= 0 ? find(resultTo) : null;
         if (caller == null) return;
         int[] grants = new int[names.length];
         for (int i = 0; i < names.length; i++)

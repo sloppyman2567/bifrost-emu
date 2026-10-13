@@ -13,6 +13,13 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Android permission results after off-main-thread requests (2026-10-13)
+
+- A permission result for an Activity's own request is delivered only after
+  `requestPermissions` has marked the request pending. Unity requests off
+  the main thread, and an earlier result would have left the request
+  pending, cancelling every later one with empty results.
+
 ### Android window max bounds and launcher tracing (2026-10-13)
 
 - Android's `windowConfiguration` max bounds are now the host display's

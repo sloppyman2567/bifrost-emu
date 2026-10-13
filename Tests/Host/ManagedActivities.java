@@ -19,6 +19,7 @@ import java.util.List;
 public final class ManagedActivities extends Activity {
     private final Handler main = new Handler();
     private boolean requested, started;
+    private int permissionResults;
     private int returned;  // results received
 
     @Override public void onCreate(Bundle state) {
@@ -56,10 +57,12 @@ public final class ManagedActivities extends Activity {
                             new Intent("org.bifrost.fixture.NONE"), 0).isEmpty())
                 throw new AssertionError("provider intent query incorrect: " + files);
             System.out.println("MANAGED_ACTIVITIES_PROVIDER_QUERY_OK");
-            requestPermissions(new String[] {android.Manifest.permission.INTERNET,
-                    android.Manifest.permission.CAMERA}, 7);
+            // Off the main thread, as Unity requests permissions.
+            new Thread(() -> requestPermissions(new String[] {android.Manifest.permission.INTERNET,
+                    android.Manifest.permission.CAMERA}, 7)).start();
             return;
         }
+        if (permissionResults < 2) return;
         started = true;
         startActivityForResult(new Intent(this, Second.class).putExtra("value", 7), 42);
     }
@@ -67,6 +70,10 @@ public final class ManagedActivities extends Activity {
     @Override public void onRequestPermissionsResult(int request, String[] names, int[] grants) {
         System.out.println("MANAGED_ACTIVITIES_PERMISSIONS " + request + " " + Arrays.toString(names)
                 + " " + Arrays.toString(grants));
+        // A finished request allows the next one; a stale pending request
+        // would cancel it with empty arrays.
+        if (++permissionResults == 1)
+            requestPermissions(new String[] {android.Manifest.permission.CAMERA}, 8);
     }
 
     /** Declared with an intent filter; queries resolve it without instantiating it. */
