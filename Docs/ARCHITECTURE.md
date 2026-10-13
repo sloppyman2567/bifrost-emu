@@ -92,7 +92,7 @@ Code under `Guest/` is compiled for, or runs inside, the guest:
 
 - `Guest/Android/Include/`: freestanding Bionic and NativeActivity headers.
 - `Guest/Android/Adapters/`: Bionic adapter libraries (EGL, surface, AAudio,
-  assets, log, Activity window, managed looper) built by
+  OpenSL ES, assets, log, Activity window, managed looper) built by
   `Tools/Android/build-android-adapters.py`.
 - `Guest/Android/Launchers/`: native and ART launch executables.
 - `Guest/Android/Managed/`: the managed launcher dex (`ManagedLauncher.java`,

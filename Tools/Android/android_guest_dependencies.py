@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BIONIC_REVISION = "361ba86734fb2821a6adcfdf775db8abd04e0de0" # android-15.0.0_r1
 MEDIA_REVISION = "1863cb0ea5a9e1340f11a435618ff863e017da29" # android-15.0.0_r1
 FRAMEWORKS_REVISION = "4e43ad12e1b211f15152e9c5b16b0fe88e6b93f3" # android-15.0.0_r1
+WILHELM_REVISION = "8d46666feda581e8e2d4917c86929e4c3ecef95e" # android-15.0.0_r1
 ZLIB_VERSION = "1.3.2"
 ARCHIVES = {
     # libandroid.map.txt: the public LIBANDROID export list.
@@ -34,6 +35,11 @@ ARCHIVES = {
     "media": (
         f"https://android.googlesource.com/platform/frameworks/av/+archive/{MEDIA_REVISION}/media/ndk.tar.gz",
         "6f58997452f80240b5af4ed67578aa0885db4fe193c1b05c821d6ab1cec55b75",
+    ),
+    # SLES/: the OpenSL ES 1.0.1 and Android extension headers.
+    "wilhelm": (
+        f"https://android.googlesource.com/platform/frameworks/wilhelm/+archive/{WILHELM_REVISION}/include.tar.gz",
+        "fee39d85c59289d4622320f88df7fc56c6e17a1c0ab528fa8fb74eb80839cd44",
     ),
     "zlib": (
         "https://zlib.net/fossils/zlib-1.3.2.tar.gz",
@@ -141,6 +147,7 @@ def prepare_headers(directory):
     extract("mapper", directory / "include")
     extract("native-handle", directory / "include/cutils", {"native_handle.h"})
     extract("media", directory / "media-ndk")
+    extract("wilhelm", directory / "include")
     for name in ("include", "uapi", "android", "jni"):
         extract(name, directory / name)
     for name in ("ndk", "window", "rect", "log"):

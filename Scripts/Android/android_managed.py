@@ -289,10 +289,12 @@ def install_managed_graphics(root, adapters):
     Unity resolves libandroid/libEGL/libGLES through the default namespace,
     where the framework already loaded them, so they are replaced there. The
     real library moves to re_<name> (same soname length) and each adapter
-    depends on it for every export it does not thunk.
+    depends on it for every export it does not thunk. libOpenSLES is a whole
+    implementation over the libaaudio adapter and needs nothing from its original.
     """
     lib64 = root / "system/lib64"
-    names = ("libandroid.so", "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libaaudio.so")
+    names = ("libandroid.so", "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libaaudio.so",
+             "libOpenSLES.so")
     if {p.name for p in adapters.glob("*.so")} != set(names) | {"mapper.bifrost.so"}:
         raise ValueError("Unexpected managed graphics adapters")
     for adapter in (adapters / name for name in names):
@@ -569,7 +571,8 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     adapter_manifest = json.loads((adapters / "adapters.json").read_text())
     adapter_names = ["libbifrost-activity.so"] + [
         "managed/" + name for name in ("libandroid.so", "libEGL.so", "libGLESv2.so",
-                                      "libGLESv3.so", "libaaudio.so", "mapper.bifrost.so")]
+                                      "libGLESv3.so", "libaaudio.so", "libOpenSLES.so",
+                                      "mapper.bifrost.so")]
     for name in adapter_names:
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)

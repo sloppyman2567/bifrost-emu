@@ -245,6 +245,15 @@ def build(runtime, output):
                                  str(bionic / "libc.so"), "-o", str(managed / "libaaudio.so")],
                        check=True)
         names.append("managed/libaaudio.so")
+        # OpenSL ES players render through the managed libaaudio above, whose
+        # callback thread runs their buffer-queue callbacks. The image's real
+        # libOpenSLES plays through AudioFlinger, which is not provided.
+        subprocess.run(common + ["-std=c2x", "-fPIC", "-shared", "-Wl,-soname,libOpenSLES.so",
+                                 str(ROOT / "Guest/Android/Adapters/opensles.c"),
+                                 str(managed / "libaaudio.so"), str(bionic / "libm.so"),
+                                 str(bionic / "libc.so"), "-o", str(managed / "libOpenSLES.so")],
+                       check=True)
+        names.append("managed/libOpenSLES.so")
         for soname, table, exports in (
             ("libandroid.so", "libandroid.so", thunked_android),
             ("libEGL.so", "libEGL.so", groups["libEGL.so"]),

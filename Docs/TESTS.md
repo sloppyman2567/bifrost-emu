@@ -1,5 +1,26 @@
 # Tests
 
+## Managed OpenSL ES players (2026-10-13)
+
+`Tests/Unit/android_opensles_player.c` (run by `test_android_bionic.sh`)
+passes in JIT, interpreter and Tier-2 through the real Bionic linker, the
+managed libaaudio and libOpenSLES adapters and the pinned wilhelm headers. It
+checks the shared engine, creation validation codes, configuration before and
+after Realize, both buffer-queue IIDs, queue limits and state, callbacks on a
+separate thread with Bionic TLS, position, HEADATNEWPOS/HEADATEND, pause, stop,
+clear, Destroy from the player's own callback, and a mono float `PCM_EX`
+player. It does not inspect the rendered samples (format conversion, gain and
+pan are unverified by tests). The adapter's exports equal AOSP's
+`libOpenSLES.map.txt`. JIT suite 326/326, interpreter 317/317 (9 skipped),
+`make verify`, `make generated-check`, the full `test_android_bionic.sh` and the
+headless build pass.
+
+One 180 s Azur Lane 9.3.7 run (JIT): CRIWARE initializes without the earlier
+`CEngine_Realize`/`createTrack` errors or `failed to realize OpenSLES player`,
+and a host audio device is open for the session. Startup still logs nothing
+after the update checker's `MAP: No Split File Need To Download.`; the intro
+movie and title were not confirmed from the logs.
+
 ## Azur Lane startup: exclusive pairs, onCreate launches, libandroid (2026-10-13)
 
 `test_exclusive_pair` (registered in `run_tests.sh`) passes under QEMU 11.1

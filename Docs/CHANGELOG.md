@@ -13,6 +13,16 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Managed OpenSL ES playback (2026-10-13)
+
+- Managed Android apps get a `libOpenSLES.so` adapter: engine, output mix and
+  PCM buffer-queue audio players with Play, Volume, EffectSend direct level and
+  AndroidConfiguration, following AOSP wilhelm (Android 15). Players render
+  through the managed AAudio adapter, so buffer-queue callbacks run on a Bionic
+  thread. The image's own library needed AudioFlinger tracks and failed to
+  realize players (Azur Lane's CRIWARE: `failed to realize OpenSLES player`).
+  Decoding (URI/fd) players and recording are not supported.
+
 ### Azur Lane startup fixes (2026-10-13)
 
 - LDXP/LDAXP/STXP/STLXP are decoded and executed (interpreter, shared

@@ -68,3 +68,34 @@ for mode in jit interp tier2; do
     if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
     echo "Bionic AAudio callback thread: $mode passed"
 done
+# Managed libOpenSLES adapter: PCM buffer-queue players over managed libaaudio.
+# The fixture compiles against the pinned Bionic and AOSP wilhelm headers.
+cp build/android-adapters/managed/libOpenSLES.so "$runtime/data/local/tmp/aaudio/"
+mapfile -t headers < <(python3 -c 'import sys; from pathlib import Path
+sys.path.insert(0, "Tools/Android")
+from android_guest_dependencies import prepare_headers
+print("\n".join(prepare_headers(Path(sys.argv[1]))))' "$task_tmp/headers")
+clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -fPIE -pie -O2 -Wall -Wextra \
+    -Wno-deprecated-declarations "${headers[@]}" \
+    -Wl,-z,max-page-size=16384 -Wl,--dynamic-linker=/system/bin/linker64 \
+    -Wl,-rpath,/data/local/tmp/aaudio:/apex/com.android.runtime/lib64/bionic \
+    -Wl,--allow-shlib-undefined \
+    -mno-outline-atomics Tests/Unit/android_bionic_start.S Tests/Unit/android_opensles_player.c \
+    "$runtime/data/local/tmp/aaudio/libOpenSLES.so" "$runtime/data/local/tmp/aaudio/libaaudio.so" \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libc.so" \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libm.so" \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libdl.so" \
+    -o "$runtime/data/local/tmp/opensles_player"
+for mode in jit interp tier2; do
+    args=()
+    [[ "$mode" != interp ]] || args=(--no-jit)
+    tier=0
+    [[ "$mode" != tier2 ]] || tier=1
+    log="$task_tmp/opensles-$mode.log"
+    env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy BIFROST_TIER2="$tier" BIFROST_TIER2_HITS=32 \
+        timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
+        /data/local/tmp/opensles_player > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
+    rg -q '^android_opensles_player: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+    if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
+    echo "Bionic OpenSL ES player: $mode passed"
+done

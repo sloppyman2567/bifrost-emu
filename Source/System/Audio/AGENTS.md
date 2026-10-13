@@ -9,9 +9,15 @@
   waits must allow group exit to complete.
 - `AudioThunk/AudioThunk.cpp` owns export registration; the Android adapter builder
   reads its AAudio export list. Keep that tooling in sync when moving registration.
+- Managed OpenSL ES is the guest `Guest/Android/Adapters/opensles.c`, layered on
+  the managed libaaudio adapter (its callback thread runs buffer-queue callbacks),
+  not the host `AudioThunk/OpenSL.cpp` vtables. Keep its result codes and
+  validation matched to AOSP wilhelm `android-15.0.0_r1`, and its exports to
+  that release's `libOpenSLES.map.txt`.
 - Native thunk return polarity must preserve the SVC dispatch convention:
   a handled host return is not permission to run a second syscall dispatcher.
 - Managed `isMusicActive` reflects real started host output streams. Keep audio
   service answers tied to supported state rather than unconditional success.
-- Validate host callback stress/frame counters and managed Bionic AAudio thread
-  tests in JIT/interpreter/Tier-2. Host tests alone do not validate Android TLS.
+- Validate host callback stress/frame counters and the managed Bionic AAudio
+  thread and OpenSL ES player tests in JIT/interpreter/Tier-2. Host tests alone
+  do not validate Android TLS.

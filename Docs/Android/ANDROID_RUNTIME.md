@@ -142,7 +142,7 @@ transactions 8/80/82 and flinger 3/5/6 add stream-output, empty strategy/group
 lists, sample-rate, frame-count and estimated output-quantum latency queries.
 `AudioTrack.getMinBufferSize` now traverses those real native clients. This
 does not implement AudioFlinger track creation or AudioTrack PCM playback;
-existing AAudio playback continues through the host audio adapter.
+AAudio and OpenSL ES play through the host audio adapter instead.
 
 Notification channels/groups support creation, copied queries, app-allowed
 updates, deletion and resurrection with preserved settings, following
@@ -1593,6 +1593,40 @@ host callback pump cannot make Bionic TLS. That thread asks the thunk when the
 host ring has room for one more callback (`bifrost_aaudio_wait_callback`),
 calls the app, and hands the buffer back. `test_android_bionic.sh` checks
 this in all three engine modes (`Tests/Unit/android_aaudio_thread.c`).
+
+#### Managed OpenSL ES (2026-10-13)
+
+The image's real `libOpenSLES.so` (wilhelm) plays through AudioTrack, so
+`createTrack` fails without AudioFlinger and player Realize returns
+`SL_RESULT_CONTENT_UNSUPPORTED`; Azur Lane's CRIWARE then reports
+`E2015062223: failed to realize OpenSLES player`. The managed
+`libOpenSLES.so` adapter (`Guest/Android/Adapters/opensles.c`) replaces it.
+It implements, against AOSP `frameworks/wilhelm` at `android-15.0.0_r1` and
+its pinned headers:
+
+- all 53 `SL_IID_*` exports of `libOpenSLES.map.txt` with their real GUIDs,
+  matched by content as wilhelm does; `slCreateEngine` returns Android's one
+  reference-counted engine per process;
+- engine, output mix and audio player objects; the player takes a
+  `BUFFERQUEUE`/`ANDROIDSIMPLEBUFFERQUEUE` source of PCM or `PCM_EX`
+  (8-bit unsigned, 16/24/32-bit signed, 32-bit float, little-endian, 1–8
+  channels, 8–192 kHz) and an output-mix sink. Creation validation and
+  result codes follow `checkDataFormat`/`android_audioPlayer_checkSourceSink`;
+- `Play` (states, position, marker/new-position/end events), both buffer-queue
+  IIDs on one interface, `Volume` (level, mute, stereo position with
+  wilhelm's gain and pan law), `EffectSend` direct level, and
+  `AndroidConfiguration` stream type and performance mode before Realize.
+
+Realize opens a float AAudio stream through the managed `libaaudio.so`, so
+buffer-queue and play callbacks run on that adapter's Bionic callback thread,
+pulling from the queue the way wilhelm's AudioTrack callback does. Mono plays
+on a stereo stream so it can be panned. Destroy from a player's own callback is
+deferred until the callback returns. Not implemented: decoding sources
+(URI, fd, Android buffer queue), audio recording, LED/vibra/MIDI/3D/metadata
+objects, environmental reverb and other effects, routing proxies, and
+`BufferQueue::Clear`/Stop flushing audio already queued in the host stream
+(up to about three callbacks). `test_android_bionic.sh` runs
+`Tests/Unit/android_opensles_player.c` in all three engine modes.
 
 SpongeBob's FMOD now opens its AAudio stream and the callback thread feeds
 the host engine. A 120-second JIT play run still presents zero frames: about

@@ -17,8 +17,8 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   for its subfolders); adapter provisioning
   reads the audio registry in `Audio/AudioThunk/AudioThunk.cpp`. When moving registry
   definitions, update `Tools/Android/build-android-adapters.py` too.
-- Validate both engines and the affected host/guest boundary. Android AAudio
-  needs the managed Bionic callback-thread test, not just host audio checks.
+- Validate both engines and the affected host/guest boundary. Android AAudio and
+  OpenSL ES need the managed Bionic tests, not just host audio checks.
   Display tests need GPU access; smoke frames do not establish game playability.
 
 ## Scoped contracts
