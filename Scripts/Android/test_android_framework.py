@@ -29,7 +29,7 @@ from android_managed import (LogdReceiver, install_managed_graphics, installed_a
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
         libraries=(), main_class="FrameworkProbe", app=None, probe_args=(), managed_graphics=None,
-        trace_apk=None, trace_after=0, trace_duration=15, binder_mode="broker"):
+        trace_apk=None, trace_after=0, trace_duration=15, binder_mode="broker", binder_broker=None, app_id=None):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
@@ -99,6 +99,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             arguments = [str(emu)] + (["--no-jit"] if mode == "interp" else [])
             if services:
                 arguments += ["--android-services"]
+            if app_id is not None:
+                arguments += ["--android-app-id", str(app_id)]
             arguments += ["--android-runtime", "--rootfs", str(root), "/system/bin/app_process64"] + program
         log_path = output / (mode + ".log")
         started = time.monotonic()
@@ -106,7 +108,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         with log_path.open("wb") as log, (output / (mode + ".logd")).open("wb") as logd_sink, ExitStack() as hosts:
             if services and mode != "qemu" and binder_mode == "broker":
                 process_host = hosts.enter_context(closing(ProcessHost(root, emu,
-                    ["--no-jit"] if mode == "interp" else [], environment,
+                    (["--no-jit"] if mode == "interp" else []) +
+                    (["--android-binder-broker", str(binder_broker)] if binder_broker else []), environment,
                     "/data/local/tmp/probe.dex", output / "processes", trace_args)))
                 environment = process_host.environment
                 arguments[1:1] = ["--android-binder-broker", process_host.socket]
@@ -140,6 +143,10 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             markers += ("ANDROID_JAVA_NATIVE_LOOPER_OK",)
         if main_class == "ActivityProbe$NativeChoreographerProbe":
             markers += ("ANDROID_NATIVE_CHOREOGRAPHER_OK",)
+        if main_class == "ActivityProbe$GrallocProbe":
+            markers += ("ANDROID_GRALLOC_OK",)
+            if probe_args and probe_args[0] != "0":
+                markers += ("ANDROID_GRALLOC_PEER_EXIT_OK",)
         if services and main_class == "ActivityProbe":
             markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK",
                         "ACTIVITY_TELEPHONY_SERVICE_OK", "ACTIVITY_SHARED_MEMORY_OK", "ACTIVITY_AUDIO_SERVICE_OK",
@@ -203,6 +210,9 @@ if __name__ == "__main__":
     parser.add_argument("--services", action="store_true", help="Enable Bifrost's Binder service registry")
     parser.add_argument("--binder-mode", choices=("local", "broker"), default="broker",
                         help="Binder service transport (default: broker)")
+    parser.add_argument("--binder-broker", type=Path,
+                        help="Use an existing broker for concurrent framework-client tests")
+    parser.add_argument("--app-id", type=int, help="Guest Android UID for a framework-client test")
     parser.add_argument("--library", type=Path, action="append", default=[], help="Copy a probe JNI library into /data/local/tmp")
     parser.add_argument("--main-class", default="FrameworkProbe", help="Probe class to run (e.g. ActivityProbe)")
     parser.add_argument("--app", type=Path, help="Installed /data/app/<package>-<id> directory to copy into the root")
@@ -215,6 +225,10 @@ if __name__ == "__main__":
     parser.add_argument("--managed-graphics", type=Path, nargs="?", const=ROOT / "build/android-adapters/managed",
                         help="Install managed libandroid/EGL/GLES adapters (Tools/Android/build-android-adapters.py)")
     args = parser.parse_args()
+    if args.binder_broker and (not args.services or args.binder_mode != "broker" or args.mode == "qemu"):
+        parser.error("--binder-broker requires --services and broker transport in Bifrost")
+    if args.app_id is not None and not 0 <= args.app_id <= 99999:
+        parser.error("--app-id must be between 0 and 99999")
     if args.installed_app:
         if args.app or args.probe_arg or args.main_class != "ActivityProbe":
             parser.error("--installed-app requires --main-class ActivityProbe and cannot combine with --app/--probe-arg")
@@ -260,4 +274,5 @@ if __name__ == "__main__":
                       args.art_option, args.prop, args.services, args.library, args.main_class,
                       args.app.resolve() if args.app else None, args.probe_arg,
                       args.managed_graphics.resolve() if args.managed_graphics else None,
-                      args.trace_apk, args.trace_after, args.trace_duration, args.binder_mode) else 1)
+                      args.trace_apk, args.trace_after, args.trace_duration, args.binder_mode,
+                      args.binder_broker.resolve() if args.binder_broker else None, args.app_id) else 1)

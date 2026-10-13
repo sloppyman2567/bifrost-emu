@@ -97,6 +97,23 @@ int main(void) {
     CHECK(transact(client, 0x5f504e47, 0, 0, &reply));
     CHECK(reply.flags == 8 && *(int32_t *)(uintptr_t)reply.buffer == 0);
     CHECK(!release_reply(client, &reply));
+    token();
+    string16("android.hardware.graphics.allocator.IAllocator/default");
+    CHECK(transact(client, 7, 0, 0, &reply));
+    CHECK(!reply.flags && reply.data_size == 8 && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 1);
+    CHECK(!release_reply(client, &reply));
+    token();
+    string16("android.hardware.graphics.allocator.IAllocator/missing");
+    CHECK(transact(client, 7, 0, 0, &reply));
+    CHECK(!reply.flags && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 0);
+    CHECK(!release_reply(client, &reply));
+    token();
+    string16("android.hardware.graphics.allocator.IAllocator");
+    CHECK(transact(client, 8, 0, 0, &reply));
+    CHECK(!reply.flags && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 1
+            && *(int32_t *)(uintptr_t)(reply.buffer + 8) == 7);
+    CHECK(!release_reply(client, &reply));
+    length = 0;
     CHECK(transact(client, 0x5f4e5446, 0, 0, &reply));
     CHECK(!reply.flags && *(int32_t *)(uintptr_t)reply.buffer == 26);
     CHECK(!release_reply(client, &reply));
@@ -194,7 +211,7 @@ int main(void) {
     u32(8);
     CHECK(transact(client, 4, 0, 0, &reply));
     CHECK(!reply.flags && !*(int32_t *)(uintptr_t)reply.buffer &&
-          *(int32_t *)(uintptr_t)(reply.buffer + 4) == 1);
+          *(int32_t *)(uintptr_t)(reply.buffer + 4) == 2);
     CHECK(!release_reply(client, &reply));
     token();
     u32(1);
@@ -250,6 +267,11 @@ int main(void) {
     CHECK(!flat.binder);
     CHECK(!release_reply(client, &reply));
     CHECK(!write_command(client, BF_BC_RELEASE, &handle, 0));
+    token();
+    u32(8);
+    CHECK(transact(client, 4, 0, 0, &reply));
+    CHECK(!reply.flags && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 1);
+    CHECK(!release_reply(client, &reply));
     CHECK(!munmap(a, 65536) && !munmap(b, 65536) && !close(client));
     printf("android_service_manager: ALL PASS (%d checks)\n", checks);
     return 0;

@@ -36,6 +36,9 @@ such as "misc", "common" or "core". The current version lives in
   without explicit approval.
 - Keep throwaway probes/logs outside the repository. Diagnostic switches belong
   in `Source/System/Core/DebugFlags.hpp`, not repeated getenv calls in hot paths.
+- Gralloc's allocator belongs to the Binder realm, independently of app
+  lifetimes. Keep its sealed memfd transport in `Include/Bifrost/AndroidGralloc.h`
+  in step with the guest mapper; validate concurrent clients and peer exit.
 - Preserve guest/host address boundaries, mapping and signal semantics, aliases,
   register widths and precise fault state. Do not trade correctness checks for
   benchmark speed or tailor runtime behavior to one host/kernel.

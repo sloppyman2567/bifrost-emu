@@ -126,14 +126,24 @@ The wire subset follows Android 15's kernel-Binder
 [IServiceManager AIDL](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/binder/aidl/android/os/IServiceManager.aidl)
 and [Parcel interface header](https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/libs/binder/Parcel.cpp):
 StrictMode, WorkSource, `SYST` and the String16 interface descriptor.
-It implements interface discovery, `getService`, `checkService`, `addService`
-and dump-priority-filtered `listServices`, with bounded ASCII names and aligned
+It implements interface discovery, `getService`, `checkService`, `addService`,
+dump-priority-filtered `listServices`, `isDeclared` and `getDeclaredInstances`, with bounded ASCII names and aligned
 parcels. Lookups are nonblocking. `PING_TRANSACTION` returns status 0, as
 libbinder's first use of handle 0 requires. Unknown transaction codes return
 Android's `UNKNOWN_TRANSACTION` status; malformed parcels fail explicitly.
 Transactions accept Java's `FLAG_COLLECT_NOTED_APP_OPS` (2) and `TF_ACCEPT_FDS`
 (0x10); neither makes a call one-way. `BIFROST_BINDER_TRACE=1` logs
 transactions, registry calls and failure replies.
+
+The virtual HAL manifest declares
+`android.hardware.graphics.allocator.IAllocator/default`. Its V2 implementation
+is owned by the Binder domain, including in the shared broker, and is available
+without a Java publisher. App registration cannot replace that instance. Host
+service handles retain normal strong/weak, transfer and death-subscription
+bookkeeping, but an app disconnect does not kill a realm-owned object. The
+allocator validates bounded descriptors/counts and transfers sealed-size memfds
+using the same fd delivery path as guest Binder replies. See the
+[Gralloc5 contract and validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13).
 
 The registry holds strong references to real guest Binder objects. Lookup
 returns callable translated handles, whose receive-buffer references follow

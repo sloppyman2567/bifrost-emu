@@ -62,7 +62,7 @@ int BinderNode::death_command(uint32_t command, const uint8_t* bytes, int tid) {
         auto& watchers = handle.object->deaths;
         watchers.erase(std::remove_if(watchers.begin(), watchers.end(), [](const auto& w) { return w.expired(); }), watchers.end());
         watchers.push_back(death);
-        if (!handle.object->alive || handle.object->owner.expired()) notify_death(death);
+        if (!handle.object->reachable()) notify_death(death);
     } else {
         auto death = handle.death;
         if (!death || death->cookie != value.cookie) return -EINVAL;
@@ -153,7 +153,7 @@ void BinderNode::release_all_references() {
         // Dropping that peer's last shared reference can reenter teardown and
         // erase registry entries while this iterator is still in use.
         bool same_owner = !owner.owner_before(closing) && !closing.owner_before(owner);
-        if (owner.expired() || same_owner) {
+        if (it->second.object->host_service == Object::HostService::None && (owner.expired() || same_owner)) {
             change_reference(it->second.object, -1, 0);
             it = domain_->services.erase(it);
         } else ++it;
@@ -287,15 +287,17 @@ int BinderNode::translate_objects(BinderNode& target, Event& event, Memory& mem,
             if (!(handle.strong || handle.weak || handle.temporary_strong || handle.temporary_weak)) return -EINVAL;
             object = handle.object;
         } else return -ENOTSUP;
-        if (!object->alive || object->owner.expired()) return -ENOENT;
+        if (!object->reachable()) return -ENOENT;
         // Conservative queue reservation bounds lifecycle events before committing.
         auto owner_node = domain_->promote(object->owner);
-        if (!owner_node) return -ENOENT;
+        if (!owner_node && object->host_service == Object::HostService::None) return -ENOENT;
         auto owner = static_cast<BinderNode*>(owner_node.get());
         int owner_tid = (flat.type == BF_BINDER_TYPE_BINDER ||
                          flat.type == BF_BINDER_TYPE_WEAK_BINDER) ? tid : 0;
-        const auto& queue = owner_tid ? owner->replies_[owner_tid] : owner->incoming_;
-        if (queue.size() + 2 * offsets.size() + 2 > 256) return -ENOMEM;
+        if (owner) {
+            const auto& queue = owner_tid ? owner->replies_[owner_tid] : owner->incoming_;
+            if (queue.size() + 2 * offsets.size() + 2 > 256) return -ENOMEM;
+        }
         if (object->strong > 1000000 || object->weak > 1000000) return -EOVERFLOW;
         uint32_t id = 0;
         auto existing = std::find_if(staged_handles.begin(), staged_handles.end(),

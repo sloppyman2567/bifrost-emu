@@ -111,6 +111,7 @@ def build(runtime, output):
         "-Wall",
         "-Wextra",
         "-I" + str(ROOT / "Guest/Android/Include"),
+        "-I" + str(ROOT / "Include"),
         "-Wl,-z,max-page-size=16384",
         "-Wl,-z,defs",
     ]
@@ -181,8 +182,9 @@ def build(runtime, output):
             check=True,
         )
         # ManagedLauncher and ActivityProbe share the window/identity JNI bridge.
-        subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
+        subprocess.run(common + ["-std=c2x", "-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
                                  str(ROOT / "Guest/Android/Adapters/activity_window.c"),
+                                 str(ROOT / "Guest/Android/Adapters/gralloc_probe.c"),
                                  str(staging / "libandroid.so"), str(bionic / "libc.so"),
                                  str(bionic / "libdl.so"), str(bionic / "libdl_android.so"),
                                  "-o", str(staging / "libbifrost-activity.so")], check=True)
@@ -195,6 +197,11 @@ def build(runtime, output):
         # under the same-length soname re_<name> (lib -> re_).
         managed = staging / "managed"
         managed.mkdir()
+        subprocess.run(common + ["-std=c2x", "-mno-outline-atomics", "-fPIC", "-shared", "-Wl,-soname,mapper.bifrost.so",
+                                 str(ROOT / "Guest/Android/Adapters/gralloc_mapper.c"),
+                                 str(bionic / "libc.so"), "-o", str(managed / "mapper.bifrost.so")],
+                       check=True)
+        names.append("managed/mapper.bifrost.so")
         thunked_android = [n for n in groups["libandroid.so"]
                            if not n.startswith(("AConfiguration_", "ALooper_", "AChoreographer_"))]
         # Managed Java MessageQueue polls the image's libutils Looper. Native

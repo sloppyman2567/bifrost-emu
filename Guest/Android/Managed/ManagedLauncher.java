@@ -1401,6 +1401,10 @@ public final class ManagedLauncher {
         boolean nativeChoreographer = diagnostic && args.length == 1
                 && args[0].equals("--native-choreographer");
         if (nativeChoreographer) args = new String[0];
+        boolean gralloc = diagnostic && (args.length == 1 || args.length == 2) && args[0].equals("--gralloc");
+        int grallocDelay = gralloc && args.length == 2 ? Integer.parseInt(args[1]) : 0;
+        if (grallocDelay < 0 || grallocDelay > 30) throw new IllegalArgumentException("Gralloc repeat delay");
+        if (gralloc) args = new String[0];
         boolean probeRenderer = diagnostic && args.length == 1 && args[0].equals("--webview-renderer");
         boolean probeWebView = probeRenderer || (diagnostic && args.length == 1 && args[0].equals("--webview"));
         if (probeWebView) args = new String[0];
@@ -1416,6 +1420,22 @@ public final class ManagedLauncher {
         boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
         if (diagnostic) checkServiceRegistration();
         installServices(serviceChild || inventory);
+        if (gralloc) {
+            ActivityProbe.GrallocProbe.checkDeclarations();
+            int line = ActivityProbe.GrallocProbe.check();
+            if (line != 0) throw new AssertionError("Gralloc contract failed at gralloc_probe.c:" + line);
+            if (grallocDelay != 0) {
+                System.out.println("ANDROID_GRALLOC_CLIENT_READY");
+                Thread.sleep(grallocDelay * 1000L);
+                line = ActivityProbe.GrallocProbe.check();
+                if (line != 0) throw new AssertionError("Gralloc after peer exit failed at gralloc_probe.c:" + line);
+                System.out.println("ANDROID_GRALLOC_PEER_EXIT_OK");
+            }
+            System.out.println("ANDROID_GRALLOC_OK");
+            System.out.println("FRAMEWORK_OK");
+            System.exit(0);
+            return;
+        }
         if (inventory) {
             System.out.println(services.inventory());
             System.out.println("FRAMEWORK_OK");

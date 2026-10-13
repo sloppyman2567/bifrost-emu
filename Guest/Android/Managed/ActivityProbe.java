@@ -80,6 +80,59 @@ public final class ActivityProbe {
         }
     }
 
+    public static final class GrallocProbe {
+        static native int check();
+        // A Java Parcel client independently checks the frozen V2 shape.
+        // Request packed 1x1 RGB888 pixels plus a 64-byte reserved region.
+        private static int[] allocateReserved() throws Exception {
+            IBinder allocator = (IBinder) Class.forName("android.os.ServiceManager")
+                    .getMethod("checkService", String.class).invoke(null,
+                            "android.hardware.graphics.allocator.IAllocator/default");
+            android.os.Parcel data = android.os.Parcel.obtain(), reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken("android.hardware.graphics.allocator.IAllocator");
+                data.writeInt(1);
+                int start = data.dataPosition(); data.writeInt(0);
+                data.writeByteArray(new byte[128]);
+                data.writeInt(1); data.writeInt(1); data.writeInt(1); data.writeInt(3);
+                data.writeLong(0x2433); data.writeLong(64); data.writeInt(0); // CPU plus libui's retained legacy hints
+                int end = data.dataPosition(); data.setDataPosition(start);
+                data.writeInt(end - start); data.setDataPosition(end); data.writeInt(1);
+                if (!allocator.transact(2, data, reply, 0)) throw new AssertionError("allocate2 transaction");
+                reply.readException();
+                if (reply.readInt() != 1) throw new AssertionError("AllocationResult presence");
+                reply.readInt();
+                if (reply.readInt() != 1 || reply.readInt() != 1 || reply.readInt() != 1)
+                    throw new AssertionError("AllocationResult stride/count/handle");
+                reply.readInt();
+                if (reply.readInt() != 1 || reply.readInt() != 1) throw new AssertionError("NativeHandle fds");
+                try (android.os.ParcelFileDescriptor fd = android.os.ParcelFileDescriptor.CREATOR.createFromParcel(reply)) {
+                    int[] info = reply.createIntArray();
+                    if (info == null || info.length != 12) throw new AssertionError("NativeHandle ints");
+                    int[] transport = new int[13];
+                    System.arraycopy(info, 0, transport, 1, 12);
+                    transport[0] = fd.detachFd();
+                    return transport;
+                }
+            } finally { data.recycle(); reply.recycle(); }
+        }
+        static void checkDeclarations() throws Exception {
+            Class<?> manager = Class.forName("android.os.ServiceManager");
+            String iface = "android.hardware.graphics.allocator.IAllocator";
+            if (!(Boolean) manager.getMethod("isDeclared", String.class).invoke(null, iface + "/default")
+                    || (Boolean) manager.getMethod("isDeclared", String.class).invoke(null, iface + "/missing"))
+                throw new AssertionError("HAL declaration filtering");
+            String[] instances = (String[]) manager.getMethod("getDeclaredInstances", String.class).invoke(null, iface);
+            String[] missing = (String[]) manager.getMethod("getDeclaredInstances", String.class).invoke(null, "bifrost.missing.IHal");
+            if (!Arrays.equals(instances, new String[] {"default"}) || missing.length != 0)
+                throw new AssertionError("HAL instance enumeration");
+        }
+        public static void main(String[] args) {
+            ManagedLauncher.probe(args.length == 0 ? new String[] {"--gralloc"}
+                    : new String[] {"--gralloc", args[0]});
+        }
+    }
+
     // Standalone real-ART contract probe; runs without starting an Activity.
     public static final class InputMethodProbe {
         static Object invoke(Object endpoint, String name, Object... args) throws Exception {

@@ -102,6 +102,10 @@ int main(int argc,char** argv) {
         CHECK(payload.pid==(uint32_t)tx.sender_pid&&payload.uid==tx.sender_euid&&payload.pid!=(uint32_t)getpid());
         CHECK(payload.file.type==BF_BINDER_TYPE_FD&&payload.object.type==BF_BINDER_TYPE_HANDLE);
         char text[8]={0};CHECK(pread(payload.file.binder,text,7,0)==7&&!strcmp(text,"asgard!"));
+        unsigned char* shared=mmap(0,4096,PROT_READ|PROT_WRITE,MAP_SHARED,payload.file.binder,0);
+        CHECK(shared!=MAP_FAILED&&shared[128]==0x4d);
+        shared[129]=0x72;
+        CHECK(munmap(shared,4096)==0);
         struct scatter_root* received_root=(void*)(uintptr_t)payload.root.buffer;
         CHECK(received_root->pointer==payload.child.buffer&&received_root->tag==0xabcdef);
         CHECK(!memcmp((void*)(uintptr_t)received_root->pointer,"scatter",8));
@@ -119,6 +123,9 @@ int main(int argc,char** argv) {
         if(notify){puts("PROCESS_SERVER_WAITING");fflush(stdout);for(;;)pause();}
     } else {
         int file=memfd_create("asgard-process-test",MFD_CLOEXEC);CHECK(file>=0&&write(file,"asgard!",7)==7);
+        CHECK(ftruncate(file,4096)==0);
+        unsigned char* shared=mmap(0,4096,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
+        CHECK(shared!=MAP_FAILED);shared[128]=0x4d;
         char child[]="scatter";struct scatter_root root={(uintptr_t)child,{file,file},0xabcdef};
         struct payload payload={{BF_BINDER_TYPE_FD,0,file,0},{BF_BINDER_TYPE_BINDER,0,0x765400,0xabcdef},getpid(),getuid(),
             {BF_BINDER_TYPE_PTR,0,(uintptr_t)&root,sizeof(root),0,0},
@@ -132,6 +139,7 @@ int main(int argc,char** argv) {
         do {CHECK(exchange(fd,input,size,output,&wr)==0);size=0;}
         while(!find(output,wr.read_consumed,death?BF_BR_DEAD_REPLY:BF_BR_REPLY,&tx));
         if(!death) {
+            CHECK(shared[129]==0x72);
             CHECK(tx.data_size==sizeof(payload));memcpy(&payload,(void*)(uintptr_t)tx.buffer,sizeof(payload));
             CHECK(tx.sender_pid==0&&payload.uid==tx.sender_euid&&payload.pid!=(uint32_t)getpid());
             CHECK(payload.file.type==BF_BINDER_TYPE_FD);
@@ -176,6 +184,7 @@ int main(int argc,char** argv) {
             }
             CHECK(fcntl(array_fd,F_GETFD)==-1&&errno==EBADF);
         }
+        CHECK(munmap(shared,4096)==0);
         close(file);puts(death?"PROCESS_DEATH_OK":"PROCESS_CLIENT_OK");fflush(stdout);
     }
     munmap(arena,65536);close(fd);return 0;

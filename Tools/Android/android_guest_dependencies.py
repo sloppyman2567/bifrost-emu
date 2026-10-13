@@ -17,6 +17,14 @@ BIONIC_REVISION = "361ba86734fb2821a6adcfdf775db8abd04e0de0" # android-15.0.0_r1
 MEDIA_REVISION = "1863cb0ea5a9e1340f11a435618ff863e017da29" # android-15.0.0_r1
 ZLIB_VERSION = "1.3.2"
 ARCHIVES = {
+    "mapper": (
+        "https://android.googlesource.com/platform/hardware/interfaces/+archive/488942f82bd1bc9ad1cb65a02c71421dc3a6a3d6/graphics/mapper/stable-c/include.tar.gz",
+        "4075578f9212f4295f07faa90c79ed28270a53d170c3c59b1e47174fb2c33c83",
+    ),
+    "native-handle": (
+        "https://android.googlesource.com/platform/system/core/+archive/fc7bc8c4bfb4c6095e34ea784509dae56f25b486/libcutils/include/cutils.tar.gz",
+        "e4968cbf4518ad1a8e8c164954f0f61268e19e40eb23a056a5e639895f0efe8f",
+    ),
     "media": (
         f"https://android.googlesource.com/platform/frameworks/av/+archive/{MEDIA_REVISION}/media/ndk.tar.gz",
         "6f58997452f80240b5af4ed67578aa0885db4fe193c1b05c821d6ab1cec55b75",
@@ -60,7 +68,7 @@ ARCHIVES = {
 }
 
 
-def extract(name, destination):
+def extract(name, destination, selected=None):
     url, expected = ARCHIVES[name]
     cache = ROOT / "build/android-dependencies"
     cache.mkdir(parents=True, exist_ok=True)
@@ -95,7 +103,7 @@ def extract(name, destination):
         for item in sorted(members, key=lambda member: member.name):
             path = Path(item.name)
             if (path.is_absolute() or ".." in path.parts or item.name in names or
-                    not (item.isfile() or item.isdir())):
+                    ((selected is None or item.name in selected) and not (item.isfile() or item.isdir()))):
                 raise ValueError(f"Unsafe Android dependency member: {item.name}")
             names.add(item.name)
             if item.isfile():
@@ -108,6 +116,8 @@ def extract(name, destination):
         actual = contents.hexdigest() if "+archive/" in url else hashlib.sha256(data).hexdigest()
         if actual != expected:
             raise ValueError(f"Pinned Android dependency SHA-256 mismatch: {name}")
+        if selected is not None and not selected.issubset(names):
+            raise ValueError(f"Missing pinned Android dependency member: {name}")
         if not archive.exists():
             with tempfile.NamedTemporaryFile(dir=cache, delete=False) as stream:
                 temporary = Path(stream.name)
@@ -117,10 +127,13 @@ def extract(name, destination):
                     temporary.replace(archive)
                 finally:
                     temporary.unlink(missing_ok=True)
-        source.extractall(destination, filter="data")
+        source.extractall(destination, members=[item for item in members
+                          if selected is None or item.name in selected], filter="data")
 
 
 def prepare_headers(directory):
+    extract("mapper", directory / "include")
+    extract("native-handle", directory / "include/cutils", {"native_handle.h"})
     extract("media", directory / "media-ndk")
     for name in ("include", "uapi", "android", "jni"):
         extract(name, directory / name)

@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -292,7 +293,7 @@ def install_managed_graphics(root, adapters):
     """
     lib64 = root / "system/lib64"
     names = ("libandroid.so", "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libaaudio.so")
-    if {p.name for p in adapters.glob("*.so")} != set(names):
+    if {p.name for p in adapters.glob("*.so")} != set(names) | {"mapper.bifrost.so"}:
         raise ValueError("Unexpected managed graphics adapters")
     for adapter in (adapters / name for name in names):
         real = lib64 / adapter.name
@@ -301,6 +302,16 @@ def install_managed_graphics(root, adapters):
         set_soname(moved, moved.name)
         real.unlink()
         shutil.copyfile(adapter, real)
+    vendor = root / "vendor/lib64/hw"
+    vendor.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(adapters / "mapper.bifrost.so", vendor / "mapper.bifrost.so")
+    # android_load_sphal_library falls back to the visible default namespace
+    # in this framework profile. Keep the normal vendor HAL location.
+    config = root / "linkerconfig/ld.config.txt"
+    text = config.read_text()
+    text = re.sub(r"^(namespace.default.search.paths = .*)$", r"\1:/vendor/lib64/hw", text, flags=re.M)
+    text = re.sub(r"^(namespace.default.permitted.paths = .*)$", r"\1:/vendor", text, flags=re.M)
+    config.write_text(text)
 
 
 class LogdReceiver:
@@ -558,7 +569,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     adapter_manifest = json.loads((adapters / "adapters.json").read_text())
     adapter_names = ["libbifrost-activity.so"] + [
         "managed/" + name for name in ("libandroid.so", "libEGL.so", "libGLESv2.so",
-                                      "libGLESv3.so", "libaaudio.so")]
+                                      "libGLESv3.so", "libaaudio.so", "mapper.bifrost.so")]
     for name in adapter_names:
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)

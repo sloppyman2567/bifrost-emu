@@ -1,5 +1,45 @@
 # Tests
 
+## Software Gralloc5 and allocator lifetime (2026-10-13)
+
+`ActivityProbe$GrallocProbe` uses real Android 15 AHardwareBuffer/libui clients
+and an AImageReader BufferQueue, with `--services --managed-graphics` and the
+current managed launcher dex. It covers eleven explicit CPU buffer formats,
+NDK handle transfer, independent imports and retained pixels/identity after
+the original import is released; YUV planes; unsupported protected/multi-layer/
+unknown formats; two queued RGBA frames, latest-image selection, full pixel
+comparison and a positive timestamp. It also checks the service manager's
+positive/negative HAL declarations and instance lists. JIT and interpreter pass.
+The Java Parcel allocator client additionally requests packed RGB888 with a
+64-byte reserved region and libui's two retained legacy allocation hints.
+The native mapper checks aligned/shared reserved bytes, shared dataspace,
+malformed metadata rejection and the specified rejection of non-CPU lock flags.
+An invalid lock with an unsignaled fd must return promptly and close that fd.
+
+`--binder-broker SOCKET --app-id UID` lets independent framework runners share
+one broker. `--probe-arg 15` repeats Gralloc checks in the same VM after 15 s.
+The UID-10003 survivor passed after the UID-10002 peer exited; UID 10004 then
+passed after both earlier clients exited. This verifies the realm-owned
+allocator survives app disconnects, not simultaneous full-game compatibility.
+
+`android_binder_process` additionally exchanges writes through independent
+`MAP_SHARED` mappings of a Binder-transferred memfd across distinct guest UIDs.
+`test_asgard.py` passes all four JIT/interpreter pairs, peer-death cases and the
+eight-process stress test. EGL native-buffer/external-texture import and media
+decoding are excluded. Commands and source references are in the
+[runtime guide](Android/ANDROID_RUNTIME.md#software-gralloc5-2026-10-13).
+
+Final validation for this milestone: SDL/GL and headless emulator/library builds,
+guest adapters and launcher build, generated-table check, strict GPU-enabled JIT
+suite (325/325), strict interpreter suite (316/316, nine runner exclusions),
+`make verify` (87 differential fixtures and seven threaded oracles), and the
+Bionic/bootstrap/AAudio gate pass. Interpreter exclusions were `jit_cache`,
+`jit_host_fault`, `jit_tier2_discovery`, `jit_tier2_feedback`, `jit_tier2_measure`,
+`jit_tier2_mutex`, `test_long_call_loop`, `tier2_smov` and `zstd_compression`.
+The normal-JIT untraced Trickcal run still reports the existing Scudo corrupted
+chunk header failure (saved session `fa1bca4868624ab98eee6d2341638179`, exit 127);
+these passes do not establish video playback.
+
 ## Activity windows and SurfaceView lifecycle (2026-10-13)
 
 `PackageTests.test_managed_view_window_and_surface_lifecycle` (`ManagedViews`)

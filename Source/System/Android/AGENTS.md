@@ -16,6 +16,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Framework service stubs are strict: add the exact observed method contract,
   not a blanket default. Preserve package query filtering/copy isolation and
   per-Activity manifest/requested orientation.
+- Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
+  and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
+  libui caches its Binder, which must survive other apps exiting. Preserve the
+  sealed-size memfd ABI, independent imports, bounded metadata snapshots and fd
+  ownership. Run `ActivityProbe$GrallocProbe` in both engines and with distinct
+  UIDs sharing a broker; this does not establish EGL image import or decoding.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

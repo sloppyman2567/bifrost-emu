@@ -260,6 +260,10 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
             auto handle = handles_.find(static_cast<uint32_t>(tx.target));
             if (handle != handles_.end() && (handle->second.strong || handle->second.temporary_strong)) {
                 destination = handle->second.object;
+                if (destination->alive && destination->host_service == Object::HostService::GraphicsAllocator) {
+                    if (buffers_size) { fail(tid, BF_BR_FAILED_REPLY, EINVAL); return 0; }
+                    return allocator_transaction(tx, mem, tid);
+                }
                 if (destination->alive) destination_owner = domain_->promote(destination->owner);
                 if (destination_owner) target = static_cast<BinderNode*>(destination_owner.get());
             }

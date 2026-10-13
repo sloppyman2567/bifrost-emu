@@ -93,7 +93,11 @@ require Android media services and associated drivers/framework integration;
 calls that wait for unavailable services may block. Codec decoding, playback
 and real Android native-window interoperability are not validated. A future
 host decoder bridge belongs at that service/buffer boundary; the real metadata
-API itself needs no host thunk.
+API itself needs no host thunk. The managed framework now has a realm-owned
+software Gralloc5 allocator and guest mapper, verified through AHardwareBuffer
+and AImageReader CPU pixels (see [runtime validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13)).
+This is the allocation/mapping foundation; EGL image import, MediaCodec/JNI and
+actual video playback remain unfinished.
 
 ## Package and runtime ownership
 

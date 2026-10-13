@@ -205,6 +205,110 @@ Binder suite. A bounded SpongeBob run also calls Unity's
 Neither these tests nor presented frames establish video-ad playback: the
 `libmedia_jni.so`, decoder and video-surface path remains unfinished.
 
+### Software Gralloc5 (2026-10-13)
+
+The native service manager now implements `isDeclared` and
+`getDeclaredInstances` for the virtual allocator HAL. `GraphicsAllocator.cpp`
+implements the frozen `android.hardware.graphics.allocator.IAllocator` V2
+contract, including interface version/hash, mapper suffix, `allocate2` and
+`isSupported`. It is owned by the Binder realm rather than a managed app: a
+cached libui allocator Binder survives another app closing. The legacy mapper4
+descriptor method returns `UNSUPPORTED`; malformed descriptions and unsupported
+formats are not turned into successful dummy allocations.
+
+`mapper.bifrost.so` implements the Android 15 stable-C mapper v5 ABI. The adapter
+builder fetches checksum-pinned AOSP mapper/native-handle headers and the managed
+runtime installs the library at `/vendor/lib64/hw`. The visible default linker
+namespace includes that location for `android_load_sphal_library` fallback.
+Allocations have one memfd containing a metadata prefix, linear pixels and an
+optional reserved region. Grow/shrink seals prevent truncation while imported;
+the mapper validates the transported layout and file size, duplicates the fd,
+and creates an independent guest `MAP_SHARED` mapping for every import. The
+shared transport is defined in `Include/Bifrost/AndroidGralloc.h`.
+
+Supported one-layer formats are RGBA/RGBX/BGRA 8888, RGB 888, RGB 565, RGBA FP16,
+RGBA 1010102, R8, BLOB (height 1), flexible YUV420 and YV12 (planar Y,V,U with
+aligned chroma strides). IMPLEMENTATION_DEFINED selects RGBA 8888. Dimensions,
+per-buffer bytes, batch count and reserved bytes are bounded. Protected buffers,
+front-buffer rendering, cube/mipmap layouts and vendor options/usages are
+rejected. This software allocation support does not imply native host-GPU import.
+The removed HW_2D/EXTERNAL_DISP allocation hints (bits 10 and 13) remain
+accepted, matching libui's explicit compatibility allowance. The mapper lock
+entry point requires CPU usage flags only, as required by the stable-C API.
+
+The mapper implements all 23 Android 15 standard metadata queries, transport
+size, reserved regions, import/free, lock/unlock and metadata dumps. Dataspace,
+blend and bounded HDR metadata are shared between imports using atomic
+per-field sequence snapshots. A conflicting or interrupted metadata writer
+returns `NO_RESOURCES` after bounded retries, avoiding an indefinite wait on
+a dead process. CPU memory is coherent and unlock returns no release fence;
+incoming acquire fences are waited on and closed by the mapper.
+Invalid lock requests close their fence before returning an error, without
+waiting for it to signal; valid waits do not hold the mapper registry mutex.
+
+Source-checked contracts:
+[IAllocator V2](https://android.googlesource.com/platform/hardware/interfaces/+/refs/tags/android-15.0.0_r1/graphics/allocator/aidl/aidl_api/android.hardware.graphics.allocator/2/android/hardware/graphics/allocator/IAllocator.aidl),
+[stable-C IMapper](https://android.googlesource.com/platform/hardware/interfaces/+/refs/tags/android-15.0.0_r1/graphics/mapper/stable-c/include/android/hardware/graphics/mapper/IMapper.h),
+[metadata encoding](https://android.googlesource.com/platform/hardware/interfaces/+/refs/tags/android-15.0.0_r1/graphics/mapper/stable-c/implutils/include/android/hardware/graphics/mapper/utils/IMapperMetadataTypes.h),
+and [libui's Gralloc5 client](https://android.googlesource.com/platform/frameworks/native/+/refs/tags/android-15.0.0_r1/libs/ui/Gralloc5.cpp).
+
+Observed in real-framework tests: all eleven explicit formats allocate,
+describe, lock and round-trip through the NDK Unix-socket handle API. Duplicate
+imports retain buffer identity and pixels after releasing the original import.
+The two YUV layouts expose three planes. Protected, multi-layer and unknown
+formats are rejected. A real `AImageReader` receives two buffers queued through
+`ANativeWindow_lock`/`unlockAndPost`; `acquireLatestImage` selects the latest,
+all 32x18 RGBA pixels match, and its timestamp is positive. JIT and interpreter
+pass through the shared broker. Two independent framework VMs with UIDs 10002
+and 10003 also pass, including allocating again through a cached Binder after
+the peer exits; UID 10004 allocates after both previous clients have exited.
+An independent Java `allocate2` Parcel request with legacy hints and packed
+1x1 RGB888 pixels verifies a word-aligned 64-byte reserved region, sharing it
+through duplicate imports; shared dataspace updates, malformed metadata rejection
+and non-CPU lock rejection are also checked.
+The existing raw Binder process fixture now independently checks shared-memfd
+mmap writes in both directions across different UIDs in all four engine pairs.
+
+Build and run the focused probe:
+
+After updating the emulator, an already-running shared broker still executes
+its old binary. Stop its app sessions before restarting that realm with
+`asgard.py --state-root STATE realm stop` and `realm start`. The focused runner
+starts a fresh temporary broker unless `--binder-broker` is supplied.
+
+```bash
+python3 Tools/Android/build-android-adapters.py
+make android-managed-launcher
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe build/android-managed-launcher/classes.dex \
+  --main-class 'ActivityProbe$GrallocProbe' --output /tmp/gralloc-jit
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe build/android-managed-launcher/classes.dex \
+  --main-class 'ActivityProbe$GrallocProbe' --mode interp --timeout 90 \
+  --output /tmp/gralloc-interp
+python3 Scripts/Android/test_asgard.py
+```
+
+For concurrent clients use `--binder-broker SOCKET --app-id UID` on each
+framework runner. `GrallocProbe --probe-arg 15` prints
+`ANDROID_GRALLOC_CLIENT_READY`, waits 15 seconds, then repeats the native checks
+with the same cached libui allocator. Start the peer after that marker and
+require it to exit before `ANDROID_GRALLOC_PEER_EXIT_OK` in the survivor.
+
+This completes the allocation/mapping milestone only. Managed `libandroid`
+still needs dispatch between opaque Bifrost windows and real libgui windows,
+including `ANativeWindow_toSurface`; the probe deliberately uses only native
+window entry points that already reach the platform library. EGL native-buffer
+import/external textures, `libmedia_jni`, MediaCodec callbacks, video/audio
+decoding and in-game playback remain unfinished. Two full games running
+concurrently have not been validated.
+
+The normal-JIT untraced Trickcal check on this change (session
+`fa1bca4868624ab98eee6d2341638179`) reached Unity and failed after about 69 s
+with exit 127. Its saved `logd.log` contains Scudo's `corrupted chunk header`
+on guest thread 11, reproducing the previously documented failure. The run
+does not verify a video opening or any in-game playback.
+
 ### Android app credentials (2026-10-09)
 
 `--android-runtime` uses UID/GID 10000 (Android's first application ID, user 0),

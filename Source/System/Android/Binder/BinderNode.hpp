@@ -16,11 +16,13 @@ struct BinderDeath {
     bool queued = false, delivered = false, acknowledged = false, clearing = false, cancelled = false;
 };
 struct BinderObject {
+    enum class HostService { None, GraphicsAllocator } host_service = HostService::None;
     std::weak_ptr<Node> owner;
     uint64_t pointer = 0, cookie = 0;
     uint32_t strong = 0, weak = 0;
     bool alive = true;
     bool accepts_fds = false;
+    bool reachable() const { return alive && (host_service != HostService::None || !owner.expired()); }
     std::vector<std::weak_ptr<BinderDeath>> deaths;
     uint32_t pending_strong = 0, pending_weak = 0;
 };
@@ -159,5 +161,6 @@ private:
     void drop_buffer_references(uint64_t);
     void release_all_references();
     int service_transaction(const bf_binder_transaction&, Memory&, int tid, FdTable&);
+    int allocator_transaction(const bf_binder_transaction&, Memory&, int tid);
 };
 }

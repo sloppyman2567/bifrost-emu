@@ -10,6 +10,9 @@ namespace {
 constexpr uint32_t STATUS_CODE = 0x08;
 constexpr uint32_t SYSTEM_HEADER = 0x53595354; // B_PACK_CHARS('S','Y','S','T')
 constexpr const char *DESCRIPTOR = "android.os.IServiceManager";
+// Virtual device manifest. Declarations describe implemented HAL instances,
+// independently of app lifetimes. The allocator is owned by the Binder realm.
+constexpr const char *ALLOCATOR = "android.hardware.graphics.allocator.IAllocator/default";
 bool service_name(const std::string &name) {
     return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
@@ -18,9 +21,17 @@ bool service_name(const std::string &name) {
 }
 } // namespace
 int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem, int tid, FdTable& fds) {
+    if (!domain_->services.count(ALLOCATOR)) {
+        auto object = std::make_shared<Object>();
+        object->host_service = Object::HostService::GraphicsAllocator;
+        object->strong = 1;
+        domain_->services.emplace(ALLOCATOR, BinderService{object, 8, 63});
+    }
     // Reserve the local response before changing registry/object ownership.
     uint64_t reservation = 64;
-    if (tx.code == 4) {
+    if (tx.code == 8) {
+        reservation = 128;
+    } else if (tx.code == 4) {
         reservation = 8;
         for (const auto &entry : domain_->services)
             reservation += 4 + ((2 * (entry.first.size() + 1) + 3) & ~uint64_t(3));
@@ -63,7 +74,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
             input.read<int32_t>(); // WorkSource UID
             if (input.read<uint32_t>() != SYSTEM_HEADER || input.ascii_string(64) != DESCRIPTOR)
                 throw std::invalid_argument("wrong service-manager interface");
-            if (tx.code < 1 || tx.code > 4) {
+            if ((tx.code < 1 || tx.code > 4) && tx.code != 7 && tx.code != 8) {
                 result.write<int32_t>(-EBADMSG); // Android UNKNOWN_TRANSACTION
                 reply.transaction.flags = STATUS_CODE;
             } else if (tx.code == 4) { // listServices(dumpPriority)
@@ -74,7 +85,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                 result.write<int32_t>(0); // AIDL Status: no exception
                 std::vector<std::string> names;
                 for (const auto &entry : domain_->services)
-                    if (entry.second.object->alive && !entry.second.object->owner.expired() &&
+                    if (entry.second.object->reachable() &&
                         (entry.second.dump_priority & priority))
                         names.push_back(entry.first);
                 result.write<int32_t>(names.size());
@@ -84,7 +95,22 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                 std::string name = input.ascii_string(127);
                 if (!service_name(name))
                     throw std::invalid_argument("invalid service name");
-                if (tx.code == 3) { // addService(name, binder, allowIsolated, dumpPriority)
+                if (tx.code == 7 || tx.code == 8) {
+                    input.finish();
+                    if (tx.offsets_size)
+                        throw std::invalid_argument("unexpected Binder objects");
+                    result.write<int32_t>(0);
+                    if (tx.code == 7) { // isDeclared(instance)
+                        result.write<int32_t>(name == ALLOCATOR);
+                    } else { // getDeclaredInstances(interface)
+                        bool allocator = name == "android.hardware.graphics.allocator.IAllocator";
+                        result.write<int32_t>(allocator ? 1 : 0);
+                        if (allocator)
+                            result.ascii_string("default");
+                    }
+                } else if (tx.code == 3) { // addService(name, binder, allowIsolated, dumpPriority)
+                    if (name == ALLOCATOR)
+                        throw std::invalid_argument("host allocator cannot be replaced");
                     uint64_t offset = input.position();
                     auto flat = input.read<bf_flat_binder>();
                     // Parcel::finishFlattenBinder appends an int32 stability
@@ -138,8 +164,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     auto found = domain_->services.find(name);
                     bf_flat_binder flat{BF_BINDER_TYPE_BINDER, 0, 0, 0};
                     int32_t stability = 0;
-                    if (found != domain_->services.end() && found->second.object->alive &&
-                        !found->second.object->owner.expired()) {
+                    if (found != domain_->services.end() && found->second.object->reachable()) {
                         auto object = found->second.object;
                         stability = found->second.stability;
                         auto handle =
