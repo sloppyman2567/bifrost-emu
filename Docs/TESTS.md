@@ -1,5 +1,20 @@
 # Tests
 
+## Covered Activities stop (2026-10-13)
+
+`PackageTests.test_managed_activity_stack` now checks that the opaque second
+Activity stops the root (`onStop`), removes its SurfaceView's host surface and
+restarts it (`onRestart` before `onActivityResult` and `onResume`), and that
+the translucent second round leaves the root paused and visible. The previous
+build never stops the root. The full Android package suite ran 26/27: the
+method-traced `test_managed_service_trace` hit its service-callback deadline
+once, during a run with about 11 emulator processes alive (its fixture starts
+no Activity); it passed alone. One 180 s Azur Lane run (JIT):
+`PrePermissionActivity` stops when `MainActivity` resumes, its blue window no
+longer reaches the host, and the game's surface shows (user-confirmed); the
+game then passed its update check, showed its download-group panel and quit
+through `GameMain:OnApplicationQuit`. Gameplay was not reached.
+
 ## AAudio API coverage (2026-10-13)
 
 `Tests/Unit/android_aaudio_thread.c` now also covers channel layouts and

@@ -1313,7 +1313,8 @@ public final class ManagedLauncher {
     private static void closeActivity(Activity activity) throws Exception {
         windowOpen = false;
         activity.onWindowFocusChanged(false);
-        call(activity, "performPause", new Class<?>[0]);
+        // Already paused (and stopped) when another Activity covered it.
+        if (FrameworkActivities.resumedState(activity)) call(activity, "performPause", new Class<?>[0]);
         System.out.println("APP_PAUSED");
         windows.stop();
         call(activity, "performStop", new Class<?>[] {boolean.class, String.class}, false, "bifrost");

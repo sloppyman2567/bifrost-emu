@@ -426,6 +426,8 @@ class PackageTests(unittest.TestCase):
             component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
             component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
+            component += (f'<activity android:name="{activity}$Translucent" android:exported="false" '
+                          'android:theme="@android:style/Theme.Translucent.NoTitleBar"/>')
             component += (f'<provider android:name="{activity}$Files" android:authorities="org.bifrost.fixture.files" '
                           'android:exported="false"><intent-filter>'
                           '<action android:name="org.bifrost.fixture.FILES"/></intent-filter></provider>')
@@ -937,9 +939,11 @@ class PackageTests(unittest.TestCase):
                    # A second request from the first result's callback is answered, not cancelled.
                    "MANAGED_ACTIVITIES_PERMISSIONS 8 [android.permission.CAMERA] [-1]",
                    "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
-                   "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_SECOND_FOCUS true",
-                   "MANAGED_ACTIVITIES_SECOND_WINDOW",
-                   "MANAGED_ACTIVITIES_SECOND_CLICKED", "MANAGED_ACTIVITIES_RESULT 42 -1 42",
+                   # The opaque second Activity stops the root once it is resumed.
+                   "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_ROOT_STOPPED",
+                   "MANAGED_ACTIVITIES_SECOND_FOCUS true", "MANAGED_ACTIVITIES_SECOND_WINDOW",
+                   "MANAGED_ACTIVITIES_SECOND_CLICKED", "MANAGED_ACTIVITIES_ROOT_RESTARTED",
+                   "MANAGED_ACTIVITIES_RESULT 42 -1 42",
                    "MANAGED_ACTIVITIES_ROOT_RESUMED returned=1", "MANAGED_ACTIVITIES_SECOND_DESTROYED",
                    "APP_POPUP_REMOVED",
                    # Second round: the Back key through the window's view tree.
@@ -947,6 +951,19 @@ class PackageTests(unittest.TestCase):
                    "MANAGED_ACTIVITIES_ROOT_RESUMED returned=2", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
+        # Only the opaque round stops the root; its window and SurfaceView
+        # leave the host meanwhile and come back. The translucent round keeps
+        # the root visible (one more surface teardown at the root's destroy).
+        self.assertEqual(text.count("MANAGED_ACTIVITIES_ROOT_STOPPED"), 2, text[-30000:])
+        self.assertEqual(text.count("MANAGED_ACTIVITIES_ROOT_RESTARTED"), 1)
+        stopped = text.index("MANAGED_ACTIVITIES_ROOT_STOPPED")
+        restarted = text.index("MANAGED_ACTIVITIES_ROOT_RESTARTED")
+        self.assertIn("APP_SURFACE_DESTROYED android.view.SurfaceView", text[stopped:restarted])
+        self.assertIn("APP_SURFACE android.view.SurfaceView", text[restarted:])
+        translucent = text[text.index("MANAGED_ACTIVITIES_ROOT_RESUMED returned=1"):
+                           text.index("MANAGED_ACTIVITIES_ROOT_RESUMED returned=2")]
+        self.assertNotIn("MANAGED_ACTIVITIES_ROOT_STOPPED", translucent)
+        self.assertNotIn("APP_SURFACE_DESTROYED", translucent)
         # The second window reaches the host while it is resumed; focus
         # arrives by a ViewRootImpl message, in either order with the layer.
         layer = text.index("text=Close second")

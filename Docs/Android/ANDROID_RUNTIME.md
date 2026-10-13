@@ -1439,17 +1439,31 @@ framework.jar) and posts the launch to the main thread:
 - `handleResumeActivity`'s `TYPE_BASE_APPLICATION` decor window is added
   through `WindowManager`, so `FrameworkWindows` draws it full-display,
   routes touches and keys to it and moves window focus to it;
+- once the new Activity is resumed, every Activity it covers is stopped and
+  its window made invisible, following `EnsureActivitiesVisibleHelper`: an
+  Activity occludes those beneath unless its manifest theme sets
+  `windowIsTranslucent` or `windowIsFloating` (`windowShowWallpaper` always
+  occludes; `ActivityRecord`, android-15.0.0_r1). The stop is
+  `handleStopActivity`: `performStop`, then `updateVisibility(false)` makes
+  the decor `INVISIBLE`, so `FrameworkWindows` drops its layer and destroys
+  its SurfaceViews' host surfaces;
 - `Activity.finish()` records the result through `finishActivity`; the UI loop
-  pauses the finished Activity, calls the caller's `dispatchActivityResult`
-  for `startActivityForResult`, resumes the Activity below, then stops and
-  destroys the finished one and removes its window.
+  pauses the finished Activity, restarts any Activity it uncovered
+  (`performRestart`), calls the caller's `dispatchActivityResult` for
+  `startActivityForResult`, resumes the Activity below and makes uncovered
+  windows visible again, then stops and destroys the finished one and
+  removes its window.
 `getCallingActivity`/`getCallingPackage` report the caller of an Activity
 started for a result. The launcher Activity is registered before its
 `onCreate`, so a splash Activity may start the game Activity there (Azur
 Lane's `PrePermissionActivity`); the launch is posted and runs after the
 launcher Activity has resumed. A host window close destroys stacked Activities before
 the launcher Activity. The log records `APP_ACTIVITY_PAUSED`,
-`APP_ACTIVITY_STARTING`, `APP_ACTIVITY_RESUMED` and `APP_ACTIVITY_DESTROYED`.
+`APP_ACTIVITY_STARTING`, `APP_ACTIVITY_RESUMED`, `APP_ACTIVITY_STOPPED`,
+`APP_ACTIVITY_RESTARTED` and `APP_ACTIVITY_DESTROYED`. Azur Lane's opaque
+`PrePermissionActivity` window previously stayed above `MainActivity`'s
+Unity SurfaceView (window layers sit above all surfaces), so the screen stayed
+on its blue background until a resize.
 
 The launcher Activity, too, now receives the ActivityThread as `mMainThread`.
 Without it `Activity.startActivity` failed with a null
@@ -1477,8 +1491,10 @@ every later request, as on a device it never could, since the result
 arrives from another process.
 Previously `getPermissionControllerPackageName` threw, so Trickcal's Unity
 permission request failed and its callback never ran.
-An Activity below a stacked one is paused but not stopped and keeps its
-surface, as under a translucent Activity. Stacked Activities draw only in
+An Activity below a translucent or floating one is paused but not stopped
+and keeps its window and surfaces. The stop happens at once rather than after
+the new Activity is idle, and `onSaveInstanceState` is not called on it
+(there is no process death to restore from). Stacked Activities draw only in
 software, keep the display size regardless of their requested orientation,
 and launch flags, task affinities and `onNewIntent` are not modelled.
 A mouse's back/forward buttons send `KEYCODE_BACK`/`KEYCODE_FORWARD`, as

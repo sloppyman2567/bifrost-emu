@@ -14,7 +14,8 @@ import java.util.List;
 
 /**
  * A second Activity above a SurfaceView Activity: start for result, window, finish, resume.
- * First a provider intent query and a permission request round trip.
+ * First a provider intent query and a permission request round trip. The opaque second
+ * Activity stops the root and hides its window; the translucent one only pauses it.
  */
 public final class ManagedActivities extends Activity {
     private final Handler main = new Handler();
@@ -31,8 +32,8 @@ public final class ManagedActivities extends Activity {
         super.onResume();
         System.out.println("MANAGED_ACTIVITIES_ROOT_RESUMED returned=" + returned);
         if (returned == 1) {
-            // Second round: closed with the Back key instead of a button.
-            startActivityForResult(new Intent(this, Second.class).putExtra("back", true), 43);
+            // Second round: translucent, closed with the Back key instead of a button.
+            startActivityForResult(new Intent(this, Translucent.class).putExtra("back", true), 43);
             return;
         }
         if (returned == 2) {
@@ -84,6 +85,16 @@ public final class ManagedActivities extends Activity {
         System.out.println("MANAGED_ACTIVITIES_ROOT_PAUSED");
     }
 
+    @Override public void onStop() {
+        super.onStop();
+        System.out.println("MANAGED_ACTIVITIES_ROOT_STOPPED");
+    }
+
+    @Override public void onRestart() {
+        super.onRestart();
+        System.out.println("MANAGED_ACTIVITIES_ROOT_RESTARTED");
+    }
+
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         System.out.println("MANAGED_ACTIVITIES_RESULT " + request + " " + result + " "
@@ -96,7 +107,10 @@ public final class ManagedActivities extends Activity {
         System.out.println("MANAGED_ACTIVITIES_ROOT_DESTROYED");
     }
 
-    public static final class Second extends Activity {
+    /** Theme.Translucent in the manifest: the root stays visible beneath it. */
+    public static final class Translucent extends Second {}
+
+    public static class Second extends Activity {
         private final Handler main = new Handler();
 
         @Override public void onCreate(Bundle state) {

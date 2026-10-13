@@ -32,7 +32,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   Activities from `FrameworkActivities`), goes through WindowManager and
   `FrameworkWindows`; SurfaceViews in any window get host surfaces from
   `FrameworkSurfaces` following SurfaceView's visibility contract. Keep
-  ActivityThread's lifecycle order. Only the session process publishes device
+  ActivityThread's lifecycle order. Window layers sit above every surface, so
+  an Activity covered by an opaque one must stop and hide its window
+  (`EnsureActivitiesVisibleHelper`); only translucent/floating themes leave it
+  visible. Only the session process publishes device
   services (`sensorservice`, `SurfaceFlingerAIDL`, `SurfaceFlinger`).
 - Managed connectivity presents the host route as Wi-Fi. VALIDATED requires
   the launcher's HTTPS probe returning 204 or its explicit diagnostic override.

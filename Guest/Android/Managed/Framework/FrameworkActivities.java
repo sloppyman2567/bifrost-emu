@@ -3,9 +3,11 @@
 // the launch follows ActivityThread.performLaunchActivity and
 // handleResumeActivity on the main thread. The new Activity's window is added
 // through WindowManager, so FrameworkWindows lays it out, draws it in software
-// and routes input to it; the Activity beneath is paused, as under a
-// translucent Activity, and keeps its surface. Finishing resumes the caller
-// and delivers any requested result.
+// and routes input to it. The Activity beneath is paused; when the new one
+// occludes it (its theme is not translucent or floating), it is also stopped
+// and its window becomes invisible, so its layer and SurfaceViews leave the
+// host, as on Android. Finishing restarts and resumes the caller and delivers
+// any requested result.
 import android.app.Activity;
 import android.app.Application;
 import android.app.Instrumentation;
@@ -47,6 +49,7 @@ final class FrameworkActivities {
         final Record caller;      // receives the result, or null
         final String resultWho;
         final int requestCode;
+        boolean occludes = true;  // ActivityRecord.mOccludesParent
         int resultCode = Activity.RESULT_CANCELED;
         Intent resultData;
         Record(Activity activity, IBinder token, Record caller, String resultWho, int requestCode) {
@@ -208,6 +211,7 @@ final class FrameworkActivities {
         method(context.getClass(), "setOuterContext", Context.class).invoke(context, activity);
         if (info.getThemeResource() != 0) activity.setTheme(info.getThemeResource());
         Record record = new Record(activity, token, caller, resultWho, requestCode);
+        record.occludes = occludesParent(info);
         synchronized (this) { stack.add(record); }
         System.out.println("APP_ACTIVITY_STARTING " + info.name);
         instrumentation.callActivityOnCreate(activity, null);
@@ -219,8 +223,86 @@ final class FrameworkActivities {
             resume(activity);
             show(activity);
             System.out.println("APP_ACTIVITY_RESUMED " + info.name);
+            // Once the new Activity is visible, the ones it covers stop.
+            for (Record revealed : ensureVisibility()) setVisible(revealed.activity, true);
         }
         // An Activity finishing during creation is torn down by update().
+    }
+
+    // ActivityRecord: an Activity occludes those beneath it unless its theme is
+    // translucent or floating; one showing the wallpaper always does. Without
+    // a manifest theme, the default theme is opaque.
+    private boolean occludesParent(ActivityInfo info) {
+        int themeId = info.getThemeResource();
+        if (themeId == 0) return true;
+        int[] attrs = {android.R.attr.windowIsTranslucent, android.R.attr.windowIsFloating,
+                       android.R.attr.windowShowWallpaper};
+        int[] sorted = attrs.clone();
+        java.util.Arrays.sort(sorted);  // obtainStyledAttributes requires ascending ids
+        android.content.res.Resources.Theme theme = application.getResources().newTheme();
+        theme.applyStyle(themeId, true);
+        android.content.res.TypedArray values = theme.obtainStyledAttributes(sorted);
+        try {
+            boolean translucent = values.getBoolean(java.util.Arrays.binarySearch(sorted, attrs[0]), false);
+            boolean floating = values.getBoolean(java.util.Arrays.binarySearch(sorted, attrs[1]), false);
+            boolean wallpaper = values.getBoolean(java.util.Arrays.binarySearch(sorted, attrs[2]), false);
+            return !(translucent || floating) || wallpaper;
+        } finally {
+            values.recycle();
+        }
+    }
+
+    // EnsureActivitiesVisibleHelper, top down: Activities stay visible until
+    // one occludes its parent; everything beneath it stops and its window
+    // becomes invisible. A stopped Activity uncovered again restarts; the
+    // caller makes the returned ones visible after any resume, as
+    // handleResumeActivity does.
+    private List<Record> ensureVisibility() throws Exception {
+        List<Record> records;
+        synchronized (this) { records = new ArrayList<>(stack); }
+        List<Record> revealed = new ArrayList<>();
+        boolean covered = false;
+        for (int i = records.size() - 1; i >= 0; i--) {
+            Record record = records.get(i);
+            if (record.activity.isFinishing()) continue;
+            if (covered) {
+                stop(record.activity);
+            } else if (stoppedState(record.activity)) {
+                method(Activity.class, "performRestart", boolean.class).invoke(record.activity, true);
+                System.out.println("APP_ACTIVITY_RESTARTED " + record.activity.getClass().getName());
+                revealed.add(record);
+            }
+            covered |= record.occludes;
+        }
+        return revealed;
+    }
+
+    // ActivityThread.handleStopActivity: performStop, then updateVisibility(false).
+    private static void stop(Activity activity) throws Exception {
+        if (stoppedState(activity)) return;
+        if (resumedState(activity)) pause(activity);
+        method(Activity.class, "performStop", boolean.class, String.class).invoke(activity, false, "bifrost");
+        setVisible(activity, false);
+        System.out.println("APP_ACTIVITY_STOPPED " + activity.getClass().getName());
+    }
+
+    // ActivityThread.updateVisibility: the server's visibility of the decor.
+    private static void setVisible(Activity activity, boolean show) throws Exception {
+        Field decorField = Activity.class.getDeclaredField("mDecor");
+        decorField.setAccessible(true);
+        View decor = (View) decorField.get(activity);
+        if (decor == null) return;
+        Field server = Activity.class.getDeclaredField("mVisibleFromServer");
+        server.setAccessible(true);
+        if (show == server.getBoolean(activity)) return;
+        server.setBoolean(activity, show);
+        if (!show) {
+            decor.setVisibility(View.INVISIBLE);
+        } else {
+            Field client = Activity.class.getDeclaredField("mVisibleFromClient");
+            client.setAccessible(true);
+            if (client.getBoolean(activity)) method(Activity.class, "makeVisible").invoke(activity);
+        }
     }
 
     // handleResumeActivity: the decor becomes a TYPE_BASE_APPLICATION window.
@@ -233,6 +315,9 @@ final class FrameworkActivities {
         Field field = Activity.class.getDeclaredField("mDecor");
         field.setAccessible(true);
         field.set(activity, decor);
+        Field server = Activity.class.getDeclaredField("mVisibleFromServer");
+        server.setAccessible(true);
+        server.setBoolean(activity, true);
         method(Activity.class, "makeVisible").invoke(activity);
     }
 
@@ -295,6 +380,10 @@ final class FrameworkActivities {
             below = top();
         }
         if (resumedState(activity)) pause(activity);
+        // Restart what the finished Activity uncovered, deliver the result,
+        // resume the new top, then show the uncovered windows: a stopped
+        // caller sees onRestart/onStart, onActivityResult, then onResume.
+        List<Record> revealed = resumeBelow ? ensureVisibility() : new ArrayList<>();
         if (record.caller != null && stackContains(record.caller)) {
             method(Activity.class, "dispatchActivityResult", String.class, int.class, int.class,
                     Intent.class, String.class).invoke(record.caller.activity, record.resultWho,
@@ -304,6 +393,7 @@ final class FrameworkActivities {
             resume(below.activity);
             System.out.println("APP_ACTIVITY_RESUMED " + below.activity.getClass().getName());
         }
+        for (Record uncovered : revealed) setVisible(uncovered.activity, true);
         if (!stoppedState(activity))
             method(Activity.class, "performStop", boolean.class, String.class).invoke(activity, false, "bifrost");
         method(Activity.class, "performDestroy").invoke(activity);
@@ -322,7 +412,7 @@ final class FrameworkActivities {
             activity.getWindowManager().removeViewImmediate(activity.getWindow().getDecorView());
     }
 
-    private static boolean resumedState(Activity activity) throws Exception {
+    static boolean resumedState(Activity activity) throws Exception {
         return (Boolean) method(Activity.class, "isResumed").invoke(activity);
     }
 

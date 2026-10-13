@@ -13,6 +13,14 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Covered Activities stop (2026-10-13)
+
+- An Activity started over another one that is opaque (theme neither
+  translucent nor floating) now stops the Activity beneath and hides its
+  window, as Android does; finishing it restarts the one below before its
+  result and resume. Azur Lane's blue `PrePermissionActivity` screen no
+  longer covers the game's Unity surface.
+
 ### AAudio API coverage (2026-10-13)
 
 - AAudio adds the 18 functions apps such as CRIWARE look up: channel masks
