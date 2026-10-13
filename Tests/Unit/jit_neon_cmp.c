@@ -12,12 +12,16 @@
  * 128-bit (Q=1) and 64-bit (Q=0) forms are covered — the Q=0 forms
  * also verify the interpreter's "v_hi zeroed" semantics.
  */
+#include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <arm_neon.h>
 
 static int failures = 0;
+static sigjmp_buf trap;
+static void on_sigill(int sig) { (void)sig; siglongjmp(trap, 1); }
 
 static int64_t ld_s(const uint8_t* p, int esize) {
     switch (esize) {
@@ -177,43 +181,32 @@ int main(void) {
     vst1_u64((uint64_t*)o64, vcge_u64(vld1_u64(u64a), vld1_u64(u64b)));
     check_lanes("cmhs_u64", o64, (const uint8_t*)u64a, (const uint8_t*)u64b, 8, 1, pred_ge_u);
 
-    /* ── Q=0 64-bit forms, forced via inline asm ──
-     * GCC folds the vcgt_s64 / vcgeq_u64 1-lane intrinsics into scalar
-     * cmp (or constant-folds the static inputs) at -O2 and never emits the
-     * SIMD_DP 64-bit vector compare, so force the exact `cmgt v0.1d` /
-     * `cmhi v0.1d` instructions. Note: the ISA has NO `.1d` vector compare
-     * (64-bit elements only exist as `.2d`, Q=1) — but the emulator's
-     * decoder accepts Q=0 size=3 SIMD_DP and its interpreter has explicit
-     * cases for them, so raw encodings still exercise the Q=0 esize=8 path.
-     * The old binutils rejects the `.1d` qualifier, so emit the raw words
-     * (low word = opcode<<10 | rn<<5 | rd; Rn=1 (a), Rm=2 (b)):
+    /* ── Reserved Q=0 64-bit forms ──
+     * The ISA has no `.1d` vector compare (64-bit elements only exist as
+     * `.2d`, Q=1); the raw words must raise SIGILL, as under QEMU. The
+     * emulator used to execute them. Rn=1, Rm=2:
      *   cmgt v0.1d,v1.1d,v2.1d = 0x0EE23420   cmge = 0x0EE23C20
      *   cmeq v0.1d,v1.1d,v2.1d = 0x2EE28C20
-     *   cmhi v0.1d,v1.1d,v2.1d = 0x2EE23420   cmhs = 0x2EE23C20
-     * (each & 0xBF20FC00 lands on the matching INT_CMP table row.) */
+     *   cmhi v0.1d,v1.1d,v2.1d = 0x2EE23420   cmhs = 0x2EE23C20 */
     {
-        const uint64_t* a = (const uint64_t*)s64a;
-        const uint64_t* b = (const uint64_t*)s64b;
-        const uint64_t* ua = (const uint64_t*)u64a;
-        const uint64_t* ub = (const uint64_t*)u64b;
-#define FORCE_1D_CMP(NAME, PA, PB, INST, REF_A, REF_B, PRED) \
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = on_sigill;
+        sigaction(SIGILL, &sa, 0);
+#define RESERVED_1D_CMP(NAME, INST) \
         do { \
-            __asm__ volatile( \
-                "ldr d1, [%0]\n\t" \
-                "ldr d2, [%1]\n\t" \
-                ".inst " INST "\n\t" \
-                "str d0, [%2]" \
-                :: "r"(PA), "r"(PB), "r"(o64) \
-                : "v0", "v1", "v2", "memory"); \
-            check_lanes(NAME, o64, (const uint8_t*)&REF_A, \
-                        (const uint8_t*)&REF_B, 8, 1, PRED); \
+            if (!sigsetjmp(trap, 1)) { \
+                __asm__ volatile(".inst " INST ::: "v0", "memory"); \
+                printf("FAIL %s executed instead of SIGILL\n", NAME); \
+                failures++; \
+            } \
         } while (0)
-        FORCE_1D_CMP("cmgt_s64d", a, b,    "0x0ee23420", s64a[0], s64b[0], pred_gt_s);
-        FORCE_1D_CMP("cmge_s64d", a, b,    "0x0ee23c20", s64a[0], s64b[0], pred_ge_s);
-        FORCE_1D_CMP("cmeq_s64d", a, b,    "0x2ee28c20", s64a[0], s64b[0], pred_eq);
-        FORCE_1D_CMP("cmhi_u64d", ua, ub,  "0x2ee23420", u64a[0], u64b[0], pred_gt_u);
-        FORCE_1D_CMP("cmhs_u64d", ua, ub,  "0x2ee23c20", u64a[0], u64b[0], pred_ge_u);
-#undef FORCE_1D_CMP
+        RESERVED_1D_CMP("cmgt_s64d", "0x0ee23420");
+        RESERVED_1D_CMP("cmge_s64d", "0x0ee23c20");
+        RESERVED_1D_CMP("cmeq_s64d", "0x2ee28c20");
+        RESERVED_1D_CMP("cmhi_u64d", "0x2ee23420");
+        RESERVED_1D_CMP("cmhs_u64d", "0x2ee23c20");
+#undef RESERVED_1D_CMP
     }
 
     printf("neon_cmp: %d/%d checks passed, %d failures\n", 45 - failures, 45, failures);

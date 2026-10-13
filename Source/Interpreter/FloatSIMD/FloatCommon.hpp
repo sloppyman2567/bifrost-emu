@@ -381,6 +381,33 @@ template <typename T> static inline T arm_recip_step(CPU& cpu, T a, T b, bool sq
 }
 // Arm RecipEstimate / RecipSqrtEstimate have a specified eight-bit
 // estimate. Full host division/sqrt is more precise, but is NOT this ISA.
+// Both take a 9-bit fixed-point input (256..511, or 128..511 for sqrt)
+// and return 256..511.
+static inline unsigned arm_recip_estimate9(unsigned scaled) {
+    return (((1u << 19) / (2 * scaled + 1)) + 1) >> 1;
+}
+static inline unsigned arm_rsqrt_estimate9(unsigned scaled) {
+    // The integer inequality is the exact midpoint rule from Arm's
+    // pseudocode. Build its small lookup table once, shared by lanes.
+    static const auto estimates = [] {
+        std::array<uint16_t, 384> table{};
+        for (unsigned i = 128; i < 512; ++i) {
+            unsigned a = i < 256 ? 2 * i + 1 : 2 * ((i & ~1u) + 1);
+            unsigned b = 512;
+            while (a * (b + 1) * (b + 1) < (1u << 28)) ++b;
+            table[i - 128] = (b + 1) / 2;
+        }
+        return table;
+    }();
+    return estimates[scaled - 128];
+}
+// URECPE / URSQRTE (UnsignedRecipEstimate, UnsignedRSqrtEstimate): the
+// estimate of the 9 bits below bit 31, or all ones when the operand is
+// below 0.5 (below 0.25 for the square root).
+static inline uint32_t arm_unsigned_recip_estimate(uint32_t a, bool sqrt) {
+    if (!sqrt) return (a >> 31) ? arm_recip_estimate9(a >> 23) << 23 : 0xFFFFFFFFu;
+    return (a >> 30) ? arm_rsqrt_estimate9(a >> 23) << 23 : 0xFFFFFFFFu;
+}
 template <typename T> static inline T arm_recip_estimate(CPU& cpu, T input, bool sqrt) {
     using U = typename FpTraits<T>::U;
     constexpr int fraction = sizeof(T) == 4 ? 23 : 52;
@@ -414,8 +441,7 @@ template <typename T> static inline T arm_recip_estimate(CPU& cpu, T input, bool
             if (!(frac & (1ull << 51))) { exponent = -1; frac <<= 2; }
             else frac <<= 1;
         }
-        unsigned scaled = 256 | ((frac >> 44) & 255);
-        unsigned estimate = (((1u << 19) / (2 * scaled + 1)) + 1) >> 1;
+        unsigned estimate = arm_recip_estimate9(256 | ((frac >> 44) & 255));
         exponent = max_exp - 2 - exponent;
         frac = uint64_t(estimate & 255) << 44;
         if (exponent == 0) frac = (frac >> 1) | (1ull << 51);
@@ -427,22 +453,26 @@ template <typename T> static inline T arm_recip_estimate(CPU& cpu, T input, bool
         }
         unsigned scaled = (exponent & 1) ? 128 | ((frac >> 45) & 127)
                                          : 256 | ((frac >> 44) & 255);
-        // The integer inequality is the exact midpoint rule from Arm's
-        // pseudocode. Build its small lookup table once, shared by lanes.
-        static const auto estimates = [] {
-            std::array<uint16_t, 384> table{};
-            for (unsigned i = 128; i < 512; ++i) {
-                unsigned a = i < 256 ? 2 * i + 1 : 2 * ((i & ~1u) + 1);
-                unsigned b = 512;
-                while (a * (b + 1) * (b + 1) < (1u << 28)) ++b;
-                table[i - 128] = (b + 1) / 2;
-            }
-            return table;
-        }();
         exponent = (3 * bias - 1 - exponent) / 2;
-        frac = uint64_t(estimates[scaled - 128] & 255) << 44;
+        frac = uint64_t(arm_rsqrt_estimate9(scaled) & 255) << 44;
     }
     return fp_from<T>(sign | (U(exponent) << fraction) | U(frac >> (52 - fraction)));
+}
+// FPRecpX (scalar FRECPX): keep the sign, invert the exponent (a zero
+// exponent gives max_exp - 1) and clear the fraction; NaNs are processed
+// as for the estimates, and FPCR.FZ squashes denormal inputs.
+template <typename T> static inline T arm_frecpx(CPU& cpu, T input) {
+    using U = typename FpTraits<T>::U;
+    constexpr int fraction = sizeof(T) == 4 ? 23 : 52;
+    constexpr U max_exp = sizeof(T) == 4 ? 255 : 2047;
+    if (std::isnan(input)) {
+        if (fp_is_snan(input)) cpu.fpsr |= 1u;
+        return cpu.fpcr & (1u << 25) ? fp_default_nan<T>() : fp_quiet(input);
+    }
+    const U bits = fp_bits(recip_input(cpu, input));
+    const U exponent = (bits >> fraction) & max_exp;
+    const U result = exponent == 0 ? max_exp - 1 : ~exponent & max_exp;
+    return fp_from<T>((bits & FpTraits<T>::kSign) | (result << fraction));
 }
 // Shared dispatch for scalar/vector S/D forms. Half precision and Q=0,D
 // remain UNDEFINED; FEAT_FP16/AFP/RPRES are not advertised by this profile.
@@ -544,6 +574,97 @@ static inline uint64_t smax_lane(int bits) {
 }
 static inline uint64_t smin_lane(int bits) {
     return sext_lane(static_cast<uint64_t>(1) << (bits - 1), bits);
+}
+// SignedSatQ to `bits` (<= 64); saturation sets FPSR.QC.
+static inline int64_t arm_signed_sat_qc(CPU& cpu, __int128 v, int bits) {
+    const __int128 lim = static_cast<__int128>(1) << (bits - 1);
+    if (v > lim - 1) { cpu.fpsr |= 1u << 27; return static_cast<int64_t>(lim - 1); }
+    if (v < -lim) { cpu.fpsr |= 1u << 27; return static_cast<int64_t>(-lim); }
+    return static_cast<int64_t>(v);
+}
+// Saturating doubling multiplies on sign-extended `bits`-wide lanes (16 or
+// 32). SQDMULH/SQRDMULH: SignedSatQ((2ab [+ 2^(bits-1)]) >> bits, bits).
+// SQDMULL/SQDMLAL/SQDMLSL (acc_sign 0/+1/-1): SignedSatQ(2ab, 2*bits),
+// then a saturating accumulate into the 2*bits-wide `acc`.
+static inline int64_t arm_sqdmulh(CPU& cpu, int64_t a, int64_t b, int bits, bool round) {
+    __int128 p = static_cast<__int128>(a) * b * 2;
+    if (round) p += static_cast<__int128>(1) << (bits - 1);
+    return arm_signed_sat_qc(cpu, p >> bits, bits);
+}
+static inline int64_t arm_sqdmlal(CPU& cpu, int64_t acc, int64_t a, int64_t b, int bits, int acc_sign) {
+    const __int128 p = arm_signed_sat_qc(cpu, static_cast<__int128>(a) * b * 2, 2 * bits);
+    if (acc_sign == 0) return static_cast<int64_t>(p);
+    return arm_signed_sat_qc(cpu, acc_sign > 0 ? acc + p : acc - p, 2 * bits);
+}
+// AdvSIMD shift by immediate, vector (0 Q U 011110 immh immb opcode 1 Rn Rd)
+// and scalar (01 U 111110 ...): the opcodes below except the narrowing,
+// widening and fixed-point conversions, which return false. The element
+// size is the highest set bit of immh (immh = 0 is the modified-immediate
+// space); right shifts are 2*esize - immh:immb, left shifts immh:immb -
+// esize. Vector 64-bit lanes need Q; scalar forms other than
+// SQSHL/UQSHL/SQSHLU only exist for 64 bits. Results follow the Arm
+// pseudocode on exact integers; saturation sets FPSR.QC.
+static inline bool arm_simd_shift_imm(uint32_t op, CPU& cpu) {
+    const bool scalar = (op & 0xDF800400) == 0x5F000400;
+    if (!scalar && (op & 0x9F800400) != 0x0F000400) return false;
+    const uint32_t immh = (op >> 19) & 0xF, opc = (op >> 11) & 0x1F;
+    if (immh == 0) return false;
+    enum { SHR = 0x00, SRA = 0x02, RSHR = 0x04, RSRA = 0x06, SRI = 0x08,
+           SHL = 0x0A, SQSHLU = 0x0C, QSHL = 0x0E };
+    if (opc > QSHL || (opc & 1)) return false;
+    const bool U = (op >> 29) & 1, Q = (op >> 30) & 1;
+    if (!U && (opc == SRI || opc == SQSHLU)) throw DecodeError(cpu.pc, op);
+    const int bits = 8 << (31 - __builtin_clz(immh));
+    if (scalar ? (bits != 64 && opc != SQSHLU && opc != QSHL) : (bits == 64 && !Q))
+        throw DecodeError(cpu.pc, op);
+    const int imm = (op >> 16) & 0x7F;
+    const int right = 2 * bits - imm, left = imm - bits;
+    const int esize = bits / 8, elems = scalar ? 1 : (Q ? 16 : 8) / esize;
+    const unsigned rn = (op >> 5) & 31, rd = op & 31;
+    const __int128 lane_mask = (static_cast<__int128>(1) << bits) - 1;
+    uint8_t n[16], d[16], out[16] = {0};
+    memcpy(n, &cpu.v_lo[rn], 8); memcpy(n + 8, &cpu.v_hi[rn], 8);
+    memcpy(d, &cpu.v_lo[rd], 8); memcpy(d + 8, &cpu.v_hi[rd], 8);
+    for (int i = 0; i < elems; ++i) {
+        uint64_t a = 0, acc = 0;
+        memcpy(&a, n + i * esize, esize);
+        memcpy(&acc, d + i * esize, esize);
+        const __int128 sv = static_cast<int64_t>(sext_lane(a, bits));
+        const __int128 v = U ? static_cast<__int128>(a) : sv;
+        __int128 r;
+        switch (opc) {
+            case SHR: case SRA: case RSHR: case RSRA: {
+                const __int128 round = (opc == RSHR || opc == RSRA) ? (__int128)1 << (right - 1) : 0;
+                r = (v + round) >> right;
+                if (opc == SRA || opc == RSRA) r += acc;
+                break;
+            }
+            case SRI: {  // keep Vd's top `right` bits
+                const __int128 keep = right == bits ? lane_mask : lane_mask & ~(lane_mask >> right);
+                r = (acc & keep) | (static_cast<__int128>(a) >> right);
+                break;
+            }
+            case SHL:  // SHL / SLI (keep Vd's low `left` bits)
+                r = static_cast<__int128>(a) << left;
+                if (U) r |= acc & (((__int128)1 << left) - 1);
+                break;
+            default: {  // SQSHLU, SQSHL, UQSHL
+                r = (opc == SQSHLU ? sv : v) << left;
+                const bool to_unsigned = opc == SQSHLU || U;
+                const __int128 hi = to_unsigned ? lane_mask : (lane_mask >> 1);
+                const __int128 lo = to_unsigned ? 0 : -(lane_mask >> 1) - 1;
+                if (r > hi) { r = hi; cpu.fpsr |= 1u << 27; }
+                else if (r < lo) { r = lo; cpu.fpsr |= 1u << 27; }
+                break;
+            }
+        }
+        const uint64_t bits_out = static_cast<uint64_t>(r & lane_mask);
+        memcpy(out + i * esize, &bits_out, esize);
+    }
+    memcpy(&cpu.v_lo[rd], out, 8);
+    memcpy(&cpu.v_hi[rd], out + 8, 8);
+    if (!scalar && !Q) cpu.v_hi[rd] = 0;
+    return true;
 }
 // SIMD_DP fields decoded once by execute_fp and shared by every group.
 struct SimdDpFields {

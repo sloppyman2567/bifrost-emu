@@ -64,6 +64,66 @@ and LLVM's [runtime value-location maps](https://llvm.org/docs/StackMaps.html).
 These provide design precedents; performance acceptance depends on Bifrost's
 own tests and measurements.
 
+## Base ARMv8.0 FP/SIMD sweep fixes (2026-10-13)
+
+The coverage sweep (`Scripts/Testing/simd_coverage.py`) found these defects;
+each fixed group matches QEMU in both engines. Most were interpreter bugs that
+the JIT inherited through CALL_INTERP.
+
+- **Wrong results.** CMLE #0 ran as CMEQ #0 (its `sub2` case ignored U).
+  JIT UQSUB `.4h/.8h` emitted PMINUB (`66 0F DA`) instead of PSUBUSW
+  (`66 0F D9`). USQADD zero-extended Vn. Scalar FCVTMS ran as FCVTZS in
+  both engines, because bit 23 (o2) was ignored. URECPE/URSQRTE ran as
+  FCMGT/FCMGE #0. AESE ran as AESMC; AESD/AESMC/AESIMC never reached the
+  crypto handler, and AESMC/AESIMC transformed Vd instead of Vn. Integer
+  by-element `.s` reads Vm from M:Rm. TBL/TBX table registers are always 16
+  bytes. Halving and register-shift ops use exact arithmetic (UHSUB of
+  `0 - 3` is 254), and the shift amount is `SInt(Vm<7:0>)`. JIT ADDHN2 with
+  64-bit lanes uses `pshufd 0x88`.
+- **Missing base forms.** Vector and scalar FCVT{N,P,M,A}{S,U}, SQDMULH/
+  SQRDMULH, SQDMLAL/SQDMLSL/SQDMULL{2} (vector, scalar, by element),
+  SABA/UABA, PMUL, scalar FRECPX and FMAXNMP/FMINNMP. The scalar AdvSIMD
+  forms whose pseudocode is the vector operation on one element (scalar
+  SQADD..UQRSHL, SSHL/USHL/SRSHL/URSHL d, SQDMULH, FMULX, SUQADD/USQADD,
+  SQABS/SQNEG, ABS/NEG d, SQXTN/UQXTN/SQXTUN, the doubling multiplies and
+  the saturating shift-right-narrow forms) share one table,
+  `kScalarLaneForms` in `FloatScalar.cpp`. Each row runs the vector
+  encoding on scratch v0-v2, with element 0 holding the operands and other
+  lanes zero, so they cannot saturate. Vd gets element 0 and the rest is
+  cleared. The scratch registers are restored with RAII, even on SIGILL.
+- **FPSR.QC.** The interpreter sets QC for the saturating add/sub, shifts,
+  narrows, SUQADD/USQADD/SQABS/SQNEG and doubling multiplies. Native JIT
+  SQADD/UQADD/SQSUB/UQSUB (B/H) and SQXTN/UQXTN/SQXTUN compare the result
+  with the wrapped or re-widened value and set QC with
+  `emit_simd_qc_unless_equal`. It uses PTEST, or PMOVMSKB with RAX saved,
+  and changes no live GPR. Both paths were checked; the SSE2 one in a
+  temporary build that forced `has_sse41()` off. FP cumulative exception
+  flags (IOC/IXC/OFC) of conversions and FMULX are still not modelled.
+- **Unallocated encodings now raise SIGILL in both engines.**
+  `fp_decode::is_allocated_fp_scalar` encodes the scalar FP group for
+  this CPU profile (AT_HWCAP advertises FP, ASIMD, CRC32 and atomics only).
+  ftype 10 is reserved except FMOV X↔Vn.D[1]. FEAT_FP16 (ftype 11) keeps
+  only the FCVT precision conversions, so FP16 scalar FMOV/SCVTF/FCVT*S,
+  which ran with wrong results or only partly worked, now trap.
+  `is_unallocated_advsimd_imm` rejects words with bits 23 and 10 set in the
+  shift/by-element space. `is_unallocated_advsimd_three` holds the
+  three-same and three-different per-opcode size tables, including no
+  `.1d`. Handlers reject reserved sizes and fields: compares `.1d`, EXT
+  bit 15 and `imm4 >= 8` with Q=0, INS (element) with Q=0, CNT with size 1,
+  and SHRN/SSHLL with immh 1xxx. Shift rows in `simd_dp.txt` fix bit 23
+  and require Q for 64-bit lanes.
+
+The FMADD-family words in the sweep's "interpreted" bucket are an artifact of
+its NaN-heavy inputs: they take the documented NaN cold step. A loop of finite
+FMADD/FNMSUB records no fallback, and one with a NaN addend records it only
+there. By-element SQDMULH/SQRDMULH/SQDML*L and FMULX remain CALL_INTERP.
+`jit_simd_base_forms` covers 139 forms and 30 reserved encodings against QEMU
+(see [TESTS.md](TESTS.md)). References: QEMU's
+[estimate and FRECPX helpers](https://github.com/qemu/qemu/blob/master/target/arm/tcg/vfp_helper.c)
+and [helper-a64.c](https://github.com/qemu/qemu/blob/master/target/arm/tcg/helper-a64.c);
+Arm [URECPE](https://www.scs.stanford.edu/~zyedidia/arm64/urecpe_advsimd.html).
+The x86 saturating opcodes were checked with the host assembler.
+
 ## Window limits in the header page (2026-10-12)
 
 Every native load/store bounds-checked its address with `movabs $limit, %reg`
@@ -1238,21 +1298,20 @@ by mnemonic. Its first full run found a host SIGFPE: reserved DUP (element)
 and INS (general) encodings divided by a zero element size in the
 interpreter, crashing both engines.
 
-Baseline after those fixes (2026-10-12):
+Baseline after the [2026-10-13 fixes](#base-armv80-fpsimd-sweep-fixes-2026-10-13)
+(the 2026-10-12 baseline had 23,806 missing, 38,403 accepted and 12,448
+differing words):
 - **Valid words:** 77,672 of 524,288 under QEMU.
-- **Missing:** 23,806 words. Most are features Bifrost does not advertise
-  in AT_HWCAP (FP16 arithmetic, dot products, SHA3/SM3/SM4, RDM, FCMA, FHM,
-  BF16, I8MM). Base-ARMv8.0 gaps: SQDMLAL/SQDMLSL/SQDMULL/SQDMULH (vector,
-  by element, scalar), 64-bit scalar SSRA/USRA/SRSHR/URSHR/SRSRA/URSRA/
-  SRI/SLI/SQSHL/UQSHL/SQSHLU `#imm`, SABA/UABA and PMUL.
-- **Accepted unallocated:** 38,403 words, from interpreter decode masks
-  that ignore reserved size/Q combinations.
-- **Differing results:** 12,448 words. Base-ARMv8.0 cases are integer
-  by-element ops on 32-bit elements with M set (Rm = v16-v31),
-  single-register TBL/TBX, rounding and saturating shifts, ADDHN2 and some
-  scalar FMLA by element.
-- **Interpreted:** 13,688 words, led by scalar FMADD-family forms and FP
-  multiply by element.
+- **Missing:** 25,651 words, none of them base ARMv8.0. All belong to
+  features Bifrost does not advertise in AT_HWCAP (FP16, dot products,
+  SHA3/SM3/SM4, RDM, FCMA, FHM, BF16, I8MM); FP16 scalar FP now traps.
+- **Accepted unallocated:** 2,315 words: reserved sizes in two-register
+  misc, permutes and FP by element.
+- **Differing results:** 57 words, all FP16 or other unadvertised forms
+  (for example FP16 fixed-point `scvtf h, h, #imm`, which should trap).
+- **Interpreted:** 22,839 words: the NaN cold steps described above, the
+  by-element saturating multiplies and other CALL_INTERP forms.
+The sweep compares v2, x2 and NZCV only; FPSR is not part of its hash.
 
 Across-lane reductions, widening three-different ops and
 pairwise long adds are covered by `jit_simd_widen_reduce`. FP lane helpers

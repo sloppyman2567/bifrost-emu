@@ -438,6 +438,11 @@ bool decode(DecodedInst& d, uint32_t inst) {
     case 0x0E: case 0x0F: case 0x2E:
     case 0x4E: case 0x6E: case 0x4F: {
         if ((inst >> 31) & 1) return false;
+        if (fp_decode::is_unallocated_advsimd_imm(inst) ||
+            fp_decode::is_unallocated_advsimd_three(inst)) {
+            d.cls = InstClass::UNKNOWN;
+            return false;
+        }
         d.is_vec = true;
         d.cls    = InstClass::SIMD_DP;
         d.Q      = (inst >> 30) & 1;
@@ -993,7 +998,14 @@ bool decode(DecodedInst& d, uint32_t inst) {
     }
     // FMOV (Vd.D[1] <-> Rn) + FP scalar (catch-all).
     case 0x1E: {
-        if ((inst & 0xFFE0FC00) == 0x9EA00000) {
+        // Scalar FP (bit 30 clear): reject unallocated and unadvertised
+        // forms here so neither engine executes them.
+        if (!(inst & (1u << 30)) && !fp_decode::is_allocated_fp_scalar(inst)) {
+            d.cls = InstClass::UNKNOWN;
+            return false;
+        }
+        // FMOV Xd, Vn.D[1] (0x9EAE0000) / FMOV Vd.D[1], Xn (0x9EAF0000).
+        if ((inst & 0xFFFEFC00) == 0x9EAE0000) {
             bool to_fp = (inst >> 16) & 1;
             d.cls    = to_fp ? InstClass::FMOV_VD1 : InstClass::FMOV_RVD1;
             d.is_vec = true;
@@ -1034,6 +1046,11 @@ bool decode(DecodedInst& d, uint32_t inst) {
     // check, so we just classify them as FP_SCALAR and let the translator
     // dispatch.
     case 0x1F: {
+        if ((!(inst & (1u << 30)) && !fp_decode::is_allocated_fp_scalar(inst)) ||
+            fp_decode::is_unallocated_advsimd_imm(inst)) {
+            d.cls = InstClass::UNKNOWN;
+            return false;
+        }
         d.is_vec    = true;
         d.cls       = InstClass::FP_SCALAR;
         d.ftype     = (inst >> 22) & 3;

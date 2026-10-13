@@ -354,6 +354,7 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
             default: break;
             }
             if (is_add || is_sub || is_shift) {
+                if (size == 3 && !Q) throw DecodeError(cpu.pc, op);  // .1d is reserved
                 const bool uns = (s >> 29) & 1;
                 const int esize = 1 << size;
                 const int bits = esize * 8;
@@ -375,89 +376,111 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                     uint64_t a = 0, b = 0;
                     memcpy(&a, buf_n + i * esize, esize);
                     memcpy(&b, buf_m + i * esize, esize);
-                    uint64_t r;
+                    // Operands as exact integers (Int(x, unsigned)).
+                    __int128 v = uns ? static_cast<__int128>(a)
+                        : static_cast<__int128>(static_cast<int64_t>(sext_lane(a, bits)));
+                    const __int128 w = uns ? static_cast<__int128>(b)
+                        : static_cast<__int128>(static_cast<int64_t>(sext_lane(b, bits)));
                     if (is_add) {
-                        r = uns ? sat_add_u(a, b, bits)
-                                : sat_add_s(a, b, bits);
+                        v += w;
                     } else if (is_sub) {
-                        r = uns ? sat_sub_u(a, b, bits)
-                                : sat_sub_s(a, b, bits);
-                    } else if (!round && uns) {
-                        // ── UQSHL: unsigned amount, left-only ──
-                        if (b == 0) {
-                            r = a;
-                        } else if (b >= (uint64_t)bits) {
-                            r = (a == 0) ? 0 : umax;  // saturated
-                        } else {
-                            __int128 wide =
-                                static_cast<__int128>(a) << b;
-                            r = (wide >
-                                 static_cast<__int128>(umax))
-                                    ? umax
-                                    : static_cast<uint64_t>(wide);
-                        }
+                        v -= w;
                     } else {
-                        // ── Signed-amount forms ──
-                        // (SQSHL/SQRSHL/SRSHL/URSHL — the rounding
-                        // variants are signed regardless of U.)
-                        const int64_t sh =
-                            static_cast<int64_t>(sext_lane(b, bits));
-                        const int64_t sv =
-                            static_cast<int64_t>(sext_lane(a, bits));
+                        // Every register shift form takes the SIGNED low
+                        // byte of the Vm lane (SInt(Vm<7:0>)) and computes
+                        // (Int(a, unsigned) + round) << shift exactly,
+                        // where round = 1 << (-shift - 1) for rounding
+                        // right shifts.
+                        const int sh = static_cast<int8_t>(b & 0xFF);
                         if (sh >= 0) {
-                            // Left shift. Clamp BEFORE shifting —
-                            // sh can be up to 2^63-1 and __int128
-                            // shifts >= 128 are UB.
-                            if (!saturate) {
-                                // SRSHL: identical to SSHL here.
-                                r = (sh >= bits)
-                                    ? 0
-                                    : static_cast<uint64_t>(sv << sh);
-                            } else if (sv == 0) {
-                                r = 0;
-                            } else if (sh >= bits) {
-                                r = sv < 0 ? smin_lane(bits)
-                                           : smax_lane(bits);
-                            } else {
-                                r = sat_signed_i128(
-                                    static_cast<__int128>(sv) << sh,
-                                    bits);
-                            }
-                        } else if (sh > -bits) {
-                            const int64_t rs = -sh;
-                            uint64_t rv;
-                            if (uns) {
-                                // URSHL/UQRSHL lanes are unsigned.
-                                rv = round
-                                    ? static_cast<uint64_t>(
-                                          (static_cast<__int128>(a) +
-                                           (static_cast<__int128>(1)
-                                            << (rs - 1))) >>
-                                          rs)
-                                    : a >> rs;
-                            } else if (round) {
-                                rv = static_cast<uint64_t>(
-                                    (static_cast<__int128>(sv) +
-                                     (static_cast<__int128>(1)
-                                      << (rs - 1))) >>
-                                    rs);
-                            } else {
-                                rv = static_cast<uint64_t>(sv >> rs);
-                            }
-                            r = rv;
+                            // |v| < 2^64 and sh < 64 keeps v << sh in range;
+                            // larger shifts are 0 or saturate.
+                            if (v != 0 && sh >= bits)
+                                v = !saturate ? 0 : v < 0 ? -((__int128)1 << 100) : ((__int128)1 << 100);
+                            else
+                                v <<= sh;
                         } else {
-                            // |shift| >= width: right shifts fill
-                            // (logical 0 for unsigned lanes).
-                            r = uns ? 0
-                                    : static_cast<uint64_t>(
-                                          sv < 0 ? -1 : 0);
+                            const int rs = -sh;  // 1..128
+                            if (rs >= 100) v = round ? 0 : (v < 0 ? -1 : 0);
+                            else v = (v + (round ? (__int128)1 << (rs - 1) : 0)) >> rs;
                         }
                     }
+                    // Q forms saturate to the lane range (FPSR.QC).
+                    if (saturate) {
+                        const __int128 hi = uns ? static_cast<__int128>(umax)
+                            : static_cast<__int128>(static_cast<int64_t>(smax_lane(bits)));
+                        const __int128 lo = uns ? 0
+                            : static_cast<__int128>(static_cast<int64_t>(sext_lane(smin_lane(bits), bits)));
+                        if (v > hi) { v = hi; cpu.fpsr |= 1u << 27; }
+                        else if (v < lo) { v = lo; cpu.fpsr |= 1u << 27; }
+                    }
+                    const uint64_t r = static_cast<uint64_t>(v);
                     memcpy(out + i * esize, &r, esize);
                 }
                 memcpy(&cpu.v_lo[rd], out, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
                 else cpu.v_hi[rd] = 0;
+                return true;
+            }
+        }
+        // ── SQDMULH/SQRDMULH, SABA/UABA, PMUL (three-same) and
+        //    SQDMLAL/SQDMLSL/SQDMULL{2} (three-different) ─────────
+        //   SQDMULH 0x0E20B400 / SQRDMULH 0x2E20B400   size 1/2
+        //   SABA    0x0E207C00 / UABA     0x2E207C00   size 0-2
+        //   PMUL    0x2E209C00                         size 0
+        //   SQDMLAL 0x0E209000, SQDMLSL 0x0E20B000, SQDMULL 0x0E20D000
+        //   (U=0, size 1/2; Q selects the source half, the `2` forms).
+        // Other sizes are reserved. Doubling multiplies saturate with
+        // FPSR.QC (arm_sqdmulh/arm_sqdmlal); PMUL is a carry-less
+        // byte product.
+        {
+            const uint32_t s = sub3_noq & ~(3u << 22);
+            const bool three_diff = s == 0x0E209000 || s == 0x0E20B000 || s == 0x0E20D000;
+            const bool same = s == 0x0E20B400 || s == 0x2E20B400 || s == 0x0E207C00 ||
+                              s == 0x2E207C00 || s == 0x2E209C00;
+            if (three_diff || same) {
+                const bool is_dmulh = s == 0x0E20B400 || s == 0x2E20B400;
+                const bool is_aba = s == 0x0E207C00 || s == 0x2E207C00;
+                const bool ok = s == 0x2E209C00 ? size == 0
+                              : is_aba ? size != 3
+                                       : size == 1 || size == 2;
+                if (!ok) throw DecodeError(cpu.pc, op);
+                const int esize = 1 << size, bits = esize * 8;
+                const int dsize = three_diff ? 2 * esize : esize;
+                const int elems = three_diff ? 8 / esize : (Q ? 16 : 8) / esize;
+                const int src_base = three_diff && Q ? 8 : 0;
+                uint8_t buf_n[16], buf_m[16], vd[16], out[16] = {0};
+                memcpy(buf_n, &cpu.v_lo[rn], 8); memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                memcpy(buf_m, &cpu.v_lo[rm], 8); memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                memcpy(vd, &cpu.v_lo[rd], 8); memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                for (int i = 0; i < elems; i++) {
+                    uint64_t a = 0, b = 0, acc = 0;
+                    memcpy(&a, buf_n + src_base + i * esize, esize);
+                    memcpy(&b, buf_m + src_base + i * esize, esize);
+                    memcpy(&acc, vd + i * dsize, dsize);
+                    const int64_t sa = static_cast<int64_t>(sext_lane(a, bits));
+                    const int64_t sb = static_cast<int64_t>(sext_lane(b, bits));
+                    uint64_t r;
+                    if (is_dmulh) {
+                        r = static_cast<uint64_t>(arm_sqdmulh(cpu, sa, sb, bits, U));
+                    } else if (three_diff) {
+                        const int64_t sacc = static_cast<int64_t>(sext_lane(acc, 2 * bits));
+                        r = static_cast<uint64_t>(arm_sqdmlal(cpu, sacc, sa, sb, bits,
+                                                              s == 0x0E20D000 ? 0 : s == 0x0E209000 ? 1 : -1));
+                    } else if (is_aba) {
+                        const int64_t x = U ? static_cast<int64_t>(a) : sa;
+                        const int64_t y = U ? static_cast<int64_t>(b) : sb;
+                        r = acc + static_cast<uint64_t>(x > y ? x - y : y - x);
+                    } else {  // PMUL
+                        r = 0;
+                        for (int bit = 0; bit < 8; ++bit)
+                            if ((b >> bit) & 1) r ^= a << bit;
+                    }
+                    memcpy(out + i * dsize, &r, dsize);
+                }
+                memcpy(&cpu.v_lo[rd], out, 8);
+                memcpy(&cpu.v_hi[rd], out + 8, 8);
+                if (!three_diff && !Q) cpu.v_hi[rd] = 0;
                 return true;
             }
         }
@@ -468,10 +491,13 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // SQABS(INT_MIN) = INT_MAX, SQNEG(INT_MIN) = INT_MAX.
         // SUQADD adds UNSIGNED Vn lanes into signed Vd lanes with
         // signed saturation; USQADD adds SIGNED Vn lanes into
-        // unsigned Vd lanes with unsigned saturation. Q=0 zeroes
-        // the destination upper half like every other vector op.
+        // unsigned Vd lanes with unsigned saturation (USQADD used to
+        // zero-extend Vn). Saturation sets FPSR.QC; .1d is reserved.
+        // Q=0 zeroes the destination upper half like every other
+        // vector op.
         if (sub3_noq == 0x0E207800 || sub3_noq == 0x2E207800 ||
             sub3_noq == 0x0E203800 || sub3_noq == 0x2E203800) {
+            if (size == 3 && !Q) throw DecodeError(cpu.pc, op);
             const int esize = 1 << size;
             const int bits = esize * 8;
             const int elems = (Q ? 16 : 8) / esize;
@@ -480,34 +506,25 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
             memcpy(vn + 8, &cpu.v_hi[rn], 8);
             memcpy(vd, &cpu.v_lo[rd], 8);
             memcpy(vd + 8, &cpu.v_hi[rd], 8);
-            const uint64_t umax =
-                (bits >= 64) ? ~0ULL : ((1ULL << bits) - 1);
+            const __int128 umax = (static_cast<__int128>(1) << bits) - 1;
+            const __int128 smax = umax >> 1, smin = -smax - 1;
             for (int i = 0; i < elems; i++) {
-                uint64_t n = 0;
+                uint64_t n = 0, d = 0;
                 memcpy(&n, vn + i * esize, esize);
-                uint64_t r;
-                if (sub3_noq == 0x0E207800) {         // SQABS
-                    r = sat_abs_s(n, bits);
-                } else if (sub3_noq == 0x2E207800) {  // SQNEG
-                    r = sat_neg_s(n, bits);
-                } else if (sub3_noq == 0x0E203800) {  // SUQADD
-                    uint64_t d = 0;
-                    memcpy(&d, vd + i * esize, esize);
-                    r = sat_signed_i128(
-                        static_cast<__int128>(
-                            static_cast<int64_t>(sext_lane(d, bits))) +
-                        static_cast<__int128>(n),   // Vn is UNSIGNED
-                        bits);
-                } else {                              // USQADD
-                    uint64_t d = 0;
-                    memcpy(&d, vd + i * esize, esize);
-                    __int128 w = static_cast<__int128>(d) +
-                                 static_cast<int64_t>(n);
-                    r = (w < 0) ? 0
-                        : (w > static_cast<__int128>(umax))
-                            ? umax
-                            : static_cast<uint64_t>(w);
-                }
+                memcpy(&d, vd + i * esize, esize);
+                const __int128 sn = static_cast<int64_t>(sext_lane(n, bits));
+                const __int128 sd = static_cast<int64_t>(sext_lane(d, bits));
+                const bool is_usqadd = sub3_noq == 0x2E203800;
+                __int128 w;
+                if (sub3_noq == 0x0E207800)      w = sn < 0 ? -sn : sn;  // SQABS
+                else if (sub3_noq == 0x2E207800) w = -sn;                // SQNEG
+                else if (!is_usqadd)             w = sd + static_cast<__int128>(n);  // SUQADD
+                else                             w = static_cast<__int128>(d) + sn;  // USQADD
+                const __int128 hi = is_usqadd ? umax : smax;
+                const __int128 lo = is_usqadd ? 0 : smin;
+                if (w > hi) { w = hi; cpu.fpsr |= 1u << 27; }
+                else if (w < lo) { w = lo; cpu.fpsr |= 1u << 27; }
+                const uint64_t r = static_cast<uint64_t>(w);
                 memcpy(out + i * esize, &r, esize);
             }
             memcpy(&cpu.v_lo[rd], out, 8);
@@ -520,9 +537,12 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // For ABS of the minimum signed value (e.g. INT8_MIN), ARM
         // defines the result as the input unchanged (no overflow).
         // NOTE: FCVTZS/FCVTZU share sub3_noq (0x0E20B800/0x2E20B800)
-        // but set bit16 (0x10000), so exclude them here.
+        // but set bit16 (0x10000), so exclude them here (sub3 drops
+        // bits 20:16; any other value there is a different group).
+        // .1d is reserved.
         if ((sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) &&
-            !(op & 0x10000)) {
+            !(op & 0x1F0000)) {
+            if (size == 3 && !Q) throw DecodeError(cpu.pc, op);
             int esize = 1 << size;
             int elems = (Q ? 16 : 8) / esize;
             bool is_abs = sub3_noq == 0x0E20B800;
@@ -559,7 +579,7 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
             bool is_unsigned = sub3_noq == 0x2E20B800;
             int esize = 1 << size;
             int elems = (Q ? 16 : 8) / esize;
-            uint8_t vn[16], out[16];
+            uint8_t vn[16], out[16] = {0};
             memcpy(vn, &cpu.v_lo[rn], 8);
             if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
             for (int i = 0; i < elems; i++) {
@@ -652,6 +672,7 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         if (sub3_noq == 0x2E200400 || sub3_noq == 0x2E202400 ||
             sub3_noq == 0x2E201400 || sub3_noq == 0x0E200400 ||
             sub3_noq == 0x0E202400 || sub3_noq == 0x0E201400) {
+            if (size == 3) throw DecodeError(cpu.pc, op);  // 64-bit lanes are reserved
             int esize = 1 << size;
             int elems = (Q ? 16 : 8) / esize;
             bool is_unsigned = sub3_noq == 0x2E200400 || sub3_noq == 0x2E202400 || sub3_noq == 0x2E201400;
@@ -666,29 +687,17 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
                 uint64_t a = 0, b = 0;
                 memcpy(&a, vn + i * esize, esize);
                 memcpy(&b, vm + i * esize, esize);
-                uint64_t r;
-                if (is_unsigned) {
-                    uint64_t sum = is_sub ? (a - b) : (a + b);
-                    if (is_rhadd) sum += 1;
-                    // UHSUB must wrap the difference to the
-                    // element width BEFORE halving (ARM:
-                    // (a + 2^N - b) >> 1). Without the wrap, a
-                    // 64-bit borrow makes low bytes wrong (e.g.
-                    // (0-3)>>1 = 0x7FFFFFFF...FE → 0xFE, not
-                    // (0+256-3)>>1 = 126). UHADD/URHADD can't
-                    // overflow (a+b ≤ 2^(N+1)-2), and esize=8
-                    // already wraps in 64-bit arithmetic.
-                    if (is_sub && esize < 8)
-                        sum &= (1ULL << (esize * 8)) - 1;
-                    r = sum >> 1;
-                } else {
-                    // Signed: use 64-bit arithmetic (works for all esizes).
-                    int64_t sa = static_cast<int64_t>(a << (64 - esize * 8)) >> (64 - esize * 8);
-                    int64_t sb = static_cast<int64_t>(b << (64 - esize * 8)) >> (64 - esize * 8);
-                    int64_t sum = is_sub ? (sa - sb) : (sa + sb);
-                    if (is_rhadd) sum += 1;
-                    r = static_cast<uint64_t>(sum >> 1);
-                }
+                // Arm computes the sum/difference exactly (Int(a) op
+                // Int(b) [+1]) and shifts arithmetically before
+                // truncating: UHSUB 0 - 3 is -3 >> 1 = -2 → 0xFE.
+                const int sh = 64 - esize * 8;
+                const int64_t sa = is_unsigned ? static_cast<int64_t>(a)
+                    : static_cast<int64_t>(a << sh) >> sh;
+                const int64_t sb = is_unsigned ? static_cast<int64_t>(b)
+                    : static_cast<int64_t>(b << sh) >> sh;
+                int64_t sum = is_sub ? (sa - sb) : (sa + sb);
+                if (is_rhadd) sum += 1;
+                uint64_t r = static_cast<uint64_t>(sum >> 1);
                 memcpy(out + i * esize, &r, esize);
             }
             memcpy(&cpu.v_lo[rd], out, 8);
@@ -827,11 +836,15 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // UCVTF=0x2E20D800 (size 0/1). size=0 → 4S/2S (32-bit ints),
         // size=1 → 2D/1D (64-bit ints). Note FRECPE/FRSQRTE share
         // these sub3_noq values but use size=2/3, so `size < 2` here.
+        // Bits 20:16 must be 00001 (bit 16 clear is unallocated), and
+        // the 1D form is reserved.
         {
             uint32_t cv = (op & 0xFF20FC00) & ~(1u << 30);
-            if ((cv == 0x0E20D800 || cv == 0x2E20D800) && size < 2) {
+            if ((cv == 0x0E20D800 || cv == 0x2E20D800) && size < 2 &&
+                ((op >> 16) & 0x1F) == 1) {
                 bool is_unsigned = cv == 0x2E20D800;
-                bool is_double = size == 1;   // 2D/1D output
+                bool is_double = size == 1;   // 2D output
+                if (is_double && !Q) throw DecodeError(cpu.pc, op);
                 int lanes = is_double ? (Q ? 2 : 1) : (Q ? 4 : 2);
                 uint8_t vn[16];
                 memcpy(vn, &cpu.v_lo[rn], 8);

@@ -76,8 +76,10 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
     //   NOT  = 0x6E205800 (U=1, size=0) — bitwise invert
     //   RBIT = 0x6E605800 (U=1, size=1) — bit-reverse per byte
     // v0 silently ran popcount for RBIT (vrbitq_u8 gave 0 1 1 2
-    // instead of 0 128 64). Distinguish by the raw op bits.
+    // instead of 0 128 64). Distinguish by the raw op bits. Other sizes
+    // are unallocated (CNT size 1 used to run RBIT).
     case 0x0E205800: {
+        if (size > (U ? 1 : 0)) throw DecodeError(cpu.pc, op);
         bool is_rbit = ((op >> 22) & 1) == 1;   // size=1
         bool is_not  = !is_rbit && ((op >> 29) & 1) == 1;
         uint8_t buf[16];
@@ -103,59 +105,29 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         else cpu.v_hi[rd] = 0;
         return true;
     }
-    // ── CMEQ vs zero ──
-    // but actual CMEQ #0 encoding (e.g. 0x4e209801) has bits[15:10]=0x26.
-    // The old case NEVER matched — CMEQ #0 was silently NOP'd, breaking
-    // glibc's strlen SIMD path. Corrected to 0x0E209800.
-    case 0x0E209800: {
-        int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        for (int i = 0; i < elems; i++) {
-            bool is_zero = true;
-            for (int b = 0; b < esize; b++) {
-                if (buf[i*esize + b] != 0) { is_zero = false; break; }
-            }
-            memset(buf + i*esize, is_zero ? 0xFF : 0x00, esize);
-        }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
     // ── Integer compare against zero (SIMD 2-reg misc) ───────
-    // CMGT/CMGE/CMLT/CMLE <Vd>.<T>, <Vn>.<T>, #0: per-element
+    // CMGT/CMGE/CMEQ/CMLE/CMLT <Vd>.<T>, <Vn>.<T>, #0: per-element
     // signed comparison against 0; each lane becomes all-ones if
     // the test passes, all-zeros otherwise. Encodings
     // (0 Q U 01110 size 1 0 Rn opcode Rd, opcode = bits[15:10]):
     //   CMGT (signed >):  0x0E208800 (U=0, opcode 100010)
     //   CMGE (signed >=): 0x2E208800 (U=1, opcode 100010)
+    //   CMEQ (== 0):      0x0E209800 (U=0, opcode 100110)
     //   CMLE (signed <=): 0x2E209800 (U=1, opcode 100110)
     //   CMLT (signed <):  0x0E20A800 (U=0, opcode 101010)
-    // The size bits (23:22) land in sub_noq, so each size variant
-    // is its own case label. The source register (Vn) is in the
-    // 2-reg-misc Rn field (bits[9:5]) which the decoder maps to
-    // `rn`. These were previously unhandled → DecodeError (SIGILL)
-    // — Qt5Core's text handling lowers `v<0` to CMLT #0.
-    case 0x0E208800: case 0x0E608800: case 0x0EA08800: case 0x0EE08800:
-    case 0x2E208800: case 0x2E608800: case 0x2EA08800: case 0x2EE08800:
-    case 0x2E209800: case 0x2E609800: case 0x2EA09800: case 0x2EE09800:
-    case 0x0E20A800: case 0x0E60A800: case 0x0EA0A800: case 0x0EE0A800: {
+    // sub2 strips U and size, so U selects the operation here. CMLE
+    // used to run as CMEQ #0. U=1 opcode 101010 is unallocated, and so
+    // is .1d (size 3 without Q). Qt5Core's text handling lowers `v<0`
+    // to CMLT #0; glibc's strlen uses CMEQ #0.
+    case 0x0E208800: case 0x0E209800: case 0x0E20A800: {
+        int opc = (op >> 10) & 0x3F;
+        if ((opc == 0x2A && U) || (size == 3 && !Q))
+            throw DecodeError(cpu.pc, op);
         int esize = 1 << size;
         int elems = (Q ? 16 : 8) / esize;
         uint8_t buf[16];
         memcpy(buf, &cpu.v_lo[rn], 8);
         if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        int opc = (op >> 10) & 0x3F;
-        bool is_u = U;
-        // opcode 100010: CMGT(U=0) / CMGE(U=1); 101010: CMLT(U=0);
-        // 100110: CMLE(U=1). cmp: 0=GT 1=GE 2=LT 3=LE.
-        int cmp;
-        if (opc == 0x22)      cmp = is_u ? 1 : 0;
-        else if (opc == 0x2A) cmp = 2;
-        else                  cmp = 3;
         for (int i = 0; i < elems; i++) {
             int64_t v = 0;
             memcpy(&v, buf + i * esize, esize);
@@ -163,10 +135,9 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                          : (esize == 4) ? (int32_t)v
                          : (esize == 2) ? (int16_t)v
                                         : (int8_t)v;
-            bool pass = (cmp == 0) ? (sv > 0)
-                      : (cmp == 1) ? (sv >= 0)
-                      : (cmp == 2) ? (sv < 0)
-                                   : (sv <= 0);
+            bool pass = (opc == 0x22) ? (U ? sv >= 0 : sv > 0)
+                      : (opc == 0x26) ? (U ? sv <= 0 : sv == 0)
+                                      : (sv < 0);
             memset(buf + i * esize, pass ? 0xFF : 0x00, esize);
         }
         memcpy(&cpu.v_lo[rd], buf, 8);
@@ -265,7 +236,9 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
     // and puts imm4 in bits[14:11]). src byte offset = j*esize.
     // GCC lowers vextq_u8 to a 2-source TBL whose index vector is
     // built with these INS moves, so this must not fall into EXT.
+    // INS exists only with Q=1 and bit 15 clear.
     if ((op & 0xBFE00000) == 0x2E000000 && (op & 0x400) != 0) {
+        if (!Q || (op & 0x8000)) throw DecodeError(cpu.pc, op);
         uint8_t imm5 = (op >> 16) & 0x1F;
         int esize, didx;
         // imm5 = (didx << (size+1)) | (1 << size): the lowest set
@@ -295,9 +268,11 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         return true;
     }
     // EXT (extract) — v0 mask 0xFFE00000 val 0x6E000000
-    // MISSED Q=0 form. Fixed: strip Q from the comparison.
+    // MISSED Q=0 form. Fixed: strip Q from the comparison. Bit 15 must
+    // be clear, and Q=0 only has imm4 < 8.
     if ((op & 0xBFE00000) == 0x2E000000) {
         uint8_t imm4 = (op >> 11) & 0xF;
+        if ((op & 0x8000) || (!Q && imm4 >= 8)) throw DecodeError(cpu.pc, op);
         uint8_t buf[32];
         // EXT forms Vn || Vm for both vector lengths. Q=0 uses
         // only the low 64 bits of each source; Q=1 uses all 128.

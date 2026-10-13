@@ -13,6 +13,32 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Base ARMv8.0 FP/SIMD semantics from the coverage sweep (2026-10-13)
+
+- Every base ARMv8.0 FP/SIMD word in the sweep now matches QEMU in both
+  engines (the 2026-10-12 baseline had 12,448 differing words, most of
+  them unadvertised extensions). Fixed results: CMLE #0 (ran as
+  CMEQ), JIT UQSUB `.4h/.8h` (wrong x86 opcode), USQADD, scalar FCVTMS (ran
+  as FCVTZS), URECPE/URSQRTE (ran as FP compares), AESE/AESD/AESMC/AESIMC,
+  integer by-element `.s` with Vm in v16-v31, TBL/TBX with one table
+  register, halving and rounding/saturating register shifts, ADDHN2 `.2d`,
+  scalar FMLA by element and scalar compares.
+- Added the missing base forms: vector and scalar FCVT{N,P,M,A}{S,U},
+  SQDMULH/SQRDMULH and SQDMLAL/SQDMLSL/SQDMULL{2} in every shape, SABA/UABA,
+  PMUL, FRECPX, scalar FMAXNMP/FMINNMP, and the scalar saturating, shift,
+  narrow and absolute forms. The scalar forms run the vector implementation
+  on element 0 through one table.
+- FPSR.QC is set by saturating integer operations in both engines,
+  including the JIT's native SQADD/UQADD/SQSUB/UQSUB and SQXTN family.
+- Reserved and unadvertised encodings raise SIGILL instead of executing:
+  accepted-unallocated words fell from 38,403 to 2,315. FP16 scalar FP
+  (not in AT_HWCAP) now traps apart from the FCVT half-precision
+  conversions; some of those instructions had returned wrong results.
+- `jit_simd_base_forms` checks 139 forms and 30 reserved encodings against
+  QEMU hashes. `jit_neon`, `jit_neon_fixups` and `test_simd_sat` expected
+  the old wrong results (SHL `#64`, an 8-byte TBL table, a wrapped UHSUB,
+  an unsigned UQSHL amount) and were corrected against QEMU.
+
 ### Generated native SIMD table and coverage sweep (2026-10-12)
 
 - FrostJIT's native SIMD classifier, kind enum and dispatch list are

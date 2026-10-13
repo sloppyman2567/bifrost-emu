@@ -307,6 +307,8 @@ UNIT_TESTS=(
     # Generated from Tools/CodeGen/native_simd.txt (make nativegen / nativegen-expect).
     "native_simd_gen|Tests/Unit/jit_native_simd_gen.elf||30|encodings passed"
     "simd_reserved_forms|Tests/Unit/jit_simd_reserved_forms.elf||10|checks passed"
+    # Base ARMv8.0 forms from the SIMD coverage sweep, hashed under QEMU.
+    "simd_base_forms|Tests/Unit/jit_simd_base_forms.elf||10|169 checks passed"
     # msr nzcv reads its source vreg, not a cpu.regs slot the optimizer
     # skipped storing because the block overwrites the register next.
     "msr_nzcv|Tests/Unit/jit_msr_nzcv.elf||10|64000/64000 checks passed"

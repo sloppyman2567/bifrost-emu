@@ -474,7 +474,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint8_t gopc = (op >> 12) & 0x1F;
                 bool is_unsigned = (op >> 29) & 1;
                 bool is_double = (op >> 22) & 1;
-                if (gopc == 0x1D) {  // SCVTF/UCVTF: int bits in FP reg → FP
+                // bit 23 (o2) selects FRECPE over SCVTF and FCVTZS over
+                // FCVTMS; only SCVTF/UCVTF and FCVTZS/FCVTZU are native.
+                bool o2 = (op >> 23) & 1;
+                if (gopc == 0x1D && !o2) {  // SCVTF/UCVTF: int bits in FP reg → FP
                     FpFixedParams fp;
                     fp.w = is_double ? 1 : 0;
                     fp.is_unsigned = is_unsigned;
@@ -484,7 +487,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     emit_fp_i2f_fixed(block, rd, rn, fp, cur_pc);
                     return true;
                 }
-                if (gopc == 0x1B) {  // FCVTZS/FCVTZU: FP → int bits in FP reg
+                if (gopc == 0x1B && o2) {  // FCVTZS/FCVTZU: FP → int bits in FP reg
                     FpFixedParams fp;
                     fp.w = is_double ? 1 : 0;
                     fp.is_unsigned = is_unsigned;
@@ -1058,9 +1061,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             case simd::Family::CRYPTO:
                 // subop 0 = AESE, which covers AESD/AESMC/AESIMC via
-                // bits[11:10]; subop 4 = PMULL, 5 = PMULL2.
+                // bits[13:12]; subop 4 = PMULL, 5 = PMULL2.
                 if (ct.subop == 0) {
-                    uint8_t sub_op = static_cast<uint8_t>((op >> 10) & 3);
+                    uint8_t sub_op = static_cast<uint8_t>((op >> 12) & 3);
                     AesParams ap;
                     ap.subop = sub_op;
                     emit_aes(block, d.rd, d.rn, 0, ap, cur_pc);
@@ -1232,21 +1235,14 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             case simd::Family::MUL_ELEM: {
-                // Integer by-element multiply family. width = SOURCE esize;
-                // imm = subop | (lane_index << 8). Index bits: H=bit11,
-                // L=bit21, M=bit20; Rm register = bits[19:16]. Formulas
-                // verified against the cross assembler:
-                //   .b[idx] = H:L:M:Rm<3>   .h[idx] = H:L:M   .s[idx] = H:L
-                uint32_t H = (op >> 11) & 1, L = (op >> 21) & 1,
-                         M = (op >> 20) & 1, rm_reg = (op >> 16) & 0xF;
-                uint32_t idx;
-                if (size == 0)      idx = (H << 3) | (L << 2) | (M << 1) | ((rm_reg >> 3) & 1);
-                else if (size == 1) idx = (H << 2) | (L << 1) | M;
-                else                idx = (H << 1) | L;
-                // Indexed-element Rm is bits[19:16] (4 bits); d.rm is the
-                // 5-bit bits[20:16] field which includes the M index bit,
-                // so any lane with M=1 (e.g. v.h[1]) would read v(Rm+16).
-                // Pass the 4-bit rm_reg as the IR src2.
+                // Integer by-element multiply family (table guard: halfword
+                // or word elements). width = SOURCE esize; imm = subop |
+                // (lane_index << 8). Index bits: H=bit11, L=bit21, M=bit20.
+                //   .h[idx] = H:L:M, Vm = Rm (bits 19:16, v0-v15)
+                //   .s[idx] = H:L,   Vm = M:Rm (bits 20:16, v0-v31)
+                uint32_t H = (op >> 11) & 1, L = (op >> 21) & 1, M = (op >> 20) & 1;
+                uint32_t rm_reg = size == 1 ? (op >> 16) & 0xF : (op >> 16) & 0x1F;
+                uint32_t idx = size == 1 ? (H << 2) | (L << 1) | M : (H << 1) | L;
                 SimdMulElemParams mp;
                 mp.subop = ct.subop;
                 mp.lane = static_cast<uint8_t>(idx);

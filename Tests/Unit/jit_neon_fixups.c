@@ -38,11 +38,12 @@ static void test_tbl2(void) {
 }
 
 static void test_tbl1_tbx(void) {
-    // TBL 8B: table is 8 bytes ({v0.8b}); indices ≥8 → 0.
+    // TBL 8B: table registers are always 16 bytes; Q only sizes the
+    // index and result, so indices 8-15 select v0's upper half.
     uint8_t a[16], idx[8], out[8], exp[8];
     for (int i = 0; i < 16; i++) a[i] = (uint8_t)i;
     uint8_t inds[8] = {3, 9, 15, 0, 7, 8, 1, 2};
-    for (int i = 0; i < 8; i++) exp[i] = (inds[i] < 8) ? a[inds[i]] : 0;
+    for (int i = 0; i < 8; i++) exp[i] = (inds[i] < 16) ? a[inds[i]] : 0;
     __asm__ volatile (
         "ldr q0, [%[a]]\n"
         "ldr d2, [%[idx]]\n"
@@ -106,7 +107,8 @@ static void test_ins_vector_elem(void) {
 }
 
 static void test_uhsub_wrap(void) {
-    // vhsubq_u8: (0 - 3) as unsigned halving = ((0 - 3) & 0xFF) >> 1 = 126.
+    // vhsubq_u8: Arm halves the exact difference, (0 - 3) >> 1 = -2,
+    // whose low byte is 254 (not the wrapped 0xFD >> 1 = 126).
     uint8_t a[16], b[16], out[16];
     for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = 3; }
     __asm__ volatile (
@@ -117,7 +119,7 @@ static void test_uhsub_wrap(void) {
         :: [a]"r"(a), [b]"r"(b), [out]"r"(out)
         : "v0","v1","v2","memory"
     );
-    CHECK(out[0] == 126 && out[15] == 6, "uhsub v.16b unsigned wrap");
+    CHECK(out[0] == 254 && out[15] == 6, "uhsub v.16b unsigned wrap");
 }
 
 static void test_rbit_not_cnt(void) {

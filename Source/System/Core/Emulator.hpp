@@ -753,6 +753,10 @@ private:
     bool exec_simd_misc(const SimdDpFields& f, CPU& cpu);
     bool exec_simd_imm(const SimdDpFields& f, CPU& cpu);
     bool exec_simd_arith(const SimdDpFields& f, CPU& cpu);
+    bool exec_simd_dp_groups(const SimdDpFields& f, CPU& cpu);
+    // AdvSIMD scalar forms that are their vector operation on element 0
+    // (FloatScalar.cpp); runs the vector groups on scratch registers.
+    bool exec_simd_scalar_lane(uint32_t op, CPU& cpu);
     void exec_fp_scalar(const DecodedInst& d, CPU& cpu);
     void execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,

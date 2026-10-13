@@ -108,14 +108,15 @@ int main(void) {
             "sqshl .8h (left, saturate, negative->asr)");
     }
     {
-        // uqshl .8h: 0x80 << 1 with huge unsigned amount 200 ->
-        //             lane != 0 -> saturate to 255
-        static const uint8_t a[16] = {0x80}, b[16] = {200};
+        // uqshl .16b: the amount is SInt(Vm<7:0>). 0x80 << 100 -> lane
+        //             != 0 -> saturate to 255; 200 is -56, a right
+        //             shift that clears the lane.
+        static const uint8_t a[16] = {0x80, 0x80}, b[16] = {100, 200};
         uint8_t out[16];
         __asm__ volatile("ldr q1,[%1]\n\tldr q2,[%2]\n\t"
                          "uqshl v0.16b, v1.16b, v2.16b\n\tstr q0,[%0]"
                          :: "r"(out), "r"(a), "r"(b) : "v0","v1","v2","memory");
-        chk(out[0] == 255, "uqshl .16b huge shift saturates to max");
+        chk(out[0] == 255 && out[1] == 0, "uqshl .16b huge shift saturates to max");
     }
     {
         // sqshl .2d: 1 << 63 -> saturates to INT64_MAX; INT64_MIN << 1

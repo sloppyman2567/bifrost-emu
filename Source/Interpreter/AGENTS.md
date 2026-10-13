@@ -8,7 +8,12 @@ before changing shared decode contracts or JIT-facing instruction behavior.
 - Preserve input values before destination or writeback updates, including
   register aliases, BLR X30 and faulting pre/post-indexed accesses.
 - Unsupported encodings raise DecodeError/SIGILL. Never silence a missing
-  instruction with a successful no-op.
+  instruction with a successful no-op. The decoder's `fp_decode` allocation
+  predicates define the advertised CPU profile (AT_HWCAP); change them
+  together with the HWCAP bits, and check them with the coverage sweep.
+- AdvSIMD scalar forms that are their vector operation on element 0 belong in
+  `kScalarLaneForms` (`FloatScalar.cpp`), not in a second implementation.
+  Saturating integer lanes set FPSR.QC.
 - Keep element width, signedness, Q=0 upper-half rules, FP special values and
   rounding explicit. Compare a failing case with Arm semantics or an independent
   reference before relying on agreement between the two Bifrost engines.

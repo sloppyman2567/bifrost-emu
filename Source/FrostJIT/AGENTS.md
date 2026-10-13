@@ -23,6 +23,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   helper encodings live in `native_simd.txt`. After changing it or a helper,
   run `make nativegen-expect` (QEMU) and commit the spec, generated header,
   generated test and expectations together.
+- Native saturating integer SIMD must set FPSR.QC like the interpreter
+  (`emit_simd_qc_unless_equal`); differential verification does not compare
+  FPSR, so check it against QEMU.
 - Run `make verify` and relevant guest regressions after behavior changes. A
   file split also needs a complete link/library build: missing definitions and
   old archive members can evade per-file compilation checks.

@@ -63,7 +63,8 @@ static void test_shifts(void) {
  *   USHR Dd, Dn, #s  = 0x7F000400 | ((128-s) << 16) | (rn<<5) | rd
  *   SSHR Dd, Dn, #s  = 0x5F000400 | ((128-s) << 16) | (rn<<5) | rd
  * shift == 64 (all bits shifted out) exercises the interpreter fallback
- * (clear for SHL/USHR, sign-fill for SSHR). */
+ * (clear for USHR, sign-fill for SSHR). SHL only encodes 0..63: its #64
+ * word would be 0x5F805400, a by-element encoding that raises SIGILL. */
 #define SHL_D_WORD(rd, rn, s)  (0x5F005400u | ((((64u) + (s)) & 0xFF) << 16) | ((rn) << 5) | (rd))
 #define USHR_D_WORD(rd, rn, s) (0x7F000400u | ((((128u) - (s)) & 0xFF) << 16) | ((rn) << 5) | (rd))
 #define SSHR_D_WORD(rd, rn, s) (0x5F000400u | ((((128u) - (s)) & 0xFF) << 16) | ((rn) << 5) | (rd))
@@ -79,7 +80,6 @@ static void test_scalar_shift(void) {
 
     DO_SSHIFT(SHL_D_WORD(0, 0, 1));   if (out != (in << 1))  ok = 0;
     DO_SSHIFT(SHL_D_WORD(0, 0, 32));  if (out != (in << 32)) ok = 0;
-    DO_SSHIFT(SHL_D_WORD(0, 0, 64));  if (out != 0)          ok = 0;  /* interp fallback */
     DO_SSHIFT(USHR_D_WORD(0, 0, 1));  if (out != (in >> 1))  ok = 0;
     DO_SSHIFT(USHR_D_WORD(0, 0, 32)); if (out != 0x00000000FEDCBA98ULL) ok = 0;
     DO_SSHIFT(USHR_D_WORD(0, 0, 64)); if (out != 0)          ok = 0;  /* interp fallback */

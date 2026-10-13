@@ -142,7 +142,8 @@ bool instr_will_call_interp(const DecodedInst& d) {
             // (FRINTN etc.) falls back to CALL_INTERP, so predict interp.
             if ((op & 0xDF3E0C00) == 0x5E200800) {
                 uint8_t gopc = (op >> 12) & 0x1F;
-                if (gopc == 0x1D || gopc == 0x1B)
+                bool o2 = (op >> 23) & 1;  // FRECPE / FCVTZS select
+                if ((gopc == 0x1D && !o2) || (gopc == 0x1B && o2))
                     return fp_gate >= 0 && !(fp_gate & 0x20);
                 return true;
             }

@@ -289,6 +289,92 @@ constexpr bool is_reciprocal(uint32_t op) {
            estimate == 0x0EA1D800 || estimate == 0x1EA1D800 ||
            is_reciprocal_fp16(op);
 }
+// Allocated encodings of the scalar FP data-processing group (bits 28:24 =
+// 1111x, bit 30 = 0) in this CPU profile, which advertises FEAT_FP only.
+// S and (except for conversions) M must be 0. ptype 10 is reserved apart
+// from FMOV to/from Vn.D[1]; FEAT_FP16 (ptype 11) is not advertised, so only
+// the FCVT precision conversions to and from half are allocated there. The
+// decoder rejects the rest, so both engines raise SIGILL.
+constexpr bool is_allocated_fp_scalar(uint32_t op) {
+    const uint32_t sf = op >> 31, ptype = (op >> 22) & 3;
+    if ((op >> 29) & 1) return false;                 // S
+    if ((op >> 24) & 1) return !sf && ptype < 2;      // FMADD/FMSUB/FNMADD/FNMSUB
+    if (!((op >> 21) & 1)) {                          // fixed-point conversions
+        const uint32_t rmode_opcode = (op >> 16) & 0x1F;
+        const bool known = rmode_opcode == 0x02 || rmode_opcode == 0x03 ||   // SCVTF/UCVTF
+                           rmode_opcode == 0x18 || rmode_opcode == 0x19;     // FCVTZS/FCVTZU
+        return known && ptype < 2 && (sf || ((op >> 15) & 1));  // W forms: scale >= 32
+    }
+    switch ((op >> 10) & 3) {
+        case 1: case 3: return !sf && ptype < 2;      // FCCMP/FCCMPE, FCSEL
+        case 2: return !sf && ptype < 2 && ((op >> 12) & 0xF) <= 8;  // 2-source
+    }
+    if (((op >> 10) & 0x3F) == 0) {                  // FP <-> integer
+        const uint32_t rmode = (op >> 19) & 3, opcode = (op >> 16) & 7;
+        if (opcode <= 1) return ptype < 2;                    // FCVT{N,P,M,Z}{S,U}
+        if (opcode <= 5) return rmode == 0 && ptype < 2;      // SCVTF/UCVTF/FCVTA{S,U}
+        if (rmode == 0) return ptype == sf;                   // FMOV W<->S, X<->D
+        return sf && ptype == 2 && rmode == 1;                // FMOV X<->Vn.D[1]
+    }
+    if (((op >> 10) & 0x1F) == 0x10) {                // 1-source, opcode bits 20:15
+        const uint32_t opcode = (op >> 15) & 0x3F;
+        if (sf) return false;
+        if (opcode >= 4 && opcode <= 7)               // FCVT to another precision
+            return ptype != 2 && (opcode & 3) != 2 && (opcode & 3) != ptype;
+        // FMOV/FABS/FNEG/FSQRT, FRINT{N,P,M,Z,A,X,I}
+        return ptype < 2 && (opcode <= 3 || (opcode >= 8 && opcode <= 15 && opcode != 13));
+    }
+    if (((op >> 10) & 0xF) == 0x8)                    // FCMP/FCMPE: op = 00, opcode2<2:0> = 0
+        return !sf && ptype < 2 && !((op >> 14) & 3) && !(op & 7);
+    if (((op >> 10) & 7) == 4)                        // FMOV (immediate): imm5 = 0
+        return !sf && ptype < 2 && !((op >> 5) & 0x1F);
+    return false;
+}
+// AdvSIMD vector (0 Q U 01111) and scalar (01 U 11111) words with bit 10
+// set are the shift-by-immediate / modified-immediate classes, which need
+// bit 23 clear (op1 = 10); by-element words have bit 10 clear. Bit 23 and
+// bit 10 both set is unallocated.
+constexpr bool is_unallocated_advsimd_imm(uint32_t op) {
+    const bool vector = (op & 0x9F000000) == 0x0F000000;
+    const bool scalar = (op & 0xDF000000) == 0x5F000000;
+    return (vector || scalar) && (op & 0x00800400) == 0x00800400;
+}
+// Reserved sizes in the AdvSIMD vector three-same (0 Q U 01110 size 1 Rm
+// opcode 1) and three-different (... 1 Rm opcode 00) groups, from Arm's
+// encoding index. Integer three-same: per (U, opcode) allowed sizes, where
+// most size-3 forms need Q (no .1d). FP three-same (opcode 11xxx): bit 23 is
+// part of the opcode and double precision needs Q; FHM rows (FMLAL/FMLSL,
+// not advertised) are left to the handlers.
+constexpr bool is_unallocated_advsimd_three(uint32_t op) {
+    const uint32_t U = (op >> 29) & 1, Q = (op >> 30) & 1, size = (op >> 22) & 3;
+    if ((op & 0x9F200400) == 0x0E200400) {
+        const uint32_t opcode = (op >> 11) & 0x1F;
+        if (opcode >= 0x18) {
+            const uint32_t a = size >> 1, sz = size & 1;
+            if ((opcode == 0x1D && !U) || (opcode == 0x19 && U)) return false;  // FHM
+            if (a && (opcode == 0x1B || (opcode == 0x1C && !U) || (opcode == 0x1F && U)))
+                return true;
+            return sz && !Q;
+        }
+        // Bits 0-3: allowed size values; bit 4: size 3 needs Q.
+        constexpr uint8_t A = 0x1F, N3 = 0x07, L = 0x0F, H = 0x06, B = 0x01, X = 0x00;
+        constexpr uint8_t allowed[2][24] = {
+            {N3, A, N3, L, N3, A, A, A, A, A, A, A, N3, N3, N3, N3, A, A, N3, N3, N3, N3, H, A},
+            {N3, A, N3, L, N3, A, A, A, A, A, A, A, N3, N3, N3, N3, A, A, N3, B,  N3, N3, H, X},
+        };
+        const uint8_t m = allowed[U][opcode];
+        return !((m >> size) & 1) || (size == 3 && (m & 0x10) && !Q);
+    }
+    if ((op & 0x9F200C00) == 0x0E200000) {
+        const uint32_t opcode = (op >> 12) & 0xF;
+        if (opcode == 0xF) return true;
+        if (opcode == 0xE) return U || size == 1 || size == 2;      // PMULL{2} .8h/.1q
+        if (opcode == 0x9 || opcode == 0xB || opcode == 0xD)        // SQDMLAL/SQDMLSL/SQDMULL
+            return U || size == 0 || size == 3;
+        return size == 3;
+    }
+    return false;
+}
 // True iff `op` is an FCMP/FCMPE encoding.
 //   bits[31:24]=0x1E, bits[23:22]=ftype, bit[21]=1, bits[15:10]=0b001000
 inline bool is_fcmp(uint32_t op) {

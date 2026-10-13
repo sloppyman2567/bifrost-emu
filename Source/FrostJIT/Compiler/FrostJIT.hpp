@@ -1534,6 +1534,7 @@ private:
     void store_vec(int xmm, int vreg, bool q);
     void emit_mask(int xmm, uint64_t c);
     void emit_mask16(int xmm, const uint8_t m[16]);
+    void emit_simd_qc_unless_equal(int xa, int xb, bool q);
     // ── ALU / memory / branch codegen ────────
     // Three sub-dispatchers split out of compile_ir_inst() for
     // readability. Each is a member function so it has full access to

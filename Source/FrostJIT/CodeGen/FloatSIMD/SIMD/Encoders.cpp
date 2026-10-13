@@ -135,4 +135,31 @@ void FrostJIT::emit_mask16(int xmm, const uint8_t m[16]) {
     emit_vmovq_gpr_to_xmm(5, RAX);
     sse2_op(0x6C, xmm, 5);  // punpcklqdq xmm, xmm5
 }
+// Saturating integer ops: set FPSR.QC unless every active byte of xa equals
+// xb (the result had the caller's non-saturated value). Q=0 tests the low
+// 8 bytes. Clobbers xa, xb and host flags (callers have committed lazy NZCV);
+// live GPRs are preserved.
+void FrostJIT::emit_simd_qc_unless_equal(int xa, int xb, bool q) {
+    sse2_op(0x74, xa, xb);                      // pcmpeqb xa, xb
+    size_t skip;
+    if (has_sse41()) {
+        sse2_op(0x74, xb, xb);                  // pcmpeqb xb, xb: all ones
+        if (!q) {                               // movq xb, xb: low half only
+            emit_byte(0xF3); emit_xmm_rex(xb, xb); emit_byte(0x0F); emit_byte(0x7E);
+            modrm3(xb, xb);
+        }
+        sse2_38(0x17, xa, xb);                  // ptest xa, xb: CF = all equal
+        skip = emit_jcc_rel8_placeholder(0x2);  // JC
+    } else {
+        emit_push(RAX);
+        sse2_op(0xD7, RAX, xa);                 // pmovmskb eax, xa
+        if (q) { emit_byte(0x3D); emit_u32(0xFFFF); }  // cmp eax, 0xFFFF
+        else { emit_byte(0x3C); emit_byte(0xFF); }     // cmp al, 0xFF
+        emit_pop(RAX);                          // POP leaves the flags intact
+        skip = emit_jcc_rel8_placeholder(0x4);  // JE
+    }
+    emit_byte(0x81); emit_modrm_disp(1, CPU_REG, FPSR_OFF);  // or dword [cpu+FPSR], QC
+    emit_u32(1u << 27);
+    patch_jcc_rel8(skip, static_cast<int8_t>(code_buf_used_ - (skip + 2)));
+}
 }  // namespace arm64emu

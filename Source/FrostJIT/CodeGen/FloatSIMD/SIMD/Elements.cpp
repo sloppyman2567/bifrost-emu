@@ -325,6 +325,26 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
             const int subop = static_cast<int>(sp.subop);
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
+            const bool native_sat = esize != 8 &&
+                (subop == 2 || (subop == 1 && esize == 2) || has_sse41());
+            if (subop != 0 && native_sat) {
+                // FPSR.QC: a source lane saturates unless it equals its own
+                // narrow value extended back (sign-extended for SQXTN; for
+                // SQXTUN/UQXTN its upper half, sign bit included, is zero).
+                // Every source lane is active. 64-bit sources interpret.
+                const int half = esize * 4;
+                const int shift = esize == 2 ? 0x71 : 0x72;  // word / dword
+                movdqa(1, 0);
+                if (subop == 2) {
+                    movdqa(2, 0);
+                    sse2_imm(shift, 1, 6, static_cast<uint8_t>(half));  // psll
+                    sse2_imm(shift, 1, 4, static_cast<uint8_t>(half));  // psra
+                } else {
+                    sse2_imm(shift, 1, 2, static_cast<uint8_t>(half));  // psrl
+                    sse2_op(0xEF, 2, 2);                                // pxor: zero
+                }
+                emit_simd_qc_unless_equal(1, 2, true);
+            }
             switch (subop) {
                 case 0: {  // XTN — truncate
                     if (esize == 2) {
@@ -409,7 +429,7 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
             const bool is_tbx = tp.is_tbx;
             const bool q = tp.q;
             const int nregs = static_cast<int>(tp.nregs);
-            const int bp = q ? 16 : 8;                 // bytes per table reg
+            const int bp = 16;  // table regs are always .16B; Q sizes only the index/result
             const int table_len = nregs * bp;
             // ge(T) = (idx >= T) = pcmpgtb(paddb(idx,0x80), (T-129)&0xFF)
             //   (unsigned-compare trick: idx+128 as signed > -(129-T) ⟺ idx ≥ T)
@@ -419,7 +439,7 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
             load_vec(1, static_cast<int>(inst.src1));   // X1 = table reg 1
             if (nregs == 2)
                 load_vec(3, (static_cast<int>(inst.src1) + 1) & 31);  // X3 = table reg 2
-            emit_mask(4, bp == 16 ? 0x1010101010101010ULL : 0x0808080808080808ULL);
+            emit_mask(4, 0x1010101010101010ULL);       // bp
             emit_mask(5, 0x8080808080808080ULL);
             emit_mask(6, static_cast<uint64_t>(thr_bp) * 0x0101010101010101ULL);
             emit_mask(7, static_cast<uint64_t>(thr_tl) * 0x0101010101010101ULL);

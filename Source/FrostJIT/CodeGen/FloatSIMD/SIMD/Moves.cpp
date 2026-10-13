@@ -171,6 +171,7 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
         // (1 or 2 ONLY — table guard `size < 2`), flags_op = Q. Lowered
         // with the EXACT SSE2 saturating instructions; 32/64-bit lanes
         // have no compact pre-AVX512 form and stay on the interpreter.
+        // FPSR.QC comes from comparing with the wrapping result.
         case IROp::SIMD_SATADDSUB: {
             if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
             const SimdSubopParams sp = inst.sataddsub_params();
@@ -178,17 +179,24 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
             const bool q = sp.q;
             const int subop = static_cast<int>(sp.subop);
             // opcode[subop][esize]: PADDSB EC/W ED, PADDUSB DC/W DD,
-            // PSUBSB E8/W E9, PSUBUSB D8/W DA
+            // PSUBSB E8/W E9, PSUBUSB D8/W D9
             static const uint8_t kOp[4][2] = {
                 {0xEC, 0xED},  // SQADD
                 {0xDC, 0xDD},  // UQADD
                 {0xE8, 0xE9},  // SQSUB
-                {0xD8, 0xDA},  // UQSUB
+                {0xD8, 0xD9},  // UQSUB
             };
+            // Wrapping PADDB/W, PSUBB/W: a lane that differs from the
+            // saturated result saturated, which sets FPSR.QC.
+            static const uint8_t kWrap[2][2] = {{0xFC, 0xFD}, {0xF8, 0xF9}};
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             load_vec(1, static_cast<int>(inst.src2));
+            movdqa(2, 0);
+            sse2_op(kWrap[(subop & 3) >= 2][esize == 2], 2, 1);  // xmm2 = wrapped
             sse2_op(kOp[subop & 3][esize == 2], 0, 1);  // xmm0 = xmm0 OP xmm1
+            movdqa(1, 0);
+            emit_simd_qc_unless_equal(2, 1, q);
             store_vec(0, static_cast<int>(inst.dest), q);
             return true;
         }

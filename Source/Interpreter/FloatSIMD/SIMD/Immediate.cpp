@@ -161,76 +161,12 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
         memcpy(&cpu.v_hi[rd], dst + 8, 8);
         return true;
     }
-    // SHL (vector, immediate) — mask 0xBF00FC00 excludes Q.
-    // Encoding: Q 0 1 1 0 1 1 1 1 0 immh immb 0 1 0 1 0 0 Rn Rd
-    //
-    // Element size from immh (the position of the highest set bit):
-    //   immh=0     → 8-bit  (esize=1)
-    //   immh=1     → 16-bit (esize=2)
-    //   immh=2,3   → 32-bit (esize=4)
-    //   immh=4-7   → 64-bit (esize=8)
-    //   immh=8-15  → reserved (treat as 64-bit)
-    // Shift = immh:immb - esize_bits
-    //   (e.g. shl v0.4s, #4 → immh:immb=0x24=36, esize=32, shift=36-32=4)
-    //
-    // 1. immh extracted as (op>>19)&0xF — off by one bit (should be >>20).
-    // 2. Element size rule was wrong: used 'immh < N' thresholds that
-    //    gave 16-bit for immh=3 instead of 32-bit. The correct rule is
-    //    based on the highest set bit position of immh.
-    // These broke ALL vector shifts — e.g. `ushr v0.4s, #4` was treated
-    // as a 16-bit shift, producing 0x0000 instead of 0x01000000.
-    if ((op & 0xBF00FC00) == 0x0F005400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = ((immh << 4) | immb) - (esize * 8);
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        for (int i = 0; i < elems; i++) {
-            uint64_t v = 0;
-            memcpy(&v, buf + i*esize, esize);
-            v <<= shift;
-            v &= (esize == 8) ? ~0ULL : ((1ULL << (esize*8)) - 1);
-            memcpy(buf + i*esize, &v, esize);
-        }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // Shift = (2 * esize_bits) - immh:immb.
-    // (rc.1 fixed immh extraction + element-size rule — see SHL above.)
-    if ((op & 0xBF00FC00) == 0x2F000400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = (2 * esize * 8) - ((immh << 4) | immb);
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        for (int i = 0; i < elems; i++) {
-            uint64_t v = 0;
-            memcpy(&v, buf + i*esize, esize);
-            if (shift >= esize * 8) v = 0;  // shift == esize*8 clears (avoids UB `>> 64`)
-            else v >>= shift;
-            memcpy(buf + i*esize, &v, esize);
-        }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
+    // Shift by immediate (SSHR/USHR, SSRA/USRA, SRSHR/URSHR, SRSRA/URSRA,
+    // SRI, SHL/SLI, SQSHLU, SQSHL/UQSHL) shares one decoder and executor
+    // with the scalar forms (FloatCommon.hpp). The per-opcode handlers it
+    // replaced each had their own size table; several left the .2d forms
+    // as silent no-ops.
+    if (arm_simd_shift_imm(op, cpu)) return true;
     // SCVTF/UCVTF/FCVTZS/FCVTZU (vector, fixed-point) — QEMU
     // a64.decode *_vf: 0 Q U 011110 immh immb 111001 / 111111 Rn Rd.
     // immh 01xx = .s (fbits = 64 - immh:immb), 1xxx = .d (fbits =
@@ -286,341 +222,6 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
         else cpu.v_hi[rd] = 0;
         return true;
     }
-    // SSHR (vector, immediate, signed) — mask 0xBF00FC00 excludes Q.
-    // Encoding: Q 0 1 1 0 1 1 1 1 0 immh immb 0 1 0 0 0 0 Rn Rd
-    // Shift = (2 * esize_bits) - immh:immb (same as USHR, but
-    // the shift is arithmetic — the sign bit is propagated).
-    //
-    // The MOVI/shift ambiguity check above catches
-    // this encoding only when immh == 0 (MOVI); for immh != 0
-    // (actual SSHR), control fell through past the USHR handler
-    // (which has U=1, 0x2F...) and past the SHL handler (which
-    // has a different low byte, 0x0F005400), landing in the
-    // unhandled-SIMD DecodeError path (silent NOP pre-1.5).
-    // Result: every vector SSHR-by-immediate was silently a no-op,
-    // leaving Vd unchanged. This broke `sshr v0.8h, v0.8h, #2` etc.
-    // under both interpreter and JIT (the JIT routes SIMD_SHL/
-    // SIMD_USHR/SIMD_SSHR to CALL_INTERP for the executor).
-    if ((op & 0xBF00FC00) == 0x0F000400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }       // unreachable (MOVI guard above)
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = (2 * esize * 8) - ((immh << 4) | immb);
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        bool over = (shift >= esize * 8);  // shift == esize*8 sign-fills (avoids UB `>> 64`)
-        for (int i = 0; i < elems; i++) {
-            if (esize == 1) {
-                int8_t v; memcpy(&v, buf + i, 1);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
-                memcpy(buf + i, &v, 1);
-            } else if (esize == 2) {
-                int16_t v; memcpy(&v, buf + i*2, 2);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
-                memcpy(buf + i*2, &v, 2);
-            } else if (esize == 4) {
-                int32_t v; memcpy(&v, buf + i*4, 4);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
-                memcpy(buf + i*4, &v, 4);
-            } else {
-                int64_t v; memcpy(&v, buf + i*8, 8);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
-                memcpy(buf + i*8, &v, 8);
-            }
-        }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // USRA (vector, immediate, accumulate) — mask 0xBF00FC00.
-    // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift).
-    // Used by MD5 to implement vector ROTL via
-    //   ROTL(x,n) = USRA(x << n, 32-n).
-    // The rounding variants URSRA/SRSRA (0x2F003400/0x0F003400,
-    // bit13 set) are handled just below.
-    if ((op & 0xBF00FC00) == 0x2F001400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = (2 * esize * 8) - ((immh << 4) | immb);
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        uint8_t acc[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        memcpy(acc, &cpu.v_lo[rd], 8);
-        if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
-        for (int i = 0; i < elems; i++) {
-            uint64_t v = 0, a = 0;
-            memcpy(&v, buf + i*esize, esize);
-            memcpy(&a, acc + i*esize, esize);
-            if (shift >= esize * 8) v = 0;  // shift == esize*8 clears (avoids UB `>> 64`)
-            else v >>= shift;
-            a += v;  // accumulate (wraps per element width)
-            a &= (esize == 8) ? ~0ULL : ((1ULL << (esize*8)) - 1);
-            memcpy(acc + i*esize, &a, esize);
-        }
-        memcpy(&cpu.v_lo[rd], acc, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // SSRA (vector, immediate, signed accumulate) — 0x0F001400.
-    // Same as USRA but arithmetic (signed) shift right.
-    if ((op & 0xBF00FC00) == 0x0F001400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = (2 * esize * 8) - ((immh << 4) | immb);
-        uint8_t buf[16];
-        uint8_t acc[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        memcpy(acc, &cpu.v_lo[rd], 8);
-        if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
-        bool over = (shift >= esize * 8);  // shift == esize*8 sign-fills (avoids UB `>> 64`)
-        for (int i = 0; i * esize < (Q ? 16 : 8); i++) {  // one pass per lane
-            if (esize == 1) {
-                int8_t v; memcpy(&v, buf+i, 1);
-                uint8_t a; memcpy(&a, acc+i, 1);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint8_t)v;
-                memcpy(acc+i, &a, 1);
-            } else if (esize == 2) {
-                int16_t v; memcpy(&v, buf+i*2, 2);
-                uint16_t a; memcpy(&a, acc+i*2, 2);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint16_t)v;
-                memcpy(acc+i*2, &a, 2);
-            } else if (esize == 4) {
-                int32_t v; memcpy(&v, buf+i*4, 4);
-                uint32_t a; memcpy(&a, acc+i*4, 4);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint32_t)v;
-                memcpy(acc+i*4, &a, 4);
-            } else {
-                int64_t v; memcpy(&v, buf+i*8, 8);
-                uint64_t a; memcpy(&a, acc+i*8, 8);
-                if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint64_t)v;
-                memcpy(acc+i*8, &a, 8);
-            }
-        }
-        memcpy(&cpu.v_lo[rd], acc, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // URSRA (vector, immediate, unsigned rounding accumulate) —
-    // 0x2F003400. URSRA Vd.<T>, Vn.<T>, #shift → Vd += round(Vn >> #shift)
-    // where the ARM RShr rounding is (x + 2^(shift-1)) >> shift
-    // (round-half-up, full-precision add). For shift == esize*8 this
-    // collapses to (x >= 2^(esize*8-1)) ? 1 : 0 (top bit set → the
-    // rounding carries out to 1). Differs from USRA only in the
-    // +2^(shift-1) rounding term.
-    if ((op & 0xBF00FC00) == 0x2F003400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = (2 * esize * 8) - ((immh << 4) | immb);
-        int esize_bits = esize * 8;
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        uint8_t acc[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        memcpy(acc, &cpu.v_lo[rd], 8);
-        if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
-        uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
-        for (int i = 0; i < elems; i++) {
-            uint64_t v = 0, a = 0;
-            memcpy(&v, buf + i*esize, esize);
-            memcpy(&a, acc + i*esize, esize);
-            uint64_t result;
-            if (shift == 0) {
-                result = v;  // shift 0 → no rounding, value passes through
-            } else if (shift >= esize_bits) {
-                // (x + 2^(esize-1)) >> esize == 1 iff top bit set.
-                result = (v >= (1ULL << (esize_bits - 1))) ? 1 : 0;
-            } else {
-                // (x + 2^(shift-1)) >> shift decomposed without a
-                // widening add (avoids 64-bit overflow for esize=8):
-                // result = (x >> shift) + (low_bits >= 2^(shift-1)).
-                uint64_t low = v & ((1ULL << shift) - 1);
-                result = (v >> shift) + ((low >= (1ULL << (shift - 1))) ? 1 : 0);
-            }
-            a += result;  // accumulate (wraps per element width)
-            a &= mask;
-            memcpy(acc + i*esize, &a, esize);
-        }
-        memcpy(&cpu.v_lo[rd], acc, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // SRSRA (vector, immediate, signed rounding accumulate) —
-    // 0x0F003400. Signed variant of URSRA: Vd += round(Vn >>> #shift)
-    // with an arithmetic (sign-extending) shift and the same
-    // +2^(shift-1) rounding increment on the signed value. For
-    // shift == esize*8 the rounded result is always 0 (every signed
-    // element |x| < 2^(esize*8-1) once rounded).
-    if ((op & 0xBF00FC00) == 0x0F003400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = (2 * esize * 8) - ((immh << 4) | immb);
-        int esize_bits = esize * 8;
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t buf[16];
-        uint8_t acc[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-        memcpy(acc, &cpu.v_lo[rd], 8);
-        if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
-        uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
-        for (int i = 0; i < elems; i++) {
-            uint64_t vbits = 0, a = 0;
-            memcpy(&vbits, buf + i*esize, esize);
-            memcpy(&a, acc + i*esize, esize);
-            int64_t v;
-            if (esize == 1) v = (int8_t)(uint8_t)vbits;
-            else if (esize == 2) v = (int16_t)(uint16_t)vbits;
-            else if (esize == 4) v = (int32_t)(uint32_t)vbits;
-            else v = (int64_t)vbits;
-            int64_t result;
-            if (shift == 0) {
-                result = v;  // shift 0 → no rounding, value passes through
-            } else if (shift >= esize_bits) {
-                result = 0;  // (x + 2^(esize-1)) >> esize == 0 for all signed x
-            } else {
-                // Rounding increment on the signed value, decomposed
-                // (avoids widening-add overflow): result = (x >> shift)
-                // + (low_bits >= 2^(shift-1)). x >> shift is arithmetic.
-                uint64_t low = (uint64_t)v & ((1ULL << shift) - 1);
-                result = (v >> shift) + ((low >= (1ULL << (shift - 1))) ? 1 : 0);
-            }
-            a += (uint64_t)result;  // accumulate (wraps per element width)
-            a &= mask;
-            memcpy(acc + i*esize, &a, esize);
-        }
-        memcpy(&cpu.v_lo[rd], acc, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // SLI (vector, immediate, shift left insert) — 0x2F005400.
-    // SLI Vd.<T>, Vn.<T>, #shift → Vd = (Vn << shift) | (Vd & ((1<<shift)-1)).
-    // The source shifts left; the destination's low `shift` bits are
-    // retained in place (merged below the shifted source). Note: this
-    // is NOT ROTL — ROTL(x,n) = (x<<n)|(x>>(w-n)) differs when Vd!=x.
-    if ((op & 0xBF00FC00) == 0x2F005400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        shift = ((immh << 4) | immb) - (esize * 8);
-        int esize_bits = esize * 8;
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t vn[16], vd[16];
-        memcpy(vn, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
-        memcpy(vd, &cpu.v_lo[rd], 8);
-        if (Q) memcpy(vd + 8, &cpu.v_hi[rd], 8);
-        uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
-        static bool sli_dbg_ = (getenv("BIFROST_LD2_DBG") != nullptr);
-        if (sli_dbg_) {
-            fprintf(stderr, "[SLI-DBG] op=0x%08x esize=%d shift=%d elems=%d\n", op, esize, shift, elems);
-            fprintf(stderr, "[SLI-DBG]   vn:"); for (int i = 0; i < elems*esize; i++) fprintf(stderr, " %02x", vn[i]); fprintf(stderr, "\n");
-            fprintf(stderr, "[SLI-DBG]   vd:"); for (int i = 0; i < elems*esize; i++) fprintf(stderr, " %02x", vd[i]); fprintf(stderr, "\n");
-        }
-        for (int i = 0; i < elems; i++) {
-            uint64_t n = 0, d = 0;
-            memcpy(&n, vn + i*esize, esize);
-            memcpy(&d, vd + i*esize, esize);
-            uint64_t r;
-            if (shift <= 0) {
-                r = n & mask;
-            } else if (shift >= esize_bits) {
-                r = d & mask;
-            } else {
-                uint64_t lo_mask = (1ULL << shift) - 1;
-                r = ((n << shift) & mask) | (d & lo_mask);
-            }
-            memcpy(vd + i*esize, &r, esize);
-        }
-        if (sli_dbg_) {
-            fprintf(stderr, "[SLI-DBG]   out:"); for (int i = 0; i < elems*esize; i++) fprintf(stderr, " %02x", vd[i]); fprintf(stderr, "\n");
-        }
-        memcpy(&cpu.v_lo[rd], vd, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
-    // SRI (vector, immediate, shift right insert) — 0x2F004400.
-    // SRI Vd.<T>, Vn.<T>, #shift → Vd = (Vn >> shift) | (Vd & (~((1<<(esize-shift))-1))).
-    // The source shifts right; the destination's top `shift` bits are
-    // retained in place (merged above the shifted source). Note: this
-    // is NOT ROTR — ROTR(x,n) = (x>>n)|(x<<(w-n)) differs when Vd!=x.
-    if ((op & 0xBF00FC00) == 0x2F004400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int esize, shift;
-        if (immh == 0) { esize = 1; }
-        else if (immh == 1) { esize = 2; }
-        else if (immh <= 3) { esize = 4; }
-        else { esize = 8; }
-        int esize_bits = esize * 8;
-        shift = (2 * esize_bits) - ((immh << 4) | immb);
-        int elems = (Q ? 16 : 8) / esize;
-        uint8_t vn[16], vd[16];
-        memcpy(vn, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
-        memcpy(vd, &cpu.v_lo[rd], 8);
-        if (Q) memcpy(vd + 8, &cpu.v_hi[rd], 8);
-        uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
-        for (int i = 0; i < elems; i++) {
-            uint64_t n = 0, d = 0;
-            memcpy(&n, vn + i*esize, esize);
-            memcpy(&d, vd + i*esize, esize);
-            uint64_t r;
-            if (shift <= 0) {
-                r = n & mask;
-            } else if (shift >= esize_bits) {
-                r = d & mask;
-            } else {
-                uint64_t lo_keep = (1ULL << (esize_bits - shift)) - 1;
-                uint64_t hi_mask = mask & ~lo_keep;
-                r = (n >> shift) | (d & hi_mask);
-            }
-            memcpy(vd + i*esize, &r, esize);
-        }
-        memcpy(&cpu.v_lo[rd], vd, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
-        else cpu.v_hi[rd] = 0;
-        return true;
-    }
     // Narrowing shift right (SHRN). immh determines SOURCE element size
     // (2× the destination size).
     //
@@ -638,6 +239,9 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
     // Q register), even when Q=0. Q=0 means the destination is 64
     // bits (SHRN), Q=1 means 128 bits (SHRN2, writes to upper half).
     if ((op & 0xBF00FC00) == 0x0F008400) {
+        // The architectural immh is bits[22:19]; 1xxx (a 64-bit result)
+        // is reserved. The fields below are shifted views of it.
+        if ((op >> 22) & 1) throw DecodeError(cpu.pc, op);
         uint8_t immh = (op >> 20) & 0xF;
         uint8_t immb = (op >> 16) & 0xF;
         int esize, shift;
@@ -675,6 +279,7 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
     if (((op & ~((1u << 30) | (1u << 29))) & 0xFF00FC00) == 0x0F00A400) {
         uint8_t immh = (op >> 19) & 0xF;   // bits[22:19]
         uint8_t immb = (op >> 16) & 0x7;   // bits[18:16]
+        if (immh >= 8) throw DecodeError(cpu.pc, op);  // 64-bit sources are reserved
         if (immh != 0) {
         bool is_unsigned = (op >> 29) & 1;
         int src_esize, shift;
@@ -774,8 +379,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
     // Encoding: 0 Q U 01111 size L M Rm opcode H 0 Rn Rd
     // (bits[28:24]=01111 — the "by element" space, distinct from
     // the three-same 01110 space the sub3 chain below handles).
-    // Index bits: H=bit11, L=bit21, M=bit20; Rm register =
-    // bits[19:16]. Lane sizes: size=01 → H src (.h[idx]), size=10
+    // Index bits: H=bit11, L=bit21, M=bit20; for words M is the top
+    // Rm bit. Lane sizes: size=01 → H src (.h[idx]), size=10
     // → S src (.s[idx]). Widening ops (SMULL/UMULL/SMLAL/UMLAL/
     // SMLSL/UMLSL) double the lane width; MUL/MLA/MLS keep it.
     // Opcode map (verified against the cross assembler):
@@ -786,112 +391,75 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
     // libjpeg-turbo's AArch64 IDCT does `smull v18.4s, v7.4h,
     // v6.h[3]` / `smlal …` — without this the interp SIGILL'd
     // during JPEG decode.
-    if (((op >> 24) & 0x1F) == 0x0F) {
-        uint32_t opc = (op >> 12) & 0xF;
-        bool U = (op >> 29) & 1;
-        uint32_t sz = (op >> 22) & 3;
-        int H = (op >> 11) & 1, L = (op >> 21) & 1, M = (op >> 20) & 1;
-        uint32_t rm_reg = (op >> 16) & 0xF;
-        int esize_src, idx;
-        if (sz == 1) {                       // .h[idx]
-            esize_src = 2;
-            idx = (H << 2) | (L << 1) | M;
-        } else if (sz == 2) {                // .s[idx]
-            esize_src = 4;
-            idx = (H << 1) | L;
-        } else if (sz == 0) {                // .b[idx]
-            esize_src = 1;
-            idx = (H << 3) | (L << 2) | (M << 1) | ((rm_reg >> 3) & 1);
-        } else {
-            esize_src = 0;                   // D scalar form: unsupported
-            idx = 0;
-        }
-        if (esize_src &&
-            (opc == 0x0 || opc == 0x4 || opc == 0x8 ||
-             opc == 0x2 || opc == 0x6 || opc == 0xA ||
-             opc == 0xC || opc == 0xD || opc == 0xE)) {
-            bool widen = (opc == 0x2 || opc == 0x6 || opc == 0xA ||
-                          opc == 0xE);
-            bool is_sub = (opc == 0x4 || opc == 0x6);
-            bool accum = (opc == 0x0 || opc == 0x2 || opc == 0x6);
-            int esize = widen ? esize_src * 2 : esize_src;
-            // Non-widening Q selects a 64- or 128-bit destination.
-            // Widening forms always produce 128 bits, while Q
-            // selects the low or high 64-bit source half (the `2`
-            // forms such as SMULL2 are common in libjpeg's IDCT).
-            int elems = widen ? 8 / esize_src : (Q ? 16 : 8) / esize;
-            int src_base = (widen && Q) ? 8 : 0;
-            uint64_t mask = esize == 8 ? ~0ULL : ((1ULL << (esize * 8)) - 1);
+    // By-element encodings have bit 10 clear (bit 10 set is the shift and
+    // modified-immediate space).
+    if (((op >> 24) & 0x1F) == 0x0F && !(op & 0x400)) {
+        const uint32_t opc = (op >> 12) & 0xF;
+        const bool U = (op >> 29) & 1;
+        const uint32_t sz = (op >> 22) & 3;
+        const int H = (op >> 11) & 1, L = (op >> 21) & 1, M = (op >> 20) & 1;
+        // Allocated integer forms: U=1 MLA 0000, MLS 0100; U=0 MUL 1000,
+        // SQDMULH 1100, SQRDMULH 1101, SQDMLAL 0011, SQDMLSL 0111, SQDMULL
+        // 1011; either U: [SU]MLAL 0010, [SU]MLSL 0110, [SU]MULL 1010. The
+        // other opcodes are FP, FHM, dot-product or RDM forms and fall
+        // through (U=0 0000 is FMLAL, not MLA; 1110 is SDOT, not SQDMULL).
+        const bool doubling = !U && (opc == 0x3 || opc == 0x7 || opc == 0xB);
+        const bool known = (U && (opc == 0x0 || opc == 0x4)) ||
+            (!U && (opc == 0x8 || opc == 0xC || opc == 0xD)) ||
+            opc == 0x2 || opc == 0x6 || opc == 0xA || doubling;
+        if (known) {
+            if (sz != 1 && sz != 2) throw DecodeError(cpu.pc, op);
+            // Halfword elements: Vm is v0-v15 (bits 19:16), index H:L:M.
+            // Word elements: Vm is M:Rm (v0-v31), index H:L. Using the
+            // 4-bit form for words read the wrong register when M was set.
+            const uint32_t rm_reg = sz == 1 ? (op >> 16) & 0xF : (op >> 16) & 0x1F;
+            const int esize_src = sz == 1 ? 2 : 4;
+            const int idx = sz == 1 ? (H << 2) | (L << 1) | M : (H << 1) | L;
+            const bool widen = opc == 0x2 || opc == 0x6 || opc == 0xA || doubling;
+            const bool is_sub = opc == 0x4 || opc == 0x6 || opc == 0x7;
+            const bool accum = opc == 0x0 || opc == 0x4 || opc == 0x2 || opc == 0x6 ||
+                               opc == 0x3 || opc == 0x7;
+            const int esize = widen ? esize_src * 2 : esize_src;
+            // Non-widening Q selects a 64- or 128-bit destination. Widening
+            // forms produce 128 bits; Q selects the source half (the `2`
+            // forms such as SMULL2 in libjpeg's IDCT).
+            const int elems = widen ? 8 / esize_src : (Q ? 16 : 8) / esize;
+            const int src_base = (widen && Q) ? 8 : 0;
+            const int bw = esize * 8;
+            const uint64_t mask = esize == 8 ? ~0ULL : ((1ULL << bw) - 1);
             uint8_t buf_n[16], buf_m[16], vd[16];
             memcpy(buf_n, &cpu.v_lo[rn], 8);
             memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
-            // Indexed-element Rm is bits[19:16] (4 bits); the
-            // shared 5-bit d.rm includes the M index bit (bit20),
-            // so `smull v.4s,v.4h,v.h[1]` (M=1) would read v(Rm+16)
-            // (stale/zero) instead of vRm. rm_reg is the 4-bit form.
             memcpy(buf_m, &cpu.v_lo[rm_reg], 8);
             memcpy(buf_m + 8, &cpu.v_hi[rm_reg], 8);
-            if (widen && !accum) {
-                memset(vd, 0, sizeof(vd));
-            } else {
+            if (accum) {
                 memcpy(vd, &cpu.v_lo[rd], 8);
                 memcpy(vd + 8, &cpu.v_hi[rd], 8);
+            } else {
+                memset(vd, 0, sizeof(vd));
             }
             uint64_t mul_v = 0;
             memcpy(&mul_v, buf_m + idx * esize_src, esize_src);
-            int64_t smul_v = static_cast<int64_t>(
-                static_cast<int64_t>(mul_v << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+            const int src_shift = 64 - esize_src * 8;
+            const int64_t smul_v = static_cast<int64_t>(mul_v << src_shift) >> src_shift;
             for (int i = 0; i < elems; i++) {
-                // Source lanes are esize_src wide (widening reads
-                // NARROWER lanes than it writes — using esize here
-                // fused adjacent lanes into one 32-bit value).
+                // Source lanes are esize_src wide (widening reads narrower
+                // lanes than it writes).
                 uint64_t a = 0;
                 memcpy(&a, buf_n + src_base + i * esize_src, esize_src);
-                int64_t sa = static_cast<int64_t>(
-                    static_cast<int64_t>(a << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                const int64_t sa = static_cast<int64_t>(a << src_shift) >> src_shift;
                 uint64_t acc = 0;
                 memcpy(&acc, vd + i * esize, esize);
+                const int64_t sacc = static_cast<int64_t>(acc << (64 - bw)) >> (64 - bw);
                 uint64_t r;
-                if (!widen) {
-                    // MUL (opc 8, U=0) / MLA (opc 0, U=1) /
-                    // MLS (opc 1, U=1) / SQDMULH (opc C) /
-                    // SQRDMULH (opc D): same-width lanes.
-                    if (opc == 0x8) {
-                        r = a * mul_v;
-                    } else if (opc == 0xC || opc == 0xD) {
-                        // Saturating doubling multiply high:
-                        // r = sat_s( (sa*smul*2 [+round]) >> bits )
-                        __int128 p = (__int128)sa * smul_v * 2;
-                        int bw = esize * 8;
-                        if (opc == 0xD) p += (__int128)1 << (bw - 1);
-                        __int128 sh = p >> bw;
-                        __int128 lim = (__int128)1 << (bw - 1);
-                        if (sh > lim - 1) r = (uint64_t)(int64_t)(lim - 1);
-                        else if (sh < -lim) r = (uint64_t)(int64_t)(-lim);
-                        else r = (uint64_t)(int64_t)sh;
-                    } else {
-                        uint64_t prod = a * mul_v;
-                        r = is_sub ? acc - prod : acc + prod;
-                    }
-                } else if (U) {
-                    uint64_t uprod = a * mul_v;
-                    r = (opc == 0x6) ? acc - uprod :
-                        (opc == 0x2 ? acc + uprod : uprod);
+                if (opc == 0xC || opc == 0xD) {
+                    r = static_cast<uint64_t>(arm_sqdmulh(cpu, sa, smul_v, bw, opc == 0xD));
+                } else if (doubling) {
+                    r = static_cast<uint64_t>(arm_sqdmlal(cpu, sacc, sa, smul_v, bw / 2,
+                                                          opc == 0xB ? 0 : is_sub ? -1 : 1));
                 } else {
-                    // Signed widening: SMLAL/SMLSL/SMULL/SQDMULL
-                    __int128 prod = (__int128)sa * smul_v;
-                    __int128 sacc2 = (opc == 0xE) ? 0 : (__int128)(int64_t)acc;
-                    __int128 sr;
-                    if (opc == 0xE) {
-                        // SQDMULL: doubling, saturate to dest width
-                        prod *= 2;
-                        __int128 dlim = (__int128)1 << (esize * 8 - 1);
-                        sr = prod > dlim - 1 ? dlim - 1 :
-                             prod < -dlim ? -dlim : prod;
-                    } else {
-                        sr = (opc == 0x6) ? sacc2 - prod : sacc2 + prod;
-                    }
-                    r = (uint64_t)(int64_t)sr;
+                    const uint64_t prod = widen && !U ? (uint64_t)(sa * smul_v) : a * mul_v;
+                    r = !accum ? prod : is_sub ? acc - prod : acc + prod;
                 }
                 r &= mask;
                 memcpy(vd + i * esize, &r, esize);

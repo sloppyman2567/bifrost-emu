@@ -16,6 +16,37 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     uint32_t sub_noq = f.sub_noq;
     (void)op; (void)Q; (void)U; (void)size; (void)rm; (void)rn; (void)rd;
     (void)sub; (void)sub_noq;
+    // FP across-lanes reductions, single precision (the half forms need
+    // FEAT_FP16): FMAXNMV 0x6E30C800, FMINNMV 0x6EB0C800, FMAXV 0x6E30F800,
+    // FMINV 0x6EB0F800; Q=0 is reserved. Arm's Reduce() pairs lanes as a
+    // tree, op(op(e0, e1), op(e2, e3)), which decides NaN and signed-zero
+    // results. FMINNMV used to reach an unrelated handler; the others trapped.
+    {
+        int which = -1;
+        switch (op & 0xBFFFFC00) {
+            case 0x2E30C800: which = 0; break;
+            case 0x2EB0C800: which = 1; break;
+            case 0x2E30F800: which = 2; break;
+            case 0x2EB0F800: which = 3; break;
+        }
+        if (which >= 0) {
+            if (!Q) throw DecodeError(cpu.pc, op);
+            static constexpr ArmFpOp reduce[] = {ArmFpOp::MaxNum, ArmFpOp::MinNum,
+                                                 ArmFpOp::Max, ArmFpOp::Min};
+            const ArmFpOp fop = reduce[which];
+            const bool dn = (cpu.fpcr >> 25) & 1;
+            float e[4];
+            memcpy(e, &cpu.v_lo[rn], 8);
+            memcpy(e + 2, &cpu.v_hi[rn], 8);
+            const float r = arm_fp_binop(fop, arm_fp_binop(fop, e[0], e[1], dn),
+                                         arm_fp_binop(fop, e[2], e[3], dn), dn);
+            uint32_t bits;
+            memcpy(&bits, &r, 4);
+            cpu.v_lo[rd] = bits;
+            cpu.v_hi[rd] = 0;
+            return true;
+        }
+    }
     // FCVTL (sz=0) widens four halves from the selected half to singles.
     // It used to fall through to an unrelated handler and return garbage
     // (SpongeBob's half-float atlas repack). Keep bit16 here too.
@@ -114,9 +145,19 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         }
         return true;
     }
-    // FCVTNU: nearest-even unsigned conversion, independent of FPCR.RMode.
-    // Skia's icon rasterizer uses the in-place .4s form. Q=0,.d is reserved.
-    if ((op & 0xBFBFFC00) == 0x2E21A800) {
+    // FCVTNS/NU, FCVTPS/PU, FCVTMS/MU, FCVTAS/AU (vector): round with the
+    // instruction's mode, independent of FPCR.RMode, then saturate.
+    // Skia's icon rasterizer uses the in-place FCVTNU .4s form. FCVTZS/ZU
+    // live in Arithmetic.cpp; bit 23 set on the A opcode is URECPE/URSQRTE.
+    // Q=0,.d is reserved.
+    int fcvt_mode = -1;  // arm_frint mode
+    switch (op & 0x9FBFFC00) {
+        case 0x0E21A800: fcvt_mode = 0; break;  // N
+        case 0x0EA1A800: fcvt_mode = 6; break;  // P
+        case 0x0E21B800: fcvt_mode = 2; break;  // M
+        case 0x0E21C800: fcvt_mode = 1; break;  // A
+    }
+    if (fcvt_mode >= 0) {
         const bool dbl = (op >> 22) & 1;
         if (dbl && !Q) throw DecodeError(cpu.pc, op);
         uint8_t source[16], result[16] = {};
@@ -125,15 +166,17 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         RecipFpEnv environment(cpu);
         fesetround(FE_TONEAREST);
         const int bytes = dbl ? 8 : 4;
+        const double limit = dbl ? 18446744073709551616.0 : 4294967296.0;
         for (int i = 0; i < (Q ? 16 : 8) / bytes; ++i) {
             double value;
             if (dbl) { memcpy(&value, source + i * bytes, 8); value = recip_input(cpu, value); }
             else { float f; memcpy(&f, source + i * bytes, 4); value = recip_input(cpu, f); }
-            double rounded = std::nearbyint(value);
-            const double limit = dbl ? 18446744073709551616.0 : 4294967296.0;
-            if (std::isnan(value) || rounded < 0 || rounded >= limit) cpu.fpsr |= 1;
+            double rounded = arm_frint(fcvt_mode, value, false);
+            const double lo = U ? 0 : -limit / 2, hi = U ? limit : limit / 2;
+            if (std::isnan(value) || rounded < lo || rounded >= hi) cpu.fpsr |= 1;
             else if (rounded != value) cpu.fpsr |= 16;
-            uint64_t integer = fp_to_unsigned_sat(rounded, dbl);
+            uint64_t integer = U ? fp_to_unsigned_sat(rounded, dbl)
+                                 : static_cast<uint64_t>(fp_to_signed_sat(rounded, dbl));
             memcpy(result + i * bytes, &integer, bytes);
         }
         memcpy(&cpu.v_lo[rd], result, 8);
@@ -788,13 +831,15 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         bool is_tbx     = (op & 0x1000) != 0;  // op2 bit (bit 12)
         int nregs       = ((op >> 13) & 0x3) + 1;  // bits[14:13]
         // Q bit (bit 30) — already extracted as `Q` above.
-        // Build the source table: nregs x (16 or 8) bytes.
-        int bytes_per_reg = Q ? 16 : 8;
+        // Build the table: nregs full 16-byte registers ({Vn.16B, ...}).
+        // Q only sizes the index and result (8B or 16B); an 8-byte table
+        // per register made every .8b lookup read the wrong bytes.
+        const int bytes_per_reg = 16;
         uint8_t table[4 * 16];
         for (int r = 0; r < nregs; r++) {
             int rn_r = (rn + r) & 31;
             memcpy(table + r * bytes_per_reg, &cpu.v_lo[rn_r], 8);
-            if (Q) memcpy(table + r * bytes_per_reg + 8, &cpu.v_hi[rn_r], 8);
+            memcpy(table + r * bytes_per_reg + 8, &cpu.v_hi[rn_r], 8);
         }
         int table_len = nregs * bytes_per_reg;
         // Read the index vector Vm.
@@ -1121,12 +1166,28 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         return true;
     }
     // Ordered vector FP comparisons against zero. Q=0 clears v_hi;
-    // NaNs compare false, and +0/-0 compare equal.
+    // NaNs compare false, and +0/-0 compare equal. sub_noq drops bits
+    // 20:16; with bit 16 set, FCMGT/FCMGE #0 are URECPE/URSQRTE, which
+    // used to run as the comparisons. .1d and 64-bit URECPE are reserved.
     case 0x0EA0D800: case 0x2EA0C800: case 0x0EA0C800:
     case 0x2EA0D800: case 0x0EA0E800:
     case 0x0EE0D800: case 0x2EE0C800: case 0x0EE0C800:
     case 0x2EE0D800: case 0x0EE0E800: {
         const bool is_double = (sub_noq >> 22) & 1;
+        const uint32_t bits20_16 = (op >> 16) & 0x1F;
+        if (bits20_16 == 1 && (sub_noq & 0xFFBFFFFF) == (U ? 0x2EA0C800u : 0x0EA0C800u)) {
+            if (is_double) throw DecodeError(cpu.pc, op);
+            uint32_t lanes[4] = {static_cast<uint32_t>(cpu.v_lo[rn]),
+                                 static_cast<uint32_t>(cpu.v_lo[rn] >> 32),
+                                 static_cast<uint32_t>(cpu.v_hi[rn]),
+                                 static_cast<uint32_t>(cpu.v_hi[rn] >> 32)};
+            for (uint32_t& lane : lanes) lane = arm_unsigned_recip_estimate(lane, U);
+            cpu.v_lo[rd] = lanes[0] | static_cast<uint64_t>(lanes[1]) << 32;
+            cpu.v_hi[rd] = Q ? lanes[2] | static_cast<uint64_t>(lanes[3]) << 32 : 0;
+            return true;
+        }
+        if (bits20_16) break;
+        if (is_double && !Q) throw DecodeError(cpu.pc, op);
         const int esz = is_double ? 8 : 4;
         const uint32_t kind = sub_noq & ~(1u << 22);
         uint64_t source[2] = {cpu.v_lo[rn], cpu.v_hi[rn]};
@@ -1241,6 +1302,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     case 0x0E204800: case 0x0E604800: case 0x0EA04800:  // SQXTN (U=0)
     case 0x2E204800: case 0x2E604800: case 0x2EA04800:  // UQXTN (U=1)
     {
+        if (((op >> 16) & 0x1F) != 1) break;  // sub_noq drops bits 20:16
         if (size == 3) {
             dump_decode_error(cpu, mem_, op);
             throw DecodeError(cpu.pc, op);
@@ -1264,6 +1326,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         for (int i = 0; i < elems; i++) {
             uint64_t v = 0;
             memcpy(&v, buf + i * src_esize, src_esize);
+            const uint64_t before = v;
             if (sat_signed) {
                 int64_t sv;
                 if      (src_esize == 2) sv = (int64_t)(int16_t)(uint16_t)v;
@@ -1283,6 +1346,12 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
                 else if ((uint64_t)sv > max_u) v = max_u;
                 else v = (uint64_t)sv;
             }
+            // A saturating form that changed the value saturated (QC).
+            // Signed results compare as sign-extended source lanes.
+            if ((sat_signed || sat_unsigned || sat_to_unsigned) &&
+                (sat_signed ? sext_lane(v, 8 * src_esize) != sext_lane(before, 8 * src_esize)
+                            : v != before))
+                cpu.fpsr |= 1u << 27;
             // XTN: plain truncation — low dst_esize bytes copied below.
             memcpy(out + i * dst_esize, &v, dst_esize);
         }

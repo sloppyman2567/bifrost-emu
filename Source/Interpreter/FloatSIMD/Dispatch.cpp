@@ -12,6 +12,12 @@
 // interp-vs-JIT divergence remains detectable.
 #include "Interpreter/FloatSIMD/FloatCommon.hpp"
 namespace arm64emu {
+// The SIMD_DP groups in their fixed order; also run by AdvSIMD scalar forms
+// that execute as element 0 of their vector operation.
+bool Emulator::exec_simd_dp_groups(const SimdDpFields& f, CPU& cpu) {
+    return exec_simd_three(f, cpu) || exec_simd_misc(f, cpu) ||
+           exec_simd_imm(f, cpu) || exec_simd_arith(f, cpu);
+}
 // execute_fp — handle all FP/SIMD instruction classes.
 //
 // Called from Emulator::execute() for:
@@ -276,10 +282,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // that aren't covered by the regular sub-dispatch.
             if (exec_crypto(op, cpu)) return;
             if (exec_reciprocal(op, cpu)) return;
-            if (exec_simd_three(f, cpu)) return;
-            if (exec_simd_misc(f, cpu)) return;
-            if (exec_simd_imm(f, cpu)) return;
-            if (exec_simd_arith(f, cpu)) return;
+            if (exec_simd_dp_groups(f, cpu)) return;
             // Fallback: any SIMD_DP op we don't model used to be silently
             // NOP'd — "incorrect but lets glibc continue", with wrong FP
             // results for any program that actually depends on the op.

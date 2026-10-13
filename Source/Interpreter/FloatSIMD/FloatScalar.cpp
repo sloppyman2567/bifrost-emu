@@ -3,6 +3,129 @@
 // FCMP, FCSEL, FCVT*, SCVTF/UCVTF, FRINT*, FMADD family, crypto SHA1H/SU).
 #include "Interpreter/FloatSIMD/FloatCommon.hpp"
 namespace arm64emu {
+// AdvSIMD scalar forms whose Arm pseudocode is the vector operation with
+// one element. Each runs its vector encoding (bit 28 clear) through the
+// SIMD_DP groups on scratch v0-v2, whose element 0 holds the operands and
+// whose other lanes are zero, so they cannot saturate or set FPSR flags.
+// Vd receives element 0 and the rest of the register is cleared. Copying
+// the operands first keeps register aliases correct.
+namespace {
+enum class LaneShape : uint8_t {
+    Same,      // Vd = op(Vn[, Vm]) at one width
+    Acc,       // Vd = op(Vd, Vn) at one width (SUQADD/USQADD)
+    Narrow,    // Vd(esize) = op(Vn(2*esize))
+    Widen,     // Vd(2*esize) = op(Vn, Vm(esize)) [+ Vd]
+    ElemSame,  // as Same, Vm[index]
+    ElemWiden, // as Widen, Vm[index]
+    ShiftNarrow,  // narrowing shift by immediate; esize from immh
+};
+struct ScalarLaneForm {
+    uint32_t mask, value;
+    uint8_t sizes;  // allowed size values (bit n = size n)
+    LaneShape shape;
+    bool acc;       // reads Vd element 0
+    bool fp;        // element size is 4 << sz (bit 22)
+};
+constexpr ScalarLaneForm kScalarLaneForms[] = {
+    // Three-same: SQADD/UQADD, SQSUB/UQSUB, SSHL/USHL, SQSHL/UQSHL,
+    // SRSHL/URSHL, SQRSHL/UQRSHL, SQDMULH/SQRDMULH, FMULX.
+    {0xDF20FC00, 0x5E200C00, 0xF, LaneShape::Same, false, false},
+    {0xDF20FC00, 0x5E202C00, 0xF, LaneShape::Same, false, false},
+    {0xDF20FC00, 0x5E204400, 0x8, LaneShape::Same, false, false},
+    {0xDF20FC00, 0x5E204C00, 0xF, LaneShape::Same, false, false},
+    {0xDF20FC00, 0x5E205400, 0x8, LaneShape::Same, false, false},
+    {0xDF20FC00, 0x5E205C00, 0xF, LaneShape::Same, false, false},
+    {0xDF20FC00, 0x5E20B400, 0x6, LaneShape::Same, false, false},
+    {0xFFA0FC00, 0x5E20DC00, 0x3, LaneShape::Same, false, true},
+    // Two-register misc: SUQADD/USQADD, SQABS/SQNEG, ABS/NEG,
+    // SQXTN/UQXTN, SQXTUN.
+    {0xDF3FFC00, 0x5E203800, 0xF, LaneShape::Acc, true, false},
+    {0xDF3FFC00, 0x5E207800, 0xF, LaneShape::Same, false, false},
+    {0xDF3FFC00, 0x5E20B800, 0x8, LaneShape::Same, false, false},
+    {0xDF3FFC00, 0x5E214800, 0x7, LaneShape::Narrow, false, false},
+    {0xFF3FFC00, 0x7E212800, 0x7, LaneShape::Narrow, false, false},
+    // Three-different: SQDMLAL, SQDMLSL, SQDMULL.
+    {0xFF20FC00, 0x5E209000, 0x6, LaneShape::Widen, true, false},
+    {0xFF20FC00, 0x5E20B000, 0x6, LaneShape::Widen, true, false},
+    {0xFF20FC00, 0x5E20D000, 0x6, LaneShape::Widen, false, false},
+    // By element: SQDMLAL, SQDMLSL, SQDMULL, SQDMULH, SQRDMULH.
+    {0xFF00F400, 0x5F003000, 0x6, LaneShape::ElemWiden, true, false},
+    {0xFF00F400, 0x5F007000, 0x6, LaneShape::ElemWiden, true, false},
+    {0xFF00F400, 0x5F00B000, 0x6, LaneShape::ElemWiden, false, false},
+    {0xFF00F400, 0x5F00C000, 0x6, LaneShape::ElemSame, false, false},
+    {0xFF00F400, 0x5F00D000, 0x6, LaneShape::ElemSame, false, false},
+    // Shift right narrow: SQSHRN/UQSHRN, SQRSHRN/UQRSHRN, SQSHRUN,
+    // SQRSHRUN (size is unused; immh selects the element).
+    {0xDF80FC00, 0x5F009400, 0xF, LaneShape::ShiftNarrow, false, false},
+    {0xDF80FC00, 0x5F009C00, 0xF, LaneShape::ShiftNarrow, false, false},
+    {0xFF80FC00, 0x7F008400, 0xF, LaneShape::ShiftNarrow, false, false},
+    {0xFF80FC00, 0x7F008C00, 0xF, LaneShape::ShiftNarrow, false, false},
+};
+}  // namespace
+bool Emulator::exec_simd_scalar_lane(uint32_t op, CPU& cpu) {
+    const ScalarLaneForm* form = nullptr;
+    for (const ScalarLaneForm& f : kScalarLaneForms)
+        if ((op & f.mask) == f.value) { form = &f; break; }
+    if (!form) return false;
+    const unsigned size = (op >> 22) & 3;
+    unsigned esize;  // bytes of the narrower operand
+    if (form->shape == LaneShape::ShiftNarrow) {
+        const unsigned immh = (op >> 19) & 0xF;
+        if (immh == 0 || immh >= 8) throw DecodeError(cpu.pc, op);
+        esize = 1u << (31 - __builtin_clz(immh));  // destination element
+    } else if (form->fp) {
+        if (!((form->sizes >> size) & 1)) throw DecodeError(cpu.pc, op);
+        esize = (op >> 22) & 1 ? 8 : 4;
+    } else {
+        if (!((form->sizes >> size) & 1)) throw DecodeError(cpu.pc, op);
+        esize = 1u << size;
+    }
+    const bool narrow = form->shape == LaneShape::Narrow || form->shape == LaneShape::ShiftNarrow;
+    const bool widen = form->shape == LaneShape::Widen || form->shape == LaneShape::ElemWiden;
+    const bool indexed = form->shape == LaneShape::ElemSame || form->shape == LaneShape::ElemWiden;
+    const unsigned src_bytes = narrow ? 2 * esize : esize;
+    const unsigned dst_bytes = widen ? 2 * esize : esize;
+    auto low = [](uint64_t v, unsigned bytes) { return bytes >= 8 ? v : v & ((1ull << (8 * bytes)) - 1); };
+    // Three-same, three-different and by-element forms have Vm in bits
+    // 20:16 (two-register misc keeps opcode bits there, shifts immh:immb).
+    // By-element halfword forms keep M (bit 20) as an index bit: Vm is
+    // Rm<3:0>.
+    const bool has_rm = !(form->mask & 0x10000) && form->shape != LaneShape::ShiftNarrow;
+    const uint32_t rm_field = indexed && size == 1 ? 0xF0000u : 0x1F0000u;
+    const unsigned rd = op & 31, rn = (op >> 5) & 31, rm = (op & rm_field) >> 16;
+    const uint64_t n_lo = cpu.v_lo[rn], d_lo = cpu.v_lo[rd];
+    const uint64_t m_lo = cpu.v_lo[rm], m_hi = cpu.v_hi[rm];
+    struct Scratch {
+        CPU& cpu;
+        uint64_t lo[3], hi[3];
+        explicit Scratch(CPU& c) : cpu(c) {
+            for (int i = 0; i < 3; ++i) { lo[i] = c.v_lo[i]; hi[i] = c.v_hi[i]; }
+        }
+        ~Scratch() { for (int i = 0; i < 3; ++i) { cpu.v_lo[i] = lo[i]; cpu.v_hi[i] = hi[i]; } }
+    } scratch(cpu);
+    // Every source element fits in the low 64 bits (src_bytes <= 8).
+    cpu.v_lo[0] = form->acc ? low(d_lo, dst_bytes) : 0; cpu.v_hi[0] = 0;
+    cpu.v_lo[1] = low(n_lo, src_bytes); cpu.v_hi[1] = 0;
+    if (indexed) { cpu.v_lo[2] = m_lo; cpu.v_hi[2] = m_hi; }
+    else { cpu.v_lo[2] = low(m_lo, src_bytes); cpu.v_hi[2] = 0; }
+    // Vector word: bit 28 clear, registers v0/v1/v2, Q=0 for the forms
+    // whose Q=1 variant is the upper-half ("2") operation.
+    uint32_t vec = (op & ~(1u << 28) & ~0x3FFu) | (1u << 5);
+    if (has_rm) vec = (vec & ~rm_field) | (2u << 16);
+    if (narrow || widen) vec &= ~(1u << 30);
+    bool handled;
+    try {
+        handled = exec_simd_dp_groups(SimdDpFields(vec), cpu);
+    } catch (const DecodeError&) {
+        handled = false;
+    }
+    if (!handled) throw DecodeError(cpu.pc, op);  // scratch restores v0-v2
+    const uint64_t result = low(cpu.v_lo[0], dst_bytes);
+    if (rd < 3) { scratch.lo[rd] = result; scratch.hi[rd] = 0; }
+    cpu.v_lo[rd] = result;
+    cpu.v_hi[rd] = 0;
+    return true;
+}
 void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     uint32_t op = d.raw;
     uint8_t rn = (op >> 5) & 0x1F;
@@ -32,49 +155,85 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         cpu.v_hi[rd] = 0;
         return;
     }
-    // ── SHL (scalar, immediate): Dd, Dn, #imm ─────────────────
-    // Encoding: 0x5F005400 (mask 0xFF00FC00).
-    // silently NOP'd, breaking GCC -O2's vectorized TLS init
-    // pattern (shl d31, d31, #2 to multiply by 4).
-    if ((op & 0xFF00FC00) == 0x5F005400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int shift = ((immh << 4) | immb) - 64;
-        if (shift < 0) shift = 0;
-        uint64_t v = cpu.v_lo[rn];
-        if (shift >= 64) v = 0;  // shift == 64 clears (avoids UB `<< 64`)
-        else v <<= shift;
-        cpu.v_lo[rd] = v;
-        cpu.v_hi[rd] = 0;
-        return;
+    // AdvSIMD scalar compares producing an all-ones/zero mask in the low
+    // element (the rest of Vd is cleared). Integer forms exist only for
+    // 64-bit lanes:
+    //   CMTST 0x5EE08C00  CMEQ 0x7EE08C00 (register)
+    //   CMGT 0x5EE08800  CMGE 0x7EE08800  CMEQ 0x5EE09800
+    //   CMLE 0x7EE09800  CMLT 0x5EE0A800  (#0)
+    // FP forms (bit 22 = double; NaN compares false):
+    //   FCMEQ 0x5E20E400  FCMGE 0x7E20E400  FCMGT 0x7EA0E400
+    //   FACGE 0x7E20EC00  FACGT 0x7EA0EC00 (register)
+    //   FCMGT 0x5EA0C800  FCMGE 0x7EA0C800  FCMEQ 0x5EA0D800
+    //   FCMLE 0x7EA0D800  FCMLT 0x5EA0E800 (#0)
+    // libgcc's unwinder folds a flag into the FDE pc with `cmge d0, d0, #0`;
+    // an older broad mask ran that as a double compare and swallowed
+    // SUB/CMEQ d and FCMGE s #0 (evaluated as FCMLE).
+    {
+        int icase = -1;  // tst, eq, gt0, ge0, eq0, le0, lt0
+        switch (op & 0xFFE0FC00) {
+            case 0x5EE08C00: icase = 0; break;
+            case 0x7EE08C00: icase = 1; break;
+        }
+        switch (op & 0xFFFFFC00) {
+            case 0x5EE08800: icase = 2; break;
+            case 0x7EE08800: icase = 3; break;
+            case 0x5EE09800: icase = 4; break;
+            case 0x7EE09800: icase = 5; break;
+            case 0x5EE0A800: icase = 6; break;
+        }
+        if (icase >= 0) {
+            const uint64_t a = cpu.v_lo[rn], b = cpu.v_lo[rm];
+            const int64_t s = static_cast<int64_t>(a);
+            const bool t = icase == 0 ? (a & b) != 0 : icase == 1 ? a == b
+                : icase == 2 ? s > 0 : icase == 3 ? s >= 0 : icase == 4 ? s == 0
+                : icase == 5 ? s <= 0 : s < 0;
+            cpu.v_lo[rd] = t ? ~0ULL : 0;
+            cpu.v_hi[rd] = 0;
+            return;
+        }
+        int fcase = -1;  // eq, ge, gt, acge, acgt, gt0, ge0, eq0, le0, lt0
+        switch (op & 0xFFA0FC00) {
+            case 0x5E20E400: fcase = 0; break;
+            case 0x7E20E400: fcase = 1; break;
+            case 0x7EA0E400: fcase = 2; break;
+            case 0x7E20EC00: fcase = 3; break;
+            case 0x7EA0EC00: fcase = 4; break;
+        }
+        switch (op & 0xFFBFFC00) {
+            case 0x5EA0C800: fcase = 5; break;
+            case 0x7EA0C800: fcase = 6; break;
+            case 0x5EA0D800: fcase = 7; break;
+            case 0x7EA0D800: fcase = 8; break;
+            case 0x5EA0E800: fcase = 9; break;
+        }
+        if (fcase >= 0) {
+            const bool dbl = (op >> 22) & 1;
+            double a = dbl ? read_fp_d(cpu, rn) : read_fp_s(cpu, rn);
+            double b = fcase >= 5 ? 0.0 : dbl ? read_fp_d(cpu, rm) : read_fp_s(cpu, rm);
+            if (fcase == 3 || fcase == 4) { a = std::fabs(a); b = std::fabs(b); }
+            bool t;
+            switch (fcase) {
+                case 0: case 7: t = a == b; break;
+                case 1: case 3: case 6: t = a >= b; break;
+                case 8: t = a <= b; break;
+                case 9: t = a < b; break;
+                default: t = a > b; break;
+            }
+            cpu.v_lo[rd] = t ? (dbl ? ~0ULL : 0xFFFFFFFFull) : 0;
+            cpu.v_hi[rd] = 0;
+            return;
+        }
     }
-    // ── USHR (scalar, immediate): Dd, Dn, #imm ────────────────
-    // Encoding: 0x7F000400 (mask 0xFF00FC00).
-    if ((op & 0xFF00FC00) == 0x7F000400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int shift = 128 - ((immh << 4) | immb);
-        if (shift < 0) shift = 0;
-        if (shift >= 64) cpu.v_lo[rd] = 0;
-        else cpu.v_lo[rd] = cpu.v_lo[rn] >> shift;
-        cpu.v_hi[rd] = 0;
-        return;
-    }
-    // ── SSHR (scalar, immediate, signed): Dd, Dn, #imm ────────
-    // Encoding: 0x5F000400 (mask 0xFF00FC00). Scalar USHR is the
-    // unsigned twin with mask 0x7F000400 (handled above). The old
-    // mask 0x7F000000 never matched the real SSHR encodings
-    // (e.g. `sshr d9, d8, #32` = 0x5f600509), silently NOP'ing
-    // the shift and breaking raster/geometry code.
-    if ((op & 0xFF00FC00) == 0x5F000400) {
-        uint8_t immh = (op >> 20) & 0xF;
-        uint8_t immb = (op >> 16) & 0xF;
-        int shift = 128 - ((immh << 4) | immb);
-        if (shift < 0) shift = 0;
-        int64_t v = static_cast<int64_t>(cpu.v_lo[rn]);
-        if (shift >= 64) cpu.v_lo[rd] = (v < 0) ? ~0ULL : 0;
-        else cpu.v_lo[rd] = static_cast<uint64_t>(v >> shift);
-        cpu.v_hi[rd] = 0;
+    // ── Scalar shift by immediate (SSHR/USHR/SSRA/USRA/SRSHR/URSHR/
+    // SRSRA/URSRA/SRI/SHL/SLI on Dn, SQSHL/UQSHL/SQSHLU on any size):
+    // shared with the vector forms (FloatCommon.hpp).
+    if (arm_simd_shift_imm(op, cpu)) return;
+    if (exec_simd_scalar_lane(op, cpu)) return;
+    // FRECPX Sd/Dd (0x5EA1F800, bit 22 = double).
+    if ((op & 0xFFBFFC00) == 0x5EA1F800) {
+        if ((op >> 22) & 1) write_fp_d(cpu, rd, arm_frecpx(cpu, read_fp_d(cpu, rn)));
+        else write_fp_s(cpu, rd, arm_frecpx(cpu, read_fp_s(cpu, rn)));
         return;
     }
     // ── DUP (element → scalar FP register): MOV Sd, Vn.S[i] ──
@@ -242,42 +401,6 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         } else {
             float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
             write_fp_s(cpu, rd, arm_fp_binop(ArmFpOp::Abd, a, b, (cpu.fpcr >> 25) & 1));
-        }
-        return;
-    }
-    // FP compare-with-zero: FCMGE/FCMGT/FCMLE/FCMLT <Dd>,<Dn>,#0.0
-    // (also the 2D/4S/2S vector forms, size bits free).
-    //   FCMGE 0x7EE08800  FCMGT 0x7EE08C00
-    //   FCMLE 0x7EE0C800  FCMLT 0x7EE0CC00
-    // mask 0xFF3F9000/0x7E208000: bits[31:24]=0x7E, bit21=1,
-    // bits[20:16]=0, bit15=1, bit12=0; bit10 selects strict
-    // (1=GT/LT, 0=GE/LE) and bit14 selects the swapped operand
-    // (1=compare #0 vs Dn: LE/LT). libgcc's aarch64 unwinder
-    // (uw_frame_state_for) lowers `context->ra` + a flag mask via
-    // `cmge d0,d0,#0` (0x7EE08800) — a silent NOP here OR'd
-    // 0x4000000000000000 into the pc, crashing every C++
-    // exception with a bogus _Unwind_Find_FDE address.
-    if ((op & 0xFF3F9000) == 0x7E208000) {
-        // Result is a compare MASK (all-ones/all-zeros), not 1.0/0.0:
-        // libgcc's aarch64 unwinder (uw_frame_state_for) does
-        // `cmge d0,d0,#0` (0x7EE08800), `fmov x0,d0`, `add x0,ra,x0`
-        // to fold a flag mask into the FDE pc (ra-1 when set). A
-        // 1.0/0.0 result would OR 0x3FF0000000000000 into the pc.
-        bool is_double = (op >> 22) & 1;
-        bool strict    = (op >> 10) & 1;   // 0: GE/LE, 1: GT/LT
-        bool swapped   = (op >> 14) & 1;   // 0: Dn op #0, 1: #0 op Dn
-        if (is_double) {
-            double a = read_fp_d(cpu, rn);
-            bool t = swapped ? (strict ? (0.0 > a) : (0.0 >= a))
-                             : (strict ? (a > 0.0) : (a >= 0.0));
-            cpu.v_lo[rd] = t ? ~0ULL : 0ULL;
-            cpu.v_hi[rd] = t ? ~0ULL : 0ULL;
-        } else {
-            float a = read_fp_s(cpu, rn);
-            bool t = swapped ? (strict ? (0.0f > a) : (0.0f >= a))
-                             : (strict ? (a > 0.0f) : (a >= 0.0f));
-            cpu.v_lo[rd] = t ? 0xFFFFFFFFu : 0u;
-            cpu.v_hi[rd] = 0;
         }
         return;
     }
@@ -681,21 +804,23 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             }
             return;
         }
-        if (opcode == 0x1B) {  // FCVTZS/FCVTZU (FP → int, FP dest)
-            if (is_double) {
-                double v = read_fp_d(cpu, rn);
-                uint64_t out = is_unsigned
-                    ? fp_to_unsigned_sat(v, true)
-                    : static_cast<uint64_t>(fp_to_signed_sat(v, true));
-                cpu.v_lo[rd] = out;
-            } else {
-                float v = read_fp_s(cpu, rn);
-                uint64_t out = is_unsigned
-                    ? fp_to_unsigned_sat(v, false)
-                    : static_cast<uint64_t>(fp_to_signed_sat(v, false));
-                // Zero-extend 32-bit result into 64-bit FP register
-                cpu.v_lo[rd] = out & 0xFFFFFFFFULL;
-            }
+        // FCVT{N,M,A,P,Z}{S,U} (FP → int, FP dest). bit 23 (o2) splits
+        // each opcode: 11010 N/P, 11011 M/Z, 11100 A/unallocated. FCVTMS
+        // used to run as FCVTZS. Rounding goes through arm_frint (ties to
+        // even for N, independent of FPCR), then FPToFixed's saturation.
+        // The result zero-extends through the whole vector register.
+        if (opcode >= 0x1A && opcode <= 0x1C) {
+            const bool o2 = (op >> 23) & 1;
+            if (opcode == 0x1C && o2) throw DecodeError(cpu.pc, op);
+            static const int kMode[3][2] = {{0, 6}, {2, 4}, {1, -1}};  // arm_frint modes
+            const int mode = kMode[opcode - 0x1A][o2];
+            double v = is_double ? read_fp_d(cpu, rn) : read_fp_s(cpu, rn);
+            if (!std::isnan(v)) v = arm_frint(mode, v, false);
+            uint64_t out = is_unsigned
+                ? fp_to_unsigned_sat(v, is_double)
+                : static_cast<uint64_t>(fp_to_signed_sat(v, is_double));
+            cpu.v_lo[rd] = is_double ? out : out & 0xFFFFFFFFULL;
+            cpu.v_hi[rd] = 0;
             return;
         }
         // Other opcodes in this group (FRINTN, FABS, etc.) are
@@ -766,23 +891,26 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // ── Scalar FCVTXN (Sd ← Dn, round-to-odd) ─────────────────
     // fcvtxn s8,d7 = 0x7E6168E8 → masked 0x7E616800 (rn/rd
     // stripped; U=1 and size=01 are part of the constant).
-    // Round-to-odd double→single narrowing; writes Sd (low 32
-    // bits of Vd), the rest of Vd unchanged (scalar rule).
+    // Round-to-odd double→single narrowing; writes Sd and clears
+    // the rest of Vd, like every scalar AdvSIMD result.
     // The vector forms live in the SIMD_DP section above.
     if ((op & 0xFFFFFC00) == 0x7E616800) {
         uint64_t raw = cpu.v_lo[rn];
         double dv;
         memcpy(&dv, &raw, 8);
         float fv = fp_to_f32_rto(dv);
-        memcpy(reinterpret_cast<uint32_t*>(&cpu.v_lo[rd]), &fv, 4);
+        uint32_t bits; memcpy(&bits, &fv, 4);
+        cpu.v_lo[rd] = bits;  // scalar writes clear the rest of Vd
+        cpu.v_hi[rd] = 0;
         return;
     }
-    // ── Scalar pairwise FADDP/FMAXP/FMINP ─────────────────────
+    // ── Scalar pairwise FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP ─────
     //   faddp s0,v0.2s = 0x7E30D800   faddp d0,v0.2d = 0x7E70D800
     //   fmaxp s0,v0.2s = 0x7E30F800   fmaxp d0,v0.2d = 0x7E70F800
     //   fminp s0,v0.2s = 0x7EB0F800   fminp d0,v0.2d = 0x7EF0F800
-    // (mask 0xFFFFFC00 strips Rn/Rd; bit23=FMINP, bit22=double,
-    //  opcode bits[15:12]: D=add, F=max/min). compiler-rt's
+    //   fmaxnmp        = 0x7E30C800   fminnmp        = 0x7EB0C800
+    // (mask 0xFFFFFC00 strips Rn/Rd; bit23=min, bit22=double,
+    //  opcode bits[15:12]: D=add, F=max/min, C=maxnum/minnum). compiler-rt's
     // vectorized sin() emits `faddp d4,v4.2d`; previously these
     // fell through to the silent FP-NOP fallback, corrupting sin().
     {
@@ -800,12 +928,16 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         }
         if (pw == 0x7E30D800 || pw == 0x7E70D800 ||
             pw == 0x7E30F800 || pw == 0x7E70F800 ||
-            pw == 0x7EB0F800 || pw == 0x7EF0F800) {
+            pw == 0x7EB0F800 || pw == 0x7EF0F800 ||
+            (op & 0xFFBFFC00) == 0x7E30C800 || (op & 0xFFBFFC00) == 0x7EB0C800) {
             const bool is_add = ((op >> 12) & 0xF) == 0xD;
+            const bool is_num = ((op >> 12) & 0xF) == 0xC;
             const bool is_min = (op & 0x00800000) != 0;
-            // FMAXP/FMINP are the non-NM forms (FMAXNMP/FMINNMP are separate
-            // encodings). ARM NaN propagation and +qNaN default, not x86's.
-            const ArmFpOp kind = is_add ? ArmFpOp::Add : is_min ? ArmFpOp::Min : ArmFpOp::Max;
+            // ARM NaN propagation and +qNaN default, not x86's; the NM forms
+            // return the number when exactly one operand is a quiet NaN.
+            const ArmFpOp kind = is_add ? ArmFpOp::Add
+                               : is_num ? (is_min ? ArmFpOp::MinNum : ArmFpOp::MaxNum)
+                               : is_min ? ArmFpOp::Min : ArmFpOp::Max;
             const bool dn = (cpu.fpcr >> 25) & 1;
             if (op & 0x00400000) {  // double: lanes = Vn.2D
                 double a = read_fp_d(cpu, rn);
@@ -840,6 +972,7 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         bool is_u = (op >> 29) & 1;
         if ((opc == 0x1 || opc == 0x5 || opc == 0x9) && !(is_u && opc != 0x9)) {
             bool is_dbl = (op >> 22) & 1;
+            if (is_dbl && ((op >> 21) & 1)) throw DecodeError(cpu.pc, op);  // .d with L=1
             uint8_t rm_reg =
                 (uint8_t)((((op >> 20) & 1) << 4) | ((op >> 16) & 0xF));
             unsigned idx = is_dbl ? ((op >> 11) & 1)
@@ -858,24 +991,18 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
                     src >> ((idx & 1) ? 32 : 0));
                 memcpy(&elem_s, &w, 4);
             }
-            if (opc == 0x9) {              // FMUL / FMULX
-                if (is_dbl)
-                    write_fp_d(cpu, rd, read_fp_d(cpu, rn) * elem);
-                else
-                    write_fp_s(cpu, rd, read_fp_s(cpu, rn) * elem_s);
-            } else {                       // FMLA/FMLS: rd accumulates
-                if (is_dbl) {
-                    double acc = read_fp_d(cpu, rd);
-                    double prod = read_fp_d(cpu, rn) * elem;
-                    write_fp_d(cpu, rd, opc == 0x1 ? acc + prod
-                                                   : acc - prod);
-                } else {
-                    float acc = read_fp_s(cpu, rd);
-                    float prod = read_fp_s(cpu, rn) * elem_s;
-                    write_fp_s(cpu, rd, opc == 0x1 ? acc + prod
-                                                   : acc - prod);
-                }
-            }
+            // FMUL/FMULX use FPMul/FPMulX; FMLA/FMLS are fused FPMulAdd
+            // (FMLS negates the multiplicand). ARM NaN rules and FPCR.DN.
+            const bool dn = (cpu.fpcr >> 25) & 1;
+            const ArmFpOp mul = is_u ? ArmFpOp::MulX : ArmFpOp::Mul;
+            auto apply = [&](auto a, auto e, auto acc) {
+                if (opc == 0x9) return arm_fp_binop(mul, a, e, dn);
+                return arm_fp_muladd(acc, opc == 0x5 ? fp_neg(a) : a, e, dn);
+            };
+            if (is_dbl)
+                write_fp_d(cpu, rd, apply(read_fp_d(cpu, rn), elem, read_fp_d(cpu, rd)));
+            else
+                write_fp_s(cpu, rd, apply(read_fp_s(cpu, rn), elem_s, read_fp_s(cpu, rd)));
             return;
         }
     }

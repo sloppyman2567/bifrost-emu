@@ -335,14 +335,18 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     uint8_t rn = (op >> 5) & 0x1F;
     uint8_t rm = (op >> 16) & 0x1F;
     // ── AES instructions (0x4E284800 - 0x4E287800) ─────────────────
-    // Mask: 0xFFFFFC00 (only Rn/Rd are variable)
-    if ((op & 0xFFFFFC00) == 0x4E284800) {
+    // Mask: 0xFFFFCC00; bits[13:12] select AESE/AESD/AESMC/AESIMC (the
+    // old mask matched only AESE, and ran it as AESMC). AESE/AESD
+    // combine Vd with the key in Vn; AESMC/AESIMC transform Vn.
+    if ((op & 0xFFFFCC00) == 0x4E284800) {
+        const unsigned sub = (op >> 12) & 0x3;
         uint8_t state[16], key[16];
-        memcpy(state, &cpu.v_lo[rd], 8);
-        memcpy(state + 8, &cpu.v_hi[rd], 8);
         memcpy(key, &cpu.v_lo[rn], 8);
         memcpy(key + 8, &cpu.v_hi[rn], 8);
-        switch ((op >> 10) & 0x3) {
+        const uint8_t src = sub < 2 ? rd : rn;
+        memcpy(state, &cpu.v_lo[src], 8);
+        memcpy(state + 8, &cpu.v_hi[src], 8);
+        switch (sub) {
             case 0: aes_aese(state, key); break;
             case 1: aes_aesd(state, key); break;
             case 2: aes_aesmc(state); break;

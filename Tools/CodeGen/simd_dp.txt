@@ -72,16 +72,16 @@ FMLS    0xBFA0FC00   0x0EA0CC00   FP        0xF   -
 # semantic reference.
 MOVI    0x9F800C00   0x0F000400   MODIMM    0   ((op >> 19) & 0xF) == 0
 
-# ── Vector shift-by-immediate (sm mask 0xBF00FC00) ───────────────────────
-SHL     0xBF00FC00   0x0F005400   SHIFT     0   -
-USHR    0xBF00FC00   0x2F000400   SHIFT     1   -
-SSHR    0xBF00FC00   0x0F000400   SHIFT     2   -
-USRA    0xBF00FC00   0x2F001400   SHIFT     3   -
-SSRA    0xBF00FC00   0x0F001400   SHIFT     4   -
-SLI     0xBF00FC00   0x2F005400   SHIFT     5   -
-SRI     0xBF00FC00   0x2F004400   SHIFT     6   -
-URSRA   0xBF00FC00   0x2F003400   SHIFT     7   -
-SRSRA   0xBF00FC00   0x0F003400   SHIFT     8   -
+# ── Vector shift-by-immediate (bit 23 = 0; immh 1xxx is .2d and needs Q) ──
+SHL     0xBF80FC00   0x0F005400   SHIFT     0   ((op >> 22) & 1) == 0 || Q
+USHR    0xBF80FC00   0x2F000400   SHIFT     1   ((op >> 22) & 1) == 0 || Q
+SSHR    0xBF80FC00   0x0F000400   SHIFT     2   ((op >> 22) & 1) == 0 || Q
+USRA    0xBF80FC00   0x2F001400   SHIFT     3   ((op >> 22) & 1) == 0 || Q
+SSRA    0xBF80FC00   0x0F001400   SHIFT     4   ((op >> 22) & 1) == 0 || Q
+SLI     0xBF80FC00   0x2F005400   SHIFT     5   ((op >> 22) & 1) == 0 || Q
+SRI     0xBF80FC00   0x2F004400   SHIFT     6   ((op >> 22) & 1) == 0 || Q
+URSRA   0xBF80FC00   0x2F003400   SHIFT     7   ((op >> 22) & 1) == 0 || Q
+SRSRA   0xBF80FC00   0x0F003400   SHIFT     8   ((op >> 22) & 1) == 0 || Q
 
 # ── GPR->vector DUP: lowest set imm5 bit = size (higher bits ignored); imm5 = x0000 and .1d (Q=0) are reserved ──
 DUP     0xBFE0FC00   0x0E000C00   DUP       0   ((op >> 16) & 0xF) != 0 && (((op >> 16) & 0xF) != 8 || Q)
@@ -98,40 +98,40 @@ DUP     0xBFE0FC00   0x0E000C00   DUP       0   ((op >> 16) & 0xF) != 0 && (((op
 # to read the broadcast back — native here avoids the interp round-trip.
 UMOV    0xBFE0FC00   0x0E003C00   UMOV       0   -
 
-# ── AES / PMULL (AESE row covers AESD/AESMC/AESIMC via bits[11:10]) ──────
-AESE    0xFFFFFC00   0x4E284800   CRYPTO     0   -
+# ── AES / PMULL (AESE row covers AESD/AESMC/AESIMC via bits[13:12]) ──────
+AESE    0xFFFFCC00   0x4E284800   CRYPTO     0   -
 PMULL   0xFFE0FC00   0x0EE0E000   CRYPTO     4   -
 PMULL2  0xFFE0FC00   0x4EE0E000   CRYPTO     5   -
 
 # ── PMISC: CNT/NOT/RBIT/ABS/NEG (2-reg misc) ─────────────────────────────
 # CNT/NOT/RBIT share sub2 0x0E205800 (interp collapses them) but differ in
-# U (bit29) and size[0] (bit22). Mask 0xBFE0FC00 keeps U, size, bit21 and
-# bits[15:10] so each gets a distinct row:
+# U (bit29) and size[0] (bit22). Mask 0xBFFFFC00 keeps everything but Q and
+# the registers (other sizes and bits 20:16 are unallocated or other ops):
 #   CNT  = 0x0E205800 (U=0, size=0) — popcount per byte
 #   NOT  = 0x2E205800 (U=1, size=0) — bitwise invert
 #   RBIT = 0x2E605800 (U=1, size=1) — bit-reverse per byte
 # ABS/NEG share sub3 0x0E20B800 but FCVTZS/FCVTZU also match that base with
-# bit16 (0x10000) set, so mask 0xBF21FC00 keeps bit16 and strips size:
+# bit16 (0x10000) set, so mask 0xBF3FFC00 keeps bits 21:16 and strips size;
+# .1d (size 3 without Q) is reserved:
 #   ABS = 0x0E20B800 (U=0), NEG = 0x2E20B800 (U=1)
 # ABS of INT_MIN returns the input unchanged (ARM semantics).
-CNT     0xBFE0FC00   0x0E205800   PMISC      0   -
-NOT     0xBFE0FC00   0x2E205800   PMISC      1   -
-RBIT    0xBFE0FC00   0x2E605800   PMISC      2   -
-ABS     0xBF21FC00   0x0E20B800   PMISC      3   -
-NEG     0xBF21FC00   0x2E20B800   PMISC      4   -
+CNT     0xBFFFFC00   0x0E205800   PMISC      0   -
+NOT     0xBFFFFC00   0x2E205800   PMISC      1   -
+RBIT    0xBFFFFC00   0x2E605800   PMISC      2   -
+ABS     0xBF3FFC00   0x0E20B800   PMISC      3   size != 3 || Q
+NEG     0xBF3FFC00   0x2E20B800   PMISC      4   size != 3 || Q
 
 # ── CVTF: vector integer <-> FP converts (2-reg misc) ────────────────────
-# SCVTF/UCVTF (int->fp) match 0x0E20D800/0x2E20D800 with size 0/1. CRITICAL:
-# FRECPE/FRSQRTE share these exact sub3_noq values but use size 2/3 — the
-# `size == 0` guard is what keeps them on the interpreter. size==1 (2D/1D,
-# 64-bit ints) stays interp too (no vector 64-bit int<->fp in SSE2/AVX2).
-# FCVTZS/FCVTZU (fp->int) match 0x0E21B800/0x2E21B800 (bit16 set on the
-# ABS/NEG base); guard size == 2 (4S/2S native), size==3 (2D/1D) stays
-# interp. NaN -> 0, out-of-range saturates.
-SCVTF   0xBF20FC00   0x0E20D800   CVTF       0   size == 0
-UCVTF   0xBF20FC00   0x2E20D800   CVTF       1   size == 0
-FCVTZS  0xBF21FC00   0x0E21B800   CVTF       2   size == 2
-FCVTZU  0xBF21FC00   0x2E21B800   CVTF       3   size == 2
+# Each row fixes size and bits 21:16. SCVTF/UCVTF (int->fp) 0x0E21D800/
+# 0x2E21D800 are the 4S/2S forms; FRECPE/FRSQRTE (size 2/3), the 2D form and
+# the unallocated bit16=0 encoding stay on the interpreter (no vector 64-bit
+# int<->fp in SSE2/AVX2). FCVTZS/FCVTZU (fp->int) 0x0EA1B800/0x2EA1B800 are
+# 4S/2S; 2D stays interp, and FCVTMS/MU (bit 23 clear) are separate.
+# NaN -> 0, out-of-range saturates.
+SCVTF   0xBFFFFC00   0x0E21D800   CVTF       0   -
+UCVTF   0xBFFFFC00   0x2E21D800   CVTF       1   -
+FCVTZS  0xBFFFFC00   0x0EA1B800   CVTF       2   -
+FCVTZU  0xBFFFFC00   0x2EA1B800   CVTF       3   -
 
 # ── ADDP (vector, pairwise add) ──────────────────────────────────────────
 # Native for B/H/S and Q=1 D. The reserved .1D form (size 3, Q 0) stays on
@@ -167,10 +167,11 @@ TBX2    0xBFE0FC00   0x0E003000   TBL        3   -
 # putting imm4 in bits[14:11]). imm5 (bits[20:16]) encodes the dest element
 # size + index; lowest set bit = esize, upper bits = dest index. Guard keeps
 # imm5 low nibble non-zero so esize is 1/2/4/8 (imm5=0/0x10 -> DecodeError
-# stays on the interp). src element index = bits[14:11] / esize.
+# stays on the interp). src element index = bits[14:11] / esize. INS exists
+# only with Q=1 and bit 15 clear, so the mask keeps both.
 # GCC lowers vextq_u8 to a 2-source TBL whose index vector is built with
 # these INS moves — native here avoids the interp round-trip.
-INS     0xBFE00400   0x2E000400   INS        0   ((op >> 16) & 0x0F) != 0
+INS     0xFFE08400   0x6E000400   INS        0   ((op >> 16) & 0x0F) != 0
 
 # ── PERMUTE: ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2 (3-reg same, U=0) ─────────────
 # Encoding: 0 Q size 01110 00 Rm 0 opc 10 Rn Rd (U=0, bit21=0). opc6 =
@@ -230,24 +231,24 @@ ADDHN   0xBF20FC00   0x0E204000   ADDHN     0   size < 3
 RADDHN  0xBF20FC00   0x2E204000   ADDHN     1   size < 3
 SUBHN   0xBF20FC00   0x0E206000   ADDHN     2   size < 3
 RSUBHN  0xBF20FC00   0x2E206000   ADDHN     3   size < 3
-SQSHRN  0xBF00FC00   0x0F009400   SHRN_SAT  0   ((op >> 19) & 0xF) != 0
-UQSHRN  0xBF00FC00   0x2F009400   SHRN_SAT  1   ((op >> 19) & 0xF) != 0
-SQRSHRN 0xBF00FC00   0x0F009C00   SHRN_SAT  2   ((op >> 19) & 0xF) != 0
-URQSHRN 0xBF00FC00   0x2F009C00   SHRN_SAT  3   ((op >> 19) & 0xF) != 0
-SQSHRUN 0xBF00FC00   0x2F008400   SHRN_SAT  4   ((op >> 19) & 0xF) != 0
-SQRSHRUN 0xBF00FC00  0x2F008C00   SHRN_SAT  5   ((op >> 19) & 0xF) != 0
-MUL_ELEM   0xBF00F400 0x0F008000  MUL_ELEM  0   size < 3
-MLA_ELEM   0xBF00F400 0x2F000000  MUL_ELEM  1   size < 3
-MLS_ELEM   0xBF00F400 0x2F004000  MUL_ELEM  2   size < 3
-SMULL_ELEM 0xBF00F400 0x0F00A000  MUL_ELEM  3   size < 3
-UMULL_ELEM 0xBF00F400 0x2F00A000  MUL_ELEM  4   size < 3
-SMLAL_ELEM 0xBF00F400 0x0F002000  MUL_ELEM  5   size < 3
-UMLAL_ELEM 0xBF00F400 0x2F002000  MUL_ELEM  6   size < 3
-SMLSL_ELEM 0xBF00F400 0x0F006000  MUL_ELEM  7   size < 3
-UMLSL_ELEM 0xBF00F400 0x2F006000  MUL_ELEM  8   size < 3
-SQDMULH_ELEM 0xBF00F400 0x0F00C000 MUL_ELEM 9  size < 3
-SQRDMULH_ELEM 0xBF00F400 0x0F00D000 MUL_ELEM 10 size < 3
-SQDMULL_ELEM 0xBF00F400 0x0F00B000 MUL_ELEM 11 size < 3
+SQSHRN  0xBF80FC00   0x0F009400   SHRN_SAT  0   ((op >> 19) & 0xF) != 0 && ((op >> 22) & 1) == 0
+UQSHRN  0xBF80FC00   0x2F009400   SHRN_SAT  1   ((op >> 19) & 0xF) != 0 && ((op >> 22) & 1) == 0
+SQRSHRN 0xBF80FC00   0x0F009C00   SHRN_SAT  2   ((op >> 19) & 0xF) != 0 && ((op >> 22) & 1) == 0
+URQSHRN 0xBF80FC00   0x2F009C00   SHRN_SAT  3   ((op >> 19) & 0xF) != 0 && ((op >> 22) & 1) == 0
+SQSHRUN 0xBF80FC00   0x2F008400   SHRN_SAT  4   ((op >> 19) & 0xF) != 0 && ((op >> 22) & 1) == 0
+SQRSHRUN 0xBF80FC00  0x2F008C00   SHRN_SAT  5   ((op >> 19) & 0xF) != 0 && ((op >> 22) & 1) == 0
+MUL_ELEM   0xBF00F400 0x0F008000  MUL_ELEM  0   size == 1 || size == 2
+MLA_ELEM   0xBF00F400 0x2F000000  MUL_ELEM  1   size == 1 || size == 2
+MLS_ELEM   0xBF00F400 0x2F004000  MUL_ELEM  2   size == 1 || size == 2
+SMULL_ELEM 0xBF00F400 0x0F00A000  MUL_ELEM  3   size == 1 || size == 2
+UMULL_ELEM 0xBF00F400 0x2F00A000  MUL_ELEM  4   size == 1 || size == 2
+SMLAL_ELEM 0xBF00F400 0x0F002000  MUL_ELEM  5   size == 1 || size == 2
+UMLAL_ELEM 0xBF00F400 0x2F002000  MUL_ELEM  6   size == 1 || size == 2
+SMLSL_ELEM 0xBF00F400 0x0F006000  MUL_ELEM  7   size == 1 || size == 2
+UMLSL_ELEM 0xBF00F400 0x2F006000  MUL_ELEM  8   size == 1 || size == 2
+SQDMULH_ELEM 0xBF00F400 0x0F00C000 MUL_ELEM 9  size == 1 || size == 2
+SQRDMULH_ELEM 0xBF00F400 0x0F00D000 MUL_ELEM 10 size == 1 || size == 2
+SQDMULL_ELEM 0xBF00F400 0x0F00B000 MUL_ELEM 11 size == 1 || size == 2
 
 # ── SMOV (vector element -> GPR, SIGN-extended) ──────────────────────────
 # Same ASIMDINS group as UMOV but bits[15:12]=0010 (sub_noq 0x0E002C00;
