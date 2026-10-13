@@ -13,6 +13,17 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Consistent process identity (2026-10-13)
+
+- `/proc/self/stat` and `/proc/self/status` report the process's real PID,
+  parent, process group, session and name instead of `1 (bifrost)` with
+  `PPid: 0`, so they agree with getpid/getppid/getpgid/getsid. Android apps
+  with the host's PID previously saw PID 1 there.
+- `getpgid`/`getsid` follow the same identity; for a host-identity process
+  `setsid` returns `EPERM` instead of a fake session 1, and `kill(1, …)` is
+  `EPERM` instead of signalling the app itself. After execve the leader's TID
+  equals its PID.
+
 ### Kernel-format /proc/self/maps (2026-10-13)
 
 - `/proc/self/maps` lists every guest mapping with its real permissions,

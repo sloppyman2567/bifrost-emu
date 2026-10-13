@@ -335,11 +335,8 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             // A fork child's pid is its host pid (fork_guest gives the
             // forking thread that tid), for every thread: threads created
             // in the child inherit is_fork_process but have their own tid.
-            if (cpu.is_fork_process) {
-                ret_host(static_cast<uint64_t>(::getpid()));
-            } else {
-                ret_host(1);
-            }
+            // process_ids() is the shared identity: /proc and getpgid agree.
+            ret_host(static_cast<uint64_t>(emu.vfs().process_ids().pid));
             return 0;
         }
         case 173: { // getppid
@@ -352,11 +349,7 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             // send signals back to its parent (e.g. test_sigint_handler
             // does `kill(getppid(), SIGINT)`), so we MUST return the
             // real host ppid for forked children.
-            if (cpu.is_fork_process) {
-                ret_host(::getppid());
-            } else {
-                ret_host(1);  // main process: parent is init
-            }
+            ret_host(static_cast<uint64_t>(emu.vfs().process_ids().ppid));
             return 0;
         }
         case 174: { // getuid

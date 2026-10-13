@@ -620,7 +620,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             memset(cpu.regs, 0, sizeof(cpu.regs));
             memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
             memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
-            cpu.tid = static_cast<int>(getpid());
+            cpu.tid = emu.vfs().process_ids().pid;  // exec keeps the PID; the leader TID equals it
             // the new binary loads at the same addresses as the old one
             // (e.g., 0x400000). The decode cache matches on PC, so stale
             // entries from the old binary would match new PCs but return
@@ -1247,10 +1247,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             int sig = static_cast<int>(a1);
             if (sig == 0) { ret_host(0); return 0; }
             if (sig < 1 || sig > MAX_SIGNAL) { ret_err(EINVAL); return 0; }
-            // Guest PID 1 = self (the main guest process, which always
-            // has PID 1 in our model). Also treat pid == 0, pid < 0,
-            // and pid == host PID as self.
-            if (pid == 1 || pid == 0 || pid < 0 ||
+            // Self: our PID (1 in the PID-1 model, else the host PID), and
+            // pid == 0 / pid < 0 (process groups are not modelled). PID 1
+            // of a host-identity process is init: an unprivileged signal
+            // to it is EPERM, and it must never reach the host's init.
+            const int self = emu.vfs().process_ids().pid;
+            if (pid == 1 && self != 1) { ret_err(EPERM); return 0; }
+            if (pid == self || pid == 0 || pid < 0 ||
                 pid == static_cast<int>(::getpid())) {
                 // Self-process: deliver to the main thread (TID 1) or
                 // the caller if it's the main thread.

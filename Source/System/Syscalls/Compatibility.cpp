@@ -443,11 +443,22 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
             // Single-process sandbox: silently accept. Real pgid is 1.
             ret_host(0); return 0;
         }
-        case 156: { // getsid(pid) — return 1 (we're session leader)
-            ret_host(1); return 0;
+        case 156: { // getsid(pid): matches /proc/self/stat (process_ids)
+            const auto ids = emu.vfs().process_ids();
+            const int pid = static_cast<int>(a0);
+            if (pid == 0 || pid == ids.pid) { ret_host(static_cast<uint64_t>(ids.sid)); return 0; }
+            if (ids.pid == 1) { ret_host(1); return 0; }
+            const pid_t session = ::getsid(pid);  // a forked guest: a host process
+            if (session < 0) { ret_errno(); return 0; }
+            ret_host(static_cast<uint64_t>(session));
+            return 0;
         }
-        case 157: { // setsid() — become session leader; return 1
-            ret_host(1); return 0;
+        case 157: { // setsid()
+            // The PID-1 model already leads session 1. A host-identity
+            // process does not leave the session its supervisor manages;
+            // EPERM is the kernel's answer for a process-group leader.
+            if (emu.vfs().process_ids().pid == 1) { ret_host(1); return 0; }
+            ret_err(EPERM); return 0;
         }
         // ── setrlimit (164) ───────────────────────────────────────────
         // Accept but don't actually enforce. The guest can't escape the

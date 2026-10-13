@@ -1,5 +1,18 @@
 # Tests
 
+## Consistent process identity (2026-10-13)
+
+`test_proc_exe` checks, in the parent (PID-1 model) and a fork child (host
+identity), that `getpid() == gettid()` and that `getpid`, `getppid`,
+`getpgid(0)`, `getsid(0)` and the comm equal `/proc/self/stat`,
+`/proc/<pid>/stat` and `/proc/self/status` (`Pid`, `Tgid`, `PPid`). The same
+checks pass natively on the host kernel, also under `setsid`; QEMU user mode
+is not a reference here (it synthesizes stat with session 0 and passes the
+host comm through). The previous build fails them (`ppid=0`, comm
+`bifrost`, status `PPid=0`). JIT suite 325/325, interpreter 316/316,
+`make verify` and `test_android_bionic.sh` pass. Managed Binder-broker apps
+were not run for this change.
+
 ## Kernel-format /proc/self/maps (2026-10-13)
 
 `test_proc_exe` now also checks a private file mapping split by `mprotect`

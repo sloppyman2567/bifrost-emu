@@ -13,6 +13,11 @@
   default-fatal signals use Emulator::signal_exit, never `group_exit(128+n)`
   directly. Signal delivery uses
   the shared reporter/recovery path, not uncaught worker exceptions.
+- Process identity comes from `Yggdrasil::process_ids()`: the PID-1 model of
+  a plain run, or the host process's identity for fork children and
+  Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and
+  `/proc/self/{stat,status}` must agree with it; a leader's TID equals its
+  PID, including after execve.
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
 - Memory operations retain alias/file identity and userfaultfd registration;

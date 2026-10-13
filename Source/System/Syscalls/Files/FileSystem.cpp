@@ -92,8 +92,8 @@ int resolve_dirfd(FdTable& fds, uint64_t guest_dirfd) {
     return hfd;  // may be -1 for virtual nodes
 }
 // ── Helper: is /proc/self/exe or /proc/<pid>/exe (guest view) ────────
-// Qt resolves its own binary via /proc/<getpid()>/exe (the guest's
-// getpid() returns 1, so the path is /proc/1/exe). The host kernel's
+// Qt resolves its own binary via /proc/<getpid()>/exe (in the PID-1
+// model the path is /proc/1/exe). The host kernel's
 // /proc/1/exe belongs to a DIFFERENT process, so stat/lstat/readlink on
 // these paths must be served synthetically from elf_path_ instead of
 // leaking the host PID 1 (or failing with EACCES for unprivileged runs).

@@ -188,8 +188,8 @@ static std::string sandbox_root_str() {
     return root;
 }
 // True for /proc/<digits>... (any numeric PID dir, including bare
-// "/proc/1234"). The guest's getpid() returns 1, so /proc/1/* means the
-// guest itself — but procfs only serves /proc/self/*; anything else fell
+// "/proc/1234"). The guest's own PID (1 in the PID-1 model) canonicalizes to
+// /proc/self; procfs only serves /proc/self/*, and anything else fell
 // through to the HOST proc table (other PIDs' environ/maps/mem!).
 static bool is_numeric_proc_pid(const std::string& p) {
     if (p.compare(0, 6, "/proc/") != 0) return false;

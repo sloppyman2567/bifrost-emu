@@ -192,6 +192,11 @@ public:
     // fork child. /proc/<that pid> names the same process as /proc/self.
     void set_self_pid(int pid) { self_pid_ = pid; }
     int self_pid() const { return self_pid_; }
+    // The process identity getpid/getppid/getpgid/getsid and /proc report:
+    // the PID-1 model of a plain run, or the host process's own identity
+    // for fork children and Binder-broker apps (self_pid != 1).
+    struct ProcessIds { int pid, ppid, pgid, sid; };
+    ProcessIds process_ids() const;
     std::string canonical_proc_path(const std::string& path) const;
     // Wire up the graphics backend (for /dev/fb0). May be null if the
     // emulator was built without SDL2 and the guest never opens /dev/fb0.

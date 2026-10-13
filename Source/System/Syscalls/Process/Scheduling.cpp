@@ -106,10 +106,16 @@ int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 155: { // getpgid(pid) — AArch64 155
-            // BUGFIX: previously labeled "sched_yield" but sched_yield is
-            // at 124 (now correctly handled). The real syscall at 155 is
-            // getpgid. Return 1 (we're a single-process guest with PGID=1).
-            ret_host(1);
+            // The caller's group matches /proc/self/stat (process_ids).
+            // Other PIDs are forked guests, real host processes, except in
+            // the PID-1 model, which reports one group.
+            const auto ids = emu.vfs().process_ids();
+            const int pid = static_cast<int>(a0);
+            if (pid == 0 || pid == ids.pid) { ret_host(static_cast<uint64_t>(ids.pgid)); return 0; }
+            if (ids.pid == 1) { ret_host(1); return 0; }
+            const pid_t group = ::getpgid(pid);
+            if (group < 0) { ret_errno(); return 0; }
+            ret_host(static_cast<uint64_t>(group));
             return 0;
         }
         case 168: { // getcpu(cpu, node, tcache) — AArch64 168

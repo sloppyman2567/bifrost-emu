@@ -149,20 +149,34 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
     // Bionic finds the main stack via stat field 28, then /proc/self/maps.
     // Host passthrough supplied the emulator's host SP, outside guest maps.
     // Keep unmodeled accounting fields zero rather than exposing host state.
-    if (path == "/proc/self/stat" || path == "/proc/1/stat") {
-        std::string stat = "1 (bifrost) R";
-        for (unsigned field = 4; field <= 52; ++field) {
-            stat += ' ';
-            switch (field) {
-                case 5: case 6: case 20: stat += "1"; break;
-                case 8: stat += "-1"; break;
-                case 18: stat += "20"; break;
-                case 28: stat += std::to_string(initial_stack_); break;
-                default: stat += "0"; break;
+    // Identity fields match getpid/getppid/getpgid/getsid (process_ids);
+    // the comm is the task name, as /proc/self/comm reports it.
+    if (path == "/proc/self/stat") {
+        return serve_lazy([this]() -> std::string {
+            const ProcessIds ids = process_ids();
+            std::string comm = comm_provider_ ? comm_provider_() : elf_path_;
+            if (!comm_provider_) {
+                size_t slash = comm.find_last_of('/');
+                if (slash != std::string::npos) comm = comm.substr(slash + 1);
+                if (comm.size() > 15) comm = comm.substr(0, 15);
             }
-        }
-        stat += '\n';
-        return serve_static(stat, flags);
+            std::string stat = std::to_string(ids.pid) + " (" + comm + ") R";
+            for (unsigned field = 4; field <= 52; ++field) {
+                stat += ' ';
+                switch (field) {
+                    case 4: stat += std::to_string(ids.ppid); break;
+                    case 5: stat += std::to_string(ids.pgid); break;
+                    case 6: stat += std::to_string(ids.sid); break;
+                    case 20: stat += "1"; break;
+                    case 8: stat += "-1"; break;
+                    case 18: stat += "20"; break;
+                    case 28: stat += std::to_string(initial_stack_); break;
+                    default: stat += "0"; break;
+                }
+            }
+            stat += '\n';
+            return stat;
+        }, flags);
     }
     // ── /proc/self/maps → real memory layout (LAZY) ─────────────────
     // The maps provider may return different results each time (memory
@@ -249,20 +263,21 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             s += "Name:\t" + name + "\n";
             s += "Umask:\t0022\n";
             s += "State:\tR (running)\n";
-            s += "Tgid:\t1\n";
+            const ProcessIds ids = process_ids();
+            s += "Tgid:\t" + std::to_string(ids.pid) + "\n";
             s += "Ngid:\t0\n";
-            s += "Pid:\t1\n";
-            s += "PPid:\t0\n";
+            s += "Pid:\t" + std::to_string(ids.pid) + "\n";
+            s += "PPid:\t" + std::to_string(ids.ppid) + "\n";
             s += "TracerPid:\t0\n";
             for (const auto& identity : {std::make_pair("Uid", process_uid_), std::make_pair("Gid", process_gid_)}) {
                 s += std::string(identity.first) + ":";
                 for (int i = 0; i < 4; ++i) s += '\t' + std::to_string(identity.second);
                 s += '\n';
             }
-            s += "NStgid:\t1\n";
-            s += "NSpid:\t1\n";
-            s += "NSpgid:\t1\n";
-            s += "NSsid:\t1\n";
+            s += "NStgid:\t" + std::to_string(ids.pid) + "\n";
+            s += "NSpid:\t" + std::to_string(ids.pid) + "\n";
+            s += "NSpgid:\t" + std::to_string(ids.pgid) + "\n";
+            s += "NSsid:\t" + std::to_string(ids.sid) + "\n";
             s += "VmPeak:"; s += vm_sz;  s += "\n";
             s += "VmSize:"; s += vm_sz;  s += "\n";
             s += "VmLck:\t 0 kB\n";

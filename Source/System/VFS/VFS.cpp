@@ -37,6 +37,11 @@ std::string Yggdrasil::canonical_proc_path(const std::string& path) const {
     if (path.size() != own.size() && path[own.size()] != '/') return path;
     return "/proc/self" + path.substr(own.size());
 }
+Yggdrasil::ProcessIds Yggdrasil::process_ids() const {
+    if (self_pid_ == 1) return {1, 1, 1, 1};
+    return {self_pid_, static_cast<int>(::getppid()), static_cast<int>(::getpgid(0)),
+            static_cast<int>(::getsid(0))};
+}
 std::unique_ptr<Node> Yggdrasil::open(const std::string& requested_path,
                                       int flags, mode_t mode, int* err_out) {
     const std::string guest_path = canonical_proc_path(requested_path);
