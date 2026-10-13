@@ -100,6 +100,7 @@ public final class ManagedLauncher {
             new FrameworkActivities(orientations, displays);
     private static boolean play;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
+    private static final FrameworkAppOps appOps = new FrameworkAppOps(packages);
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
@@ -560,6 +561,19 @@ public final class ManagedLauncher {
                     == PackageManager.PERMISSION_GRANTED;
             if (context.getSystemService(android.app.NotificationManager.class).areNotificationsEnabled() != notify)
                 throw new AssertionError("notification enablement differs from POST_NOTIFICATIONS grant");
+            // Firebase measurement verifies its caller through AppOpsManager.checkPackage.
+            android.app.AppOpsManager appOps = context.getSystemService(android.app.AppOpsManager.class);
+            if (appOps == null) throw new AssertionError("AppOpsManager is unavailable");
+            appOps.checkPackage(Process.myUid(), installed.packageName);
+            for (String foreign : new String[] {"bifrost.missing.package", "root", "com.android.shell"}) {
+                try {
+                    appOps.checkPackage(Process.myUid(), foreign);
+                    throw new AssertionError("checkPackage accepted " + foreign + " for the app uid");
+                } catch (SecurityException expected) {
+                    // AppOpsService returns MODE_ERRORED for packages the uid does not own.
+                }
+            }
+            System.out.println("APP_APP_OPS_OK");
             File cache = context.getExternalCacheDir();
             if (cache == null || !cache.isDirectory())
                 throw new AssertionError("external app cache was not created");
@@ -576,6 +590,7 @@ public final class ManagedLauncher {
 
     private static void installServices(boolean serviceChild) throws Exception {
         jobs.install(services);
+        appOps.install(services);
         services.diagnostic = diagnostic;
         connectivity.install(services);
         inputMethod.install(services);
@@ -920,6 +935,14 @@ public final class ManagedLauncher {
                 return packages.checkPermission((String) a[0], (Integer) a[2], Context.DEVICE_ID_DEFAULT);
             if (method.equals("getContentProvider") && Arrays.asList(a).contains("settings"))
                 return holder;
+            // AOSP ContentProviderHelper returns no holder when no package
+            // declares the authority (e.g. Play services providers that
+            // Firebase probes); ActivityThread then logs "Failed to find
+            // provider info" and ContentResolver returns null.
+            if (method.equals("getContentProvider") && !packages.declaresProvider((String) a[2])) {
+                System.out.println("APP_PROVIDER_MISSING " + a[2]);
+                return null;
+            }
             // Log.wtf report; false means "do not kill this process".
             if (method.equals("handleApplicationWtf")) return false;
             if (method.equals("handleApplicationCrash")) {

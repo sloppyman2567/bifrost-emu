@@ -13,6 +13,16 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### App ops service (2026-10-12)
+
+- `getSystemService(APP_OPS_SERVICE)` returns an `AppOpsManager`. The new
+  strict `appops` service implements `checkPackage` per Android 15
+  AppOpsService, which Firebase measurement uses to verify its caller.
+- `IActivityManager.getContentProvider` returns no holder for authorities
+  no package declares (such as Play services' phenotype provider), as
+  AOSP does, instead of throwing. Firebase measurement now initializes
+  without errors.
+
 ### Window growth and SIGKILL exit (2026-10-12)
 
 - Growing the host window no longer leaves full-window software views

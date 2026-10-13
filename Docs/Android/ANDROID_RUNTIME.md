@@ -1132,6 +1132,34 @@ Unity surfaced the exception in the game's state-change event, which then
 skipped `MainHudHandler` re-enabling the main HUD after Settings closed: the
 scene kept drawing without its buttons. The user confirmed the HUD now stays.
 
+### App ops and missing content providers (2026-10-12)
+
+`SystemServiceRegistry` builds `AppOpsManager` from
+`ServiceManager.getServiceOrThrow("appops")`, so without that service
+`getSystemService(APP_OPS_SERVICE)` returned null. Firebase measurement then
+failed its upload task with a `NullPointerException`. `FrameworkAppOps`
+registers a strict `com.android.internal.app.IAppOpsService`. A SpongeBob
+run with a fully unimplemented stub showed only `checkPackage(uid, pkg)`
+(from GMS UidVerifier), so that is the one method. It follows Android 15's
+[AppOpsService](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/services/core/java/com/android/server/appop/AppOpsService.java)
+`checkPackage`/`verifyAndGetBypass`/`resolveUid`. Root may name any existing
+package. `root`, `shell`, `dumpstate`, `media`, `audioserver`, `cameraserver`
+and `com.android.shell` resolve to fixed uids. Any other package must exist
+and belong to the uid. Failures return `MODE_ERRORED`, which
+`AppOpsManager.checkPackage` throws as `SecurityException`. Other methods
+print `APPOPS_UNSUPPORTED <method>` and throw.
+
+Firebase next asked `IActivityManager.getContentProvider` for Play
+services' `com.google.android.gms.phenotype` and hit the unsupported path.
+As in AOSP's `ContentProviderHelper`, an authority no installed or system
+package declares now returns no holder (`APP_PROVIDER_MISSING <authority>`).
+`ContentResolver` then returns null. Declared authorities other than
+`settings` still throw. Firebase now logs `App measurement initialized` and
+only `Service invalid`, its warning for a device without Play services.
+ActivityProbe prints `APP_APP_OPS_OK` after checking the app's own package
+and rejecting a missing package, `root` and `com.android.shell` for the
+app uid. This was run in JIT play mode only.
+
 ### Activity stack (2026-10-12)
 
 Play mode starts further Activities of the installed package above the

@@ -102,6 +102,12 @@ Native : false` after each check, and the user confirmed the main HUD stays
 after closing Settings. The foreign-package `SecurityException` path is not
 exercised by a test.
 
+The same resumed check prints `APP_APP_OPS_OK`.
+`AppOpsManager.checkPackage` accepts the installed package for the app uid
+and throws `SecurityException` for a missing package, `root` and
+`com.android.shell`. It passes in JIT play mode (1,725 frames); interpreter
+mode was not run.
+
 ## Configurable Android back key (2026-10-12)
 
 `test-android-window-backend` checks key-name lookup (`escape`, `f12`, `a`,

@@ -46,6 +46,12 @@ final class FrameworkPackages {
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
+    // Uid of the installed or a system package, or -1 when it does not exist.
+    int packageUid(String name) {
+        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : systemPackages.get(name);
+        return pkg == null ? -1 : pkg.applicationInfo.uid;
+    }
+
     PackageInfo processPackage(String name) {
         PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : systemPackages.get(name);
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
@@ -463,6 +469,19 @@ final class FrameworkPackages {
             return result;
         }
         return null;
+    }
+
+    // Whether the installed or a system package declares `authority`.
+    boolean declaresProvider(String authority) {
+        java.util.List<PackageInfo> all = new ArrayList<>(systemPackages.values());
+        if (installed != null) all.add(installed);
+        for (PackageInfo pkg : all) {
+            if (pkg.providers == null) continue;
+            for (ProviderInfo provider : pkg.providers)
+                if (provider.authority != null
+                        && Arrays.asList(provider.authority.split(";")).contains(authority)) return true;
+        }
+        return false;
     }
 
     private ProviderInfo resolveProvider(String authority, long flags, int userId) {
