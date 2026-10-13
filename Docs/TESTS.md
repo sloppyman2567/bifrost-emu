@@ -1,5 +1,47 @@
 # Tests
 
+## Scalar FP scratch preservation (2026-10-13)
+
+`jit_fp_scalar` now checks full scalar writeback bits across fourteen live
+FP registers, including partial caching, high host XMM registers, aliases,
+NZCV, signed zero, subnormals, infinities and quiet/signaling NaN payloads.
+It also keeps integer results live across FADD, FSQRT and FMOV, including
+their NaN/invalid cold paths. QEMU, JIT and the reference interpreter pass;
+a temporary host driver disabling the JIT's SSE4.1 feature bit also passes.
+The emitter audit checked that the retained hot paths use only XMM scratch
+and that `emit_fp_interp_step` preserves RAX. These are local-source checks
+and executable results, not broader proof of FP exception/FPCR coverage.
+
+`make verify` passes 87 differential fixtures, seven threaded oracle runs
+and 21,836 SSA checks. The selected FP/SIMD/flags/memory tests pass 37/37.
+Tier-2 discovery/recovery checks pass in single/shared-thread mode with
+ordinary and chain-skip frames.
+The release executable/library and headless executable/library compile and
+link. The headless `all` target's final copy to the running `./bifrost-emu`
+was refused with `Text file busy`; the built headless artifacts are intact.
+
+A temporary generated loop alternates `add x9,x9,#1` and
+`fadd sN,sN,s31` for N=0..7, then decrements X0 and branches back. Six
+interleaved process runs (three per build), each with one excluded warmup
+and five measured trials of 16 million iterations, validate all eight
+accumulators at 8 million, X9 at 128 million and cleared upper lanes.
+Median time was 103.516 ms before and 93.049 ms after (10.1% less time).
+Total emitted function size, including cold code, was 3,627 versus 3,593
+bytes. The actual profiled IL2CPP block at file offset `0x58eb6f4`, replayed
+at a fixed guest address, shrank from 5,067 to 5,060 bytes.
+
+Separate three-run CoreMark medians were 12.729 s before and 13.045 s after;
+matrix medians were 79.4 ms and 77.7 ms. All result checks passed, but
+background game/build activity varied between these general benchmark
+windows, so they establish neither a general speedup nor a controlled
+regression. The mixed-loop result is also host-specific. An updated
+SpongeBob session was started; the user reported it was still loading.
+It later entered Kidoz's ad path, logged a thread-161 unmapped null read and
+122-146 skipped frames per report while remaining alive. The earlier
+pre-change profiling session had the same ad/null-read signature; its
+cause was not investigated in this codegen change. Cooking compatibility
+and FPS improvement remain unverified.
+
 ## Covered Activities stop (2026-10-13)
 
 `PackageTests.test_managed_activity_stack` now checks that the opaque second

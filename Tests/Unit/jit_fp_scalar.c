@@ -37,7 +37,80 @@ __attribute__((noinline)) float f_sqrt(float a) { return sqrtf(a); }
 __attribute__((noinline)) double d_fnmul(double a, double b) { return -(a * b); }
 __attribute__((noinline)) float f_fnmul(float a, float b) { return -(a * b); }
 
+/* Separate seed, scalar and observation blocks so the scalar block can
+ * cache FP registers. Fourteen live registers also exercise partial pinning
+ * and high host XMM registers. FMOV must preserve every low-lane bit (even
+ * sNaNs) while clearing the other three lanes and retaining NZCV. */
+__attribute__((noinline)) static int scalar_writeback(uint32_t bits) {
+    uint32_t lanes[14][4];
+    unsigned zero;
+#define SEED(n) "movi v" #n ".16b, #0xa5\n"
+#define COPY(n) "fmov s" #n ", s31\n"
+#define SAVE(n, off) "str q" #n ", [%[out], #" #off "]\n"
+    __asm__ volatile(
+        SEED(0) SEED(1) SEED(2) SEED(3) SEED(4) SEED(5) SEED(6)
+        SEED(7) SEED(8) SEED(9) SEED(10) SEED(11) SEED(12)
+        "dup v31.4s, %w[bits]\n"
+        "cmp %w[bits], #0\n"
+        "b 1f\n1:\n"
+        COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5) COPY(6)
+        COPY(7) COPY(8) COPY(9) COPY(10) COPY(11) COPY(12)
+        "fmov s0, s0\n"
+        "b 2f\n2:\n"
+        "cset %w[zero], eq\n"
+        SAVE(0, 0) SAVE(1, 16) SAVE(2, 32) SAVE(3, 48) SAVE(4, 64)
+        SAVE(5, 80) SAVE(6, 96) SAVE(7, 112) SAVE(8, 128) SAVE(9, 144)
+        SAVE(10, 160) SAVE(11, 176) SAVE(12, 192) SAVE(31, 208)
+        : [zero] "=&r"(zero)
+        : [bits] "r"(bits), [out] "r"(lanes)
+        : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7",
+          "v8", "v9", "v10", "v11", "v12", "v31", "cc", "memory");
+#undef SEED
+#undef COPY
+#undef SAVE
+    if (zero != (bits == 0)) return 0;
+    for (unsigned r = 0; r < 14; ++r)
+        for (unsigned lane = 0; lane < 4; ++lane) {
+            uint32_t want = r == 13 || lane == 0 ? bits : 0;
+            if (lanes[r][lane] != want) {
+                printf("scalar writeback r=%u lane=%u got=%08x want=%08x\n",
+                       r, lane, lanes[r][lane], want);
+                return 0;
+            }
+        }
+    return 1;
+}
+
+/* The ordinary FP hot path must retain live integer temporaries. NaN and
+ * negative-square-root cases take the cold interpreter path, whose saved
+ * GPR mappings must survive as well. */
+__attribute__((noinline)) static int scalar_live_gpr(uint64_t value, uint32_t bits) {
+    uint64_t got;
+    __asm__ volatile(
+        "fmov s1, %w[bits]\n"
+        "fmov s2, #1.0\n"
+        "add x9, %[value], #37\n"
+        "fadd s0, s1, s2\n"
+        "fsqrt s3, s1\n"
+        "fmov s4, s0\n"
+        "add %[got], x9, #1\n"
+        : [got] "=r"(got)
+        : [value] "r"(value), [bits] "r"(bits)
+        : "x9", "v0", "v1", "v2", "v3", "v4", "cc");
+    return got == value + 38;
+}
+
 int main(void) {
+    const uint32_t patterns[] = {0, 0x80000000u, 1, 0x007fffffu,
+        0x3fc00000u, 0x7f800000u, 0xff800000u, 0x7fc12345u,
+        0xffc12345u, 0x7f812345u, 0xff812345u, 0xffffffffu};
+    for (unsigned i = 0; i < sizeof(patterns) / sizeof(patterns[0]); ++i)
+        CHECK(scalar_writeback(patterns[i]), "scalar_writeback_bits_and_upper_lanes");
+    const uint64_t integers[] = {0, 1, 0x123456789abcdef0ull, ~0ull};
+    for (unsigned i = 0; i < sizeof(patterns) / sizeof(patterns[0]); ++i)
+        for (unsigned j = 0; j < sizeof(integers) / sizeof(integers[0]); ++j)
+            CHECK(scalar_live_gpr(integers[j], patterns[i]), "scalar_live_gpr_hot_and_cold");
+
     /* ── FADD / FSUB / FMUL / FDIV ────────────────────────────────── */
     CHECK(d_add(1.5, 2.25) == 3.75, "fadd");
     CHECK(d_sub(1.5, 2.25) == -0.75, "fsub");

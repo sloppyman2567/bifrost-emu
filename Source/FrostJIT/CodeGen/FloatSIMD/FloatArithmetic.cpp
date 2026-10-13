@@ -132,26 +132,20 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             return true;
         }
         // ── FP scalar arithmetic — native SSE2 codegen ──────────────
-        // These ops use XMM0/XMM1 as scratch, loading from and storing
-        // to v_lo[]/v_hi[] via CPU_REG (RBX). They don't interact with
-        // the GPR register allocator at all.
-        //
-        // replaced flush_all_vregs()+invalidate_all_vregs()
-        // (O(max_vreg_) per op) with flush_invalidate_host_regs({RAX})
-        // (O(1) per op). FP_BINOP only clobbers RAX (for the FNMUL sign
-        // mask and the v_hi[dest]=0 zero store). Callee-saved vregs in
-        // R12/R13/R15 are preserved.
+        // XMM0/XMM1 hold scalar scratch, with cache-aware operand loads
+        // and stores. Only mask-building operations need a GPR scratch;
+        // ordinary arithmetic retains the allocator's live GPR values.
         case IROp::FP_BINOP: {
             // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest] = 0
             const FpBinopParams bp = inst.fp_binop_params();
             bool is_double = (bp.ftype == 1);
             uint8_t ld_prefix = is_double ? 0xF2 : 0xF3;  // MOVSD/MOVSS
+            const uint8_t opc = bp.opcode;
             clobber_flags();
-            // FP_BINOP only clobbers RAX (zero store to
-            // v_hi[dest]; sign mask for FNMUL). XMM0/XMM1 are scratch and
-            // don't hold vregs. Use targeted flush for O(1) instead of
-            // O(max_vreg_) flush_all+invalidate_all.
-            flush_invalidate_host_regs(1u << RAX);
+            // Only sign/absolute masks borrow RAX. Ordinary arithmetic,
+            // result canonicalization and the NaN guard use XMM scratch;
+            // the cold interpreter step saves/restores live GPR mappings.
+            if (opc == 8 || opc == 0xD) flush_invalidate_host_regs(1u << RAX);
             // Load src1 into XMM0: movsd/movss xmm0, [rbx+off]
             // (fp_load_operand uses a reg-reg move when the fp cache pins
             // src1 — partial pinning; unpinned operands load from memory).
@@ -159,7 +153,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // Load src2 into XMM1: movsd/movss xmm1, [rbx+off]
             fp_load_operand(1, inst.src2, is_double);
             // Execute SSE2 op
-            uint8_t opc = bp.opcode;
             uint8_t sse_op;
             switch (opc) {
                 case 0: sse_op = 0x59; break;  // mul (mulsd)
@@ -239,12 +232,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             const FpUnopParams up = inst.fp_unop_params();
             bool is_double = (up.ftype == 1);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
+            const uint8_t opc = up.opcode;
             clobber_flags();
-            // FP_UNOP clobbers only RAX (sign mask for FABS/FNEG; zero store).
-            // RCX/RDX are not touched — don't flush them.
-            flush_invalidate_host_regs(1u << RAX);
+            // FABS/FNEG build their mask in RAX; FMOV/FSQRT do not use it.
+            if (opc == 1 || opc == 2) flush_invalidate_host_regs(1u << RAX);
             fp_load_operand(0, inst.src1, is_double);
-            uint8_t opc = up.opcode;
             if (opc == 0) {
                 // FMOV — no-op
             } else if (opc == 1) {
@@ -293,9 +285,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             bool is_double = (mp.ftype == 1);
             clobber_flags();
             // movsd/movss preserve flags; clobber_flags() is a conservative
-            // marker matching FP_UNOP/FP_BINOP. fp_zero_hi uses only XMM0;
-            // the single path keeps its historical RAX flush.
-            flush_invalidate_host_regs(is_double ? 0 : (1u << RAX));
+            // marker matching FP_UNOP/FP_BINOP. Neither the copy nor
+            // upper-lane canonicalization touches a GPR.
             // Load lo[src1] into XMM0 (reg-reg move when pinned), store lo
             // into dest (pinned → reg-reg + dirty, else memory).
             fp_load_operand(0, inst.src1, is_double);

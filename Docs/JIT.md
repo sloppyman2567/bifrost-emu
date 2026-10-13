@@ -11,6 +11,26 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Scalar FP scratch preservation (2026-10-13)
+
+Scalar ADD/SUB/MUL/DIV, min/max, SQRT and register MOV use XMM scratch
+without changing RAX. Their emitter previously evicted RAX's live GPR
+mapping anyway. It now retains that mapping, avoiding unnecessary spill and
+reload instructions in mixed integer/FP blocks. FNMUL/FABD and FABS/FNEG
+still evict RAX before constructing their sign/absolute-value masks.
+Guest flags still pass through `clobber_flags`; NaN/zero cold paths retain
+the existing interpreter step, which commits and saves/restores live GPRs.
+FP upper-lane canonicalization, memory checks and block boundaries are
+unchanged. This does not require a new host ISA feature.
+
+An interleaved mixed integer/scalar-FP loop measured 103.516 ms before and
+93.049 ms after (15 measured samples per build, first trial of each process
+excluded): 10.1% less loop time on this host. Its generated function shrank
+from 3,627 to 3,593 bytes, including cold paths. A replay of the profiled
+SpongeBob IL2CPP block shrank by seven bytes. These are scoped codegen and
+loop observations, not a gameplay FPS result; see the
+[validation and limits](TESTS.md#scalar-fp-scratch-preservation-2026-10-13).
+
 ## Planned codegen: retaining guest state across regions
 
 This is the proposed v2 compiler direction, with milestones and performance
