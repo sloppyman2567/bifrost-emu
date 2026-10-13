@@ -85,6 +85,10 @@ public final class ManagedLauncher {
     private static final Map<IBinder, Long> fullyDrawn = new ConcurrentHashMap<>();
     // The package installed by app mode; the only package that exists here.
     private static volatile PackageInfo installed;
+    private static final FrameworkAudio audio = new FrameworkAudio(packages);
+    private static final FrameworkNotifications notifications = new FrameworkNotifications(packages);
+    private static final FrameworkPower power = new FrameworkPower(packages, () -> windowOpen);
+    private static final FrameworkWifi wifi = new FrameworkWifi(packages, connectivity::online);
     private static final FrameworkInputMethod inputMethod = new FrameworkInputMethod((name, uid) ->
             installed != null && installed.packageName.equals(name) && installed.applicationInfo.uid == uid);
     private static String androidId;
@@ -455,6 +459,13 @@ public final class ManagedLauncher {
     }
 
     // Public AudioManager queries the app SDKs use; the probe starts no stream.
+    static boolean hostAudioActive() {
+        loadActivityLibrary();
+        int active = activeAudioOutputs();
+        if (active < 0) throw new IllegalStateException("host audio state unavailable: " + active);
+        return active > 0;
+    }
+
     private static void checkAudioService(Context context) throws Exception {
         AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         if (audio == null || audio.getMode() != AudioManager.MODE_NORMAL || audio.isVolumeFixed()
@@ -596,6 +607,7 @@ public final class ManagedLauncher {
         appOps.install(services);
         services.diagnostic = diagnostic;
         connectivity.install(services);
+        wifi.install(services);
         inputMethod.install(services);
         // The runner exposes both credential and device protected storage
         // for user 0, so this single user is running and unlocked.
@@ -671,12 +683,6 @@ public final class ManagedLauncher {
             }
         });
         packages.register(services);
-        // A fresh device's volumes: AudioSystem.DEFAULT_STREAM_VOLUME (client
-        // side, read from this image) and AudioService.MAX/MIN_STREAM_VOLUME.
-        int[] volumes = (int[]) Class.forName("android.media.AudioSystem")
-                .getField("DEFAULT_STREAM_VOLUME").get(null);
-        int[] maxVolumes = {5, 7, 7, 15, 7, 7, 15, 7, 15, 15, 15, 15};
-        int[] minVolumes = {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0}; // AudioService.MIN_STREAM_VOLUME
         // Service children share the session's Binder registry. These are
         // device services (system_server/surfaceflinger on Android): a child
         // must not replace the session's entries, or their clients see a
@@ -697,43 +703,12 @@ public final class ManagedLauncher {
             Class.forName("android.os.ServiceManager").getMethod(
                     "addService", String.class, IBinder.class)
                     .invoke(null, "SurfaceFlinger", transactionComposer);
-        }
-        if (play) {
             Method add = Class.forName("android.os.ServiceManager").getMethod(
                     "addService", String.class, IBinder.class);
             add.invoke(null, "media.audio_policy", audioPolicy);
             add.invoke(null, "media.audio_flinger", audioFlinger);
         }
-        services.register("audio", "android.media.IAudioService", (method, a) -> {
-            switch (method) {
-                case "getStreamVolume": return volumes[(Integer) a[0]];
-                case "getStreamMaxVolume": return maxVolumes[(Integer) a[0]];
-                // AudioService: telephony/communication changes the mode; this
-                // device has neither, and config_useFixedVolume defaults to false.
-                case "getMode": return AudioManager.MODE_NORMAL;
-                case "isVolumeFixed": return false;
-                // No call route, ringer policy or per-stream mute exists here.
-                case "isSpeakerphoneOn": return false;
-                case "getRingerModeExternal": return AudioManager.RINGER_MODE_NORMAL;
-                case "isStreamMute": return false;
-                // View click/navigation feedback: AudioService plays these in
-                // system_server; there is no system sound pool here.
-                case "areNavigationRepeatSoundEffectsEnabled": return false;
-                case "playSoundEffect":
-                case "playSoundEffectVolume": return null;
-                case "getStreamMinVolume": return minVolumes[(Integer) a[0]];
-                case "isMusicActive": {
-                    // AudioSystem.isStreamActive(STREAM_MUSIC): a started output.
-                    // Every host stream plays as media; there is no remote submix.
-                    if ((Boolean) a[0]) return false;
-                    loadActivityLibrary(); // SDKs may ask before the window opens.
-                    int active = activeAudioOutputs();
-                    if (active < 0) throw new IllegalStateException("host audio state unavailable: " + active);
-                    return active > 0;
-                }
-                default: throw unsupported("audio", method);
-            }
-        });
+        audio.install(services);
         services.register("content", "android.content.IContentService", content::call);
         services.register("window", "android.view.IWindowManager", (method, a) -> {
             switch (method) {
@@ -750,34 +725,8 @@ public final class ManagedLauncher {
                 default: throw unsupported("window", method);
             }
         });
-        // The virtual device stays awake while its host window is open. It
-        // has no battery saver, idle controller, or low-power standby policy.
-        services.register("power", "android.os.IPowerManager", (method, a) -> {
-            switch (method) {
-                case "isInteractive": return windowOpen;
-                case "isDisplayInteractive": return (Integer) a[0] == 0 && windowOpen;
-                case "isPowerSaveMode":
-                case "areAutoPowerSaveModesEnabled":
-                case "isDeviceIdleMode":
-                case "isLightDeviceIdleMode":
-                case "isLowPowerStandbySupported":
-                case "isLowPowerStandbyEnabled": return false;
-                default: throw unsupported("power", method);
-            }
-        });
-        // NotificationManagerService: same-package callers only; enablement is
-        // the POST_NOTIFICATIONS grant, which this profile never makes at runtime.
-        services.register("notification", "android.app.INotificationManager", (method, a) -> {
-            switch (method) {
-                case "areNotificationsEnabled":
-                    if (installed == null || !installed.packageName.equals(a[0]))
-                        throw new SecurityException("Caller not system or systemui or same package");
-                    return packages.checkPermission("android.permission.POST_NOTIFICATIONS",
-                            installed.applicationInfo.uid, Context.DEVICE_ID_DEFAULT)
-                            == PackageManager.PERMISSION_GRANTED;
-                default: throw unsupported("notification", method);
-            }
-        });
+        power.install(services);
+        notifications.install(services);
         Map<IBinder, Object> thermalEvents = new ConcurrentHashMap<>();
         Map<IBinder, Object> thermalStatuses = new ConcurrentHashMap<>();
         // No virtual thermal HAL: no temperature/cooling samples and no
@@ -1447,6 +1396,8 @@ public final class ManagedLauncher {
     }
 
     private static void run(String[] args) throws Exception {
+        boolean inventory = args.length == 1 && args[0].equals("--service-inventory");
+        if (inventory) args = new String[0];
         boolean nativeChoreographer = diagnostic && args.length == 1
                 && args[0].equals("--native-choreographer");
         if (nativeChoreographer) args = new String[0];
@@ -1464,7 +1415,13 @@ public final class ManagedLauncher {
         Looper.prepareMainLooper();
         boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
         if (diagnostic) checkServiceRegistration();
-        installServices(serviceChild);
+        installServices(serviceChild || inventory);
+        if (inventory) {
+            System.out.println(services.inventory());
+            System.out.println("FRAMEWORK_OK");
+            System.exit(0);
+            return;
+        }
         if (nativeChoreographer) {
             loadActivityLibrary();
             ActivityProbe.NativeLooperProbe.checkNativeFrames();
@@ -1765,6 +1722,10 @@ public final class ManagedLauncher {
     }
 
     public static void main(String[] args) {
+        if (args.length == 1 && args[0].equals("--service-inventory")) {
+            execute(args);
+            return;
+        }
         if (args.length == 3 && args[0].equals("--service-child")) {
             execute(args);
             return;

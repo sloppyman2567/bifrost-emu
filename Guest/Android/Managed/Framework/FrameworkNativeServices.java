@@ -29,6 +29,8 @@ final class FrameworkNativeServices {
     // This profile has no Android HAL ports/patches; host audio is a separate backend.
     static final class AudioPolicy extends Binder {
         static final String DESCRIPTOR = "android.media.IAudioPolicyService";
+        // Transaction ids from Android 15 IAudioPolicyService.aidl.
+        private static final int GET_OUTPUT = 8, PRODUCT_STRATEGIES = 80, VOLUME_GROUPS = 82;
         private final List<IBinder> clients = new ArrayList<>();
         private boolean portCallbacks, volumeCallbacks;
         private void readCount(Parcel data) {
@@ -41,11 +43,19 @@ final class FrameworkNativeServices {
         @Override protected synchronized boolean onTransact(int code, Parcel data,
                 Parcel reply, int flags) throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != 44 && code != 49 && code != 51 && code != 52 && code != 53)
+            if (code != GET_OUTPUT && code != PRODUCT_STRATEGIES && code != VOLUME_GROUPS
+                    && code != 44 && code != 49 && code != 51 && code != 52 && code != 53)
                 return super.onTransact(code, data, reply, flags);
             data.enforceInterface(DESCRIPTOR);
-            System.out.println("AUDIO_POLICY_TRANSACTION " + code);
-            if (code == 51) {
+            if (code == GET_OUTPUT) {
+                int stream = data.readInt();
+                data.enforceNoDataAvail(); reply.writeNoException();
+                reply.writeInt(stream >= 0 && stream < 12 ? 1 : 0);
+                return true;
+            } else if (code == PRODUCT_STRATEGIES || code == VOLUME_GROUPS) {
+                data.enforceNoDataAvail(); reply.writeNoException(); reply.writeInt(0);
+                return true;
+            } else if (code == 51) {
                 IBinder client = data.readStrongBinder();
                 if (client == null) throw new IllegalArgumentException("null audio client");
                 if (!clients.contains(client)) clients.add(client);
@@ -81,26 +91,32 @@ final class FrameworkNativeServices {
     // Playback uses the managed AAudio adapter and Bifrost's host Audio engine.
     static final class AudioFlinger extends Binder {
         static final String DESCRIPTOR = "android.media.IAudioFlingerService";
+        private static final int SAMPLE_RATE = 3, FRAME_COUNT = 5, LATENCY = 6;
         private IBinder client;
         @Override protected synchronized boolean onTransact(int code, Parcel data,
                 Parcel reply, int flags) throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != 23 && code != 45 && code != 46)
+            if (code != SAMPLE_RATE && code != FRAME_COUNT && code != LATENCY
+                    && code != 23 && code != 45 && code != 46)
                 return super.onTransact(code, data, reply, flags);
             data.enforceInterface(DESCRIPTOR);
-            System.out.println("AUDIO_FLINGER_TRANSACTION " + code);
+            int output = 1;
             if (code == 23) {
                 IBinder incoming = data.readStrongBinder();
                 if (incoming == null) throw new IllegalArgumentException("null audio client");
                 if (client == null) client = incoming; // AudioFlinger keeps the first per process.
-            }
+            } else if (code == SAMPLE_RATE || code == FRAME_COUNT || code == LATENCY) output = data.readInt();
             data.enforceNoDataAvail();
             long[] config = new long[3];
             if (code != 23 && ManagedLauncher.audioConfig(config) != 0)
                 throw new IllegalStateException("host audio configuration unavailable");
             reply.writeNoException();
-            if (code == 45) reply.writeInt((int) config[0]);
-            if (code == 46) reply.writeLong(config[1]);
+            if (code == 45 || code == SAMPLE_RATE) reply.writeInt(output == 1 ? (int) config[0] : 0);
+            if (code == 46 || code == FRAME_COUNT) reply.writeLong(output == 1 ? config[1] : 0);
+            // Estimated duration of one host output quantum. This is not a
+            // claim to have hardware presentation timestamps.
+            if (code == LATENCY) reply.writeInt(output == 1 && config[0] > 0
+                    ? (int) ((config[1] * 1000 + config[0] - 1) / config[0]) : 0);
             return true;
         }
     }

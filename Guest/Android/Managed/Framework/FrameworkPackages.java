@@ -28,6 +28,7 @@ final class FrameworkPackages {
     private volatile PackageInfo installed;
     private final Map<String, PackageInfo> systemPackages = new ConcurrentHashMap<>();
     private final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> serviceFeatures = ConcurrentHashMap.newKeySet();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> providerFilters = new ConcurrentHashMap<>();
 
     void install(Context system, PackageInfo pkg) {
@@ -60,18 +61,24 @@ final class FrameworkPackages {
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
+    void provideFeature(String name) { serviceFeatures.add(name); }
+
     void register(FrameworkServices services) throws Exception {
         services.register("package", "android.content.pm.IPackageManager", (method, a) -> {
             switch (method) {
                 case "hasSystemFeature":
                     return hasSystemFeature((String) a[0], (Integer) a[1]);
                 case "getSystemAvailableFeatures": {
-                    FeatureInfo feature = null;
-                    if (systemPackages.containsKey("com.android.webview")) {
-                        feature = new FeatureInfo();
-                        feature.name = PackageManager.FEATURE_WEBVIEW;
+                    List<String> names = new ArrayList<>(serviceFeatures);
+                    if (systemPackages.containsKey("com.android.webview")) names.add(PackageManager.FEATURE_WEBVIEW);
+                    java.util.Collections.sort(names);
+                    List<FeatureInfo> features = new ArrayList<>();
+                    for (String name : names) {
+                        FeatureInfo feature = new FeatureInfo(); feature.name = name;
+                        features.add(feature);
                     }
-                    return listSlice(feature);
+                    return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
+                            .newInstance(features);
                 }
                 case "isInstantApp": return false;  // This profile installs full APKs only.
                 // Activity.requestPermissions targets this package; FrameworkActivities
@@ -404,8 +411,8 @@ final class FrameworkPackages {
     }
 
     private boolean hasSystemFeature(String name, int version) {
-        return PackageManager.FEATURE_WEBVIEW.equals(name) && version <= 0
-                && systemPackages.containsKey("com.android.webview");
+        return version <= 0 && (serviceFeatures.contains(name)
+                || PackageManager.FEATURE_WEBVIEW.equals(name) && systemPackages.containsKey("com.android.webview"));
     }
 
     private List<android.content.pm.ResolveInfo> queryProviders(Intent original, String type,

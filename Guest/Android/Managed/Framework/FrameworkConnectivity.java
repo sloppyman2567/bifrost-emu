@@ -34,6 +34,8 @@ final class FrameworkConnectivity {
     private NetworkCapabilities hostCapabilities;
     private Handler networkHandler;
 
+    boolean online() { return hostNetwork; }
+
     private void prepareNetwork() throws Exception {
         System.out.println("APP_NETWORK " + (!hostNetwork ? "offline"
                 : "host-default-route " + hostInterface + (validated ? " validated" : " unvalidated")));

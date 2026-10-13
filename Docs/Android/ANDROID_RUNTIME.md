@@ -118,6 +118,93 @@ See the APK guide for provisioning and namespace boundaries.
 
 ## Android 15 framework probe
 
+### App audio, notification, Wi-Fi and power services (2026-10-13)
+
+`ManagedLauncher` installs four explicit method contracts from
+`FrameworkAudio`, `FrameworkNotifications`, `FrameworkWifi` and
+`FrameworkPower`. Unknown operations still throw. Their enums drive both
+dispatch and `ManagedLauncher --service-inventory`: JSON lists each registered
+Java service's actual image interface signatures as `implemented`,
+`unsupported` or `unclassified`. Existing lambda services are unclassified;
+native Binder endpoints are outside this inventory. Registration rejects a
+declared method absent from the provisioned interface.
+
+Audio focus follows the Android 15
+[MediaFocusControl](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/audio/MediaFocusControl.java)
+and FocusRequester stack rules: permanent/transient/duck losses, restoration,
+duplicate requests, abandonment and client death. Callbacks are ordered and
+delivered outside the state lock. This is cooperative focus within a guest VM;
+it does not impose host mixer ducking, system-wide focus across independent VMs,
+locked audio policies or telephony behavior. `isMusicActive` queries real host
+output streams. Native `media.audio_policy` and `media.audio_flinger` publish
+before app initialization, only from the session owner. Android 15 policy
+transactions 8/80/82 and flinger 3/5/6 add stream-output, empty strategy/group
+lists, sample-rate, frame-count and estimated output-quantum latency queries.
+`AudioTrack.getMinBufferSize` now traverses those real native clients. This
+does not implement AudioFlinger track creation or AudioTrack PCM playback;
+existing AAudio playback continues through the host audio adapter.
+
+Notification channels/groups support creation, copied queries, app-allowed
+updates, deletion and resurrection with preserved settings, following
+[PreferencesHelper](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/notification/PreferencesHelper.java).
+Metadata, including delegate selection/revocation, is stored below each app's
+data directory in `.asgard-notifications/channels`. Atomic replacement and a
+file lock serialize writers across processes; a JVM lock handles overlapping
+local instances. The format contains Android 15 Parcel data and is tied to
+that provisioned framework version. Limits are 5,000 channels, 6,000 groups
+and 8 MiB. Package/user checks apply, channel creation requires no
+`POST_NOTIFICATIONS` grant, and an uninstalled delegate is ignored, as in
+NotificationManagerService. Runtime notification permission is not invented.
+Desktop delivery, legacy automatic default-channel creation and notification
+administration remain unsupported.
+
+Wi-Fi uses the same host-route snapshot as connectivity. Registering the
+service also advertises `FEATURE_WIFI`, required by WifiFrameworkInitializer
+to construct the public manager. Connection details remain redacted, scans
+and DHCP data are empty, and radio-changing operations return false. The scan
+list uses the actual image interface's Parcelable return type, including
+Mainline package relocation. Scan callbacks have bounded registration and
+death cleanup; without a scan backend they produce no events. Access/change
+permissions and package checks apply. `getVerboseLoggingLevel`, queried during
+manager construction, is permission-free as specified by Android's WifiManager.
+
+Power supports permission-checked, token-owned wake locks, reference counting
+through the public PowerManager client, state callbacks, attribution checks
+and death cleanup. It retains the virtual device's interactive/power-save
+profile; wake locks do not change host suspend policy.
+
+Build and run the focused real-framework clients (`java` and `javac` from an
+installed JDK must be on `PATH`):
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, 'Scripts/Android')
+from android_managed import build_launcher
+build_launcher(Path('/tmp/bifrost-service-probe'), (Path('Tests/Host/ManagedServiceBatch.java'),))
+PY
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch \
+  --output /tmp/bifrost-service-jit
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch \
+  --mode interp --timeout 90 --output /tmp/bifrost-service-interp
+python3 Scripts/Android/test_android_framework.py --services \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedLauncher \
+  --probe-arg=--service-inventory --output /tmp/bifrost-service-inventory
+```
+
+The default transport is the shared broker. `--binder-mode local` isolates the
+same native Binder contracts in one process; it does not validate cross-process
+transport. The focused probe uses real NotificationManager, AudioManager,
+AudioFocusRequest, AudioTrack queries, PowerManager and WifiManager. Token
+death in this probe is simulated; transport death is tested separately by the
+Binder suite. A bounded SpongeBob run also calls Unity's
+`registerNotificationChannel` successfully through the production service.
+Neither these tests nor presented frames establish video-ad playback: the
+`libmedia_jni.so`, decoder and video-surface path remains unfinished.
+
 ### Android app credentials (2026-10-09)
 
 `--android-runtime` uses UID/GID 10000 (Android's first application ID, user 0),
@@ -1371,9 +1458,10 @@ and `FRAMEWORK_OK`, but the runner rejects its existing null worker reads
 
 #### Managed audio checkpoint (2026-10-07)
 
-With `--play`, ActivityProbe registers `media.audio_policy` and
+The session's managed launcher registers `media.audio_policy` and
 `media.audio_flinger` stand-ins. They answer only the Android 15 transactions
-native AudioSystem makes here (policy 44/49/51/52/53, flinger 23/45/46; codes
+native AudioSystem makes here (policy 8/44/49/51/52/53/80/82,
+flinger 3/5/6/23/45/46; codes
 checked against `IAudioPolicyService.aidl`/`IAudioFlingerService.aidl` at
 `android-15.0.0_r1`): no HAL ports or patches, and the primary output's rate
 and frames per buffer come from Bifrost's host Audio engine
