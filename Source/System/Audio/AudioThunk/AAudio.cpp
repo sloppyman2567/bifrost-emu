@@ -1,6 +1,26 @@
 // Android AAudio streams and the guest callback-thread protocol.
 #include "System/Audio/AudioThunk/AudioThunkInternal.hpp"
 namespace arm64emu {
+namespace {
+// AOSP libaaudio (android-15.0.0_r1): AAudioUtilities.h channel index bit,
+// FCC_LIMIT from system/audio.h, and AAudioStreamParameters::validateChannelMask.
+constexpr uint32_t AA_CHANNEL_BIT_INDEX = 0x80000000u;
+constexpr int32_t AA_FCC_LIMIT = 12;
+bool aa_output_mask_valid(int32_t mask) {
+    const uint32_t m = static_cast<uint32_t>(mask);
+    if (m & AA_CHANNEL_BIT_INDEX) {
+        const uint32_t bits = m & ~AA_CHANNEL_BIT_INDEX;
+        return bits && bits < (1u << 24) && (bits & (bits + 1)) == 0;  // INDEX_MASK_1..24
+    }
+    static const uint32_t layouts[] = {
+        0x1, 0x3, 0xb, 0x7, 0x103, 0xf, 0xc0003, 0xc000b, 0xc0007, 0xc000f, 0x33, 0x603,
+        0x107, 0x37, 0x3f, 0x60f, 0xc003f, 0x2d03f, 0x13f, 0x63f, 0xc063f, 0x2d63f,
+        0x302d63f, 0x30ed63f};  // MONO ... 9POINT1POINT6 (AAudio.h)
+    for (uint32_t layout : layouts)
+        if (m == layout) return true;
+    return false;
+}
+}  // namespace
 #define R(i) (cpu.regs[i])
 std::optional<int64_t> AudioDispatch::aaudio() {
     // ══ AAudio (Android) ════════════════════════════════════════════
@@ -25,11 +45,83 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         if (it != I.aa_builders_.end()) it->second.fmt = (int32_t)R(1);
         tr(0); return 0;
     }
-    if (name == "AAudioStreamBuilder_setChannelCount") {
+    if (name == "AAudioStreamBuilder_setChannelCount" ||
+        name == "AAudioStreamBuilder_setSamplesPerFrame") {
+        // AOSP AAudioConvert_channelCountToMask: a count is an index mask.
         std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
-        if (it != I.aa_builders_.end()) it->second.ch = (int32_t)R(1);
+        const int32_t count = (int32_t)R(1);
+        if (it != I.aa_builders_.end())
+            it->second.channel_mask = count < 0 || count > 30 ? -1  // AAUDIO_CHANNEL_INVALID
+                : count == 0 ? 0 : (int32_t)(AA_CHANNEL_BIT_INDEX | ((1u << count) - 1));
         tr(0); return 0;
+    }
+    if (name == "AAudioStreamBuilder_setChannelMask" ||
+        name == "AAudioStreamBuilder_setContentType" ||
+        name == "AAudioStreamBuilder_setSpatializationBehavior" ||
+        name == "AAudioStreamBuilder_setIsContentSpatialized" ||
+        name == "AAudioStreamBuilder_setAllowedCapturePolicy" ||
+        name == "AAudioStreamBuilder_setPrivacySensitive") {
+        // Like AOSP, values are stored here and validated by openStream.
+        std::lock_guard<std::recursive_mutex> g(I.mu);
+        auto it = I.aa_builders_.find(R(0));
+        if (it != I.aa_builders_.end()) {
+            auto& b = it->second;
+            const int32_t value = (int32_t)R(1);
+            if (name == "AAudioStreamBuilder_setChannelMask") b.channel_mask = value;
+            else if (name == "AAudioStreamBuilder_setContentType") b.content_type = value;
+            else if (name == "AAudioStreamBuilder_setSpatializationBehavior") b.spatialization = value;
+            else if (name == "AAudioStreamBuilder_setIsContentSpatialized") b.spatialized = (R(1) & 0xff) != 0;
+            else if (name == "AAudioStreamBuilder_setAllowedCapturePolicy") b.capture_policy = value;
+            else b.privacy = (R(1) & 0xff) ? 2 : 1;
+        }
+        tr(0); return 0;
+    }
+    if (name == "AAudioStreamBuilder_setPackageName" ||
+        name == "AAudioStreamBuilder_setAttributionTag") {
+        // Identify the app to the audio service's app-ops checks; no public
+        // getter exposes them and the host has no such service.
+        tr(0); return 0;
+    }
+    if (name == "AAudio_convertResultToText" || name == "AAudio_convertStreamStateToText") {
+        // AOSP AudioGlobal_convert*ToText: the enum name, else "Unrecognized".
+        static const std::map<int32_t, const char*> results = {
+            {0, "AAUDIO_OK"}, {-899, "AAUDIO_ERROR_DISCONNECTED"},
+            {-898, "AAUDIO_ERROR_ILLEGAL_ARGUMENT"}, {-896, "AAUDIO_ERROR_INTERNAL"},
+            {-895, "AAUDIO_ERROR_INVALID_STATE"}, {-892, "AAUDIO_ERROR_INVALID_HANDLE"},
+            {-890, "AAUDIO_ERROR_UNIMPLEMENTED"}, {-889, "AAUDIO_ERROR_UNAVAILABLE"},
+            {-888, "AAUDIO_ERROR_NO_FREE_HANDLES"}, {-887, "AAUDIO_ERROR_NO_MEMORY"},
+            {-886, "AAUDIO_ERROR_NULL"}, {-885, "AAUDIO_ERROR_TIMEOUT"},
+            {-884, "AAUDIO_ERROR_WOULD_BLOCK"}, {-883, "AAUDIO_ERROR_INVALID_FORMAT"},
+            {-882, "AAUDIO_ERROR_OUT_OF_RANGE"}, {-881, "AAUDIO_ERROR_NO_SERVICE"},
+            {-880, "AAUDIO_ERROR_INVALID_RATE"}};
+        static const std::map<int32_t, const char*> states = {
+            {0, "AAUDIO_STREAM_STATE_UNINITIALIZED"}, {1, "AAUDIO_STREAM_STATE_UNKNOWN"},
+            {2, "AAUDIO_STREAM_STATE_OPEN"}, {3, "AAUDIO_STREAM_STATE_STARTING"},
+            {4, "AAUDIO_STREAM_STATE_STARTED"}, {5, "AAUDIO_STREAM_STATE_PAUSING"},
+            {6, "AAUDIO_STREAM_STATE_PAUSED"}, {7, "AAUDIO_STREAM_STATE_FLUSHING"},
+            {8, "AAUDIO_STREAM_STATE_FLUSHED"}, {9, "AAUDIO_STREAM_STATE_STOPPING"},
+            {10, "AAUDIO_STREAM_STATE_STOPPED"}, {11, "AAUDIO_STREAM_STATE_CLOSING"},
+            {12, "AAUDIO_STREAM_STATE_CLOSED"}, {13, "AAUDIO_STREAM_STATE_DISCONNECTED"}};
+        const auto& table = name == "AAudio_convertResultToText" ? results : states;
+        auto found = table.find((int32_t)R(0));
+        const std::string text = found != table.end() ? found->second : "Unrecognized";
+        std::lock_guard<std::recursive_mutex> g(I.mu);
+        auto cached = I.aa_texts_.find(text);
+        uint64_t addr = cached != I.aa_texts_.end() ? cached->second : 0;
+        if (!addr) {
+            // Every string together fits in one page; they stay for the process.
+            if (!I.aa_text_block_ || I.aa_text_used_ + text.size() + 1 > 4096) {
+                I.aa_text_block_ = I.mem->mmap_alloc(4096);
+                I.aa_text_used_ = 0;
+            }
+            if (!I.aa_text_block_) { tr(0); return 0; }
+            addr = I.aa_text_block_ + I.aa_text_used_;
+            I.mem->write(addr, text.c_str(), text.size() + 1);
+            I.aa_text_used_ += text.size() + 1;
+            I.aa_texts_[text] = addr;
+        }
+        tr((int64_t)addr); return (int64_t)addr;
     }
     if (name == "AAudioStreamBuilder_setSampleRate") {
         std::lock_guard<std::recursive_mutex> g(I.mu);
@@ -102,9 +194,19 @@ std::optional<int64_t> AudioDispatch::aaudio() {
             b.input_preset == 6 || b.input_preset == 7 ||
             b.input_preset == 9 || b.input_preset == 10 ||
             b.input_preset == 1997 || b.input_preset == 1999;
+        // A channel count comes from the mask (AAudioConvert_channelMaskToCount).
+        const int32_t channels = __builtin_popcount(
+            static_cast<uint32_t>(b.channel_mask) & ~AA_CHANNEL_BIT_INDEX);
+        if (channels > AA_FCC_LIMIT) { tr(-882); return -882; } // OUT_OF_RANGE
         if (!valid_usage || !valid_preset) { tr(-898); return -898; }
+        if (b.content_type < 0 || b.content_type > 4 || b.spatialization < 0 ||
+            b.spatialization > 2 || b.capture_policy < 0 || b.capture_policy > 3 ||
+            (b.channel_mask && !aa_output_mask_valid(b.channel_mask))) {
+            tr(-898); return -898;
+        }
         if (b.direction == 1) { tr(-890); return -890; } // Input not implemented.
-        if (b.direction != 0 || b.ch < 0 || b.ch > 8 || b.rate < 0 ||
+        if (channels > 8) { tr(-889); return -889; } // The host engine mixes up to 8.
+        if (b.direction != 0 || b.rate < 0 ||
             b.rate > 384000 || b.frames_per_cb < 0 || b.frames_per_cb > 65536 ||
             b.capacity < 0 || b.sharing < 0 || b.sharing > 1 || b.session < -1 ||
             b.performance < 10 || b.performance > 12) { tr(-898); return -898; }
@@ -116,13 +218,25 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         auto& s = I.aa_streams_[h];
         s.fmt = (b.fmt == 2) ? PCM_FMT_F32 : PCM_FMT_S16;   // AAUDIO_FORMAT_FLOAT=2, I16=1
         s.size = (s.fmt == PCM_FMT_F32) ? 4 : 2;
-        s.ch   = b.ch > 0 ? (uint8_t)b.ch : 2;
+        s.ch   = channels > 0 ? (uint8_t)channels : 2;
         s.rate = b.rate > 0 ? (uint32_t)b.rate : 48000;
         s.frames_per_cb = b.frames_per_cb > 0
             ? (uint32_t)b.frames_per_cb : 1024;
         s.aa_session = b.session == 0 ? static_cast<int32_t>(I.next_aa_stream_) : b.session;
         s.aa_usage = b.usage;
         s.aa_input_preset = b.input_preset;
+        // AudioStream::open defaults; AudioStreamTrack reports an unspecified
+        // mask as the stereo layout it opened, and hides index masks.
+        s.aa_channel_mask = b.channel_mask == 0 ? 0x3
+            : (static_cast<uint32_t>(b.channel_mask) & AA_CHANNEL_BIT_INDEX) ? 0
+            : b.channel_mask;
+        s.aa_content_type = b.content_type ? b.content_type : 2;        // MUSIC
+        s.aa_spatialization = b.spatialization ? b.spatialization : 1;  // AUTO
+        s.aa_spatialized = b.spatialized;
+        s.aa_capture_policy = b.capture_policy ? b.capture_policy : 1;  // BY_ALL
+        // AudioStreamBuilder::build: camcorder/communication capture defaults on.
+        s.aa_privacy_sensitive = b.privacy == 2 || (b.privacy == 0 && b.direction == 1 &&
+                                 (b.input_preset == 5 || b.input_preset == 7));
         s.cb_fn = b.cb_fn; s.cb_ud = b.cb_ud;
         s.stream_arg = (int64_t)h;
         s.aaudio = true;
@@ -161,6 +275,9 @@ std::optional<int64_t> AudioDispatch::aaudio() {
     if (name == "AAudioStream_requestStart") {
         std::lock_guard<std::mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
+        if (it != I.aa_streams_.end() && it->second.aa_state == 11) {
+            tr(-895); return -895;  // released: CLOSING
+        }
         if (it != I.aa_streams_.end()) {
             it->second.paused = false;
             it->second.aa_state = 4;
@@ -174,6 +291,9 @@ std::optional<int64_t> AudioDispatch::aaudio() {
     if (name == "AAudioStream_requestPause" || name == "AAudioStream_requestStop") {
         std::lock_guard<std::mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
+        if (it != I.aa_streams_.end() && it->second.aa_state == 11) {
+            tr(-895); return -895;  // released: CLOSING
+        }
         if (it != I.aa_streams_.end()) {
             it->second.paused = true;
             it->second.aa_state = name == "AAudioStream_requestPause" ? 6 : 10;
@@ -183,6 +303,77 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         I.wake_pump();
         I.callback_cv.notify_all();
         tr(0); return 0;
+    }
+    if (name == "AAudioStream_requestFlush") {
+        // AudioStream::safeFlush and AAudio_isFlushAllowed: output only, not
+        // from the data callback, and only while OPEN/PAUSED/STOPPED/FLUSHED.
+        // AudioStreamTrack's flush discards queued audio and counts it as read.
+        std::lock_guard<std::mutex> pmu(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        auto& s = it->second;
+        if (s.callback_active && s.callback_host == std::this_thread::get_id()) {
+            tr(-895); return -895;
+        }
+        if (s.aa_state != 2 && s.aa_state != 6 && s.aa_state != 10 && s.aa_state != 8) {
+            tr(-895); return -895;
+        }
+        if (s.engine_stream && I.engine) I.engine->stream_clear(s.engine_stream);
+        s.aa_state = 8;  // FLUSHED; the host flush completes immediately
+        I.callback_cv.notify_all();
+        tr(0); return 0;
+    }
+    if (name == "AAudioStream_release") {
+        // AudioStream::safeRelease: frees the device (state CLOSING) but keeps
+        // the handle until close. Illegal from the data callback.
+        std::unique_lock<std::mutex> pmu(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        if (it->second.callback_active &&
+            it->second.callback_host == std::this_thread::get_id()) {
+            tr(-895); return -895;
+        }
+        const uint64_t stream_id = it->first;
+        I.callback_cv.wait(pmu, [&] {
+            auto cur = I.aa_streams_.find(stream_id);
+            return cur == I.aa_streams_.end() || !cur->second.callback_active;
+        });
+        it = I.aa_streams_.find(stream_id);
+        if (it == I.aa_streams_.end()) { tr(0); return 0; }
+        auto& s = it->second;
+        if (s.aa_state != 11) {
+            s.paused = true;
+            s.aa_state = 11;
+            if (s.engine_stream && I.engine) {
+                I.engine->stream_frame_counters(s.engine_stream, s.aa_released_written,
+                                                s.aa_released_read);
+                I.engine->stream_close(s.engine_stream);
+            }
+            s.engine_stream = 0;
+        }
+        I.wake_pump();
+        I.callback_cv.notify_all();
+        tr(0); return 0;
+    }
+    if (name == "AAudioStream_getChannelMask" || name == "AAudioStream_getSamplesPerFrame" ||
+        name == "AAudioStream_getAllowedCapturePolicy" ||
+        name == "AAudioStream_getSpatializationBehavior" ||
+        name == "AAudioStream_isContentSpatialized" || name == "AAudioStream_isPrivacySensitive") {
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) {
+            const int64_t invalid = name.rfind("AAudioStream_is", 0) == 0 ? 0 : -892;
+            tr(invalid); return invalid;
+        }
+        const auto& s = it->second;
+        int64_t result =
+            name == "AAudioStream_getChannelMask" ? s.aa_channel_mask
+            : name == "AAudioStream_getSamplesPerFrame" ? s.ch  // == getChannelCount
+            : name == "AAudioStream_getAllowedCapturePolicy" ? s.aa_capture_policy
+            : name == "AAudioStream_getSpatializationBehavior" ? s.aa_spatialization
+            : name == "AAudioStream_isContentSpatialized" ? s.aa_spatialized
+            : s.aa_privacy_sensitive;
+        tr(result); return result;
     }
     if (name == "AAudioStream_close") {
         std::unique_lock<std::mutex> pmu(I.pump_mu);
@@ -425,7 +616,10 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         std::lock_guard<std::mutex> lock(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         uint64_t written = 0, read = 0;
-        if (it == I.aa_streams_.end() || !I.engine ||
+        if (it != I.aa_streams_.end() && it->second.aa_state == 11) {
+            written = it->second.aa_released_written;
+            read = it->second.aa_released_read;
+        } else if (it == I.aa_streams_.end() || !I.engine ||
             !I.engine->stream_frame_counters(it->second.engine_stream, written, read)) {
             tr(-892); return -892;
         }

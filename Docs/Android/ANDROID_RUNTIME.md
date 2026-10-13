@@ -1594,6 +1594,18 @@ host ring has room for one more callback (`bifrost_aaudio_wait_callback`),
 calls the app, and hands the buffer back. `test_android_bionic.sh` checks
 this in all three engine modes (`Tests/Unit/android_aaudio_thread.c`).
 
+The AudioThunk exports every AAudio function CRIWARE looks up. Builder
+attributes (channel mask or count, content type, spatialization, capture
+policy, privacy) are validated at open with AOSP libaaudio's rules and codes
+(`AAudioStreamParameters::validate`, `android-15.0.0_r1`); the host engine
+mixes at most 8 of the 12 channels AOSP accepts and returns `UNAVAILABLE` above
+that. A channel count becomes an index mask, which `getChannelMask` hides, as
+AOSP does. `requestFlush` works in OPEN/PAUSED/STOPPED/FLUSHED, discards the
+queued host audio and reports FLUSHED at once; `release` waits for a running
+callback, frees the host stream and leaves the handle in CLOSING until close.
+Both return `INVALID_STATE` from the data callback. Package name and
+attribution tag are accepted and ignored (no app-ops service).
+
 #### Managed OpenSL ES (2026-10-13)
 
 The image's real `libOpenSLES.so` (wilhelm) plays through AudioTrack, so

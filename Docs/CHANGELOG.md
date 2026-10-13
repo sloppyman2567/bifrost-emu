@@ -13,6 +13,16 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### AAudio API coverage (2026-10-13)
+
+- AAudio adds the 18 functions apps such as CRIWARE look up: channel masks
+  and samples per frame, content type, spatialization, capture policy,
+  privacy sensitivity, package name/attribution tag, `requestFlush`,
+  `release` and `AAudio_convertStreamStateToText`. Validation, defaults and
+  state rules follow AOSP libaaudio (Android 15). `AAudio_convertResultToText`
+  now returns its text; it previously had no implementation.
+- Clearing a host audio stream counts the discarded frames as read.
+
 ### Managed OpenSL ES playback (2026-10-13)
 
 - Managed Android apps get a `libOpenSLES.so` adapter: engine, output mix and

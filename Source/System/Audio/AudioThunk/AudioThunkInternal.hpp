@@ -63,7 +63,12 @@ struct AudioThunkImpl {
         int32_t aa_state = 2;                // AAUDIO_STREAM_STATE_OPEN
         int32_t aa_session = -1;
         int32_t aa_usage = 1, aa_input_preset = 6;
+        int32_t aa_channel_mask = 0, aa_content_type = 2, aa_spatialization = 1;
+        int32_t aa_capture_policy = 1;
+        bool aa_spatialized = false, aa_privacy_sensitive = false;
         uint32_t aa_buffer_frames = 0;
+        // AAudioStream_release frees the engine stream; frame counts stay readable.
+        uint64_t aa_released_written = 0, aa_released_read = 0;
         // AAudio: a guest thread made by the Android libaaudio adapter runs
         // the data callback, so the pump and inline firing skip the stream.
         bool guest_thread = false;
@@ -137,13 +142,21 @@ struct AudioThunkImpl {
     // ── AAudio builders ───────────────────────────────────────────────
     struct AaBuilder {
         int32_t fmt = 0;                   // AAUDIO_FORMAT_UNSPECIFIED=0/I16=1/FLOAT=2
-        int32_t ch = 0, rate = 0, frames_per_cb = 0;
+        int32_t channel_mask = 0;          // AAUDIO_UNSPECIFIED; channel counts become index masks
+        int32_t rate = 0, frames_per_cb = 0;
         int32_t device = 0, direction = 0, sharing = 1, performance = 10;
         int32_t session = -1, capacity = 0;
         int32_t usage = 1, input_preset = 6;
+        int32_t content_type = 0, spatialization = 0, capture_policy = 0;
+        int32_t privacy = 0;               // 0 default (from the input preset), 1 off, 2 on
+        bool spatialized = false;
         uint64_t cb_fn = 0, cb_ud = 0, err_fn = 0, err_ud = 0;
     };
     std::map<uint64_t, AaBuilder> aa_builders_;
+    // AAudio_convert*ToText strings, written once into guest memory.
+    std::map<std::string, uint64_t> aa_texts_;
+    uint64_t aa_text_block_ = 0;
+    size_t aa_text_used_ = 0;
 
     void wake_pump() {
         // Serialize the predicate change with wait_for's unlock-and-wait.

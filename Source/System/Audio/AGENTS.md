@@ -9,6 +9,8 @@
   waits must allow group exit to complete.
 - `AudioThunk/AudioThunk.cpp` owns export registration; the Android adapter builder
   reads its AAudio export list. Keep that tooling in sync when moving registration.
+  AAudio validation, defaults and state rules follow AOSP libaaudio
+  `android-15.0.0_r1`; strings returned to the guest live in guest memory.
 - Managed OpenSL ES is the guest `Guest/Android/Adapters/opensles.c`, layered on
   the managed libaaudio adapter (its callback thread runs buffer-queue callbacks),
   not the host `AudioThunk/OpenSL.cpp` vtables. Keep its result codes and

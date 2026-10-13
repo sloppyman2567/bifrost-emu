@@ -1,5 +1,17 @@
 # Tests
 
+## AAudio API coverage (2026-10-13)
+
+`Tests/Unit/android_aaudio_thread.c` now also covers channel layouts and
+counts (index masks hidden), invalid mask/count/content type, attribute
+defaults and setters, state/result text, flush rules, release (CLOSING, no
+restart) and release/flush from the data callback; JIT, interpreter and
+Tier-2 pass in `test_android_bionic.sh`. The managed `libaaudio.so` exports
+every AAudio name CRIWARE looks up (59). JIT suite 326/326, interpreter
+317/317 (9 skipped), `make verify` and `make generated-check` pass; the
+headless build compiled and linked (its copy to `./bifrost-emu` was refused
+while that binary was running).
+
 ## Managed OpenSL ES players (2026-10-13)
 
 `Tests/Unit/android_opensles_player.c` (run by `test_android_bionic.sh`)

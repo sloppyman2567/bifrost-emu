@@ -464,6 +464,24 @@ void AudioThunk::register_known_symbols_() {
     REG(aa_libs, AAudioStream_getFramesRead);
     REG(aa_libs, AAudioStream_getFramesWritten);
     REG(aa_libs, AAudio_convertResultToText);
+    REG(aa_libs, AAudio_convertStreamStateToText);
+    REG(aa_libs, AAudioStreamBuilder_setSamplesPerFrame);
+    REG(aa_libs, AAudioStreamBuilder_setChannelMask);
+    REG(aa_libs, AAudioStreamBuilder_setContentType);
+    REG(aa_libs, AAudioStreamBuilder_setSpatializationBehavior);
+    REG(aa_libs, AAudioStreamBuilder_setIsContentSpatialized);
+    REG(aa_libs, AAudioStreamBuilder_setAllowedCapturePolicy);
+    REG(aa_libs, AAudioStreamBuilder_setPrivacySensitive);
+    REG(aa_libs, AAudioStreamBuilder_setPackageName);
+    REG(aa_libs, AAudioStreamBuilder_setAttributionTag);
+    REG(aa_libs, AAudioStream_getSamplesPerFrame);
+    REG(aa_libs, AAudioStream_getChannelMask);
+    REG(aa_libs, AAudioStream_getAllowedCapturePolicy);
+    REG(aa_libs, AAudioStream_getSpatializationBehavior);
+    REG(aa_libs, AAudioStream_isContentSpatialized);
+    REG(aa_libs, AAudioStream_isPrivacySensitive);
+    REG(aa_libs, AAudioStream_requestFlush);
+    REG(aa_libs, AAudioStream_release);
     // ── libOpenSLES.so (Android) — synthetic vtable methods + IIDs ─
     const char* sl_libs[] = {"libOpenSLES.so"};
     REG(sl_libs, slCreateEngine);

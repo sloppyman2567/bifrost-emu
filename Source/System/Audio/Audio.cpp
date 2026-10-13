@@ -203,6 +203,8 @@ void Audio::stream_clear(int id) {
         it->second.head = 0;
         it->second.tail = 0;
         it->second.frame_batches.clear();
+        // Discarded frames count as read, like an AudioTrack flush.
+        it->second.frames_read = it->second.frames_written;
     }
 }
 size_t Audio::stream_queued_frames(int id) {

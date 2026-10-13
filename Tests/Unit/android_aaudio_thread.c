@@ -26,13 +26,40 @@ extern int AAudioStream_close(AAudioStream*);
 extern int AAudioStream_getUsage(AAudioStream*);
 extern int AAudioStream_getInputPreset(AAudioStream*);
 extern int AAudioStream_getTimestamp(AAudioStream*, int, long*, long*);
-enum { FORMAT_FLOAT = 2, STATE_STARTED = 4, STATE_STOPPED = 10, FRAMES = 256 };
+extern void AAudioStreamBuilder_setChannelMask(AAudioStreamBuilder*, unsigned);
+extern void AAudioStreamBuilder_setSamplesPerFrame(AAudioStreamBuilder*, int);
+extern void AAudioStreamBuilder_setContentType(AAudioStreamBuilder*, int);
+extern void AAudioStreamBuilder_setSpatializationBehavior(AAudioStreamBuilder*, int);
+extern void AAudioStreamBuilder_setIsContentSpatialized(AAudioStreamBuilder*, _Bool);
+extern void AAudioStreamBuilder_setAllowedCapturePolicy(AAudioStreamBuilder*, int);
+extern void AAudioStreamBuilder_setPrivacySensitive(AAudioStreamBuilder*, _Bool);
+extern void AAudioStreamBuilder_setPackageName(AAudioStreamBuilder*, const char*);
+extern void AAudioStreamBuilder_setAttributionTag(AAudioStreamBuilder*, const char*);
+extern unsigned AAudioStream_getChannelMask(AAudioStream*);
+extern int AAudioStream_getSamplesPerFrame(AAudioStream*);
+extern int AAudioStream_getAllowedCapturePolicy(AAudioStream*);
+extern int AAudioStream_getSpatializationBehavior(AAudioStream*);
+extern _Bool AAudioStream_isContentSpatialized(AAudioStream*);
+extern _Bool AAudioStream_isPrivacySensitive(AAudioStream*);
+extern int AAudioStream_requestFlush(AAudioStream*);
+extern int AAudioStream_requestStop(AAudioStream*);
+extern int AAudioStream_release(AAudioStream*);
+extern int AAudioStream_getState(AAudioStream*);
+extern const char* AAudio_convertStreamStateToText(int);
+extern const char* AAudio_convertResultToText(int);
+extern int strcmp(const char*, const char*);
+enum { FORMAT_FLOAT = 2, STATE_STARTED = 4, STATE_FLUSHED = 8, STATE_STOPPED = 10,
+       STATE_CLOSING = 11, FRAMES = 256, INVALID_STATE = -895 };
 
 static volatile int calls, stop_after, last_frames, callback_tid, errno_kept, user_ok;
+static volatile int release_in_callback = 1, flush_in_callback = 1; // 1: not tried yet
 static int user_tag;
 
 static int callback(AAudioStream* stream, void* user, void* audio, int frames) {
-    (void)stream;
+    if (release_in_callback == 1) { // both are illegal from the data callback
+        release_in_callback = AAudioStream_release(stream);
+        flush_in_callback = AAudioStream_requestFlush(stream);
+    }
     float* out = audio;
     for (int i = 0; i < frames * 2; ++i) out[i] = (i & 32) ? 0.25f : -0.25f;
     *__errno() = 4321; // Bionic TLS of the calling thread
@@ -114,6 +141,64 @@ int main(void) {
 
     AAudioStream* plain = open_stream(0); // write()-mode stream: no thread
     check(plain != 0 && AAudioStream_close(plain) == 0, "write-mode stream opens and closes");
+    check(release_in_callback == INVALID_STATE && flush_in_callback == INVALID_STATE,
+          "release and flush are illegal from the data callback");
+
+    // Channel masks follow AOSP: a count is a (hidden) index mask; layouts stay.
+    AAudioStreamBuilder* builder = 0;
+    AAudioStream* masked = 0;
+    AAudio_createStreamBuilder(&builder);
+    AAudioStreamBuilder_setChannelMask(builder, 0x3f); // AAUDIO_CHANNEL_5POINT1
+    check(AAudioStreamBuilder_openStream(builder, &masked) == 0 &&
+          AAudioStream_getChannelMask(masked) == 0x3f &&
+          AAudioStream_getSamplesPerFrame(masked) == 6, "5.1 layout mask");
+    AAudioStream_close(masked);
+    AAudioStreamBuilder_setSamplesPerFrame(builder, 1);
+    check(AAudioStreamBuilder_openStream(builder, &masked) == 0 &&
+          AAudioStream_getChannelMask(masked) == 0 &&
+          AAudioStream_getSamplesPerFrame(masked) == 1, "channel count hides its index mask");
+    // Defaults from AudioStream::open, then the requested values.
+    check(AAudioStream_getAllowedCapturePolicy(masked) == 1 &&
+          AAudioStream_getSpatializationBehavior(masked) == 1 &&
+          !AAudioStream_isContentSpatialized(masked) && !AAudioStream_isPrivacySensitive(masked),
+          "stream attribute defaults");
+    AAudioStream_close(masked);
+    AAudioStreamBuilder_setChannelMask(builder, 0x5); // not an output layout
+    check(AAudioStreamBuilder_openStream(builder, &masked) == -898, "invalid channel mask");
+    AAudioStreamBuilder_setSamplesPerFrame(builder, 13); // above FCC_LIMIT
+    check(AAudioStreamBuilder_openStream(builder, &masked) == -882, "channel count out of range");
+    AAudioStreamBuilder_setChannelMask(builder, 0x3);
+    AAudioStreamBuilder_setContentType(builder, 99);
+    check(AAudioStreamBuilder_openStream(builder, &masked) == -898, "invalid content type");
+    AAudioStreamBuilder_setContentType(builder, 3); // MOVIE
+    AAudioStreamBuilder_setSpatializationBehavior(builder, 2);
+    AAudioStreamBuilder_setIsContentSpatialized(builder, 1);
+    AAudioStreamBuilder_setAllowedCapturePolicy(builder, 3);
+    AAudioStreamBuilder_setPrivacySensitive(builder, 1);
+    AAudioStreamBuilder_setPackageName(builder, "com.example");
+    AAudioStreamBuilder_setAttributionTag(builder, 0);
+    check(AAudioStreamBuilder_openStream(builder, &masked) == 0 &&
+          AAudioStream_getAllowedCapturePolicy(masked) == 3 &&
+          AAudioStream_getSpatializationBehavior(masked) == 2 &&
+          AAudioStream_isContentSpatialized(masked) && AAudioStream_isPrivacySensitive(masked),
+          "requested stream attributes");
+    AAudioStream_close(masked);
+    AAudioStreamBuilder_delete(builder);
+
+    check(!strcmp(AAudio_convertStreamStateToText(STATE_FLUSHED), "AAUDIO_STREAM_STATE_FLUSHED") &&
+          !strcmp(AAudio_convertResultToText(INVALID_STATE), "AAUDIO_ERROR_INVALID_STATE") &&
+          !strcmp(AAudio_convertStreamStateToText(99), "Unrecognized"), "state and result text");
+
+    // Flush only while inactive; release frees the device but keeps the handle.
+    AAudioStream* life = open_stream(0);
+    check(life && AAudioStream_requestStart(life) == 0 &&
+          AAudioStream_requestFlush(life) == INVALID_STATE, "flush rejected while started");
+    check(AAudioStream_requestStop(life) == 0 && AAudioStream_requestFlush(life) == 0 &&
+          AAudioStream_getState(life) == STATE_FLUSHED, "flush after stop");
+    check(AAudioStream_release(life) == 0 && AAudioStream_getState(life) == STATE_CLOSING &&
+          AAudioStream_release(life) == 0, "release enters CLOSING once");
+    check(AAudioStream_requestStart(life) == INVALID_STATE, "a released stream cannot start");
+    check(AAudioStream_close(life) == 0, "close after release");
 
     if (failures) return 1;
     printf("android_aaudio_thread: ALL PASS\n");
