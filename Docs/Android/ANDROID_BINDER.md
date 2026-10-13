@@ -40,6 +40,16 @@ and [driver implementation](https://raw.githubusercontent.com/torvalds/linux/v6.
 
 ## Concurrency and broker channels
 
+Shared-Binder process leaders use their host PID as the guest PID/TID.
+Worker allocation skips that ID, including native callback workers. Previously
+a leader with PID 5 or 6 inside a PID namespace could collide with a synthetic
+worker ID, corrupting ART startup. The Bionic bootstrap now creates 16 workers
+and checks their TIDs against the leader. With a low-PID shared-broker run the
+old binary exits 3; the fixed binary completes. Framework service probes also
+pass through the shared broker in JIT and interpreter mode. This checks unique
+identities within each guest process, not globally unique worker IDs across
+independent guest processes.
+
 The domain uses an ordinary mutex for shared handle/ownership/queue metadata.
 Promoted peer references are retained until after unlocking, so a last-reference
 release cannot recursively enter teardown while the lock is held. Transaction

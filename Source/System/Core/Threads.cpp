@@ -367,6 +367,11 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         gt->cpu.clear_child_tid = ctid_ptr;
     }
     int child_tid = next_tid_.fetch_add(1);
+    // A shared-Binder process uses its host PID for the leader. In a PID
+    // namespace that can be a small number in our synthetic worker range.
+    // Never give a worker the leader's identity (TLS, futex and Binder users
+    // must be able to distinguish them).
+    if (child_tid == main_cpu_.tid) child_tid = next_tid_.fetch_add(1);
     gt->cpu.tid = child_tid;
     gt->tid = child_tid;
     if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
@@ -935,6 +940,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     st->cpu.running = true;
     st->cpu.pstate = 0;
     st->cpu.tid = next_tid_.fetch_add(1);
+    if (st->cpu.tid == main_cpu_.tid) st->cpu.tid = next_tid_.fetch_add(1);
     st->tid = static_cast<uint64_t>(st->cpu.tid);
     st->stack_top = stack + STACK_SIZE;
     st->stack_size = STACK_SIZE;

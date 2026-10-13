@@ -149,6 +149,9 @@ static int check_main_stack(void) {
 }
 static void* worker(void* unused) {
     (void)unused;
+    // Linux gives every worker a TID different from the process leader.
+    // Shared-Binder runs can have a low host PID inside a PID namespace.
+    if (syscall(178) == syscall(172)) return (void*)3;
     if (tls_value != 17) return (void*)1;
     tls_value = 99;
     *__errno() = 22;
@@ -177,9 +180,10 @@ int main(int argc, char** argv, char** envp) {
     *__errno() = 11;
     pthread_t thread;
     void* result = 0;
-    if (pthread_create(&thread, 0, worker, 0) || pthread_join(thread, &result) ||
-        result != (void*)42 || tls_value != 31 || *__errno() != 11) return 3;
-    printf("Bionic: pthread and isolated TLS passed\n");
+    for (int i = 0; i < 16; ++i)
+        if (pthread_create(&thread, 0, worker, 0) || pthread_join(thread, &result) ||
+            result != (void*)42 || tls_value != 31 || *__errno() != 11) return 3;
+    printf("Bionic: pthread identity and isolated TLS passed\n");
     void* library = dlopen("libm.so", 2); // RTLD_NOW
     if (!library) { printf("dlopen: %s\n", dlerror()); return 4; }
     double (*square_root)(double) = (double (*)(double))dlsym(library, "sqrt");
