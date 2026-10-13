@@ -11,6 +11,7 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
     switch (inst.op) {
         case IROp::SIMD_NATIVE_EXTRA: {
             const uint32_t opcode = inst.native_simd_opcode();
+            if (emit_native_simd_inline(opcode)) return true;
             auto fn = native_simd_helper(classify_native_simd(opcode));
             if (!fn) { emit_call_interp(inst.arm_pc, false); return true; }
             clobber_flags();

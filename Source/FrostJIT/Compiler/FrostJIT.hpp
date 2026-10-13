@@ -1514,6 +1514,11 @@ private:
     bool compile_simd_shifts_(const IRInst& inst);
     bool compile_simd_elements_(const IRInst& inst);
     bool compile_simd_widening_(const IRInst& inst);
+    // Inline SSE/AVX2 bodies for SIMD_NATIVE_EXTRA kinds (CodeGen/Native/
+    // NativeSIMDInline.cpp). The predicate is exact: the emitter succeeds
+    // for every word it accepts, so Tier-2 need not treat those as calls.
+    bool native_simd_inlinable(uint32_t w) const;
+    bool emit_native_simd_inline(uint32_t w);
     // SSE/VEX encoding helpers shared by the SIMD families (SIMD/Encoders.cpp).
     void load_fp_vector(int xmm, int v, bool q);
     void store_fp_vector(int v, bool q);

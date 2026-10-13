@@ -892,6 +892,13 @@ Focused additions:
   `make nativegen-expect`. An encoding QEMU rejects with SIGILL (hash 0)
   fails, which caught 605 unallocated encodings the old classifier ran
   natively. Passes in both engines, JIT verify and IR validation.
+- `jit_native_simd_inline`: USHL/SSHL `.2s/.4s/.2d` for all 256 count
+  bytes (junk in the upper count bits) on four value patterns, checked
+  against an ARM-pseudocode reference. Also EXT, FP compares, CMEQ #0,
+  REV64, USHL and SSHL with Vd aliasing Vn or Vm, compared with the same
+  instruction on distinct registers (6,166 checks). Passes under QEMU, both
+  engines and `BIFROST_NO_AVX2=1`. Dropping SSHL's negative-count select
+  from the inline body fails 2,578 checks.
 - `jit_simd_reserved_forms`: reserved DUP (element/general), INS (general)
   and FCVTZS `.1d` encodings raise SIGILL. DUP (general) with ignored imm5
   bits executes. Vector FCVTZS/FCVTZU of ±inf, NaN and out-of-range values

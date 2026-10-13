@@ -215,7 +215,10 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
         for (const IRInst& inst : region_ir) {
             if (inst.op == IROp::SVC || inst.op == IROp::BR ||
                 inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_EXTRA)
+                inst.op == IROp::CALL_INTERP)
+                return true;
+            if (inst.op == IROp::SIMD_NATIVE_EXTRA &&
+                !native_simd_inlinable(inst.native_simd_opcode()))
                 return true;
         }
         return false;

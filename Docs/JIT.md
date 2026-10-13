@@ -1047,7 +1047,8 @@ polynomials instead of erroneous hand-copied entries. `jit_crc32` checks
 2,048 cases against a bitwise oracle, QEMU and differential verification.
 CRC32 retains the normal interpreter fallback in JIT mode.
 
-Vector FMOV immediates use the interpreter fallback in JIT mode. Scalar
+Vector FMOV immediates are native (inline, see
+[inline native SIMD kinds](#inline-native-simd-kinds-2026-10-13)). Scalar
 DUP element reads now use native `SIMD_SCALAR_DUP`; their reference bugs affected both engines and
 can escape JIT-versus-interpreter verification. Two Doom 3 collision-code
 probes exposed this: `.2s #0.5` expanded with a wrong exponent, and
@@ -1278,7 +1279,7 @@ They are typed, validated IR operations and optimizer barriers. Flush GPR
 state before helpers that read `cpu.regs`, disable incompatible pinning, and
 preserve `WIN_REG` across every SysV call: it is caller-saved R10, so an
 otherwise correct C++ helper can corrupt all later direct-window accesses.
-Tier-2 treats SIMD helpers as calls for GPR pinning and LICM purposes.
+Tier-2 treats SIMD helper calls as calls for GPR pinning and LICM purposes.
 The translator checks `classify_native_simd` before the interpreter
 fallback, so a classified encoding must be one its `run<K>` implements.
 The classifier, the kind enum and the dispatch list are generated from
@@ -1298,6 +1299,44 @@ Its first run found 605 classified encodings that QEMU rejects:
 All 1,480 remaining encodings match QEMU in both engines. A
 generated-versus-hand-written check over all 2^32 words showed no
 classification change before the spec was corrected.
+
+### Inline native SIMD kinds (2026-10-13)
+
+`SIMD_NATIVE_EXTRA` codegen first tries `emit_native_simd_inline`
+(`CodeGen/Native/NativeSIMDInline.cpp`) and calls `run<K>` only when it
+declines. A helper call flushes every cached GPR, pushes `WIN_REG` and
+counts as a call for Tier-2. In a SpongeBob steady-state profile, helper
+bodies alone were 3.5% of sampled CPU. The inline kinds and their x86 forms:
+
+- **EXT:** `psrldq`/`pslldq`/`por`. Q=0 packs Vn.8B and Vm.8B into one
+  register first.
+- **FCMEQ/FCMGE/FCMGT and the #0 forms:** `cmpps`/`cmppd` with ordered
+  predicates (EQ_OQ, LT_OS, LE_OS), so NaN lanes compare false as on ARM.
+  GE/GT swap operands. Generated code never sets MXCSR DAZ/FTZ, so
+  denormal inputs compare as in the helper; FPCR.FZ is unmodelled in both.
+- **CMEQ #0:** `pcmpeq{b,w,d}`. `.2d` uses `pcmpeqd`, a dword swap and
+  `pand`, so it needs only SSE2.
+- **REV64:** `pshufd`, or `pshuflw`/`pshufhw` plus a byte swap within words.
+- **Vector FMOV (immediate):** the expanded constant via `emit_mask`
+  (RAX only).
+- **USHL/SSHL with 32- or 64-bit lanes:** needs AVX2 (`vpsllv`/`vpsrlv`).
+  The count is Vm's low byte zero-extended, so a negative shift is
+  >= 128 and shifts left to 0. The right count, `-b & 255`, is >= 129 for a
+  positive shift. USHL is `left | right`. SSHL's right shift is
+  `srl(n ^ sign, c) ^ sign`, which gives the sign for large counts, and it
+  is selected only in lanes whose count byte is negative. 8/16-bit lanes and
+  hosts without AVX2 keep the helper.
+
+Every source is loaded before Vd is written, so aliased registers behave as
+in the helper. Both caches already refuse blocks containing this op, so
+`cpu.v_lo/v_hi` are current and XMM0-5 are scratch.
+`native_simd_inlinable` is exact for the emitter, and
+`plan_tier2_region` counts only helper-called words as calls.
+`jit_native_simd_gen` runs the inline bodies against the QEMU hashes, and
+mutating an inline predicate fails it. `jit_native_simd_inline` adds
+every USHL/SSHL count byte and aliased Vd. A synthetic guest loop of EXT,
+FCMGT, REV64, USHL, FMOV and ADD fell from 1,682 to 104 ms of CPU. That is
+an upper bound for this op mix, not a game measurement.
 `Scripts/Testing/simd_coverage.py` sweeps the whole FP/SIMD
 data-processing group (2^19 words, Rd/Rn pinned) under QEMU and Bifrost in
 about 20 seconds. It reports instructions Bifrost is missing, unallocated

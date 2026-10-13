@@ -13,7 +13,7 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
-### JIT compile time (2026-10-13)
+### JIT compile time and inline SIMD (2026-10-13)
 
 - Tier-1 and Tier-2 compiles no longer rebuild all 4,096 per-vreg use lists
   for every block; only the lists the previous compile filled are emptied,
@@ -21,6 +21,13 @@ labels below are historical records.
   was about a third of Tier-1 compile time (2.3% of sampled CPU).
   `jit_native_simd_gen`, which compiles thousands of small blocks, dropped
   from 118.5 to 108.5 ms of CPU.
+- EXT, FCMEQ/FCMGE/FCMGT and their #0 forms, CMEQ #0, REV64, vector FMOV
+  (immediate) and USHL/SSHL with 32/64-bit lanes (AVX2 hosts) are emitted
+  inline instead of calling a C++ helper that flushed every cached GPR.
+  Tier-2 no longer treats those words as calls. A synthetic loop of these
+  ops fell from 1,682 to 104 ms of CPU; game FPS is not yet measured.
+  `jit_native_simd_inline` checks every shift count byte and aliased
+  destinations.
 
 ### Base ARMv8.0 FP/SIMD semantics from the coverage sweep (2026-10-13)
 

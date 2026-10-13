@@ -22,7 +22,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   through `Tools/CodeGen/`, never manual generated-header edits. Native SIMD
   helper encodings live in `native_simd.txt`. After changing it or a helper,
   run `make nativegen-expect` (QEMU) and commit the spec, generated header,
-  generated test and expectations together.
+  generated test and expectations together. Inline bodies in
+  `CodeGen/Native/NativeSIMDInline.cpp` must match their `run<K>` lane for
+  lane, and `native_simd_inlinable` must accept exactly what the emitter
+  emits (Tier-2 relies on it to skip the call treatment).
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.
