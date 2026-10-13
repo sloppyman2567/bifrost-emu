@@ -79,12 +79,12 @@ public final class Managed extends Activity {
                 || android.app.PendingIntent.getService(this, 71, absent, flags) != null)
             throw new AssertionError("NO_CREATE created or invented a PendingIntent");
         System.out.println("MANAGED_FIXTURE_PENDING_LOOKUP_OK");
-        try {
-            android.app.PendingIntent.getBroadcast(this, 71, absent, android.app.PendingIntent.FLAG_IMMUTABLE);
-            throw new AssertionError("Unimplemented PendingIntent creation silently succeeded");
-        } catch (UnsupportedOperationException expected) {
-            System.out.println("MANAGED_FIXTURE_PENDING_CREATE_UNSUPPORTED");
-        }
+        android.app.PendingIntent sender = android.app.PendingIntent.getBroadcast(this, 71, absent, android.app.PendingIntent.FLAG_IMMUTABLE);
+        if (sender == null || !sender.equals(android.app.PendingIntent.getBroadcast(this, 71, absent,
+                android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_NO_CREATE)))
+            throw new AssertionError("PendingIntent identity lookup failed");
+        sender.cancel();
+        System.out.println("MANAGED_FIXTURE_PENDING_CREATE_OK");
         if ("activity".equals(System.getProperty("bifrost.apk.trace.mode"))) {
             for (int i = 0; i < 2; i++) android.app.ActivityManager.getMyMemoryState(
                     new android.app.ActivityManager.RunningAppProcessInfo());
@@ -107,6 +107,8 @@ public final class Managed extends Activity {
             throw new IllegalStateException("Settings missing/default semantics incorrect");
         System.out.println("MANAGED_FIXTURE_SETTINGS_OK " + id);
         int starts = prefs.getInt("starts", 0) + 1;
+        if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
+            throw new AssertionError("System defaults or preserved override incorrect");
         if (!prefs.edit().putInt("starts", starts).commit())
             throw new IllegalStateException("preference commit failed");
         System.out.println("MANAGED_FIXTURE_START " + starts);

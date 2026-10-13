@@ -30,14 +30,28 @@ final class FrameworkPackages {
     private final Map<String, PackageInfo> systemPackages = new ConcurrentHashMap<>();
     private final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
     private volatile Map<String, PermissionInfo> permissionDefinitions = java.util.Collections.emptyMap();
+    private Map<String, PermissionInfo> platformPermissions;
     private final java.util.Set<String> serviceFeatures = ConcurrentHashMap.newKeySet();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> providerFilters = new ConcurrentHashMap<>();
+    private final Map<String, Map<ComponentName, List<IntentFilter>>> receiverFilters = new ConcurrentHashMap<>();
+    private java.util.Set<String> protectedBroadcasts;
+
+    synchronized boolean protectedBroadcast(String action) throws Exception {
+        if (protectedBroadcasts == null) {
+            java.util.Set<String> names = new java.util.HashSet<>();
+            for (Object name : (List<?>) invoke(parseArchive(new java.io.File("/system/framework/framework-res.apk")), "getProtectedBroadcasts"))
+                names.add((String) name);
+            protectedBroadcasts = names;
+        }
+        return protectedBroadcasts.contains(action);
+    }
 
     void install(Context system, PackageInfo pkg) {
         installPermissions(system, pkg);
         installed = copy(pkg, PackageInfo.CREATOR);
         componentStates.clear();
         providerFilters.remove(pkg.packageName);
+        receiverFilters.remove(pkg.packageName);
     }
 
     void installSystem(PackageInfo pkg) {
@@ -61,6 +75,43 @@ final class FrameworkPackages {
     PackageInfo processPackage(String name) {
         PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : systemPackages.get(name);
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
+    }
+
+    List<ActivityInfo> receivers(Intent intent, String type, int user) throws Exception {
+        if (user != 0) throw new SecurityException("Foreign broadcast user");
+        List<ActivityInfo> results = new ArrayList<>();
+        PackageInfo pkg = installed;
+        if (pkg == null || pkg.receivers == null
+                || intent.getPackage() != null && !pkg.packageName.equals(intent.getPackage())) return results;
+        if (intent.getComponent() != null) {
+            for (ActivityInfo info : pkg.receivers)
+                if (new ComponentName(pkg.packageName, info.name).equals(intent.getComponent()) && componentMatches(info, 0, user))
+                    results.add(copy(info, ActivityInfo.CREATOR));
+            return results;
+        }
+        Map<ComponentName, List<IntentFilter>> filters = receiverFilters.get(pkg.packageName);
+        if (filters == null) {
+            filters = new java.util.HashMap<>();
+            java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
+            java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
+                    && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
+            for (Object receiver : (List<?>) invoke(parseArchive(archive), "getReceivers")) {
+                List<IntentFilter> entries = new ArrayList<>();
+                for (Object entry : (List<?>) invoke(receiver, "getIntents"))
+                    entries.add(new IntentFilter((IntentFilter) invoke(entry, "getIntentFilter")));
+                filters.put(new ComponentName(pkg.packageName, (String) invoke(receiver, "getName")), entries);
+            }
+            receiverFilters.put(pkg.packageName, filters);
+        }
+        for (ActivityInfo info : pkg.receivers) {
+            ComponentName name = new ComponentName(pkg.packageName, info.name);
+            if (!componentMatches(info, 0, user)) continue;
+            boolean matches = name.equals(intent.getComponent());
+            if (intent.getComponent() == null) for (IntentFilter filter : filters.getOrDefault(name, java.util.Collections.emptyList()))
+                if (filter.match(intent.getAction(), type, intent.getScheme(), intent.getData(), intent.getCategories(), "AsgardReceiver") >= 0) matches = true;
+            if (matches) results.add(copy(info, ActivityInfo.CREATOR));
+        }
+        return results;
     }
 
     void provideFeature(String name) { serviceFeatures.add(name); }
@@ -468,16 +519,24 @@ final class FrameworkPackages {
         return results;
     }
 
-    private void installPermissions(Context system, PackageInfo pkg) {
+    private synchronized void installPermissions(Context system, PackageInfo pkg) {
         // The single-app profile grants manifest-requested normal permissions
-        // at install time. Runtime and signature grants require services this
-        // profile does not provide; unknown permission names stay denied.
-        PackageInfo platform = system.getPackageManager().getPackageArchiveInfo(
-                "/system/framework/framework-res.apk", PackageManager.GET_PERMISSIONS);
-        if (platform == null || platform.permissions == null)
-            throw new IllegalStateException("platform permission definitions unavailable");
-        Map<String, PermissionInfo> definitions = new java.util.HashMap<>();
-        for (PermissionInfo permission : platform.permissions) definitions.put(permission.name, permission);
+        // at install time, including WRITE_SETTINGS's pre-M compatibility
+        // grant. Other runtime/signature grants require unavailable services;
+        // unknown permission names stay denied.
+        // The runtime image is immutable. Retain its definitions independently
+        // of app installation/grants, as PackageManager's permission registry
+        // does; app permissions and target-dependent grants are rebuilt below.
+        if (platformPermissions == null) {
+            PackageInfo platform = system.getPackageManager().getPackageArchiveInfo(
+                    "/system/framework/framework-res.apk", PackageManager.GET_PERMISSIONS);
+            if (platform == null || platform.permissions == null)
+                throw new IllegalStateException("platform permission definitions unavailable");
+            Map<String, PermissionInfo> definitions = new java.util.HashMap<>();
+            for (PermissionInfo permission : platform.permissions) definitions.put(permission.name, permission);
+            platformPermissions = java.util.Collections.unmodifiableMap(definitions);
+        }
+        Map<String, PermissionInfo> definitions = new java.util.HashMap<>(platformPermissions);
         if (pkg.permissions != null)
             for (PermissionInfo permission : pkg.permissions) definitions.putIfAbsent(permission.name, permission);
         permissionDefinitions = java.util.Collections.unmodifiableMap(definitions);
@@ -486,8 +545,9 @@ final class FrameworkPackages {
         for (int i = 0; i < pkg.requestedPermissions.length; i++) {
             String name = pkg.requestedPermissions[i];
             PermissionInfo definition = definitions.get(name);
-            if (definition != null && (definition.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE)
-                    == PermissionInfo.PROTECTION_NORMAL) {
+            boolean legacySettings = name.equals("android.permission.WRITE_SETTINGS") && pkg.applicationInfo.targetSdkVersion < 23;
+            if (definition != null && ((definition.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE)
+                    == PermissionInfo.PROTECTION_NORMAL || legacySettings)) {
                 grantedPermissions.add(name);
                 pkg.requestedPermissionsFlags[i] |= PackageInfo.REQUESTED_PERMISSION_GRANTED;
             }

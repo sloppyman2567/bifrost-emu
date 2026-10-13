@@ -1,5 +1,66 @@
 # Tests
 
+## Settings and PendingIntent contracts (2026-10-13)
+
+`ManagedServiceBatch` adds real Android Settings/PendingIntent clients to the
+common-device probe. It checks fresh AOSP defaults (`accelerometer_rotation=0`,
+screen timeout, location and bubbles), absence of Google's `limit_ad_tracking`,
+namespace/user isolation, System write grants and validators, persistence after
+provider recreation, read-only generation transport/cache invalidation and
+ContentObserver delivery. PendingIntent checks include identity through Parcel,
+lookup, replacement/cancellation, extras updates, immutable and mutable sends,
+one-shot and cancellation listeners, creator metadata, service and Activity
+result delivery, dynamic and manifest broadcasts and ordered result propagation.
+Protected-only receiver filters can omit export flags; custom and mixed filters
+must supply them. This regresses SpongeBob WebView's system receiver registration.
+Alarms exercise exact-permission denial, operation cancellation and two actual
+repeating deliveries with the 60-second minimum interval.
+
+The installed `ManagedActivities` fixture launches an additional translucent
+Activity through a PendingIntent, checks that it has no result caller, and
+returns through its real window/lifecycle. The signed `Managed` fixture now
+creates/looks up/cancels senders and checks fresh System values; its forced
+runtime replacement preserves an injected System override. `SettingsIdentityTests`
+continues to cover SSAID keys separately.
+
+The defaults generator downloads only pinned `android-15.0.0_r1` inputs into a
+temporary cache. Source/spec checks cover loader table ownership, resources,
+reviewed fresh-device upgrades, public validators, sender keys/flags, protected
+broadcast exemption and Android 15 receiver signatures. Runtime tests exercise
+the cases above; they do not prove all framework API contracts, OEM/property
+overrides, cross-app/process delivery, background restart, foreground services,
+notification taps or full gameplay.
+
+Observed on the final source: all 153 service assertions passed in JIT
+(86.3 s) and interpreter (105.1 s), including two real repeating alarm
+deliveries. The complete APK package suite passed 29/29 (401.0 s). Platform
+permission definitions are cached independently of app grants: before that
+change, repeated framework APK parsing in the expanded interpreter probe
+encountered an unmapped null read. Its native cause remains unlocalized;
+passing the cached path is not a native interpreter repair.
+
+GPU-enabled real-app runs reached Application/Activity resume, window and
+surface checkpoints. Hungry Shark ran its bounded 150 s session (exit 137
+after guest process termination on closure); SpongeBob ran 150 s (timeout
+124), including WebView initialization after the protected-receiver fix.
+Neither reported the original PendingIntent/rotation failures. Azur Lane
+passed those startup paths but exited 127 when MediaCodec initialization
+could not load `libmedia_jni.so`; media provisioning is separate work.
+Google's `limit_ad_tracking` remains absent. These are lifecycle observations,
+not visual gameplay verification.
+
+```bash
+python3 Tools/Android/generate-settings-defaults.py --check
+PATH=/usr/lib/jvm/java-25-openjdk/bin:$PATH python3 -c \
+  "from pathlib import Path; import sys; sys.path.insert(0,'Scripts/Android'); from android_managed import build_launcher; build_launcher(Path('/tmp/bifrost-service-probe'), (Path('Tests/Host/ManagedServiceBatch.java'),))"
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch \
+  --emu build/release-sdl1-gl1/bifrost-emu --timeout 240
+# Repeat with --mode interp.
+JAVAC=/usr/lib/jvm/java-25-openjdk/bin/javac make android-managed-launcher
+PATH=/usr/lib/jvm/java-25-openjdk/bin:$PATH python3 Scripts/Android/test_android_package.py
+```
+
 ## Common device services (2026-10-13)
 
 `ManagedServiceBatch` drives the real Android 15 `UiModeManager`,
@@ -10,17 +71,18 @@ It checks AOSP defaults, grant/denial agreement with the install-time model,
 copy isolation of permission and clip replies, sticky battery delivery to a
 receiver, focus-gated clipboard reads and listeners, a listener alarm firing
 no earlier than 5 s while a cancelled one never fires, and SecurityException
-for privileged calls and for revoked VIBRATE/DISABLE_KEYGUARD. It passes 106
-checks in JIT and interpreter mode. `--service-inventory` lists 32 services.
+for privileged calls and for revoked VIBRATE/DISABLE_KEYGUARD. The original
+106-check probe passes in JIT and interpreter mode. `--service-inventory` lists 32 services.
 `test_android_package.py` passes 29/29 (with `javac` on `PATH`).
 
 Hungry Shark Evolution, which had thrown on a null `UiModeManager`, ran its
 full 180-second session to its window, surface, popups and resume, without
 null-manager or unsupported-service exceptions. SpongeBob ran its 150-second
 session through the same checkpoints. Both still report missing Google Play
-services (`SERVICE_INVALID`) and PendingIntent creation; Hungry Shark's King
-SDK and SpongeBob read missing secure/system settings (`accelerometer_rotation`,
-`limit_ad_tracking`). Gameplay was not checked in these bounded runs.
+services (`SERVICE_INVALID`). At that earlier checkpoint they also reported
+PendingIntent creation and missing settings, addressed by the contracts above;
+Google's `limit_ad_tracking` intentionally remains absent. Gameplay was not
+checked in those bounded runs.
 
 ```bash
 python3 - <<'PY'
@@ -67,13 +129,14 @@ if incorrectly instantiated. Two JIT launches and an interpreter launch pass,
 including data persistence and runtime replacement. The interpreter attempt
 first exceeded 90 seconds during WebView/package startup, before reaching this
 path; the 180-second interpreter budget passes. The same fixture checks absent
-NO_CREATE broadcast/activity/service PendingIntents and rejects unsupported
-sender creation.
+NO_CREATE broadcast/activity/service PendingIntents, successful sender creation,
+identity lookup/cancellation and System overrides across runtime replacement.
 
-`PackageTests.test_managed_activity_api_report` passes against a signed APK and
-the real framework: 428 cataloged signatures in the three Activity Binder
-interfaces, 11 distinct observed methods and 17 calls. Two deliberate unsupported
-calls (`getIntentSenderWithFeature` creation and `getAppTasks`) retain exception
+`PackageTests.test_managed_activity_api_report` uses a signed APK and the real
+framework. The earlier trace cataloged 428 signatures in the three Activity
+Binder interfaces, 11 distinct observed methods and 17 calls, including two
+deliberately unsupported calls: `getIntentSenderWithFeature` creation and
+`getAppTasks`. Creation now succeeds; the remaining `getAppTasks` failure retains exception
 and caller stacks; repeated `getMyMemoryState` calls aggregate correctly. All
 calls complete, the capture stops cleanly, and no global thread-stack, library
 map or ART method records are emitted in `activity` mode. The saved example is

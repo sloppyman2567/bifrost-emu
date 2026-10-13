@@ -921,6 +921,10 @@ class PackageTests(unittest.TestCase):
             "-storepass", "bifrost-test", "-alias", "fixture"])
         for starts in (1, 2, 3):
             if starts == 3:
+                settings = app / "managed/rootfs/data/system/users/0/bifrost-system-settings.xml"
+                settings.write_text('<?xml version="1.0" encoding="UTF-8"?>\n'
+                                    '<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">\n'
+                                    '<properties><entry key="screen_off_timeout">112345</entry></properties>')
                 # Force a runtime replacement, as a launcher upgrade does.
                 import json
                 stamp = app / "managed/runtime.json"
@@ -938,7 +942,7 @@ class PackageTests(unittest.TestCase):
             positions = [text.index(marker) for marker in markers]
             self.assertEqual(positions, sorted(positions), text[-30000:])
             self.assertIn("MANAGED_FIXTURE_PENDING_LOOKUP_OK", text)
-            self.assertIn("MANAGED_FIXTURE_PENDING_CREATE_UNSUPPORTED", text)
+            self.assertIn("MANAGED_FIXTURE_PENDING_CREATE_OK", text)
             key = (state / ".settings/user-0.key").read_bytes()
             expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,
                                    hashlib.sha256).hexdigest()[:16]
@@ -1033,7 +1037,8 @@ class PackageTests(unittest.TestCase):
                    "APP_POPUP_REMOVED",
                    # Second round: the Back key through the window's view tree.
                    "MANAGED_ACTIVITIES_SECOND_BACK", "MANAGED_ACTIVITIES_RESULT 43 0 null",
-                   "MANAGED_ACTIVITIES_ROOT_RESUMED returned=2", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
+                   "MANAGED_ACTIVITIES_ROOT_RESUMED returned=2", "MANAGED_ACTIVITIES_PENDING_CREATED",
+                   "MANAGED_ACTIVITIES_PENDING_RETURNED", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
         # Only the opaque round stops the root; its window and SurfaceView

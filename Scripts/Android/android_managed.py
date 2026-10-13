@@ -41,7 +41,9 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkBattery.java", "Framework/FrameworkVibrator.java",
                     "Framework/FrameworkKeyguard.java", "Framework/FrameworkClipboard.java",
                     "Framework/FrameworkAlarms.java", "Framework/FrameworkAccounts.java",
-                    "Framework/FrameworkLocation.java")
+                    "Framework/FrameworkLocation.java", "Framework/FrameworkSettingsDefaults.java",
+                    "Framework/FrameworkSettings.java", "Framework/FrameworkBroadcasts.java",
+                    "Framework/FrameworkPendingIntents.java")
 
 
 def add_trace_arguments(parser):
@@ -708,6 +710,9 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
             target = fresh / relative
             if source.is_dir():
                 shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
+        settings_overrides = Path("data/system/users/0/bifrost-system-settings.xml")
+        if (data_source / settings_overrides).is_file():
+            shutil.copy2(data_source / settings_overrides, fresh / settings_overrides)
         ensure_app_data(fresh, metadata["package"])
         (fresh / "data/data").symlink_to("user/0")
         (fresh / "data/dalvik-cache/arm64").mkdir(parents=True, exist_ok=True)

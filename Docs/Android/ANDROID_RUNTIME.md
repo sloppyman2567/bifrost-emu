@@ -226,7 +226,7 @@ server classes, for one app, user 0 and the default device:
 | `vibrator_manager` | No vibrators; `VIBRATE` is enforced and accepted vibrations are ignored. |
 | `trust` and `window` keyguard calls | No credential and never locked; `DISABLE_KEYGUARD` gates keyguard locks, `exitKeyguardSecurely` succeeds. |
 | `clipboard` | In-process clipboard with copied `ClipData`, one-hour auto-clear and listeners; reads need the play window's focus. Not shared with the host desktop. |
-| `alarm` | One-shot `OnAlarmListener` alarms on a scheduler thread, at least 5 s ahead (`MIN_FUTURITY`), RTC converted to elapsed time; exact-alarm queries follow the target-SDK rules. PendingIntent alarms throw (no PendingIntent creation yet); alarms never restart a stopped process. |
+| `alarm` | Listener and PendingIntent alarms on a scheduler thread, at least 5 s ahead (`MIN_FUTURITY`), RTC converted to elapsed time. PendingIntent repeats clamp to at least 60 s; `remove(operation)` cancels them. Exact PendingIntent alarms enforce the target-SDK permission policy; exact listener alarms remain exempt. Alarms never restart a stopped process; AlarmClockInfo scheduling is unsupported. |
 | `account` | No accounts or authenticators (no Play services); secret reads and explicit additions are rejected. |
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
 
@@ -235,6 +235,75 @@ for its own package: nothing is posted, so they find nothing. Clipboard and
 alarm checks construct a focused clipboard and wait for a real listener alarm.
 `ManagedServiceBatch` exercises these through the real managers; see
 [the test record](../TESTS.md#common-device-services-2026-10-13).
+
+### Settings, PendingIntents and broadcasts (2026-10-13)
+
+`FrameworkSettings` serves `GET_system`, `GET_secure`, `GET_global`,
+`GET_config` and the corresponding `LIST_*` call protocols. Its fresh user-0
+phone defaults come from Android 15's
+[DatabaseHelper](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/packages/SettingsProvider/src/com/android/providers/settings/DatabaseHelper.java),
+the SettingsProvider resources, framework resources from this runtime, and
+the fresh-device effects of
+[UpgradeController](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java).
+`Tools/Android/generate-settings-defaults.py` caches the pinned inputs outside
+the checkout and emits `FrameworkSettingsDefaults.java` with source hashes;
+`--check` verifies regeneration. The destination table follows the loader,
+including constants historically aliased to another namespace. Framework
+configuration resources are resolved from `Resources.getSystem()` at runtime.
+`accelerometer_rotation` is present and defaults to `0`; Google's
+`limit_ad_tracking` remains absent.
+
+This is a fresh phone profile, not an existing-device database upgrader. Wear
+defaults (v203/v217), VR listeners (v125), upgrade-only SSAID migration (v136),
+gesture navigation insets (v191), refresh-rate rewrites (v222), and deletes of
+keys absent on a fresh device are omitted. It has no DeviceConfig overrides,
+query/cursor API or privileged settings administration.
+
+Foreign callers/users are rejected; current-user aliases resolve to user 0.
+`PUT_secure`, `PUT_global` and `PUT_config` require the unavailable privileged
+grant. `PUT_system` requires requested `WRITE_SETTINGS` and target SDK below
+23: newer apps have no user-granted special access in this profile.
+The install-time permission model and `Settings.System.canWrite` agree with
+that policy. Writes are limited to AOSP `PUBLIC_SETTINGS` and checked against
+its validators. Values, including nullable overrides, are atomically saved in
+the app runtime's `/data/system/users/0/bifrost-system-settings.xml`, preserved
+through runtime replacement. This is per-app state, not device-wide mutable
+settings shared between different applications. Read-only `MemoryIntArray`
+duplicates carry generation data; writes invalidate framework caches and
+notify matching ContentObservers.
+
+Framework permission definitions are parsed once from the immutable platform
+APK and cached separately. Each app install still recomputes app definitions,
+requested permissions and grants, so the cache does not retain revoked or
+previous-app grants.
+
+`FrameworkPendingIntents` follows Android 15's
+[PendingIntentController](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/PendingIntentController.java)
+and [PendingIntentRecord](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/PendingIntentRecord.java):
+identity includes sender type, package/feature, Activity token/result target,
+request code, final Intent filter, resolved type, retained flags and user.
+Extras do not change identity. `NO_CREATE`, `CANCEL_CURRENT`, `UPDATE_CURRENT`,
+`ONE_SHOT`, immutable/mutable sends, cancel listeners, metadata and tags are
+supported. Update replaces extras even for immutable senders; mutable send
+uses `Intent.fillIn`. The local IIntentSender is attached to a real Binder,
+so Parcel round trips retain identity. Android 15 exposes creator package/UID
+through `getInfoForIntentSender` rather than older separate AIDL queries.
+
+Activity sends use `FrameworkActivities`; Activity-result sends post to the
+target Activity; service sends use `FrameworkServiceRuntime`. Foreground
+service sends retain that runtime's explicit unsupported error. Dynamic
+receiver registration retains filters, permissions and export flags;
+`broadcastIntentWithFeature` and PendingIntent broadcasts match them and
+the installed manifest's receivers. Android 15's `scheduleRegisteredReceiver`
+and `scheduleReceiver` deliver through ActivityThread. Ordered delivery waits
+for `finishReceiver`, propagates results, and honors aborts. Protected actions
+come from the platform manifest; apps cannot send them. Broadcast options,
+app-op policies, sticky app broadcasts, receivers in other processes and
+cross-app delivery are unsupported. There is no broadcast timeout/ANR policy.
+Sender records and alarms live in the current process; they do not survive
+process exit or implement system-server background/wakeup policies.
+Notifications still have no posting/interaction implementation; supporting
+PendingIntent tokens does not make notification taps available.
 
 ### Software Gralloc5 (2026-10-13)
 
@@ -1512,8 +1581,9 @@ force-stop check: `PendingIntent.getBroadcast(..., FLAG_NO_CREATE, ...)`.
 user, sender type and intents and returns null for an empty-registry
 `FLAG_NO_CREATE` lookup. This follows the lookup contract in Android 15's
 [PendingIntent](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/PendingIntent.java).
-Sender creation remains explicitly unsupported; this does not implement alarms
-or background PendingIntent delivery.
+Sender creation and in-process delivery are now supported as described in
+the Settings, PendingIntents and broadcasts section above. Process restart
+and cross-app background PendingIntent delivery remain unavailable.
 
 In the real untraced JIT session `84a17b02fbb54a1d83802245e543c2a3`, Azur Lane
 passed that path and wrote 2,305,675,539 asset bytes across 12,470 files, up from
@@ -2196,8 +2266,9 @@ identity. Corrupt or redirected key files fail explicitly instead of silently
 generating a new identity.
 
 This is a bounded user-0 settings profile. Foreign users/callers are rejected;
-unprovided keys return null so framework defaults still apply. Settings writes,
-observers, query-based access and generation tracking are not implemented.
+unprovided keys return null so framework defaults still apply. Fresh AOSP
+defaults, permitted System writes, observers and generation tracking are
+implemented as described above; query-based access remains unsupported.
 `APP_SETTINGS_OK` checks real framework reads, defaults, write denial and a
 fixed derivation oracle; the signed fixture independently computes the expected
 ID from its actual certificate and checks persistence through a forced runtime
@@ -2223,7 +2294,8 @@ orientation, enabled/direct-boot filters, and `GET_META_DATA` behavior, as servi
 and provider queries do. Permission checks grant only the installed app's
 requested normal permissions, using protection levels parsed from the runtime's
 `framework-res.apk` and the app's own permission definitions. Unknown names,
-other UIDs/devices, runtime permissions and signature permissions are denied;
+other UIDs/devices, runtime permissions and signature permissions are denied
+(apart from the pre-M `WRITE_SETTINGS` compatibility grant described above);
 runtime grant dialogs and signature grant policy are not implemented. Package
 permission flags agree with this bounded policy. See Android's
 [permission types](https://developer.android.com/guide/topics/permissions/overview#types_of_permissions).

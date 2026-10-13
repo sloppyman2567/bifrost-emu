@@ -21,6 +21,14 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   configurations must agree. Process, Activity and bind configurations take
   `uiMode` from `FrameworkUiMode.CONFIGURATION_UI_MODE`. New `Framework*.java`
   modules go in `LAUNCHER_SOURCES` (`Scripts/Android/android_managed.py`).
+- Settings defaults are generated from pinned AOSP inputs with
+  `Tools/Android/generate-settings-defaults.py`; regenerate rather than edit
+  `FrameworkSettingsDefaults.java`. Preserve System overrides through runtime
+  replacement and keep write grants, validators, cache generations and
+  observer notifications consistent. PendingIntent identity excludes extras;
+  broadcasts must use the image's ActivityThread receiver signatures and
+  protected-action declarations. Keep unsupported cross-process and
+  foreground-service behavior explicit.
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the

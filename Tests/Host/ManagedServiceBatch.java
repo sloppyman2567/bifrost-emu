@@ -2,6 +2,17 @@
 import android.app.NotificationChannel;
 import android.app.NotificationChannelGroup;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ServiceInfo;
+import android.os.Bundle;
+import android.provider.Settings;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
@@ -23,6 +34,224 @@ import java.util.List;
 public final class ManagedServiceBatch {
     private static final String NAME = "org.bifrost.servicebatch";
     private static int checks;
+    private static volatile CountDownLatch manifestDelivery, serviceDelivery, resultDelivery;
+    private static volatile Intent manifestIntent, serviceIntent, resultIntent;
+    private static final List<Long> manifestTimes = java.util.Collections.synchronizedList(new ArrayList<>());
+    public static final class ProbeReceiver extends BroadcastReceiver {
+        @Override public void onReceive(Context context, Intent intent) {
+            manifestIntent = intent;
+            manifestTimes.add(android.os.SystemClock.elapsedRealtime());
+            if (isOrderedBroadcast()) setResultCode(getResultCode() + 1);
+            manifestDelivery.countDown();
+        }
+    }
+    public static final class ProbeService extends android.app.Service {
+        @Override public IBinder onBind(Intent intent) { return null; }
+        @Override public int onStartCommand(Intent intent, int flags, int id) {
+            serviceIntent = intent; serviceDelivery.countDown(); return START_NOT_STICKY;
+        }
+    }
+    public static final class ProbeActivity extends android.app.Activity {
+        @Override protected void onActivityResult(int request, int result, Intent data) {
+            resultIntent = data;
+            if (request == 17 && result == 23) resultDelivery.countDown();
+        }
+    }
+
+    private static Object launcherField(String name) throws Exception {
+        java.lang.reflect.Field field = ManagedLauncher.class.getDeclaredField(name);
+        field.setAccessible(true); return field.get(null);
+    }
+
+    private static void settings(Context context, Context system, FrameworkPackages packages, PackageInfo pkg) throws Exception {
+        check(Settings.System.getInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION) == 0,
+                "accelerometer_rotation default missing");
+        check(Settings.System.getInt(context.getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT) == 60000,
+                "screen timeout default missing");
+        check(Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.LOCATION_MODE) == 3
+                && Settings.Secure.getInt(context.getContentResolver(), "notification_bubbles") == 1,
+                "fresh-device upgrade defaults missing");
+        check(Settings.Secure.getString(context.getContentResolver(), "limit_ad_tracking") == null,
+                "Google setting fabricated");
+        FrameworkSettings provider = (FrameworkSettings) launcherField("settings");
+        check(provider.call("LIST_system", null, null, null).getStringArrayList("result_settings_list")
+                .contains("accelerometer_rotation=0"), "LIST_system protocol incorrect");
+        check(provider.call("GET_config", "unknown/name", null, null).getString("value") == null,
+                "DeviceConfig overrides invented");
+        Bundle other = new Bundle(); other.putInt("_user", 1);
+        denied(() -> provider.call("GET_system", "accelerometer_rotation", other, null));
+        denied(() -> Settings.System.putInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 1));
+        check(!Settings.System.canWrite(context), "modern WRITE_SETTINGS granted");
+        denied(() -> Settings.Secure.putInt(context.getContentResolver(), "location_mode", 0));
+        denied(() -> Settings.Global.putInt(context.getContentResolver(), "airplane_mode_on", 1));
+        String[] original = pkg.requestedPermissions;
+        pkg.requestedPermissions = Arrays.copyOf(original, original.length + 1);
+        pkg.requestedPermissions[original.length] = "android.permission.WRITE_SETTINGS";
+        pkg.requestedPermissionsFlags = new int[pkg.requestedPermissions.length];
+        pkg.applicationInfo.targetSdkVersion = 22; packages.install(system, pkg);
+        check(packages.granted("android.permission.WRITE_SETTINGS") && Settings.System.canWrite(context), "legacy WRITE_SETTINGS grant disagrees with canWrite");
+        Bundle tracking = new Bundle(); tracking.putString("_track_generation", null);
+        Bundle tracked = provider.call("GET_system", "accelerometer_rotation", tracking, null);
+        Object memory = tracked.getParcelable("_track_generation");
+        int index = tracked.getInt("_generation_index"), before = tracked.getInt("_generation");
+        CountDownLatch observed = new CountDownLatch(1);
+        android.database.ContentObserver observer = new android.database.ContentObserver(new android.os.Handler(Looper.getMainLooper())) {
+            @Override public void onChange(boolean self, Uri uri) { if (Settings.System.getUriFor("accelerometer_rotation").equals(uri)) observed.countDown(); }
+        };
+        context.getContentResolver().registerContentObserver(Settings.System.getUriFor("accelerometer_rotation"), false, observer);
+        check(Settings.System.putInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 1)
+                && Settings.System.getInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION) == 1,
+                "legacy WRITE_SETTINGS or cached read incorrect");
+        check((Integer) memory.getClass().getMethod("get", int.class).invoke(memory, index) > before,
+                "settings generation not incremented");
+        check(observed.await(5, TimeUnit.SECONDS), "Settings observer not notified");
+        context.getContentResolver().unregisterContentObserver(observer);
+        memory.getClass().getMethod("close").invoke(memory);
+        invalid(() -> Settings.System.putInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 2));
+        invalid(() -> Settings.System.putString(context.getContentResolver(), "bifrost.private", "x"));
+        try (FrameworkSettings reopened = new FrameworkSettings(packages, new FrameworkContent())) {
+            check(reopened.call("GET_system", "accelerometer_rotation", null, null).getString("value").equals("1"), "System write not persistent");
+        }
+        Settings.System.putInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0);
+        pkg.applicationInfo.targetSdkVersion = 35;
+        pkg.requestedPermissions = original; pkg.requestedPermissionsFlags = new int[original.length]; packages.install(system, pkg);
+    }
+
+    private static void pendingIntents(Context context, Object thread, Object loaded, FrameworkPackages packages) throws Exception {
+        FrameworkBroadcasts broadcasts = (FrameworkBroadcasts) launcherField("broadcasts");
+        broadcasts.attach(thread, NAME);
+        ((FrameworkServiceRuntime) launcherField("serviceRuntime")).attach(thread, context.getApplicationInfo());
+        FrameworkActivities activities = (FrameworkActivities) launcherField("activities");
+        Binder token = new Binder();
+        java.util.concurrent.FutureTask<android.app.Activity> root = new java.util.concurrent.FutureTask<>(() -> {
+            ActivityInfo info = new ActivityInfo(); info.applicationInfo = context.getApplicationInfo();
+            info.packageName = NAME; info.name = ProbeActivity.class.getName();
+            android.app.Activity instance = new android.app.Instrumentation().newActivity(ProbeActivity.class, context, token,
+                    (android.app.Application) context, new Intent().setComponent(new ComponentName(NAME, info.name)),
+                    info, "PendingIntent probe", null, null, null);
+            FrameworkActivities.attachThread(instance, thread);
+            return instance;
+        });
+        new android.os.Handler(Looper.getMainLooper()).post(root);
+        activities.attach(thread, loaded, new android.app.Instrumentation(), (android.app.Application) context, root.get(5, TimeUnit.SECONDS), token);
+        Object activity = endpoint("activity", "android.app.IActivityManager");
+        BroadcastReceiver systemReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent intent) { }
+        };
+        IntentFilter protectedFilter = new IntentFilter(Intent.ACTION_SCREEN_ON);
+        protectedFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        context.registerReceiver(systemReceiver, protectedFilter);
+        context.unregisterReceiver(systemReceiver);
+        check(true, "protected-only receiver registration failed");
+        denied(() -> context.registerReceiver(systemReceiver, new IntentFilter(NAME + ".UNPROTECTED")));
+        protectedFilter.addAction(NAME + ".UNPROTECTED");
+        denied(() -> context.registerReceiver(systemReceiver, protectedFilter));
+        Intent base = new Intent(NAME + ".DYNAMIC").setPackage(NAME).putExtra("value", 1);
+        int immutable = PendingIntent.FLAG_IMMUTABLE;
+        check(PendingIntent.getBroadcast(context, 1, base, immutable | PendingIntent.FLAG_NO_CREATE) == null,
+                "NO_CREATE created a sender");
+        PendingIntent first = PendingIntent.getBroadcast(context, 1, base, immutable);
+        check(first.getCreatorPackage().equals(NAME) && first.getCreatorUid() == Process.myUid()
+                && first.isImmutable() && first.isBroadcast(), "PendingIntent metadata incorrect");
+        android.os.Parcel parcel = android.os.Parcel.obtain();
+        try {
+            first.writeToParcel(parcel, 0); parcel.setDataPosition(0);
+            check(first.equals(PendingIntent.CREATOR.createFromParcel(parcel)), "PendingIntent Binder identity lost in parcel");
+        } finally { parcel.recycle(); }
+        denied(() -> invoke(activity, "getIntentSenderWithFeature", 1, "foreign", null, null, null, 1, new Intent[] {base}, null, immutable, null, 0));
+        invalid(() -> invoke(activity, "getIntentSenderWithFeature", 1, NAME, null, null, null, 1, new Intent[] {new Intent("implicit")}, null, PendingIntent.FLAG_MUTABLE, null, 0));
+        check(first.equals(PendingIntent.getBroadcast(context, 1, new Intent(base).putExtra("value", 2), immutable)),
+                "extras affect sender identity");
+        check(!first.equals(PendingIntent.getBroadcast(context, 2, base, immutable)), "requestCode omitted from identity");
+        CountDownLatch delivered = new CountDownLatch(1);
+        Intent[] received = new Intent[1];
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent intent) { received[0] = intent; delivered.countDown(); }
+        };
+        context.registerReceiver(receiver, new IntentFilter(base.getAction()), Context.RECEIVER_NOT_EXPORTED);
+        first = PendingIntent.getBroadcast(context, 1, new Intent(base).putExtra("value", 7), immutable | PendingIntent.FLAG_UPDATE_CURRENT);
+        first.send(context, 0, new Intent("injected").putExtra("value", 9));
+        check(delivered.await(5, TimeUnit.SECONDS) && received[0].getIntExtra("value", 0) == 7
+                && base.getAction().equals(received[0].getAction()), "UPDATE_CURRENT or immutable fill-in incorrect");
+        context.unregisterReceiver(receiver);
+        PendingIntent old = first;
+        CountDownLatch cancelled = new CountDownLatch(1);
+        Object cancelListener = new FrameworkServices().local("cancel-probe", "com.android.internal.os.IResultReceiver", (method, a) -> {
+            if (!method.equals("send")) throw new UnsupportedOperationException(method);
+            cancelled.countDown(); return null;
+        });
+        Object oldTarget = PendingIntent.class.getMethod("getTarget").invoke(old);
+        check((Boolean) invoke(activity, "registerIntentSenderCancelListenerEx", oldTarget, cancelListener), "cancel listener registration failed");
+        first = PendingIntent.getBroadcast(context, 1, base, immutable | PendingIntent.FLAG_CANCEL_CURRENT);
+        check(!old.equals(first) && cancelled.await(5, TimeUnit.SECONDS), "CANCEL_CURRENT failed");
+        try { old.send(); throw new AssertionError("Cancelled sender sent"); } catch (PendingIntent.CanceledException expected) { checks++; }
+        PendingIntent once = PendingIntent.getBroadcast(context, 3, base, immutable | PendingIntent.FLAG_ONE_SHOT);
+        once.send();
+        try { once.send(); throw new AssertionError("ONE_SHOT sent twice"); } catch (PendingIntent.CanceledException expected) { checks++; }
+        CountDownLatch mutableDelivery = new CountDownLatch(1);
+        BroadcastReceiver mutableReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent intent) { received[0] = intent; mutableDelivery.countDown(); }
+        };
+        context.registerReceiver(mutableReceiver, new IntentFilter(base.getAction()), Context.RECEIVER_NOT_EXPORTED);
+        PendingIntent mutable = PendingIntent.getBroadcast(context, 4, base, PendingIntent.FLAG_MUTABLE);
+        mutable.send(context, 0, new Intent().putExtra("added", 8));
+        check(mutableDelivery.await(5, TimeUnit.SECONDS) && received[0].getIntExtra("added", 0) == 8
+                && received[0].getIntExtra("value", 0) == 1, "mutable extras merge failed");
+        context.unregisterReceiver(mutableReceiver);
+        CountDownLatch copies = new CountDownLatch(2);
+        boolean[] isolated = {false};
+        BroadcastReceiver mutate = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent intent) { intent.getIntArrayExtra("array")[0] = 9; copies.countDown(); }
+        };
+        BroadcastReceiver inspect = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent intent) { isolated[0] = intent.getIntArrayExtra("array")[0] == 1; copies.countDown(); }
+        };
+        context.registerReceiver(mutate, new IntentFilter(base.getAction()), Context.RECEIVER_NOT_EXPORTED);
+        context.registerReceiver(inspect, new IntentFilter(base.getAction()), Context.RECEIVER_NOT_EXPORTED);
+        int[] originalArray = {1};
+        context.sendBroadcast(new Intent(base).putExtra("array", originalArray));
+        check(copies.await(5, TimeUnit.SECONDS) && isolated[0] && originalArray[0] == 1, "broadcast nested extras were shared");
+        context.unregisterReceiver(mutate); context.unregisterReceiver(inspect);
+        manifestDelivery = new CountDownLatch(1);
+        Intent manifest = new Intent(NAME + ".MANIFEST").setComponent(new ComponentName(NAME, ProbeReceiver.class.getName()));
+        PendingIntent manifestSender = PendingIntent.getBroadcast(context, 5, manifest, immutable);
+        manifestSender.send();
+        check(manifestDelivery.await(5, TimeUnit.SECONDS) && manifest.getAction().equals(manifestIntent.getAction()), "manifest receiver delivery failed");
+        CountDownLatch orderedDelivery = new CountDownLatch(1);
+        context.sendOrderedBroadcast(manifest, null, new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent intent) { if (getResultCode() == 8) orderedDelivery.countDown(); }
+        }, new android.os.Handler(Looper.getMainLooper()), 7, null, null);
+        check(orderedDelivery.await(5, TimeUnit.SECONDS), "finishReceiver lost ordered result");
+        serviceDelivery = new CountDownLatch(1);
+        Intent service = new Intent().setComponent(new ComponentName(NAME, ProbeService.class.getName())).putExtra("service", 11);
+        PendingIntent.getService(context, 6, service, immutable).send();
+        check(serviceDelivery.await(5, TimeUnit.SECONDS) && serviceIntent.getIntExtra("service", 0) == 11, "service sender delivery failed");
+        try { PendingIntent.getForegroundService(context, 7, service, immutable).send(); throw new AssertionError("Foreground service silently accepted"); }
+        catch (UnsupportedOperationException expected) { checks++; }
+        resultDelivery = new CountDownLatch(1);
+        Object resultSender = invoke(activity, "getIntentSenderWithFeature", 3, NAME, null, token, null, 17, new Intent[] {new Intent("result")}, null, immutable, null, 0);
+        check((Integer) invoke(activity, "sendIntentSender", null, resultSender, null, 23, null, null, null, null, null) == 0
+                && resultDelivery.await(5, TimeUnit.SECONDS) && "result".equals(resultIntent.getAction()), "Activity-result sender delivery failed");
+        PendingIntent activitySender = PendingIntent.getActivity(context, 8, new Intent("unresolved"), immutable);
+        check(activitySender.isActivity(), "Activity sender type lost");
+        try { activitySender.send(); throw new AssertionError("Unresolved Activity send succeeded"); }
+        catch (PendingIntent.CanceledException expected) { checks++; }
+        android.app.AlarmManager alarm = context.getSystemService(android.app.AlarmManager.class);
+        denied(() -> alarm.setExact(android.app.AlarmManager.ELAPSED_REALTIME, 0, manifestSender));
+        manifestDelivery = new CountDownLatch(1);
+        alarm.set(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime(), manifestSender);
+        check(manifestDelivery.await(15, TimeUnit.SECONDS), "PendingIntent alarm did not deliver");
+        manifestDelivery = new CountDownLatch(1);
+        alarm.set(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime(), manifestSender); alarm.cancel(manifestSender);
+        check(!manifestDelivery.await(6, TimeUnit.SECONDS), "remove(operation) did not cancel alarm");
+        manifestTimes.clear(); manifestDelivery = new CountDownLatch(2);
+        alarm.setRepeating(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime(), 1000, manifestSender);
+        check(manifestDelivery.await(75, TimeUnit.SECONDS) && manifestTimes.size() == 2
+                && manifestTimes.get(1) - manifestTimes.get(0) >= 59900, "repeating PendingIntent alarm or 60-second minimum incorrect");
+        alarm.cancel(manifestSender);
+        first.cancel(); mutable.cancel(); manifestSender.cancel(); activitySender.cancel();
+        check(PendingIntent.getBroadcast(context, 1, base, immutable | PendingIntent.FLAG_NO_CREATE) == null, "cancelled sender remains in registry");
+    }
     private static void check(boolean value, String message) {
         if (!value) throw new AssertionError(message);
         checks++;
@@ -451,6 +680,14 @@ public final class ManagedServiceBatch {
         info.enabled = true; info.targetSdkVersion = 35;
         info.sourceDir = info.publicSourceDir = "/system/framework/framework-res.apk";
         info.dataDir = "/data/user/0/" + NAME;
+        ActivityInfo receiver = new ActivityInfo();
+        receiver.name = ProbeReceiver.class.getName(); receiver.packageName = NAME; receiver.applicationInfo = info;
+        receiver.enabled = true; receiver.exported = false; receiver.processName = NAME;
+        pkg.receivers = new ActivityInfo[] {receiver};
+        ServiceInfo service = new ServiceInfo();
+        service.name = ProbeService.class.getName(); service.packageName = NAME; service.applicationInfo = info;
+        service.enabled = true; service.exported = false; service.processName = NAME;
+        pkg.services = new ServiceInfo[] {service};
         new File(info.dataDir).mkdirs();
         pkg.requestedPermissions = new String[] {"android.permission.WAKE_LOCK", "android.permission.MODIFY_AUDIO_SETTINGS",
                 "android.permission.ACCESS_WIFI_STATE", "android.permission.CHANGE_WIFI_STATE",
@@ -460,6 +697,8 @@ public final class ManagedServiceBatch {
         Class<?> compatibility = Class.forName("android.content.res.CompatibilityInfo");
         Object loaded = threadType.getMethod("getPackageInfoNoCheck", ApplicationInfo.class, compatibility)
                 .invoke(thread, info, compatibility.getField("DEFAULT_COMPATIBILITY_INFO").get(null));
+        java.lang.reflect.Field loader = loaded.getClass().getDeclaredField("mClassLoader");
+        loader.setAccessible(true); loader.set(loaded, ManagedServiceBatch.class.getClassLoader());
         Method bind = ManagedLauncher.class.getDeclaredMethod("bindApplicationMetadata", Object.class,
                 Context.class, ApplicationInfo.class, Object.class);
         bind.setAccessible(true); bind.invoke(null, thread, system, info, loaded);
@@ -467,10 +706,18 @@ public final class ManagedServiceBatch {
                 android.app.Instrumentation.class);
         make.setAccessible(true);
         Context context = (Context) make.invoke(loaded, false, null);
+        java.lang.reflect.Field initial = threadType.getDeclaredField("mInitialApplication");
+        initial.setAccessible(true); initial.set(thread, context);
+        new Thread(() -> {
+        try {
         notifications(context, packages); audio(context); power(context); wifi(context);
         uiMode(context); permissions(context);
         battery(context); vibratorAndKeyguard(context); clipboard(context, packages);
         alarmsAccountsLocation(context);
+        settings(context, system, packages, pkg);
+        System.out.println("MANAGED_SETTINGS_OK");
+        pendingIntents(context, thread, loaded, packages);
+        System.out.println("MANAGED_PENDING_INTENTS_OK");
         pkg.requestedPermissions = new String[0]; pkg.requestedPermissionsFlags = new int[0];
         packages.install(system, pkg);
         Object wifi = endpoint("wifi", "android.net.wifi.IWifiManager");
@@ -484,6 +731,10 @@ public final class ManagedServiceBatch {
         denied(() -> invoke(window, "disableKeyguard", new Binder(), "denied", 0));
         System.out.println("MANAGED_SERVICE_BATCH_OK checks=" + checks);
         System.out.println("FRAMEWORK_OK");
+        System.exit(0);
+        } catch (Throwable error) { error.printStackTrace(); System.exit(1); }
+        }, "service-checks").start();
+        Looper.loop();
     }
 
     public static void main(String[] args) {

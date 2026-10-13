@@ -18,6 +18,12 @@ final class FrameworkAppOps {
         switch (method) {
             // Firebase measurement (GMS UidVerifier) via AppOpsManager.checkPackage.
             case "checkPackage": return checkPackage((Integer) a[0], (String) a[1]);
+            case "checkOperation":
+                // OP_WRITE_SETTINGS: no user override, so Settings.canWrite
+                // falls back to the install-time (pre-M) permission grant.
+                if ((Integer) a[0] != 23) throw new UnsupportedOperationException("appops.checkOperation " + a[0]);
+                if (checkPackage((Integer) a[1], (String) a[2]) != MODE_ALLOWED) return MODE_ERRORED;
+                return 3; // MODE_DEFAULT
             default:
                 System.out.println("APPOPS_UNSUPPORTED " + method);
                 throw new UnsupportedOperationException("appops." + method);

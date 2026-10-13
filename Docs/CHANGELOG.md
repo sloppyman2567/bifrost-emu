@@ -13,6 +13,23 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Asgard Settings and PendingIntent contracts (2026-10-13)
+
+- Generate fresh user-0 phone Settings defaults from pinned Android 15
+  DatabaseHelper/resources and reviewed SettingsProvider upgrades. System
+  settings include `accelerometer_rotation=0`; Google-specific keys remain
+  absent. Legacy `WRITE_SETTINGS` grants, public-key validation, persistent
+  per-app overrides, cache generations and ContentObservers now work.
+- Implement local Binder-backed PendingIntent identity, lookup/update/cancel,
+  one-shot and mutability rules, cancellation callbacks, metadata and delivery
+  to Activities, Activity results, services and dynamic/manifest receivers.
+  Ordered broadcasts propagate completion/results and enforce platform
+  protected actions. Foreground services, cross-app/process receiver delivery,
+  process restart and notification interactions remain unsupported.
+- Accept PendingIntent alarms, including repeating intervals of at least
+  60 seconds and cancellation by operation; enforce exact-alarm permissions.
+  Preserve System overrides across managed runtime upgrades.
+
 ### Common Android device services (2026-10-13)
 
 - Managed apps get eleven more framework services, so `getSystemService`
@@ -25,8 +42,8 @@ labels below are historical records.
   null `UiModeManager`.
 - `registerReceiver` now returns and delivers the sticky
   `ACTION_BATTERY_CHANGED` broadcast, and configurations carry `uiMode`
-  normal/night-off. Listener alarms fire; PendingIntent alarms, host
-  clipboard sharing and host battery state are not implemented.
+  normal/night-off. Listener and PendingIntent alarms fire; host clipboard
+  sharing and host battery state are not implemented.
 
 ### Fewer JIT recompiles and compile stalls (2026-10-13)
 

@@ -430,6 +430,20 @@ final class FrameworkActivities {
         return stack.isEmpty() ? null : stack.get(stack.size() - 1);
     }
 
+    synchronized boolean contains(IBinder token) { return find(token) != null; }
+
+    synchronized void result(IBinder token, String who, int requestCode, int code, Intent intent) {
+        Record record = find(token);
+        if (record == null || record.activity.isFinishing()) return;
+        Intent data = intent == null ? null : new Intent(intent);
+        main.post(() -> {
+            try {
+                method(Activity.class, "dispatchActivityResult", String.class, int.class, int.class,
+                        Intent.class, String.class).invoke(record.activity, who, requestCode, code, data, "pending-intent");
+            } catch (Exception error) { throw new RuntimeException("PendingIntent Activity result", error); }
+        });
+    }
+
     private synchronized Record find(IBinder token) {
         for (Record record : stack) if (record.token == token) return record;
         return null;

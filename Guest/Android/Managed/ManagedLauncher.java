@@ -111,6 +111,10 @@ public final class ManagedLauncher {
     private static final FrameworkPermissions permissions = new FrameworkPermissions(packages);
     private static final FrameworkUiMode uiMode = new FrameworkUiMode(packages);
     private static final FrameworkBattery battery = new FrameworkBattery(packages);
+    private static final FrameworkSettings settings = new FrameworkSettings(packages, content);
+    private static final FrameworkBroadcasts broadcasts = new FrameworkBroadcasts(packages, battery);
+    private static final FrameworkPendingIntents pendingIntents =
+            new FrameworkPendingIntents(services, packages, activities, serviceRuntime, broadcasts);
     private static final FrameworkVibrator vibrator = new FrameworkVibrator(packages);
     private static final FrameworkKeyguard keyguard = new FrameworkKeyguard(packages);
     private static final FrameworkClipboard clipboard = new FrameworkClipboard(packages, () -> windowOpen);
@@ -862,6 +866,7 @@ public final class ManagedLauncher {
         holderType.getField("provider").set(holder, provider);
         holderType.getField("noReleaseNeeded").setBoolean(holder, true);
         services.register("activity", "android.app.IActivityManager", (method, a) -> {
+            if (pendingIntents.handles(method)) return pendingIntents.invoke(method, a);
             switch (method) {
                 case "addPackageDependency":
                     if (packages.systemPackage((String) a[0]) == null)
@@ -905,24 +910,13 @@ public final class ManagedLauncher {
                 case "unbindFinished": serviceRuntime.unbindFinished((IBinder) a[0], (Intent) a[1], (Boolean) a[2]); return null;
                 case "serviceDoneExecuting": serviceRuntime.done((IBinder) a[0], (Integer) a[1], (Intent) a[4]); return null;
                 case "publishContentProviders": content.publishProviders(a[0], (List<?>) a[1]); return null;
-                case "getIntentSenderWithFeature": {
-                    String owner = (String) a[1];
-                    int user = (Integer) a[10];
-                    if (installed == null || !installed.packageName.equals(owner)
-                            || (user != Process.myUid() / 100000 && user != -2))
-                        throw new SecurityException("Foreign PendingIntent lookup");
-                    int type = (Integer) a[0];
-                    Intent[] intents = (Intent[]) a[6];
-                    if (type < 1 || type > 5 || intents == null || intents.length == 0)
-                        throw new IllegalArgumentException("Invalid PendingIntent request");
-                    for (Intent intent : intents)
-                        if (intent == null) throw new IllegalArgumentException("Null PendingIntent intent");
-                    // No sender creation is implemented, so the sender registry
-                    // is empty. NO_CREATE is a lookup, never a creation request;
-                    // WorkManager uses it before reading process exit history.
-                    if (((Integer) a[8] & android.app.PendingIntent.FLAG_NO_CREATE) != 0) return null;
-                    throw unsupported("activity", method);
-                }
+                case "broadcastIntentWithFeature":
+                    if ((Integer) a[11] != -1 || a[12] != null)
+                        throw unsupported("activity", "broadcastIntentWithFeature options/appOp");
+                    return broadcasts.send((Intent) a[2], (String) a[3], a[4], (Integer) a[5], (String) a[6],
+                            (Bundle) a[7], (String[]) a[8], (String[]) a[9], (String[]) a[10],
+                            (Boolean) a[13], (Boolean) a[14], (Integer) a[15]);
+                case "finishReceiver": broadcasts.finish(a); return null;
             }
             if (method.equals("checkPermissionForDevice"))
                 return packages.checkPermission((String) a[0], (Integer) a[2], (Integer) a[3]);
@@ -972,30 +966,12 @@ public final class ManagedLauncher {
                 return null;
             }
             // ACTION_BATTERY_CHANGED is the only sticky broadcast published here.
-            if (method.equals("registerReceiverWithFeature")) return stickyBroadcast(a[4], (IntentFilter) a[5]);
-            if (method.equals("unregisterReceiver")) return null;
+            if (method.equals("registerReceiverWithFeature")) return broadcasts.register(a);
+            if (method.equals("unregisterReceiver")) { broadcasts.unregister(a[0]); return null; }
             // Scheduling hint for HardwareRenderer's thread; no priority policy here.
             if (method.equals("setRenderThread")) return null;
             throw unsupported("activity", method);
         });
-    }
-
-    // ActivityManagerService.registerReceiverWithFeature: returns the first
-    // sticky Intent the filter matches and schedules it to a new receiver
-    // (LoadedApk's InnerReceiver posts it to the receiver's Handler).
-    private static Intent stickyBroadcast(Object receiver, IntentFilter filter) throws Exception {
-        if (filter == null) throw new NullPointerException("filter");
-        Intent sticky = battery.stickyIntent();
-        if (filter.match(null, sticky, false, "ActivityManager") < 0) return null;
-        if (receiver != null) {
-            for (Method method : receiver.getClass().getMethods()) {
-                if (!method.getName().equals("performReceive") || method.getParameterCount() != 7) continue;
-                method.invoke(receiver, new Intent(sticky), 0, null, null, false, true, 0);
-                return sticky;
-            }
-            throw new IllegalStateException("IIntentReceiver.performReceive missing");
-        }
-        return sticky;
     }
 
     private static Object call(Object target, String name, Class<?>[] types, Object... arguments)
@@ -1051,36 +1027,8 @@ public final class ManagedLauncher {
         return key;
     }
 
-    private static Bundle settingsCall(String method, String name, Bundle extras) {
-        // This profile provides user 0 and immutable settings. Missing values
-        // remain absent, so the real Settings client applies its own defaults.
-        int user = extras == null ? 0 : extras.getInt("_user", 0);
-        if (user != 0 && user != -2 && user != -3)
-            throw new SecurityException("Settings for another user are unavailable");
-        // Settings.Config lists a namespace using a null setting name and
-        // extras._prefix. This immutable profile has no DeviceConfig overrides.
-        // Match SettingsProvider's serialized map response, allowing clients
-        // such as AutofillFeatureFlags to apply their platform defaults.
-        if (method.equals("LIST_config")) {
-            Bundle result = new Bundle();
-            result.putSerializable("value", new java.util.HashMap<String, String>());
-            return result;
-        }
-        if (name == null) throw new IllegalArgumentException("Missing setting name");
-        switch (method) {
-            case "GET_secure":
-            case "GET_system":
-            case "GET_global":
-                Bundle result = new Bundle();
-                result.putString("value", method.equals("GET_secure")
-                        && name.equals(Settings.Secure.ANDROID_ID) ? androidId : null);
-                return result;
-            case "PUT_secure":
-            case "PUT_global":
-            case "PUT_system":
-                throw new SecurityException("Settings writes are not granted by this profile");
-            default: throw unsupported("settings", method);
-        }
+    private static Bundle settingsCall(String method, String name, Bundle extras) throws Exception {
+        return settings.call(method, name, extras, androidId);
     }
 
     private static void checkSettings(Context context) throws Exception {
@@ -1096,6 +1044,9 @@ public final class ManagedLauncher {
                 || settingsCall("GET_system", Settings.Secure.ANDROID_ID, null).getString("value") != null
                 || Settings.Global.getInt(context.getContentResolver(), "bifrost.missing", 37) != 37)
             throw new AssertionError("Settings namespace/default mismatch");
+        if (!java.util.Objects.equals(Settings.System.getString(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION),
+                settingsCall("GET_system", Settings.System.ACCELEROMETER_ROTATION, null).getString("value")))
+            throw new AssertionError("System client/provider values disagree");
         Bundle other = new Bundle();
         other.putInt("_user", 1);
         try {
@@ -1208,6 +1159,7 @@ public final class ManagedLauncher {
         packages.install(system, packageInfo);
         installed = packageInfo;
         androidId = scopedAndroidId(settingsKey(app.uid / 100000), packageInfo.signatures);
+        settings.identityChanged();
         if (diagnostic) {
             packages.checkPackageServices(system);
             checkSettings(system);
@@ -1313,6 +1265,7 @@ public final class ManagedLauncher {
             System.out.println("APP_AUDIO_ROUTING_READY " + config[0] + " " + config[1]);
         }
         serviceRuntime.attach(thread, app);
+        broadcasts.attach(thread, app.packageName);
         jobs.attach(application);
         // handleBindApplication installs this process's manifest providers
         // before Application.onCreate (SDK startup providers depend on it).
@@ -1552,6 +1505,7 @@ public final class ManagedLauncher {
                     new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
             setField(thread, "mInitialApplication", application);
             serviceRuntime.attach(thread, app); serviceRuntime.remote(parent);
+            broadcasts.attach(thread, app.packageName);
             jobs.attach(application);
             parent.ready(call(thread, "getApplicationThread", new Class<?>[0]));
             Looper.loop();
@@ -1595,6 +1549,7 @@ public final class ManagedLauncher {
                     new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
             setField(thread, "mInitialApplication", application);
             serviceRuntime.attach(thread, probeInfo);
+            broadcasts.attach(thread, probeInfo.packageName);
             jobs.attach(application);
             context = application;
             checkApplicationRestrictions(context);

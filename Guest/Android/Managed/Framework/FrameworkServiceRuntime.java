@@ -164,6 +164,10 @@ final class FrameworkServiceRuntime {
         for (Binding binding : record.bindings.values()) requestBinding(binding, false);
     }
 
+    synchronized ComponentName startPending(Intent intent, String resolvedType, String owner, boolean foreground) throws Exception {
+        return start(new Object[] {applicationThread, intent, resolvedType, foreground, owner, null, 0});
+    }
+
     synchronized ComponentName start(Object[] a) throws Exception {
         Intent intent = copy((Intent) a[1]);
         ServiceInfo info = resolve(a[0], intent, (String) a[4], (Integer) a[6]);

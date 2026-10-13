@@ -3,10 +3,10 @@
 // getSystemService(ALARM_SERVICE) is null. Listener alarms (OnAlarmListener)
 // fire on a scheduler thread through IAlarmListener.doAlarm, which AlarmManager
 // posts to the caller's Handler. Alarms do not wake or restart a stopped
-// process. PendingIntent alarms are unsupported: this runtime cannot yet
-// create PendingIntents (IActivityManager.getIntentSenderWithFeature).
+// process. PendingIntent operations use the same sender registry as apps.
 // Timing and permission rules follow Android 15's AlarmManagerService.
 import android.os.IBinder;
+import android.app.PendingIntent;
 import android.os.Process;
 import android.os.SystemClock;
 import java.lang.reflect.Proxy;
@@ -43,7 +43,16 @@ final class FrameworkAlarms implements FrameworkServices.Call {
     }
 
     private final FrameworkPackages packages;
-    private final Map<IBinder, ScheduledFuture<?>> alarms = new HashMap<>();
+    private static final class Alarm {
+        final Object listener;
+        final PendingIntent operation;
+        final long interval;
+        ScheduledFuture<?> future;
+        Alarm(Object listener, PendingIntent operation, long interval) {
+            this.listener = listener; this.operation = operation; this.interval = interval;
+        }
+    }
+    private final Map<IBinder, Alarm> alarms = new HashMap<>();
     private ScheduledThreadPoolExecutor scheduler;
 
     FrameworkAlarms(FrameworkPackages packages) { this.packages = packages; }
@@ -62,6 +71,10 @@ final class FrameworkAlarms implements FrameworkServices.Call {
     }
 
     private static IBinder binder(Object listener) throws Exception {
+        if (listener instanceof PendingIntent) {
+            Object sender = PendingIntent.class.getMethod("getTarget").invoke(listener);
+            return ((android.os.IInterface) sender).asBinder();
+        }
         return (IBinder) listener.getClass().getMethod("asBinder").invoke(listener);
     }
 
@@ -91,11 +104,17 @@ final class FrameworkAlarms implements FrameworkServices.Call {
         return schedule || use;
     }
 
-    private synchronized void fire(IBinder key, Object listener) {
-        if (alarms.remove(key) == null) return;  // removed or replaced after scheduling
+    private void fire(IBinder key, Alarm alarm) {
+        synchronized (this) {
+            if (alarms.get(key) != alarm) return;
+            if (alarm.interval == 0) alarms.remove(key);
+        }
         try {
-            listener.getClass().getMethod("doAlarm", Class.forName("android.app.IAlarmCompleteListener"))
-                    .invoke(listener, completion());
+            if (alarm.operation != null) alarm.operation.send();
+            else alarm.listener.getClass().getMethod("doAlarm", Class.forName("android.app.IAlarmCompleteListener"))
+                    .invoke(alarm.listener, completion());
+        } catch (PendingIntent.CanceledException cancelled) {
+            synchronized (this) { if (alarms.remove(key, alarm)) alarm.future.cancel(false); }
         } catch (Exception error) {
             System.out.println("ALARM_DELIVERY_FAILED " + error);
         }
@@ -110,14 +129,18 @@ final class FrameworkAlarms implements FrameworkServices.Call {
                 ownPackage(a[0]);
                 int type = (Integer) a[1];
                 long trigger = (Long) a[2], interval = (Long) a[4];
-                Object operation = a[6], listener = a[7];
+                PendingIntent operation = (PendingIntent) a[6];
+                Object listener = a[7];
                 if (interval != 0 && listener != null)
                     throw new IllegalArgumentException("Repeating alarms cannot use AlarmReceivers");
                 if (a[9] != null) enforce("android.permission.UPDATE_DEVICE_STATS");  // workSource
-                if (operation != null && listener == null)
-                    throw new UnsupportedOperationException("alarm.set with a PendingIntent");
                 // "Alarms must either supply a PendingIntent or an AlarmReceiver": dropped.
-                if (operation != null || listener == null) return null;
+                if ((operation == null) == (listener == null)) return null;
+                if (operation != null && ((Long) a[3] == 0 || a[10] != null) && !exactAllowed())
+                    throw new SecurityException("android.permission.SCHEDULE_EXACT_ALARM or USE_EXACT_ALARM");
+                if (a[10] != null) throw new UnsupportedOperationException("AlarmClockInfo scheduling");
+                if (interval < 0) interval = 0;
+                if (interval > 0) interval = Math.max(60000, Math.min(interval, 31536000000L));
                 if (type < RTC_WAKEUP || type > ELAPSED_REALTIME)
                     throw new IllegalArgumentException("Invalid alarm type " + type);
                 if (trigger < 0) trigger = 0;
@@ -125,9 +148,9 @@ final class FrameworkAlarms implements FrameworkServices.Call {
                 // convertToElapsed: RTC types are wall-clock times.
                 if (type <= 1) trigger -= System.currentTimeMillis() - now;
                 long when = Math.max(now + MIN_FUTURITY, trigger);
-                IBinder key = binder(listener);
-                ScheduledFuture<?> previous = alarms.remove(key);
-                if (previous != null) previous.cancel(false);
+                IBinder key = binder(operation == null ? listener : operation);
+                Alarm previous = alarms.remove(key);
+                if (previous != null) previous.future.cancel(false);
                 if (alarms.size() >= 500) throw new IllegalStateException("Maximum limit of concurrent alarms 500 reached");
                 if (scheduler == null) {
                     scheduler = new ScheduledThreadPoolExecutor(1, task -> {
@@ -137,18 +160,22 @@ final class FrameworkAlarms implements FrameworkServices.Call {
                     });
                     scheduler.setRemoveOnCancelPolicy(true);
                 }
-                alarms.put(key, scheduler.schedule(() -> fire(key, listener), when - now, TimeUnit.MILLISECONDS));
+                Alarm alarm = new Alarm(listener, operation, interval);
+                alarms.put(key, alarm);
+                if (interval == 0) alarm.future = scheduler.schedule(() -> fire(key, alarm), when - now, TimeUnit.MILLISECONDS);
+                else alarm.future = scheduler.scheduleAtFixedRate(() -> fire(key, alarm), when - now, interval, TimeUnit.MILLISECONDS);
                 return null;
             }
             case remove: {
-                if (a[1] == null) return null;  // PendingIntent alarms never exist here
-                ScheduledFuture<?> alarm = alarms.remove(binder(a[1]));
-                if (alarm != null) alarm.cancel(false);
+                if (a[0] == null && a[1] == null) return null;
+                IBinder key = binder(a[0] == null ? a[1] : a[0]);
+                Alarm alarm = alarms.remove(key);
+                if (alarm != null) alarm.future.cancel(false);
                 return null;
             }
             case removeAll: {
                 ownPackage(a[0]);
-                for (ScheduledFuture<?> alarm : alarms.values()) alarm.cancel(false);
+                for (Alarm alarm : alarms.values()) alarm.future.cancel(false);
                 alarms.clear();
                 return null;
             }

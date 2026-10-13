@@ -20,6 +20,7 @@ import java.util.List;
 public final class ManagedActivities extends Activity {
     private final Handler main = new Handler();
     private boolean requested, started;
+    private boolean pendingStarted;
     private int permissionResults;
     private int returned;  // results received
 
@@ -37,6 +38,15 @@ public final class ManagedActivities extends Activity {
             return;
         }
         if (returned == 2) {
+            if (!pendingStarted) {
+                pendingStarted = true;
+                try {
+                    android.app.PendingIntent.getActivity(this, 9, new Intent(this, Translucent.class)
+                            .putExtra("back", true).putExtra("pending", true), android.app.PendingIntent.FLAG_IMMUTABLE).send();
+                } catch (android.app.PendingIntent.CanceledException error) { throw new AssertionError(error); }
+                return;
+            }
+            System.out.println("MANAGED_ACTIVITIES_PENDING_RETURNED");
             main.postDelayed(this::finish, 300);
             return;
         }
@@ -128,6 +138,10 @@ public final class ManagedActivities extends Activity {
 
         @Override public void onCreate(Bundle state) {
             super.onCreate(state);
+            if (getIntent().getBooleanExtra("pending", false)) {
+                if (getCallingActivity() != null) throw new AssertionError("PendingIntent invented a result caller");
+                System.out.println("MANAGED_ACTIVITIES_PENDING_CREATED");
+            }
             System.out.println("MANAGED_ACTIVITIES_SECOND_CREATED value="
                     + getIntent().getIntExtra("value", -1) + " caller=" + getCallingActivity());
             Button close = new Button(this);
