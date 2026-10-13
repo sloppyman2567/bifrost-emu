@@ -1018,8 +1018,7 @@ without changing framebuffer alpha or other creation attributes. Translucent
 surfaces retain per-pixel alpha. Hosts without the extension can use alpha-free
 configs; an opaque surface with alpha bits fails creation rather than exposing
 the desktop. Changing opacity on a live EGL surface requires recreation and is
-rejected with EBUSY. Dynamic SurfaceView replacement remains unsupported by the
-play-mode traversal adapter.
+rejected with EBUSY.
 
 The Java `Surface` is an identity key for the host window, not a real libgui
 Surface: its native object stays null, so `Surface.isValid()` is false. Android
@@ -1040,10 +1039,16 @@ right after `APP_STOPPED`, as a phone would. The launcher prints
 reports a SIGKILL exit (137) after that marker as state `closed`, keeping the
 real exit code. A SIGKILL without the marker remains `failed`.
 
-### Framework popup windows (2026-10-12)
+### Framework windows and SurfaceViews (2026-10-13)
 
-Play mode supports `WindowManager.addView` windows other than the Activity's
-SurfaceView content: `Dialog`/`AlertDialog`, `PopupWindow` and similar.
+Every `WindowManager.addView` window goes through one path: the launcher
+Activity's decor, stacked Activities, `Dialog`/`AlertDialog`, `PopupWindow`
+and similar. After `onResume` the launcher adds its decor as a
+`TYPE_BASE_APPLICATION` window like `handleResumeActivity`, so an Activity
+built only from Views (buttons, text, WebView) launches; ViewRootImpl lays it
+out and the window is drawn like any other. A base Activity window stacks
+below the dialogs and panels sharing its token, whatever the add order, as
+in WindowManagerService (a dialog shown from `onResume` is added first).
 `IWindowManager.openSession` returns `FrameworkWindows`' `IWindowSession`:
 - `addToDisplay*` registers the window, initializes its input channel pair
   (ViewRootImpl's receiver requires one), reports size-compat scale 1, display
@@ -1057,15 +1062,50 @@ SurfaceView content: `Dialog`/`AlertDialog`, `PopupWindow` and similar.
 
 Android composes these windows in SurfaceFlinger. Here the UI loop draws each
 view tree in software when it is dirty and sends the pixels through private
-op 9 to a host popup layer above every surface (op 10 removes it); see
-[window plugins](ANDROID_WINDOW_PLUGINS.md). `FLAG_DIM_BEHIND` adds a
-translucent full-display layer below its window. Input follows
-InputDispatcher: touches go to the topmost window containing them or to a
-modal window, popups with `FLAG_WATCH_OUTSIDE_TOUCH` receive `ACTION_OUTSIDE`,
-and keys go to the topmost focusable popup (the back key cancels dialogs).
-The Activity loses window focus while a focusable popup is shown. The log
-records `APP_POPUP_ADDED`, `APP_POPUP_SHOWN … text=<visible text>` and
-`APP_POPUP_REMOVED`. View click sounds are accepted silently.
+op 9 to a host layer above every surface (op 10 removes it); see
+[window plugins](ANDROID_WINDOW_PLUGINS.md). A fully transparent window gets
+no host layer. Host layers stack in creation order, so when a window or dim
+layer appears below existing ones, the layers above it are recreated in
+window order. `FLAG_DIM_BEHIND` adds a translucent full-display layer below
+its window. Input follows InputDispatcher: touches go to the topmost window
+containing them or to a modal window, windows with `FLAG_WATCH_OUTSIDE_TOUCH`
+receive `ACTION_OUTSIDE`, and keys go to the topmost focusable window (the
+back key cancels dialogs). Exactly one window has focus; a window that never
+had it gets no `onWindowFocusChanged(false)`, as under WindowManagerService.
+The log records `APP_POPUP_ADDED`, `APP_POPUP_SHOWN <id> <frame>
+visible=<non-transparent pixels> text=<visible text>` (once per window),
+`APP_POPUP_HIDDEN <id> transparent` when a shown window becomes fully
+transparent, and `APP_POPUP_REMOVED` for every window, Activity windows
+included. Unity's startup placeholder view, for example, covers its
+SurfaceView in the Activity window until Unity removes it. View click
+sounds are accepted silently.
+
+`SurfaceView.updateSurface()` gives up while its window has no
+SurfaceFlinger surface, so `FrameworkSurfaces` applies its visibility
+contract instead
+([Android 15 SurfaceView](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/view/SurfaceView.java)
+`mRequestedVisible` and `mHaveFrame`): a SurfaceView has a host surface while
+it is attached, shown, laid out with a non-empty frame and its window is
+visible and not stopped. After each traversal (a ViewTreeObserver pre-draw)
+the window's SurfaceViews are compared with the tracked ones: a new one gets
+`surfaceCreated` then `surfaceChanged`, a size or format change gets
+`surfaceChanged`, and a hidden, detached or removed one gets
+`surfaceDestroyed` and its host reference released. A created surface marks
+the SurfaceView drawn (`performDrawFinished`), so the window punches its hole
+with `Canvas.punchHole` in drawing order and Views drawn after it stay
+visible above the surface. Host resizes relayout every window
+(`ViewRootImpl.forceWmRelayout`). Window close stops all windows, delivering
+`surfaceDestroyed` before `onStop`. The log records
+`APP_SURFACE <class> <w>x<h> at <x>,<y> format=<f>` and
+`APP_SURFACE_DESTROYED <class>`.
+
+`releaseSurfaces` applies an empty `SurfaceControl.Transaction` on every such
+update. libgui sends it through the legacy `SurfaceFlinger` service
+(`android.ui.ISurfaceComposer`), which `ComposerService` waits for forever.
+The session process therefore publishes `SurfaceFlinger` next to
+`SurfaceFlingerAIDL`: it accepts `SET_TRANSACTION_STATE` with no layer or
+display states and rejects every other transaction, since no SurfaceControl
+layers exist.
 
 The Activity context now receives the override configuration WMS supplies:
 window bounds, app bounds and max bounds equal to the virtual display, updated
@@ -1083,9 +1123,10 @@ launcher now calls the hidden `ViewConfiguration.resetCacheForTesting()`
 after `updateResourcesForActivity` on each resize, so the next lookup uses
 the new bounds.
 
-Limits: windows draw only through software `View.draw` (no hardware layers,
-`TextureView` or SurfaceView inside popups), window animations are not
-played, and system windows (toasts, system alerts) are not composited. On
+Limits: windows draw only through software `View.draw` (no hardware layers or
+`TextureView`), SurfaceView surfaces are not positioned or clipped (see the
+launcher limits below), window animations are not played, and system windows
+(toasts, system alerts) are not composited. On
 X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
 that never redraws (no rendering SurfaceView) can keep stale dialog pixels
 after removal.
@@ -1252,9 +1293,10 @@ second round closed by a `KEYCODE_BACK` through the window's view tree
 (`RESULT_CANCELED`), and a
 display-sized window with the button text on the host layer.
 
-Adding `--play` opens a host window, starts/resumes the Activity, reports
-SurfaceView holder callbacks and pumps host input. These callbacks use the
-managed graphics adapters; they are not a WindowManager attachment. The runner
+Adding `--play` opens a host window, starts/resumes the Activity, adds its
+decor window through WindowManager, reports SurfaceView holder callbacks and
+pumps host input. The SurfaceView surfaces use the managed graphics adapters,
+not SurfaceFlinger. The runner
 also provisions `/storage/emulated/0`. A strict local `mount` service answers
 `getVolumeList` with this single mounted, writable emulated volume for user 0
 (no removable storage or other users), using Android 15's
@@ -1851,11 +1893,15 @@ the corresponding installed APK paths, offsets and sizes. The regression covers
 archive reordering and retaining the index of an excluded 32-bit split.
 
 Window close and Activity.finish drive pause, SurfaceView destruction, stop,
-queued preference writes and destroy before releasing the native surface.
-This is a bounded SurfaceView launcher, not a complete Android system_server or
-WindowManager implementation: arbitrary framework View drawing, dynamically
-replacing SurfaceViews, every service, and every Activity transition are not
-implemented. Unsupported service calls remain explicit failures.
+queued preference writes, destroy and removal of the Activity window.
+This is a bounded launcher, not a complete Android system_server or
+WindowManager implementation. Views draw in software only; SurfaceView
+surfaces are full-window host layers below every View window, so their
+position, size within the window, clipping, `setZOrderOnTop` and
+`setFixedSize` buffer sizes are not composited (surfaces report the View's
+size). The UI loop still polls the host every 4 ms rather than waking from
+host events. Every service and every Activity transition are not implemented.
+Unsupported service calls remain explicit failures.
 
 The managed window uses the launcher Activity label and icon from the APK's
 real resources (with Android's application/default fallbacks). Android renders
@@ -1870,7 +1916,10 @@ the independent stats window remains opt-in.
 The signed managed fixture verifies three launches, persistent preferences and
 Android ID across a runtime replacement,
 resource label resolution, a real SurfaceView, Activity.finish and ordered
-pause/surface destruction/stop/destroy/close. These checks do not establish
+pause/surface destruction/stop/destroy/close. The View fixture
+(`ManagedViews`) launches an Activity without a SurfaceView, checks that its
+button reaches the host, and adds, hides, shows and removes a SurfaceView with
+exactly two create/destroy pairs. These checks do not establish
 compatibility with arbitrary managed games.
 
 ### ART field lookup restart correction

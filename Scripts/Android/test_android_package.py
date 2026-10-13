@@ -874,23 +874,49 @@ class PackageTests(unittest.TestCase):
         status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
         text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
         self.assertEqual(status, 0, text[-30000:])
-        markers = ("MANAGED_DIALOG_SHOWN", "APP_POPUP_SHOWN", "MANAGED_DIALOG_POSITIVE",
+        markers = ("MANAGED_DIALOG_SHOWN", "text=Bifrost dialog", "MANAGED_DIALOG_POSITIVE",
                    "MANAGED_DIALOG_DISMISSED", "MANAGED_DIALOG_POPUP_SHOWN",
                    "MANAGED_DIALOG_POPUP_DISMISSED", "MANAGED_DIALOG_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
-        self.assertLess(text.index("MANAGED_DIALOG_ACTIVITY_FOCUS false"), text.index("APP_POPUP_SHOWN"))
-        # The modal dialog takes focus; removal returns it before the
-        # non-focusable PopupWindow, which leaves the Activity focused.
+        # The dialog shown from onResume holds focus before the Activity's
+        # window exists, so the Activity first gains focus when the dialog
+        # goes; the non-focusable PopupWindow leaves it focused.
         regained = text.index("MANAGED_DIALOG_ACTIVITY_FOCUS true")
+        self.assertNotIn("MANAGED_DIALOG_ACTIVITY_FOCUS false", text[:regained], text[-30000:])
         self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)
         self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
-        # Both the dialog and the PopupWindow reached the host layer, at
-        # framework-computed frames, and were removed again.
+        # The Activity window (its action bar), the dialog and the PopupWindow
+        # reached the host, at framework-computed frames, and were removed.
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
-        self.assertEqual(len(shown), 2, shown)
-        self.assertEqual(shown[1][1], "[40,60][280,140]")
-        self.assertEqual(text.count("APP_POPUP_REMOVED"), 2)
+        self.assertEqual(len(shown), 3, text[-30000:])
+        self.assertEqual(shown[2][1], "[40,60][280,140]")
+        self.assertEqual(text.count("APP_POPUP_REMOVED"), 3, text[-30000:])
+
+    def test_managed_view_window_and_surface_lifecycle(self):
+        state = self.work / "views-state"
+        bundle = self.work / "views.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("views", managed="ManagedViews"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        # An Activity without a SurfaceView launches and its button reaches
+        # the host; the SurfaceView's surface follows its attachment and
+        # visibility, created once per visible period.
+        markers = ("MANAGED_VIEWS_RESUMED", "APP_WINDOW_ADDED", "APP_POPUP_SHOWN",
+                   "MANAGED_VIEWS_SURFACE_CREATED", "MANAGED_VIEWS_SURFACE_CHANGED 400x300",
+                   "MANAGED_VIEWS_SURFACE_DESTROYED", "MANAGED_VIEWS_SURFACE_CREATED",
+                   "MANAGED_VIEWS_SURFACE_DESTROYED", "MANAGED_VIEWS_DESTROYED", "APP_POPUP_REMOVED")
+        position = 0
+        for marker in markers:
+            position = text.index(marker, position) + len(marker)
+        self.assertRegex(text, r"APP_POPUP_SHOWN \d+ \[0,0\]\[\d+,\d+\] visible=\d+ text=Overlay button")
+        self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_CREATED"), 2)
+        self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
 
     def test_managed_activity_stack(self):
         state = self.work / "activities-state"
@@ -912,7 +938,7 @@ class PackageTests(unittest.TestCase):
                    "MANAGED_ACTIVITIES_PERMISSIONS 8 [android.permission.CAMERA] [-1]",
                    "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
                    "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_SECOND_FOCUS true",
-                   "APP_POPUP_SHOWN", "MANAGED_ACTIVITIES_SECOND_WINDOW",
+                   "MANAGED_ACTIVITIES_SECOND_WINDOW",
                    "MANAGED_ACTIVITIES_SECOND_CLICKED", "MANAGED_ACTIVITIES_RESULT 42 -1 42",
                    "MANAGED_ACTIVITIES_ROOT_RESUMED returned=1", "MANAGED_ACTIVITIES_SECOND_DESTROYED",
                    "APP_POPUP_REMOVED",
@@ -921,12 +947,17 @@ class PackageTests(unittest.TestCase):
                    "MANAGED_ACTIVITIES_ROOT_RESUMED returned=2", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
+        # The second window reaches the host while it is resumed; focus
+        # arrives by a ViewRootImpl message, in either order with the layer.
+        layer = text.index("text=Close second")
+        self.assertLess(text.index("MANAGED_ACTIVITIES_SECOND_RESUMED"), layer)
+        self.assertLess(layer, text.index("MANAGED_ACTIVITIES_SECOND_CLICKED"))
         # Started for a result: the caller is reported. The window covers
         # the display, and its button text reached the host layer.
         self.assertIn("caller=ComponentInfo{org.bifrost.fixture/org.bifrost.fixture.ManagedActivities}", text)
         width, height = re.search(r"APP_WINDOW_OPEN (\d+)x(\d+)", text).groups()
         self.assertIn(f"MANAGED_ACTIVITIES_SECOND_WINDOW {width}x{height}", text)
-        self.assertRegex(text, rf"APP_POPUP_SHOWN \d+ \[0,0\]\[{width},{height}\] text=.*Close second")
+        self.assertRegex(text, rf"APP_POPUP_SHOWN \d+ \[0,0\]\[{width},{height}\] visible=\d+ text=.*Close second")
 
 
 if __name__ == "__main__":

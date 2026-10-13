@@ -1,9 +1,11 @@
-// Framework windows other than the Activity's SurfaceView content: dialogs,
-// popup menus and other WindowManager.addView windows. Android composes them
-// in SurfaceFlinger; here IWindowSession lays them out like WindowLayout, the
-// launcher draws each view tree in software when it is dirty, and the host
-// shows the pixels as a layer above every surface (activity_window.c op 9).
-// Input goes to the topmost popup the way InputDispatcher would deliver it.
+// Every WindowManager.addView window: Activity windows, dialogs, popup menus.
+// Android composes them in SurfaceFlinger; here IWindowSession lays them out
+// like WindowLayout, the launcher draws each view tree in software when it is
+// dirty, and the host shows the pixels as a layer above every surface
+// (activity_window.c op 9). A fully transparent window, such as an Activity
+// whose SurfaceView punches a hole through all of it, needs no host layer.
+// SurfaceViews in these windows get host surfaces from FrameworkSurfaces.
+// Input goes to the topmost window the way InputDispatcher would deliver it.
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -20,7 +22,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Consumer;
 
 final class FrameworkWindows {
     private static native int showPopup(int id, int x, int y, int width, int height, int[] argb);
@@ -50,30 +51,26 @@ final class FrameworkWindows {
         Bitmap bitmap;
         int[] pixels;
         boolean focused;
+        boolean onHost;  // a host layer shows `shown`; blank windows have none
+        boolean announced;  // APP_POPUP_SHOWN logged
+        // Set by each traversal (ViewTreeObserver pre-draw), when SurfaceView
+        // attachment, visibility or layout may have changed.
+        volatile boolean traversed = true;
+        View observed;
         Popup(IBinder token, Object window, int id) { this.token = token; this.window = window; this.id = id; }
     }
 
     private final FrameworkDisplay displays;
-    private final List<Popup> popups = new ArrayList<>();
+    private final FrameworkSurfaces surfaces;
+    private final List<Popup> popups = new ArrayList<>();  // bottom to top
     private Object session;
     private int nextId;
-    private Consumer<Boolean> activityFocus = focused -> {};
-    private boolean activityFocused = true;
     private Popup touchTarget;
+    private boolean stopped;
 
-    FrameworkWindows(FrameworkDisplay displays) {
+    FrameworkWindows(FrameworkDisplay displays, FrameworkSurfaces surfaces) {
         this.displays = displays;
-    }
-
-    // Activity window focus follows the topmost focusable popup; the callback
-    // receives the current state once installed.
-    void setActivityFocus(Consumer<Boolean> callback) {
-        boolean focused;
-        synchronized (this) {
-            activityFocus = callback;
-            focused = activityFocused;
-        }
-        callback.accept(focused);
+        this.surfaces = surfaces;
     }
 
     synchronized Object openSession(FrameworkServices services) throws Exception {
@@ -129,7 +126,15 @@ final class FrameworkWindows {
             popup.attrs = new WindowManager.LayoutParams();
             popup.attrs.copyFrom((WindowManager.LayoutParams) a[1]);
             popup.visibility = (Integer) a[2];
-            popups.add(popup);
+            // WindowManager stacks an Activity's base window below the
+            // dialogs and panels sharing its token, whatever the add order
+            // (a dialog shown from onResume is added first).
+            int index = popups.size();
+            if (popup.attrs.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION
+                    && popup.attrs.token != null)
+                for (int i = 0; i < popups.size(); i++)
+                    if (popups.get(i).attrs.token == popup.attrs.token) { index = i; break; }
+            popups.add(index, popup);
         }
         for (Object out : a) {
             if (CHANNEL.isInstance(out)) {
@@ -236,7 +241,11 @@ final class FrameworkWindows {
             popups.remove(popup);
             if (touchTarget == popup) touchTarget = null;
         }
-        removePopup(popup.id);
+        // ViewRootImpl detaches the tree before removing its window, as
+        // SurfaceView.onDetachedFromWindow ends its surface.
+        surfaces.destroy(popup);
+        popup.observed = null;
+        if (popup.onHost) removePopup(popup.id);
         hideDim(popup);
         if (popup.server != null) CHANNEL.getMethod("dispose").invoke(popup.server);
         if (popup.focused) focus(popup, false);
@@ -277,7 +286,8 @@ final class FrameworkWindows {
         return null;
     }
 
-    // One focused window: the topmost focusable popup, else the Activity.
+    // One focused window: the topmost focusable one. A window that never
+    // had focus gets no callback, as under WindowManagerService.
     private void updateFocus() throws Exception {
         Popup top;
         List<Popup> others = new ArrayList<>();
@@ -287,9 +297,26 @@ final class FrameworkWindows {
         }
         for (Popup popup : others) focus(popup, false);
         if (top != null && !top.focused) focus(top, true);
-        if (activityFocused != (top == null)) {
-            activityFocused = top == null;
-            activityFocus.accept(activityFocused);
+    }
+
+    // The app is stopping: like ViewRootImpl.setWindowStopped, every
+    // SurfaceView loses its surface and none is created again.
+    void stop() throws Exception {
+        synchronized (this) { stopped = true; }
+        surfaces.destroy(null);
+    }
+
+    // A display resize: every window lays out again against the new bounds
+    // (WindowManagerService relayout; ViewRootImpl.forceWmRelayout).
+    void displayChanged() throws Exception {
+        List<Popup> all;
+        synchronized (this) { all = new ArrayList<>(popups); }
+        for (Popup popup : all) {
+            Object viewRoot = viewRoot(popup);
+            if (viewRoot == null) continue;
+            Method relayout = viewRoot.getClass().getDeclaredMethod("forceWmRelayout");
+            relayout.setAccessible(true);
+            relayout.invoke(viewRoot);
         }
     }
 
@@ -302,22 +329,41 @@ final class FrameworkWindows {
         change.invoke(viewRoot, focused);
     }
 
-    // Called from the launcher's UI loop: redraw dirty or moved popups.
+    // Called from the launcher's UI loop: update SurfaceViews after each
+    // traversal, then redraw dirty or moved windows bottom to top.
     void render() throws Exception {
-        List<Popup> visible = new ArrayList<>();
-        synchronized (this) { visible.addAll(popups); }
-        for (Popup popup : visible) {
+        List<Popup> stack = new ArrayList<>();
+        synchronized (this) {
+            if (stopped) return;
+            stack.addAll(popups);
+        }
+        for (int index = 0; index < stack.size(); index++) {
+            Popup popup = stack.get(index);
             View root = root(popup);
             int w = popup.frame.width(), h = popup.frame.height();
             boolean showing = popup.visibility == View.VISIBLE && root != null && w > 0 && h > 0
                     && root.getWidth() > 0 && root.getHeight() > 0;
             if (!showing) {
-                if (!popup.shown.isEmpty()) { removePopup(popup.id); popup.shown.setEmpty(); }
+                surfaces.update(popup, null, false);
+                if (popup.onHost) { removePopup(popup.id); popup.onHost = false; }
+                popup.shown.setEmpty();
                 hideDim(popup);
                 continue;
             }
             if (root.isLayoutRequested()) continue;  // ViewRootImpl lays out before the next draw
-            dim(popup);
+            if (popup.observed != root) {
+                popup.observed = root;
+                root.getViewTreeObserver().addOnPreDrawListener(() -> {
+                    popup.traversed = true;
+                    return true;
+                });
+                popup.traversed = true;
+            }
+            if (popup.traversed) {
+                popup.traversed = false;
+                surfaces.update(popup, root, true);
+            }
+            if (dim(popup)) restackAbove(stack, index);
             if (popup.shown.equals(popup.frame) && !root.isDirty()) continue;
             if (popup.bitmap == null || popup.bitmap.getWidth() != w || popup.bitmap.getHeight() != h) {
                 if (popup.bitmap != null) popup.bitmap.recycle();
@@ -329,19 +375,53 @@ final class FrameworkWindows {
             canvas.clipRect(0, 0, w, h);
             root.draw(canvas);
             popup.bitmap.getPixels(popup.pixels, 0, w, 0, 0, w, h);
+            int visible = visible(popup.pixels, w * h);
+            if (visible == 0) {
+                if (popup.onHost) {
+                    removePopup(popup.id);
+                    popup.onHost = false;
+                    System.out.println("APP_POPUP_HIDDEN " + popup.id + " transparent");
+                }
+                popup.shown.set(popup.frame);
+                continue;
+            }
             int result = showPopup(popup.id, popup.frame.left, popup.frame.top, w, h, popup.pixels);
             if (result == 0) {
-                if (popup.shown.isEmpty()) {
-                    StringBuilder text = new StringBuilder();
-                    collectText(root, text);
-                    System.out.println("APP_POPUP_SHOWN " + popup.id + " " + popup.frame.toShortString()
-                            + (text.length() > 0 ? " text=" + text : ""));
+                if (!popup.onHost) {
+                    if (!popup.announced) {
+                        StringBuilder text = new StringBuilder();
+                        collectText(root, text);
+                        System.out.println("APP_POPUP_SHOWN " + popup.id + " " + popup.frame.toShortString()
+                                + " visible=" + visible + (text.length() > 0 ? " text=" + text : ""));
+                        popup.announced = true;
+                    }
+                    popup.onHost = true;
+                    restackAbove(stack, index);
                 }
                 popup.shown.set(popup.frame);
             }
             else if (result != -11) {  // EAGAIN: host buffers busy, retry next frame
                 throw new IllegalStateException("popup window " + popup.id + ": host error " + result);
             }
+        }
+    }
+
+    // Pixels with nonzero alpha; zero means the window shows nothing.
+    private static int visible(int[] argb, int count) {
+        int visible = 0;
+        for (int i = 0; i < count; i++) if ((argb[i] >>> 24) != 0) visible++;
+        return visible;
+    }
+
+    // Host layers stack in creation order. When a layer appears below
+    // existing ones, recreate those above it in window order; this pass
+    // continues upward and shows them again.
+    private void restackAbove(List<Popup> stack, int index) {
+        for (int i = index + 1; i < stack.size(); i++) {
+            Popup above = stack.get(i);
+            hideDim(above);
+            if (above.onHost) { removePopup(above.id); above.onHost = false; }
+            above.shown.setEmpty();
         }
     }
 
@@ -361,27 +441,31 @@ final class FrameworkWindows {
     }
 
     // FLAG_DIM_BEHIND: SurfaceFlinger's dim layer, a translucent black layer
-    // spanning the display directly below the window.
-    private void dim(Popup popup) throws Exception {
+    // spanning the display directly below the window. Returns true when the
+    // dim layer is new, so the layers above it must be recreated.
+    private boolean dim(Popup popup) throws Exception {
         if ((popup.attrs.flags & WindowManager.LayoutParams.FLAG_DIM_BEHIND) == 0) {
             hideDim(popup);
-            return;
+            return false;
         }
         Rect display = displays.bounds();
         int alpha = Math.round(Math.max(0f, Math.min(1f, popup.attrs.dimAmount)) * 255);
-        if (display.equals(popup.dimShown) && alpha == popup.dimAlpha) return;
+        if (display.equals(popup.dimShown) && alpha == popup.dimAlpha) return false;
         int[] pixels = new int[display.width() * display.height()];
         java.util.Arrays.fill(pixels, alpha << 24);
         int result = showPopup(DIM | popup.id, 0, 0, display.width(), display.height(), pixels);
-        if (result == -11) return;  // EAGAIN: retry next frame
+        if (result == -11) return false;  // EAGAIN: retry next frame
         if (result != 0) throw new IllegalStateException("dim layer " + popup.id + ": host error " + result);
-        if (popup.dimShown.isEmpty() && !popup.shown.isEmpty()) {
+        boolean created = popup.dimShown.isEmpty();
+        if (created && popup.onHost) {
             // Layers stack in creation order: recreate the window above its dim.
             removePopup(popup.id);
+            popup.onHost = false;
             popup.shown.setEmpty();
         }
         popup.dimShown.set(display);
         popup.dimAlpha = alpha;
+        return created;
     }
 
     private static void hideDim(Popup popup) {

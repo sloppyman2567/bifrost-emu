@@ -22,10 +22,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   the window, in both the process and Activity configurations. Layers created by Bifrost on Wayland
   must scale their pixel buffers to the parent's desktop coordinates
   (`SurfaceScale`, generated `wp_viewporter` glue; regenerate, don't hand-edit).
-- Windows beyond the launcher Activity's SurfaceView (dialogs, popups, stacked
-  Activities from `FrameworkActivities`) go through WindowManager and
-  `FrameworkWindows`; keep ActivityThread's lifecycle order. Only the session
-  process publishes device services (`sensorservice`, `SurfaceFlingerAIDL`).
+- Every window, the launcher Activity's included (dialogs, popups, stacked
+  Activities from `FrameworkActivities`), goes through WindowManager and
+  `FrameworkWindows`; SurfaceViews in any window get host surfaces from
+  `FrameworkSurfaces` following SurfaceView's visibility contract. Keep
+  ActivityThread's lifecycle order. Only the session process publishes device
+  services (`sensorservice`, `SurfaceFlingerAIDL`, `SurfaceFlinger`).
 - Managed connectivity presents the host route as Wi-Fi. VALIDATED requires
   the launcher's HTTPS probe returning 204 or its explicit diagnostic override.
 - Keep Android's unmapped null page, real shared/private file mappings and

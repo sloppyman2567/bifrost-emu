@@ -1,5 +1,29 @@
 # Tests
 
+## Activity windows and SurfaceView lifecycle (2026-10-13)
+
+`PackageTests.test_managed_view_window_and_surface_lifecycle` (`ManagedViews`)
+launches an Activity with only a button, requires its window on the host
+layer with the button text, then adds, hides, shows and removes a SurfaceView
+and requires exactly two create/destroy pairs in that order. The persistence,
+dialog/popup, activity-stack and service tests pass with the root Activity
+as a window (5/5). The dialog test now expects three host windows (the
+Activity's action bar, the dialog, the PopupWindow) and no initial focus
+loss; the activity-stack test no longer orders the second window's layer
+against its asynchronous focus callback. It also requests a permission from a
+background thread and a second one from the first result; the
+few-instruction race that motivated the delivery wait is too narrow for the
+fixture to reproduce, so the fixture covers only the request contract.
+
+Before the `SurfaceFlinger` stand-in all four play tests hung in libgui's
+`waitForService("SurfaceFlinger")`. In SpongeBob and Trickcal (JIT, 75-150 s)
+Unity's SurfaceView got its surface, rendering started, and the Activity
+window showed only Unity's startup placeholder (`visible=3543040`) until
+Unity removed it (`APP_POPUP_HIDDEN 1 transparent`). Game frame rates were
+not measured. Trickcal still aborts in Scudo ("corrupted chunk header") about
+45 s in on guest thread 11 (2 of 2 untraced runs; not with `--trace-apk`);
+that crash is unrelated to these changes and remains open.
+
 ## Base ARMv8.0 FP/SIMD sweep fixes (2026-10-13)
 
 `jit_simd_base_forms` (registered as `simd_base_forms`) hashes 139 base forms

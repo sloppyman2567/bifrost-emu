@@ -305,6 +305,33 @@ final class FrameworkNativeServices {
             return true;
         }
     }
+    // libgui's ComposerService ("SurfaceFlinger", android.ui.ISurfaceComposer)
+    // carries SurfaceControl transactions. No SurfaceControl layer exists
+    // here: SurfaceView.updateSurface applies an empty transaction from
+    // releaseSurfaces whenever its window has no SurfaceFlinger surface.
+    // Only empty transactions are accepted (AOSP 15 ISurfaceComposer.cpp:
+    // FrameTimelineInfo parcelable, then the layer and display state counts).
+    static final class TransactionComposer extends Binder {
+        static final String DESCRIPTOR = "android.ui.ISurfaceComposer";
+        static final int SET_TRANSACTION_STATE = FIRST_CALL_TRANSACTION + 7;
+        TransactionComposer() { attachInterface(null, DESCRIPTOR); }
+        @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code != SET_TRANSACTION_STATE) return super.onTransact(code, data, reply, flags);
+            data.enforceInterface(DESCRIPTOR);
+            int start = data.dataPosition(), size = data.readInt();
+            if (size < 4 || size > data.dataSize() - start)
+                throw new IllegalArgumentException("invalid FrameTimelineInfo");
+            data.setDataPosition(start + size);
+            int layers = data.readInt(), displays = data.readInt();
+            if (layers != 0 || displays != 0)
+                throw new UnsupportedOperationException("SurfaceFlinger transaction with "
+                        + layers + " layer and " + displays + " display states");
+            return true;
+        }
+    }
+
     static final class SurfaceComposer extends Binder {
         static final String DESCRIPTOR = "android.gui.ISurfaceComposer";
         private DisplayClock clock;

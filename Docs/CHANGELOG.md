@@ -13,6 +13,28 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Android Activity windows and SurfaceView lifecycle (2026-10-13)
+
+- The launcher Activity's decor is now a WindowManager window like every
+  other Activity's, so an Activity built only from Views (buttons, text,
+  WebView) launches instead of failing with "Activity has no SurfaceView".
+  ViewRootImpl lays it out; its Views draw in software above the game surface,
+  and a fully transparent window (a SurfaceView punching through all of it)
+  gets no host layer.
+- SurfaceViews in any window follow SurfaceView's visibility contract: their
+  surfaces are created, resized and destroyed as views are added, shown,
+  hidden, resized or removed, not only at startup and host resize. A created
+  surface lets the window punch its hole, so Views drawn after the
+  SurfaceView stay above it.
+- Activity windows stack below their own dialogs, as in WindowManagerService,
+  and window focus no longer reports a loss to a window that never had it.
+- The session publishes a strict legacy `SurfaceFlinger` service accepting
+  only empty SurfaceControl transactions; SurfaceView sends one on each
+  update, and libgui otherwise waited for that service forever.
+- Not yet: positioned/clipped/z-ordered SurfaceViews and fixed buffer sizes
+  (surfaces stay full-window layers below the Views), and event-driven
+  wakeups (the UI loop still polls every 4 ms).
+
 ### Android permission results after off-main-thread requests (2026-10-13)
 
 - A permission result for an Activity's own request is delivered only after

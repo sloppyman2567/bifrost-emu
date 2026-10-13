@@ -2,7 +2,8 @@
 // ActivityThread, Instrumentation, LoadedApk and main Looper with a bounded
 // in-process service profile. ManagedLauncher --app starts and resumes an app;
 // ActivityProbe delegates to probe() for framework assertions and checkpoints.
-// SurfaceView input, resize and teardown are owned here. There is no system_server.
+// Host input, resize and teardown are owned here; every Activity, including
+// the launcher one, is a FrameworkWindows window. There is no system_server.
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.Application;
@@ -19,8 +20,6 @@ import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.content.pm.Signature;
 import android.content.res.Configuration;
-import android.graphics.PixelFormat;
-import android.graphics.Rect;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.hardware.input.InputManager;
@@ -46,10 +45,7 @@ import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
 import android.view.View;
-import android.view.ViewGroup;
 import java.io.File;
 import java.io.DataInputStream;
 import java.io.FileInputStream;
@@ -95,7 +91,13 @@ public final class ManagedLauncher {
     // ActivityRecord's requested orientation is initialized from its manifest.
     private static final Map<IBinder, Integer> orientations = new ConcurrentHashMap<>();
     private static final FrameworkDisplay displays = new FrameworkDisplay();
-    private static final FrameworkWindows windows = new FrameworkWindows(displays);
+    private static final FrameworkWindows windows = new FrameworkWindows(displays,
+            new FrameworkSurfaces(new FrameworkSurfaces.Host() {
+                @Override public long prepare(android.view.Surface surface, boolean opaque) {
+                    return prepareSurface(surface, opaque);
+                }
+                @Override public void release(long window) { releaseSurface(window); }
+            }));
     private static final FrameworkActivities activities =
             new FrameworkActivities(orientations, displays, packages);
     private static boolean play;
@@ -116,7 +118,6 @@ public final class ManagedLauncher {
     }
     private static native long prepareSurface(android.view.Surface surface, boolean opaque);
     private static native void releaseSurface(long window);
-    private static final Map<SurfaceView, Long> surfaceWindows = new java.util.IdentityHashMap<>();
 
     private static void checkServiceRegistration() throws Exception {
         if (!(Boolean) Class.forName("android.os.SystemProperties")
@@ -179,6 +180,7 @@ public final class ManagedLauncher {
     private static final Binder sensorService = new FrameworkNativeServices.SensorService();
     private static boolean sensorServiceRegistered;
     private static final Binder surfaceComposer = new FrameworkNativeServices.SurfaceComposer();
+    private static final Binder transactionComposer = new FrameworkNativeServices.TransactionComposer();
 
     private static ByteBuffer readDisplayEvent(ParcelFileDescriptor channel, boolean wait) throws Exception {
         long until = System.nanoTime() + 2000000000L;
@@ -692,6 +694,9 @@ public final class ManagedLauncher {
             Class.forName("android.os.ServiceManager").getMethod(
                     "addService", String.class, IBinder.class)
                     .invoke(null, "SurfaceFlingerAIDL", surfaceComposer);
+            Class.forName("android.os.ServiceManager").getMethod(
+                    "addService", String.class, IBinder.class)
+                    .invoke(null, "SurfaceFlinger", transactionComposer);
         }
         if (play) {
             Method add = Class.forName("android.os.ServiceManager").getMethod(
@@ -1328,52 +1333,6 @@ public final class ManagedLauncher {
         System.exit(0);
     }
 
-    private static void findSurfaceViews(View view, List<SurfaceView> out) {
-        if (view instanceof SurfaceView) out.add((SurfaceView) view);
-        if (view instanceof ViewGroup)
-            for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++)
-                findSurfaceViews(((ViewGroup) view).getChildAt(i), out);
-    }
-
-    // What ViewRootImpl.performTraversals and SurfaceView.updateSurface do
-    // for a new or resized window: lay out the decor, then report each
-    // SurfaceView's surface through its registered holder callbacks.
-    @SuppressWarnings("unchecked")
-    private static void layoutAndReportSurfaces(Activity activity, int width, int height,
-            boolean created) throws Exception {
-        View decor = activity.getWindow().getDecorView();
-        decor.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
-        decor.layout(0, 0, width, height);
-        List<SurfaceView> views = new ArrayList<>();
-        findSurfaceViews(decor, views);
-        for (SurfaceView view : views) {
-            Field frame = SurfaceView.class.getDeclaredField("mSurfaceFrame");
-            frame.setAccessible(true);
-            ((Rect) frame.get(view)).set(0, 0, view.getWidth(), view.getHeight());
-            Field field = SurfaceView.class.getDeclaredField("mCallbacks");
-            field.setAccessible(true);
-            SurfaceHolder holder = view.getHolder();
-            Field requestedFormat = SurfaceView.class.getDeclaredField("mRequestedFormat");
-            requestedFormat.setAccessible(true);
-            int format = requestedFormat.getInt(view);
-            if (created) {
-                long window = prepareSurface(holder.getSurface(), !PixelFormat.formatHasAlpha(format));
-                if (window <= 0) throw new IllegalStateException("surface preparation: " + window);
-                surfaceWindows.put(view, window);
-            }
-            for (SurfaceHolder.Callback callback :
-                    new ArrayList<>((List<SurfaceHolder.Callback>) field.get(view))) {
-                if (created) callback.surfaceCreated(holder);
-                callback.surfaceChanged(holder, format,
-                        view.getWidth(), view.getHeight());
-            }
-            System.out.println("APP_SURFACE " + view.getClass().getName() + " "
-                    + view.getWidth() + "x" + view.getHeight() + " format=" + format);
-        }
-        if (views.isEmpty()) throw new IllegalStateException("Activity has no SurfaceView");
-    }
-
     // Converts one op-3 event record (activity_window.c) into a framework
     // input event and dispatches it like ViewRootImpl's input stages.
     // Popup windows (FrameworkWindows) above the Activity receive input first.
@@ -1399,40 +1358,20 @@ public final class ManagedLauncher {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private static void closeActivity(Activity activity) throws Exception {
         windowOpen = false;
         activity.onWindowFocusChanged(false);
         call(activity, "performPause", new Class<?>[0]);
         System.out.println("APP_PAUSED");
-        for (SurfaceView view : new ArrayList<>(surfaceWindows.keySet())) {
-            Field callbacks = SurfaceView.class.getDeclaredField("mCallbacks");
-            callbacks.setAccessible(true);
-            for (SurfaceHolder.Callback callback :
-                    new ArrayList<>((List<SurfaceHolder.Callback>) callbacks.get(view))) {
-                try {
-                    callback.surfaceDestroyed(view.getHolder());
-                } catch (IllegalArgumentException e) {
-                    // Play-mode Java Surfaces have no native libgui Surface, so
-                    // Surface.isValid() is false and PixelCopy rejects the final
-                    // snapshot some apps (Unity) take here. Finish teardown;
-                    // every other callback failure still propagates.
-                    StackTraceElement[] trace = e.getStackTrace();
-                    if (trace.length == 0 || !"android.view.PixelCopy".equals(trace[0].getClassName()))
-                        throw e;
-                    System.out.println("APP_SURFACE_SNAPSHOT_SKIPPED " + callback.getClass().getName());
-                }
-            }
-        }
+        windows.stop();
         call(activity, "performStop", new Class<?>[] {boolean.class, String.class}, false, "bifrost");
         System.out.println("APP_STOPPED");
         call(Class.forName("android.app.QueuedWork"), "waitToFinish", new Class<?>[0]);
         call(activity, "performDestroy", new Class<?>[0]);
+        FrameworkActivities.removeWindow(activity);
         call(activity.getBaseContext(), "scheduleFinalCleanup", new Class<?>[] {String.class, String.class},
                 activity.getClass().getName(), "Activity");
         System.out.println("APP_DESTROYED");
-        for (long window : surfaceWindows.values()) releaseSurface(window);
-        surfaceWindows.clear();
         System.out.println("APP_WINDOW_CLOSED");
     }
 
@@ -1445,10 +1384,10 @@ public final class ManagedLauncher {
                 false, "bifrost");
         if (diagnostic) checkRuntimeServices(activity, true);
         System.out.println("APP_RESUMED");
-        layoutAndReportSurfaces(activity, width, height, true);
-        // Focused unless a dialog shown during creation already holds focus.
-        windows.setActivityFocus(activity::onWindowFocusChanged);
-        System.out.println("APP_SURFACE_READY");
+        // The decor becomes a window like any other Activity's; ViewRootImpl
+        // lays it out and FrameworkWindows draws it and its SurfaceViews.
+        FrameworkActivities.show(activity);
+        System.out.println("APP_WINDOW_ADDED");
         Handler handler = new Handler(Looper.getMainLooper());
         long[] event = new long[20];
         int[] size = {width, height};
@@ -1490,7 +1429,7 @@ public final class ManagedLauncher {
                             // ad WebViews stop drawing after the window grows.
                             Class.forName("android.view.ViewConfiguration")
                                     .getMethod("resetCacheForTesting").invoke(null);
-                            layoutAndReportSurfaces(activity, size[0], size[1], false);
+                            windows.displayChanged();
                         }
                         if (event[0] == 0) break;
                         dispatch(activity, event);

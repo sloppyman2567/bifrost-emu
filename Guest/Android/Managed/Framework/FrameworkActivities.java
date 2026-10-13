@@ -223,7 +223,8 @@ final class FrameworkActivities {
     }
 
     // handleResumeActivity: the decor becomes a TYPE_BASE_APPLICATION window.
-    private static void show(Activity activity) throws Exception {
+    // The launcher Activity uses the same path.
+    static void show(Activity activity) throws Exception {
         if (activity.getWindow() == null) return;
         View decor = activity.getWindow().getDecorView();
         WindowManager.LayoutParams attrs = activity.getWindow().getAttributes();
@@ -305,14 +306,19 @@ final class FrameworkActivities {
         if (!stoppedState(activity))
             method(Activity.class, "performStop", boolean.class, String.class).invoke(activity, false, "bifrost");
         method(Activity.class, "performDestroy").invoke(activity);
-        Field added = Activity.class.getDeclaredField("mWindowAdded");
-        added.setAccessible(true);
-        if (added.getBoolean(activity) && activity.getWindow() != null)
-            activity.getWindowManager().removeViewImmediate(activity.getWindow().getDecorView());
+        removeWindow(activity);
         method(activity.getBaseContext().getClass(), "scheduleFinalCleanup", String.class, String.class)
                 .invoke(activity.getBaseContext(), activity.getClass().getName(), "Activity");
         orientations.remove(record.token);
         System.out.println("APP_ACTIVITY_DESTROYED " + activity.getClass().getName());
+    }
+
+    // handleDestroyActivity: an added decor window is removed after onDestroy.
+    static void removeWindow(Activity activity) throws Exception {
+        Field added = Activity.class.getDeclaredField("mWindowAdded");
+        added.setAccessible(true);
+        if (added.getBoolean(activity) && activity.getWindow() != null)
+            activity.getWindowManager().removeViewImmediate(activity.getWindow().getDecorView());
     }
 
     private static boolean resumedState(Activity activity) throws Exception {

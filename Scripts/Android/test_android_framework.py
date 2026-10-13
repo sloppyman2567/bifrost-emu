@@ -152,7 +152,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                 markers += ("ASGARD_PROCESS_READY", "ACTIVITY_WEBVIEW_RENDERER_DOM_OK",
                             "ACTIVITY_WEBVIEW_RENDERER_PIXELS_OK")
         if play:
-            markers += ("APP_WINDOW_OPEN", "APP_AUDIO_ROUTING_READY", "APP_RESUMED", "APP_SURFACE_READY")
+            markers += ("APP_WINDOW_OPEN", "APP_AUDIO_ROUTING_READY", "APP_RESUMED", "APP_WINDOW_ADDED")
         # A play session ends when its window closes (exit 0) or its time runs out.
         # A worker can die while the UI thread keeps pumping until the timeout.
         # Also catch Unity's fatal signal forwarding when an outer debugger

@@ -33,7 +33,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkProcessRuntime.java", "Framework/FrameworkJobs.java",
                     "Framework/FrameworkContent.java", "Framework/FrameworkNativeServices.java",
                     "Framework/FrameworkWindows.java", "Framework/FrameworkActivities.java",
-                    "Framework/FrameworkAppOps.java")
+                    "Framework/FrameworkAppOps.java", "Framework/FrameworkSurfaces.java")
 
 
 def add_trace_arguments(parser):
