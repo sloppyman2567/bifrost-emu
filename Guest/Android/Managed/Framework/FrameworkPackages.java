@@ -15,6 +15,7 @@ import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
 import android.os.Process;
 import android.os.Parcel;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -22,6 +23,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
 final class FrameworkPackages {
+    // AOSP PermissionController module package.
+    static final String PERMISSION_CONTROLLER = "com.android.permissioncontroller";
     private volatile PackageInfo installed;
     private final Map<String, PackageInfo> systemPackages = new ConcurrentHashMap<>();
     private final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
@@ -61,8 +64,7 @@ final class FrameworkPackages {
         services.register("package", "android.content.pm.IPackageManager", (method, a) -> {
             switch (method) {
                 case "hasSystemFeature":
-                    return PackageManager.FEATURE_WEBVIEW.equals(a[0]) && (Integer) a[1] <= 0
-                            && systemPackages.containsKey("com.android.webview");
+                    return hasSystemFeature((String) a[0], (Integer) a[1]);
                 case "getSystemAvailableFeatures": {
                     FeatureInfo feature = null;
                     if (systemPackages.containsKey("com.android.webview")) {
@@ -72,6 +74,9 @@ final class FrameworkPackages {
                     return listSlice(feature);
                 }
                 case "isInstantApp": return false;  // This profile installs full APKs only.
+                // Activity.requestPermissions targets this package; FrameworkActivities
+                // answers its REQUEST_PERMISSIONS intent from the install-time grants.
+                case "getPermissionControllerPackageName": return PERMISSION_CONTROLLER;
                 case "notifyPackageUse": return null;  // one-way usage report
                 // (name, flags, user): null means "not installed", which the
                 // client turns into NameNotFoundException.
@@ -343,22 +348,64 @@ final class FrameworkPackages {
         // from provider authorities. Parse the installed cluster, including splits.
         java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
         if (base.isFile() && pkg.providers != null && pkg.providers.length != 0) {
-            Class<?> parserType = Class.forName("android.content.pm.PackageParser");
-            Object parser = parserType.getConstructor().newInstance();
             java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
                     && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
-            Object parsed = parserType.getMethod("parsePackage", java.io.File.class, int.class)
-                    .invoke(parser, archive, 0);
-            for (Object provider : (List<?>) parsed.getClass().getField("providers").get(parsed)) {
-                ProviderInfo info = (ProviderInfo) provider.getClass().getField("info").get(provider);
+            for (Object provider : (List<?>) invoke(parseArchive(archive), "getProviders")) {
                 List<IntentFilter> intents = new ArrayList<>();
-                for (Object filter : (List<?>) provider.getClass().getField("intents").get(provider))
-                    intents.add(new IntentFilter((IntentFilter) filter));
-                filters.put(new ComponentName(pkg.packageName, info.name), intents);
+                for (Object intent : (List<?>) invoke(provider, "getIntents"))
+                    intents.add(new IntentFilter((IntentFilter) invoke(intent, "getIntentFilter")));
+                filters.put(new ComponentName(pkg.packageName, (String) invoke(provider, "getName")), intents);
             }
         }
         Map<ComponentName, List<IntentFilter>> previous = providerFilters.putIfAbsent(pkg.packageName, filters);
         return previous == null ? filters : previous;
+    }
+
+    // ParsingPackageUtils.parseDefault, the one-off parse outside
+    // PackageManagerService. Unlike the legacy PackageParser it takes split
+    // permissions as an argument instead of reading IPermissionManager, which
+    // this profile does not publish. Split permissions only extend requested
+    // permissions, so an empty list leaves the parsed components unchanged.
+    // Inputs mirror PackageManager.getPackageArchiveInfo.
+    private Object parseArchive(java.io.File archive) throws Exception {
+        Class<?> utils = Class.forName("com.android.internal.pm.pkg.parsing.ParsingPackageUtils");
+        Class<?> callbackType = Class.forName(utils.getName() + "$Callback");
+        Class<?> input = Class.forName("android.content.pm.parsing.result.ParseInput");
+        Method forParsing = Class.forName("com.android.internal.pm.parsing.pkg.PackageImpl").getMethod(
+                "forParsing", String.class, String.class, String.class, android.content.res.TypedArray.class,
+                boolean.class, callbackType);
+        Object callback = java.lang.reflect.Proxy.newProxyInstance(callbackType.getClassLoader(),
+                new Class<?>[] {callbackType}, (self, method, a) -> {
+                    switch (method.getName()) {
+                        case "hasFeature": return hasSystemFeature((String) a[0], 0);
+                        case "startParsingPackage":
+                            return forParsing.invoke(null, a[0], a[1], a[2], a[3], a[4], self);
+                        case "getHiddenApiWhitelistedApps":
+                        case "getInstallConstraintsAllowlist": return java.util.Collections.emptySet();
+                        case "hashCode": return System.identityHashCode(self);
+                        case "equals": return self == a[0];
+                        case "toString": return "BifrostParsingCallback";
+                        default: throw new AssertionError(method);
+                    }
+                });
+        Object result = utils.getMethod("parseDefault", input, java.io.File.class, int.class, List.class,
+                boolean.class, callbackType).invoke(null,
+                Class.forName("android.content.pm.parsing.result.ParseTypeImpl")
+                        .getMethod("forParsingWithoutPlatformCompat").invoke(null),
+                archive, 0, java.util.Collections.emptyList(), false, callback);
+        if ((Boolean) invoke(result, "isError"))
+            throw new IllegalStateException("Failed to parse " + archive + ": " + invoke(result, "getErrorMessage"),
+                    (Exception) invoke(result, "getException"));
+        return invoke(result, "getResult");
+    }
+
+    private static Object invoke(Object target, String name) throws Exception {
+        return target.getClass().getMethod(name).invoke(target);
+    }
+
+    private boolean hasSystemFeature(String name, int version) {
+        return PackageManager.FEATURE_WEBVIEW.equals(name) && version <= 0
+                && systemPackages.containsKey("com.android.webview");
     }
 
     private List<android.content.pm.ResolveInfo> queryProviders(Intent original, String type,

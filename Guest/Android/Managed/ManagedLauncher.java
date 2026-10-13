@@ -97,7 +97,7 @@ public final class ManagedLauncher {
     private static final FrameworkDisplay displays = new FrameworkDisplay();
     private static final FrameworkWindows windows = new FrameworkWindows(displays);
     private static final FrameworkActivities activities =
-            new FrameworkActivities(orientations, displays);
+            new FrameworkActivities(orientations, displays, packages);
     private static boolean play;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
     private static final FrameworkAppOps appOps = new FrameworkAppOps(packages);

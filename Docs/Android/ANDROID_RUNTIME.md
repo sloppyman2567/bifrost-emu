@@ -1213,6 +1213,16 @@ Only explicit components of the installed package resolve. Implicit Intents
 and other packages (browser, Play Store) return `START_INTENT_NOT_RESOLVED`
 and an unknown class `START_CLASS_NOT_FOUND` (Android 15 values -91 and -92),
 so apps receive `ActivityNotFoundException` as on a device without a handler.
+The exception is `PackageManager.ACTION_REQUEST_PERMISSIONS` addressed to the
+permission controller, built by `Activity.requestPermissions`
+([android15-release](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/core/java/android/app/Activity.java)).
+It is answered as `GrantPermissionsActivity` would: the caller pauses, receives
+`RESULT_OK` with `EXTRA_REQUEST_PERMISSIONS_NAMES`/`_RESULTS` through
+`dispatchActivityResult` (so `onRequestPermissionsResult` runs), then resumes.
+With no permission UI, each grant is the install-time `checkPermission`
+result, so runtime permissions come back denied, as if the user declined.
+Previously `getPermissionControllerPackageName` threw, so Trickcal's Unity
+permission request failed and its callback never ran.
 An Activity below a stacked one is paused but not stopped and keeps its
 surface, as under a translucent Activity. Stacked Activities draw only in
 software, keep the display size regardless of their requested orientation,
@@ -1229,7 +1239,9 @@ task to the back; with no home screen here the root stays in front, so only
 the app's own key handling (Unity's view, for example) acts on it.
 `getTaskForActivity` reports the single launcher task.
 `PackageTests.test_managed_activity_stack` (`ManagedActivities`) checks the
-ordering above, the unresolved implicit Intent, the result, the caller, a
+ordering above, the unresolved implicit Intent, a provider intent-filter query
+against the installed split cluster, a permission request returning a granted
+normal and a denied runtime permission, the result, the caller, a
 second round closed by a `KEYCODE_BACK` through the window's view tree
 (`RESULT_CANCELED`), and a
 display-sized window with the button text on the host layer.
@@ -1800,6 +1812,20 @@ other UIDs/devices, runtime permissions and signature permissions are denied;
 runtime grant dialogs and signature grant policy are not implemented. Package
 permission flags agree with this bounded policy. See Android's
 [permission types](https://developer.android.com/guide/topics/permissions/overview#types_of_permissions).
+`getPermissionControllerPackageName` reports AOSP's
+`com.android.permissioncontroller`, and `Activity.requestPermissions` receives
+that controller's result (see the stacked-Activity section below).
+
+`queryIntentContentProviders` matches provider intent filters read from the
+installed APK cluster (base plus splits) by
+[`ParsingPackageUtils.parseDefault`](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/core/java/com/android/internal/pm/pkg/parsing/ParsingPackageUtils.java),
+AOSP's one-off parser outside PackageManagerService, with the same inputs as
+`PackageManager.getPackageArchiveInfo`. The legacy `PackageParser` cannot be
+used: `parseBaseApkCommon` dereferences `ActivityThread.getPermissionManager()`
+without a null check, and this profile publishes no `permissionmgr`, so
+Trickcal's AppsFlyer `queryIntentContentProviders` failed with a
+`NullPointerException`. Split permissions are passed as an empty list; they
+only extend requested permissions, not components.
 An isolated call into SpongeBob's actual Facebook SDK exposed
 `package.getActivityInfo`, then `activity.checkPermissionForDevice` throwing
 before initialization; with both services implemented, `isInitialized()` returns

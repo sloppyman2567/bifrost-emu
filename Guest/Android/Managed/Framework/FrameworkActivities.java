@@ -32,6 +32,12 @@ final class FrameworkActivities {
     private static final int START_SUCCESS = 0;
     private static final int START_INTENT_NOT_RESOLVED = -91;
     private static final int START_CLASS_NOT_FOUND = -92;
+    // PackageManager permission-request @SystemApi strings (Android 15).
+    private static final String ACTION_REQUEST_PERMISSIONS = "android.content.pm.action.REQUEST_PERMISSIONS";
+    private static final String EXTRA_REQUEST_PERMISSIONS_NAMES =
+            "android.content.pm.extra.REQUEST_PERMISSIONS_NAMES";
+    private static final String EXTRA_REQUEST_PERMISSIONS_RESULTS =
+            "android.content.pm.extra.REQUEST_PERMISSIONS_RESULTS";
 
     private static final class Record {
         final Activity activity;
@@ -49,15 +55,18 @@ final class FrameworkActivities {
 
     private final Map<IBinder, Integer> orientations;
     private final FrameworkDisplay displays;
+    private final FrameworkPackages packages;
     private final List<Record> stack = new ArrayList<>();  // root first; main thread
     private Handler main;
     private Object thread, loaded;
     private Instrumentation instrumentation;
     private Application application;
 
-    FrameworkActivities(Map<IBinder, Integer> orientations, FrameworkDisplay displays) {
+    FrameworkActivities(Map<IBinder, Integer> orientations, FrameworkDisplay displays,
+            FrameworkPackages packages) {
         this.orientations = orientations;
         this.displays = displays;
+        this.packages = packages;
     }
 
     // Activity.attach receives the ActivityThread from performLaunchActivity;
@@ -92,6 +101,19 @@ final class FrameworkActivities {
             if (main == null) throw new UnsupportedOperationException("activity_task.startActivity");
         }
         ComponentName component = intent.getComponent();
+        if (component == null && ACTION_REQUEST_PERMISSIONS.equals(intent.getAction())
+                && FrameworkPackages.PERMISSION_CONTROLLER.equals(intent.getPackage())) {
+            String[] requested = intent.getStringArrayExtra(EXTRA_REQUEST_PERMISSIONS_NAMES);
+            String[] names = requested == null ? new String[0] : requested;
+            main.post(() -> {
+                try {
+                    grantResult(names, resultTo, resultWho, requestCode);
+                } catch (Exception error) {
+                    throw new RuntimeException("Unable to deliver permission result", error);
+                }
+            });
+            return START_SUCCESS;
+        }
         if (component == null) {
             // Intent-filter resolution and other packages (browser, store)
             // are not provisioned: like a device without a handler.
@@ -115,6 +137,33 @@ final class FrameworkActivities {
             }
         });
         return START_SUCCESS;
+    }
+
+    // GrantPermissionsActivity: RESULT_OK with each requested name and its
+    // grant. This profile has no permission UI, so a permission not granted
+    // at install time stays denied, as when the user declines. Like the
+    // controller's translucent Activity, the caller pauses, receives the
+    // result, then resumes.
+    private void grantResult(String[] names, IBinder resultTo, String resultWho, int requestCode)
+            throws Exception {
+        Record caller = resultTo != null && requestCode >= 0 ? find(resultTo) : null;
+        if (caller == null) return;
+        int[] grants = new int[names.length];
+        for (int i = 0; i < names.length; i++)
+            grants[i] = packages.checkPermission(names[i], application.getApplicationInfo().uid,
+                    Context.DEVICE_ID_DEFAULT);
+        Intent data = new Intent(ACTION_REQUEST_PERMISSIONS)
+                .putExtra(EXTRA_REQUEST_PERMISSIONS_NAMES, names)
+                .putExtra(EXTRA_REQUEST_PERMISSIONS_RESULTS, grants);
+        boolean resumed = caller == top() && resumedState(caller.activity);
+        if (resumed) pause(caller.activity);
+        method(Activity.class, "dispatchActivityResult", String.class, int.class, int.class,
+                Intent.class, String.class).invoke(caller.activity, resultWho, requestCode,
+                Activity.RESULT_OK, data, "bifrost");
+        if (resumed) {
+            resume(caller.activity);
+            System.out.println("APP_ACTIVITY_RESUMED " + caller.activity.getClass().getName());
+        }
     }
 
     private void launch(ActivityInfo info, Intent intent, IBinder resultTo, String resultWho,

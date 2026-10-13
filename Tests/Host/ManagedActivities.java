@@ -3,16 +3,22 @@ package org.bifrost.fixture;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.view.SurfaceView;
 import android.widget.Button;
+import java.util.Arrays;
+import java.util.List;
 
-/** A second Activity above a SurfaceView Activity: start for result, window, finish, resume. */
+/**
+ * A second Activity above a SurfaceView Activity: start for result, window, finish, resume.
+ * First a provider intent query and a permission request round trip.
+ */
 public final class ManagedActivities extends Activity {
     private final Handler main = new Handler();
-    private boolean started;
+    private boolean requested, started;
     private int returned;  // results received
 
     @Override public void onCreate(Bundle state) {
@@ -33,16 +39,38 @@ public final class ManagedActivities extends Activity {
             return;
         }
         if (started) return;
-        started = true;
-        try {
-            // No browser is installed: an implicit view Intent has no handler.
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://example.invalid/")));
-            throw new AssertionError("implicit Intent resolved");
-        } catch (ActivityNotFoundException expected) {
-            System.out.println("MANAGED_ACTIVITIES_UNRESOLVED_OK");
+        if (!requested) {
+            requested = true;
+            try {
+                // No browser is installed: an implicit view Intent has no handler.
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://example.invalid/")));
+                throw new AssertionError("implicit Intent resolved");
+            } catch (ActivityNotFoundException expected) {
+                System.out.println("MANAGED_ACTIVITIES_UNRESOLVED_OK");
+            }
+            // Provider intent filters come from the installed split cluster's manifest.
+            List<ResolveInfo> files = getPackageManager().queryIntentContentProviders(
+                    new Intent("org.bifrost.fixture.FILES"), 0);
+            if (files.size() != 1 || !files.get(0).providerInfo.name.equals(Files.class.getName())
+                    || !getPackageManager().queryIntentContentProviders(
+                            new Intent("org.bifrost.fixture.NONE"), 0).isEmpty())
+                throw new AssertionError("provider intent query incorrect: " + files);
+            System.out.println("MANAGED_ACTIVITIES_PROVIDER_QUERY_OK");
+            requestPermissions(new String[] {android.Manifest.permission.INTERNET,
+                    android.Manifest.permission.CAMERA}, 7);
+            return;
         }
+        started = true;
         startActivityForResult(new Intent(this, Second.class).putExtra("value", 7), 42);
     }
+
+    @Override public void onRequestPermissionsResult(int request, String[] names, int[] grants) {
+        System.out.println("MANAGED_ACTIVITIES_PERMISSIONS " + request + " " + Arrays.toString(names)
+                + " " + Arrays.toString(grants));
+    }
+
+    /** Declared with an intent filter; queries resolve it without instantiating it. */
+    public static final class Files {}
 
     @Override public void onPause() {
         super.onPause();

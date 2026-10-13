@@ -426,8 +426,15 @@ class PackageTests(unittest.TestCase):
             component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
             component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
+            component += (f'<provider android:name="{activity}$Files" android:authorities="org.bifrost.fixture.files" '
+                          'android:exported="false"><intent-filter>'
+                          '<action android:name="org.bifrost.fixture.FILES"/></intent-filter></provider>')
         required = ' android:isSplitRequired="true"' if not split else ""
         job_permission = '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>' if managed == "ManagedServices" else ""
+        if managed == "ManagedActivities":
+            # Normal (granted at install) and runtime (denied without a permission UI).
+            job_permission = ('<uses-permission android:name="android.permission.INTERNET"/>'
+                              '<uses-permission android:name="android.permission.CAMERA"/>')
         manifest.write_text(
             f"""<manifest xmlns:android="http://schemas.android.com/apk/res/android"
             package="org.bifrost.fixture" android:versionCode="{version}"{split_attr}>
@@ -897,7 +904,11 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(status, 0, text[-30000:])
         self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
         markers = ("MANAGED_ACTIVITIES_ROOT_RESUMED returned=0", "MANAGED_ACTIVITIES_UNRESOLVED_OK",
-                   "MANAGED_ACTIVITIES_ROOT_PAUSED", "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
+                   "MANAGED_ACTIVITIES_PROVIDER_QUERY_OK",
+                   # The permission controller's result arrives while the caller is paused.
+                   "MANAGED_ACTIVITIES_ROOT_PAUSED",
+                   "MANAGED_ACTIVITIES_PERMISSIONS 7 [android.permission.INTERNET, android.permission.CAMERA] [0, -1]",
+                   "MANAGED_ACTIVITIES_SECOND_CREATED value=7",
                    "MANAGED_ACTIVITIES_SECOND_RESUMED", "MANAGED_ACTIVITIES_SECOND_FOCUS true",
                    "APP_POPUP_SHOWN", "MANAGED_ACTIVITIES_SECOND_WINDOW",
                    "MANAGED_ACTIVITIES_SECOND_CLICKED", "MANAGED_ACTIVITIES_RESULT 42 -1 42",
