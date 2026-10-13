@@ -20,6 +20,10 @@ State shared between them goes in `MemoryInternal.hpp`.
   and file identity. Never preload them into anonymous copies. Detach partial
   replaced/unmapped aliases before zeroing anonymous storage. Preserve identity
   through fork/remap and refault file contents after MADV_DONTNEED.
+- `mappings_snapshot` builds `/proc/self/maps` from `vmas_`, splitting runs at
+  protection, file identity and offset discontinuities. Loader-copied ELF
+  pages are named with `name_image`; `detach_file_locked` drops those names
+  wherever storage is replaced or unmapped (mprotect keeps them).
 - MADV_REMOVE punches writable shared file mappings; reject unsupported,
   private, read-only and unmapped ranges with the appropriate errno. Do not
   report successful discard while retaining stale data. Check wrapping lengths.

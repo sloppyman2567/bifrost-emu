@@ -622,9 +622,12 @@ The Android profile leaves guest page 0 unmapped, as Linux does
 handler converts it into `NullPointerException`. Bifrost's Linux profiles
 still map a readable zero page for legacy guests. With it mapped, nterp read
 a zero method entry point from a null `ArtMethod*` and jumped to address 0.
-`/proc/self/maps` reports the linker's real extent and omits an empty
-`[heap]`, so lines never overlap. Bionic takes the first line containing the
-initial SP as the main stack; the old 256 MiB `[interp]` guess could win.
+`/proc/self/maps` lists every guest mapping in the kernel's format with its
+real permissions; file-backed pages carry their offset, device, inode and
+resolved guest path (`linker64` appears as `/apex/com.android.runtime/bin/linker64`).
+It omits an empty `[heap]`, so lines never overlap. Bionic takes the first
+line containing the initial SP as the main stack; an old 256 MiB `[interp]`
+guess could win.
 ART then computed a negative `madvise` length below the stack. `madvise` now
 returns `EINVAL` for wrapping ranges like Linux `do_madvise`; it previously
 zeroed every page above the start, including libc text. This caused the

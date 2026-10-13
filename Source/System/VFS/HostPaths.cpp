@@ -528,14 +528,17 @@ int Yggdrasil::fd_link_target(int host_fd, std::string& target) {
     ssize_t size = ::readlink(proc, buffer, PATH_MAX);
     if (size < 0) return -errno;
     if (size == PATH_MAX) return -ENAMETOOLONG;
-    target.assign(buffer, static_cast<size_t>(size));
-    const std::string root = sandbox_root_canonical();
-    if (!root.empty() && root != "/" && target.compare(0, root.size(), root) == 0 &&
-        (target.size() == root.size() || target[root.size()] == '/')) {
-        target.erase(0, root.size());
-        if (target.empty()) target = "/";
-    }
+    target = guest_view_of_host_path(std::string(buffer, static_cast<size_t>(size)));
     return 0;
+}
+std::string Yggdrasil::guest_view_of_host_path(std::string path) {
+    const std::string root = sandbox_root_canonical();
+    if (!root.empty() && root != "/" && path.compare(0, root.size(), root) == 0 &&
+        (path.size() == root.size() || path[root.size()] == '/')) {
+        path.erase(0, root.size());
+        if (path.empty()) path = "/";
+    }
+    return path;
 }
 // ── dirfd confinement decision ────────────────────────────────────
 // True when `host_dirfd` resolves inside the sandbox root, meaning

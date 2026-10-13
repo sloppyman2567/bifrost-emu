@@ -166,6 +166,8 @@ public:
     // Kernel /proc target for a real host fd, with the canonical sandbox
     // prefix removed so linker/realpath callers see a guest absolute path.
     static int fd_link_target(int host_fd, std::string& target);
+    // Guest view of a canonical host path: the sandbox prefix removed.
+    static std::string guest_view_of_host_path(std::string path);
     // Explicit-dirfd open: absolute paths behave exactly like open()
     // (dirfd ignored per POSIX); relative paths resolve under host_dirfd
     // (a real host dir fd, or AT_FDCWD with the same confinement policy).
@@ -197,16 +199,15 @@ public:
     // Wire up the audio backend (for /dev/dsp, /dev/snd). May be null.
     void set_audio(::arm64emu::Audio* audio) { audio_ = audio; }
     // ── Live memory layout for /proc/self/maps ─────────────────────
-    // The Emulator registers a callback that returns the current
-    // allocations + brk range so /proc/self/maps can show a real layout
-    // instead of the old hardcoded 5-line string. The callback returns
-    // a vector of (start, size, label) tuples; label is "rwxp" style
-    // permissions + optional [stack]/[heap]/[anon] annotation.
+    // The Emulator registers a callback that returns every guest mapping
+    // in address order, printed in the kernel's /proc/<pid>/maps format.
     struct MapEntry {
         uint64_t    start;
         uint64_t    end;
         char        perms[5];  // "rwxp\0"
-        std::string label;     // "" or "[stack]"/"[heap]"/etc.
+        uint64_t    offset = 0;            // file offset of `start`
+        uint64_t    dev = 0, inode = 0;    // host st_dev/st_ino of the file
+        std::string label;     // guest path, "[stack]"/"[heap]"/"[vdso]" or ""
     };
     void set_maps_provider(std::function<std::vector<MapEntry>()> cb) {
         maps_provider_ = std::move(cb);

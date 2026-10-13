@@ -67,6 +67,26 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         return bytes;
     };
+    // The loader copies ELF bytes; name its PT_LOAD pages in /proc/self/maps
+    // after the file, as the kernel names its own mappings (resolved path).
+    auto name_segments = [this](const ElfLoader::Loaded& image, const std::string& guest_path) {
+        Memory::FileIdentity file;
+        file.path = guest_path;
+        int err = 0;
+        if (auto node = vfs_.open(guest_path, O_RDONLY, 0, &err)) {
+            struct stat st{};
+            if (node->fstat(&st) == 0) {
+                file.dev = st.st_dev;
+                file.inode = st.st_ino;
+            }
+            std::string resolved;
+            if (node->host_fd() >= 0 &&
+                yggdrasil::Yggdrasil::fd_link_target(node->host_fd(), resolved) == 0)
+                file.path = resolved;
+        }
+        for (const auto& segment : image.segments)
+            mem_.name_image(segment.addr, segment.file_end - segment.addr, segment.offset, file);
+    };
     // IFUNC resolvers can read Linux auxiliary data at low addresses while
     // the dynamic linker is running. Keep the emulator's zero page mapped
     // before loading or relocating any guest objects. The Android profile
@@ -108,71 +128,50 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     });
     vfs_.set_graphics(&graphics_);
     vfs_.set_audio(&audio_);
-    // Wire up /proc/self/maps to query live memory state. The callback
-    // captures `this` — the Emulator outlives the VFS, so this is safe.
-    // BUGFIX: previously /proc/self/maps returned hardcoded 5-line string
-    // that didn't reflect actual guest memory layout. Now we emit real
-    // entries: ELF load range, brk (heap), stack, mmap region, and
-    // dynamic linker range.
+    // /proc/self/maps lists every guest mapping as the kernel does: real
+    // permissions, and file offset, device, inode and resolved path for
+    // file-backed pages. The callback captures `this`; the Emulator outlives
+    // the VFS. Bionic and glibc find the main stack as the first line that
+    // contains the initial SP, so [stack] is split out of coalesced ranges.
     vfs_.set_maps_provider([this]() {
+        struct Special { uint64_t start, end; const char* name; };
+        std::vector<Special> specials;
+        if (brk_start_ > 0 && brk_ > brk_start_)  // Linux omits an empty [heap]
+            specials.push_back({brk_start_, brk_, "[heap]"});
+        specials.push_back({mem_.stack_top() - Memory::STACK_SIZE, mem_.stack_top(), "[stack]"});
+        if (vdso_base_ && vdso_size_)
+            specials.push_back({vdso_base_, vdso_base_ + vdso_size_, "[vdso]"});
         std::vector<yggdrasil::Yggdrasil::MapEntry> out;
-        // Main ELF image: its lowest to highest PT_LOAD page.
-        if (end_addr_ > exe_start_) {
-            yggdrasil::Yggdrasil::MapEntry e;
-            e.start = exe_start_;
-            e.end   = (end_addr_ + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
-            std::snprintf(e.perms, sizeof(e.perms), "rwxp");
-            out.push_back(e);
+        for (const auto& view : mem_.mappings_snapshot()) {
+            std::vector<uint64_t> cuts{view.start, view.end};
+            if (!view.file)
+                for (const auto& special : specials)
+                    for (uint64_t at : {special.start, special.end})
+                        if (at > view.start && at < view.end) cuts.push_back(at);
+            std::sort(cuts.begin(), cuts.end());
+            for (size_t i = 0; i + 1 < cuts.size(); ++i) {
+                yggdrasil::Yggdrasil::MapEntry e;
+                e.start = cuts[i];
+                e.end = cuts[i + 1];
+                e.perms[0] = (view.prot & Memory::GUEST_PROT_READ) ? 'r' : '-';
+                e.perms[1] = (view.prot & Memory::GUEST_PROT_WRITE) ? 'w' : '-';
+                e.perms[2] = (view.prot & Memory::GUEST_PROT_EXEC) ? 'x' : '-';
+                e.perms[3] = view.shared ? 's' : 'p';
+                e.perms[4] = '\0';
+                if (view.file) {
+                    e.offset = view.offset + (e.start - view.start);
+                    e.dev = view.file->dev;
+                    e.inode = view.file->inode;
+                    e.label = view.file->host_path
+                        ? yggdrasil::Yggdrasil::guest_view_of_host_path(view.file->path)
+                        : view.file->path;
+                } else {
+                    for (const auto& special : specials)
+                        if (special.start <= e.start && e.end <= special.end) e.label = special.name;
+                }
+                out.push_back(std::move(e));
+            }
         }
-        // Heap (brk): from brk_start_ to brk_.
-        if (brk_start_ > 0 && brk_ > brk_start_) {  // Linux omits an empty [heap]
-            yggdrasil::Yggdrasil::MapEntry e;
-            e.start = brk_start_;
-            e.end   = brk_;
-            std::snprintf(e.perms, sizeof(e.perms), "rw-p");
-            e.label = "[heap]";
-            out.push_back(e);
-        }
-        // Dynamic linker image. Report its real extent: Bionic and glibc
-        // find the main stack by taking the first maps line that contains
-        // the initial SP, so an oversized guess here can swallow the stack.
-        if (interp_base_ > 0 && interp_end_ > interp_base_) {
-            yggdrasil::Yggdrasil::MapEntry e;
-            e.start = interp_base_;
-            e.end   = (interp_end_ + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
-            std::snprintf(e.perms, sizeof(e.perms), "rwxp");
-            e.label = "[interp]";
-            out.push_back(e);
-        }
-        // All mmap_alloc'd regions (excluding the brk heap already
-        // emitted above).
-        for (const auto& kv : mem_.allocations_snapshot()) {
-            uint64_t a = kv.first, s = kv.second;
-            // Skip the heap region (already emitted above).
-            if (a == brk_start_) continue;
-            // The Android linker's reservation is the [interp] line above.
-            if (interp_base_ && a == interp_base_) continue;
-            // Skip the TLS scratch area near brk_start_ (it's part of the
-            // mmap region but we want to show it as anon).
-            yggdrasil::Yggdrasil::MapEntry e;
-            e.start = a;
-            e.end   = a + s;
-            std::snprintf(e.perms, sizeof(e.perms), "rw-p");
-            out.push_back(e);
-        }
-        // Stack: 64 MiB ending at the (ASLR-jittered) stack top.
-        {
-            yggdrasil::Yggdrasil::MapEntry e;
-            e.start = mem_.stack_top() - Memory::STACK_SIZE;
-            e.end   = mem_.stack_top();
-            std::snprintf(e.perms, sizeof(e.perms), "rw-p");
-            e.label = "[stack]";
-            out.push_back(e);
-        }
-        // Match Linux's address ordering, including allocations above 4 GiB.
-        std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
-            return a.start < b.start;
-        });
         return out;
     });
     // Wire up guest cwd tracking. The host cwd is meaningless because
@@ -262,16 +261,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     ElfLoader::Options load_options;
     load_options.apply_relocations = !android_runtime_;
     auto info = ElfLoader::load(mem_, data, load_options);
+    name_segments(info, path);
     entry_ = info.entry;
     prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
-    exe_start_ = info.start_addr;
     phdr_addr_ = info.phdr_addr;
     phnum_ = info.phnum;
     phent_ = info.phent;
     has_lse_ = info.has_lse;
     interp_base_ = 0;
-    interp_end_ = 0;
     // If the binary has a PT_INTERP (dynamic linker), load it.
     // The dynamic linker's entry point becomes the real entry point;
     // the binary's entry is passed via AT_ENTRY in auxv.
@@ -298,10 +296,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
         if (!loaded.interp.empty())
             throw EmuError("Android linker64 must not itself require PT_INTERP");
+        name_segments(loaded, info.interp);
         dyn_linker_.reset();
         entry_ = loaded.entry;
         interp_base_ = loaded.base_addr;
-        interp_end_ = loaded.end_addr;
         has_lse_ = has_lse_ || loaded.has_lse;
         // Guest shim DSOs resolve only explicit adapter exports. Bionic
         // continues to own all ELF relocation/TLS; no custom linker is made.
@@ -837,6 +835,19 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // 0x4000000000 (256 GiB) is above the low region and the heap.
             interp_base = 0x4000000000ULL;
             interp_base_ = interp_base;  // Save for AT_BASE in auxv.
+            Memory::FileIdentity interp_file;
+            interp_file.host_path = true;
+            if (char* resolved = ::realpath(found_path.c_str(), nullptr)) {
+                interp_file.path = resolved;
+                free(resolved);
+            } else {
+                interp_file.path = found_path;
+            }
+            struct stat interp_stat{};
+            if (::stat(interp_file.path.c_str(), &interp_stat) == 0) {
+                interp_file.dev = interp_stat.st_dev;
+                interp_file.inode = interp_stat.st_ino;
+            }
             if (idata.size() >= 64 && idata[0] == 0x7f && idata[1] == 'E') {
                 uint64_t i_entry, i_phoff;
                 uint16_t i_phnum, i_phentsize;
@@ -858,9 +869,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     mem_.map_range(addr, p_memsz);
                     if (p_filesz > 0) {
                         mem_.write(addr, idata.data() + p_offset, p_filesz);
+                        mem_.name_image(addr, p_filesz, p_offset, interp_file);
                     }
-                    uint64_t end = addr + p_memsz;
-                    if (end > interp_end_) interp_end_ = end;
                 }
                 // The entry point is the interpreter's entry (relative to interp_base).
                 // Skip this if we used native dynlink — we run the main

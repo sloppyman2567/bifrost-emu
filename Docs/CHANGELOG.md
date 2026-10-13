@@ -13,6 +13,17 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Kernel-format /proc/self/maps (2026-10-13)
+
+- `/proc/self/maps` lists every guest mapping with its real permissions,
+  including `PROT_NONE` reservations, instead of one `rw-p` line per
+  allocation. File mappings show `s`/`p`, their file offset, device, inode and
+  resolved guest path, split and merged as the kernel does.
+- ELF images Bifrost loads by copying (the main executable, Android
+  `linker64`, the legacy interpreter, native-linker libraries) are named after
+  their files; `[interp]`, which Linux never prints, is gone. `[vdso]` is
+  labelled.
+
 ### Android Activity windows and SurfaceView lifecycle (2026-10-13)
 
 - The launcher Activity's decor is now a WindowManager window like every

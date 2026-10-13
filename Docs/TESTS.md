@@ -1,5 +1,28 @@
 # Tests
 
+## Kernel-format /proc/self/maps (2026-10-13)
+
+`test_proc_exe` now also checks a private file mapping split by `mprotect`
+(`r--p 00001000`, `rw-p 00002000`), a `MAP_SHARED` view (`rw-s`), each with
+the file's `major:minor`, inode and real path at column 74; a `PROT_NONE`
+anonymous reservation (exactly `---p 00000000 00:00 0 `); and an `r-x` line
+naming `/proc/self/exe`. The file-line checks pass under QEMU 11.1 user mode
+(names from host kernel mappings). QEMU pads anonymous lines, unlike the
+kernel, so the anonymous check follows the host kernel's own maps. Running
+the original test under QEMU truncates the fixture: QEMU's `/proc/self/exe`
+open with `O_TRUNC` has no `ETXTBSY`.
+
+Bifrost passes it, the JIT suite (324/325; `xwayland_wire` failed once with an
+X `GetImage` BadMatch and passed 3/3 alone), the interpreter suite (316/316),
+`make verify`, the headless build and `test_android_bionic.sh` (bootstrap and
+AAudio in all modes; one earlier AAudio STOP failure did not recur and nothing
+in that fixture reads maps). Bifrost-copied images: the main ELF, Android
+`linker64`, the legacy interpreter and native-linker libraries are named after
+their files; native-linker libraries stay `rwxp` because that linker never
+applies PT_LOAD permissions. The vDSO is reported as its three real
+`[vdso]` ranges; `[vvar]` and anonymous VMA names (`PR_SET_VMA`) are not
+modelled.
+
 ## Software Gralloc5 and allocator lifetime (2026-10-13)
 
 `ActivityProbe$GrallocProbe` uses real Android 15 AHardwareBuffer/libui clients

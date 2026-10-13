@@ -71,6 +71,10 @@ public:
         uint64_t base_addr;  // load bias (0 for ET_EXEC, randomized pie_base() for ET_DYN)
         bool     has_lse;    // ELF declared AArch64 LSE atomic feature
         std::string interp;  // PT_INTERP path (dynamic linker), empty if static
+        // File-backed span of each PT_LOAD, as the kernel maps it: pages
+        // [addr, file_end) hold file bytes from page-aligned `offset`.
+        struct Segment { uint64_t addr, file_end, offset; };
+        std::vector<Segment> segments;
     };
     static Loaded load(Memory& mem, const std::vector<uint8_t>& data);
     static Loaded load(Memory& mem, const std::vector<uint8_t>& data,
@@ -394,7 +398,6 @@ private:
     CPU    main_cpu_;          // main thread's CPU state
     uint64_t entry_ = 0;
     uint64_t end_addr_ = 0;
-    uint64_t exe_start_ = 0;   // main ELF's lowest PT_LOAD page, for /proc/self/maps
     uint64_t brk_ = 0;
     uint64_t brk_start_ = 0;   // initial brk (set at ELF load time)
     std::mutex brk_mu_;        // serializes concurrent brk() calls
@@ -402,7 +405,6 @@ private:
     uint64_t phnum_ = 0;
     uint64_t phent_ = 0;
     uint64_t interp_base_ = 0;  // dynamic linker load address (0 if static)
-    uint64_t interp_end_ = 0;   // end of its last PT_LOAD, for /proc/self/maps
     uint64_t prog_entry_ = 0;   // original program entry (for AT_ENTRY)
     uint64_t vdso_base_ = 0;    // vDSO ELF load address (for AT_SYSINFO_EHDR)
     uint64_t vdso_size_ = 0;    // vDSO mapped size (page-rounded), for fast-path PC checks

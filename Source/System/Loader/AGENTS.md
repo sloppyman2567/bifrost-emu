@@ -6,7 +6,9 @@
   the existing soname/root/toolchain search behavior.
 - `/proc/self/maps` must contain non-overlapping real ELF/interpreter extents.
   Loading the interpreter does not extend the main ELF's end address; Bionic
-  and glibc use the mapping containing SP to find the main stack.
+  and glibc use the mapping containing SP to find the main stack. Every loader
+  that copies PT_LOAD bytes names their file pages (`Memory::name_image`) with
+  the file it read, so maps attributes them like kernel file mappings.
 - glibc variant-I TLS reserves `TLS_PRE_TCB_SIZE` immediately below TP, with
   module TLS below the pthread descriptor. Keep `allocate_static_tls`,
   `allocate_thread_tls`, the syscall `_dl_allocate_tls` handler and patched

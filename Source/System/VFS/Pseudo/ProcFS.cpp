@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 namespace arm64emu::yggdrasil {
 // Helper: build a static-content MemfdNode.
@@ -171,17 +172,24 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         return serve_lazy([this]() -> std::string {
             std::string maps;
             if (maps_provider_) {
+                // fs/proc/task_mmu.c show_map_vma: the header ends with a
+                // space; a name is padded to column 73 (64-bit seq_setwidth).
+                constexpr size_t NAME_COLUMN = 25 + sizeof(uint64_t) * 6 - 1;
                 for (const auto& e : maps_provider_()) {
-                    char line[256];
+                    char line[160];
                     int n = snprintf(line, sizeof(line),
-                        "%08llx-%08llx %s 00000000 00:00 0",
+                        "%08llx-%08llx %s %08llx %02x:%02x %llu ",
                         static_cast<unsigned long long>(e.start),
                         static_cast<unsigned long long>(e.end),
-                        e.perms);
-                    if (n < 0) continue;
+                        e.perms, static_cast<unsigned long long>(e.offset),
+                        major(static_cast<dev_t>(e.dev)), minor(static_cast<dev_t>(e.dev)),
+                        static_cast<unsigned long long>(e.inode));
+                    if (n < 0 || static_cast<size_t>(n) >= sizeof(line)) continue;
                     maps.append(line, static_cast<size_t>(n));
                     if (!e.label.empty()) {
-                        maps += "  ";
+                        if (static_cast<size_t>(n) < NAME_COLUMN)
+                            maps.append(NAME_COLUMN - static_cast<size_t>(n), ' ');
+                        maps += ' ';
                         maps += e.label;
                     }
                     maps += '\n';

@@ -66,7 +66,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
         if (aarch64_elf) {
             resolved = found_path;
             std::vector<uint8_t> file_data = std::move(data);
-            return load_library_from_data(cpu, path, file_data);
+            return load_library_from_data(cpu, path, file_data, found_path);
         }
         // Missing or host-arch library: thunk graphic/audio/display APIs.
         if (thunk_resolver_ && is_thunk_supported_lib_(path)) {
@@ -93,7 +93,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
             && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
             && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
         if (aarch64_elf) {
-            return load_library_from_data(cpu, path, data);
+            return load_library_from_data(cpu, path, data, found_path);
         }
         // Same thunk fallback as the bare-soname path: an absolute
         // host-arch path (e.g. /usr/lib/x86_64/libGL.so.1) should
@@ -126,7 +126,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
             && alt[0] == 0x7f && alt[1] == 'E' && alt[2] == 'L' && alt[3] == 'F'
             && alt[18] == (EM_AARCH64 & 0xFF) && alt[19] == (EM_AARCH64 >> 8);
         if (alt_ok) {
-            return load_library_from_data(cpu, path, alt);
+            return load_library_from_data(cpu, path, alt, found_path);
         }
         // Same thunk fallback: host-arch file at an absolute path
         // thunks when the basename names a supported api.
@@ -134,7 +134,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
             return register_thunk_library_(basename);
         }
     }
-    return load_library_from_data(cpu, path, data);
+    return load_library_from_data(cpu, path, data, resolved);
 }
 // Internal helper: load a library from an in-memory ELF image.
 // Used by load_library (dlopen by path) and by soname-based lookup.
@@ -142,7 +142,8 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
 // init array execution, and refcount tracking.
 uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                                                 const std::string& path,
-                                                std::vector<uint8_t>& data) {
+                                                std::vector<uint8_t>& data,
+                                                const std::string& file) {
     if (data.size() < 64 || data[0] != 0x7f || data[1] != 'E' ||
         data[2] != 'L' || data[3] != 'F') {
         set_last_error("not an ELF file");
@@ -193,7 +194,7 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
     obj.refcount = 1;
     obj.map_size = max_end;
     uint64_t entry;
-    map_segments(data, base, entry);
+    map_segments(data, base, entry, file);
     obj.entry = entry;
     if (!parse_dynamic(data, base, obj)) {
         set_last_error("parse_dynamic failed");

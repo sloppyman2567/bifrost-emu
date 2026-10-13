@@ -32,6 +32,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -273,6 +274,30 @@ public:
         }
         return out;
     }
+    // ── /proc/self/maps ───────────────────────────────────────────────
+    // A file as Linux names it in maps: device, inode and path. `path` is
+    // a host path when `host_path`, translated to the guest view by VFS.
+    struct FileIdentity {
+        std::string path;
+        bool host_path = false;
+        uint64_t dev = 0, inode = 0;
+    };
+    // Loaders that copy ELF bytes instead of mapping the file attribute
+    // [addr, addr+size) to file bytes at `offset`, as the kernel would name
+    // the PT_LOAD mapping. Replaced or unmapped storage drops the name.
+    void name_image(uint64_t addr, uint64_t size, uint64_t offset,
+                    const FileIdentity& file);
+    // One maps line: a run of equal protection and file identity, with
+    // contiguous file offsets. Anonymous runs have no `file`.
+    struct MappingView {
+        uint64_t start = 0, end = 0;
+        uint8_t prot = 0;
+        bool shared = false;
+        uint64_t offset = 0;
+        std::shared_ptr<const FileIdentity> file;
+    };
+    // Every guest mapping in address order, PROT_NONE reservations included.
+    std::vector<MappingView> mappings_snapshot() const;
     // ── The reservation ───────────────────────────────────────────────
     // The JIT addresses guest memory as `[window_base + guest_addr]` after
     // checking guest_addr + width <= window_size().
@@ -349,8 +374,17 @@ private:
     };
     std::map<uint64_t, FilePage> file_pages_;  // keyed by page number
     const FilePage* file_page_locked(uint64_t addr) const;
-    // Restore anonymous storage over file mappings in [lo, hi).
+    // Restore anonymous storage over file mappings in [lo, hi), and drop
+    // loader image names there.
     void detach_file_locked(uint64_t lo, uint64_t hi);
+    // Loader image names (name_image), disjoint and keyed by start.
+    struct ImageRun {
+        uint64_t end = 0;
+        uint64_t offset = 0;  // file offset of the run's start
+        std::shared_ptr<const FileIdentity> file;
+    };
+    std::map<uint64_t, ImageRun> image_runs_;
+    void forget_images_locked(uint64_t lo, uint64_t hi);
     std::map<uint64_t, Vma> vmas_;
     // Tracked allocations (start → page-aligned size), ordered so munmap and
     // MAP_FIXED find their overlaps without scanning every allocation. The

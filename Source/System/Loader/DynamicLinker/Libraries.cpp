@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <fstream>
@@ -178,8 +179,22 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
 }
 // ── map_segments ───────────────────────────────────────────────────────
 uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
-                                     uint64_t base, uint64_t& entry) {
+                                     uint64_t base, uint64_t& entry,
+                                     const std::string& file) {
     if (data.size() < 64) return 0;
+    Memory::FileIdentity identity;
+    identity.host_path = true;
+    if (char* resolved = ::realpath(file.c_str(), nullptr)) {
+        identity.path = resolved;
+        free(resolved);
+    } else {
+        identity.path = file;
+    }
+    struct stat st{};
+    if (::stat(identity.path.c_str(), &st) == 0) {
+        identity.dev = st.st_dev;
+        identity.inode = st.st_ino;
+    }
     uint64_t e_entry, e_phoff;
     uint16_t e_phentsize, e_phnum;
     memcpy(&e_entry,     data.data() + 24, 8);
@@ -203,6 +218,7 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
         mem_.map_range(addr, p_memsz);
         if (p_filesz > 0 && p_offset + p_filesz <= data.size()) {
             mem_.write(addr, data.data() + p_offset, p_filesz);
+            if (!file.empty()) mem_.name_image(addr, p_filesz, p_offset, identity);
         }
         uint64_t end = addr + p_memsz;
         if (end > end_addr) end_addr = end;
@@ -274,7 +290,7 @@ uint64_t DynamicLinker::load_shared_library(CPU& cpu,
     obj.is_main = false;
     obj.map_size = max_end;  // for find_object_by_addr (dladdr)
     uint64_t entry;
-    uint64_t end = map_segments(data, base, entry);
+    uint64_t end = map_segments(data, base, entry, path);
     obj.entry = entry;
     (void)end;
     if (!parse_dynamic(data, base, obj)) {

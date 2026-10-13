@@ -534,11 +534,13 @@ private:
     bool parse_dynamic(const std::vector<uint8_t>& data,
                        uint64_t base,
                        LoadedObject& obj);
-    // Internal helper: load a library from an in-memory ELF image.
-    // Shared by load_library (dlopen by path) and soname-based lookup.
+    // Internal helper: load a library from an in-memory ELF image read
+    // from host file `file`. Shared by load_library (dlopen by path) and
+    // soname-based lookup.
     uint64_t load_library_from_data(CPU& cpu,
                                     const std::string& path,
-                                    std::vector<uint8_t>& data);
+                                    std::vector<uint8_t>& data,
+                                    const std::string& file);
     // Parse PT_TLS from program headers and record it in obj.tls.
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
     // Parse PT_GNU_EH_FRAME from program headers and record the
@@ -592,11 +594,13 @@ private:
     // __libc_init instead of depending on ld-linux, except we do it
     // at the dynamic-linker level rather than the libc level.
     bool register_ld_linux_shim_();
-    // Map PT_LOAD segments from `data` at `base`. Returns the highest
+    // Map PT_LOAD segments from `data` at `base`, naming their file pages
+    // after host file `file` in /proc/self/maps. Returns the highest
     // mapped address + 1 (i.e., the new end_addr). Sets `entry` to
     // the absolute entry point.
     uint64_t map_segments(const std::vector<uint8_t>& data,
-                          uint64_t base, uint64_t& entry);
+                          uint64_t base, uint64_t& entry,
+                          const std::string& file);
     // Build the global symbol table from obj's .dynsym. Only exported
     // (SHN_UNDEF == 0, st_shndx != SHN_UNDEF) symbols are added.
     void index_symbols(CPU& cpu, const LoadedObject& obj,

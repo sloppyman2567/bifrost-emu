@@ -12,6 +12,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <new>
@@ -476,6 +477,7 @@ const Memory::FilePage* Memory::file_page_locked(uint64_t addr) const {
     return it == file_pages_.end() ? nullptr : &it->second;
 }
 void Memory::detach_file_locked(uint64_t lo, uint64_t hi) {
+    forget_images_locked(lo, hi);
     // Restore anonymous storage before zero/reuse, rather than overwriting
     // a live file through a former MAP_SHARED alias. Adjacent file mappings are
     // replaced with one host mapping.
@@ -493,6 +495,112 @@ void Memory::detach_file_locked(uint64_t lo, uint64_t hi) {
         if (mapped == MAP_FAILED) throw std::bad_alloc();
         it = file_pages_.erase(it, next);
     }
+}
+// ── Mapping names (/proc/self/maps) ───────────────────────────────────
+void Memory::forget_images_locked(uint64_t lo, uint64_t hi) {
+    auto it = image_runs_.upper_bound(lo);
+    if (it != image_runs_.begin() && std::prev(it)->second.end > lo) --it;
+    while (it != image_runs_.end() && it->first < hi) {
+        const uint64_t start = it->first;
+        const ImageRun run = it->second;
+        it = image_runs_.erase(it);
+        if (start < lo) image_runs_[start] = ImageRun{lo, run.offset, run.file};
+        if (run.end > hi) {
+            image_runs_[hi] = ImageRun{run.end, run.offset + (hi - start), run.file};
+            break;
+        }
+    }
+}
+void Memory::name_image(uint64_t addr, uint64_t size, uint64_t offset,
+                        const FileIdentity& file) {
+    const uint64_t lo = addr & ~PAGE_MASK;
+    if (!size || addr > UINT64_MAX - size || addr - lo > offset) return;
+    const uint64_t hi = (addr + size + PAGE_MASK) & ~PAGE_MASK;
+    auto identity = std::make_shared<const FileIdentity>(file);
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    forget_images_locked(lo, hi);
+    image_runs_[lo] = ImageRun{hi, offset - (addr - lo), std::move(identity)};
+}
+std::vector<Memory::MappingView> Memory::mappings_snapshot() const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    // The kernel names a file mapping by the opened file, not the fd.
+    std::unordered_map<const FileBacking*, std::shared_ptr<const FileIdentity>> files;
+    auto backing_file = [&](const FileBacking* backing) {
+        auto [it, fresh] = files.try_emplace(backing);
+        if (fresh) {
+            auto file = std::make_shared<FileIdentity>();
+            struct stat st{};
+            if (::fstat(backing->fd, &st) == 0) {
+                file->dev = st.st_dev;
+                file->inode = st.st_ino;
+            }
+            char link[32], target[4096];
+            std::snprintf(link, sizeof(link), "/proc/self/fd/%d", backing->fd);
+            const ssize_t n = ::readlink(link, target, sizeof(target));
+            if (n > 0 && static_cast<size_t>(n) < sizeof(target)) file->path.assign(target, n);
+            file->host_path = true;
+            it->second = std::move(file);
+        }
+        return it->second;
+    };
+    std::vector<MappingView> out;
+    for (const auto& [vma_start, vma] : vmas_) {
+        uint64_t at = vma_start;
+        while (at < vma.end) {
+            MappingView view;
+            view.start = at;
+            view.prot = vma.prot & 7;
+            uint64_t end = vma.end;
+            auto page = file_pages_.lower_bound(at / PAGE_SIZE);
+            auto image = image_runs_.upper_bound(at);
+            if (image != image_runs_.begin() && std::prev(image)->second.end > at) --image;
+            if (page != file_pages_.end() && page->first * PAGE_SIZE == at) {
+                const FileBacking* backing = page->second.backing.get();
+                view.file = backing_file(backing);
+                view.shared = backing->shared;
+                view.offset = backing->file_offset + page->second.offset;
+                end = at + PAGE_SIZE;
+                for (auto next = std::next(page); next != file_pages_.end() &&
+                         next->first * PAGE_SIZE == end && end < vma.end; ++next) {
+                    const FileBacking* other = next->second.backing.get();
+                    if (other->file_offset + next->second.offset != view.offset + (end - at) ||
+                        other->shared != backing->shared) break;
+                    if (other != backing) {
+                        const auto file = backing_file(other);
+                        if (file->dev != view.file->dev || file->inode != view.file->inode) break;
+                    }
+                    end += PAGE_SIZE;
+                }
+            } else {
+                if (page != file_pages_.end()) end = std::min(end, page->first * PAGE_SIZE);
+                if (image != image_runs_.end() && image->first <= at) {
+                    view.file = image->second.file;
+                    view.offset = image->second.offset + (at - image->first);
+                    end = std::min(end, image->second.end);
+                } else if (image != image_runs_.end()) {
+                    end = std::min(end, image->first);
+                }
+            }
+            view.end = end;
+            // Linux merges neighbours with equal flags, file and offsets.
+            if (!out.empty()) {
+                MappingView& last = out.back();
+                const bool same_file = last.file == view.file ||
+                    (last.file && view.file && last.file->dev == view.file->dev &&
+                     last.file->inode == view.file->inode && last.file->path == view.file->path);
+                if (last.end == view.start && last.prot == view.prot &&
+                    last.shared == view.shared && same_file &&
+                    (!view.file || last.offset + (last.end - last.start) == view.offset)) {
+                    last.end = view.end;
+                    at = end;
+                    continue;
+                }
+            }
+            out.push_back(std::move(view));
+            at = end;
+        }
+    }
+    return out;
 }
 int Memory::map_shared_file(uint64_t addr, uint64_t size, int fd,
                             uint64_t offset, uint8_t prot) {

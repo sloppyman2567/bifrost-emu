@@ -182,6 +182,9 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
             if (h.p_offset + h.p_filesz > data.size())
                 throw EmuError("PT_LOAD file range out of bounds");
             mem.write(vaddr, data.data() + h.p_offset, h.p_filesz);
+            info.segments.push_back({vaddr & ~Memory::PAGE_MASK,
+                                     (vaddr + h.p_filesz + Memory::PAGE_MASK) & ~Memory::PAGE_MASK,
+                                     h.p_offset & ~Memory::PAGE_MASK});
         }
         // p_memsz). On real Linux, the kernel gives zero pages for
         // the BSS. Our map_range may leave stale data from a previous
