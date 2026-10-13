@@ -13,6 +13,15 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### JIT compile time (2026-10-13)
+
+- Tier-1 and Tier-2 compiles no longer rebuild all 4,096 per-vreg use lists
+  for every block; only the lists the previous compile filled are emptied,
+  keeping their storage. In a fresh SpongeBob startup profile that rebuild
+  was about a third of Tier-1 compile time (2.3% of sampled CPU).
+  `jit_native_simd_gen`, which compiles thousands of small blocks, dropped
+  from 118.5 to 108.5 ms of CPU.
+
 ### Base ARMv8.0 FP/SIMD semantics from the coverage sweep (2026-10-13)
 
 - Every base ARMv8.0 FP/SIMD word in the sweep now matches QEMU in both

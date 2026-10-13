@@ -577,6 +577,14 @@ bool FrostJIT::vreg_last_use_this_op(int v) const {
 // per-vreg use lists come from the same block use-scan that builds
 // kills_per_op_, so within a basic block the future is fully known and
 // evicting the furthest-next-use vreg is provably reload-optimal.
+void FrostJIT::reset_vreg_uses() {
+    if (vreg_uses_.size() != 4096) {
+        vreg_uses_.assign(4096, {});
+    } else {
+        for (uint16_t v : vreg_uses_touched_) vreg_uses_[v].clear();
+    }
+    vreg_uses_touched_.clear();
+}
 int FrostJIT::next_use_after(int v, size_t cur) const {
     if (v < 0 || static_cast<size_t>(v) >= vreg_uses_.size()) return -1;
     const std::vector<uint16_t>& u = vreg_uses_[v];

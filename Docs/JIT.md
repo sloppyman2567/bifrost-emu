@@ -645,6 +645,14 @@ expected region shapes assume the default cap.
 `jit_bitfield_regalloc` covers immediate multiplier signs/widths, aliases and
 a long body with fifteen live GPRs.
 
+Belady eviction reads per-vreg use lists (`vreg_uses_`, 4,096 entries).
+Each Tier-1 and Tier-2 use-scan starts with `reset_vreg_uses()`, which
+empties only the lists that the previous scan filled (`note_vreg_use`
+records them) and keeps their storage. Outside a compile every list is
+empty, so `next_use_after` returns -1 as before. Rebuilding all 4,096
+lists per block had been about a third of Tier-1 compile time in a
+SpongeBob startup profile (2026-10-13).
+
 ## Scalar SSA
 
 `Source/FrostJIT/IR/SSA/SSA.hpp` and `Source/FrostJIT/IR/SSA/SSA.cpp` define a scalar SSA graph with

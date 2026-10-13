@@ -876,7 +876,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     {
         size_t n = ir_block.insts.size();
         vreg_last_use_op_.assign(4096, -1);
-        vreg_uses_.assign(4096, {});
+        reset_vreg_uses();
         for (size_t i = 0; i < n; i++) {
             const IRInst& inst = ir_block.insts[i];
             if (inst.op != IROp::LOAD_REG) {
@@ -885,18 +885,18 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 // >=4096 indicates a translator bug; cap to avoid OOB.
                 if (inst.src1 > 31 && inst.src1 < 4096) {
                     vreg_last_use_op_[inst.src1] = static_cast<int>(i);
-                    vreg_uses_[inst.src1].push_back(static_cast<uint16_t>(i));
+                    note_vreg_use(inst.src1, static_cast<uint16_t>(i));
                 }
                 if (inst.src2 > 31 && inst.src2 < 4096) {
                     vreg_last_use_op_[inst.src2] = static_cast<int>(i);
-                    vreg_uses_[inst.src2].push_back(static_cast<uint16_t>(i));
+                    note_vreg_use(inst.src2, static_cast<uint16_t>(i));
                 }
             }
             // aux is a vreg for SMADDL/UMADDL/SMSUBL/UMSUBL (accumulator);
             // SIMD_INS stores a small element index (< 33, filtered out).
             if (inst.aux > 31 && inst.aux < 4096) {
                 vreg_last_use_op_[inst.aux] = static_cast<int>(i);
-                vreg_uses_[inst.aux].push_back(static_cast<uint16_t>(i));
+                note_vreg_use(inst.aux, static_cast<uint16_t>(i));
             }
         }
         // Build kills_per_op_: for each op i, the list of scratch vregs
@@ -1026,7 +1026,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     kills_per_op_.clear();
     fold_ahead_kind_.clear();
     vreg_last_use_op_.clear();
-    vreg_uses_.clear();
+    reset_vreg_uses();
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
     // Counts the spill/reload instruction density of THIS block. A high
     // reload:spill ratio for the same vreg within a block is the bloat

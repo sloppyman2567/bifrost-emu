@@ -132,22 +132,22 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     {
         size_t n = region_ir.size();
         vreg_last_use_op_.assign(4096, -1);
-        vreg_uses_.assign(4096, {});
+        reset_vreg_uses();
         for (size_t i = 0; i < n; i++) {
             const IRInst& inst = region_ir[i];
             if (inst.op != IROp::LOAD_REG) {
                 if (inst.src1 > 31 && inst.src1 < 4096) {
                     vreg_last_use_op_[inst.src1] = static_cast<int>(i);
-                    vreg_uses_[inst.src1].push_back(static_cast<uint16_t>(i));
+                    note_vreg_use(inst.src1, static_cast<uint16_t>(i));
                 }
                 if (inst.src2 > 31 && inst.src2 < 4096) {
                     vreg_last_use_op_[inst.src2] = static_cast<int>(i);
-                    vreg_uses_[inst.src2].push_back(static_cast<uint16_t>(i));
+                    note_vreg_use(inst.src2, static_cast<uint16_t>(i));
                 }
             }
             if (inst.aux > 31 && inst.aux < 4096) {
                 vreg_last_use_op_[inst.aux] = static_cast<int>(i);
-                vreg_uses_[inst.aux].push_back(static_cast<uint16_t>(i));
+                note_vreg_use(inst.aux, static_cast<uint16_t>(i));
             }
         }
         kills_per_op_.assign(n, {});
@@ -325,11 +325,11 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         for (size_t k = 0; k < preheader.size(); k++) {
             const IRInst& inst = preheader[k];
             if (inst.src1 > 32 && inst.src1 < 4096)
-                vreg_uses_[inst.src1].push_back(static_cast<uint16_t>(PREHEADER_BASE + k));
+                note_vreg_use(inst.src1, static_cast<uint16_t>(PREHEADER_BASE + k));
             if (inst.src2 > 32 && inst.src2 < 4096)
-                vreg_uses_[inst.src2].push_back(static_cast<uint16_t>(PREHEADER_BASE + k));
+                note_vreg_use(inst.src2, static_cast<uint16_t>(PREHEADER_BASE + k));
             if (inst.aux > 32 && inst.aux < 4096)
-                vreg_uses_[inst.aux].push_back(static_cast<uint16_t>(PREHEADER_BASE + k));
+                note_vreg_use(inst.aux, static_cast<uint16_t>(PREHEADER_BASE + k));
         }
         for (size_t k = 0; k < preheader.size(); k++) {
             cur_op_index_ = PREHEADER_BASE + k;  // real-chain liveness, fold-ahead off

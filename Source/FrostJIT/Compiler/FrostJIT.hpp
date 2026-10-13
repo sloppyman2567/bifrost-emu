@@ -1609,9 +1609,18 @@ private:
     // costs at most a spill store and never a reload. For straight-line
     // basic blocks this provably minimizes reloads, unlike the old LRU
     // timestamps which can evict a hot vreg needed on the very next op.
-    // Indexed by any vreg in [0, 4096). Cleared with the other block-local
-    // scans at the end of translate_block.
+    // Indexed by any vreg in [0, 4096). Each compile's use-scan starts with
+    // reset_vreg_uses(), which empties only the lists the previous scan
+    // filled (vreg_uses_touched_) and keeps their capacity; rebuilding all
+    // 4096 lists per block was a measurable share of Tier-1 compile time.
     std::vector<std::vector<uint16_t>> vreg_uses_;
+    std::vector<uint16_t> vreg_uses_touched_;
+    void reset_vreg_uses();
+    void note_vreg_use(uint16_t v, uint16_t op_index) {
+        std::vector<uint16_t>& uses = vreg_uses_[v];
+        if (uses.empty()) vreg_uses_touched_.push_back(v);
+        uses.push_back(op_index);
+    }
     // fold_ahead_kind_[i] = fold-lookahead classification of IR op i:
     //   0 = no fold ahead
     //   1 = IMM whose dest's ONLY read is op i+1, and op i+1 is a foldable
