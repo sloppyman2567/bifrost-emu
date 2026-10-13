@@ -13,6 +13,17 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Window growth and SIGKILL exit (2026-10-12)
+
+- Growing the host window no longer leaves full-window software views
+  undrawn. `ViewConfiguration`'s cached drawing-cache limit is rebuilt
+  after each resize, which fixes the black screen after SpongeBob levels
+  (a Kidoz ad WebView).
+- A guest SIGKILL to its own process (`Process.killProcess`) ends the host
+  process immediately with status 137. The cooperative group exit waited
+  for every thread to unwind, and SpongeBob kept running at full CPU until
+  terminated by hand. Other fatal signals still use the group exit.
+
 ### Acquire-load and trial-timing overhead (2026-10-12)
 
 - Emit aligned acquire loads through the guarded native memory path, avoiding

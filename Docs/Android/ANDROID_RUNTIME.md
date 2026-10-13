@@ -1073,6 +1073,16 @@ on host resize through `ResourcesManager.updateResourcesForActivity`. Without
 them, ViewRootImpl measured new dialogs to 0×0 and
 `WindowManager.getCurrentWindowMetrics()` reported an empty window.
 
+`ViewConfiguration` caches `4 × maxBounds` area per density as the software
+drawing-cache limit and never recomputes it (AOSP 15 constructor), because
+a phone display never grows. After the host window grew from 2560 to 3226
+pixels wide, SpongeBob's full-window Kidoz ad `HtmlFiveWebView` failed
+"too large to fit into a software layer" on every frame. The level-end
+screen stayed black while the main thread retried at full CPU. The
+launcher now calls the hidden `ViewConfiguration.resetCacheForTesting()`
+after `updateResourcesForActivity` on each resize, so the next lookup uses
+the new bounds.
+
 Limits: windows draw only through software `View.draw` (no hardware layers,
 `TextureView` or SurfaceView inside popups), window animations are not
 played, and system windows (toasts, system alerts) are not composited. On

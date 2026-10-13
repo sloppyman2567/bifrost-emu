@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <pthread.h>
@@ -489,6 +490,19 @@ void Emulator::group_exit(CPU& caller, int code) {
     if (&caller != &main_cpu_ && main_host_thread_set_.load(std::memory_order_acquire) &&
         !::pthread_equal(main_host_thread_, ::pthread_self()))
         ::pthread_kill(main_host_thread_, KICK_SIGNAL);
+}
+void Emulator::signal_exit(CPU& caller, int signo) {
+    if (signo != BIFROST_SIGKILL) {
+        group_exit(caller, 128 + signo);
+        return;
+    }
+    // A cooperative group exit waits for every thread to notice; one that
+    // never does (a host library wait, a busy JIT loop) kept SIGKILLed apps
+    // alive. Keep the exit status of the cooperative path.
+    if (dbg().process_trace || dbg().fault_trace)
+        fprintf(stderr, "[guest-exit] tid=%d SIGKILL\n", caller.tid);
+    std::fflush(nullptr);
+    std::quick_exit(128 + BIFROST_SIGKILL);
 }
 void Emulator::reap_finished_threads() {
     // Detached SDL threads are joined + freed here too.

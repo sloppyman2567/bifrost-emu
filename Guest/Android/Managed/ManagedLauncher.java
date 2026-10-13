@@ -1454,6 +1454,13 @@ public final class ManagedLauncher {
                                     new Class<?>[] {IBinder.class, Configuration.class, int.class},
                                     call(activity, "getActivityToken", new Class<?>[0]),
                                     displays.activityOverride(), 0);
+                            // ViewConfiguration caches 4 * maxBounds area as the
+                            // software drawing-cache limit, per density, forever
+                            // (a phone display never grows). Rebuild it from the
+                            // new bounds, or full-window software layers such as
+                            // ad WebViews stop drawing after the window grows.
+                            Class.forName("android.view.ViewConfiguration")
+                                    .getMethod("resetCacheForTesting").invoke(null);
                             layoutAndReportSurfaces(activity, size[0], size[1], false);
                         }
                         if (event[0] == 0) break;

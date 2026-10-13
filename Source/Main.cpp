@@ -142,6 +142,7 @@ static void set_raw_terminal() {
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     term_set = true;
     atexit(restore_terminal);
+    at_quick_exit(restore_terminal);  // guest SIGKILL (Emulator::signal_exit)
 }
 // ── Quick ELF sanity check (friendlier than letting the loader throw) ────
 static bool looks_like_static_aarch64_elf(const std::string& path) {

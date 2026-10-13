@@ -206,6 +206,12 @@ public:
     // futex sleepers and kicks blocked host threads. run() then joins
     // everything and returns the code. Callable from any guest thread.
     void group_exit(CPU& caller, int code);
+    // A fatal default signal ends the process. SIGKILL is not cooperative
+    // in Linux: no guest or host thread gets to run again, so it flushes
+    // host stdio and leaves through quick_exit(137) (at_quick_exit
+    // handlers restore host state such as the terminal). Other signals
+    // use group_exit(caller, 128 + signo).
+    void signal_exit(CPU& caller, int signo);
     bool group_exit_requested() const {
         return group_exit_.load(std::memory_order_acquire);
     }

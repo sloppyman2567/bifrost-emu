@@ -597,7 +597,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     // SIG_DFL: apply the default disposition.
     if (!act || act->handler == 0) {
         if (default_terminates(signo)) {
-            emu.group_exit(cpu, 128 + signo);
+            emu.signal_exit(cpu, signo);
             if (default_dumps_core(signo)) {
                 fprintf(stderr, "[%s] signal %d (default core dump): "
                         "fault_addr=0x%llx pc=0x%llx\n",
@@ -636,7 +636,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
             CODENAME, signo,
             static_cast<unsigned long long>(handler_addr));
         if (default_terminates(signo)) {
-            emu.group_exit(cpu, 128 + signo);
+            emu.signal_exit(cpu, signo);
         }
         return false;
     }
@@ -646,7 +646,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const uint64_t tramp = map_sigreturn_trampoline(emu.mem());
     if (tramp == 0) {
         if (default_terminates(signo)) {
-            emu.group_exit(cpu, 128 + signo);
+            emu.signal_exit(cpu, signo);
         }
         return false;
     }

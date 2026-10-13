@@ -1188,7 +1188,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // task->pending queue semantics.
                 auto target = emu.find_cpu_by_tid(tid);
                 if (target && signal_kills_process(emu, *target, sig)) {
-                    emu.group_exit(cpu, 128 + sig);
+                    emu.signal_exit(cpu, sig);
                 } else if (target) {
                     if (!target->push_pending(sig, SI_USER_EMU, 0)) {
                         // Queue full — fall back to setting the bit in
@@ -1221,7 +1221,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Cross-thread: queue on target (see tgkill above).
                 auto target = emu.find_cpu_by_tid(tid);
                 if (target && signal_kills_process(emu, *target, sig)) {
-                    emu.group_exit(cpu, 128 + sig);
+                    emu.signal_exit(cpu, sig);
                 } else if (target) {
                     if (!target->push_pending(sig, SI_USER_EMU, 0)) {
                         target->sigpending.fetch_or(1ULL << (sig - 1));
@@ -1261,7 +1261,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // (see tgkill above for rationale).
                     auto main = emu.find_cpu_by_tid(emu.main_cpu().tid);
                     if (main && signal_kills_process(emu, *main, sig)) {
-                        emu.group_exit(cpu, 128 + sig);
+                        emu.signal_exit(cpu, sig);
                     } else if (main) {
                         if (!main->push_pending(sig, SI_USER_EMU, 0)) {
                             main->sigpending.fetch_or(1ULL << (sig - 1));
