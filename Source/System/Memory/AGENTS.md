@@ -12,6 +12,10 @@ State shared between them goes in `MemoryInternal.hpp`.
   flag and per-width window limits (`JIT_WINDOW_LIMITS_OFF`); generated code
   reads both through the window register, so keep their offsets and contents
   in step with `window_size_`.
+- `write()` stores each 2/4/8-byte element (and 16-byte halves) with a single
+  host access. Never route instruction-sized guest stores through a
+  runtime-sized `memcpy`: its overlapping moves replay the store and can undo
+  another CPU's write (see the JIT guide's guest memory barriers).
 - File-backed MAP_SHARED and MAP_PRIVATE mappings retain their host backing
   and file identity. Never preload them into anonymous copies. Detach partial
   replaced/unmapped aliases before zeroing anonymous storage. Preserve identity
@@ -32,6 +36,7 @@ State shared between them goes in `MemoryInternal.hpp`.
   walk), not a full scan. Every insertion must keep ranges disjoint: evict
   (fixed), refuse (no-replace) or take free/bump space.
 - Relevant regressions: `test_shared_alias`, `test_madv_remove`,
-  `test_userfaultfd`, `test_mem_guard`; rebuild fixtures before comparing modes.
+  `test_userfaultfd`, `test_mem_guard`, `test_lse_inline` (store replay);
+  rebuild fixtures before comparing modes.
   Known concurrent C++ copy versus mprotect/unmap limitations are documented in
   [the JIT guide](../../../Docs/JIT.md); do not claim native JIT recovery covers them.

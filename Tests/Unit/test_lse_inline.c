@@ -8,12 +8,48 @@
 // Build: make cross SRC=Tests/Unit/test_lse_inline.c OUT=Tests/Unit/test_lse_inline.elf
 //        (Makefile's cross target adds -march=armv8.1-a+lse via CFLAGS)
 // Run:   ./bifrost-emu Tests/Unit/test_lse_inline.elf
+#include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
+// IL2CPP's Boehm GC lock: SWPAB acquire, 64-bit STLR release. A release
+// written twice by the host reopened a lock another thread had just taken.
+#define LOCK_THREADS 4
+#define LOCK_ITERS 2000000
+static volatile uint64_t lock_word;
+static volatile uint64_t locked_count;
+
+static void* lock_worker(void* arg) {
+    (void)arg;
+    for (int i = 0; i < LOCK_ITERS; i++) {
+        uint32_t old;
+        do {
+            __asm__ volatile("swpab %w1, %w0, [%2]"
+                             : "=&r"(old) : "r"(1u), "r"(&lock_word) : "memory");
+        } while (old);
+        locked_count = locked_count + 1;
+        __asm__ volatile("stlr xzr, [%0]" :: "r"(&lock_word) : "memory");
+    }
+    return NULL;
+}
+
 int main(void) {
     int failures = 0;
+
+    {
+        pthread_t t[LOCK_THREADS];
+        for (int i = 0; i < LOCK_THREADS; i++) pthread_create(&t[i], NULL, lock_worker, NULL);
+        for (int i = 0; i < LOCK_THREADS; i++) pthread_join(t[i], NULL);
+        uint64_t expected = (uint64_t)LOCK_THREADS * LOCK_ITERS;
+        if (locked_count != expected) {
+            printf("SWPAB lock/STLR unlock: %llu (exp %llu) FAIL\n",
+                   (unsigned long long)locked_count, (unsigned long long)expected);
+            failures++;
+        } else {
+            printf("SWPAB lock/STLR unlock: %llu OK\n", (unsigned long long)expected);
+        }
+    }
 
     // Chromium's renderer uses LDSETH for 16-bit flags. Check the complete
     // X result, a dirty upper operand, and both neighboring halfwords.

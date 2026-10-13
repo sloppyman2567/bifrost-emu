@@ -25,6 +25,18 @@ were fixed with it; see [the JIT guide](../JIT.md#half-precision-conversions-and
 The user confirmed the character, portrait and lobby draw correctly afterwards.
 Native-density rendering was ruled out first with `BIFROST_ANDROID_LOGICAL_PIXELS=1`.
 
+## Fixed: IL2CPP heap corruption crash (2026-10-13)
+
+A session left on the 73% loading screen exited with status 191 after 87 s.
+Threads 94/306/308/311 faulted in `libil2cpp.so` (identified by matching the
+logged instruction bytes; the emulated `/proc/self/maps` has no file names):
+a NULL class at `+0x135`, a garbage array allocation, and a Boehm free-list
+link containing the text `mscorlib`. Two threads had allocated the same
+object. The cause was a replayed STLR store releasing the GC allocation lock
+held by another thread; see [the JIT guide](../JIT.md#guest-memory-barriers).
+The crash is rare in the game (a 240 s unattended run did not reproduce it);
+the guest fixtures reproduce it in most runs.
+
 ## Open issues
 
 ### Kidoz ad stuck on its loading screen (2026-10-13)

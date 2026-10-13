@@ -593,7 +593,25 @@ void Memory::write(uint64_t addr, const void* src, size_t n) {
     if (n == 0) return;
     check_access(addr, n, GUEST_PROT_WRITE);
     record_write(addr, src, n);
-    std::memcpy(direct_window_ + addr, src, n);
+    uint8_t* dst = direct_window_ + addr;
+    // A runtime-sized memcpy stores 2..32 bytes as overlapping head/tail
+    // moves, so a register-sized guest store is written twice. The replay
+    // can undo another CPU's write in between (a released lock reopened
+    // after a native LSE swap took it). Store each element exactly once;
+    // aligned elements are single-copy atomic as AArch64 requires.
+    using U16 = uint16_t __attribute__((aligned(1), may_alias));
+    using U32 = uint32_t __attribute__((aligned(1), may_alias));
+    using U64 = uint64_t __attribute__((aligned(1), may_alias));
+    switch (n) {
+        case 2: *reinterpret_cast<volatile U16*>(dst) = *static_cast<const U16*>(src); return;
+        case 4: *reinterpret_cast<volatile U32*>(dst) = *static_cast<const U32*>(src); return;
+        case 8: *reinterpret_cast<volatile U64*>(dst) = *static_cast<const U64*>(src); return;
+        case 16:
+            reinterpret_cast<volatile U64*>(dst)[0] = static_cast<const U64*>(src)[0];
+            reinterpret_cast<volatile U64*>(dst)[1] = static_cast<const U64*>(src)[1];
+            return;
+        default: std::memcpy(dst, src, n);
+    }
 }
 void Memory::record_write(uint64_t addr, const void* src, size_t n) {
     // BIFROST_WATCH: attribute stores overlapping the watch range. Log the

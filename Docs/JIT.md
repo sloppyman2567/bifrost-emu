@@ -461,6 +461,19 @@ This is value-based exclusive emulation; an ABA sequence that changes the word
 and restores its original value is not detected across processes. Pair-exclusive
 operations and full reservation-granule semantics need separate coverage.
 
+Helper and interpreter stores (`Memory::write`, used by STLR, slow-path
+stores and every interpreter store) must reach the host exactly once per
+element. glibc's x86-64 `memcpy` copies runtime sizes 2-32 with overlapping
+head/tail moves, so an 8-byte STLR was written twice. IL2CPP's Boehm GC lock
+(SWPAB acquire through outline atomics, `stlr xzr` release) let a second thread
+in between the two stores; the replay then released that thread's lock, two
+allocators popped one free-list entry, and SpongeBob crashed with corrupt
+objects (2026-10-13). `Memory::write` now issues one access per 2/4/8-byte
+element and two 8-byte accesses for 16 bytes. The `test_lse_inline` contention
+case fails about 4 of 5 runs without the fix (`STLRB` releases were never
+affected); QEMU and the interpreter pass. Reads are unchanged: duplicated loads
+return one complete value.
+
 DMB and DSB decode through `HINT`, but must retain their memory effects.
 `is_data_memory_barrier()` recognizes their encodings including the domain/type
 option. Translation emits the side-effecting `MEMORY_BARRIER` IR operation;
