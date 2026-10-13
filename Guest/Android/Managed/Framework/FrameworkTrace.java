@@ -23,15 +23,18 @@ final class FrameworkTrace {
     private static final long LIMIT = 64L * 1024 * 1024;
     private static FileOutputStream output;
     private static volatile boolean enabled;
+    private static boolean activityOnly;
+    private static final Set<String> catalogs = ConcurrentHashMap.newKeySet();
     private static boolean methods;
     private static long bytes;
     private static File directory;
 
     private static final class Pending {
         final String operation;
+        final String signature;
         final long started = System.nanoTime();
         final int tid = Process.myTid();
-        Pending(String operation) { this.operation = operation; }
+        Pending(String operation, String signature) { this.operation = operation; this.signature = signature; }
     }
 
     private static JSONObject event(String kind) throws Exception {
@@ -88,15 +91,44 @@ final class FrameworkTrace {
         return result;
     }
 
+    private static boolean activity(String service) {
+        return service.equals("activity") || service.equals("activity_task") || service.equals("bifrost.activity_client");
+    }
+
+    static void catalog(String service, Class<?> type, String[] handled) {
+        if (!enabled || !activityOnly || !activity(service) || !catalogs.add(service + ":" + type.getName())) return;
+        try {
+            java.lang.reflect.Method[] declared = type.getMethods();
+            java.util.Arrays.sort(declared, java.util.Comparator.comparing(java.lang.reflect.Method::toGenericString));
+            JSONArray methods = new JSONArray();
+            for (java.lang.reflect.Method method : declared) {
+                if (method.getName().equals("asBinder") || method.getDeclaringClass() == Object.class) continue;
+                methods.put(new JSONObject().put("method", method.getName()).put("signature", method.toGenericString())
+                        .put("declared_coverage", handled == null ? "unclassified"
+                                : java.util.Arrays.asList(handled).contains(method.getName()) ? "implemented" : "unsupported"));
+            }
+            write(event("api.catalog").put("service", service).put("interface", type.getName()).put("methods", methods));
+        } catch (Exception error) { failed("catalog", error); }
+    }
+
+    static long begin(String service, java.lang.reflect.Method method, Object[] arguments) {
+        if (!enabled || (activityOnly && !activity(service))) return 0;
+        return begin(service, method.getName(), activityOnly ? method.toGenericString() : null, arguments);
+    }
+
     static long begin(String service, String method, Object[] arguments) {
-        if (!enabled) return 0;
+        return begin(service, method, null, arguments);
+    }
+
+    private static long begin(String service, String method, String signature, Object[] arguments) {
+        if (!enabled || (activityOnly && !activity(service))) return 0;
         long id = sequence.incrementAndGet();
-        Pending call = new Pending(service + "." + method);
+        Pending call = new Pending(service + "." + method, signature);
         pending.put(id, call);
         try {
             JSONArray args = new JSONArray();
             if (arguments != null) for (Object argument : arguments) args.put(value(argument));
-            write(event("call").put("id", id).put("operation", call.operation).put("args", args)
+            write(event("call").put("id", id).put("operation", call.operation).put("signature", signature).put("args", args)
                     .put("caller", stack(Thread.currentThread().getStackTrace(), 12)));
         } catch (Exception error) { failed("call", error); }
         return id;
@@ -108,7 +140,8 @@ final class FrameworkTrace {
         if (call == null || !enabled) return;
         try {
             JSONObject record = event(error == null ? "return" : "throw").put("id", id)
-                    .put("operation", call.operation).put("duration_ns", System.nanoTime() - call.started);
+                    .put("operation", call.operation).put("signature", call.signature)
+                    .put("duration_ns", System.nanoTime() - call.started);
             if (error == null) record.put("result", value(result));
             else record.put("exception", error.getClass().getName()).put("message", value(error.getMessage()))
                     .put("stack", stack(error.getStackTrace(), 24));
@@ -132,6 +165,7 @@ final class FrameworkTrace {
         Runtime runtime = Runtime.getRuntime();
         write(event("heartbeat").put("pending", active).put("java_used_bytes", runtime.totalMemory() - runtime.freeMemory())
                 .put("java_total_bytes", runtime.totalMemory()).put("java_max_bytes", runtime.maxMemory()));
+        if (activityOnly) return;
         try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/maps"))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -176,10 +210,12 @@ final class FrameworkTrace {
         output = new FileOutputStream(new File(directory, "calls.jsonl"));
         enabled = true;
         String mode = System.getProperty("bifrost.apk.trace.mode", "calls");
+        activityOnly = mode.equals("activity");
         long after = Long.parseLong(System.getProperty("bifrost.apk.trace.after", "0")) * 1000;
         long duration = Long.parseLong(System.getProperty("bifrost.apk.trace.duration", "15")) * 1000;
         write(event("trace.start").put("mode", mode).put("calls_limit_bytes", LIMIT)
-                .put("scope", "local framework boundaries; periodic Java stacks and library mappings"));
+                .put("scope", activityOnly ? "activity Binder APIs; declared signatures and observed calls"
+                        : "local framework boundaries; periodic Java stacks and library mappings"));
         Runtime.getRuntime().addShutdownHook(new Thread(FrameworkTrace::stop, "Bifrost trace shutdown"));
         Thread watcher = new Thread(() -> {
             Set<String> libraries = new HashSet<>();
@@ -190,7 +226,7 @@ final class FrameworkTrace {
         }, "Bifrost APK trace");
         watcher.setDaemon(true);
         watcher.start();
-        if (!mode.equals("calls")) {
+        if (mode.equals("methods") || mode.equals("sample")) {
             Thread tracer = new Thread(() -> {
                 try { Thread.sleep(after); startMethods(mode); Thread.sleep(duration); stopMethods(); }
                 catch (Exception error) { failed("methods", error); }

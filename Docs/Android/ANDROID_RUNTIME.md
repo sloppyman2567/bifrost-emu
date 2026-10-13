@@ -1007,12 +1007,40 @@ unfinished calls, alongside exception counts, slow calls and the last thread
 stacks. Arrays are described by type/length; arbitrary object contents are not
 serialized.
 
-A daemon records pending calls, Java heap usage and Java thread states/stacks
-every ten seconds, with separate markers before/after stack collection. Mapped
+For an Activity API implementation backlog, use `--trace-apk activity`, for
+example on the next Azur Lane launch:
+
+```bash
+python3 Scripts/Android/android_package.py run com.YoStarEN.AzurLane --trace-apk activity
+```
+
+This mode catalogs the actual loaded `IActivityManager`, `IActivityTaskManager`
+and `IActivityClientController` interfaces, including overloaded signatures.
+It captures their local Binder calls, returns, throws and pending-call/heap
+heartbeats, without ART method tracing, global thread-stack snapshots, library
+map scans or automatically enabling native Binder/fault/frame tracing. Normal
+launches leave tracing disabled. The full `calls` mode still captures other
+local framework boundaries.
+
+After the session exits or times out, `activity-api-report.json` and
+`activity-api-report.txt` accompany the raw `calls.jsonl` and `summary.json`.
+Reports list all cataloged signatures, group repeated calls by signature and
+prioritize failures and unfinished calls. JSON includes first arguments/caller,
+exception counts and the last exception stack. Invalid JSON records, truncation,
+unmatched completions and absence of a clean trace stop are reported explicitly.
+An available signature is a possible API, not evidence the app uses it. A
+successful observed return establishes only that invocation; unclassified
+dispatch handlers remain unclassified rather than being labeled implemented.
+This is a catalog of three Binder interfaces, not every Java Activity method,
+JNI lookup, filesystem request, network request or API in an unexecuted branch.
+
+In `calls`, `methods` and `sample` modes, a daemon records pending calls, Java
+heap usage and Java thread states/stacks every ten seconds, with separate
+markers before/after stack collection. Mapped
 library names are recorded when the guest maps expose them; this profile omits
 most library labels, so ART's existing `nativeloader` output in `last-run.log`
-remains the library-load evidence. Native Binder, fault and frame tracing are
-enabled for the traced session through their existing centralized flags. The
+remains the library-load evidence. These modes enable native Binder, fault and
+frame tracing through their existing centralized flags. The
 JSONL file stops at 64 MiB and emits a truncation marker. Completed JSONL writes
 survive a process abort/kill, and supervision preserves the files on timeout.
 The ordinary runtime/logd logs have their existing size behavior.
@@ -1418,11 +1446,49 @@ services' `com.google.android.gms.phenotype` and hit the unsupported path.
 As in AOSP's `ContentProviderHelper`, an authority no installed or system
 package declares now returns no holder (`APP_PROVIDER_MISSING <authority>`).
 `ContentResolver` then returns null. Declared authorities other than
-`settings` still throw. Firebase now logs `App measurement initialized` and
+`settings` originally still threw; normal launches now install local manifest
+providers as described below. Firebase now logs `App measurement initialized` and
 only `Service invalid`, its warning for a device without Play services.
 ActivityProbe prints `APP_APP_OPS_OK` after checking the app's own package
 and rejecting a missing package, `root` and `com.android.shell` for the
 app uid. This was run in JIT play mode only.
+
+### Manifest provider startup and Azur Lane downloads (2026-10-13)
+
+Azur Lane 9.3.7 fetched its version/hash lists and prepared a download queue,
+but its YsDownload code called `Context.getSystemService` on a null static
+context. Inspection of the APK's `YsDownloadProvider.onCreate` showed that this
+context is initialized by its manifest ContentProvider. The launcher had never
+installed manifest providers.
+
+Normal installed-app launches now filter enabled providers to the current
+process, order them by descending `initOrder`, and invoke the framework's real
+`ActivityThread.installContentProviders` before `Application.onCreate`.
+ActivityThread supplies context attachment, class loading, `onCreate` and local
+authority caching; `FrameworkContent` validates and retains its published
+holders, including semicolon-separated aliases. Startup ordering and publication
+were checked against Android 15's
+[ActivityThread](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/ActivityThread.java),
+and priority sorting against
+[ComputerEngine](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/ComputerEngine.java).
+Disabled providers and declarations for another process are skipped. Remote
+provider acquisition, provider startup in service-only child processes and
+multi-process provider policy are not implemented by this change.
+
+Starting the previously omitted AndroidX WorkManager provider exposed its
+force-stop check: `PendingIntent.getBroadcast(..., FLAG_NO_CREATE, ...)`.
+`IActivityManager.getIntentSenderWithFeature` now validates the installed owner,
+user, sender type and intents and returns null for an empty-registry
+`FLAG_NO_CREATE` lookup. This follows the lookup contract in Android 15's
+[PendingIntent](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/PendingIntent.java).
+Sender creation remains explicitly unsupported; this does not implement alarms
+or background PendingIntent delivery.
+
+In the real untraced JIT session `84a17b02fbb54a1d83802245e543c2a3`, Azur Lane
+passed that path and wrote 2,305,675,539 asset bytes across 12,470 files, up from
+78,150 bytes in two files before the fix. This is filesystem evidence of
+downloading, not a claim that the roughly 24.5 GB queue completed or gameplay
+was reached. The session was left running during logger validation.
 
 ### Activity stack (2026-10-12)
 

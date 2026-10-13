@@ -1,5 +1,58 @@
 # Tests
 
+## Provider startup and Activity API reports (2026-10-13)
+
+`PackageTests.test_managed_launcher_persists_data_and_finishes_activity` now
+checks two real manifest providers before `Application.onCreate`, descending
+`initOrder` despite reversed manifest order, an attached provider/application
+context with connectivity access, semicolon authority aliases and a single
+provider instance. A provider returning false from `onCreate` is still
+published by ActivityThread. Disabled and remote-process provider classes throw
+if incorrectly instantiated. Two JIT launches and an interpreter launch pass,
+including data persistence and runtime replacement. The interpreter attempt
+first exceeded 90 seconds during WebView/package startup, before reaching this
+path; the 180-second interpreter budget passes. The same fixture checks absent
+NO_CREATE broadcast/activity/service PendingIntents and rejects unsupported
+sender creation.
+
+`PackageTests.test_managed_activity_api_report` passes against a signed APK and
+the real framework: 428 cataloged signatures in the three Activity Binder
+interfaces, 11 distinct observed methods and 17 calls. Two deliberate unsupported
+calls (`getIntentSenderWithFeature` creation and `getAppTasks`) retain exception
+and caller stacks; repeated `getMyMemoryState` calls aggregate correctly. All
+calls complete, the capture stops cleanly, and no global thread-stack, library
+map or ART method records are emitted in `activity` mode. The saved example is
+under `build/android-activity-trace-results/apk-trace-*/`; its JSON and text
+reports distinguish available signatures from observed outcomes. The focused
+host parser regression checks overload separation, unseen declarations, thrown
+and unfinished calls, truncation and a partial JSON record.
+
+The existing Activity stack gate and untraced service execution/restart gate
+also pass. Full ART service tracing initially hit its 15-second callback
+deadline twice; a temporary launcher built from the prior commit passed.
+Catalog generation and generic signature formatting are now restricted to
+`activity` mode, preserving the earlier full-trace record behavior. The final
+Activity-report plus full-ART service-trace run passes 2/2 (58.5 seconds).
+This comparison does not establish that formatting alone caused the deadlines.
+
+Reproduce the focused runtime checks with:
+
+```bash
+python3 Scripts/Android/test_android_package.py \
+  PackageTests.test_managed_launcher_persists_data_and_finishes_activity \
+  PackageTests.test_managed_activity_api_report \
+  PackageTests.test_managed_service_trace \
+  PackageTests.test_managed_activity_stack
+```
+
+Provider ordering, publication and PendingIntent lookup behavior were checked
+against Android 15 source linked in the runtime guide. These fixtures do not
+cover remote provider processes, PendingIntent creation/delivery or every
+cataloged API. Real Azur Lane 9.3.7 writes growing asset files after the fix
+(over 3.5 GB observed), but download completion, login and gameplay remain
+unverified. The game was left downloading during validation. This change does
+not establish a full Android package-suite or JIT differential result.
+
 ## Scalar FP scratch preservation (2026-10-13)
 
 `jit_fp_scalar` now checks full scalar writeback bits across fourteen live

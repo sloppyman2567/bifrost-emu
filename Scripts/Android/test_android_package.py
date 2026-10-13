@@ -26,6 +26,35 @@ ARGS = None
 
 
 class LauncherArgumentTests(unittest.TestCase):
+    def test_activity_report_separates_overloads_failures_and_unfinished_calls(self):
+        import json
+        from android_managed import activity_api_report
+        records = [
+            {"event": "api.catalog", "service": "activity", "interface": "fixture.Manager", "methods": [
+                {"method": "probe", "signature": "int probe(int)", "declared_coverage": "unclassified"},
+                {"method": "probe", "signature": "int probe(long)", "declared_coverage": "unclassified"},
+                {"method": "unused", "signature": "void unused()", "declared_coverage": "unsupported"}]},
+            {"event": "call", "operation": "activity.probe", "signature": "int probe(int)", "id": 1},
+            {"event": "return", "operation": "activity.probe", "signature": "int probe(int)", "id": 1},
+            {"event": "call", "operation": "activity.probe", "signature": "int probe(long)", "id": 2},
+            {"event": "throw", "operation": "activity.probe", "signature": "int probe(long)", "id": 2,
+             "exception": "java.lang.UnsupportedOperationException", "message": "unsupported"},
+            {"event": "call", "operation": "activity.probe", "signature": "int probe(int)", "id": 3},
+            {"event": "trace.truncated"}]
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "calls.jsonl"
+            log.write_text("\n".join(json.dumps(record) for record in records) + '\n{"event":')
+            report = activity_api_report(log)
+        self.assertEqual((report["available_methods"], report["observed_methods"]), (3, 2))
+        self.assertTrue(report["truncated"])
+        self.assertFalse(report["trace_stopped"])
+        self.assertEqual(report["invalid_records"], 1)
+        self.assertEqual(report["orphan_completions"], 0)
+        failure, unfinished, unused = report["methods"]
+        self.assertEqual((failure["signature"], failure["throws"]), ("int probe(long)", 1))
+        self.assertEqual((unfinished["calls"], unfinished["returns"], unfinished["unfinished"]), (2, 1, 1))
+        self.assertEqual(unused["calls"], 0)
+
     def test_split_paths_follow_install_order_before_abi_filtering(self):
         from android_managed import installed_arguments
         manifests = [{"split": name, "abis": abis} for name, abis in (
@@ -424,6 +453,16 @@ class PackageTests(unittest.TestCase):
             component += f'<service android:name="{activity}$LifecycleDisabled" android:enabled="false" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleRemote" android:process=":remote" android:exported="false"/>'
             component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
+        if managed is True and not split:
+            # Deliberately declare the lower-priority provider first.
+            component += (f'<provider android:name="{activity}$InitProvider" '
+                          'android:authorities="org.bifrost.fixture.init;org.bifrost.fixture.alias" android:exported="false"/>')
+            component += (f'<provider android:name="{activity}$EarlyProvider" '
+                          'android:authorities="org.bifrost.fixture.early" android:initOrder="100" android:exported="false"/>')
+            component += (f'<provider android:name="{activity}$DisabledProvider" '
+                          'android:authorities="org.bifrost.fixture.disabled" android:enabled="false" android:exported="false"/>')
+            component += (f'<provider android:name="{activity}$RemoteProvider" '
+                          'android:authorities="org.bifrost.fixture.remote" android:process=":provider" android:exported="false"/>')
         if managed == "ManagedActivities" and not split:
             component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
             component += (f'<activity android:name="{activity}$Translucent" android:exported="false" '
@@ -432,6 +471,7 @@ class PackageTests(unittest.TestCase):
                           'android:exported="false"><intent-filter>'
                           '<action android:name="org.bifrost.fixture.FILES"/></intent-filter></provider>')
         required = ' android:isSplitRequired="true"' if not split else ""
+        application_class = f' android:name="{activity}$App"' if managed is True and not split else ""
         job_permission = '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>' if managed == "ManagedServices" else ""
         if managed == "ManagedActivities":
             # Normal (granted at install) and runtime (denied without a permission UI).
@@ -442,7 +482,7 @@ class PackageTests(unittest.TestCase):
             package="org.bifrost.fixture" android:versionCode="{version}"{split_attr}>
             <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="35"/>
             {job_permission}
-            <application android:label="Managed Fixture" android:hasCode="{'true' if managed else 'false'}"{required}>{component}</application></manifest>"""
+            <application android:label="Managed Fixture" android:hasCode="{'true' if managed else 'false'}"{required}{application_class}>{component}</application></manifest>"""
         )
         subprocess.run(
             [
@@ -829,6 +869,44 @@ class PackageTests(unittest.TestCase):
             self.assertFalse(method_summary["partial_record"])
             self.assertFalse(method_summary["overflow"])
 
+    def test_managed_activity_api_report(self):
+        import json
+        state = self.work / "activity-trace-state"
+        bundle = self.work / "activity-trace.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("activity-trace", managed=True), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        app = state / "org.bifrost.fixture"
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90, trace_apk="activity")
+        text = (app / "managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertIn("MANAGED_FIXTURE_ACTIVITY_TRACE_FAILURE_OK", text)
+        directory, = (app / "managed/traces").iterdir()
+        records = [json.loads(line) for line in (directory / "calls.jsonl").read_text().splitlines()]
+        self.assertFalse(any(record["event"] in ("thread.stack", "threads.begin", "library.mapping", "methods.start")
+                             for record in records))
+        report = json.loads((directory / "activity-api-report.json").read_text())
+        self.assertEqual(set(report["interfaces"]), {"activity", "activity_task", "bifrost.activity_client"})
+        self.assertGreater(report["available_methods"], report["observed_methods"])
+        self.assertFalse(report["truncated"])
+        self.assertEqual(report["invalid_records"], 0)
+        self.assertEqual(report["orphan_completions"], 0)
+        self.assertTrue(report["trace_stopped"])
+        self.assertFalse(any(item["unfinished"] for item in report["methods"]))
+        memory, = [item for item in report["methods"] if item["method"] == "getMyMemoryState"]
+        self.assertGreaterEqual(memory["returns"], 2)
+        self.assertEqual(memory["calls"], memory["returns"])
+        failure, = [item for item in report["methods"] if item["method"] == "getAppTasks"]
+        self.assertEqual(failure["throws"], 1)
+        self.assertIn("UnsupportedOperationException", failure["last_failure"]["exception"])
+        self.assertTrue(failure["first_caller"])
+        self.assertTrue(failure["signature"])
+        output = ROOT / "build/android-activity-trace-results"
+        output.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(directory, output / directory.name)
+        shutil.copyfile(app / "managed/last-run.log", output / "jit.log")
+
     def test_managed_launcher_persists_data_and_finishes_activity(self):
         state = self.work / "managed-state"
         base = self.apk("managed", managed=True)
@@ -849,11 +927,18 @@ class PackageTests(unittest.TestCase):
                 saved = json.loads(stamp.read_text())
                 saved["identity"]["schema"] = 0
                 stamp.write_text(json.dumps(saved))
-            status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+            status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(),
+                                    no_jit=starts == 3, timeout=180 if starts == 3 else 90)
             text = (app / "managed/last-run.log").read_text()
             self.assertEqual(status, 0, text[-30000:])
             self.assertIn("APP_WINDOW_IDENTITY Managed Fixture icon=", text)
             self.assertIn(f"MANAGED_FIXTURE_START {starts}", text)
+            markers = ["MANAGED_FIXTURE_PROVIDER_CREATED", "APP_PROVIDERS_STARTED 2",
+                       "MANAGED_FIXTURE_APPLICATION_AFTER_PROVIDERS", "MANAGED_FIXTURE_PROVIDER_ALIASES_OK"]
+            positions = [text.index(marker) for marker in markers]
+            self.assertEqual(positions, sorted(positions), text[-30000:])
+            self.assertIn("MANAGED_FIXTURE_PENDING_LOOKUP_OK", text)
+            self.assertIn("MANAGED_FIXTURE_PENDING_CREATE_UNSUPPORTED", text)
             key = (state / ".settings/user-0.key").read_bytes()
             expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,
                                    hashlib.sha256).hexdigest()[:16]

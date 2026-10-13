@@ -77,8 +77,21 @@ public final class ManagedActivities extends Activity {
             requestPermissions(new String[] {android.Manifest.permission.CAMERA}, 8);
     }
 
-    /** Declared with an intent filter; queries resolve it without instantiating it. */
-    public static final class Files {}
+    /** Real manifest provider, also resolved through its intent filter. */
+    public static final class Files extends android.content.ContentProvider {
+        @Override public boolean onCreate() { return true; }
+        @Override public android.database.Cursor query(android.net.Uri uri, String[] projection,
+                String selection, String[] args, String order) { return null; }
+        @Override public String getType(android.net.Uri uri) { return "application/bifrost-fixture"; }
+        @Override public android.net.Uri insert(android.net.Uri uri, android.content.ContentValues values) {
+            throw new UnsupportedOperationException();
+        }
+        @Override public int delete(android.net.Uri uri, String selection, String[] args) {
+            throw new UnsupportedOperationException();
+        }
+        @Override public int update(android.net.Uri uri, android.content.ContentValues values,
+                String selection, String[] args) { throw new UnsupportedOperationException(); }
+    }
 
     @Override public void onPause() {
         super.onPause();

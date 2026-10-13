@@ -63,6 +63,7 @@ final class FrameworkServices {
     // parent service rather than published in ServiceManager.
     Object local(String name, String iface, Call call) throws Exception {
         Class<?> type = Class.forName(iface);
+        FrameworkTrace.catalog(name, type, call.methods());
         Binder binder = new Binder();
         Object proxy = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
                 (self, method, arguments) -> {
@@ -76,7 +77,7 @@ final class FrameworkServices {
                         }
                     }
                     if (diagnostic) System.out.println("LOCAL_SERVICE " + name + "." + method.getName());
-                    long trace = FrameworkTrace.begin(name, method.getName(), arguments);
+                    long trace = FrameworkTrace.begin(name, method, arguments);
                     try {
                         Object result = call.invoke(method.getName(), arguments);
                         FrameworkTrace.end(trace, result, null);

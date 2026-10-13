@@ -883,6 +883,25 @@ public final class ManagedLauncher {
                 case "publishService": serviceRuntime.publish((IBinder) a[0], (Intent) a[1], (IBinder) a[2]); return null;
                 case "unbindFinished": serviceRuntime.unbindFinished((IBinder) a[0], (Intent) a[1], (Boolean) a[2]); return null;
                 case "serviceDoneExecuting": serviceRuntime.done((IBinder) a[0], (Integer) a[1], (Intent) a[4]); return null;
+                case "publishContentProviders": content.publishProviders(a[0], (List<?>) a[1]); return null;
+                case "getIntentSenderWithFeature": {
+                    String owner = (String) a[1];
+                    int user = (Integer) a[10];
+                    if (installed == null || !installed.packageName.equals(owner)
+                            || (user != Process.myUid() / 100000 && user != -2))
+                        throw new SecurityException("Foreign PendingIntent lookup");
+                    int type = (Integer) a[0];
+                    Intent[] intents = (Intent[]) a[6];
+                    if (type < 1 || type > 5 || intents == null || intents.length == 0)
+                        throw new IllegalArgumentException("Invalid PendingIntent request");
+                    for (Intent intent : intents)
+                        if (intent == null) throw new IllegalArgumentException("Null PendingIntent intent");
+                    // No sender creation is implemented, so the sender registry
+                    // is empty. NO_CREATE is a lookup, never a creation request;
+                    // WorkManager uses it before reading process exit history.
+                    if (((Integer) a[8] & android.app.PendingIntent.FLAG_NO_CREATE) != 0) return null;
+                    throw unsupported("activity", method);
+                }
             }
             if (method.equals("checkPermissionForDevice"))
                 return packages.checkPermission((String) a[0], (Integer) a[2], (Integer) a[3]);
@@ -890,6 +909,10 @@ public final class ManagedLauncher {
                 return packages.checkPermission((String) a[0], (Integer) a[2], Context.DEVICE_ID_DEFAULT);
             if (method.equals("getContentProvider") && Arrays.asList(a).contains("settings"))
                 return holder;
+            if (method.equals("getContentProvider")) {
+                Object local = content.publishedProvider((String) a[2], (String) a[1], (Integer) a[3]);
+                if (local != null) return local;
+            }
             // AOSP ContentProviderHelper returns no holder when no package
             // declares the authority (e.g. Play services providers that
             // Firebase probes); ActivityThread then logs "Failed to find
@@ -1250,6 +1273,9 @@ public final class ManagedLauncher {
         }
         serviceRuntime.attach(thread, app);
         jobs.attach(application);
+        // handleBindApplication installs this process's manifest providers
+        // before Application.onCreate (SDK startup providers depend on it).
+        content.installProviders(thread, application, packageInfo);
         instrumentation.callApplicationOnCreate(application);
         System.out.println("APP_APPLICATION_STARTED");
 

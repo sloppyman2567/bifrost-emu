@@ -40,15 +40,16 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
 
 
 def add_trace_arguments(parser):
-    parser.add_argument("--trace-apk", nargs="?", const="calls", choices=("calls", "methods", "sample"),
+    parser.add_argument("--trace-apk", nargs="?", const="calls", choices=("calls", "activity", "methods", "sample"),
                         help="APK framework calls, pending calls, thread stacks and library mappings; "
+                             "activity limits capture to Activity Binder APIs and their catalog; "
                              "methods/sample also records a bounded ART Java/JNI trace")
     parser.add_argument("--trace-after", type=int, default=0, help="seconds before ART method capture, 0..3600")
     parser.add_argument("--trace-duration", type=int, default=15, help="ART capture seconds, 1..300 (16 MiB buffer)")
 
 
 def trace_options(root, mode=None, after=0, duration=15):
-    if mode not in (None, "calls", "methods", "sample") or not 0 <= after <= 3600 or not 1 <= duration <= 300:
+    if mode not in (None, "calls", "activity", "methods", "sample") or not 0 <= after <= 3600 or not 1 <= duration <= 300:
         raise ValueError("Invalid APK trace mode or capture window")
     if mode is None:
         if after or duration != 15: raise ValueError("Trace window requires --trace-apk")
@@ -107,6 +108,64 @@ def method_trace_summary(path):
                                       for thread, events in recent.items()]}
 
 
+def activity_api_report(path):
+    """Separate the runtime's available Activity signatures from observed behavior."""
+    apis, pending, interfaces = {}, {}, {}
+    invalid_records = orphan_completions = 0
+    truncated = stopped = False
+
+    def entry(service, method, signature):
+        key = (service, signature or method)
+        if key not in apis:
+            apis[key] = {"service": service, "method": method, "signature": signature,
+                         "declared_coverage": "unclassified", "calls": 0, "returns": 0,
+                         "throws": 0, "unfinished": 0, "exceptions": {}}
+        return apis[key]
+
+    with path.open(encoding="utf-8", errors="replace") as source:
+        for line in source:
+            try: record = json.loads(line)
+            except (ValueError, UnicodeError):
+                invalid_records += 1
+                continue
+            kind = record.get("event")
+            if kind == "api.catalog":
+                service = record["service"]
+                interfaces[service] = record["interface"]
+                for method in record["methods"]:
+                    entry(service, method["method"], method["signature"])["declared_coverage"] = method["declared_coverage"]
+            elif kind in ("call", "return", "throw"):
+                service, _, method = record.get("operation", "").rpartition(".")
+                if service not in ("activity", "activity_task", "bifrost.activity_client"): continue
+                item = entry(service, method, record.get("signature"))
+                key = (record.get("pid"), record["id"])
+                if kind == "call":
+                    item["calls"] += 1
+                    pending[key] = item
+                    if "first_caller" not in item:
+                        item["first_caller"] = record.get("caller", [])
+                        item["first_args"] = record.get("args", [])
+                else:
+                    if pending.pop(key, None) is None: orphan_completions += 1
+                    item["returns" if kind == "return" else "throws"] += 1
+                    if kind == "throw":
+                        exception = record["exception"]
+                        item["exceptions"][exception] = item["exceptions"].get(exception, 0) + 1
+                        item["last_failure"] = {name: record.get(name) for name in ("exception", "message", "stack")}
+            elif kind == "trace.truncated": truncated = True
+            elif kind == "trace.stop": stopped = True
+    for item in pending.values(): item["unfinished"] += 1
+    if not interfaces: return None
+    methods = sorted(apis.values(), key=lambda item: (
+        -item["throws"], -item["unfinished"], -item["calls"], item["service"], item["signature"] or item["method"]))
+    return {"scope": "ActivityManager, ActivityTaskManager and ActivityClientController Binder interfaces; "
+                     "available signatures are not proof that the app calls them or that their full contract is implemented",
+            "interfaces": interfaces, "truncated": truncated, "invalid_records": invalid_records,
+            "trace_stopped": stopped, "orphan_completions": orphan_completions,
+            "available_methods": len(methods), "observed_methods": sum(item["calls"] > 0 for item in methods),
+            "methods": methods}
+
+
 def collect_trace(directory, destination):
     """Preserve guest trace files before a temporary root disappears, even on timeout."""
     if directory is None: return None
@@ -114,19 +173,21 @@ def collect_trace(directory, destination):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(directory, target)
     calls, errors, pending, threads, slowest = Counter(), Counter(), {}, {}, []
+    scope = "local framework boundaries; Java stacks; mapped libraries"
     truncated = False
     method_started = method_stopped = False
     diagnostics = []
     log = target / "calls.jsonl"
     if log.exists():
-        with log.open() as source:
+        with log.open(encoding="utf-8", errors="replace") as source:
             for line in source:
                 try: event = json.loads(line)
                 except (ValueError, UnicodeError):
                     truncated = True
                     continue
                 kind = event.get("event")
-                if kind == "call":
+                if kind == "trace.start": scope = event.get("scope", scope)
+                elif kind == "call":
                     calls[event["operation"]] += 1
                     pending[event["id"]] = event
                 elif kind in ("return", "throw"):
@@ -139,7 +200,7 @@ def collect_trace(directory, destination):
                 elif kind == "methods.start": method_started = True
                 elif kind == "methods.stop": method_stopped = True
                 elif kind == "trace.error": diagnostics.append(event)
-    summary = {"scope": "local framework boundaries; Java stacks; mapped libraries",
+    summary = {"scope": scope,
                "calls": dict(calls.most_common()), "errors": dict(errors.most_common()),
                "unfinished_calls": list(pending.values()), "slowest_calls": slowest,
                "last_thread_stacks": list(threads.values()), "truncated": truncated,
@@ -148,6 +209,23 @@ def collect_trace(directory, destination):
                "methods_trace_bytes": (target / "methods.trace").stat().st_size
                if (target / "methods.trace").exists() else None}
     (target / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    if log.exists():
+        report = activity_api_report(log)
+        if report is not None:
+            (target / "activity-api-report.json").write_text(json.dumps(report, indent=2) + "\n")
+            lines = [report["scope"], "",
+                     f"Available signatures: {report['available_methods']}; observed: {report['observed_methods']}",
+                     f"Stopped: {report['trace_stopped']}; truncated: {report['truncated']}; "
+                     f"invalid records: {report['invalid_records']}; orphan completions: {report['orphan_completions']}", ""]
+            for item in report["methods"]:
+                lines.append(f"{item['service']}: {item['signature'] or item['method']}")
+                lines.append(f"  declared={item['declared_coverage']} calls={item['calls']} "
+                             f"returns={item['returns']} throws={item['throws']} unfinished={item['unfinished']}")
+                if "last_failure" in item:
+                    lines.append(f"  last failure: {item['last_failure']['exception']}: {item['last_failure']['message']}")
+                if item.get("first_caller"):
+                    lines.append("  first caller: " + " <- ".join(item["first_caller"]))
+            (target / "activity-api-report.txt").write_text("\n".join(lines) + "\n")
     if (target / "methods.trace").exists():
         try: method_summary = method_trace_summary(target / "methods.trace")
         except (ValueError, struct.error) as error: method_summary = {"incomplete": True, "error": str(error)}
@@ -681,7 +759,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     "ManagedLauncher", *installed_arguments(metadata, code)]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
-        if trace_apk:
+        if trace_apk and trace_apk != "activity":
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"
         environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())

@@ -1,12 +1,84 @@
 // Content notifications used by real ContentObservers and JobScheduler triggers.
 import android.net.Uri;
+import android.app.Application;
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.ProviderInfo;
 import android.os.IBinder;
 import android.os.IInterface;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Map;
+import java.util.LinkedHashMap;
 
 final class FrameworkContent {
+    // ActivityThread owns provider instances and its local authority cache.
+    // This registry supplies the ActivityManager publication contract only;
+    // remote-process providers are not instantiated in the caller's process.
+    private final Map<String, ProviderInfo> localProviders = new LinkedHashMap<>();
+    private final Map<String, Object> publishedProviders = new LinkedHashMap<>();
+    private IBinder applicationThread;
+    private String packageName;
+
+    void installProviders(Object thread, Application application, PackageInfo pkg) throws Exception {
+        packageName = pkg.packageName;
+        applicationThread = ((IInterface) thread.getClass().getMethod("getApplicationThread")
+                .invoke(thread)).asBinder();
+        List<ProviderInfo> providers = new ArrayList<>();
+        String process = Application.getProcessName();
+        if (pkg.applicationInfo.enabled && pkg.providers != null) {
+            for (ProviderInfo info : pkg.providers) {
+                if (!info.enabled || !Objects.equals(process,
+                        info.processName == null ? pkg.packageName : info.processName)) continue;
+                if (info.authority == null || info.authority.isEmpty())
+                    throw new IllegalArgumentException("Provider has no authority: " + info.name);
+                providers.add(info);
+                for (String authority : info.authority.split(";")) {
+                    if (localProviders.putIfAbsent(authority, info) != null)
+                        throw new IllegalArgumentException("Duplicate provider authority: " + authority);
+                }
+            }
+        }
+        // ActivityManager normally orders this list before binding the app.
+        providers.sort((a, b) -> Integer.compare(b.initOrder, a.initOrder));
+        if (providers.isEmpty()) return;
+        java.lang.reflect.Method install = thread.getClass().getDeclaredMethod(
+                "installContentProviders", Context.class, List.class);
+        install.setAccessible(true);
+        install.invoke(thread, application, providers);
+        System.out.println("APP_PROVIDERS_STARTED " + providers.size());
+    }
+
+    synchronized void publishProviders(Object caller, List<?> holders) throws Exception {
+        if (!(caller instanceof IInterface)
+                || ((IInterface) caller).asBinder() != applicationThread)
+            throw new SecurityException("Foreign provider publisher");
+        for (Object holder : holders) {
+            ProviderInfo info = (ProviderInfo) holder.getClass().getField("info").get(holder);
+            IInterface provider = (IInterface) holder.getClass().getField("provider").get(holder);
+            if (info == null || info.authority == null || provider == null
+                    || !Objects.equals(packageName, info.packageName))
+                throw new SecurityException("Invalid local provider publication");
+            for (String authority : info.authority.split(";")) {
+                ProviderInfo declared = localProviders.get(authority);
+                if (declared == null || !declared.name.equals(info.name))
+                    throw new SecurityException("Undeclared local provider: " + authority);
+                Object previous = publishedProviders.putIfAbsent(authority, holder);
+                if (previous != null && previous != holder)
+                    throw new IllegalStateException("Provider already published: " + authority);
+            }
+        }
+    }
+
+    synchronized Object publishedProvider(String authority, String caller, int user) {
+        Object holder = publishedProviders.get(authority);
+        if (holder != null && (user != android.os.Process.myUid() / 100000
+                || !Objects.equals(packageName, caller)))
+            throw new SecurityException("Foreign provider caller");
+        return holder;
+    }
+
     private final List<Observer> observers = new ArrayList<>();
     private final class Observer implements IBinder.DeathRecipient {
         final Uri uri;

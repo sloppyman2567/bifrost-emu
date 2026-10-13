@@ -70,7 +70,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                    "-Djava.class.path=/data/local/tmp/probe.dex", "/system/bin", main_class, *probe_args]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
-        if trace_apk:
+        if trace_apk and trace_apk != "activity":
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"
         guest_env = dict(metadata["environment"], **host_network_environment())
