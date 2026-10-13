@@ -205,6 +205,37 @@ Binder suite. A bounded SpongeBob run also calls Unity's
 Neither these tests nor presented frames establish video-ad playback: the
 `libmedia_jni.so`, decoder and video-surface path remains unfinished.
 
+### Common device services (2026-10-13)
+
+Android 15's
+[SystemServiceRegistry](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/app/SystemServiceRegistry.java)
+builds many managers with `ServiceManager.getServiceOrThrow`, or looks the
+Binder up in the manager constructor. Without the service,
+`getSystemService` logs `ServiceNotFoundException` and returns null; Hungry
+Shark Evolution then dereferenced a null `UiModeManager`, and session logs held
+40 null `PermissionManager` dereferences from `PackageManager.checkPermission`.
+Eleven services now let the real managers construct. Each declares its
+contract enum; other methods throw. Semantics follow the linked Android 15
+server classes, for one app, user 0 and the default device:
+
+| Service | Model |
+|---|---|
+| `uimode` | Normal UI mode, night mode off and locked, contrast 0 (`config_defaultNightMode`, `config_lockDayNightMode`). Process, Activity and bind configurations carry `uiMode` 0x11. Per-app dark mode throws: it needs a configuration change. |
+| `permissionmgr`, `permission_checker` | Delegate to the install-time grants (normal permissions granted, runtime permissions denied), retained framework-res/app permission definitions, no user rationale, no policy revocation, Android 15's 24 `platform.xml` split permissions, attribution registration. Proxy chains through other uids are hard-denied. |
+| `batteryproperties`, `batterystats` | healthd's no-battery AC profile: absent battery, AC plugged, unknown status, level/capacity 100, unknown charge/current, not charging. `registerReceiver` returns the sticky `ACTION_BATTERY_CHANGED` intent and delivers it to a new receiver. A host laptop battery is not reflected. |
+| `vibrator_manager` | No vibrators; `VIBRATE` is enforced and accepted vibrations are ignored. |
+| `trust` and `window` keyguard calls | No credential and never locked; `DISABLE_KEYGUARD` gates keyguard locks, `exitKeyguardSecurely` succeeds. |
+| `clipboard` | In-process clipboard with copied `ClipData`, one-hour auto-clear and listeners; reads need the play window's focus. Not shared with the host desktop. |
+| `alarm` | One-shot `OnAlarmListener` alarms on a scheduler thread, at least 5 s ahead (`MIN_FUTURITY`), RTC converted to elapsed time; exact-alarm queries follow the target-SDK rules. PendingIntent alarms throw (no PendingIntent creation yet); alarms never restart a stopped process. |
+| `account` | No accounts or authenticators (no Play services); secret reads and explicit additions are rejected. |
+| `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
+
+`notification` also accepts `cancelAll`, `cancel` and `getActiveNotifications`
+for its own package: nothing is posted, so they find nothing. Clipboard and
+alarm checks construct a focused clipboard and wait for a real listener alarm.
+`ManagedServiceBatch` exercises these through the real managers; see
+[the test record](../TESTS.md#common-device-services-2026-10-13).
+
 ### Software Gralloc5 (2026-10-13)
 
 The native service manager now implements `isDeclared` and

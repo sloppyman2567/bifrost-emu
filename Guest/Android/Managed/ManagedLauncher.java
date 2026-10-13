@@ -13,6 +13,7 @@ import android.content.AttributionSource;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
@@ -107,6 +108,15 @@ public final class ManagedLauncher {
     private static boolean play;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
     private static final FrameworkAppOps appOps = new FrameworkAppOps(packages);
+    private static final FrameworkPermissions permissions = new FrameworkPermissions(packages);
+    private static final FrameworkUiMode uiMode = new FrameworkUiMode(packages);
+    private static final FrameworkBattery battery = new FrameworkBattery(packages);
+    private static final FrameworkVibrator vibrator = new FrameworkVibrator(packages);
+    private static final FrameworkKeyguard keyguard = new FrameworkKeyguard(packages);
+    private static final FrameworkClipboard clipboard = new FrameworkClipboard(packages, () -> windowOpen);
+    private static final FrameworkAlarms alarms = new FrameworkAlarms(packages);
+    private static final FrameworkAccounts accounts = new FrameworkAccounts(packages);
+    private static final FrameworkLocation location = new FrameworkLocation(packages);
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
@@ -722,11 +732,22 @@ public final class ManagedLauncher {
                     return null;
                 // Dialogs and popup windows (WindowManagerGlobal.getWindowSession).
                 case "openSession": return windows.openSession(services);
-                default: throw unsupported("window", method);
+                default:
+                    if (keyguard.handlesWindow(method)) return keyguard.window(method, a);
+                    throw unsupported("window", method);
             }
         });
         power.install(services);
         notifications.install(services);
+        permissions.install(services);
+        uiMode.install(services);
+        battery.install(services);
+        vibrator.install(services);
+        keyguard.install(services);
+        clipboard.install(services);
+        alarms.install(services);
+        accounts.install(services);
+        location.install(services);
         Map<IBinder, Object> thermalEvents = new ConcurrentHashMap<>();
         Map<IBinder, Object> thermalStatuses = new ConcurrentHashMap<>();
         // No virtual thermal HAL: no temperature/cooling samples and no
@@ -950,13 +971,31 @@ public final class ManagedLauncher {
                 memoryInfo((ActivityManager.MemoryInfo) a[0]);
                 return null;
             }
-            // Nothing broadcasts here: no sticky Intent matches a new receiver.
-            if (method.equals("registerReceiverWithFeature")) return null;
+            // ACTION_BATTERY_CHANGED is the only sticky broadcast published here.
+            if (method.equals("registerReceiverWithFeature")) return stickyBroadcast(a[4], (IntentFilter) a[5]);
             if (method.equals("unregisterReceiver")) return null;
             // Scheduling hint for HardwareRenderer's thread; no priority policy here.
             if (method.equals("setRenderThread")) return null;
             throw unsupported("activity", method);
         });
+    }
+
+    // ActivityManagerService.registerReceiverWithFeature: returns the first
+    // sticky Intent the filter matches and schedules it to a new receiver
+    // (LoadedApk's InnerReceiver posts it to the receiver's Handler).
+    private static Intent stickyBroadcast(Object receiver, IntentFilter filter) throws Exception {
+        if (filter == null) throw new NullPointerException("filter");
+        Intent sticky = battery.stickyIntent();
+        if (filter.match(null, sticky, false, "ActivityManager") < 0) return null;
+        if (receiver != null) {
+            for (Method method : receiver.getClass().getMethods()) {
+                if (!method.getName().equals("performReceive") || method.getParameterCount() != 7) continue;
+                method.invoke(receiver, new Intent(sticky), 0, null, null, false, true, 0);
+                return sticky;
+            }
+            throw new IllegalStateException("IIntentReceiver.performReceive missing");
+        }
+        return sticky;
     }
 
     private static Object call(Object target, String name, Class<?>[] types, Object... arguments)
@@ -1096,7 +1135,9 @@ public final class ManagedLauncher {
         setField(binding, "processName", processName);
         setField(binding, "appInfo", app);
         setField(binding, "info", loaded);
-        setField(binding, "config", new Configuration(system.getResources().getConfiguration()));
+        Configuration bindConfig = new Configuration(system.getResources().getConfiguration());
+        bindConfig.uiMode = FrameworkUiMode.CONFIGURATION_UI_MODE;
+        setField(binding, "config", bindConfig);
         setField(binding, "compatInfo", Class.forName("android.content.res.CompatibilityInfo")
                 .getField("DEFAULT_COMPATIBILITY_INFO").get(null));
         setField(thread, "mBoundApplication", binding);

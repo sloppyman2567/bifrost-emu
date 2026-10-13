@@ -1,5 +1,39 @@
 # Tests
 
+## Common device services (2026-10-13)
+
+`ManagedServiceBatch` drives the real Android 15 `UiModeManager`,
+`PackageManager`/`PermissionManager`/`PermissionChecker`, `BatteryManager`,
+`Vibrator`/`VibratorManager`, `KeyguardManager`, `ClipboardManager`,
+`AlarmManager`, `AccountManager`, `LocationManager` and `NotificationManager`.
+It checks AOSP defaults, grant/denial agreement with the install-time model,
+copy isolation of permission and clip replies, sticky battery delivery to a
+receiver, focus-gated clipboard reads and listeners, a listener alarm firing
+no earlier than 5 s while a cancelled one never fires, and SecurityException
+for privileged calls and for revoked VIBRATE/DISABLE_KEYGUARD. It passes 106
+checks in JIT and interpreter mode. `--service-inventory` lists 32 services.
+`test_android_package.py` passes 29/29 (with `javac` on `PATH`).
+
+Hungry Shark Evolution, which had thrown on a null `UiModeManager`, ran its
+full 180-second session to its window, surface, popups and resume, without
+null-manager or unsupported-service exceptions. SpongeBob ran its 150-second
+session through the same checkpoints. Both still report missing Google Play
+services (`SERVICE_INVALID`) and PendingIntent creation; Hungry Shark's King
+SDK and SpongeBob read missing secure/system settings (`accelerometer_rotation`,
+`limit_ad_tracking`). Gameplay was not checked in these bounded runs.
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, 'Scripts/Android')
+from android_managed import build_launcher
+build_launcher(Path('/tmp/bifrost-service-probe'), (Path('Tests/Host/ManagedServiceBatch.java'),))
+PY
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch
+```
+
 ## Selective invalidation and shared MT compiles (2026-10-13)
 
 `Scripts/Testing/test_jit_cache.sh` adds `jit_cache_invalidation retain` in

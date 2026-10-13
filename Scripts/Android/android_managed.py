@@ -36,7 +36,12 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkWindows.java", "Framework/FrameworkActivities.java",
                     "Framework/FrameworkAppOps.java", "Framework/FrameworkSurfaces.java",
                     "Framework/FrameworkAudio.java", "Framework/FrameworkNotifications.java",
-                    "Framework/FrameworkPower.java", "Framework/FrameworkWifi.java")
+                    "Framework/FrameworkPower.java", "Framework/FrameworkWifi.java",
+                    "Framework/FrameworkPermissions.java", "Framework/FrameworkUiMode.java",
+                    "Framework/FrameworkBattery.java", "Framework/FrameworkVibrator.java",
+                    "Framework/FrameworkKeyguard.java", "Framework/FrameworkClipboard.java",
+                    "Framework/FrameworkAlarms.java", "Framework/FrameworkAccounts.java",
+                    "Framework/FrameworkLocation.java")
 
 
 def add_trace_arguments(parser):

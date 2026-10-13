@@ -16,6 +16,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Framework service stubs are strict: add the exact observed method contract,
   not a blanket default. Preserve package query filtering/copy isolation and
   per-Activity manifest/requested orientation.
+- Device services model one fixed device (see the runtime guide's common
+  device services): their answers, the install-time permission grants and the
+  configurations must agree. Process, Activity and bind configurations take
+  `uiMode` from `FrameworkUiMode.CONFIGURATION_UI_MODE`. New `Framework*.java`
+  modules go in `LAUNCHER_SOURCES` (`Scripts/Android/android_managed.py`).
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the

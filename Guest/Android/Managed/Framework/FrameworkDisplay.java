@@ -63,7 +63,7 @@ final class FrameworkDisplay {
     }
 
     private Object windowContextInfo() throws Exception {
-        Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
+        Configuration config = globalConfiguration();
         setScreen(config);
         setWindowBounds(config);
         return Class.forName("android.window.WindowContextInfo")
@@ -91,7 +91,7 @@ final class FrameworkDisplay {
     // context asks first; empty bounds there made the limit 0, so software
     // layers, such as WebView ads in stacked Activities, never drew.
     synchronized Configuration processConfiguration() throws Exception {
-        Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
+        Configuration config = globalConfiguration();
         setScreen(config);
         setWindowBounds(config);
         return config;
@@ -103,6 +103,14 @@ final class FrameworkDisplay {
         if (newWidth <= 0 || newHeight <= 0) throw new IllegalArgumentException("Invalid display bounds");
         maxWidth = newWidth;
         maxHeight = newHeight;
+    }
+
+    // The system configuration with the uiMode UiModeManagerService applies
+    // to WMS's global configuration (normal type, night mode off).
+    private static Configuration globalConfiguration() {
+        Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
+        config.uiMode = FrameworkUiMode.CONFIGURATION_UI_MODE;
+        return config;
     }
 
     // TaskFragment rounds pixel sizes to dp as (int) (px / density + 0.5f).

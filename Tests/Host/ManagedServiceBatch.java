@@ -246,6 +246,193 @@ public final class ManagedServiceBatch {
         check(dhcp.ipAddress == 0 && dhcp.gateway == 0, "virtual DHCP invented host addresses");
     }
 
+    private static void uiMode(Context context) throws Exception {
+        android.app.UiModeManager manager = context.getSystemService(android.app.UiModeManager.class);
+        check(manager != null, "UiModeManager unavailable");
+        check(manager.getCurrentModeType() == android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+                && manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_NO
+                && manager.getContrast() == 0f, "UI mode defaults differ from AOSP resources");
+        check(FrameworkUiMode.CONFIGURATION_UI_MODE == (android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+                | android.content.res.Configuration.UI_MODE_NIGHT_NO), "configuration uiMode differs from the service");
+        manager.setNightMode(android.app.UiModeManager.MODE_NIGHT_YES);
+        check(manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_NO, "locked night mode changed");
+        manager.setApplicationNightMode(android.app.UiModeManager.MODE_NIGHT_NO);
+        try {
+            manager.setApplicationNightMode(android.app.UiModeManager.MODE_NIGHT_YES);
+            throw new AssertionError("per-app dark mode claimed without a configuration change");
+        } catch (UnsupportedOperationException expected) { checks++; }
+        Object remote = endpoint("uimode", "android.app.IUiModeManager");
+        invalid(() -> invoke(remote, "setNightMode", 7));
+        denied(() -> invoke(remote, "getActiveProjectionTypes"));
+    }
+
+    private static void permissions(Context context) throws Exception {
+        android.content.pm.PackageManager pm = context.getPackageManager();
+        int granted = android.content.pm.PackageManager.PERMISSION_GRANTED;
+        check(pm.checkPermission("android.permission.WAKE_LOCK", NAME) == granted, "requested normal permission denied");
+        check(pm.checkPermission("android.permission.CAMERA", NAME) != granted, "runtime permission invented");
+        check(pm.checkPermission("android.permission.WAKE_LOCK", "foreign.package") != granted, "foreign package granted");
+        android.content.pm.PermissionInfo camera = pm.getPermissionInfo("android.permission.CAMERA", 0);
+        check(camera.getProtection() == android.content.pm.PermissionInfo.PROTECTION_DANGEROUS
+                && "android".equals(camera.packageName), "platform permission definition incorrect");
+        camera.protectionLevel = 0;
+        check(pm.getPermissionInfo("android.permission.CAMERA", 0).getProtection()
+                == android.content.pm.PermissionInfo.PROTECTION_DANGEROUS, "permission reply aliases service");
+        try {
+            pm.getPermissionInfo("org.bifrost.absent", 0);
+            throw new AssertionError("unknown permission resolved");
+        } catch (android.content.pm.PackageManager.NameNotFoundException expected) { checks++; }
+        // System APIs absent from the compile-time SDK jar.
+        Class<?> managerType = Class.forName("android.permission.PermissionManager");
+        Object manager = context.getSystemService(managerType);
+        java.util.List<?> splits = (java.util.List<?>) managerType.getMethod("getSplitPermissions").invoke(manager);
+        check(splits.size() == 24, "split permission table incomplete");
+        Method self = Class.forName("android.content.PermissionChecker")
+                .getMethod("checkSelfPermissionForPreflight", Context.class, String.class);
+        check((Integer) self.invoke(null, context, "android.permission.WAKE_LOCK") == 0
+                && (Integer) self.invoke(null, context, "android.permission.CAMERA") == 2,
+                "permission checker results incorrect");
+        Object remote = endpoint("permissionmgr", "android.permission.IPermissionManager");
+        check(!(Boolean) invoke(remote, "shouldShowRequestPermissionRationale", NAME, "android.permission.CAMERA", 0, 0),
+                "rationale shown without a user denial");
+        android.content.AttributionSource own = new android.content.AttributionSource.Builder(Process.myUid())
+                .setPackageName(NAME).build();
+        Object state = android.content.AttributionSource.class.getMethod("asState").invoke(own);
+        invoke(remote, "registerAttributionSource", state);
+        check((Boolean) invoke(remote, "isRegisteredAttributionSource", state), "attribution source not registered");
+        Object foreign = android.content.AttributionSource.class.getMethod("asState").invoke(
+                new android.content.AttributionSource.Builder(Process.myUid() + 1).setPackageName(NAME).build());
+        denied(() -> invoke(remote, "registerAttributionSource", foreign));
+        denied(() -> invoke(remote, "getRegisteredAttributionSourceCount", Process.myUid()));
+    }
+
+    private static void battery(Context context) throws Exception {
+        android.os.BatteryManager manager = context.getSystemService(android.os.BatteryManager.class);
+        check(manager != null && !manager.isCharging(), "BatteryManager unavailable or charging without a battery");
+        check(manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) == 100
+                && manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) == Integer.MIN_VALUE,
+                "battery properties invented hardware values");
+        android.content.IntentFilter filter = new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED);
+        android.content.Intent sticky = context.registerReceiver(null, filter);
+        check(sticky != null && sticky.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) == 100
+                && sticky.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) == 100
+                && sticky.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1) == android.os.BatteryManager.BATTERY_PLUGGED_AC
+                && !sticky.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true), "sticky battery intent incorrect");
+        check(context.registerReceiver(null, new android.content.IntentFilter("org.bifrost.none")) == null,
+                "sticky intent returned for an unrelated filter");
+        android.os.HandlerThread thread = new android.os.HandlerThread("battery-receiver");
+        thread.start();
+        java.util.concurrent.CountDownLatch received = new java.util.concurrent.CountDownLatch(1);
+        android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
+            @Override public void onReceive(Context c, android.content.Intent intent) {
+                if (isInitialStickyBroadcast() && intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) == 100)
+                    received.countDown();
+            }
+        };
+        context.registerReceiver(receiver, filter, null, new android.os.Handler(thread.getLooper()));
+        check(received.await(10, java.util.concurrent.TimeUnit.SECONDS), "sticky battery intent not delivered");
+        context.unregisterReceiver(receiver);
+        thread.quitSafely();
+    }
+
+    private static void vibratorAndKeyguard(Context context) throws Exception {
+        android.os.Vibrator vibrator = context.getSystemService(android.os.Vibrator.class);
+        check(vibrator != null && !vibrator.hasVibrator(), "vibrator invented");
+        vibrator.vibrate(android.os.VibrationEffect.createOneShot(20, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
+        vibrator.cancel();
+        Object manager = context.getSystemService(Class.forName("android.os.VibratorManager"));
+        check(((int[]) manager.getClass().getMethod("getVibratorIds").invoke(manager)).length == 0, "vibrator ids invented");
+        android.app.KeyguardManager keyguard = context.getSystemService(android.app.KeyguardManager.class);
+        check(keyguard != null && !keyguard.isKeyguardLocked() && !keyguard.isKeyguardSecure()
+                && !keyguard.isDeviceLocked() && !keyguard.isDeviceSecure()
+                && !keyguard.inKeyguardRestrictedInputMode(), "keyguard state invented a lock");
+        android.app.KeyguardManager.KeyguardLock lock = keyguard.newKeyguardLock("batch");
+        lock.disableKeyguard(); lock.reenableKeyguard();
+        boolean[] exited = new boolean[1];
+        keyguard.exitKeyguardSecurely(success -> exited[0] = success);
+        check(exited[0], "unlocked keyguard exit not reported");
+        Object trust = endpoint("trust", "android.app.trust.ITrustManager");
+        denied(() -> invoke(trust, "isDeviceLocked", 10, 0));
+        denied(() -> invoke(trust, "isTrustUsuallyManaged", 0));
+    }
+
+    private static void clipboard(Context context, FrameworkPackages packages) throws Exception {
+        android.content.ClipboardManager manager = context.getSystemService(android.content.ClipboardManager.class);
+        manager.setPrimaryClip(android.content.ClipData.newPlainText("code", "unfocused"));
+        check(manager.getPrimaryClip() == null && !manager.hasPrimaryClip(), "clipboard readable without window focus");
+        // A focused instance: the play window holds focus while it is open.
+        new FrameworkClipboard(packages, () -> true).install(new FrameworkServices());
+        Object remote = endpoint("clipboard", "android.content.IClipboard");
+        int[] changes = new int[1];
+        Class<?> listenerType = Class.forName("android.content.IOnPrimaryClipChangedListener");
+        android.os.Binder listenerBinder = new android.os.Binder();
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(listenerType.getClassLoader(),
+                new Class<?>[] {listenerType}, (self, method, args) -> {
+                    if (method.getName().equals("asBinder")) return listenerBinder;
+                    if (method.getName().equals("dispatchPrimaryClipChanged")) changes[0]++;
+                    return null;
+                });
+        invoke(remote, "addPrimaryClipChangedListener", listener, NAME, null, 0, 0);
+        android.content.ClipData clip = android.content.ClipData.newPlainText("code", "GIFT-1234");
+        invoke(remote, "setPrimaryClip", clip, NAME, null, 0, 0);
+        android.content.ClipData read = (android.content.ClipData) invoke(remote, "getPrimaryClip", NAME, null, 0, 0);
+        check(read != null && read != clip && "GIFT-1234".contentEquals(read.getItemAt(0).getText())
+                && read.getDescription().getTimestamp() > 0, "focused clipboard read failed or aliased");
+        check((Boolean) invoke(remote, "hasClipboardText", NAME, null, 0, 0) && changes[0] == 1,
+                "clipboard text/listener state incorrect");
+        invoke(remote, "clearPrimaryClip", NAME, null, 0, 0);
+        check(!(Boolean) invoke(remote, "hasPrimaryClip", NAME, null, 0, 0) && changes[0] == 2, "clipboard clear failed");
+        denied(() -> invoke(remote, "setPrimaryClip", clip, "foreign.package", null, 0, 0));
+        denied(() -> invoke(remote, "getPrimaryClip", NAME, null, 10, 0));
+    }
+
+    private static void alarmsAccountsLocation(Context context) throws Exception {
+        android.app.AlarmManager alarms = context.getSystemService(android.app.AlarmManager.class);
+        check(alarms != null && !alarms.canScheduleExactAlarms() && alarms.getNextAlarmClock() == null,
+                "AlarmManager unavailable or exact alarms granted without permission");
+        android.os.HandlerThread thread = new android.os.HandlerThread("alarm-listener");
+        thread.start();
+        android.os.Handler handler = new android.os.Handler(thread.getLooper());
+        java.util.concurrent.CountDownLatch fired = new java.util.concurrent.CountDownLatch(1);
+        boolean[] cancelledFired = new boolean[1];
+        android.app.AlarmManager.OnAlarmListener cancelled = () -> cancelledFired[0] = true;
+        long start = android.os.SystemClock.elapsedRealtime();
+        alarms.set(android.app.AlarmManager.ELAPSED_REALTIME, start, "cancelled", cancelled, handler);
+        alarms.cancel(cancelled);
+        // An exact listener alarm needs no permission; app alarms fire no
+        // sooner than MIN_FUTURITY (5 s) after scheduling.
+        alarms.setExact(android.app.AlarmManager.ELAPSED_REALTIME, start, "fired", fired::countDown, handler);
+        check(fired.await(15, java.util.concurrent.TimeUnit.SECONDS)
+                && android.os.SystemClock.elapsedRealtime() - start >= 5000 && !cancelledFired[0],
+                "listener alarm timing or cancellation incorrect");
+        thread.quitSafely();
+        Object alarmRemote = endpoint("alarm", "android.app.IAlarmManager");
+        Class<?> listenerType = Class.forName("android.app.IAlarmListener");
+        Binder listenerBinder = new Binder();
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(listenerType.getClassLoader(),
+                new Class<?>[] {listenerType}, (self, method, args) ->
+                        method.getName().equals("asBinder") ? listenerBinder : null);
+        invalid(() -> invoke(alarmRemote, "set", NAME, 3, 0L, 0L, 60000L, 0, null, listener, null, null, null));
+        denied(() -> invoke(alarmRemote, "setTime", 0L));
+
+        android.accounts.AccountManager accounts = android.accounts.AccountManager.get(context);
+        check(accounts.getAccounts().length == 0 && accounts.getAccountsByType("com.google").length == 0
+                && accounts.getAuthenticatorTypes().length == 0, "accounts or authenticators invented");
+        denied(() -> accounts.addAccountExplicitly(new android.accounts.Account("player", "com.google"), null, null));
+
+        android.location.LocationManager location = context.getSystemService(android.location.LocationManager.class);
+        check(location != null && location.getAllProviders().equals(Arrays.asList("passive"))
+                && location.isLocationEnabled() && location.getProviders(true).isEmpty()
+                && location.getBestProvider(new android.location.Criteria(), true) == null,
+                "location providers differ from a device without GNSS or Play services");
+        denied(() -> location.getLastKnownLocation("passive"));
+
+        NotificationManager notifications = context.getSystemService(NotificationManager.class);
+        notifications.cancelAll();
+        notifications.cancel("tag", 7);
+        check(notifications.getActiveNotifications().length == 0, "active notifications invented");
+    }
+
     private static void run() throws Exception {
         Looper.prepareMainLooper();
         Class<?> threadType = Class.forName("android.app.ActivityThread");
@@ -266,7 +453,8 @@ public final class ManagedServiceBatch {
         info.dataDir = "/data/user/0/" + NAME;
         new File(info.dataDir).mkdirs();
         pkg.requestedPermissions = new String[] {"android.permission.WAKE_LOCK", "android.permission.MODIFY_AUDIO_SETTINGS",
-                "android.permission.ACCESS_WIFI_STATE", "android.permission.CHANGE_WIFI_STATE"};
+                "android.permission.ACCESS_WIFI_STATE", "android.permission.CHANGE_WIFI_STATE",
+                "android.permission.VIBRATE", "android.permission.DISABLE_KEYGUARD"};
         pkg.requestedPermissionsFlags = new int[pkg.requestedPermissions.length];
         packages.install(system, pkg);
         Class<?> compatibility = Class.forName("android.content.res.CompatibilityInfo");
@@ -280,6 +468,9 @@ public final class ManagedServiceBatch {
         make.setAccessible(true);
         Context context = (Context) make.invoke(loaded, false, null);
         notifications(context, packages); audio(context); power(context); wifi(context);
+        uiMode(context); permissions(context);
+        battery(context); vibratorAndKeyguard(context); clipboard(context, packages);
+        alarmsAccountsLocation(context);
         pkg.requestedPermissions = new String[0]; pkg.requestedPermissionsFlags = new int[0];
         packages.install(system, pkg);
         Object wifi = endpoint("wifi", "android.net.wifi.IWifiManager");
@@ -287,6 +478,10 @@ public final class ManagedServiceBatch {
         denied(() -> invoke(wifi, "getConnectionInfo", NAME, null));
         Object power = endpoint("power", "android.os.IPowerManager");
         denied(() -> invoke(power, "acquireWakeLock", new Binder(), 1, "denied", NAME, null, null, -1, null));
+        Object vibrators = endpoint("vibrator_manager", "android.os.IVibratorManagerService");
+        denied(() -> invoke(vibrators, "cancelVibrate", -1, new Binder()));
+        Object window = endpoint("window", "android.view.IWindowManager");
+        denied(() -> invoke(window, "disableKeyguard", new Binder(), "denied", 0));
         System.out.println("MANAGED_SERVICE_BATCH_OK checks=" + checks);
         System.out.println("FRAMEWORK_OK");
     }

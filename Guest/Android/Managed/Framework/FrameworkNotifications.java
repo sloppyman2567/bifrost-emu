@@ -34,7 +34,10 @@ final class FrameworkNotifications implements FrameworkServices.Call {
         deleteNotificationChannel,
         getNotificationChannelGroup,
         getNotificationChannelGroups,
-        deleteNotificationChannelGroup
+        deleteNotificationChannelGroup,
+        cancelAllNotifications,
+        cancelNotificationWithTag,
+        getAppActiveNotifications
     }
 
     @Override public String[] methods() {
@@ -246,6 +249,14 @@ final class FrameworkNotifications implements FrameworkServices.Call {
         if (method.equals("getNotificationChannels")) {
             owner((String) a[1]); user((Integer) a[2]);
             if (!pkg.packageName.equals(a[1])) throw new SecurityException("Foreign notification package");
+        }
+        // Nothing is ever posted here (desktop delivery is unsupported), so
+        // cancellation finds no notification and the active list is empty.
+        switch (contract) {
+            case cancelAllNotifications: user((Integer) a[1]); return null;
+            case cancelNotificationWithTag: owner((String) a[1]); user((Integer) a[4]); return null;
+            case getAppActiveNotifications: user((Integer) a[1]); return slice(new ArrayList<Object>());
+            default: break;
         }
         File directory = new File(pkg.applicationInfo.dataDir, ".asgard-notifications");
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("Notification storage unavailable");

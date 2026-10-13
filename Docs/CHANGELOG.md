@@ -13,6 +13,21 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Common Android device services (2026-10-13)
+
+- Managed apps get eleven more framework services, so `getSystemService`
+  returns real Android managers instead of null: `uimode`, `permissionmgr`,
+  `permission_checker`, `batteryproperties`, `batterystats`,
+  `vibrator_manager`, `trust` (with the window manager's keyguard calls),
+  `clipboard`, `alarm`, `account` and `location`. They model one plugged-in
+  device without a battery, vibrator, lock screen, GNSS or Play services,
+  following Android 15's services. Hungry Shark Evolution had crashed on a
+  null `UiModeManager`.
+- `registerReceiver` now returns and delivers the sticky
+  `ACTION_BATTERY_CHANGED` broadcast, and configurations carry `uiMode`
+  normal/night-off. Listener alarms fire; PendingIntent alarms, host
+  clipboard sharing and host battery state are not implemented.
+
 ### Fewer JIT recompiles and compile stalls (2026-10-13)
 
 - A 64-byte `DC`/`IC` publish (one per line from ART's `__clear_cache`) now

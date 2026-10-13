@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 final class FrameworkPackages {
     // AOSP PermissionController module package.
@@ -28,6 +29,7 @@ final class FrameworkPackages {
     private volatile PackageInfo installed;
     private final Map<String, PackageInfo> systemPackages = new ConcurrentHashMap<>();
     private final java.util.Set<String> grantedPermissions = ConcurrentHashMap.newKeySet();
+    private volatile Map<String, PermissionInfo> permissionDefinitions = java.util.Collections.emptyMap();
     private final java.util.Set<String> serviceFeatures = ConcurrentHashMap.newKeySet();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> providerFilters = new ConcurrentHashMap<>();
 
@@ -478,6 +480,7 @@ final class FrameworkPackages {
         for (PermissionInfo permission : platform.permissions) definitions.put(permission.name, permission);
         if (pkg.permissions != null)
             for (PermissionInfo permission : pkg.permissions) definitions.putIfAbsent(permission.name, permission);
+        permissionDefinitions = java.util.Collections.unmodifiableMap(definitions);
         grantedPermissions.clear();
         if (pkg.requestedPermissions == null) return;
         for (int i = 0; i < pkg.requestedPermissions.length; i++) {
@@ -489,6 +492,41 @@ final class FrameworkPackages {
                 pkg.requestedPermissionsFlags[i] |= PackageInfo.REQUESTED_PERMISSION_GRANTED;
             }
         }
+    }
+
+    // Platform (framework-res) and app-defined permissions, as installed.
+    // Callers receive copies: PermissionInfo is mutable.
+    PermissionInfo permissionInfo(String name) {
+        PermissionInfo info = name == null ? null : permissionDefinitions.get(name);
+        return info == null ? null : new PermissionInfo(info);
+    }
+
+    // Permissions declaring `group`; a null group selects ungrouped ones.
+    java.util.List<PermissionInfo> permissionsInGroup(String group) {
+        java.util.List<PermissionInfo> result = new java.util.ArrayList<>();
+        for (PermissionInfo info : permissionDefinitions.values())
+            if (Objects.equals(info.group, group)) result.add(new PermissionInfo(info));
+        result.sort(java.util.Comparator.comparing(info -> info.name));
+        return result;
+    }
+
+    // The installed app's targetSdkVersion (compat-change gates), or 0.
+    int targetSdk() {
+        PackageInfo pkg = installed;
+        return pkg == null ? 0 : pkg.applicationInfo.targetSdkVersion;
+    }
+
+    // Whether the installed app's manifest requests `permission`.
+    boolean requested(String permission) {
+        PackageInfo pkg = installed;
+        return pkg != null && pkg.requestedPermissions != null
+                && Arrays.asList(pkg.requestedPermissions).contains(permission);
+    }
+
+    // Whether the calling app holds the permission (services' enforce checks).
+    boolean granted(String permission) {
+        return checkPermission(permission, android.os.Process.myUid(), Context.DEVICE_ID_DEFAULT)
+                == PackageManager.PERMISSION_GRANTED;
     }
 
     int checkPermission(String permission, int uid, int deviceId) {
