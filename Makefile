@@ -577,7 +577,7 @@ test-capi: lib $(TARGET) $(CAPI_TESTLIB)
 .PHONY: test-ir-ssa
 test-ir-ssa:
 	@mkdir -p $(OBJDIR)
-	$(CXX) $(CXXFLAGS) Tests/Host/ir_ssa.cpp Source/FrostJIT/IR/SSA/SSA.cpp -o $(OBJDIR)/ir_ssa_test $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) Tests/Host/ir_ssa.cpp Source/FrostJIT/IR/SSA/SSA.cpp Source/FrostJIT/IR/Passes/Optimize.cpp -o $(OBJDIR)/ir_ssa_test $(LDFLAGS)
 	./$(OBJDIR)/ir_ssa_test
 
 .PHONY: test-audio-frame-counters

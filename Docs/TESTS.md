@@ -37,6 +37,28 @@ median improvement was 12.1%; it is a local benchmark observation. No new
 game FPS/stability, complete FPCR/FPSR, arbitrary concurrent mapping-race or
 cross-host performance claim follows from these checks.
 
+## Dead-code compaction accounting (2026-10-14)
+
+The expanded managed service probe exposed `vector::reserve` during ART
+translation, before its first manager assertion. A bounded GDB backtrace
+localized it to `optimize_ir`. The saved pre-batch binary reached the expected
+unsupported `user.isUserRunning` call; a temporary binary changing only
+known-entry loop growth still hit the reserve exception. Source tracing found
+DSE/DCE double-counting plus unsigned capacity subtraction. The fix reserves
+the actual retained count and reports physical removals once.
+
+`Tests/Host/ir_ssa.cpp` adds a legacy block with sixteen constant stores and
+a helper boundary. It must retain the final value/store/helper, count thirty
+removals and survive a second optimization with cumulative statistics intact.
+`test-ir-ssa` links the real optimizer and passes 21,839 checks; `make verify`
+passes 87 differential fixtures and seven threaded oracle runs. SDL/GL and
+headless executable/library builds pass. The managed service batch then
+completed in both engines (174 assertions before the final power-query
+additions), removing the native exception on the concrete failing path.
+
+The final full-suite and service results are recorded below; this fix does
+not repair unrelated mapping races or establish game stability.
+
 ## Realm-owned host media decoding (2026-10-14)
 
 Two Java MediaCodec clients (UIDs 10000/10001) shared one realm, each

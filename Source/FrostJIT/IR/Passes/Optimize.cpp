@@ -300,7 +300,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 auto it = last_store_to.find(key);
                 if (it != last_store_to.end()) {
                     block.insts[it->second].op = IROp::NOP;
-                    block.dce_removed++;
                 }
                 last_store_to[key] = i;
             } else if (inst.op == IROp::LOAD_REG) {
@@ -831,6 +830,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // We compute liveness backward, then drop pure ops whose dest is
     // never used.
     std::vector<bool> used(block.insts.size(), false);
+    size_t kept = 0;
     // We mark an instruction as "used" if it has a side effect, OR if
     // its dest is read by a later used instruction. Walk backward.
     std::unordered_set<uint16_t> live;
@@ -848,6 +848,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
         }
         if (keep) {
             used[i - 1] = true;
+            ++kept;
             // Mark sources as live.
             // For LOAD_REG, src1 is the ARM64 reg index (0-31). The value
             // is "read" from that architectural reg, so any earlier op that
@@ -881,12 +882,14 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             }
         } else {
             used[i - 1] = false;
-            block.dce_removed++;
         }
     }
     // Build the new instruction list, dropping unused.
     std::vector<IRInst> new_insts;
-    new_insts.reserve(block.insts.size() - block.dce_removed);
+    // DSE marks NOPs before this pass; its statistics are not a capacity.
+    // Count actual retained instructions, including on repeated optimization.
+    block.dce_removed += static_cast<int>(block.insts.size() - kept);
+    new_insts.reserve(kept);
     for (size_t i = 0; i < block.insts.size(); i++) {
         if (used[i]) new_insts.push_back(block.insts[i]);
     }

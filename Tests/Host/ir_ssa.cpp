@@ -62,6 +62,24 @@ static std::vector<SSASourceBlock> lower(SSAFunction& f) {
     return out;
 }
 int main() {
+    // Legacy DSE + folded constants must not count the same store twice
+    // when reserving the compacted vector. CALL_INTERP keeps the legacy
+    // pipeline, matching the ART block that exposed the reserve underflow.
+    IRBlock compact;
+    for (uint16_t v = 33; v < 49; ++v) {
+        compact.insts.push_back(IRInst::make_imm(v, v));
+        compact.insts.push_back(IRInst::make_store_reg(0, v, false));
+    }
+    compact.insts.push_back(IRInst::make(IROp::CALL_INTERP));
+    optimize_ir(compact);
+    check(compact.insts.size() == 3 && compact.dce_removed == 30,
+          "DSE compaction counts each removed instruction once");
+    check(compact.insts[0].op == IROp::IMM && compact.insts[0].imm_value() == 48 &&
+          compact.insts[1].op == IROp::STORE_REG && compact.insts[2].op == IROp::CALL_INTERP,
+          "DSE preserves the final architectural store and helper boundary");
+    optimize_ir(compact);
+    check(compact.insts.size() == 3 && compact.dce_removed == 30,
+          "repeated optimization does not subtract cumulative removals");
     // Diamond, including reassignment of a scalar temporary on both arms.
     // The incoming x0 differs from x1, exposing wrong phi predecessor choices.
     std::vector<SSASourceBlock> diamond(4);

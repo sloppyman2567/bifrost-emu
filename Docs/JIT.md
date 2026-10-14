@@ -47,6 +47,19 @@ Every run exceeded ten seconds and validated all CRCs. This measures the
 combined batch on one host, not each change separately or game FPS. See
 [validation and limits](TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
 
+### Dead-code compaction accounting follow-up
+
+The broader Android service probe exposed a `vector::reserve` exception in
+`optimize_ir`: DSE counted stores when marking them NOP, then DCE counted
+their physical removal again. Clearing folded IMM operands removed more
+dead producers, so subtracting the diagnostic removal count from the input
+size underflowed. Compaction now reserves its actual retained count and
+counts each physical removal once. Repeated optimization also uses the
+current pass's retained count, independently of cumulative statistics.
+This changes allocation/accounting, not instruction semantics or the
+retained IR. The regression and Android validation are recorded in
+[TESTS.md](TESTS.md#dead-code-compaction-accounting-2026-10-14).
+
 ## Scalar FP scratch preservation (2026-10-13)
 
 Scalar ADD/SUB/MUL/DIV, min/max, SQRT and register MOV use XMM scratch
