@@ -52,7 +52,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Every window, the launcher Activity's included (dialogs, popups, stacked
   Activities from `FrameworkActivities`), goes through WindowManager and
   `FrameworkWindows`; SurfaceViews in any window get host surfaces from
-  `FrameworkSurfaces` following SurfaceView's visibility contract. Keep
+  `FrameworkSurfaces` following SurfaceView's visibility contract;
+  `FrameworkSurfaces`, not SurfaceView's own `updateSurface`, owns their
+  surface lifecycle (see the runtime guide). Keep
   ActivityThread's lifecycle order. Window layers sit above every surface, so
   an Activity covered by an opaque one must stop and hide its window
   (`EnsureActivitiesVisibleHelper`); only translucent/floating themes leave it

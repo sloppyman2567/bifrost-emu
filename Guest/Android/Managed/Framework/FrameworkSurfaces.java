@@ -18,6 +18,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -51,6 +52,8 @@ final class FrameworkSurfaces {
     private static final Field SURFACE_FRAME = field("mSurfaceFrame");
     private static final Field DRAW_FINISHED = field("mDrawFinished");
     private static final Method DRAW_FINISHED_METHOD = method("performDrawFinished");
+    private static final Field HAVE_FRAME = field("mHaveFrame");
+    private static final Field DRAW_LISTENER = field("mDrawListener");
 
     private final Host host;
     private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
@@ -89,6 +92,15 @@ final class FrameworkSurfaces {
         for (Entry entry : new ArrayList<>(entries.values()))
             if (entry.owner == owner && !visible.contains(entry.view)) destroy(entry);
         for (SurfaceView view : visible) {
+            // This class is the SurfaceView's compositor. Its own updateSurface()
+            // treats our host-drawn window (no valid ViewRootImpl surface) as
+            // lost: it would call surfaceDestroyed and destroy the real Surface
+            // installed below. Only its pre-draw listener sets mHaveFrame, and
+            // every updateSurface() path returns while that is false. A
+            // re-attach adds the listener again, so detach it on every pass.
+            view.getViewTreeObserver().removeOnPreDrawListener(
+                    (ViewTreeObserver.OnPreDrawListener) DRAW_LISTENER.get(view));
+            HAVE_FRAME.setBoolean(view, false);
             Entry entry = entries.get(view);
             int format = REQUESTED_FORMAT.getInt(view);
             int width = view.getWidth(), height = view.getHeight();

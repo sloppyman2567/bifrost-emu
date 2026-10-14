@@ -305,6 +305,14 @@ decoded on the host; there are no Java or JNI codec substitutes.
   windows; the GraphicThunk EGL path resolves that alias to its host
   backing. SDR YUV is converted to ARGB on the Java UI thread (matrix and
   range from the dataspace, crop, stride). HDR is reported unsupported.
+  `FrameworkSurfaces` owns each SurfaceView's lifecycle: it detaches
+  SurfaceView's pre-draw listener and keeps `mHaveFrame` false. Otherwise
+  [`SurfaceView.updateSurface`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/java/android/view/SurfaceView.java)
+  treats the host-drawn window (no valid `ViewRootImpl` surface) as lost.
+  Once the SurfaceView's own Surface is valid, that path calls
+  `surfaceDestroyed` and destroys the installed Surface. Unity games then
+  stopped before their first frame ("Timeout (2000 ms) while trying
+  detaching primary window").
 
 Verified (temporary realm probes, not regression gates):
 - Java MediaCodec under UIDs 10000/10001 sharing one realm: AVC, HEVC, VP8
