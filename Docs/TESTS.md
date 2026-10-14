@@ -1,5 +1,23 @@
 # Tests
 
+## ARM64 write-only mappings (2026-10-14)
+
+The real Goldfish H.264 component maps its command/reply arena with
+`PROT_WRITE`, then reads replies. Bifrost previously faulted on that read.
+Effective page-access flags now include read access when write is requested;
+the VMA retains its requested permissions for `/proc/maps`. This follows
+Linux ARM64's [protection table](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/mm/mmap.c),
+which maps both private and shared `VM_WRITE` pages to readable PTEs.
+
+The added `test_shared_alias` cases cover a shared write-only load and
+`mprotect(PROT_NONE)` followed by `mprotect(PROT_WRITE)`. The unchanged
+default binary faulted at the first load; the rebuilt graphics binary and
+QEMU each passed all 22,058 checks, including both Bifrost engines.
+`test_memory_permissions` passed 106 checks in each engine, retaining
+read-only/PROT_NONE faults, fork isolation and syscall `EFAULT` coverage.
+`make verify` passed 87 differential fixtures and seven threaded oracle runs.
+These are observed regression results; they do not establish video playback.
+
 ## Inherited host open-file limit (2026-10-13)
 
 `test_syscall_regress` now holds 1,536 separate regular-file opens

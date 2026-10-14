@@ -25,6 +25,15 @@ int main(void) {
     int fd = syscall(SYS_memfd_create, "alias-test", 0);
     CHECK(fd >= 0);
     CHECK(ftruncate(fd, 4 * page) == 0);
+    // Goldfish's transport uses PROT_WRITE, then reads host-written replies.
+    // Linux arm64 grants read access too, while the VMA remains write-only.
+    volatile uint32_t *write_only = alias(fd, 0x7400000000ULL, PROT_WRITE, page, 0);
+    write_only[0] = 42;
+    CHECK(write_only[0] == 42);
+    CHECK(mprotect((void *)write_only, page, PROT_NONE) == 0);
+    CHECK(mprotect((void *)write_only, page, PROT_WRITE) == 0);
+    CHECK(write_only[0] == 42);
+    CHECK(munmap((void *)write_only, page) == 0);
     volatile uint32_t *low = alias(fd, 0x30000000, PROT_READ | PROT_WRITE, 3 * page, 0);
     volatile uint32_t *high = alias(fd, 0x7100000000ULL, PROT_READ | PROT_WRITE, 3 * page, 0);
     volatile uint32_t *view = alias(fd, 0x7200000000ULL, PROT_READ, 3 * page, 0);
