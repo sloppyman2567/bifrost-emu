@@ -1,5 +1,24 @@
 # Tests
 
+## X11 wire readback synchronization (2026-10-14)
+
+The intermittent `xwayland_wire` failure was X `BadMatch` on `GetImage`
+(request 73). The fixture called `XMapWindow` and immediately issued its
+draw/readback sequence. XSync round-trips do not wait for a window manager's
+redirected map request. The fixture now selects StructureNotify and waits
+for its window's MapNotify before drawing, preserving the 100 round-trips
+and real guest libX11/server pixel check.
+
+This enforces the
+[Xlib mapping and readback contracts](https://www.x.org/releases/X11R7.5/doc/libX11/libX11.html):
+window readback requires a viewable window. A temporary probe with an extra
+attribute query passed ten runs, so it did not independently capture an
+unmapped window at failure. After the mapping wait, the final strict JIT
+suite passed 326/326 and the interpreter suite passed 317/317 with nine
+JIT-only skips. This is a test synchronization correction, not an emulator
+rendering or gameplay fix; other desktop/readback error causes remain outside
+this bounded check.
+
 ## Tier-1 hot-path code reduction (2026-10-14)
 
 The codegen/dispatch batch described in [JIT.md](JIT.md#tier-1-hot-path-code-reduction-2026-10-14)

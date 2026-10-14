@@ -15,7 +15,14 @@ int main(void) {
                                          0, 0, 240, 160, 0, color,
                                          BlackPixel(display, screen));
     XStoreName(display, window, "Bifrost ARM64 XWayland wire test");
+    XSelectInput(display, window, StructureNotifyMask);
     XMapWindow(display, window);
+    // A window manager may redirect the map request. XSync round-trips
+    // only our requests; it does not wait for the manager to map the window.
+    // XGetImage requires a viewable window, so wait for its actual mapping.
+    XEvent event;
+    do { XNextEvent(display, &event); }
+    while (event.type != MapNotify || event.xmap.window != window);
     GC gc = XCreateGC(display, window, 0, NULL);
     XSetForeground(display, gc, color);
     // Repeated round-trips warm both branch targets and retroactive chaining;
