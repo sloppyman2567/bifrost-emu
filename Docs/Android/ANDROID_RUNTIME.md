@@ -2172,6 +2172,13 @@ ActivityProbe now implements the newly observed calls explicitly:
 
 - `reportActivityFullyDrawn` records the first completion for a known Activity
   token; unknown tokens are ignored, as in AOSP's ActivityRecord lookup.
+- `overridePendingTransition` (synchronous) completes without recording
+  anything. In AOSP's
+  [ActivityClientController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/wm/ActivityClientController.java)
+  it only selects custom animations for the next window transition, and
+  Bifrost does not animate window transitions. The Yostar SDK calls it from
+  `BackgroundAct.finish()` when Azur Lane closes its web view; the missing
+  stub previously ended the app with `System.exit(1)`.
 - `getMyMemoryState` fills PID/UID and documented process-state fields, using
   the actual Activity `isResumed()` state for foreground importance. The
   single-process profile has no trim callbacks or OOM-adjustment dependencies.

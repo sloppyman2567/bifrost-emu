@@ -806,6 +806,12 @@ public final class ManagedLauncher {
                 "android.app.IActivityClientController", (method, a) -> {
                     switch (method) {
                         case "setTaskDescription": return null;
+                        // ActivityClientController.overridePendingTransition only
+                        // records custom animations for the next window transition
+                        // (resumed/pausing Activities; others are ignored). Window
+                        // transitions are not animated here, so there is nothing to
+                        // record; the synchronous call completes for any token.
+                        case "overridePendingTransition": return null;
                         // Record the first completion for a known Activity;
                         // unknown tokens are ignored, like ActivityRecord lookup.
                         case "reportActivityFullyDrawn":
