@@ -4,13 +4,13 @@ All notable changes to **bifrost-emu** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
+with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 ## [2.0.0-alpha.1] — first v2.0 pre-release (2026-10-12)
 
-The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
-[v2.0 roadmap](roadmap.md), not a completed v2.0. It includes all unreleased
-work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
+**2.0.0-alpha.1** is the first alpha release toward the
+[v2.0 roadmap](roadmap.md). This section records its changes since 1.5.5
+(2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
 ### Android screenshots, release priorities and licenses (2026-10-14)
