@@ -33,6 +33,16 @@ INCDIR   := Include
 CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR) -ISource -MMD -MP
 LDFLAGS  ?= -pthread
 
+# Android's host-backed Codec2 transport. Builds without these optional host
+# libraries keep explicit ENOSYS behavior instead of advertising fake decoders.
+USE_MEDIA ?= 1
+ifeq ($(USE_MEDIA),1)
+ifneq ($(shell pkg-config --exists libavcodec libavutil libswscale 2>/dev/null && echo yes),)
+    CXXFLAGS += $(shell pkg-config --cflags libavcodec libavutil libswscale) -DBIFROST_MEDIA_FFMPEG
+    LDFLAGS += $(shell pkg-config --libs libavcodec libavutil libswscale)
+endif
+endif
+
 BUILD_PROFILE ?= release
 USE_SDL2 ?= 1
 USE_THUNK_GL ?= 1
@@ -580,6 +590,11 @@ test-audio-frame-counters:
 test-android-window-backend: $(LIB)
 	$(CXX) $(CXXFLAGS) Tests/Unit/android_window_backend_host.cpp $(LIB) -o $(OBJDIR)/android_window_backend_host $(LDFLAGS)
 	./$(OBJDIR)/android_window_backend_host
+
+.PHONY: test-android-goldfish-media
+test-android-goldfish-media: $(LIB)
+	$(CXX) $(CXXFLAGS) Tests/Unit/android_goldfish_media_host.cpp $(LIB) -o $(OBJDIR)/android_goldfish_media_host $(LDFLAGS)
+	./$(OBJDIR)/android_goldfish_media_host
 
 .PHONY: test-android-sdl-backend
 test-android-sdl-backend:

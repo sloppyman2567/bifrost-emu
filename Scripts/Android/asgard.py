@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import socket
 import stat
@@ -12,6 +13,8 @@ import struct
 import subprocess
 import sys
 import time
+import tempfile
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 HEADER = struct.Struct("<IIIIQQ")
@@ -38,18 +41,104 @@ def receive(stream, length):
     return data
 
 
-def control(path, stop=False, version=VERSION):
+def control(path, stop=False, version=VERSION, operation=None, body=b""):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
-        stream.settimeout(2)
+        stream.settimeout(45 if operation == 8 else 5)
         stream.connect(str(path))
-        operation = 6 if stop else 5
-        stream.sendall(HEADER.pack(MAGIC, version, operation, 0, 0, 0))
+        operation = operation if operation is not None else 6 if stop else 5
+        stream.sendall(HEADER.pack(MAGIC, version, operation, len(body), 0, 0) + body)
         magic, returned_version, reply, size, _, _ = HEADER.unpack(receive(stream, HEADER.size))
-        if (magic, returned_version, reply, size) != (MAGIC, version, operation, 16):
+        if (magic, returned_version, reply) != (MAGIC, version, operation) or not 16 <= size <= 1024 * 1024:
             raise ValueError("Invalid Asgard broker reply")
-        result, chunks, files = struct.unpack("<qII", receive(stream, size))
+        data = receive(stream, size)
+        result, chunks, files = struct.unpack("<qII", data[:16])
         if result or chunks or files:
             raise ValueError("Asgard broker rejected control request")
+        return bytes(data[16:])
+
+
+def media_status(path):
+    return json.loads(control(path, operation=7))
+
+
+def decoder_mask(emu, broker=None):
+    if broker is not None:
+        status = media_status(broker)
+        if status['state'] != 'disabled':
+            return status['routing_mask']
+    result = subprocess.run([str(emu), '--media-capabilities'], check=True, capture_output=True, text=True, timeout=30)
+    report = json.loads(result.stdout)
+    key = 'gpu_probe_passed' if os.environ.get('BIFROST_MEDIA_BACKEND') == 'gpu' else 'cpu_probe_passed'
+    return sum(1 << index for index, codec in enumerate(report['codecs']) if codec[key])
+
+
+def configure_media(root, mask):
+    """Select verified components before the managed runtime is inventoried."""
+    names = ('vp8', 'vp9', 'h264', 'hevc')
+    config = root / 'vendor/etc/media_codecs.xml'
+    tree = ET.parse(config)
+    for codec in tree.iter('MediaCodec'):
+        name = codec.get('name', '')
+        matches = [index for index, family in enumerate(names) if name == f'c2.goldfish.{family}.decoder']
+        if len(matches) != 1:
+            raise ValueError('Unexpected host codec in verified runtime')
+        codec.set('enabled', 'true' if mask & (1 << matches[0]) else 'false')
+    ET.indent(tree)
+    tree.write(config, encoding='utf-8', xml_declaration=True)
+    properties = root / 'debug_ramdisk/adb_debug.prop'
+    properties.parent.mkdir(parents=True, exist_ok=True)
+    # This file is generated runtime configuration, never app-persistent data.
+    generated = ('media.c2.hal.selection=aidl\nro.vendor.api_level=202404\n'
+                          'debug.stagefright.c2-poolmask=786432\n'
+                          f'ro.boot.qemu.hwcodec.avcdec={2 if mask & 4 else 0}\n'
+                          f'ro.boot.qemu.hwcodec.hevcdec={2 if mask & 8 else 0}\n'
+                          f'ro.boot.qemu.hwcodec.vpxdec={2 if mask & 3 else 0}\n')
+    keys = {line.split('=', 1)[0] for line in generated.splitlines()}
+    retained = [line for line in properties.read_text().splitlines()
+                if line.split('=', 1)[0] not in keys] if properties.exists() else []
+    properties.write_text('\n'.join(retained) + '\n' + generated)
+
+
+def ensure_media(path, emu, framework, art, adapters, mask):
+    """Attach one independent verified service root to a broker, never to an app."""
+    path, framework, art, adapters = map(Path, (path, framework, art, adapters))
+    with Path(str(path) + '.media.lock').open('a+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        status = media_status(path)
+        if status['state'] == 'disabled':
+            import android_framework
+            android_framework.install(framework, art)
+            manifest = json.loads((adapters / 'adapters.json').read_text())
+            mapper = adapters / 'managed/mapper.bifrost.so'
+            if hashlib.sha256(mapper.read_bytes()).hexdigest() != manifest['files']['managed/mapper.bifrost.so']:
+                raise ValueError('Modified media mapper adapter')
+            root = Path(str(path) + '.media-root')
+            if root.exists() or root.is_symlink():
+                # Only replace our own previous service tree, under the realm lock.
+                marker = root / '.asgard-media-root'
+                if root.is_symlink() or not marker.is_file() or marker.read_text() != str(path):
+                    raise ValueError('Refusing to replace foreign media service root')
+                shutil.rmtree(root)
+            with tempfile.TemporaryDirectory(prefix='.media-', dir=path.parent) as temporary:
+                fresh = Path(temporary) / 'rootfs'
+                shutil.copytree(framework, fresh, symlinks=True)
+                target = fresh / 'vendor/lib64/hw/mapper.bifrost.so'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(mapper, target)
+                configure_media(fresh, mask)
+                (fresh / '.asgard-media-root').write_text(str(path))
+                fresh.rename(root)
+            control(path, operation=8, body=struct.pack('<I', mask) + str(root).encode())
+        deadline = time.monotonic() + 45
+        while True:
+            status = media_status(path)
+            if status.get('routing_mask') != mask:
+                raise ValueError('Media routing changed while preparing the app; retry launch')
+            if status['state'] == 'ready':
+                return status
+            if status['state'] in ('failed', 'stopped') or time.monotonic() >= deadline:
+                raise ValueError(f'Media services did not become ready: {status}; logs: {path}.media-*.log')
+            time.sleep(.1)
 
 
 def broker_status(state):
@@ -57,8 +146,14 @@ def broker_status(state):
     for version in (VERSION, 1):
         try:
             control(path, version=version)
-            return {"name": "Asgard", "state": "running" if version == VERSION else "incompatible",
-                    "protocol": version, "socket": str(path)}
+            status = {"name": "Asgard", "state": "running" if version == VERSION else "incompatible",
+                      "protocol": version, "socket": str(path)}
+            if version == VERSION:
+                try:
+                    status['media'] = media_status(path)
+                except (OSError, ValueError):
+                    status['media'] = {'state': 'unavailable', 'reason': 'Broker lacks media status support'}
+            return status
         except (OSError, ValueError):
             pass
     return {"name": "Asgard", "state": "stopped", "socket": str(path)}

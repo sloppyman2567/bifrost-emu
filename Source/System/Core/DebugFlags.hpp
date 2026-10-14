@@ -19,6 +19,8 @@
 namespace bifrost {
 
 struct DebugFlags {
+    int media_backend = 0; // BIFROST_MEDIA_BACKEND=auto/cpu/gpu; gpu forbids silent CPU fallback
+    bool media_trace = false; // BIFROST_MEDIA_TRACE — decoded frame transport
     // ── X protocol wire / fd-lifecycle traces ─────────────────────────
     size_t jit_cache_initial_mb = 64; // BIFROST_JIT_CACHE_INITIAL_MB: growth-regression diagnostic
     size_t jit_cache_mb = 1024; // BIFROST_JIT_CACHE_MB: bounded cache-budget diagnostic (1..1024 MiB)
@@ -140,6 +142,10 @@ struct DebugFlags {
 
     static DebugFlags parse() {
         DebugFlags f;
+        if (const char* backend = std::getenv("BIFROST_MEDIA_BACKEND")) {
+            if (std::string(backend) == "cpu") f.media_backend = 1;
+            else if (std::string(backend) == "gpu") f.media_backend = 2;
+        }
         if (const char* limit = std::getenv("BIFROST_JIT_BLOCK_LIMIT")) {
             char* end = nullptr;
             unsigned long n = std::strtoul(limit, &end, 10);
@@ -226,6 +232,7 @@ struct DebugFlags {
         f.simd_collect = all || env("BIFROST_SIMD_COLLECT");
         f.trace_mmap = all || env("BIFROST_TRACE_MMAP");
         f.binder_trace = all || env("BIFROST_BINDER_TRACE");
+        f.media_trace = env("BIFROST_MEDIA_TRACE");
         f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");
         f.watch_trap = all || env("BIFROST_WATCH_TRAP");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;

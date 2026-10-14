@@ -123,6 +123,11 @@ int main() {
   CHECK(manager.set_buffers_geometry(320, 240, 0) == 0);
   auto primary = manager.from_surface(100);
   CHECK(primary != 0 && manager.from_surface(100) == primary);
+  CHECK(state->children.size() == 1); // Managed surfaces always have their own backing.
+  CHECK(manager.bind_native_window(0, primary) == -EINVAL);
+  CHECK(manager.bind_native_window(0x7200010000, primary) == 0);
+  CHECK(manager.surface_handle(0x7200010000) == primary);
+  CHECK(manager.surface_handle(0x7200010001) == 0);
   auto layer = manager.from_surface(200);
   CHECK(layer != 0 && layer != primary);
   CHECK(!manager.surface_opaque(primary) && !manager.surface_opaque(layer));
@@ -142,14 +147,19 @@ int main() {
   CHECK(manager.set_surface_opaque(layer, true) == -EBUSY);
   CHECK(manager.set_surface_opaque(layer, false) == 0);
   manager.release(layer);
-  CHECK(manager.host_native_window(layer) != 0 && state->children[0]->opened);
+  CHECK(manager.host_native_window(layer) != 0 && state->children[1]->opened);
   manager.destroy_egl_surface(900);
   CHECK(!manager.present_egl_surface(900));
-  CHECK(manager.host_native_window(layer) == 0 && !state->children[0]->opened);
+  CHECK(manager.host_native_window(layer) == 0 && !state->children[1]->opened);
   CHECK(manager.width(layer) == -EINVAL);
   auto replacement = manager.from_surface(200);
   CHECK(replacement && replacement != layer);
   manager.release(replacement);
+  CHECK(manager.present_pixels(primary, 0, 0, 1, 1, nullptr) == -ENOTSUP);
+  manager.release(primary);
+  CHECK(manager.surface_handle(0x7200010000) == primary);
+  manager.release(primary);
+  CHECK(manager.surface_handle(0x7200010000) == 0);
   manager.close_host_window();
   CHECK(!state->opened && !manager.ready() && !manager.host_native_window());
   // Guest handles can remain live after close; replacing their backend

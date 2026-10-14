@@ -7,6 +7,12 @@
 // format changes, and destroyed when it becomes false or its window goes.
 // Callbacks run in SurfaceView's order: surfaceCreated, then surfaceChanged.
 import android.graphics.PixelFormat;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.media.Image;
+import android.media.ImageReader;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -18,6 +24,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.nio.ByteBuffer;
 
 final class FrameworkSurfaces {
     // Host surfaces for Java Surfaces (ManagedLauncher's activity_window.c bridge).
@@ -30,9 +37,12 @@ final class FrameworkSurfaces {
         final SurfaceView view;
         final Object owner;  // the framework window holding the view
         final long window;
+        final ImageReader reader;
         int width, height, format;
-        Entry(SurfaceView view, Object owner, long window) {
-            this.view = view; this.owner = owner; this.window = window;
+        int x = Integer.MIN_VALUE, y = Integer.MIN_VALUE;
+        boolean closed;
+        Entry(SurfaceView view, Object owner, long window, ImageReader reader) {
+            this.view = view; this.owner = owner; this.window = window; this.reader = reader;
         }
     }
 
@@ -44,6 +54,8 @@ final class FrameworkSurfaces {
 
     private final Host host;
     private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
+    private static native int present(long window, int x, int y, int width, int height, int[] argb);
+    private static native int geometry(long window, int x, int y, int width, int height);
 
     FrameworkSurfaces(Host host) {
         this.host = host;
@@ -80,31 +92,99 @@ final class FrameworkSurfaces {
             Entry entry = entries.get(view);
             int format = REQUESTED_FORMAT.getInt(view);
             int width = view.getWidth(), height = view.getHeight();
-            if (entry != null && entry.width == width && entry.height == height && entry.format == format)
+            int[] location = new int[2]; view.getLocationInWindow(location);
+            boolean changed = entry == null || entry.width != width || entry.height != height || entry.format != format;
+            if (!changed && entry.x == location[0] && entry.y == location[1])
                 continue;
             ((android.graphics.Rect) SURFACE_FRAME.get(view)).set(0, 0, width, height);
             boolean created = entry == null;
             if (created) {
-                long window = host.prepare(view.getHolder().getSurface(), !PixelFormat.formatHasAlpha(format));
-                if (window <= 0) throw new IllegalStateException("surface preparation: " + window);
-                entry = new Entry(view, owner, window);
+                // Keep the pinned framework's real BufferQueue, GraphicBuffer
+                // ownership and acquire/release fences. A host token cannot
+                // stand in for android::Surface in MediaCodec or the NDK.
+                ImageReader reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3);
+                Surface target = view.getHolder().getSurface();
+                long window;
+                try {
+                    Surface.class.getMethod("transferFrom", Surface.class).invoke(target, reader.getSurface());
+                    window = host.prepare(target, !PixelFormat.formatHasAlpha(format));
+                    if (window <= 0) throw new IllegalStateException("surface preparation: " + window);
+                } catch (Exception error) {
+                    reader.close(); target.release(); throw error;
+                }
+                entry = new Entry(view, owner, window, reader);
                 entries.put(view, entry);
+                final Entry consumer = entry;
+                reader.setOnImageAvailableListener(available -> consume(consumer), new Handler(Looper.getMainLooper()));
             }
             entry.width = width;
             entry.height = height;
             entry.format = format;
+            entry.x = location[0]; entry.y = location[1];
+            int positioned = geometry(entry.window, entry.x, entry.y, width, height);
+            if (positioned != 0) throw new IllegalStateException("Surface geometry: " + positioned);
             SurfaceHolder holder = view.getHolder();
             for (SurfaceHolder.Callback callback : callbacks(view)) {
                 if (created) callback.surfaceCreated(holder);
-                callback.surfaceChanged(holder, format, width, height);
+                if (changed) callback.surfaceChanged(holder, format, width, height);
             }
             // The first frame is drawn: the window now punches the
             // SurfaceView's hole (SurfaceView.performDrawFinished).
             if (created && !DRAW_FINISHED.getBoolean(view)) DRAW_FINISHED_METHOD.invoke(view);
-            int[] location = new int[2];
-            view.getLocationInWindow(location);
             System.out.println("APP_SURFACE " + view.getClass().getName() + " " + width + "x" + height
                     + " at " + location[0] + "," + location[1] + " format=" + format);
+        }
+    }
+
+    private static int clamp(double value) { return Math.max(0, Math.min(255, (int)Math.round(value))); }
+
+    // CpuConsumer has already waited for the producer's acquire fence before
+    // exposing planes. Closing the Image returns its buffer even on failure.
+    private static int[] pixels(Image image, int width, int height) {
+        Rect crop = image.getCropRect();
+        if (crop.width() <= 0 || crop.height() <= 0 || width <= 0 || height <= 0 || width > 4096 || height > 4096)
+            throw new IllegalArgumentException("Surface image dimensions");
+        Image.Plane[] planes = image.getPlanes();
+        if (image.getFormat() != ImageFormat.YUV_420_888 || planes.length != 3)
+            throw new UnsupportedOperationException("Surface image format: " + image.getFormat());
+        int dataspace;
+        try { dataspace = (Integer)Image.class.getMethod("getDataSpace").invoke(image); }
+        catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+        int standard = (dataspace >> 16) & 63, transfer = (dataspace >> 22) & 31;
+        if (transfer == 6 || transfer == 7) throw new UnsupportedOperationException("HDR Surface output");
+        double kr = standard == 1 ? .2126 : standard == 6 ? .2627 : .299;
+        double kb = standard == 1 ? .0722 : standard == 6 ? .0593 : .114;
+        if (standard != 0 && standard != 1 && standard != 2 && standard != 4 && standard != 6)
+            throw new UnsupportedOperationException("Surface color standard: " + standard);
+        boolean full = ((dataspace >> 27) & 7) == 1;
+        ByteBuffer[] bytes = {planes[0].getBuffer(), planes[1].getBuffer(), planes[2].getBuffer()};
+        int[] out = new int[width * height];
+        for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
+            int sx = crop.left + (int)((long)x * crop.width() / width);
+            int sy = crop.top + (int)((long)y * crop.height() / height);
+            int yy = bytes[0].get(bytes[0].position() + sy * planes[0].getRowStride() + sx * planes[0].getPixelStride()) & 255;
+            int u = bytes[1].get(bytes[1].position() + (sy / 2) * planes[1].getRowStride() + (sx / 2) * planes[1].getPixelStride()) & 255;
+            int v = bytes[2].get(bytes[2].position() + (sy / 2) * planes[2].getRowStride() + (sx / 2) * planes[2].getPixelStride()) & 255;
+            double luminance = full ? yy : (yy - 16) * (255.0 / 219);
+            double cb = (u - 128) * (full ? 1 : 255.0 / 224), cr = (v - 128) * (full ? 1 : 255.0 / 224);
+            int r = clamp(luminance + 2 * (1 - kr) * cr);
+            int b = clamp(luminance + 2 * (1 - kb) * cb);
+            int g = clamp(luminance - 2 * kb * (1 - kb) / (1 - kr - kb) * cb
+                    - 2 * kr * (1 - kr) / (1 - kr - kb) * cr);
+            out[y * width + x] = 0xff000000 | (r << 16) | (g << 8) | b;
+        }
+        return out;
+    }
+
+    private static void consume(Entry entry) {
+        if (entry.closed) return;
+        try (Image image = entry.reader.acquireLatestImage()) {
+            if (image == null) return;
+            int[] location = new int[2];
+            entry.view.getLocationInWindow(location);
+            int result = present(entry.window, location[0], location[1], entry.width, entry.height,
+                                 pixels(image, entry.width, entry.height));
+            if (result != 0 && result != -11) throw new IllegalStateException("Surface presentation: " + result);
         }
     }
 
@@ -134,21 +214,17 @@ final class FrameworkSurfaces {
     private void destroy(Entry entry) throws Exception {
         entries.remove(entry.view);
         DRAW_FINISHED.setBoolean(entry.view, false);
-        for (SurfaceHolder.Callback callback : callbacks(entry.view)) {
-            try {
+        try {
+            for (SurfaceHolder.Callback callback : callbacks(entry.view)) {
                 callback.surfaceDestroyed(entry.view.getHolder());
-            } catch (IllegalArgumentException e) {
-                // Play-mode Java Surfaces have no native libgui Surface, so
-                // Surface.isValid() is false and PixelCopy rejects the final
-                // snapshot some apps (Unity) take here. Finish teardown;
-                // every other callback failure still propagates.
-                StackTraceElement[] trace = e.getStackTrace();
-                if (trace.length == 0 || !"android.view.PixelCopy".equals(trace[0].getClassName()))
-                    throw e;
-                System.out.println("APP_SURFACE_SNAPSHOT_SKIPPED " + callback.getClass().getName());
             }
+        } finally {
+            entry.closed = true;
+            entry.reader.setOnImageAvailableListener(null, null);
+            entry.reader.close();
+            host.release(entry.window);
+            entry.view.getHolder().getSurface().release();
         }
-        host.release(entry.window);
         System.out.println("APP_SURFACE_DESTROYED " + entry.view.getClass().getName());
     }
 }

@@ -121,6 +121,7 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_00024NativeLooperProbe_finish(JNIEnv *
 }
 
 void *ANativeWindow_fromSurface(JNIEnv *, jobject);
+void *bifrost_surface_prepare(JNIEnv *, jobject) __attribute__((weak));
 void ANativeWindow_release(void *);
 
 // ActivityProbe's JNI bridge to the managed-window ops of Bifrost's private
@@ -134,6 +135,10 @@ static long bifrost_window(long op, long a, long b) {
     register long x8 __asm__("x8") = 0x100E;
     __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory");
     return x0;
+}
+JNIEXPORT jint JNICALL Java_ManagedLauncher_processState(JNIEnv *env, jclass type, jint state) {
+    (void)env; (void)type;
+    return (jint)bifrost_window(14, state, 0);
 }
 
 JNIEXPORT jint JNICALL Java_ActivityProbe_openWindow(JNIEnv *env, jclass type, jint width,
@@ -167,7 +172,7 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_audioConfig(JNIEnv *env, jclass type, 
 JNIEXPORT jlong JNICALL Java_ActivityProbe_prepareSurface(JNIEnv *env, jclass type,
                                                          jobject surface, jboolean opaque) {
     (void)type;
-    void *window = ANativeWindow_fromSurface(env, surface);
+    void *window = bifrost_surface_prepare ? bifrost_surface_prepare(env, surface) : ANativeWindow_fromSurface(env, surface);
     if (!window) return -19; // ENODEV
     long result = bifrost_window(5, (long)window, opaque != JNI_FALSE);
     if (result) { ANativeWindow_release(window); return result; }
@@ -245,6 +250,25 @@ JNIEXPORT jlong JNICALL Java_ManagedLauncher_prepareSurface(JNIEnv *e, jclass c,
 }
 JNIEXPORT void JNICALL Java_ManagedLauncher_releaseSurface(JNIEnv *e, jclass c, jlong w) {
     Java_ActivityProbe_releaseSurface(e, c, w);
+}
+
+JNIEXPORT jint JNICALL Java_FrameworkSurfaces_present(JNIEnv *env, jclass type, jlong window,
+        jint x, jint y, jint width, jint height, jintArray pixels) {
+    (void)type;
+    if (!pixels || width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+            (*env)->GetArrayLength(env, pixels) != (int64_t)width * height) return -22;
+    jint *argb = (*env)->GetPrimitiveArrayCritical(env, pixels, NULL);
+    if (!argb) return -12;
+    int64_t record[] = {window, x, y, width, height, (intptr_t)argb};
+    long result = bifrost_window(16, (long)record, 0);
+    (*env)->ReleasePrimitiveArrayCritical(env, pixels, argb, JNI_ABORT);
+    return result;
+}
+JNIEXPORT jint JNICALL Java_FrameworkSurfaces_geometry(JNIEnv *env, jclass type, jlong window,
+        jint x, jint y, jint width, jint height) {
+    (void)env; (void)type;
+    int64_t record[] = {window, x, y, width, height};
+    return bifrost_window(18, (long)record, 0);
 }
 
 JNIEXPORT jint JNICALL Java_ManagedLauncher_setWindowIdentity(JNIEnv *env, jclass type,

@@ -27,6 +27,13 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
         object->strong = 1;
         domain_->services.emplace(ALLOCATOR, BinderService{object, 8, 63});
     }
+    domain_->declared_services.insert(ALLOCATOR);
+    if (!domain_->services.count("processinfo")) {
+        auto object = std::make_shared<Object>();
+        object->host_service = Object::HostService::ProcessInfo;
+        object->strong = 1;
+        domain_->services.emplace("processinfo", BinderService{object, 8, 12});
+    }
     // Reserve the local response before changing registry/object ownership.
     uint64_t reservation = 64;
     if (tx.code == 8) {
@@ -101,16 +108,22 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                         throw std::invalid_argument("unexpected Binder objects");
                     result.write<int32_t>(0);
                     if (tx.code == 7) { // isDeclared(instance)
-                        result.write<int32_t>(name == ALLOCATOR);
+                        result.write<int32_t>(domain_->declared_services.count(name) != 0);
                     } else { // getDeclaredInstances(interface)
-                        bool allocator = name == "android.hardware.graphics.allocator.IAllocator";
-                        result.write<int32_t>(allocator ? 1 : 0);
-                        if (allocator)
-                            result.ascii_string("default");
+                        std::vector<std::string> instances;
+                        const auto prefix = name + "/";
+                        for (const auto& declaration : domain_->declared_services)
+                            if (declaration.compare(0, prefix.size(), prefix) == 0)
+                                instances.push_back(declaration.substr(prefix.size()));
+                        result.write<int32_t>(instances.size());
+                        for (const auto& instance : instances) result.ascii_string(instance);
                     }
                 } else if (tx.code == 3) { // addService(name, binder, allowIsolated, dumpPriority)
-                    if (name == ALLOCATOR)
-                        throw std::invalid_argument("host allocator cannot be replaced");
+                    if (name == ALLOCATOR || name == "processinfo")
+                        throw std::invalid_argument("realm service cannot be replaced");
+                    if ((name == "media.resource_manager" && sender_uid_ != 1013) ||
+                        (name.rfind("android.hardware.media.c2.IComponentStore/", 0) == 0 && sender_uid_ != 1046))
+                        throw std::invalid_argument("wrong media-service UID");
                     uint64_t offset = input.position();
                     auto flat = input.read<bf_flat_binder>();
                     // Parcel::finishFlattenBinder appends an int32 stability

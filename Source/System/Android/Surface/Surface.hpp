@@ -116,6 +116,10 @@ public:
     // Stable identity supplied by the managed JNI adapter (not a jobject address).
     // Identity zero is reserved for the NativeActivity primary surface.
     uint64_t from_surface(uint64_t identity = 0);
+    int bind_native_window(uint64_t guest_window, uint64_t handle);
+    uint64_t surface_handle(uint64_t guest_window) const;
+    int present_pixels(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* pixels);
+    int surface_geometry(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h);
     static bool is_shim(uint64_t handle) {
         return handle >= kHandleBase && handle <= kHandleBase + 0xFFFF;
     }
@@ -377,6 +381,7 @@ public:
     mutable std::mutex surface_mu_;
     std::map<uint64_t, Surface> surfaces_;
     std::map<uint64_t, uint64_t> egl_surfaces_;
+    std::map<uint64_t, uint64_t> native_windows_;
     uint64_t surface_handle_ = 0;
     uint64_t next_surface_ = 0;
     int32_t width_ = kBaseWidth;

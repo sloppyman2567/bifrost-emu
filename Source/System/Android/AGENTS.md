@@ -35,6 +35,14 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   sealed-size memfd ABI, independent imports, bounded metadata snapshots and fd
   ownership. Run `ActivityProbe$GrallocProbe` in both engines and with distinct
   UIDs sharing a broker; this does not establish EGL image import or decoding.
+- Media decoding (`Media/`) uses the real Codec2 stack. The Binder broker
+  owns the codec services, never an app. Treat Goldfish `user_priv` as
+  opaque and never dereference it. Match the provisioned binaries'
+  contract: VPX needs immediate output and packed YV12 at the decoded size.
+  Change `HostDecoder`/`GoldfishMedia` together with
+  `make test-android-goldfish-media`. Keep `--media-capabilities` limited to
+  what it decodes. Do not report codec, Surface or playback readiness from
+  64x64 probes.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

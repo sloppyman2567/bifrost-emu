@@ -176,120 +176,6 @@ int android_key(SDL_Scancode key) {
 }
 #endif
 #if defined(BIFROST_USE_SDL3)
-class WaylandSurfaceBackend final : public AndroidWindowBackend {
-public:
-  WaylandSurfaceBackend(wl_display* display, wl_surface* parent, int32_t width, int32_t height,
-                        PixelRatio ratio)
-      : display_(display), ratio_(std::move(ratio)), width_(width), height_(height) {
-    queue_ = wl_display_create_queue(display_);
-    if (!queue_) return;
-    auto wrapper = static_cast<wl_display*>(wl_proxy_create_wrapper(display_));
-    wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(wrapper), queue_);
-    registry_ = wl_display_get_registry(wrapper);
-    wl_proxy_wrapper_destroy(wrapper);
-    static const wl_registry_listener listener = {
-      [](void* data, wl_registry* registry, uint32_t id, const char* name, uint32_t version) {
-        auto& self = *static_cast<WaylandSurfaceBackend*>(data);
-        if (!std::strcmp(name, "wl_compositor")) {
-          self.compositor_version_ = version < 3 ? version : 3;
-          self.compositor_ = static_cast<wl_compositor*>(
-              wl_registry_bind(registry, id, &wl_compositor_interface, self.compositor_version_));
-        } else if (!std::strcmp(name, "wl_subcompositor"))
-          self.subcompositor_ = static_cast<wl_subcompositor*>(wl_registry_bind(registry, id, &wl_subcompositor_interface, 1));
-        else self.scale_.bind(registry, id, name);
-      }, [](void*, wl_registry*, uint32_t) {}};
-    wl_registry_add_listener(registry_, &listener, this);
-    if (wl_display_roundtrip_queue(display_, queue_) < 0 || !compositor_ || !subcompositor_) return;
-    surface_ = wl_compositor_create_surface(compositor_);
-    subsurface_ = wl_subcompositor_get_subsurface(subcompositor_, surface_, parent);
-    wl_subsurface_set_desync(subsurface_);
-    wl_subsurface_place_above(subsurface_, parent);
-    scale_.attach(surface_, compositor_version_);
-    scale_.apply(width_, height_, ratio_->load());
-    if (egl_.create) window_ = egl_.create(surface_, width_, height_);
-    wl_surface_commit(parent);
-    wl_display_flush(display_);
-  }
-  ~WaylandSurfaceBackend() override { close(); }
-  const char* name() const noexcept override { return "wayland-subsurface-egl"; }
-  int open(const char*, int32_t, int32_t) override { return window_ ? 0 : -ENODEV; }
-  void close() noexcept override {
-    if (window_) egl_.destroy(window_);
-    window_ = nullptr;
-    scale_.reset();
-    if (subsurface_) wl_subsurface_destroy(subsurface_);
-    if (surface_) wl_surface_destroy(surface_);
-    if (subcompositor_) wl_subcompositor_destroy(subcompositor_);
-    if (compositor_) wl_compositor_destroy(compositor_);
-    if (registry_) wl_registry_destroy(registry_);
-    if (queue_) wl_event_queue_destroy(queue_);
-    queue_ = nullptr;
-    subsurface_ = nullptr; surface_ = nullptr; subcompositor_ = nullptr;
-    compositor_ = nullptr; registry_ = nullptr;
-  }
-  int resize(int32_t width, int32_t height, bool) override {
-    if (width <= 0 || height <= 0 || !window_) return -EINVAL;
-    // The destination joins the buffer resize in EGL's next swap commit.
-    scale_.apply(width, height, ratio_->load());
-    egl_.resize(window_, width, height, 0, 0); width_ = width; height_ = height; return 0;
-  }
-  AndroidWindowBinding binding() override { return {reinterpret_cast<uint64_t>(window_), display_}; }
-  int poll(AndroidWindowEvent& event) override { event = {}; return 0; }
-  void set_visible(bool visible) override {
-    if (!visible && surface_) {
-      wl_surface_attach(surface_, nullptr, 0, 0);
-      wl_surface_commit(surface_);
-      wl_display_flush(display_);
-    }
-  }
-private:
-  wl_display* display_;
-  PixelRatio ratio_;
-  wl_event_queue* queue_ = nullptr;
-  wl_registry* registry_ = nullptr;
-  wl_compositor* compositor_ = nullptr;
-  uint32_t compositor_version_ = 1;
-  wl_subcompositor* subcompositor_ = nullptr;
-  wl_surface* surface_ = nullptr;
-  wl_subsurface* subsurface_ = nullptr;
-  SurfaceScale scale_;
-  WlEglFns egl_;
-  void* window_ = nullptr;
-  int32_t width_, height_;
-};
-class X11SurfaceBackend final : public AndroidWindowBackend {
-public:
-  X11SurfaceBackend(Display* display, Window parent, int32_t width, int32_t height) : display_(display) {
-    XWindowAttributes attrs{};
-    if (!XGetWindowAttributes(display, parent, &attrs)) return;
-    XSetWindowAttributes settings{};
-    settings.colormap = attrs.colormap;
-    settings.background_pixel = 0;
-    window_ = XCreateWindow(display, parent, 0, 0, width, height, 0, attrs.depth,
-                            InputOutput, attrs.visual, CWColormap | CWBackPixel, &settings);
-    if (window_) { XMapRaised(display_, window_); XFlush(display_); }
-  }
-  ~X11SurfaceBackend() override { close(); }
-  const char* name() const noexcept override { return "x11-child-egl"; }
-  int open(const char*, int32_t, int32_t) override { return window_ ? 0 : -ENODEV; }
-  void close() noexcept override {
-    if (window_) { XDestroyWindow(display_, window_); XFlush(display_); window_ = 0; }
-  }
-  int resize(int32_t width, int32_t height, bool) override {
-    if (!window_ || width <= 0 || height <= 0) return -EINVAL;
-    XResizeWindow(display_, window_, width, height); XFlush(display_); return 0;
-  }
-  AndroidWindowBinding binding() override { return {window_, display_}; }
-  int poll(AndroidWindowEvent& event) override { event = {}; return 0; }
-  void set_visible(bool visible) override {
-    if (!window_) return;
-    if (visible) XMapRaised(display_, window_); else XUnmapWindow(display_, window_);
-    XFlush(display_);
-  }
-private:
-  Display* display_;
-  Window window_ = 0;
-};
 // Popup layers receive straight-alpha 0xAARRGGBB rows from the guest renderer.
 inline uint32_t premultiply(uint32_t p) {
   const uint32_t a = p >> 24;
@@ -299,16 +185,17 @@ inline uint32_t premultiply(uint32_t p) {
   return (a << 24) | (channel((p >> 16) & 255) << 16) | (channel((p >> 8) & 255) << 8) |
          channel(p & 255);
 }
-class PopupLayer {
+class PixelLayer {
 public:
-  virtual ~PopupLayer() = default;
+  virtual ~PixelLayer() = default;
   virtual int show(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) = 0;
+  virtual uintptr_t native_layer() const = 0;
 };
 // A desynchronized subsurface with shared-memory buffers. Its empty input
 // region leaves pointer focus on the primary surface.
-class WaylandPopup final : public PopupLayer {
+class WaylandPixels final : public PixelLayer {
 public:
-  WaylandPopup(wl_display *display, wl_surface *parent, PixelRatio ratio)
+  WaylandPixels(wl_display *display, wl_surface *parent, PixelRatio ratio)
       : display_(display), parent_(parent), ratio_(std::move(ratio)) {
     queue_ = wl_display_create_queue(display_);
     if (!queue_) return;
@@ -318,7 +205,7 @@ public:
     wl_proxy_wrapper_destroy(wrapper);
     static const wl_registry_listener listener = {
       [](void *data, wl_registry *registry, uint32_t id, const char *name, uint32_t version) {
-        auto &self = *static_cast<WaylandPopup *>(data);
+        auto &self = *static_cast<WaylandPixels *>(data);
         if (!std::strcmp(name, "wl_compositor")) {
           self.compositor_version_ = version < 3 ? version : 3;
           self.compositor_ = static_cast<wl_compositor *>(
@@ -341,7 +228,7 @@ public:
     wl_surface_set_input_region(surface_, none);
     wl_region_destroy(none);
   }
-  ~WaylandPopup() override {
+  ~WaylandPixels() override {
     for (auto &buffer : buffers_) release(buffer);
     scale_.reset();
     if (subsurface_) wl_subsurface_destroy(subsurface_);
@@ -355,6 +242,27 @@ public:
     if (queue_) wl_event_queue_destroy(queue_);
   }
   bool ready() const { return surface_ != nullptr; }
+  wl_surface* surface() const { return surface_; }
+  uintptr_t native_layer() const override { return reinterpret_cast<uintptr_t>(surface_); }
+  void below(uintptr_t sibling) {
+    if (sibling) { wl_subsurface_place_below(subsurface_, reinterpret_cast<wl_surface*>(sibling)); wl_surface_commit(parent_); }
+  }
+  void geometry(int32_t x, int32_t y, int32_t w, int32_t h) {
+    const double ratio = ratio_->load();
+    scale_.apply(w, h, ratio);
+    const int32_t dx = SurfaceScale::to_desktop(x, ratio), dy = SurfaceScale::to_desktop(y, ratio);
+    if (dx != x_ || dy != y_) {
+      wl_subsurface_set_position(subsurface_, dx, dy);
+      wl_surface_commit(parent_);
+      x_ = dx; y_ = dy;
+    }
+  }
+  void hide() {
+    if (!surface_) return;
+    wl_surface_attach(surface_, nullptr, 0, 0);
+    wl_surface_commit(surface_); wl_display_flush(display_);
+  }
+
   int show(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) override {
     wl_display_dispatch_queue_pending(display_, queue_);  // buffer releases
     Buffer *target = nullptr;
@@ -367,19 +275,10 @@ public:
     auto *out = static_cast<uint32_t *>(target->data);
     for (size_t i = 0, n = size_t(w) * h; i < n; ++i) out[i] = premultiply(argb[i]);
     target->busy = true;
-    // Window pixels map to the parent's desktop coordinates at its ratio.
-    const double ratio = ratio_->load();
-    scale_.apply(w, h, ratio);
+    geometry(x, y, w, h);
     wl_surface_attach(surface_, target->buffer, 0, 0);
     wl_surface_damage(surface_, 0, 0, w, h);
     wl_surface_commit(surface_);
-    const int32_t dx = SurfaceScale::to_desktop(x, ratio), dy = SurfaceScale::to_desktop(y, ratio);
-    if (dx != x_ || dy != y_) {
-      // Subsurface position is parent state: apply it with a parent commit.
-      wl_subsurface_set_position(subsurface_, dx, dy);
-      wl_surface_commit(parent_);
-      x_ = dx; y_ = dy;
-    }
     wl_display_flush(display_);
     return 0;
   }
@@ -426,13 +325,13 @@ private:
 // A 32-bit ARGB visual differs from the parent's, so the Composite extension
 // implicitly redirects the child and blends its premultiplied alpha. Without
 // one, the parent's visual is used and translucent pixels blend on black.
-class X11Popup final : public PopupLayer {
+class X11Pixels final : public PixelLayer {
 public:
-  X11Popup(Display *display, Window parent) : display_(display), parent_(parent) {
+  X11Pixels(Display *display, Window parent, bool surface = false) : display_(display), parent_(parent) {
     XWindowAttributes attrs{};
     if (!XGetWindowAttributes(display_, parent_, &attrs) || !attrs.visual) return;
     XVisualInfo argb{};
-    if (XMatchVisualInfo(display_, XScreenNumberOfScreen(attrs.screen), 32, TrueColor, &argb) &&
+    if (!surface && XMatchVisualInfo(display_, XScreenNumberOfScreen(attrs.screen), 32, TrueColor, &argb) &&
         rgb_masks(argb.visual)) {
       visual_ = argb.visual; depth_ = 32; alpha_ = true;
       colormap_ = owned_colormap_ = XCreateColormap(display_, parent_, visual_, AllocNone);
@@ -440,13 +339,26 @@ public:
       visual_ = attrs.visual; depth_ = attrs.depth; colormap_ = attrs.colormap;
     }
   }
-  ~X11Popup() override {
+  ~X11Pixels() override {
     if (gc_) XFreeGC(display_, gc_);
     if (window_) XDestroyWindow(display_, window_);
     if (owned_colormap_) XFreeColormap(display_, owned_colormap_);
     XFlush(display_);
   }
   bool ready() const { return visual_ != nullptr; }
+  Window window() const { return window_; }
+  uintptr_t native_layer() const override { return window_; }
+  void below(uintptr_t sibling) {
+    if (sibling && window_) {
+      XWindowChanges changes{}; changes.sibling = sibling; changes.stack_mode = Below;
+      XConfigureWindow(display_, window_, CWSibling | CWStackMode, &changes); XFlush(display_);
+    }
+  }
+  void visible(bool shown) {
+    if (!window_) return;
+    if (shown) XMapWindow(display_, window_); else XUnmapWindow(display_, window_);
+    XFlush(display_);
+  }
   int show(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) override {
     if (!window_) {
       XSetWindowAttributes settings{};
@@ -463,6 +375,7 @@ public:
       XMoveResizeWindow(display_, window_, x, y, unsigned(w), unsigned(h));
     }
     x_ = x; y_ = y; w_ = w; h_ = h;
+    if (!argb) { XFlush(display_); return 0; }
     pixels_.resize(size_t(w) * h);
     const uint32_t keep = alpha_ ? 0xffffffffu : 0xffffffu;
     for (size_t i = 0; i < pixels_.size(); ++i) pixels_[i] = premultiply(argb[i]) & keep;
@@ -490,6 +403,74 @@ private:
   GC gc_ = nullptr;
   int32_t x_ = 0, y_ = 0, w_ = 0, h_ = 0;
   std::vector<uint32_t> pixels_;
+};
+class WaylandSurfaceBackend final : public AndroidWindowBackend {
+public:
+  WaylandSurfaceBackend(wl_display* display, wl_surface* parent, int32_t width, int32_t height,
+                        PixelRatio ratio, uintptr_t below = 0) : display_(display), pixels_(std::make_unique<WaylandPixels>(display, parent, std::move(ratio))) {
+    if (pixels_->ready() && egl_.create) {
+      pixels_->geometry(0, 0, width, height);
+      window_ = egl_.create(pixels_->surface(), width, height);
+      pixels_->below(below);
+    }
+  }
+  ~WaylandSurfaceBackend() override { close(); }
+  const char* name() const noexcept override { return "wayland-surface"; }
+  int open(const char*, int32_t, int32_t) override { return window_ ? 0 : -ENODEV; }
+  void close() noexcept override {
+    if (window_) egl_.destroy(window_);
+    window_ = nullptr;
+    pixels_.reset();
+  }
+  int resize(int32_t width, int32_t height, bool) override {
+    if (!window_ || width <= 0 || height <= 0) return -EINVAL;
+    pixels_->geometry(0, 0, width, height);
+    egl_.resize(window_, width, height, 0, 0);
+    return 0;
+  }
+  AndroidWindowBinding binding() override { return {reinterpret_cast<uint64_t>(window_), display_}; }
+  int poll(AndroidWindowEvent& event) override { event = {}; return 0; }
+  void set_visible(bool shown) override { if (pixels_ && !shown) pixels_->hide(); }
+  int present_pixels(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* pixels) override {
+    return pixels_ ? pixels_->show(x, y, w, h, pixels) : -ENODEV;
+  }
+  int surface_geometry(int32_t x, int32_t y, int32_t w, int32_t h) override {
+    if (!window_) return -ENODEV;
+    pixels_->geometry(x, y, w, h); egl_.resize(window_, w, h, 0, 0); return 0;
+  }
+private:
+  wl_display* display_;
+  std::unique_ptr<WaylandPixels> pixels_;
+  WlEglFns egl_;
+  void* window_ = nullptr;
+};
+class X11SurfaceBackend final : public AndroidWindowBackend {
+public:
+  X11SurfaceBackend(Display* display, Window parent, int32_t width, int32_t height, uintptr_t below = 0)
+      : display_(display), pixels_(std::make_unique<X11Pixels>(display, parent, true)) {
+    if (pixels_->ready()) pixels_->show(0, 0, width, height, nullptr);
+    pixels_->below(below);
+  }
+  ~X11SurfaceBackend() override { close(); }
+  const char* name() const noexcept override { return "x11-surface"; }
+  int open(const char*, int32_t, int32_t) override { return pixels_ && pixels_->window() ? 0 : -ENODEV; }
+  void close() noexcept override { pixels_.reset(); }
+  int resize(int32_t width, int32_t height, bool) override {
+    if (!pixels_ || width <= 0 || height <= 0) return -EINVAL;
+    return pixels_->show(0, 0, width, height, nullptr);
+  }
+  AndroidWindowBinding binding() override { return {pixels_ ? pixels_->window() : 0, display_}; }
+  int poll(AndroidWindowEvent& event) override { event = {}; return 0; }
+  void set_visible(bool shown) override { if (pixels_) pixels_->visible(shown); }
+  int present_pixels(int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* pixels) override {
+    return pixels_ ? pixels_->show(x, y, w, h, pixels) : -ENODEV;
+  }
+  int surface_geometry(int32_t x, int32_t y, int32_t w, int32_t h) override {
+    return pixels_ ? pixels_->show(x, y, w, h, nullptr) : -ENODEV;
+  }
+private:
+  Display* display_;
+  std::unique_ptr<X11Pixels> pixels_;
 };
 #endif
 class SdlAndroidWindowBackend final : public AndroidWindowBackend {
@@ -657,17 +638,20 @@ public:
   std::unique_ptr<AndroidWindowBackend> create_surface(int32_t width, int32_t height) override {
 #if defined(BIFROST_USE_SDL3)
     if (!window_) return {};
+    // Window layers stay above SurfaceViews, including a surface created
+    // after its window was already drawn.
+    uintptr_t below = popups_.empty() ? 0 : popups_.begin()->second->native_layer();
     auto props = sdl_.GetWindowProperties(window_);
     auto display = static_cast<wl_display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr));
     auto parent = static_cast<wl_surface*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr));
     if (display && parent) {
-      auto layer = std::make_unique<WaylandSurfaceBackend>(display, parent, width, height, ratio_);
+      auto layer = std::make_unique<WaylandSurfaceBackend>(display, parent, width, height, ratio_, below);
       if (layer->binding().window) return layer;
     } else {
       auto xdisplay = static_cast<Display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
       auto parent_window = sdl_.GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
       if (xdisplay && parent_window) {
-        auto layer = std::make_unique<X11SurfaceBackend>(xdisplay, parent_window, width, height);
+        auto layer = std::make_unique<X11SurfaceBackend>(xdisplay, parent_window, width, height, below);
         if (layer->binding().window) return layer;
       }
     }
@@ -686,14 +670,14 @@ public:
       auto parent = static_cast<wl_surface *>(
           sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr));
       if (display && parent) {
-        auto popup = std::make_unique<WaylandPopup>(display, parent, ratio_);
+        auto popup = std::make_unique<WaylandPixels>(display, parent, ratio_);
         if (popup->ready()) layer = std::move(popup);
       } else {
         auto xdisplay = static_cast<Display *>(
             sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
         auto xparent = sdl_.GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
         if (xdisplay && xparent) {
-          auto popup = std::make_unique<X11Popup>(xdisplay, Window(xparent));
+          auto popup = std::make_unique<X11Pixels>(xdisplay, Window(xparent));
           if (popup->ready()) layer = std::move(popup);
         }
       }
@@ -848,7 +832,7 @@ private:
   std::unique_ptr<WlEglFns> wl_fns_;
   void *wl_window_ = nullptr;
   AndroidWindowBinding binding_;
-  std::map<uint32_t, std::unique_ptr<PopupLayer>> popups_;
+  std::map<uint32_t, std::unique_ptr<PixelLayer>> popups_;
   PixelRatio ratio_ = std::make_shared<std::atomic<double>>(1.0);
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;

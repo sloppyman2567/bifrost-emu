@@ -267,7 +267,7 @@ def build(runtime, output):
                                      "-x", "assembler", "/dev/null", "-o", str(stub)],
                            check=True)
             assembly = staging / ("managed-" + soname + ".S")
-            hidden = {"ANativeWindow_fromSurface"} if soname == "libandroid.so" else set()
+            hidden = {name for name in exports if name.startswith('ANativeWindow_')} if soname == "libandroid.so" else set()
             if soname == "libEGL.so":
                 wrappers = set(re.findall(r"^\s+EGL_WRAPPER\((\w+)\)",
                     (ROOT / "Guest/Android/Adapters/egl.c").read_text(), re.MULTILINE))

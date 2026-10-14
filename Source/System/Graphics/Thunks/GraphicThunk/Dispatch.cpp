@@ -67,9 +67,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     uint64_t android_surface_handle = 0;
     if (entry.name == "eglCreateWindowSurface") {
         auto& mgr = frost::AndroidSurfaceManager::instance();
-        if (frost::AndroidSurfaceManager::is_shim(cpu.regs[2])) {
-            android_surface_handle = cpu.regs[2];
-            uint64_t hw = mgr.host_native_window(cpu.regs[2]);
+        if ((android_surface_handle = mgr.surface_handle(cpu.regs[2]))) {
+            uint64_t hw = mgr.host_native_window(android_surface_handle);
             if (hw == 0) {
                 // No host window backing the shim — EGL_NO_SURFACE.
                 if (dbg().thunk_trace)

@@ -21,6 +21,9 @@ public:
   // Additional independently backed layers on the same native display.
   // Unsupported backends fail closed rather than aliasing the primary window.
   virtual std::unique_ptr<AndroidWindowBackend> create_surface(int32_t, int32_t) { return {}; }
+  // Pixels for this surface's own backing, below framework window layers.
+  virtual int present_pixels(int32_t, int32_t, int32_t, int32_t, const uint32_t*) { return -ENOTSUP; }
+  virtual int surface_geometry(int32_t, int32_t, int32_t, int32_t) { return -ENOTSUP; }
   // Software-drawn framework windows (dialogs, popup menus) above every
   // surface, in creation order. Pixels are unpremultiplied 0xAARRGGBB words
   // at window-pixel x/y. Popups never take host input: the primary window

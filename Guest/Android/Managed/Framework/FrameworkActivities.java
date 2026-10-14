@@ -464,10 +464,12 @@ final class FrameworkActivities {
 
     private static void pause(Activity activity) throws Exception {
         method(Activity.class, "performPause").invoke(activity);
+        ManagedLauncher.reportProcessState(19);
         System.out.println("APP_ACTIVITY_PAUSED " + activity.getClass().getName());
     }
 
     private static void resume(Activity activity) throws Exception {
         method(Activity.class, "performResume", boolean.class, String.class).invoke(activity, false, "bifrost");
+        ManagedLauncher.reportProcessState(2);
     }
 }

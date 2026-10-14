@@ -14,6 +14,11 @@ bool SDL_GetWindowPosition(SDL_Window *window, int *x, int *y) {
     (void)window; *x = 0; *y = 0; return true;
 }
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) { (void)window; return SDL_WINDOW_INPUT_FOCUS; }
+SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window *window) { return window ? 1 : 0; }
+bool SDL_GetDisplayBounds(SDL_DisplayID display, SDL_Rect *bounds) {
+    if (display != 1 || !bounds) return false;
+    *bounds = (SDL_Rect){0, 0, 1920, 1080}; return true;
+}
 static struct fake_window *windows[16];
 static void record(const char *event) {
     const char *path = getenv("BIFROST_TEST_WL_LOG");

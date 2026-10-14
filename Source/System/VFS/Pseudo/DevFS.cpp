@@ -17,6 +17,7 @@
 #include "System/VFS/VFS.hpp"
 #include "System/Android/Binder/BinderNode.hpp"
 #include "System/Android/Binder/Broker.hpp"
+#include "System/Android/Media/GoldfishMedia.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/VFS/Nodes/MemfdNode.hpp"
 #include "System/VFS/Nodes/FramebufferNode.hpp"
@@ -88,6 +89,8 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         }
         return std::make_unique<BinderNode>(domain, flags);
     }
+    if (path == "/dev/goldfish_address_space" && android_properties_)
+        return open_goldfish_media(flags, err_out);
     // Android system properties (Bionic "pre-split" single prop_area).
     if (path == "/dev/__properties__" && android_properties_) {
         if ((flags & O_ACCMODE) != O_RDONLY) { *err_out = -EACCES; return nullptr; }
@@ -210,6 +213,13 @@ void Yggdrasil::enable_android_services() {
     if (!binder_domains_.empty())
         throw std::logic_error("Android services must be selected before opening Binder");
     android_services_ = true;
+}
+int Yggdrasil::report_android_process_state(int32_t state) {
+    if (!binder_broker_.empty()) return report_broker_process_state(binder_broker_, state);
+    std::lock_guard<std::mutex> lock(binder_mu_);
+    auto domain = binder_domains_.find("/dev/binder");
+    if (domain == binder_domains_.end()) return -ESRCH;
+    return domain->second->report_process_state(process_ids().pid, state);
 }
 void Yggdrasil::stop_binder() {
     std::lock_guard<std::mutex> lock(binder_mu_);

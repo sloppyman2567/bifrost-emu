@@ -1,5 +1,60 @@
 # Tests
 
+## Realm-owned host media decoding (2026-10-14)
+
+Two Java MediaCodec clients (UIDs 10000/10001) shared one realm, each
+decoding five 64x64 frames. AVC and HEVC were exact, but VP8 and VP9
+returned their first frame with PTS 200000. The host trace showed every
+VPX image arriving one packet late, with guest `user_priv` work addresses
+reused. FFmpeg frame threading delayed output by a frame, while the real
+`C2GoldfishVpxDec` reads each shown frame immediately and then releases
+the work. Once output was immediate, frame 0 had exact luma but swapped
+chroma. Disassembly of the provisioned `libcodec2_goldfish_vp8dec.so`
+matches the android-15.0.0_r36 source: it reads the host buffer as YV12
+(Y, V, U). The pinned r1 source and the emulator's libvpx host helper both
+use I420. VPX now uses slice-only threading. It also writes a packed Y, V, U
+frame at the decoded size, ignoring the guest's stale output size, as the
+emulator's `getImage` does. Contexts are keyed by codec family, because both
+VPX modules use ID 1. See the
+[runtime guide](Android/ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
+
+`make test-android-goldfish-media` (`Tests/Unit/android_goldfish_media_host.cpp`,
+165 checks, needs `USE_MEDIA=1` with FFmpeg) drives the device through
+`libbifrost.a`. It runs VP8 and VP9 contexts with ID 1 on separate slots
+and passes a stale 320x240 output size. Each image is fetched immediately
+after its decode, must carry that packet's opaque `user_priv`, and must
+match an independent single-threaded libavcodec decode in Y, V, U order.
+A second fetch must find no frame. Restoring frame threading fails check
+13; I420 output fails check 33.
+
+Temporary realm probes (`/tmp`, not regression gates) passed:
+- All four codecs concurrently, with exact MD5/PTS/EOS and unchanged
+  service PIDs after app exit.
+- An ImageReader Surface with `render=true`.
+- NDK `AMediaCodec` to `ANativeWindow` under forced GPU (VA-API H.264),
+  with X11 pixel presentation.
+- Earlier realm probes: service registration, restart of a killed daemon
+  with a new PID, and synchronous `STOP` reaping every child before
+  acknowledgement.
+
+`android_service_manager` has 104 checks, including `processinfo`. Also passed:
+- Full `run_tests.sh --strict`: JIT 326/326; interpreter 317/317 with 9
+  JIT-only skips.
+- `ActivityProbe$GrallocProbe` in JIT and interpreter.
+- `test_asgard.py`.
+- `make test-android-window-backend` and `test-android-sdl-backend`
+  (256 teardown cycles).
+- `generated-check`.
+- The headless `USE_MEDIA=0` build, which reports no codecs.
+
+The JIT host-test scripts now link with the `LDFLAGS` recorded in the
+library's `.build-config`, because a media-enabled `libbifrost.a` needs
+FFmpeg.
+
+None of this covers SurfaceView recreation/resize, Wayland readback,
+native EGL into an aliased Surface, flush/reconfigure, B-frames, HDR or
+large resolutions, malformed-transport fuzzing, or game playback.
+
 ## Binder one-way callback ordering (2026-10-14)
 
 The real Codec2 H.264 service decoded five frames on the host, but Android

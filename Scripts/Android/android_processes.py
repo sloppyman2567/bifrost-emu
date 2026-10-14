@@ -14,7 +14,7 @@ import time
 
 
 class ProcessHost:
-    def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=()):
+    def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None):
         self.root, self.emu = Path(root), str(emu)
         self.emu_args, self.environment = list(emu_args), dict(environment)
         self.dex, self.logs = dex, Path(logs)
@@ -32,7 +32,8 @@ class ProcessHost:
         else:
             self.socket = str(Path(self.temporary.name) / 'binder')
             self.broker_log = (self.logs / 'broker.log').open('ab')
-            self.broker = subprocess.Popen([self.emu, '--asgard-broker', self.socket],
+            self.broker = subprocess.Popen([self.emu, '--asgard-broker', self.socket,
+                                           '--asgard-service-parent', str(os.getpid())],
                                           stdout=self.broker_log, stderr=subprocess.STDOUT,
                                           env=self.environment)
             deadline = time.monotonic() + 5
@@ -41,6 +42,14 @@ class ProcessHost:
                     self.close()
                     raise RuntimeError('Asgard Binder broker did not start')
                 time.sleep(.02)
+        if media_mask is not None:
+            from asgard import ROOT, ensure_media
+            try:
+                ensure_media(self.socket, self.emu, ROOT / 'build/android-framework/rootfs',
+                             ROOT / 'build/android-art/rootfs', ROOT / 'build/android-adapters', media_mask)
+            except BaseException:
+                self.close()
+                raise
         # One byte-range lock per isolated UID, shared by all app supervisors
         # using this realm. Keep one FD open: POSIX locks are process-scoped.
         self.leases = os.open(self.socket + '.uids', os.O_RDWR | os.O_CREAT, 0o600)
@@ -200,10 +209,12 @@ class ProcessHost:
         if hasattr(self, 'path'):
             self.path.unlink(missing_ok=True)
         if self.broker is not None:
-            self.broker.terminate()
             try:
-                self.broker.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+                if self.broker.poll() is None:
+                    from asgard import control
+                    control(self.socket, stop=True)
+                self.broker.wait(timeout=5)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
                 self.broker.kill()
                 self.broker.wait()
             self.broker_log.close()

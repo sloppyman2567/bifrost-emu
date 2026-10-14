@@ -131,14 +131,45 @@ uint64_t AndroidSurfaceManager::from_surface(uint64_t identity) {
     Surface surface;
     surface.identity = identity;
     surface.width = width_; surface.height = height_; surface.format = format_;
-    if (surface_handle_) {
+    if (identity || surface_handle_) {
         surface.backend = window_backend_->create_surface(width_, height_);
         if (!surface.backend) return 0;
     }
     uint64_t handle = kHandleBase + ++next_surface_;
     surfaces_.emplace(handle, std::move(surface));
-    if (!surface_handle_) surface_handle_ = handle;
+    if (!identity && !surface_handle_) surface_handle_ = handle;
     return handle;
+}
+
+int AndroidSurfaceManager::bind_native_window(uint64_t guest_window, uint64_t handle) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (!guest_window || is_shim(guest_window) || !surfaces_.count(handle)) return -EINVAL;
+    native_windows_[guest_window] = handle;
+    return 0;
+}
+uint64_t AndroidSurfaceManager::surface_handle(uint64_t guest_window) const {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    if (is_shim(guest_window)) return surfaces_.count(guest_window) ? guest_window : 0;
+    auto found = native_windows_.find(guest_window);
+    return found == native_windows_.end() ? 0 : found->second;
+}
+int AndroidSurfaceManager::present_pixels(uint64_t handle, int32_t x, int32_t y,
+        int32_t w, int32_t h, const uint32_t* pixels) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto found = surfaces_.find(handle);
+    if (!window_open_ || found == surfaces_.end()) return -ENODEV;
+    if (!found->second.backend) return -ENOTSUP;
+    int result = found->second.backend->present_pixels(x, y, w, h, pixels);
+    if (!result) arm64emu::window_stats::note_present(window_backend_.get(), "Android Surface");
+    return result;
+}
+int AndroidSurfaceManager::surface_geometry(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto found = surfaces_.find(handle);
+    if (found == surfaces_.end() || !found->second.backend) return -ENODEV;
+    int result = found->second.backend->surface_geometry(x, y, w, h);
+    if (!result) { found->second.width = w; found->second.height = h; }
+    return result;
 }
 
 void AndroidSurfaceManager::acquire(uint64_t handle) {
@@ -154,6 +185,10 @@ void AndroidSurfaceManager::release(uint64_t handle) {
     if (--it->second.refs == 0) {
         if (it->second.backend) it->second.backend->set_visible(false);
         if (handle == surface_handle_) surface_handle_ = 0;
+        for (auto alias = native_windows_.begin(); alias != native_windows_.end(); ) {
+            if (alias->second == handle) alias = native_windows_.erase(alias);
+            else ++alias;
+        }
         surfaces_.erase(it);
     }
 }

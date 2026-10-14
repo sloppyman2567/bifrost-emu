@@ -646,7 +646,7 @@ def ensure_app_data(root, package):
         (root / relative / package).mkdir(parents=True, exist_ok=True)
 
 
-def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex):
+def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex, media_mask=15):
     """Rebuild only the runtime; retain app data across starts and upgrades.
 
     Caller holds the package lock through preparation AND the live session.
@@ -662,7 +662,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)
     settings_key = settings_user_key(app.parent)
-    identity = {"schema": 3, "code": code, "files": metadata["files"],
+    identity = {"schema": 3, "code": code, "files": metadata["files"], "media_mask": media_mask,
                 "framework": file_hash(framework / "bifrost-framework.json"),
                 "adapters": {n: adapter_manifest["files"][n] for n in adapter_names},
                 "launcher": file_hash(dex), "settings_key": hashlib.sha256(settings_key).hexdigest()}
@@ -693,6 +693,8 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     with tempfile.TemporaryDirectory(prefix=".prepare-", dir=managed) as temporary:
         fresh = Path(temporary) / "rootfs"
         shutil.copytree(framework, fresh, symlinks=True)
+        from asgard import configure_media
+        configure_media(fresh, media_mask)
         local = fresh / "data/local/tmp"
         local.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dex, local / "launcher.dex")
@@ -744,13 +746,16 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                    process_session=None):
     if process_session is None: raise ValueError("Managed launch requires an app process session")
     dex = launcher_dex(ROOT / "build/android-managed-launcher")
+    from asgard import decoder_mask
+    broker = emu_args[emu_args.index('--android-binder-broker') + 1] if '--android-binder-broker' in emu_args else None
+    media_mask = decoder_mask(emu, broker)
     # The validation probe can wait for its timeout; overlap it with root setup.
     with ThreadPoolExecutor(1) as pool:
         network = pool.submit(host_network_environment)
         root, guest_env = prepare_root(app, metadata, code, installed_root,
                                       ROOT / "build/android-framework/rootfs",
                                       ROOT / "build/android-art/rootfs",
-                                      ROOT / "build/android-adapters", dex)
+                                      ROOT / "build/android-adapters", dex, media_mask)
         guest_env = dict(guest_env, **network.result())
     trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
@@ -783,7 +788,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
             process_host = services.enter_context(closing(ProcessHost(guest_root, emu,
                     list(emu_args) + (["--no-jit"] if no_jit else [])
                     + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
-                environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args)))
+                environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args,
+                media_mask=media_mask)))
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]
             services.enter_context(closing(LogdReceiver(guest_root, sink)))

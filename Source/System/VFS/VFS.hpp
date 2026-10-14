@@ -72,6 +72,7 @@ public:
     Yggdrasil();
     void stop_binder();
     void set_binder_broker(std::string path) { binder_broker_ = std::move(path); }
+    int report_android_process_state(int32_t state);
     // Select before opening Binder devices. Only /dev/binder gets a manager;
     // hardware/vendor domains retain the raw transport contract.
     void enable_android_services();

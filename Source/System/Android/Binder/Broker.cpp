@@ -4,6 +4,9 @@
 #include "System/VFS/VFS.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
+#include "System/Android/Media/CodecServices.hpp"
+#include "System/Android/Media/HostDecoder.hpp"
+#include <filesystem>
 #include <array>
 #include <algorithm>
 #include <cerrno>
@@ -23,7 +26,7 @@ namespace arm64emu::yggdrasil {
 namespace {
 constexpr uint32_t MAGIC = 0x41534744, VERSION = 2;
 constexpr size_t LIMIT = 16 * 1024 * 1024, MAX_FDS = 64, MAX_CHUNKS = 256;
-enum Operation : uint32_t { OPEN = 1, MAP, IOCTL, UNMAP, PING, STOP };
+enum Operation : uint32_t { OPEN = 1, MAP, IOCTL, UNMAP, PING, STOP, STATUS, ENABLE_MEDIA, PROCESS_STATE };
 using Key = std::array<uint64_t, 2>;
 struct Header { uint32_t magic = MAGIC, version = VERSION, operation = 0, size = 0; Key key{}; };
 struct Open { uint32_t device, flags, uid; int32_t pid; };
@@ -350,6 +353,8 @@ struct Broker {
     std::array<std::shared_ptr<BinderDomain>, 3> domains;
     std::string path;
     std::atomic<unsigned> connections{0};
+    std::mutex media_mutex;
+    std::shared_ptr<CodecServices> media;
     Broker(std::string path) : path(std::move(path)) {
         for (auto& domain : domains) domain = std::make_shared<BinderDomain>();
         domains[0]->service_manager = true;
@@ -370,14 +375,54 @@ struct Broker {
         }
         try {
             Reader input{packet.body}; std::vector<uint8_t> output; std::vector<int> rights;
+            if (packet.header.operation == STATUS) {
+                input.finish();
+                std::lock_guard<std::mutex> lock(media_mutex);
+                const std::string status = media ? media->status() : "{\"state\":\"disabled\",\"reason\":\"No verified codec runtime attached\"}";
+                append(output, Result{0}); append_bytes(output, status.data(), status.size());
+                send_packet(fd, packet.header, output); return;
+            }
+            if (packet.header.operation == ENABLE_MEDIA) {
+                uint32_t mask = input.take<uint32_t>();
+                const size_t length = packet.body.size() - sizeof(mask);
+                if (!length || length > 4096) return;
+                const char* bytes = reinterpret_cast<const char*>(input.data(length));
+                if (std::memchr(bytes, 0, length)) return;
+                std::string root(bytes, length); input.finish();
+                if (root.front() != '/' || mask & ~15u || !std::filesystem::is_directory(root)) return;
+                std::lock_guard<std::mutex> lock(media_mutex);
+                if (media) append(output, Result{-EALREADY});
+                else if (mask & ~HostDecoder::routing_mask()) append(output, Result{-ENODEV});
+                else {
+                    {
+                        std::lock_guard<std::mutex> domain_lock(domains[0]->mutex);
+                        if (mask) domains[0]->declared_services.insert("android.hardware.media.c2.IComponentStore/default");
+                        domains[0]->declared_services.insert("android.hardware.media.c2.IComponentStore/software");
+                    }
+                    media = std::make_shared<CodecServices>(path, root, mask, domains[0]);
+                    append(output, Result{0});
+                }
+                send_packet(fd, packet.header, output); return;
+            }
+            if (packet.header.operation == PROCESS_STATE) {
+                int32_t state = input.take<int32_t>(); input.finish();
+                append(output, Result{domains[0]->report_process_state(credentials.pid, state)});
+                send_packet(fd, packet.header, output); return;
+            }
             if (packet.header.operation == PING || packet.header.operation == STOP) {
-                input.finish(); append(output, Result{0}); send_packet(fd, packet.header, output);
-                if (packet.header.operation == STOP) { ::unlink(path.c_str()); ::_exit(0); }
+                input.finish(); append(output, Result{0});
+                if (packet.header.operation == STOP) {
+                    std::lock_guard<std::mutex> lock(media_mutex);
+                    if (media) media->stop();
+                    send_packet(fd, packet.header, output);
+                    ::unlink(path.c_str()); ::_exit(0);
+                }
+                send_packet(fd, packet.header, output);
                 return;
             }
             if (packet.header.operation == OPEN) {
                 auto options = input.take<Open>(); input.finish();
-                if (options.device >= domains.size() || options.pid <= 0 || options.flags & ~(O_RDWR | O_NONBLOCK | O_CLOEXEC)) return;
+                if (options.device >= domains.size() || options.pid != credentials.pid || options.flags & ~(O_RDWR | O_NONBLOCK | O_CLOEXEC)) return;
                 auto endpoint = std::make_shared<Endpoint>();
                 endpoint->node = std::make_shared<BinderNode>(domains[options.device], options.flags);
                 endpoint->node->set_sender(options.uid, options.pid);
@@ -495,6 +540,16 @@ struct Broker {
     }
 };
 } // namespace
+int report_broker_process_state(const std::string& path, int32_t state) {
+    int fd = connect_socket(path); if (fd < 0) return -errno;
+    Header header; header.operation = PROCESS_STATE;
+    std::vector<uint8_t> body; append(body, state); Packet reply;
+    const bool success = send_packet(fd, header, body) && receive_packet(fd, reply);
+    ::close(fd);
+    if (!success || reply.body.size() != sizeof(Result) || reply.header.operation != PROCESS_STATE) return -ECONNREFUSED;
+    Result result; std::memcpy(&result, reply.body.data(), sizeof(result));
+    return result.value;
+}
 std::unique_ptr<Node> open_broker_binder(const std::string& path, const std::string& device,
                                         int flags, uint32_t uid, int pid, int* error) {
     int fd = connect_socket(path); if (fd < 0) { *error = -errno; return nullptr; }

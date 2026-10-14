@@ -96,6 +96,38 @@ Partial command progress is reported in `write_consumed`/`read_consumed`.
 Unmapping any part of an arena invalidates it before guest address reuse;
 active Binder arenas cannot gain write/execute permission or move via mremap.
 
+## Realm services and process state
+
+The broker's control channel now carries several operations:
+- `OPEN` requires the reported guest PID to equal the socket's
+  `SO_PEERCRED` PID.
+- `STATUS` (7) returns the media JSON, or `disabled` when no verified codec
+  runtime is attached.
+- `ENABLE_MEDIA` (8) attaches an absolute root and a routing mask. The mask
+  must be a subset of the broker's own probed `HostDecoder::routing_mask()`.
+  This op declares the Codec2 `default` (only when the mask is nonzero) and
+  `software` HALs and starts the realm-owned `CodecServices`. A second
+  attach returns `EALREADY`.
+- `PROCESS_STATE` (9) records the authenticated sender's lifecycle state:
+  top 2, cached 10 or 19, with oom adjustments 0, 500 and 900. The managed
+  launcher reports these through private op 14 on resume and pause.
+- `STOP` stops and reaps the media children before it acknowledges.
+
+Codec services, their logs and roots belong to the broker, so app exit
+does not stop them. Ephemeral launcher brokers send a synchronous `STOP`
+when they close.
+
+`Services/ProcessInfo.cpp` serves the native `processinfo`
+(`IProcessInfoService`) Parcel contract to ResourceManagerService. It
+answers with tracked states and scores; unknown PIDs report state 20 and
+adjustment -10000. Counts are bounded to 4096. Following API 35's
+`platform.xml`, only root, system, media (1013) and cameraserver (1047) may
+query OOM scores. The host service uses platform stability; with stability
+0, Java `getService` failed. Only UID 1013 may register
+`media.resource_manager`, and only UID 1046 may register a Codec2
+component store. Media decoding and Surface contracts are described in
+[the runtime guide](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
+
 ## Boundaries
 
 This is a transport foundation, not a complete Android Binder driver. It does
@@ -224,9 +256,11 @@ barrier behaviors on a host supporting the expedited commands. The pinned real
 Bionic fixture also opens/maps Binder and checks `prctl` through actual Bionic
 wrappers, in fixed/random ASLR and interpreter/JIT/Tier-2 configurations.
 
-The service-manager fixture checks 52 behaviors, including descriptor/name
+The service-manager fixture checks 104 behaviors, including descriptor/name
 validation, registration, lookup, a real invocation through the discovered
 handle, reference ownership, priority filtering and service-owner teardown.
+It also looks up `processinfo` and checks both methods' Parcel replies
+(tracked and unknown PIDs, oom scores and a mismatched output length).
 It also runs inside the signed APK through the real Bionic wrappers. These
 are subset tests; they do not prove compatibility with guest libbinder or the
 Android framework as a whole.

@@ -56,7 +56,7 @@ static inline int bf_gralloc_layout(int width, int height, int layers, int forma
     // libui's Gralloc5::getValidUsageBits explicitly retains the removed
     // HW_2D/EXTERNAL_DISP hints (bits 10 and 13) for existing callers.
     const uint64_t allowed = 0xff | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x10000 | 0x400000;
-    if (width <= 0 || height <= 0 || width > 16384 || height > 16384 || layers != 1
+    if (width <= 0 || height <= 0 || (format != 33 && width > 16384) || height > 16384 || layers != 1
             || reserved > 1024 * 1024 || (usage & ~allowed)
             || ((usage & 15) != 0 && (usage & 15) != 2 && (usage & 15) != 3)
             || ((usage & 240) != 0 && (usage & 240) != 32 && (usage & 240) != 48)) return 0;

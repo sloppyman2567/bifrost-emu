@@ -181,6 +181,7 @@ deeper. Host forwarding and input are described in
 | g++ 9+ (C++17), make, Linux x86_64 | Everything (required) |
 | SDL2 development headers (`./Tools/Fetch/fetch-sdl2-headers.sh`) | Framebuffer, guest SDL2 and GL thunks |
 | SDL3 ≥ 3.2 headers and runtime | Android host windows |
+| FFmpeg libavcodec/libavutil/libswscale development files | Android host media decoding (`USE_MEDIA=1`, default) |
 | AArch64 cross toolchain (`./Tools/Fetch/fetch-musl-toolchain.sh`) | Building guest test programs |
 
 | Command | Builds |
@@ -188,6 +189,7 @@ deeper. Host forwarding and input are described in
 | `make` | Default; auto-detects SDL2 and enables host GL/EGL thunking |
 | `make USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1` | Android SDL3 windows plus guest SDL2/GL thunks |
 | `make USE_SDL2=0 USE_SDL3=0` | Headless build |
+| `make USE_MEDIA=0` | No host media decoders; Codec2 advertises no host codecs |
 | `make debug` | Sanitizer build at `build/debug/bifrost-emu-dbg` |
 | `make lib` | `libbifrost.a` for [embedding](Docs/EMBEDDING.md) |
 

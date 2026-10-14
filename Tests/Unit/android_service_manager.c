@@ -18,6 +18,7 @@ static int checks;
 static unsigned char output[512], parcel[512];
 static size_t length;
 static size_t read_capacity = sizeof(output);
+static uint32_t target;
 static struct bf_binder_write_read wr;
 static void u32(uint32_t x) {
     memcpy(parcel + length, &x, 4);
@@ -71,6 +72,7 @@ static int find(uint32_t wanted, void *value) {
 static int transact(int fd, uint32_t code, uint64_t *offsets, size_t count,
                     struct bf_binder_transaction *reply) {
     struct bf_binder_transaction tx = {0};
+    tx.target = target;
     // Java proxies pass FLAG_COLLECT_NOTED_APP_OPS plus TF_ACCEPT_FDS.
     // Neither flag changes the synchronous transaction into a one-way call.
     tx.flags = BF_TF_COLLECT_NOTED_APP_OPS | 0x10;
@@ -97,6 +99,30 @@ int main(void) {
     CHECK(transact(client, 0x5f504e47, 0, 0, &reply));
     CHECK(reply.flags == 8 && *(int32_t *)(uintptr_t)reply.buffer == 0);
     CHECK(!release_reply(client, &reply));
+    token();string16("processinfo");
+    CHECK(transact(client, 2, 0, 0, &reply));
+    struct bf_flat_binder process_info;
+    memcpy(&process_info,(void*)(uintptr_t)(reply.buffer+4),sizeof(process_info));
+    CHECK(process_info.type==BF_BINDER_TYPE_HANDLE&&process_info.binder);
+    uint32_t process_handle=process_info.binder;
+    CHECK(!write_command(client,BF_BC_ACQUIRE,&process_handle,0));
+    CHECK(!release_reply(client,&reply));
+    target=process_handle;
+    for (uint32_t method=1;method<=2;++method) {
+        length=0;u32(0);u32(-1);u32(0x53595354);string16("android.os.IProcessInfoService");
+        u32(2);u32(-1);u32(0x7fffffff);u32(2);if(method==2)u32(2);
+        CHECK(transact(client,method,0,0,&reply));
+        const int32_t* values=(void*)(uintptr_t)reply.buffer;
+        CHECK(!reply.flags&&values[0]==0&&values[1]==2&&values[2]==20&&values[3]==20);
+        if(method==2)CHECK(reply.data_size==32&&values[4]==2&&values[5]==-10000&&values[6]==-10000&&values[7]==0);
+        else CHECK(reply.data_size==20&&values[4]==0);
+        CHECK(!release_reply(client,&reply));
+    }
+    length=0;u32(0);u32(-1);u32(0x53595354);string16("android.os.IProcessInfoService");
+    u32(1);u32(-1);u32(2);
+    CHECK(transact(client,1,0,0,&reply)&&reply.flags==8);
+    CHECK(!release_reply(client,&reply));
+    target=0;
     token();
     string16("android.hardware.graphics.allocator.IAllocator/default");
     CHECK(transact(client, 7, 0, 0, &reply));
@@ -211,7 +237,7 @@ int main(void) {
     u32(8);
     CHECK(transact(client, 4, 0, 0, &reply));
     CHECK(!reply.flags && !*(int32_t *)(uintptr_t)reply.buffer &&
-          *(int32_t *)(uintptr_t)(reply.buffer + 4) == 2);
+          *(int32_t *)(uintptr_t)(reply.buffer + 4) == 3);
     CHECK(!release_reply(client, &reply));
     token();
     u32(1);
@@ -270,7 +296,7 @@ int main(void) {
     token();
     u32(8);
     CHECK(transact(client, 4, 0, 0, &reply));
-    CHECK(!reply.flags && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 1);
+    CHECK(!reply.flags && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 2);
     CHECK(!release_reply(client, &reply));
     CHECK(!munmap(a, 65536) && !munmap(b, 65536) && !close(client));
     printf("android_service_manager: ALL PASS (%d checks)\n", checks);

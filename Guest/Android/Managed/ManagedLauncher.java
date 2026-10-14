@@ -129,6 +129,20 @@ public final class ManagedLauncher {
     private static native int displaySize(long[] size); // host display pixel width, height
     static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
     private static native int activeAudioOutputs();
+    private static native int processState(int state);
+
+    static void reportProcessState(int state) throws Exception {
+        if (!(Boolean) Class.forName("android.os.SystemProperties")
+                .getMethod("getBoolean", String.class, boolean.class)
+                .invoke(null, "servicemanager.ready", false)) return;
+        loadActivityLibrary();
+        // Establish this process's realm endpoint before reporting lifecycle.
+        Object service = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String.class).invoke(null, "processinfo");
+        if (service == null) throw new IllegalStateException("Realm processinfo is unavailable");
+        int result = processState(state);
+        if (result != 0) throw new IllegalStateException("Process lifecycle report: " + result);
+    }
 
     // The launcher's JNI bridge; loading the same path again is a no-op.
     private static void loadActivityLibrary() {
@@ -1335,6 +1349,7 @@ public final class ManagedLauncher {
         activity.onWindowFocusChanged(false);
         // Already paused (and stopped) when another Activity covered it.
         if (FrameworkActivities.resumedState(activity)) call(activity, "performPause", new Class<?>[0]);
+        reportProcessState(19); // PROCESS_STATE_CACHED_EMPTY
         System.out.println("APP_PAUSED");
         windows.stop();
         call(activity, "performStop", new Class<?>[] {boolean.class, String.class}, false, "bifrost");
@@ -1355,6 +1370,7 @@ public final class ManagedLauncher {
         instrumentation.callActivityOnPostCreate(activity, null);
         call(activity, "performResume", new Class<?>[] {boolean.class, String.class},
                 false, "bifrost");
+        reportProcessState(2); // PROCESS_STATE_TOP
         if (diagnostic) checkRuntimeServices(activity, true);
         System.out.println("APP_RESUMED");
         // The decor becomes a window like any other Activity's; ViewRootImpl
@@ -1444,6 +1460,7 @@ public final class ManagedLauncher {
         boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
         if (diagnostic) checkServiceRegistration();
         installServices(serviceChild || inventory);
+        if (!inventory) reportProcessState(serviceChild ? 10 : 19);
         if (gralloc) {
             ActivityProbe.GrallocProbe.checkDeclarations();
             int line = ActivityProbe.GrallocProbe.check();

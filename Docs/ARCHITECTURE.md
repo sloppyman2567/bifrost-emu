@@ -16,7 +16,7 @@ the emulator's memory, signal, syscall, loader and host-service implementations.
 | ELF and dynamic linking | `Source/System/Loader/ElfLoader.cpp`, `DynamicLinker/` |
 | Linux syscall dispatch | `Source/System/Syscalls/Syscalls.cpp`; families in `Files/`, `Process/`, `Memory.cpp`, `Time.cpp`, `Compatibility.cpp`; Bifrost-private calls in `HostCalls/` |
 | Guest filesystem and devices | `Source/System/VFS/`: `VFS.cpp`, `HostPaths.cpp`, `Nodes/`, `Pseudo/` |
-| Android runtime integration | `Source/System/Android/`: `Binder/`, `Properties/`, `Services/`, `Surface/`, `Window/`; guest-side code lives in `Guest/Android/` |
+| Android runtime integration | `Source/System/Android/`: `Binder/`, `Media/` (realm codec services, Goldfish media transport, host decoders), `Properties/`, `Services/`, `Surface/`, `Window/`; guest-side code lives in `Guest/Android/` |
 | Guest-side code | `Guest/Android/` Bionic adapters, launchers and managed framework; `Guest/VDSO/` vDSO source |
 | Graphics and display | `Source/System/Graphics/`: `Display/`, `Input/`, `Thunks/` |
 | Host audio and API forwarding | `Source/System/Audio/Audio.cpp`, `AudioThunk/` |

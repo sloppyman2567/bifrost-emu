@@ -241,18 +241,87 @@ or missing-JNI markers. This removes the observed missing-library crash;
 the screen was not visually inspected and gameplay/video playback remains
 unverified.
 
-The current runtime still supplies no media.player, media.extractor or Codec2
-service. A real MediaCodecList probe found zero codecs; loading JNI cannot
-create a decoder backend. A future host backend can retain the Android
-MediaCodec/Codec2 interface while routing compressed packets to native host
-CPU decoding or a supported hardware API, with explicit capability discovery
-and CPU fallback. FFmpeg's
-[hardware decoding example](https://ffmpeg.org/doxygen/trunk/hw_decode_8c-example.html)
-documents packet/frame and hardware-surface transfer. A standalone host
-H.264 test decoded five 64x64 frames through CPU and VA-API with identical
-pixel hashes; this is feasibility evidence, not an Android-to-host bridge.
-Surface buffers, fences, callbacks, flush/reconfiguration, EOS and protected
-content require their own supported contracts.
+### Host media decoding (2026-10-14)
+
+Apps use Android's real MediaCodec/Codec2 stack. Compressed packets are
+decoded on the host; there are no Java or JNI codec substitutes.
+`media.player` and `media.extractor` are still not supplied.
+
+- **Provisioning.** Framework schema 8 (`Tools/Android/android_codecs.py`)
+  extracts the SDK image's real media.swcodec APEX, Goldfish Codec2 vendor
+  modules, ResourceManagerService and their native closures. The codec
+  daemon has its own linker section; the app namespace excludes those
+  private libraries. `Guest/Android/Launchers/codec2_store.{c,S}` registers
+  the genuine Goldfish store as `IComponentStore/default`; the stock
+  software store stays `/software`.
+- **Realm ownership.** The Binder broker owns the services
+  (`Source/System/Android/Media/CodecServices.cpp`), independently of any
+  app: `media.resource_manager` as UID 1013 and both component stores as
+  UID 1046, from a cloned root with their own logs. A service counts as
+  ready only when the registered endpoint belongs to its spawned PID. A
+  child that does not register within 30 s is killed. Restarts back off
+  (250 ms × count) and give up after four consecutive failures. Broker
+  `STOP` reaps every child before acknowledging. Children get
+  `PR_SET_PDEATHSIG(SIGKILL)` and are spawned through `/proc/self/exe`.
+  `Scripts/Android/asgard.py` (`ensure_media`) attaches a verified root;
+  realm status reports it under `media`.
+- **Capability report.** `bifrost-emu --media-capabilities` decodes a 64x64
+  black probe for VP8/VP9/AVC/HEVC on the native CPU and forced GPU paths
+  (VA-API, CUDA or Vulkan when FFmpeg offers them). It checks every pixel,
+  PTS 12345 and exactly one frame plus EOS. Scope is `host-decoder` only,
+  not service or Surface readiness. The routing mask (VP8=1, VP9=2, AVC=4,
+  HEVC=8) enables only probed codecs in `media_codecs.xml`.
+  `BIFROST_MEDIA_BACKEND=auto|cpu|gpu` selects the decoder (`gpu` forbids a
+  CPU fallback). `BIFROST_MEDIA_TRACE=1` logs transport inputs and images.
+  Build with `USE_MEDIA=1` (default; needs FFmpeg's libavcodec/libavutil/
+  libswscale). `USE_MEDIA=0`, or missing libraries, reports
+  `FFmpeg support not built` and no codecs.
+- **Goldfish transport.** `/dev/goldfish_address_space` is media-only
+  (`GoldfishMedia.cpp`): a sealed memfd arena, snapshotted parameters and a
+  bounds check on every offset. Decoder contexts are keyed by
+  (codec family, guest ID) because the VP8 and VP9 modules both start at
+  ID 1. Host color-buffer IDs are rejected; frames go to real gralloc
+  buffers. `user_priv` is an opaque guest work address, returned verbatim
+  and never dereferenced.
+- **VPX output contract.** The pinned `C2GoldfishVpxDec` matches
+  [android-15.0.0_r36](https://android.googlesource.com/device/generic/goldfish-opengl/+/refs/tags/android-15.0.0_r36/system/codecs/c2/decoders/vpxdec/C2GoldfishVpxDec.cpp),
+  checked against the disassembly of the provisioned
+  `libcodec2_goldfish_vp8dec.so`, not r1. It reads each shown frame right
+  after its decode call and then releases that work. So VP8/VP9 use FFmpeg
+  slice threading only; frame threading delays output one frame, and the
+  late frame then carries a released work's `user_priv`. Like the
+  emulator's
+  [`MediaVpxDecoderGeneric::getImage`](https://android.googlesource.com/platform/external/qemu/+/refs/heads/emu-31-stable-release/android/android-emu/android/emulation/MediaVpxDecoderGeneric.cpp),
+  the host writes a packed frame at the decoded size and ignores the
+  guest's stale output size. The plane order is YV12 (Y, V, U), because
+  that is what this binary copies into its YV12 block.
+- **Surface output.** `FrameworkSurfaces` presents decoded frames through a
+  genuine YUV `ImageReader` BufferQueue and `Surface.transferFrom`. The
+  native adapter returns real `ANativeWindow`s. `bifrost_surface_prepare`
+  binds a managed window to a separate host surface below the framework
+  windows; the GraphicThunk EGL path resolves that alias to its host
+  backing. SDR YUV is converted to ARGB on the Java UI thread (matrix and
+  range from the dataspace, crop, stride). HDR is reported unsupported.
+
+Verified (temporary realm probes, not regression gates):
+- Java MediaCodec under UIDs 10000/10001 sharing one realm: AVC, HEVC, VP8
+  and VP9 each decoded five 64x64 frames with ffmpeg-reference MD5s, PTS
+  0–800000 µs and EOS. Service PIDs were unchanged after the apps exited.
+- `releaseOutputBuffer(render=true)` into a real ImageReader Surface, and
+  NDK `AMediaCodec` to `ANativeWindow` with forced GPU, each produced exact
+  frames and presented pixels to an X11 host layer.
+- An X11 readback checked pixel placement, geometry and stacking.
+
+Not yet established:
+- Full SurfaceView callback, resize and recreation sequences.
+- Wayland readback.
+- Native EGL rendering into an aliased Surface.
+- Flush/reconfigure, B-frames, adaptive or HDR profiles, and resolutions
+  beyond the 64x64 fixtures.
+- Gameplay or video-ad playback.
+
+On this host VA-API does not decode VP8, so forced GPU mode routes VP8 to
+the software store.
 
 ### Common device services (2026-10-13)
 

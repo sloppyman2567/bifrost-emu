@@ -1,4 +1,5 @@
 #include "System/Android/Binder/Broker.hpp"
+#include "System/Android/Media/HostDecoder.hpp"
 // Source/Main.cpp — bifrost-emu: fast ARM64 Linux user-mode emulator
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
@@ -45,6 +46,9 @@
 #include <cerrno>
 #include <termios.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
+#include <signal.h>
+#include <climits>
 #include <unistd.h>
 using arm64emu::Emulator;
 using arm64emu::VERSION;
@@ -85,6 +89,7 @@ static void print_banner() {
         "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
         "    --android-services provide the API-35 Binder service-manager subset\n"
         "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
+        "    --media-capabilities  probe native CPU/GPU decoders and print JSON\n"
         "    --android-binder-broker SOCKET  join a shared guest Binder domain\n"
         "    --android-app-id N  user-0 app UID (10000..19999) or isolated UID (99000..99999)\n"
         "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
@@ -202,10 +207,24 @@ static void raise_open_file_limit() {
         fprintf(stderr, "bifrost-emu: cannot raise host open-file limit: %s\n", strerror(errno));
 }
 
+static bool bind_asgard_parent(const char* argument) {
+    char* end = nullptr;
+    long parent = std::strtol(argument, &end, 10);
+    return end && !*end && parent > 1 && parent <= INT_MAX &&
+        !::prctl(PR_SET_PDEATHSIG, SIGKILL) && ::getppid() == parent;
+}
+
 int main(int argc, char** argv) {
     raise_open_file_limit();
-    if (argc == 3 && std::string(argv[1]) == "--asgard-broker")
+    if (argc == 2 && std::string(argv[1]) == "--media-capabilities") {
+        puts(arm64emu::yggdrasil::HostDecoder::capabilities_json().c_str());
+        return 0;
+    }
+    if ((argc == 3 || (argc == 5 && std::string(argv[3]) == "--asgard-service-parent"))
+            && std::string(argv[1]) == "--asgard-broker") {
+        if (argc == 5 && !bind_asgard_parent(argv[4])) return 2;
         return arm64emu::yggdrasil::asgard_broker_main(argv[2]);
+    }
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
         return arm64emu::window_stats::ui_main(std::atoi(argv[2]));
     bool debug   = false;
@@ -248,7 +267,7 @@ int main(int argc, char** argv) {
         } else if (a == "--rootfs" || a == "--jit-threshold" ||
                    a == "--fb-dump" || a == "--audio-dump" ||
                    a == "--android-window-plugin" || a == "--android-binder-broker" ||
-                   a == "--android-app-id") {
+                   a == "--android-app-id" || a == "--android-system-uid" || a == "--asgard-service-parent") {
             if (i + 1 < argc) i++;
         }
     }
@@ -299,6 +318,20 @@ int main(int argc, char** argv) {
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
         if (a == "--android-services")      { android_services = true; arg_i++; continue; }
+        if (a == "--asgard-service-parent") {
+            if (arg_i + 1 >= argc) return 2;
+            if (!bind_asgard_parent(argv[arg_i + 1])) return 2;
+            arg_i += 2; continue;
+        }
+        if (a == "--android-system-uid") {
+            if (arg_i + 1 >= argc) return 2;
+            const std::string value = argv[arg_i + 1];
+            if (value != "1000" && value != "1013" && value != "1046" && value != "1047") {
+                fprintf(stderr, "Asgard: unsupported system-service UID\n"); return 2;
+            }
+            android_app_id = std::stoul(value); android_app_id_set = true;
+            arg_i += 2; continue;
+        }
         if (a == "--android-binder-broker") {
             if (arg_i + 1 >= argc) { fprintf(stderr, "Asgard: --android-binder-broker requires a socket path\n"); return 2; }
             android_binder_broker = argv[arg_i + 1]; arg_i += 2; continue;

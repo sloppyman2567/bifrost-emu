@@ -16,12 +16,13 @@ import zipfile
 
 from android_media import ROOT, IMAGE_SHA256, image_archive, extract_system, dump
 import android_art
+import android_codecs
 
 # Classpath order comes from the image's own boot image files (see
 # boot_classpaths): the primary boot.oat records its jars in the
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
-SCHEMA = 7
+SCHEMA = 8
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -169,6 +170,8 @@ def install(destination, art_root, archive=None):
         actual.pop("bifrost-framework.json", None)
         if metadata.get("image_sha256") != IMAGE_SHA256 or actual != metadata.get("files"):
             raise ValueError("Refusing modified framework runtime")
+        if metadata.get("codecs", {}).get("adapter_fingerprint") != android_codecs.fingerprint():
+            raise ValueError("Codec adapters changed; provision a fresh framework directory")
         return metadata
     android_art.install(art_root)  # verifies the pinned ART layer
     archive = image_archive(archive)
@@ -245,22 +248,26 @@ def install(destination, art_root, archive=None):
         # it; use the real library from the same verified framework image.
         dump(system, "/system/lib64/libmedia_jni.so", root / "system/lib64/libmedia_jni.so")
         graph, preloads = android_art.native_dependencies(root, system, limit=1024)
+        codecs = android_codecs.install(root, system, work)
         # app_process64 lives in /system/bin; give it the same linker section.
         config = root / "linkerconfig/ld.config.txt"
-        apexes = sorted(path.name for path in (root / "apex").iterdir() if path.is_dir())
+        apexes = sorted(path.name for path in (root / "apex").iterdir()
+                        if path.is_dir() and path.name != "com.android.media.swcodec")
         # Preserve the ART bootstrap's single canonical library scope. Each
         # exported identity delegates there, avoiding duplicate VM globals.
         paths = ["/apex/com.android.runtime/lib64/bionic"]
         paths += [f"/apex/{name}/lib64" for name in apexes
                   if (root / "apex" / name / "lib64").is_dir()]
-        paths += ["/system/lib64"]
-        config.write_text(framework_linker_configuration(apexes, paths))
+        paths += ["/system/lib64", "/vendor/lib64/hw"]
+        service_paths = [paths[0], "/apex/com.android.media.swcodec/lib64", *paths[1:], "/vendor/lib64"]
+        config.write_text("dir.codec2 = /apex/com.android.media.swcodec/bin\n" +
+                          framework_linker_configuration(apexes, paths) + android_codecs.linker_section(service_paths))
         files = android_art.inventory(root)
         metadata = {"schema_version": SCHEMA,
                     "purpose": "Android framework on guest ART; system services and Activity display not implemented",
                     "image_sha256": IMAGE_SHA256,
                     "environment": environment(primary, mainline), "files": files,
-                    "native_dependencies": graph, "public_preloads": preloads}
+                    "native_dependencies": graph, "public_preloads": preloads, "codecs": codecs}
         (root / "bifrost-framework.json").write_text(json.dumps(metadata, indent=2) + "\n")
         root.rename(destination)
     return metadata

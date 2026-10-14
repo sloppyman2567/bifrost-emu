@@ -45,6 +45,9 @@ void BinderNode::disconnect() {
     if (disconnected_) return;
     disconnected_ = true;
     domain_->endpoints.erase(this);
+    if (std::none_of(domain_->endpoints.begin(), domain_->endpoints.end(), [this](const BinderNode* peer) {
+            return peer->sender_pid_ == sender_pid_;
+        })) domain_->processes.erase(sender_pid_);
     if (domain_->manager == this) domain_->manager = nullptr;
     release_all_references();
     auto abandon = [&](const Call& call) {
@@ -272,6 +275,10 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
                 if (destination->alive && destination->host_service == Object::HostService::GraphicsAllocator) {
                     if (buffers_size) { fail(tid, BF_BR_FAILED_REPLY, EINVAL); return 0; }
                     return allocator_transaction(tx, mem, tid);
+                }
+                if (destination->alive && destination->host_service == Object::HostService::ProcessInfo) {
+                    if (buffers_size) { fail(tid, BF_BR_FAILED_REPLY, EINVAL); return 0; }
+                    return process_info_transaction(tx, mem, tid);
                 }
                 if (destination->alive) destination_owner = domain_->promote(destination->owner);
                 if (destination_owner) target = static_cast<BinderNode*>(destination_owner.get());

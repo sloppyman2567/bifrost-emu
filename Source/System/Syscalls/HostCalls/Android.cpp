@@ -88,7 +88,7 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             else if (cpu.regs[0] == 5) { // Managed SurfaceView composition policy.
                 if (cpu.regs[2] > 1) ret_host(-EINVAL);
-                else ret_host(manager.set_surface_opaque(cpu.regs[1], cpu.regs[2] != 0));
+                else ret_host(manager.set_surface_opaque(manager.surface_handle(cpu.regs[1]), cpu.regs[2] != 0));
             }
             else if (cpu.regs[0] == 6) { // UI thread: UTF-8 title and RGBA icon.
                 try {
@@ -157,6 +157,46 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 catch (const EmuError&) { ret_host(-EFAULT); return 0; }
                 emu.mem().write(cpu.regs[1], data, sizeof(data));
                 ret_host(0);
+            }
+            else if (cpu.regs[0] == 14) { // Managed process lifecycle, owned by the Binder realm.
+                ret_host(emu.vfs().report_android_process_state(static_cast<int32_t>(cpu.regs[1])));
+            }
+            else if (cpu.regs[0] == 15) { // Explicit real guest ANativeWindow -> host backing association.
+                ret_host(manager.bind_native_window(cpu.regs[1], cpu.regs[2]));
+            }
+            else if (cpu.regs[0] == 16) { // Acquired Android image, converted to straight ARGB rows.
+                try {
+                    int64_t record[6];
+                    emu.mem().read(cpu.regs[1], record, sizeof(record));
+                    const int64_t w = record[3], h = record[4];
+                    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 ||
+                            record[1] < -65536 || record[1] > 65536 || record[2] < -65536 || record[2] > 65536) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    uint64_t handle = manager.surface_handle(record[0]);
+                    if (!handle) { ret_host(-ENODEV); return 0; }
+                    std::vector<uint32_t> pixels(static_cast<size_t>(w * h));
+                    emu.mem().read(record[5], pixels.data(), pixels.size() * 4);
+                    ret_host(manager.present_pixels(handle, record[1], record[2], w, h, pixels.data()));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
+            }
+            else if (cpu.regs[0] == 17) { // Real window's corresponding host reference, when attached.
+                uint64_t handle = manager.surface_handle(cpu.regs[1]);
+                if (cpu.regs[2] == 1 && handle) manager.acquire(handle);
+                else if (cpu.regs[2] == 2 && handle) manager.release(handle);
+                else if (cpu.regs[2] > 2) { ret_host(-EINVAL); return 0; }
+                ret_host(handle);
+            }
+            else if (cpu.regs[0] == 18) { // Managed SurfaceView's position and pixel size.
+                try {
+                    int64_t record[5]; emu.mem().read(cpu.regs[1], record, sizeof(record));
+                    if (record[1] < -65536 || record[1] > 65536 || record[2] < -65536 || record[2] > 65536 ||
+                            record[3] <= 0 || record[3] > 4096 || record[4] <= 0 || record[4] > 4096) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    ret_host(manager.surface_geometry(manager.surface_handle(record[0]),
+                             record[1], record[2], record[3], record[4]));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
             }
             else ret_host(-EINVAL);
             return 0;

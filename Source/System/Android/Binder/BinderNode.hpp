@@ -16,7 +16,7 @@ struct BinderDeath {
     bool queued = false, delivered = false, acknowledged = false, clearing = false, cancelled = false;
 };
 struct BinderObject {
-    enum class HostService { None, GraphicsAllocator } host_service = HostService::None;
+    enum class HostService { None, GraphicsAllocator, ProcessInfo } host_service = HostService::None;
     std::weak_ptr<Node> owner;
     uint64_t pointer = 0, cookie = 0;
     uint32_t strong = 0, weak = 0;
@@ -66,6 +66,10 @@ struct BinderDomain {
     bool manager_accepts_fds = true;
     uint32_t sender_euid = 0; // single guest process, not the host's credentials
     std::map<std::string, BinderService> services;
+    std::set<std::string> declared_services;
+    struct ProcessState { uint32_t uid; int32_t state, adjustment; };
+    std::map<int, ProcessState> processes;
+    int report_process_state(int pid, int32_t state);
 };
 class BinderNode final : public Node {
 public:
@@ -73,6 +77,7 @@ public:
     ~BinderNode() override;
     void disconnect();
     void set_sender(uint32_t uid, int pid) { sender_uid_ = uid; sender_pid_ = pid; }
+    int sender_pid() const { return sender_pid_; }
     int arena_fd() const { return arena_fd_; }
     int64_t map_broker_arena(Memory&, uint64_t, uint64_t);
     int ioctl_broker(uint32_t, uint64_t, Memory&, CPU&, FdTable&, const std::function<bool()>&, FdTable* source_files = nullptr);
@@ -165,5 +170,6 @@ private:
     void release_all_references();
     int service_transaction(const bf_binder_transaction&, Memory&, int tid, FdTable&);
     int allocator_transaction(const bf_binder_transaction&, Memory&, int tid);
+    int process_info_transaction(const bf_binder_transaction&, Memory&, int tid);
 };
 }
