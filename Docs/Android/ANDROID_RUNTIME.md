@@ -202,8 +202,57 @@ AudioFocusRequest, AudioTrack queries, PowerManager and WifiManager. Token
 death in this probe is simulated; transport death is tested separately by the
 Binder suite. A bounded SpongeBob run also calls Unity's
 `registerNotificationChannel` successfully through the production service.
-Neither these tests nor presented frames establish video-ad playback: the
-`libmedia_jni.so`, decoder and video-surface path remains unfinished.
+Neither these tests nor presented frames establish video-ad playback: JNI
+provisioning is covered below; decoders and the video-surface path remain
+unfinished.
+
+### Real media JNI (2026-10-13)
+
+The framework provisioner installs the pinned SDK image's real
+`/system/lib64/libmedia_jni.so` and its native dependency closure. Android's
+boot classes load it dynamically, so following only `app_process64`'s
+DT_NEEDED dependencies previously omitted it. Azur Lane's Unity MediaCodec
+initialization exposed this as an `UnsatisfiedLinkError`. No JNI methods or
+success-returning media substitutes are supplied by Bifrost. Android 15's
+[JNI sources and build inputs](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/jni/Android.bp)
+define the implementation; the installed binary comes from the same
+checksum-verified SDK archive as the framework.
+
+Framework manifest schema 7 requires a fresh provisioned directory. Preserve
+the old root before running `Tools/Android/android_framework.py`; do not edit
+its inventory or graft unverified libraries into an existing runtime. Managed
+app roots replace themselves from the new verified inventory while retaining
+app data and System settings. Fresh extraction adds eight native files and
+leaves every schema-6 runtime file unchanged.
+
+`ActivityProbe$MediaJniProbe` initializes MediaCodec, MediaCodecList,
+MediaExtractor, MediaMetadataRetriever, MediaPlayer, MediaMuxer and MediaCrypto,
+then writes three AAC silence samples through the real native MP4 muxer.
+It passed in JIT (3.0 s) and interpreter (10.4 s). Independently, host FFmpeg
+parsed each output as mono 8 kHz AAC with three frames and decoded exactly
+6,144 bytes of zero PCM. These checks establish JNI loading/registration and
+native muxing, not guest decoding or playback.
+
+Azur Lane's follow-up GPU-enabled session
+`c4507e78efc749aea94c80a0acd91b84` loaded the JNI library successfully,
+continued to a logged Account Recovery popup and reached its 150 s limit
+(exit 124). Neither stdout nor logd contained fatal-exception, native-fault
+or missing-JNI markers. This removes the observed missing-library crash;
+the screen was not visually inspected and gameplay/video playback remains
+unverified.
+
+The current runtime still supplies no media.player, media.extractor or Codec2
+service. A real MediaCodecList probe found zero codecs; loading JNI cannot
+create a decoder backend. A future host backend can retain the Android
+MediaCodec/Codec2 interface while routing compressed packets to native host
+CPU decoding or a supported hardware API, with explicit capability discovery
+and CPU fallback. FFmpeg's
+[hardware decoding example](https://ffmpeg.org/doxygen/trunk/hw_decode_8c-example.html)
+documents packet/frame and hardware-surface transfer. A standalone host
+H.264 test decoded five 64x64 frames through CPU and VA-API with identical
+pixel hashes; this is feasibility evidence, not an Android-to-host bridge.
+Surface buffers, fences, callbacks, flush/reconfiguration, EOS and protected
+content require their own supported contracts.
 
 ### Common device services (2026-10-13)
 
@@ -399,7 +448,7 @@ This completes the allocation/mapping milestone only. Managed `libandroid`
 still needs dispatch between opaque Bifrost windows and real libgui windows,
 including `ANativeWindow_toSurface`; the probe deliberately uses only native
 window entry points that already reach the platform library. EGL native-buffer
-import/external textures, `libmedia_jni`, MediaCodec callbacks, video/audio
+import/external textures, MediaCodec callbacks, video/audio
 decoding and in-game playback remain unfinished. Two full games running
 concurrently have not been validated.
 

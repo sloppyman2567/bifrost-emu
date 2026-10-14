@@ -1,5 +1,41 @@
 # Tests
 
+## Real media JNI (2026-10-13)
+
+After provisioning framework schema 7 and rebuilding the launcher,
+`ActivityProbe$MediaJniProbe` exercises seven real android.media class
+initializers plus native MP4 muxing of three known AAC silence access units.
+The runner requires both media markers as well as `FRAMEWORK_OK`.
+JIT passed in 3.0 s and interpreter in 10.4 s. The probe logs the small MP4
+as Base64 after `ANDROID_MEDIA_MUXER_MP4`; an independent host FFmpeg check
+decoded both outputs to exactly 6,144 bytes of zero PCM (8 kHz mono,
+three 1,024-sample AAC frames). Fresh schema-7 extraction verified 931 files,
+adding eight native dependencies without changing prior files; the old
+schema was correctly rejected rather than silently upgraded.
+
+```bash
+JAVAC=/usr/lib/jvm/java-25-openjdk/bin/javac make android-managed-launcher
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe build/android-managed-launcher/classes.dex \
+  --main-class 'ActivityProbe$MediaJniProbe' --output /tmp/media-jni-jit
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe build/android-managed-launcher/classes.dex --mode interp --timeout 90 \
+  --main-class 'ActivityProbe$MediaJniProbe' --output /tmp/media-jni-interp
+```
+
+This is a JNI/muxing regression, not decoder, DRM, AudioTrack or playback
+coverage. Codec discovery still returns zero without media services. A
+separate native host FFmpeg H.264 feasibility check produced matching CPU and
+VA-API frame hashes for a generated five-frame 64x64 clip. It does not exercise
+guest Android buffers, codec callbacks or a Bifrost host-decoder bridge.
+
+Azur Lane session `c4507e78efc749aea94c80a0acd91b84` confirmed successful
+`libmedia_jni.so` loading, reached a logged Account Recovery popup and ended
+at its 150 s limit (124). Stdout and logd had no fatal-crash markers. This
+was a bounded runtime regression, with no visual gameplay or video check.
+The installed-app persistence, Activity-stack and service-execution package
+regressions passed 3/3 against schema 7 (258.7 s).
+
 ## Settings and PendingIntent contracts (2026-10-13)
 
 `ManagedServiceBatch` adds real Android Settings/PendingIntent clients to the

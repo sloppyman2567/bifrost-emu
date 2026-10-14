@@ -21,7 +21,7 @@ import android_art
 # boot_classpaths): the primary boot.oat records its jars in the
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
-SCHEMA = 6
+SCHEMA = 7
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -240,6 +240,10 @@ def install(destination, art_root, archive=None):
                     shutil.copyfileobj(source, output, length=1024 * 1024)
         dump(system, "/system/bin/app_process64", root / "system/bin/app_process64")
         (root / "system/bin/app_process64").chmod(0o755)
+        # MediaCodec and the other android.media boot classes load this JNI
+        # library dynamically. app_process64's DT_NEEDED graph cannot discover
+        # it; use the real library from the same verified framework image.
+        dump(system, "/system/lib64/libmedia_jni.so", root / "system/lib64/libmedia_jni.so")
         graph, preloads = android_art.native_dependencies(root, system, limit=1024)
         # app_process64 lives in /system/bin; give it the same linker section.
         config = root / "linkerconfig/ld.config.txt"

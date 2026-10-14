@@ -147,6 +147,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             markers += ("ANDROID_GRALLOC_OK",)
             if probe_args and probe_args[0] != "0":
                 markers += ("ANDROID_GRALLOC_PEER_EXIT_OK",)
+        if main_class == "ActivityProbe$MediaJniProbe":
+            markers += ("ANDROID_MEDIA_JNI_OK", "ANDROID_MEDIA_MUXER_OK")
         if services and main_class == "ActivityProbe":
             markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK",
                         "ACTIVITY_TELEPHONY_SERVICE_OK", "ACTIVITY_SHARED_MEMORY_OK", "ACTIVITY_AUDIO_SERVICE_OK",

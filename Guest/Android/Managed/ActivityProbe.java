@@ -19,6 +19,48 @@ public final class ActivityProbe {
         ManagedLauncher.probe(args);
     }
 
+    // Exercise the image's JNI registration and a service-independent native
+    // media operation. This deliberately does not claim codec/playback support.
+    public static final class MediaJniProbe {
+        public static void main(String[] args) throws Exception {
+            Looper.prepareMainLooper();
+            Class.forName("android.app.ActivityThread")
+                    .getMethod("initializeMainlineModules").invoke(null);
+            for (String name : new String[] {"MediaCodec", "MediaCodecList", "MediaExtractor",
+                    "MediaMetadataRetriever", "MediaPlayer", "MediaMuxer", "MediaCrypto"})
+                Class.forName("android.media." + name);
+            System.out.println("ANDROID_MEDIA_JNI_OK");
+            java.io.File output = new java.io.File("/data/local/tmp/media-jni.mp4");
+            android.media.MediaMuxer muxer = new android.media.MediaMuxer(output.getPath(),
+                    android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            try {
+                android.media.MediaFormat format = android.media.MediaFormat.createAudioFormat(
+                        "audio/mp4a-latm", 8000, 1);
+                // AAC-LC, 8 kHz, mono; one raw AAC silence access unit generated
+                // by FFmpeg. MP4 samples exclude the ADTS transport header.
+                format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(new byte[] {0x15, (byte) 0x88}));
+                int track = muxer.addTrack(format);
+                muxer.start();
+                java.nio.ByteBuffer sample = java.nio.ByteBuffer.wrap(new byte[] {1, 0x18, 0x20, 7});
+                android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+                for (int i = 0; i < 3; i++) {
+                    info.set(0, sample.capacity(), i * 128000L, 0);
+                    muxer.writeSampleData(track, sample, info);
+                }
+                muxer.stop();
+            } finally { muxer.release(); }
+            byte[] bytes = java.nio.file.Files.readAllBytes(output.toPath());
+            if (bytes.length < 32 || bytes[4] != 'f' || bytes[5] != 't'
+                    || bytes[6] != 'y' || bytes[7] != 'p')
+                throw new AssertionError("Native muxer did not write an MP4 container");
+            System.out.println("ANDROID_MEDIA_MUXER_MP4 " + android.util.Base64.encodeToString(bytes,
+                    android.util.Base64.NO_WRAP));
+            System.out.println("ANDROID_MEDIA_MUXER_OK");
+            System.out.println("FRAMEWORK_OK");
+            System.exit(0);
+        }
+    }
+
     // A native eventfd callback must run when JAVA polls its MessageQueue.
     // Polling ALooper explicitly would hide a split Java/native looper bug.
     public static final class NativeLooperProbe {

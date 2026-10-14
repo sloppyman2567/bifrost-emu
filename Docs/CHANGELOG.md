@@ -13,6 +13,14 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Real Android media JNI (2026-10-13)
+
+- Framework schema 7 provisions the pinned image's real `libmedia_jni.so` and
+  its native dependencies, fixing missing-library errors when Android media
+  boot classes initialize. A real MediaMuxer probe writes valid AAC MP4 in
+  JIT and interpreter modes; codec services, host CPU/GPU decoder routing and
+  in-game media playback remain unfinished.
+
 ### Asgard Settings and PendingIntent contracts (2026-10-13)
 
 - Generate fresh user-0 phone Settings defaults from pinned Android 15
