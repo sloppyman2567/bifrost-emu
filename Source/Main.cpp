@@ -44,6 +44,7 @@
 #include <cstring>
 #include <cerrno>
 #include <termios.h>
+#include <sys/resource.h>
 #include <unistd.h>
 using arm64emu::Emulator;
 using arm64emu::VERSION;
@@ -185,7 +186,24 @@ static bool install_android_window_plugin(const std::string& path) {
     return false;
 }
 
+static void raise_open_file_limit() {
+    // Desktop sessions commonly inherit a soft limit of 1024 even though the
+    // hard limit permits many more files. Guest opens and broker transfers
+    // consume host descriptors too. Match `ulimit -Sn $(ulimit -Hn)` in this
+    // process, without changing the user's session or requiring privileges.
+    struct rlimit limit{};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        fprintf(stderr, "bifrost-emu: cannot read host open-file limit: %s\n", strerror(errno));
+        return;
+    }
+    if (limit.rlim_cur >= limit.rlim_max) return;
+    limit.rlim_cur = limit.rlim_max;
+    if (::setrlimit(RLIMIT_NOFILE, &limit) != 0)
+        fprintf(stderr, "bifrost-emu: cannot raise host open-file limit: %s\n", strerror(errno));
+}
+
 int main(int argc, char** argv) {
+    raise_open_file_limit();
     if (argc == 3 && std::string(argv[1]) == "--asgard-broker")
         return arm64emu::yggdrasil::asgard_broker_main(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")

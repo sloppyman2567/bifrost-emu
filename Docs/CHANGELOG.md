@@ -13,6 +13,13 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Launcher open-file limit (2026-10-13)
+
+- Raise the emulator/broker host soft open-file limit to its inherited hard
+  ceiling at executable startup. Apps opening more than 1024 files no longer
+  need a shell `ulimit -n` workaround when the host permits a higher limit.
+  The hard limit and parent process are unchanged.
+
 ### Real Android media JNI (2026-10-13)
 
 - Framework schema 7 provisions the pinned image's real `libmedia_jni.so` and

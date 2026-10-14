@@ -23,7 +23,19 @@ static void check(int ok, const char *name) {
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    // Hold real files (not virtual /dev/null nodes or aliases from dup) open
+    // past desktop sessions' usual inherited host soft limit of 1024.
+    int files[1536], opened = 0;
+    for (; opened < (int)(sizeof(files) / sizeof(files[0])); opened++) {
+        files[opened] = open(argv[0], O_RDONLY);
+        if (files[opened] < 0) break;
+    }
+    check(opened == (int)(sizeof(files) / sizeof(files[0])),
+          "startup supports more than 1024 simultaneously open real files");
+    for (int i = 0; i < opened; i++) close(files[i]);
+
     char cwd[4096];
     long cwd_len = syscall(SYS_getcwd, cwd, sizeof(cwd));
     check(cwd_len > 0 && (size_t)cwd_len == strlen(cwd) + 1,

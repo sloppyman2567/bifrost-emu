@@ -1,5 +1,45 @@
 # Tests
 
+## Inherited host open-file limit (2026-10-13)
+
+`test_syscall_regress` now holds 1,536 separate regular-file opens
+simultaneously, then closes them before the remaining syscall checks. This
+consumes real host descriptors; virtual `/dev/null` nodes or `dup` aliases
+would not reproduce the failure. Before the startup fix, a bounded
+1,600-open probe and a native control both stopped at 1,021 successful opens
+with `EMFILE` under soft 1024 / hard 1048576.
+
+The rebuilt graphics and headless executables passed the 1,600-open probe in
+JIT and interpreter mode with inherited soft 1024 and hard limits 4096 and
+1048576. With both limits 1024, each correctly retained the host ceiling and
+the probe returned `EMFILE`. An owned broker launched with soft 1024 showed
+actual host limits 1048576 / 1048576 in `/proc/PID/limits`. The expanded syscall
+fixture passed in both engines from soft 1024 / hard 1048576.
+
+Azur Lane session `8fa5a4ce1a5b456a976638e201bbfc79`, launched through the
+package runner under inherited soft 1024 / hard 1048576, reached resume,
+window, successful media-JNI loading and a logged Account Recovery popup.
+It ended at the 150 s limit (124); stdout and logd contained no fatal-crash
+or `EMFILE`/too-many-open-files markers. This is startup/runtime evidence,
+not a visual gameplay check or proof of opening one million files.
+
+```bash
+make cross SRC=Tests/Unit/test_syscall_regress.c OUT=Tests/Unit/test_syscall_regress.elf
+prlimit --nofile=1024:1048576 build/release-sdl1-gl1/bifrost-emu \
+  Tests/Unit/test_syscall_regress.elf
+prlimit --nofile=1024:1048576 build/release-sdl1-gl1/bifrost-emu --no-jit \
+  Tests/Unit/test_syscall_regress.elf
+```
+
+The startup policy follows Linux's
+[soft/hard resource-limit contract](https://man7.org/linux/man-pages/man2/getrlimit.2.html);
+the counts and broker limits above are observed tests. The fixture requires
+a host hard limit sufficient for its regular files plus emulator overhead.
+It does not establish full guest get/setrlimit semantics or readiness APIs
+with high descriptor numbers. Source review separately found the existing
+`pselect6` bridge still restricts fd sets to `FD_SETSIZE`; that is not repaired
+by raising a host limit.
+
 ## Real media JNI (2026-10-13)
 
 After provisioning framework schema 7 and rebuilding the launcher,

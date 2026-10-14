@@ -1,5 +1,16 @@
 # Signed APK installation and native launch
 
+The emulator executable raises its own host `RLIMIT_NOFILE` soft limit to
+the inherited hard limit before startup, including its Binder-broker mode.
+Desktop sessions commonly supply 1024 soft / 1048576 hard; large managed
+apps therefore no longer need a preceding `ulimit -n 1048576`. This uses
+the permitted ceiling rather than assuming a particular distribution's
+limit. It leaves the hard limit and parent desktop/shell unchanged. A
+lower hard limit still constrains open files; a failed adjustment prints
+one warning and startup continues under the inherited limit. This is a
+host-executable startup policy, not complete guest resource-limit emulation
+or a change to resource limits of library-embedding callers.
+
 Checkpoint: October 5, 2026. Bifrost installs signed APK sets and executes a
 `android.app.NativeActivity` through the real guest Bionic linker, and managed
 SurfaceView Activities through the ART/framework
