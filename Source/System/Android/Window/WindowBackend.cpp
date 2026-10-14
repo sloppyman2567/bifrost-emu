@@ -321,6 +321,74 @@ private:
   Buffer buffers_[2];
   int32_t x_ = INT32_MIN, y_ = INT32_MIN; // desktop coordinates
 };
+// Opaque black content for a toplevel that nothing else draws into. A Wayland
+// toplevel, and every subsurface below it, stays unmapped until a buffer is
+// committed to its own surface. SurfaceView layers are subsurfaces, so the
+// SDL window needs a backdrop whenever no EGL surface renders into it.
+class WaylandBackdrop {
+public:
+  ~WaylandBackdrop() { reset(); }
+  // Sized in buffer pixels; SDL's viewport or buffer scale maps it to the window.
+  bool show(wl_display *display, wl_surface *surface, int32_t w, int32_t h) {
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return false;
+    if (surface_ && (surface_ != surface || display_ != display)) reset();
+    if (surface_ == surface && w_ == w && h_ == h) return true;
+    if (!shm_ && !bind(display)) { reset(); return false; }
+    const size_t size = size_t(w) * h * 4;
+    int fd = memfd_create("bifrost-backdrop", MFD_CLOEXEC);
+    if (fd < 0) return false;
+    if (ftruncate(fd, off_t(size))) { ::close(fd); return false; }
+    wl_shm_pool *pool = wl_shm_create_pool(shm_, fd, int32_t(size));  // zero-filled: black
+    wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_XRGB8888);
+    wl_shm_pool_destroy(pool);
+    ::close(fd);
+    if (!buffer) return false;
+    // Replace the previous buffer only once the new one is committed.
+    wl_surface_attach(surface, buffer, 0, 0);
+    wl_surface_damage(surface, 0, 0, INT32_MAX, INT32_MAX);
+    wl_surface_commit(surface);
+    if (buffer_) wl_buffer_destroy(buffer_);
+    buffer_ = buffer; surface_ = surface; w_ = w; h_ = h;
+    wl_display_flush(display_);
+    return true;
+  }
+  bool active() const { return buffer_ != nullptr; }
+  // The SDL window, and so its wl_surface, outlives this backdrop.
+  void reset() {
+    if (buffer_) wl_buffer_destroy(buffer_);
+    if (shm_) wl_shm_destroy(shm_);
+    if (registry_) wl_registry_destroy(registry_);
+    if (display_) wl_display_flush(display_);
+    if (queue_) wl_event_queue_destroy(queue_);
+    buffer_ = nullptr; shm_ = nullptr; registry_ = nullptr; queue_ = nullptr;
+    display_ = nullptr; surface_ = nullptr; w_ = h_ = 0;
+  }
+private:
+  bool bind(wl_display *display) {
+    display_ = display;
+    queue_ = wl_display_create_queue(display);
+    if (!queue_) return false;
+    auto wrapper = static_cast<wl_display *>(wl_proxy_create_wrapper(display));
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(wrapper), queue_);
+    registry_ = wl_display_get_registry(wrapper);
+    wl_proxy_wrapper_destroy(wrapper);
+    static const wl_registry_listener listener = {
+      [](void *data, wl_registry *registry, uint32_t id, const char *name, uint32_t) {
+        auto &self = *static_cast<WaylandBackdrop *>(data);
+        if (!std::strcmp(name, "wl_shm"))
+          self.shm_ = static_cast<wl_shm *>(wl_registry_bind(registry, id, &wl_shm_interface, 1));
+      }, [](void *, wl_registry *, uint32_t) {}};
+    wl_registry_add_listener(registry_, &listener, this);
+    return wl_display_roundtrip_queue(display, queue_) >= 0 && shm_;
+  }
+  wl_display *display_ = nullptr;
+  wl_event_queue *queue_ = nullptr;
+  wl_registry *registry_ = nullptr;
+  wl_shm *shm_ = nullptr;
+  wl_buffer *buffer_ = nullptr;
+  wl_surface *surface_ = nullptr;
+  int32_t w_ = 0, h_ = 0;
+};
 // An unselected child window: its input events propagate to the SDL parent.
 // A 32-bit ARGB visual differs from the parent's, so the Composite extension
 // implicitly redirects the child and blends its premultiplied alpha. Without
@@ -580,6 +648,7 @@ public:
   void close() noexcept override {
 #if defined(BIFROST_USE_SDL3)
     popups_.clear();
+    backdrop_.reset();
     clear_binding();
     if (window_) {
       sdl_.DestroyWindow(window_);
@@ -608,6 +677,7 @@ public:
     }
     if (wl_window_) wl_fns_->resize(wl_window_, width, height, 0, 0);
     width_ = width; height_ = height;
+    if (window_ && backdrop_.active()) refresh_backdrop();
 #else
     (void)resize_host;
 #endif
@@ -646,7 +716,7 @@ public:
     auto parent = static_cast<wl_surface*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr));
     if (display && parent) {
       auto layer = std::make_unique<WaylandSurfaceBackend>(display, parent, width, height, ratio_, below);
-      if (layer->binding().window) return layer;
+      if (layer->binding().window) { refresh_backdrop(); return layer; }
     } else {
       auto xdisplay = static_cast<Display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
       auto parent_window = sdl_.GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
@@ -827,12 +897,24 @@ private:
     wl_fns_.reset();
     binding_ = {};
   }
+  // Managed SurfaceView layers are subsurfaces; nothing else draws into the
+  // SDL window's own surface then (its wl_egl_window may exist but stays
+  // unused), and Wayland maps the window only once that surface has a buffer.
+  void refresh_backdrop() {
+    auto props = sdl_.GetWindowProperties(window_);
+    auto display = static_cast<wl_display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr));
+    auto surface = static_cast<wl_surface*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr));
+    int pixel_w = 0, pixel_h = 0;
+    if (display && surface && sdl_.GetWindowSizeInPixels(window_, &pixel_w, &pixel_h))
+      backdrop_.show(display, surface, pixel_w, pixel_h);
+  }
   Sdl3 sdl_;
   SDL_Window *window_ = nullptr;
   std::unique_ptr<WlEglFns> wl_fns_;
   void *wl_window_ = nullptr;
   AndroidWindowBinding binding_;
   std::map<uint32_t, std::unique_ptr<PixelLayer>> popups_;
+  WaylandBackdrop backdrop_;
   PixelRatio ratio_ = std::make_shared<std::atomic<double>>(1.0);
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;

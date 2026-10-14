@@ -313,6 +313,17 @@ decoded on the host; there are no Java or JNI codec substitutes.
   `surfaceDestroyed` and destroys the installed Surface. Unity games then
   stopped before their first frame ("Timeout (2000 ms) while trying
   detaching primary window").
+  On Wayland each managed surface is a `wl_subsurface` of the SDL window,
+  [the protocol's model](https://gitlab.freedesktop.org/wayland/wayland/-/raw/main/protocol/wayland.xml)
+  for video inside a decorated window. A subsurface is shown only while its
+  parent is mapped, and an xdg toplevel maps only once a buffer is committed
+  to its own surface. SDL attaches none, and EGL renders into the
+  subsurface, so `create_surface` gives the SDL window an opaque black shm
+  backdrop at its pixel size (`WaylandBackdrop`, refreshed on resize).
+  Verified with `WAYLAND_DEBUG=client`: the toplevel received the backdrop
+  buffer and `wl_surface.enter`; Unity's frames reached its subsurface; the
+  window was visible on KDE Plasma. X11 needs no backdrop because it maps
+  child windows without content.
 
 Verified (temporary realm probes, not regression gates):
 - Java MediaCodec under UIDs 10000/10001 sharing one realm: AVC, HEVC, VP8
