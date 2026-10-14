@@ -27,9 +27,12 @@ surfaces and small exact-frame codec probes in both engines. The final managed
 service batch passes 176 assertions per engine.
 
 SpongeBob has user-confirmed cooking levels and menus through the documented
-child-age path; Google Play-dependent behavior remains incomplete. Azur Lane
-reached its logged login UI with actual host GPU access, but repeated UI delays
-remain and its Google sign-in failure path can exit on unsupported toast
+child-age path; the October 14 [screenshots](Apps/spongebob.md#screenshots-2026-10-14)
+show cooking, the level-14 pause menu, lobby and Help Center rendering.
+Google Play-dependent behavior remains incomplete. Azur Lane's
+[loading and title/login screens](Apps/azur-lane.md#screenshots-2026-10-14)
+are now visibly captured; earlier runs separately checked actual host GPU access.
+Repeated UI delays remain and its Google sign-in failure path can exit on unsupported toast
 enqueue. Its gameplay, WebView interaction and sustained performance have not
 been verified by this checkpoint.
 
@@ -38,7 +41,8 @@ implicit intent/browser resolution, notification posting/toasts, foreground
 services, cross-app background delivery, isolated WebView handshake and extended
 media/Surface recreation. HDR and arbitrary APK compatibility are not claimed.
 See [runtime contracts](Android/ANDROID_RUNTIME.md), [APK tooling](Android/ANDROID_APK.md)
-and the [v2.0 roadmap](roadmap.md) for current checkpoints and remaining work.
+and the [next-release roadmap](roadmap.md#next-release-priorities) for current
+checkpoints and compatibility, performance, experimental ads and usability targets.
 
 ## CI gates
 

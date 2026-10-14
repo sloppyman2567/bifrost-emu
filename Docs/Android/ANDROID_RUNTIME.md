@@ -1,8 +1,10 @@
 # Asgard Android compatibility layer
 
 Asgard is the Android layer of Bifrost: guest Bionic/ART, framework adapters,
-APK installation, app sessions, and shared Binder communication. Existing
-`android_package.py` commands remain supported. The Asgard entry point also
+APK installation, app sessions, and shared Binder communication. Original
+integration code uses the project Unlicense; reused AOSP material keeps its
+upstream terms. See [license scope and Android attribution](../../LICENSES/README.md).
+Existing `android_package.py` commands remain supported. The Asgard entry point also
 starts one shared Binder broker per state root:
 
 ```sh
@@ -366,8 +368,10 @@ build and normal JIT settings. The app process held an actual amdgpu
 `renderD128` context with increasing GPU engine counters, and the installed
 launcher DEX matched the current build. Completed logs reached Yostar's login
 Activity and emitted repeated Choreographer skipped-frame notifications.
-Desktop visual tools were unavailable; the logged screen and GPU work do not
-establish gameplay, working text input or measured FPS.
+Desktop visual tools were unavailable during that diagnostic run. Later
+user-supplied October 14 [screenshots](../Apps/azur-lane.md#screenshots-2026-10-14)
+visibly capture loading and the title/login screen. Neither checkpoint
+establishes gameplay, working text input or measured sustained FPS.
 
 One run ended after `APP_HOST_CLOSED` with the app sending itself SIGKILL during
 teardown; another reached its configured time limit. A follow-up session

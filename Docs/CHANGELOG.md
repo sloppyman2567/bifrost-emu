@@ -13,6 +13,21 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Android screenshots, release priorities and licenses (2026-10-14)
+
+- Add all six distinct user-supplied Android screenshots: SpongeBob cooking,
+  level-14 pause menu, lobby and Help Center, plus Azur Lane loading and login.
+  Add an Azur Lane application page and link both galleries from the README.
+- Update current support notes with visible screen evidence. Retain the limits:
+  Azur Lane gameplay/sign-in, sustained frame pacing and working video/rewarded
+  ads remain unverified; screenshot FPS values are momentary presentation stats.
+- Define proposed alpha.2 compatibility/performance, alpha.3 WebView/media/ad
+  investigation and beta.1 setup/library usability priorities with concrete
+  acceptance gates. The current runtime version remains 2.0.0-alpha.1.
+- Add `LICENSES/` with the project Unlicense, the canonical Apache 2.0 text
+  and pinned attribution for six AOSP Settings source inputs. Original Asgard
+  integration stays Unlicense; reused Android components retain upstream terms.
+
 ### Desktop Android library (2026-10-14)
 
 - Replace the launcher table with searchable game cards, bitmap icons, per-game

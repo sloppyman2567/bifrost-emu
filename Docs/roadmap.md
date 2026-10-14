@@ -9,6 +9,73 @@ runtime, improve sustained Linux game performance, and make input reliable
 across mouse, keyboard, touch and gamepads. Correctness remains the gate for
 every optimization. Existing Linux applications must keep working.
 
+## Next release priorities
+
+These are proposed scopes for the next pre-releases, not announced release dates.
+The runtime remains 2.0.0-alpha.1. The October 14
+[SpongeBob screenshots](Apps/spongebob.md#screenshots-2026-10-14) show cooking,
+the lobby, Help Center and a level-14 pause menu; the
+[Azur Lane screenshots](Apps/azur-lane.md#screenshots-2026-10-14) show loading
+and the title/login screen. Still images do not establish sustained performance
+or successful ads, sign-in and gameplay in every app.
+
+### 2.0.0-alpha.2: broader game support and less stutter
+
+- Repair concrete startup and interaction blockers in selected games, starting
+  with Azur Lane's toast failure and delayed login UI. Complete connected
+  common-service contracts rather than returning success from empty handlers.
+- Profile matching cold-load and warm gameplay scenes. Reduce compilation stalls,
+  repeated translation, paired-memory guard overhead and vector spills where
+  measurements justify it. Preserve fault, alias, invalidation and FP semantics.
+- Measure rendering, ART/GC, Binder/service work and input delays alongside JIT
+  cost. Keep supported software and hardware media routes explicit.
+- Exercise multiple selected Android engines/apps, with audio, saved data,
+  resize, pause/resume and process exit; retain working Linux game behavior.
+
+Acceptance: repeatable GPU-enabled runs report load time, CPU/compilation cost
+and median/p95/p99 frame times against the current baseline. Lower tail frame
+times must accompany correctness checks and sustained interaction; a window
+title's instantaneous FPS is not the acceptance measurement.
+
+### 2.0.0-alpha.3: WebView, media and possible ad support
+
+- Finish attached WebView pointer/focus/scroll delivery and desktop text/IME
+  composition. Help Center rendering is visible now; complete browser/editor
+  interaction still needs its own tests.
+- Complete external HTTP/HTTPS intent routing and supported return/deep-link
+  delivery, with app lifecycle and failed-browser handling.
+- Trace SpongeBob's stuck Kidoz ad from the null read and incorrect layout size.
+  Extend Surface/media lifecycle, reconfiguration, audio synchronization and
+  renderer-process handling for the path the SDK actually uses.
+- Investigate supported rewarded/interstitial ad SDKs with their test creatives.
+  Supply the platform/service contracts they require, and report unmet Google
+  Play or server prerequisites. Ad support remains experimental until a real
+  request, display and completion path works; do not synthesize reward success.
+
+Acceptance: a supported SDK test creative loads, displays, accepts interaction,
+closes and returns to the game without losing input/audio. Rewarded tests must
+deliver the SDK's actual completion callback once. Cancellation, no-fill,
+network failure and renderer exit must leave the game usable. This milestone
+does not promise every ad network or Google Play Services support.
+
+### 2.0.0-beta.1: easier setup and a dependable game library
+
+- Guide dependency/runtime provisioning and signed APK installation from the
+  library; show actionable missing-runtime or window-backend errors.
+- Make the launcher select the intended graphics-capable executable and keep
+  headless validation from silently replacing the desktop default.
+- Build on the current cards, icons, search, per-game Back-key/stats settings
+  and last-session drawer. Add clear update/reinstall and save-preservation
+  flows, with routine controls outside Developer.
+- Validate install → play → settings → stop/relaunch on a fresh setup. Broaden
+  the game matrix, including longer gameplay and multi-app realm/lifecycle
+  checks on supported Linux display stacks.
+
+Acceptance: a fresh user can provision and launch a supported game without
+editing paths or environment variables. Supported games complete repeatable
+30-minute interactive sessions with correct save, audio and input behavior;
+failed installs and app exits must leave the library and other apps usable.
+
 ## Android games: Bionic and platform compatibility
 
 Build a dedicated Bionic/Android syscall and platform compatibility layer
@@ -24,8 +91,9 @@ backend combinations. [APK setup and boundaries](Android/ANDROID_APK.md) documen
 the exact scope. Implemented managed checkpoints now include the pinned Android
 15 ART/framework, APK Activity creation, resources, JNI, WindowManager-owned
 Activity windows and a shared Binder realm. SpongeBob has user-confirmed cooking
-levels and menus; Azur Lane has reached its logged login UI. Those checkpoints
-do not establish arbitrary APK compatibility or sustained Azur Lane gameplay.
+levels and menus; Azur Lane's loading and title/login UI are visibly captured.
+Those checkpoints do not establish arbitrary APK compatibility or sustained
+Azur Lane gameplay.
 
 - Expand the pinned Android 15/API-35 baseline with documented runtime
   provenance and limits instead of claiming every Android release works.

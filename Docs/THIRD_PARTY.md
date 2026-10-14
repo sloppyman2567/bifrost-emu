@@ -4,7 +4,25 @@ Bifrost's original emulator code and original regression tests use the root
 [Unlicense](../LICENSE). Tests can be published with the project: being freely
 reusable does not prevent a project from including its own test suite.
 The Unlicense describes reuse of the authors' own work; it does not replace
-licenses attached to other people's code, binaries or assets.
+licenses attached to other people's code, binaries or assets. The
+[license directory](../LICENSES/README.md) contains a copy of the project
+Unlicense, the canonical Apache 2.0 text and Android source attribution.
+
+## Reused Android source and runtime licenses
+
+Asgard's original integration code uses the project Unlicense. Its generated
+`Guest/Android/Managed/Framework/FrameworkSettingsDefaults.java` derives defaults,
+initialization expressions, public setting names and validation rules from six
+Android 15 AOSP sources. Their Apache 2.0 terms and copyright attribution are
+recorded in [Apache-2.0.txt](../LICENSES/Apache-2.0.txt) and
+[NOTICE-Android.txt](../LICENSES/NOTICE-Android.txt); the generated header records
+the source tag, input paths and SHA-256 values.
+
+Downloaded Bionic, ART, framework, codec and packaging bundles preserve their
+own NOTICE files and per-component licenses. Android includes material under
+other licenses, so this Apache text is not a blanket license for every runtime
+library, header, tool or external game. Retain the upstream notices when
+redistributing any bundle.
 
 ## Regression sources and generated fixtures
 

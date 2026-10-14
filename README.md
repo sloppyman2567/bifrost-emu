@@ -51,6 +51,7 @@ on Bifrost, not that every feature has an automated test.
 | Program | Kind | Status |
 |---|---|---|
 | [SpongeBob – Krusty Cook-Off 5.12.0](Docs/Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, outfits and menus at native resolution. Child-age path; the adult path waits on Google Play services. |
+| [Azur Lane](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | Loading and title/login screens visibly captured. UI stutters and platform/input gaps remain; gameplay and completed sign-in are unverified. |
 | [Neverball 1.6.0](Docs/Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |
 | [Minecraft Weekend](Docs/Apps/minecraft-weekend.md) | Linux, SDL2/GL voxel game | User-confirmed stable gameplay; chunk rendering can lag. |
 | [vkQuake 1.33.1](Docs/Apps/vkquake.md) | Linux, Vulkan | User-confirmed gameplay and menus; texture corruption remains. |
@@ -58,6 +59,21 @@ on Bifrost, not that every feature has an automated test.
 | Teeworlds | Linux, SDL2/GL | Reaches its rendering menu with sound initialized. |
 | BusyBox, ToyBox | Linux CLI | Covered by the regression suite. |
 | CoreMark | Linux benchmark | CRC-validated runs through `Scripts/Bench/run_benchmarks.py`. |
+
+## Android screenshots
+
+User-supplied captures from October 14, 2026 on Bifrost 2.0.0-alpha.1:
+
+![SpongeBob cooking gameplay on Bifrost](Docs/Images/SpongeBob-2026-10-14/gameplay.png)
+
+![Azur Lane title and login screen on Bifrost](Docs/Images/AzurLane-2026-10-14/login.png)
+
+All six distinct screenshots are in the [SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-10-14)
+and [Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14).
+Still images and window-title FPS are not sustained performance measurements.
+The [next-release roadmap](Docs/roadmap.md#next-release-priorities) prioritizes
+broader Android game compatibility, lower stutter, WebView/media and possible
+ad support, followed by easier setup and library use.
 
 ## Quick start
 
@@ -209,9 +225,9 @@ make ci               # local correctness gate (generated files, APIs, both engi
 ./Scripts/Testing/run_tests.sh --strict --filter "sig|brk|pipe"   # by name
 ```
 
-On 2026-10-12, with every fixture provisioned, the strict suite passed
-**315/315** under the JIT and **306/306** under the interpreter (nine JIT-only
-tests skipped), and `make verify` passed 77 differential fixtures plus six
+On 2026-10-14, with every fixture provisioned, the strict suite passed
+**326/326** under the JIT and **317/317** under the interpreter (nine JIT-only
+tests skipped), and `make verify` passed 87 differential fixtures plus seven
 threaded oracle runs. Missing fixtures fail strict mode; environment skips
 (exit 77) stay visible. Details, history and fixture licensing are in
 [test evidence](Docs/TESTS.md) and [third-party notes](Docs/THIRD_PARTY.md).
@@ -292,8 +308,9 @@ adapter.
 - **AArch64 guests only** — no 32-bit ARM.
 - **x86_64 Linux hosts only** — other distributions are expected to work but
   only Ubuntu 24.04 is CI-built; see the [support matrix](Docs/SUPPORT.md).
-- **Android is experimental** — no Google Play services, media decoding or
-  complete system_server.
+- **Android is experimental** — Google Play services and complete system_server
+  remain absent. Small Codec2 decoding/Surface probes pass; full in-game video
+  and rewarded-ad playback are unverified.
 - **Untrusted binaries** — read the [security model](Docs/SECURITY.md) first.
 
 ## Documentation
@@ -303,7 +320,7 @@ The current version is **2.0.0-alpha.1**, the first pre-release toward the
 
 | Topic | Document |
 |---|---|
-| App status | [SpongeBob](Docs/Apps/spongebob.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
+| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
 | JIT internals | [JIT guide](Docs/JIT.md) |
 | Source layout | [Architecture](Docs/ARCHITECTURE.md) |
 | Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
@@ -311,13 +328,16 @@ The current version is **2.0.0-alpha.1**, the first pre-release toward the
 | Embedding | [C API and native bridge](Docs/EMBEDDING.md) |
 | Support and security | [Support matrix](Docs/SUPPORT.md), [security model](Docs/SECURITY.md) |
 | Tests and history | [Test evidence](Docs/TESTS.md), [changelog](Docs/CHANGELOG.md), [third-party notes](Docs/THIRD_PARTY.md) |
+| Licensing | [License scope and texts](LICENSES/README.md) |
 | Configuration | [`bifrost.toml.sample`](bifrost.toml.sample) |
 
 ## License
 
-Bifrost's original code and original regression tests use the
-[Unlicense](LICENSE). Third-party fixtures, vendored dependencies and game
-assets keep their own terms; the root license does not relicense them. See
+Bifrost's original code, original Asgard integration and original regression
+tests use the [Unlicense](LICENSE). Reused AOSP material keeps its upstream
+license; [LICENSES/](LICENSES/README.md) includes Apache 2.0 and Android source
+attribution alongside the project license. Third-party fixtures, vendored
+dependencies and game assets keep their own terms. See
 [third-party and test distribution notes](Docs/THIRD_PARTY.md).
 
 ## Contributing
@@ -329,7 +349,7 @@ assets keep their own terms; the root license does not relicense them. See
    report existing verifier failures separately from new ones.
 4. Preserve upstream notices for reused code and include validation evidence
    with your pull request. Original contributions, including tests, use the
-   Unlicense.
+   Unlicense; reused code retains its upstream license and attribution.
 
 Bug reports help most with the AArch64 binary (or a minimal reproducer), the
 exact command line, and the tail of `./bifrost-emu -v -d ... 2>&1`.

@@ -1,0 +1,46 @@
+Asgard / Android source attribution
+
+Guest/Android/Managed/Framework/FrameworkSettingsDefaults.java is generated
+from the following Android Open Source Project sources at android-15.0.0_r1.
+Their Apache License, Version 2.0 text is in Apache-2.0.txt.
+
+Bifrost adapts the source defaults, initialization expressions, public Settings
+names and validators into a generated fresh-user-0 profile. Upgrade migrations
+and device-specific overlays are not copied as a complete SettingsProvider.
+The generator records every input SHA-256 in the generated source header.
+
+packages/SettingsProvider/src/com/android/providers/settings/DatabaseHelper.java
+  Copyright (C) 2007 The Android Open Source Project
+  SHA-256: 01ea62c643a69cf0064f827cd73d3e2d6b96a696f6484095076159e8a8a537c4
+  https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/packages/SettingsProvider/src/com/android/providers/settings/DatabaseHelper.java
+
+packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java
+  Copyright (C) 2007 The Android Open Source Project
+  SHA-256: e4b1b99fd1323a4dec3ead95d4c3ea9266ce331ca65dd25a0d4725299a17cf14
+  https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java
+
+packages/SettingsProvider/res/values/defaults.xml
+  Copyright (c) 2009, The Android Open Source Project
+  SHA-256: 2bf2bf24a0f2a85d8120828a9e88b84bd400f9741fdf33085a1ecaef935073d7
+  https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/packages/SettingsProvider/res/values/defaults.xml
+
+packages/SettingsProvider/res/values/strings.xml
+  Copyright (c) 2007, The Android Open Source Project
+  SHA-256: 6ca009939a42b880d83bffb0861c8555cb44b7c4139262fdcb15df17d4852163
+  https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/packages/SettingsProvider/res/values/strings.xml
+
+core/java/android/provider/Settings.java
+  Copyright (C) 2006 The Android Open Source Project
+  SHA-256: 4820bf3f6e7599bb101daf02b3915bb2bd26f7a433f1c5ce93f9d0fff76874ad
+  https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/provider/Settings.java
+
+packages/SettingsProvider/src/android/provider/settings/validators/SystemSettingsValidators.java
+  Copyright (C) 2019 The Android Open Source Project
+  SHA-256: 3c66eb26972b19b3dd97557bfab0532647e9ef625b68db308f8d9e4a1ac9212e
+  https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/packages/SettingsProvider/src/android/provider/settings/validators/SystemSettingsValidators.java
+
+Downloaded Android runtime/framework/tool bundles retain their own upstream
+notices and individual licenses, including licenses other than Apache 2.0.
+The provisioners preserve their NOTICE files with the installed runtimes.
+This attribution file does not replace those notices or license every Android
+component, third-party dependency or game asset under Apache 2.0.

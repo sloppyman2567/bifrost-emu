@@ -4,11 +4,39 @@ Installed version: 5.12.0 (`com.tiltingpoint.spongebob`, pulled from the user's
 phone). Runtime contracts and the bug history behind each checkpoint are in
 [the Android runtime guide](../Android/ANDROID_RUNTIME.md).
 
-As of 2026-10-12 the user plays cooking levels, completes them, opens Settings
+As of 2026-10-14 the user plays cooking levels, completes them, opens Settings
 and Help Center, and the main HUD stays after closing Settings. Play renders
 at the host display's native density (2560x1384 or 3440x1384 px, 320 dpi on a
 200%-scaled 3440x1440 monitor). The child-age path is required: the adult path
 still stalls at 73% on Firebase/Google Play services.
+
+## Screenshots (2026-10-14)
+
+User-supplied captures from Bifrost 2.0.0-alpha.1 show the following scenes.
+The titles report Android EGL at 3440x1384 and the Radeon RX 7600 renderer.
+Their displayed 32.0–56.5 FPS values are momentary presentation statistics,
+not a benchmark average or a claim of sustained frame pacing.
+
+Cooking gameplay:
+
+![SpongeBob cooking gameplay with customer orders](../Images/SpongeBob-2026-10-14/gameplay.png)
+
+Level-14 pause menu:
+
+![SpongeBob level-14 pause menu](../Images/SpongeBob-2026-10-14/pause-menu.png)
+
+Lobby and progression HUD:
+
+![SpongeBob lobby and progression HUD](../Images/SpongeBob-2026-10-14/lobby.png)
+
+Help Center article rendered inside the game:
+
+![SpongeBob Help Center article](../Images/SpongeBob-2026-10-14/help-center.png)
+
+These images document visible gameplay and UI states. They do not establish
+working rewarded ads, purchases, Google Play-dependent features or complete
+WebView input. Upcoming compatibility, performance, ads and usability targets
+are in the [next-release roadmap](../roadmap.md#next-release-priorities).
 
 ## Fixed: character drawn incompletely after equipping (2026-10-12)
 
