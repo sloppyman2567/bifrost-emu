@@ -433,19 +433,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             // W^X: toggle to writable before patching the chain slot.
             make_writable();
             memcpy(saved_chain, code_buf_ + entry.chain_patch_off, 5);
-            if (chain_skip_enabled()) {
-                // Lease layout: the slot is 5 NOPs with the real ret in the
-                // cold exit AFTER it. Restore to NOPs so the block falls
-                // through into the cold exit (restores frame, returns).
-                for (int i = 0; i < 5; i++)
-                    code_buf_[entry.chain_patch_off + i] = 0x90;
-            } else {
-                code_buf_[entry.chain_patch_off] = 0xC3; // ret
-                code_buf_[entry.chain_patch_off + 1] = 0x90;
-                code_buf_[entry.chain_patch_off + 2] = 0x90;
-                code_buf_[entry.chain_patch_off + 3] = 0x90;
-                code_buf_[entry.chain_patch_off + 4] = 0x90;
-            }
+            // Lease layout: the slot is a five-byte NOP with the real ret in
+            // the cold exit AFTER it, so the block falls through into the
+            // cold exit (restores frame, returns). Default layout: `ret`.
+            write_unpatched_slot(entry.chain_patch_off);
             std::atomic_thread_fence(std::memory_order_release);
             // W^X: toggle back to executable before running the block.
             make_executable();
@@ -458,16 +449,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (was_taken_chained) {
             make_writable();
             memcpy(saved_taken_chain, code_buf_ + entry.taken_chain_patch_off, 5);
-            if (chain_skip_enabled()) {
-                for (int i = 0; i < 5; i++)
-                    code_buf_[entry.taken_chain_patch_off + i] = 0x90;
-            } else {
-                code_buf_[entry.taken_chain_patch_off] = 0xC3; // ret
-                code_buf_[entry.taken_chain_patch_off + 1] = 0x90;
-                code_buf_[entry.taken_chain_patch_off + 2] = 0x90;
-                code_buf_[entry.taken_chain_patch_off + 3] = 0x90;
-                code_buf_[entry.taken_chain_patch_off + 4] = 0x90;
-            }
+            write_unpatched_slot(entry.taken_chain_patch_off);
             std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }
@@ -483,11 +465,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (had_selfloop) {
             make_writable();
             memcpy(saved_selfloop, code_buf_ + entry.selfloop_patch_off, 5);
-            // 5× NOP (0x90) — fall through past the slot to whatever
+            // Five-byte NOP — fall through past the slot to whatever
             // code follows (the not-taken epilogue, which returns the
             // branch target as next PC).
-            for (int i = 0; i < 5; i++)
-                code_buf_[entry.selfloop_patch_off + i] = 0x90;
+            std::memcpy(code_buf_ + entry.selfloop_patch_off, kSlotNop5, 5);
             std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }

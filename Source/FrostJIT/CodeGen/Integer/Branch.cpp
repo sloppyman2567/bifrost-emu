@@ -147,7 +147,9 @@ void FrostJIT::emit_taken_path_epilogue() {
     // KEEP (not evict): the fall-through (main) epilogue is emitted LATER
     // and needs the same dirty state for its own writeback — a consuming
     // flush here would move the stale-reg bug to the fall-through path.
-    flush_all_vregs_keep();
+    // Only architectural registers: nothing after this exit reads a scratch
+    // stack slot.
+    flush_arch_vregs_keep();
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_tier2_edge_profile(true);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
@@ -163,8 +165,8 @@ void FrostJIT::emit_taken_path_epilogue() {
     //
     // CRITICAL: taken_chain_patch_off_ must be recorded at the START of
     // the actual 5-byte slot in BOTH layouts (patch_chain() guards on the
-    // slot's first byte being 0x90 / 0xC3). Under chain-skip the slot is
-    // the 5 NOPs emitted first; under the default layout the slot is the
+    // slot's first byte being kSlotNop5[0] / 0xC3). Under chain-skip the slot is
+    // the five-byte NOP emitted first; under the default layout the slot is the
     // `ret` emitted AFTER the callee-saved restore. Recording at the top of
     // the function (before the restore) left the default-mode offset 13
     // bytes early (pointing at `mov rsp,rbp`), so every default-mode
@@ -176,7 +178,7 @@ void FrostJIT::emit_taken_path_epilogue() {
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
         if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_);
-        else { emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop(); }
+        else emit_slot_nop5();
         // Cold exit (only reached when the slot above is unpatched).
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);

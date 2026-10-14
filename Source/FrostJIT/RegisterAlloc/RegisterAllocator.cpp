@@ -459,6 +459,35 @@ void FrostJIT::flush_all_vregs() {
         }
     }
 }
+// Block-exit forms: the code after an exit never reads a scratch vreg's
+// stack slot, so only architectural registers are written back. The final
+// epilogue unmaps dirty scratch vregs without storing them; the taken-path
+// epilogue keeps every mapping and dirty bit for the fall-through emission,
+// which still spills a scratch value itself if it later needs the slot.
+void FrostJIT::flush_all_vregs_exit() {
+    uint16_t m = dirty_host_regs_;
+    while (m) {
+        int r = __builtin_ctz(m);
+        m &= m - 1;
+        int v = reg_vreg_[r];
+        if (v < 0 || !vreg_dirty_[v]) continue;
+        if (v <= 31) { evict_vreg(v); continue; }
+        vreg_home_[v] = -1;
+        reg_vreg_[r] = -1;
+        vreg_dirty_[v] = false;
+        vreg_last_use_[v] = 0;
+        dirty_host_regs_ &= ~(1u << r);
+    }
+}
+void FrostJIT::flush_arch_vregs_keep() {
+    uint16_t m = dirty_host_regs_;
+    while (m) {
+        int r = __builtin_ctz(m);
+        m &= m - 1;
+        int v = reg_vreg_[r];
+        if (v >= 0 && v <= 31 && vreg_dirty_[v]) emit_store_arm(v, r);
+    }
+}
 void FrostJIT::flush_all_vregs_keep() {
     // Same stores as flush_all_vregs, but the cache mappings and dirty
     // bits are left intact for a LATER epilogue to flush again. Both

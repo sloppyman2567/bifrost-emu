@@ -23,6 +23,7 @@
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Emulator.hpp"  // Emulator complete type (for slow-path helpers)
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -214,7 +215,7 @@ void FrostJIT::emit_store8(int base, int32_t off, int src) {
     emit_modrm_disp(src, base, off);
 }
 void FrostJIT::emit_add_reg(int dst, int src) {
-    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x01); emit_byte(modrm(3,src&7,dst&7));
+    emit_alu_rex(src>=8,false,dst>=8); emit_byte(0x01); emit_byte(modrm(3,src&7,dst&7));
 }
 void FrostJIT::emit_add_reg_imm(int dst, int32_t imm) {
     // add r64, imm8/imm32: REX.W 83 /0 ib  |  REX.W 81 /0 id
@@ -229,17 +230,23 @@ void FrostJIT::emit_add_reg_imm(int dst, int32_t imm) {
 void FrostJIT::emit_alu_imm(int dst, int kind, int32_t imm) {
     // r64, imm8/imm32 with the /digit from `kind` (0=ADD 1=OR 4=AND
     // 5=SUB 6=XOR), for constant-src2 folding. Same encoding family as
-    // emit_add_reg_imm; imm32 sign-extends to 64 bits.
+    // emit_add_reg_imm; imm32 sign-extends to 64 bits (32 under alu_w32_).
     if (imm >= -128 && imm <= 127) {
-        emit_byte(rex(true,false,false,dst>=8));
+        emit_alu_rex(false,false,dst>=8);
         emit_byte(0x83); emit_byte(modrm(3,kind,dst&7)); emit_byte(static_cast<uint8_t>(imm));
     } else {
-        emit_byte(rex(true,false,false,dst>=8));
+        emit_alu_rex(false,false,dst>=8);
         emit_byte(0x81); emit_byte(modrm(3,kind,dst&7)); emit_u32(static_cast<uint32_t>(imm));
     }
 }
+// REX for the ALU emitters: REX.W unless alu_w32_ selects the 32-bit form,
+// whose result zero-extends bits 63:32. A bare 0x40 prefix is omitted.
+void FrostJIT::emit_alu_rex(bool r, bool x, bool b) {
+    const uint8_t prefix = rex(!alu_w32_, r, x, b);
+    if (prefix != 0x40) emit_byte(prefix);
+}
 void FrostJIT::emit_sub_reg(int dst, int src) {
-    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x29); emit_byte(modrm(3,src&7,dst&7));
+    emit_alu_rex(src>=8,false,dst>=8); emit_byte(0x29); emit_byte(modrm(3,src&7,dst&7));
 }
 void FrostJIT::emit_adc_reg(int dst, int src) {
     // adc r64, r64: REX.W 11 /r
@@ -250,16 +257,16 @@ void FrostJIT::emit_sbb_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x19); emit_byte(modrm(3,src&7,dst&7));
 }
 void FrostJIT::emit_and_reg(int dst, int src) {
-    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x21); emit_byte(modrm(3,src&7,dst&7));
+    emit_alu_rex(src>=8,false,dst>=8); emit_byte(0x21); emit_byte(modrm(3,src&7,dst&7));
 }
 void FrostJIT::emit_or_reg(int dst, int src) {
-    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x09); emit_byte(modrm(3,src&7,dst&7));
+    emit_alu_rex(src>=8,false,dst>=8); emit_byte(0x09); emit_byte(modrm(3,src&7,dst&7));
 }
 void FrostJIT::emit_xor_reg(int dst, int src) {
-    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x31); emit_byte(modrm(3,src&7,dst&7));
+    emit_alu_rex(src>=8,false,dst>=8); emit_byte(0x31); emit_byte(modrm(3,src&7,dst&7));
 }
 void FrostJIT::emit_imul_reg(int dst, int src) {
-    emit_byte(rex(true,dst>=8,false,src>=8)); emit_byte(0x0F); emit_byte(0xAF); emit_byte(modrm(3,dst&7,src&7));
+    emit_alu_rex(dst>=8,false,src>=8); emit_byte(0x0F); emit_byte(0xAF); emit_byte(modrm(3,dst&7,src&7));
 }
 void FrostJIT::emit_test_reg(int a, int b) {
     emit_byte(rex(true,b>=8,false,a>=8)); emit_byte(0x85); emit_byte(modrm(3,b&7,a&7));
@@ -292,6 +299,18 @@ void FrostJIT::emit_call_abs(void* target) {
 }
 void FrostJIT::emit_ret() { emit_byte(0xC3); }
 void FrostJIT::emit_nop() { emit_byte(0x90); }
+// One decoded instruction instead of five single-byte NOPs on every
+// unchained exit and indirect-branch probe.
+void FrostJIT::emit_slot_nop5() { for (uint8_t b : kSlotNop5) emit_byte(b); }
+void FrostJIT::write_unpatched_slot(size_t off) {
+    if (chain_skip_enabled()) {
+        std::memcpy(code_buf_ + off + 1, kSlotNop5 + 1, 4);
+        std::atomic_thread_fence(std::memory_order_release);
+        code_buf_[off] = kSlotNop5[0];
+    } else {
+        code_buf_[off] = 0xC3;  // ret; the following bytes never execute
+    }
+}
 void FrostJIT::emit_push(int reg) {
     if (reg>=8) { emit_byte(0x41); emit_byte(0x50+(reg&7)); }
     else emit_byte(0x50+reg);

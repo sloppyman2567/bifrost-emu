@@ -105,6 +105,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     cache_ir.insts = region_ir;
     if (!vec_cache_may_enable(cache_ir)) fp_cache_may_enable(cache_ir);
     regalloc_stats_reset();
+    // Regions keep guarded-access cold paths inline (Tier-1 only defers).
+    defer_guards_ = false;
+    deferred_guards_.clear();
     size_t block_start = code_buf_used_;
     // A region can be smaller than the preceding Tier-1 block. Clearing
     // only its own vregs leaves stale homes above region_max_vreg, then
@@ -171,6 +174,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // (emits the mov on mismatch, so a non-folding consumer still finds
         // the vreg mapped). The shift kind-2 fold has no extra guards.
         fold_ahead_kind_.assign(n, 0);
+        zext32_fused_.clear();  // Tier-1 only (BlockCompiler pre-scan)
         for (size_t i = 0; i < n; i++) {
             const IRInst& im = region_ir[i];
             if (im.op != IROp::IMM) continue;

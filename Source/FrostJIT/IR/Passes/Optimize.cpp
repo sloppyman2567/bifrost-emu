@@ -799,6 +799,12 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 break;
         }
     }
+    // Folding rewrites ops into IMM in place. An IMM's only payload is imm:
+    // stale operand fields would keep folded-away producers live through DCE
+    // and register-allocator use scans (a MOVZ/MOVK chain emitted every
+    // intermediate constant). Clear them before liveness is computed.
+    for (IRInst& inst : block.insts)
+        if (inst.op == IROp::IMM) inst.src1 = inst.src2 = inst.aux = 0;
     // ── Pass 1.5: post-substitution dead-store elimination ───────
     // After Pass 1, LOAD_REGs may have been substituted to MOVs (which
     // are then turned into copy relations or DCE'd). This reveals dead

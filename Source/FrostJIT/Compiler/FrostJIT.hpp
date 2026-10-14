@@ -686,6 +686,14 @@ public:
     static constexpr uint32_t kChainSkipFrameBytes = 0x8000;  // 32 KiB
     // Read once. True unless BIFROST_NO_CHAIN_SKIP=1.
     static bool chain_skip_enabled();
+    // Unpatched single-thread chain slot under chain-skip: one five-byte NOP
+    // (0F 1F 44 00 00). Its first byte marks the slot unpatched; patching
+    // writes the rel32 bytes, then 0xE9. The default layout keeps ret + NOPs.
+    static constexpr uint8_t kSlotNop5[5] = {0x0F, 0x1F, 0x44, 0x00, 0x00};
+    static uint8_t unpatched_slot_opcode() { return chain_skip_enabled() ? kSlotNop5[0] : 0xC3; }
+    // Restore a patched ST slot: under chain-skip the bytes after the opcode
+    // execute, so they are rewritten first; the opcode byte is written last.
+    void write_unpatched_slot(size_t off);
     // Direct BL call gate (default ON). BL_CALL sites emit a patchable
     // `call rel32` to the target block fn directly instead of going
     // through jit_call_helper → lookup_call_target. Disable with
@@ -795,6 +803,30 @@ private:
     size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
     bool compile_guarded_mem(const IRInst& inst);
     void emit_memory_fault_exit(const IRInst& inst, bool recoverable);
+    // Tier-1 guarded accesses keep only the bounds and sticky software-check
+    // tests inline. The software page checks and the recoverable fault exit
+    // are emitted after the block (flush_deferred_guards) from the GPR/vector
+    // cache state captured where the access diverts, so the fast path takes
+    // no branch. Tier-2 regions keep the inline layout (defer_guards_ false).
+    struct GuardState {
+        int reg_vreg[16];
+        uint16_t dirty_mask;
+        bool vec_dirty[32];
+    };
+    struct DeferredGuard {
+        IRInst inst;
+        int effective, temp, page;
+        uint8_t width, required, mask;
+        size_t access, sw_jump, site_index;
+        bool has_site;
+        std::vector<size_t> cold;  // jcc placeholders targeting the fault exit
+        GuardState state;
+    };
+    bool defer_guards_ = false;
+    std::vector<DeferredGuard> deferred_guards_;
+    GuardState capture_guard_state() const;
+    void swap_guard_state(GuardState& state);  // exchange with the live state
+    void flush_deferred_guards();
     static thread_local std::atomic<FrostJIT*> fault_jit_;
     void init_fault_recovery();
     void destroy_fault_recovery();
@@ -1141,6 +1173,10 @@ private:
     void emit_or_reg(int dst, int src);
     void emit_xor_reg(int dst, int src);
     void emit_imul_reg(int dst, int src);
+    // ADD/SUB/AND/OR/XOR/IMUL reg and emit_alu_imm use REX.W unless
+    // alu_w32_ is set (W-form op fused with its ZEXT 32; see zext32_fused_).
+    void emit_alu_rex(bool r, bool x, bool b);
+    bool alu_w32_ = false;
     void emit_test_reg(int a, int b);
     void emit_cmp_reg(int a, int b);
     void emit_shift_cl(int dst, int kind);
@@ -1152,6 +1188,7 @@ private:
     void emit_call_abs(void* target);
     void emit_ret();
     void emit_nop();
+    void emit_slot_nop5();  // kSlotNop5
     void emit_push(int reg);
     void emit_pop(int reg);
     // Emit the conditional-branch TAKEN-path epilogue: store RAX to cpu.pc,
@@ -1433,6 +1470,10 @@ private:
     // x22/x19 read pre-branch values and died in a null call). Same
     // hazard class as vec_cache_writeback_all(false) above it.
     void flush_all_vregs_keep();
+    // Block-exit epilogues: write back architectural registers only (see
+    // RegisterAllocator.cpp); scratch stack slots are never read afterwards.
+    void flush_all_vregs_exit();
+    void flush_arch_vregs_keep();
     void store_dirty_unpinned_arch_regs();  // self-loop back-edge writeback
     void invalidate_all_vregs();
     // ── Targeted flush/invalidate ───────────────────
@@ -1710,6 +1751,11 @@ private:
     // mov never leaves a vreg unmapped that the consumer then reads (its
     // ensure_vreg would reload garbage from the stack slot).
     std::vector<uint8_t> fold_ahead_kind_;
+    // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, SEXT 8/16) defines a
+    // scratch vreg read only by op i+1, a ZEXT 32 of it. Op i is emitted in
+    // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
+    // when it keeps the same host register. Tier-1 only; empty elsewhere.
+    std::vector<uint8_t> zext32_fused_;
     // ── Block-local constant tracking ────────────────────────────────
     // jit_consts_[v] = constant value of scratch vreg `v`, populated when
     // the IMM op that defines it is compiled. Used to fold a constant src2

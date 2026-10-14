@@ -68,3 +68,11 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   instruction words (`code_words_`) are unchanged. A translation must depend
   on no other guest bytes: a new compile-time guest read must be recorded or
   must leave `code_words_count` zero. Callers pass a `CodeInvalidation` reason.
+- Known-entry loop growth uses cached branch metadata only as a hint; actual
+  translation retains all limits and records every absorbed instruction word.
+- Tier-1 deferred guard tails must restore the allocator/vector dirty state
+  captured before the access and finalize fault-site offsets before publication.
+  Tier-2 keeps inline guards. W-form fusion is Tier-1-only and must scope its
+  encoding width to the ALU operation, preserving operand setup and lazy NZCV.
+- Restore the complete ST chain-skip slot through `write_unpatched_slot`;
+  its unpatched form is `kSlotNop5`. MT revokes data cells, never instructions.

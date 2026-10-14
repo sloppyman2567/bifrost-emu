@@ -1,5 +1,42 @@
 # Tests
 
+## Tier-1 hot-path code reduction (2026-10-14)
+
+The codegen/dispatch batch described in [JIT.md](JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
+passed the following checks with host-device access:
+
+- SDL/GL executable/library and separate headless executable/library builds;
+  `make generated-check`.
+- `make verify`: 87 differential fixtures and seven threaded oracle runs,
+  including its independent scalar SSA host oracle.
+- Serial strict JIT suite: 326/326. Interpreter: 317/317, nine JIT-only skips.
+  An initial concurrent run failed only `xwayland_wire`; it passed alone and
+  in the subsequent serial full run. The cause of that transient failure was
+  not independently established.
+- Ordinary frame layout: 36 selected JIT, userfaultfd, permission, shared-alias
+  and LSE checks, all passing (`BIFROST_NO_CHAIN_SKIP=1`).
+- Tier-2 discovery, feedback and timing oracles in ST/MT and both layouts;
+  20 mutex promotion-stress runs; all five `test_jit_mt.sh` configurations;
+  publication/lease checks in both layouts.
+
+`jit_mt_publication.cpp` now warms a loop's interior entry before its head.
+It checks five-instruction heads for B.cond, CBZ/CBNZ, TBZ/TBNZ and B,
+independent arithmetic results for the finite conditional loops, retained
+function identity after unchanged protection, and retirement/retranslation
+after rewriting an absorbed interior word. A differently targeted loop and
+a tail exceeding the remaining instruction budget must keep their split.
+These run in ST/MT and both frame layouts. The unconditional loop is checked
+for shape and dependencies only, not executed indefinitely.
+
+CoreMark used the saved pre-batch executable, the same guest ELF, normal JIT
+defaults, one warm-up each and three interleaved runs each at exactly 110,000
+iterations. Throughput samples were 8,916.99/8,926.40/9,002.37 before and
+10,005.46/9,923.32/10,030.09 after. All seed/list/matrix/state/final CRCs
+matched the benchmark runner's QEMU-checked expectations. The combined
+median improvement was 12.1%; it is a local benchmark observation. No new
+game FPS/stability, complete FPCR/FPSR, arbitrary concurrent mapping-race or
+cross-host performance claim follows from these checks.
+
 ## Realm-owned host media decoding (2026-10-14)
 
 Two Java MediaCodec clients (UIDs 10000/10001) shared one realm, each

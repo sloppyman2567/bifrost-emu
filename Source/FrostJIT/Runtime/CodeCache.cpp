@@ -368,9 +368,9 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     }
     if (chain_patch_off + 5 > CODE_BUF_SIZE) return false;
     // Verify the slot still contains the unpatched pattern: `ret` + NOPs
-    // (default) or 5 NOPs (chain-skip lease layout). If it's already
-    // patched (0xE9), don't patch again.
-    if (code_buf_[chain_patch_off] != (chain_skip_enabled() ? 0x90 : 0xC3)) return false;
+    // (default) or one five-byte NOP (chain-skip lease layout, kSlotNop5).
+    // If it's already patched (0xE9), don't patch again.
+    if (code_buf_[chain_patch_off] != unpatched_slot_opcode()) return false;
     // Compute the relative displacement: target - (slot + 5).
     int32_t rel = static_cast<int32_t>(target_fn
                             - (code_buf_ + chain_patch_off + 5));
@@ -378,13 +378,13 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     // is cheap if the buffer is already writable (e.g., during translate_block).
     // If W^X is disabled, this is a no-op.
     make_writable();
-    // Thread-safe publication: write the 4 displacement bytes FIRST, then
-    // the opcode byte LAST with release ordering. An executing thread
-    // fetching these 5 bytes concurrently then observes either:
-    //   - the old opcode (ret/0xC3 or NOP/0x90) → runs the unpatched
-    //     slot (returns to the dispatcher — safe), or
-    //   - 0xE9 with a fully-written rel32 → jumps to the target (safe).
-    // A torn rel32 with a premature 0xE9 (the old order: opcode first)
+    // Publication order: write the 4 displacement bytes FIRST, then the
+    // opcode byte LAST with release ordering. Only single-thread execution
+    // patches instructions (MT publishes data cells), so no CPU runs this
+    // slot meanwhile. For the default layout a concurrent fetch would still
+    // see either the old `ret` or 0xE9 with a complete rel32; under
+    // chain-skip the bytes after the old opcode execute, so that guarantee
+    // does not extend to it. A premature 0xE9 (the old order: opcode first)
     // jumps to a wild address. x86 stores are TSO-ordered and the fence
     // constrains the compiler, so the opcode store is globally observed
     // after the rel32 stores. Single-byte stores are atomic on x86.
@@ -727,7 +727,6 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
 void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
     // Caller holds the compiler lock and has selected exact victims.
     if (victims.empty()) return;
-    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     invalidate_dispatch_cache();
     auto unpatch_slot = [&](size_t off) {
         if (mt_active()) {
@@ -739,8 +738,7 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
         if (code_buf_[off] != 0xE9) return;  // not patched — leave alone
         // Chain-skip falls through all five bytes. Leaving the old rel32
         // behind would execute displacement bytes as instructions.
-        if (chain_skip_enabled()) std::memset(code_buf_ + off + 1, 0x90, 4);
-        code_buf_[off] = unpatched;
+        write_unpatched_slot(off);
     };
     if (!mt_active()) make_writable();
     for (uint64_t vpc : victims) {
@@ -792,7 +790,6 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
     if (!mt_active()) make_executable();
 }
 void FrostJIT::invalidate_all() {
-    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     log_invalidation_for_compiles(0, UINT64_MAX);
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
@@ -824,15 +821,13 @@ void FrostJIT::invalidate_all() {
         BlockEntry& e = kv.second;
         if (e.chained && e.chain_patch_off + 5 <= CODE_BUF_SIZE
             && code_buf_[e.chain_patch_off] == 0xE9) {
-            if (chain_skip_enabled()) std::memset(code_buf_ + e.chain_patch_off + 1, 0x90, 4);
-            code_buf_[e.chain_patch_off] = unpatched;
+            write_unpatched_slot(e.chain_patch_off);
             e.chained = false;
         }
         if (e.taken_chained && e.has_taken_chain_slot
             && e.taken_chain_patch_off + 5 <= CODE_BUF_SIZE
             && code_buf_[e.taken_chain_patch_off] == 0xE9) {
-            if (chain_skip_enabled()) std::memset(code_buf_ + e.taken_chain_patch_off + 1, 0x90, 4);
-            code_buf_[e.taken_chain_patch_off] = unpatched;
+            write_unpatched_slot(e.taken_chain_patch_off);
             e.taken_chained = false;
         }
     }
@@ -865,13 +860,11 @@ void FrostJIT::enter_multithreaded() {
         edge->target.store(0, std::memory_order_release);
     }
     mt_source_refs_.clear();
-    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
     for (auto& kv : blocks_) {
         auto& entry = kv.second;
         for (size_t off : {entry.chain_patch_off, entry.taken_chain_patch_off})
             if (off && off + 5 <= CODE_BUF_SIZE && code_buf_[off] == 0xE9) {
-                if (chain_skip_enabled()) std::memset(code_buf_ + off + 1, 0x90, 4);
-                code_buf_[off] = unpatched;
+                write_unpatched_slot(off);
             }
         tier2_counter_disable(entry.tier2_counter_off, entry.tier2_counter_len, true);
     }

@@ -20,6 +20,7 @@
 #include "FrostJIT/IR/IR.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 namespace arm64emu {
 // Scalar native accesses use allocator-selected scratch registers. Only the
 // cold exit spills live state for a C call; successful accesses retain all
@@ -82,11 +83,36 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     // Activation is sticky and visible to already compiled code. Never hoist
     // this check out of a loop: another CPU can enable userfaultfd tracking.
     emit_test_software_checks();
-    const size_t bypass_pages = emit_jcc_rel32_placeholder(4);
-    const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
     const uint8_t required = Memory::GUEST_PAGE_MAPPED |
         (load ? Memory::GUEST_PROT_READ : Memory::GUEST_PROT_WRITE);
     const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
+    if (defer_guards_) {
+        // Fast path falls through to the access; the software page checks
+        // and the fault exit follow the block (flush_deferred_guards). The
+        // GPR/vector state is captured here, where both cold paths divert,
+        // exactly as the inline fault exit below would see it.
+        DeferredGuard guard{inst, effective, temp, page, mp.width, required, mask,
+                            0, emit_jcc_rel32_placeholder(5) /* JNE */, 0, false,
+                            std::move(cold), capture_guard_state()};
+        guard.access = code_buf_used_;
+        // Placeholder recovery offset: flush_deferred_guards patches the
+        // registered site with the real stub offset before publication.
+        memory_fault_stub_ = 1;
+        guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
+        if (load) {
+            emit_load_mem(page, effective, 0, mp.width, false);
+            set_vreg_reg(inst.dest, page);
+        } else {
+            emit_store_mem(effective, 0, value, mp.width);
+        }
+        guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
+        memory_fault_stub_ = 0;
+        deferred_guards_.push_back(std::move(guard));
+        pinned_host_regs_ = saved_pins;
+        return true;
+    }
+    const size_t bypass_pages = emit_jcc_rel32_placeholder(4);
+    const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
     auto check_page = [&] {
         emit_mov_imm64(temp, flags);
         emit_add_reg(temp, page);
@@ -128,6 +154,81 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     }
     pinned_host_regs_ = saved_pins;
     return true;
+}
+// The fault exit reads only the host-register mappings, their dirty bits and
+// the vector cache's dirty flags (layout and block-wide write sets are fixed
+// for the block), so this is the complete state it observes.
+FrostJIT::GuardState FrostJIT::capture_guard_state() const {
+    GuardState state;
+    for (int r = 0; r < 16; ++r) state.reg_vreg[r] = reg_vreg_[r];
+    state.dirty_mask = dirty_host_regs_;
+    std::memcpy(state.vec_dirty, vec_dirty_, sizeof(state.vec_dirty));
+    return state;
+}
+void FrostJIT::swap_guard_state(GuardState& state) {
+    const GuardState live = capture_guard_state();
+    for (int r = 0; r < 16; ++r) {
+        if (reg_vreg_[r] < 0) continue;
+        vreg_home_[reg_vreg_[r]] = -1;
+        vreg_dirty_[reg_vreg_[r]] = false;
+        reg_vreg_[r] = -1;
+    }
+    for (int r = 0; r < 16; ++r) {
+        const int v = state.reg_vreg[r];
+        if (v < 0) continue;
+        reg_vreg_[r] = v;
+        vreg_home_[v] = r;
+        vreg_dirty_[v] = (state.dirty_mask >> r) & 1;
+    }
+    dirty_host_regs_ = state.dirty_mask;
+    std::memcpy(vec_dirty_, state.vec_dirty, sizeof(state.vec_dirty));
+    state = live;
+}
+// Emit each deferred guard's cold code after the block: the software page
+// checks (jumping back to the access when they pass) and the recoverable
+// fault exit, with the state captured at the access temporarily installed.
+void FrostJIT::flush_deferred_guards() {
+    const uint64_t flags = guest_memory_ ?
+        reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags()) : 0;
+    for (DeferredGuard& g : deferred_guards_) {
+        patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
+        auto check_page = [&] {
+            emit_mov_imm64(g.temp, flags);
+            emit_add_reg(g.temp, g.page);
+            emit_load8(g.temp, g.temp, 0);
+            emit_alu_imm(g.temp, 4, g.mask);
+            emit_alu_imm(g.temp, 7, g.required);
+            g.cold.push_back(emit_jcc_rel32_placeholder(5));
+        };
+        emit_mov_reg(g.page, g.effective);
+        emit_shift_imm8(g.page, 5, 12);
+        check_page();
+        if (g.width > 1) {
+            emit_mov_reg(g.temp, g.effective);
+            emit_add_reg_imm(g.temp, g.width - 1);
+            emit_shift_imm8(g.temp, 5, 12);
+            emit_cmp_reg(g.temp, g.page);
+            const size_t same_page = emit_jcc_rel32_placeholder(4);
+            patch_jcc_rel32(same_page, static_cast<int32_t>(g.access - (same_page + 6)));
+            emit_mov_reg(g.page, g.temp);
+            check_page();
+        }
+        const size_t back = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(back, static_cast<int32_t>(g.access - (back + 5)));
+        const size_t stub = code_buf_used_;
+        for (size_t p : g.cold)
+            patch_jcc_rel32(p, static_cast<int32_t>(stub - (p + 6)));
+        swap_guard_state(g.state);
+        emit_memory_fault_exit(g.inst, true);
+        swap_guard_state(g.state);
+        if (g.has_site) {
+            const uint64_t entry = fault_sites_[g.site_index].load(std::memory_order_relaxed);
+            fault_sites_[g.site_index].store((entry & ~uint64_t(0xFFFFFFFF)) | stub,
+                                             std::memory_order_relaxed);
+        }
+    }
+    deferred_guards_.clear();
+    memory_fault_stub_ = 0;
 }
 // ── FrostJIT::compile_ir_mem ───────────────────────────────────────────
 // Handles LOAD_MEM, STORE_MEM, LOAD_REG, STORE_REG. These are the only

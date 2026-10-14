@@ -195,8 +195,7 @@ void FrostJIT::revoke_tier2_samples_locked(Tier2Trial& trial) {
             if (!off || off + 5 > CODE_BUF_SIZE || mt_edge_slots_.count(off)) continue;
             if (code_buf_[off] != 0xE9) continue;
             make_writable();
-            std::memset(code_buf_ + off, 0x90, 5);
-            if (!chain_skip_enabled()) code_buf_[off] = 0xC3;
+            write_unpatched_slot(off);
             make_executable();
         }
     }

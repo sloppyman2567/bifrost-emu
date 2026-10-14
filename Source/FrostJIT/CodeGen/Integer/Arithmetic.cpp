@@ -97,6 +97,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // LEA preserves host flags. Keep lazy NZCV across ADD and a
             // foldable SUB, avoiding materialization and its three spills.
             // Negating INT32_MIN does not fit LEA's signed displacement.
+            // W-form fusion (zext32_fused_): 32-bit encodings; the next ZEXT
+            // 32 then needs no instruction.
+            const bool w32 = cur_op_index_ < zext32_fused_.size() && zext32_fused_[cur_op_index_];
             bool lea_sub = false;
             if (inst.op == IROp::SUB && inst.dest != inst.src2 &&
                 inst.src1 != inst.src2 && vreg_last_use_this_op(inst.src2)) {
@@ -136,10 +139,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                             if (d != s1 && inst.op != IROp::MUL &&
                                 inst.op != IROp::ADD && !lea_sub) emit_mov_reg(d, s1);
                         }
+                        alu_w32_ = w32;  // encodings only; operands are set up
                         if (inst.op == IROp::MUL) {
                             // IMUL r64,r/m64,imm8/imm32 sign-extends its
                             // immediate; the fit check above is mandatory.
-                            emit_byte(rex(true, d >= 8, false, s1 >= 8));
+                            emit_alu_rex(d >= 8, false, s1 >= 8);
                             const bool byte_imm = imm >= -128 && imm <= 127;
                             emit_byte(byte_imm ? 0x6B : 0x69);
                             emit_byte(modrm(3, d & 7, s1 & 7));
@@ -147,11 +151,12 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                             else emit_u32(static_cast<uint32_t>(imm));
                         } else if (inst.op == IROp::ADD || lea_sub) {
                             if (flags_in_host_ || d != s1) {
-                                emit_byte(rex(true, d >= 8, false, s1 >= 8));
+                                emit_alu_rex(d >= 8, false, s1 >= 8);
                                 emit_byte(0x8D);
                                 emit_modrm_disp(d, s1, lea_sub ? -imm : imm);
                             } else emit_alu_imm(d, kind, imm);
                         } else emit_alu_imm(d, kind, imm);
+                        alu_w32_ = false;
                         if (inst.dest == inst.src1) {
                             vreg_dirty_[inst.dest] = true;
                             dirty_host_regs_ |= (1u << d);
@@ -178,21 +183,24 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     vreg_last_use_this_op(inst.src2) &&
                     !(pinned_host_regs_ & (1u << s2)))) d = s2;
                 else d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);
+                alu_w32_ = w32;
                 if (flags_in_host_ || d != s1) {
                     // Allocatable registers exclude RSP. R12 is a valid
                     // SIB index with REX.X; R13 as base needs disp8=0.
                     const bool disp = (s1 & 7) == 5;
-                    emit_byte(rex(true, d >= 8, s2 >= 8, s1 >= 8));
+                    emit_alu_rex(d >= 8, s2 >= 8, s1 >= 8);
                     emit_byte(0x8D);
                     emit_byte(modrm(disp ? 1 : 0, d & 7, 4));
                     emit_byte(sib(0, s2 & 7, s1 & 7));
                     if (disp) emit_byte(0);
                 } else emit_add_reg(d, s2);
+                alu_w32_ = false;
                 set_vreg_reg(inst.dest, d);
                 return 0;
             }
             // emit_alu_op: emit `d = d op src` for the current inst.op.
             auto emit_alu_op = [&](int d, int src) {
+                alu_w32_ = w32;
                 switch (inst.op) {
                     case IROp::ADD: emit_add_reg(d, src); break;
                     case IROp::SUB: emit_sub_reg(d, src); break;
@@ -202,6 +210,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     case IROp::MUL: emit_imul_reg(d, src); break;
                     default: break;
                 }
+                alu_w32_ = false;
             };
             if (inst.dest == inst.src1) {
                 // dest == src1: compute in s1 (in-place modify).
@@ -370,8 +379,12 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int s = ensure_vreg(inst.src1);
             int d = result_reg(inst.src1, s);
             if (movsx) {
-                // REX.W is always present, so byte sources 4-7 are SPL..DIL.
-                emit_byte(rex(true, d >= 8, false, s >= 8));
+                // A REX prefix is always present, so byte sources 4-7 are
+                // SPL..DIL. Fused with a following ZEXT 32 (8/16-bit only),
+                // MOVSX r32 extends into bits 31:0 and clears bits 63:32.
+                const bool w32 = bits != 32 && cur_op_index_ < zext32_fused_.size() &&
+                                 zext32_fused_[cur_op_index_];
+                emit_byte(rex(!w32, d >= 8, false, s >= 8));
                 if (bits == 32) {
                     emit_byte(0x63);                           // movsxd r64, r/m32
                 } else {
@@ -395,7 +408,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (bits < 64 && bits != 32 && bits != 16 && bits != 8) clobber_flags();
             int s = ensure_vreg(inst.src1);
             int d = result_reg(inst.src1, s);
-            if (bits == 32) {
+            const bool fused = cur_op_index_ > 0 && cur_op_index_ - 1 < zext32_fused_.size() &&
+                               zext32_fused_[cur_op_index_ - 1];
+            if (bits == 32 && fused && d == s) {
+                // The preceding ALU op wrote its 32-bit form: already clear.
+            } else if (bits == 32) {
                 // mov e_d, e_s zero-extends to 64 bits.
                 if (d >= 8 || s >= 8) emit_byte(rex(false, s >= 8, false, d >= 8));
                 emit_byte(0x89); emit_byte(modrm(3, s & 7, d & 7));

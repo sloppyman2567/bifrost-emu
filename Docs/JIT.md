@@ -11,6 +11,42 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Tier-1 hot-path code reduction (2026-10-14)
+
+CoreMark profiles attributed 99.4% of samples to generated code; the
+dispatch microbenchmark attributed 96%. This batch reduces that code:
+
+- Folded `IMM` operations clear obsolete source/auxiliary operands before
+  liveness analysis, allowing dead MOVZ/MOVK intermediates to disappear.
+- A scratch ALU result consumed immediately by `ZEXT 32` uses the x86
+  32-bit ADD/SUB/AND/OR/XOR/IMUL form. SEXT 8/16 similarly uses MOVSX r32.
+  Operand setup keeps its normal width; only the operation encoding changes.
+  A following extension needs no instruction when it retains the same host
+  register. Tier-2 retains its existing extension path.
+- Guarded scalar accesses retain bounds and the sticky software-check test
+  inline, with successful native accesses falling through. Tier-1 emits
+  page checks and recoverable fault exits after the block, using captured
+  GPR mappings, dirtiness and vector dirtiness. Fault-site offsets are fixed
+  before code publication. Tier-2 retains inline cold paths.
+- Final/taken exits write architectural GPRs without spilling dead scratch
+  values; taken-path emission retains allocator state for fall-through.
+- Unpatched ST chain-skip slots use one five-byte NOP (`0F 1F 44 00 00`).
+  Verification, invalidation and trial revocation restore the whole slot.
+  Ordinary frames keep their return slot; MT keeps immutable instructions
+  and atomic target cells.
+- An existing native entry whose bounded tail branches back to the current
+  head no longer forces a split. Cached branch metadata is only a growth
+  hint: normal translation fetches and records every word and retains all
+  instruction, fallback and IR/vreg limits. This avoids speculative guest
+  reads and permits the existing self-loop emitter to retain loop state.
+
+Three interleaved 110,000-iteration CoreMark runs per binary, after one
+warm-up each, measured medians of 8,926.40 iterations/s for the saved
+pre-batch binary and 10,005.46 iterations/s after this batch (12.1% higher).
+Every run exceeded ten seconds and validated all CRCs. This measures the
+combined batch on one host, not each change separately or game FPS. See
+[validation and limits](TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
+
 ## Scalar FP scratch preservation (2026-10-13)
 
 Scalar ADD/SUB/MUL/DIV, min/max, SQRT and register MOV use XMM scratch

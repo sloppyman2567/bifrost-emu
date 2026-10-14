@@ -11,6 +11,75 @@
 #include <thread>
 #include <vector>
 using namespace arm64emu;
+static bool check_entry_order_loops(bool mt) {
+    constexpr uint64_t head = 0x90000, stop = 0xa0000;
+    // Warm the interior entry first, as CoreMark's list walk does. Every
+    // direct conditional family must still form one five-instruction head.
+    const uint32_t branches[] = {0x54ffff81, 0xb5ffff80, 0xb4ffff80,
+                                 0x3647ff80, 0x3747ff80, 0x17fffffc};
+    for (unsigned kind = 0; kind < sizeof(branches) / sizeof(*branches); ++kind) {
+        auto e = std::make_unique<Emulator>();
+        if (!e->mem().map_range(head, 4096)) return false;
+        uint32_t code[] = {0xd503201f, 0x8b020021, 0x91000442,
+                           0xf1000400, branches[kind], 0xd65f03c0};
+        if (kind == 3) code[3] = 0x91000400; // TBZ: increment to bit 8
+        e->mem().write(head, code, sizeof(code));
+        if (!e->mem().mprotect_guest(head, 4096, 5)) return false;
+        e->enable_jit();
+        auto* j = e->jit();
+        if (mt) j->enter_multithreaded();
+        if (!j->lookup_or_translate(*e, head + 4)) return false;
+        int count = 0;
+        auto fn = j->lookup_call_target(*e, head, count);
+        if (!fn || count != 5) {
+            std::fprintf(stderr, "entry-order loop mt=%d kind=%u: count=%d, expected 5\n",
+                         mt, kind, count);
+            return false;
+        }
+        // All absorbed words remain dependencies: unchanged protection
+        // retains the head; rewriting an interior word retires it.
+        j->invalidate_range(head + 4, 4, CodeInvalidation::Protect);
+        if (j->lookup_only(head) != fn) return false;
+        auto run = [&](uint64_t want) {
+            CPU cpu;
+            cpu.pc = head; cpu.regs[0] = kind == 2 ? 1 : kind == 3 ? 0 : kind == 4 ? 511 : 5;
+            cpu.regs[30] = stop; cpu.jit_stop_pc = stop;
+            unsigned dispatches = 0;
+            while (cpu.pc != stop && ++dispatches < 10000)
+                cpu.pc = j->run_block(cpu, *e);
+            return cpu.pc == stop && cpu.regs[1] == want &&
+                   cpu.regs[2] == (kind == 2 ? 2 : kind == 3 || kind == 4 ? 256 : 5);
+        };
+        const uint64_t n = kind == 2 ? 2 : kind == 3 || kind == 4 ? 256 : 5;
+        if (kind != 5 && !run(n * (n - 1) / 2)) return false;
+        const uint32_t add_three = 0x91000c21;
+        if (!e->mem().mprotect_guest(head, 4096, 7)) return false;
+        e->mem().write(head + 4, &add_three, 4);
+        if (!e->mem().mprotect_guest(head, 4096, 5)) return false;
+        j->invalidate_range(head + 4, 4, CodeInvalidation::CacheMaintenance);
+        if (j->lookup_only(head)) return false;
+        if (kind != 5 && !run(3 * n)) return false;
+    }
+    for (bool oversized : {false, true}) {
+        auto e = std::make_unique<Emulator>();
+        if (!e->mem().map_range(head, 4096)) return false;
+        std::vector<uint32_t> code(oversized ? 33 : 5, 0xd503201f);
+        // A tail that loops to itself, or cannot fit with the prefix, must
+        // retain the ordinary split at its known entry.
+        code.back() = oversized ? 0x17ffffe0 : 0x17fffffd;
+        e->mem().write(head, code.data(), code.size() * 4);
+        if (!e->mem().mprotect_guest(head, 4096, 5)) return false;
+        e->enable_jit();
+        auto* j = e->jit();
+        if (mt) j->enter_multithreaded();
+        j->lookup_or_translate(*e, head + 4);
+        int count = 0;
+        if (!j->lookup_call_target(*e, head, count) || count != 1) return false;
+    }
+    std::printf("jit_mt_publication: %s entry-order loop counts, results and dependencies PASS\n",
+                mt ? "MT" : "ST");
+    return true;
+}
 static bool check_signal_return(bool mt) {
     auto e = std::make_unique<Emulator>();
     constexpr uint64_t handler = 0x50100, resume = handler + 64;
@@ -199,6 +268,7 @@ int main() {
     j->invalidate_all();
     if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
-    if (!check_signal_return(false) || !check_signal_return(true) || !check_selfloops()) return 1;
+    if (!check_signal_return(false) || !check_signal_return(true) || !check_selfloops() ||
+        !check_entry_order_loops(false) || !check_entry_order_loops(true)) return 1;
     std::puts("jit_mt_publication: immutable bytes and bounded leases PASS");
 }

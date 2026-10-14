@@ -196,13 +196,32 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     static const bool leaf_inline_enabled_ = (getenv("BIFROST_ENABLE_LEAF_INLINE") != nullptr);
     bool has_inlined_leaf = false;  // cannot use contiguous interpreter step counts
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
+    uint64_t loop_tail_end = 0;
     while (!block_ended && instr_count < max_block_insts &&
            !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
-        if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
-            block_profile.entry_point++;
-            chain_target_pc_ = cur_pc;
-            break;
+        if (instr_count > 0 && cur_pc >= loop_tail_end) {
+            const auto known = blocks_.find(cur_pc);
+            if (known != blocks_.end()) {
+                const BlockEntry& tail = known->second;
+                // A previously compiled tail can make a short loop depend
+                // on entry order: splitting here hides its back-edge from
+                // emit_selfloop_backedge. Use metadata only as a growth
+                // hint; translate the actual words normally, preserving
+                // code_words_, instruction counts and all complexity caps.
+                // No speculative guest reads become cache dependencies.
+                const bool back_to_start = tail.chain_target_pc == start_pc ||
+                    (tail.has_taken_chain_slot && tail.taken_chain_target_pc == start_pc);
+                if (tail.fn && !tail.interp_only && !tail.has_call && !tail.has_svc &&
+                    tail.ends_with_branch && back_to_start && tail.instr_count > 0 &&
+                    tail.instr_count <= max_block_insts - instr_count) {
+                    loop_tail_end = cur_pc + static_cast<uint64_t>(tail.instr_count) * 4;
+                } else {
+                    block_profile.entry_point++;
+                    chain_target_pc_ = cur_pc;
+                    break;
+                }
+            }
         }
         uint32_t inst;
         try {
@@ -958,6 +977,28 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     break;
             }
         }
+        // W-form fusion: the translator follows each 32-bit ALU result with
+        // ZEXT 32. When that ZEXT is the result's only reader, the op can
+        // write the 32-bit x86 form instead (low 32 bits are identical for
+        // ADD/SUB/AND/OR/XOR/IMUL, and the 32-bit write clears bits 63:32).
+        zext32_fused_.assign(n, 0);
+        for (size_t i = 0; i + 1 < n; i++) {
+            const IRInst& op = ir_block.insts[i];
+            switch (op.op) {
+                case IROp::ADD: case IROp::SUB: case IROp::AND:
+                case IROp::OR:  case IROp::XOR: case IROp::MUL: break;
+                // MOVSX r32 sign-extends into the low 32 bits only.
+                case IROp::SEXT:
+                    if (op.sext_bits() != 8 && op.sext_bits() != 16) continue;
+                    break;
+                default: continue;
+            }
+            if (!(op.dest > 32 && op.dest < 4096)) continue;
+            if (vreg_last_use_op_[op.dest] != static_cast<int>(i + 1)) continue;
+            const IRInst& nx = ir_block.insts[i + 1];
+            if (nx.op == IROp::ZEXT && nx.src1 == op.dest && nx.zext_bits() == 32)
+                zext32_fused_[i] = 1;
+        }
     }
     // ── Flag-loop-carry pre-scan ────────────────────────────────────
     // Decides whether a self-loop back-edge may skip the taken-path
@@ -1004,6 +1045,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     // ── Compile IR ───────────────────────────────────────────────
     jit_consts_.clear();
+    // Guarded-access cold paths are emitted after the block (see below).
+    deferred_guards_.clear();
+    defer_guards_ = true;
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
         const IRInst& inst = ir_block.insts[i];
         cur_op_index_ = i;
@@ -1047,6 +1091,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     kills_per_op_.clear();
     fold_ahead_kind_.clear();
+    zext32_fused_.clear();
     vreg_last_use_op_.clear();
     reset_vreg_uses();
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
@@ -1073,8 +1118,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // next block (or the interpreter) would see stale pstate.
     // clobber_flags() handles the flush+materialize+invalidate pattern.
     clobber_flags();
-    // Flush all dirty vregs before returning (so cpu.regs[] is up to date).
-    flush_all_vregs();
+    // Write back dirty architectural vregs before returning (so cpu.regs[]
+    // is up to date); dead scratch values need no stack store at the exit.
+    flush_all_vregs_exit();
     // Write back dirty cached vectors to cpu.v_lo/v_hi. Self-loop re-entry
     // skips the epilogue, so loop-carried accumulators stay in XMM; this
     // runs only when the loop exits (or the block is entered from another
@@ -1128,7 +1174,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // from RDI/RSI at chain_entry just like fn does).
         chain_patch_off = code_buf_used_;
         if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
-        else { emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop(); }
+        else emit_slot_nop5();
         // A register branch's slot is never patched (dynamic target); try
         // the indirect-branch table instead of returning to the dispatcher.
         if (indirect_exit_ && !dbg().no_chain) emit_indirect_branch_probe();
@@ -1177,6 +1223,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             patch_jcc_rel32(off, rel);
         }
     }
+    // Cold software page checks and fault exits of guarded accesses, after
+    // all hot code; their registered fault sites get the real stub offsets.
+    flush_deferred_guards();
+    defer_guards_ = false;
     if (code_buf_overflow_) {
         rewind_codegen(block_start);
         // The budget is fixed for this JIT. Cache the failure so every
