@@ -69,6 +69,10 @@ def badging_fields(output):
         if label in ("package", "launchable-activity", "application"):
             fields[label] = dict(token.split("=", 1) for token in shlex.split(value)
                                  if "=" in token)
+        elif re.fullmatch(r"application-icon-\d+", label):
+            values = shlex.split(value)
+            if len(values) == 1:
+                fields.setdefault("application-icons", {})[int(label.rsplit("-", 1)[1])] = values[0]
         elif label in ("sdkVersion", "minSdkVersion", "targetSdkVersion"):
             values = shlex.split(value)
             if len(values) == 1:
@@ -137,6 +141,50 @@ def launcher_details(package, launcher, manifest):
 
 
 
+BITMAP = re.compile(r"[^\0]+\.(?:png|webp|jpe?g)", re.I)
+DENSITIES = {"ldpi": 120, "mdpi": 160, "tvdpi": 213, "hdpi": 240, "xhdpi": 320,
+             "xxhdpi": 480, "xxxhdpi": 640}
+
+
+def resource_bitmap(resources, path):
+    """Densest bitmap among the configurations of the resource that declares path."""
+    groups, current = [], None
+    for line in resources.splitlines():
+        if re.match(r"\s*resource 0x[0-9a-f]+ ", line):
+            current = []
+            groups.append(current)
+            continue
+        entry = re.match(r"\s*\(([^)]*)\) \(file\) (\S+)", line)
+        if entry and current is not None:
+            current.append(entry.groups())
+    group = next((x for x in groups if any(file == path for _, file in x)), [])
+    def rank(item):
+        qualifiers = item[0].split("-")
+        density = next((DENSITIES.get(x) or int(x[:-3]) for x in qualifiers
+                        if x in DENSITIES or re.fullmatch(r"\d+dpi", x)), 0)
+        return ("night" not in qualifiers, density)
+    bitmaps = sorted((x for x in group if BITMAP.fullmatch(x[1])), key=rank)
+    return bitmaps[-1][1] if bitmaps else None
+
+
+def launcher_icon(fields, path, aapt2):
+    """Pick the launcher icon as a bitmap, as pre-adaptive Android launchers do."""
+    activity = fields.get("launchable-activity", {}).get("icon")
+    icon = activity or fields.get("application", {}).get("icon")
+    if not icon:
+        return None
+    if not activity:
+        # Badging lists the application icon per density; 65534/65535 are any/nodpi.
+        dense = sorted((density % 65534, value) for density, value in fields.get("application-icons", {}).items()
+                       if BITMAP.fullmatch(value))
+        if dense:
+            return dense[-1][1]
+    if BITMAP.fullmatch(icon):
+        return icon
+    # An adaptive or vector icon: use the same resource's bitmap fallback, if any.
+    return resource_bitmap(run([aapt2, "dump", "resources", str(path)]), icon)
+
+
 def inspect_apk(name, path, aapt2, directory):
     fields = badging_fields(run([aapt2, "dump", "badging", str(path)]))
     manifest = xmltree_nodes(run([aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", str(path)]))
@@ -144,6 +192,7 @@ def inspect_apk(name, path, aapt2, directory):
     launcher = fields.get("launchable-activity", {}).get("name")
     report = {"archive": name, "package": identity["name"], "split": identity.get("split", ""),
               "label": fields.get("launchable-activity", {}).get("label") or fields.get("application", {}).get("label") or identity["name"],
+              "icon": None if identity.get("split") else launcher_icon(fields, path, aapt2),
               "version_code": identity.get("versionCode"), "version_name": identity.get("versionName"),
               "min_sdk": fields.get("minSdkVersion", fields.get("sdkVersion")),
               "target_sdk": fields.get("targetSdkVersion"),

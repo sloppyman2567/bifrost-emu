@@ -4,6 +4,43 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Desktop Android library and Surface identity fixture (2026-10-14)
+
+`test_android_preflight.py` passes four tests, including dense daytime launcher
+bitmap selection and an adaptive resource's own fallback. Nine selected package
+tests cover launch arguments, malformed/saved launcher settings, bounded icon
+copying, older install metadata, session results, persistent Settings identity
+and the actual Surface adapter. Three signed-package tests pass install/launch,
+rollback and signer/upgrade checks; the native launch case includes all six
+JIT/interpreter/Tier-2 × built-in/plugin Wayland combinations with GPU access.
+
+```sh
+python3 Scripts/Android/test_android_preflight.py
+python3 Scripts/Android/test_android_package.py \
+  LauncherArgumentTests SessionResultTests SettingsIdentityTests SurfaceIdentityTests
+python3 Scripts/Android/test_android_package.py \
+  PackageTests.test_signed_split_native_launch_and_persistence \
+  PackageTests.test_invalid_install_does_not_replace_existing_package \
+  PackageTests.test_signer_identity_upgrade_and_code_integrity
+```
+
+`SurfaceIdentityTests` builds `Tests/Host/android_surface_identity.c` against the
+real `Guest/Android/Adapters/surface.c`, pinned AOSP JNI headers and guest Bionic,
+then runs it in both engines. Controlled JNI handles check alias identity,
+distinct surfaces, collected weak-handle retirement, weak-reference failure and
+null inputs. The public native-window lookup must not fabricate a window when
+the platform returns none. This is adapter bookkeeping coverage, not real ART
+GC, libgui lifetime, rendering or SurfaceView recreation coverage.
+
+A temporary offscreen Qt check exercised old/new metadata, cards, search and
+empty results, resize/reflow, developer visibility, session details and a saved
+settings dialog. Python parsing and whitespace checks pass.
+An installed Azur Lane base APK also passes read-only AAPT2 icon selection,
+bounded copy and bitmap decoding checks; its game code is not executed by that
+check. The full package and Linux runtime suites were not repeated for this
+launcher/tooling change; desktop visual review and game interaction through
+the new launcher are unverified.
+
 ## X11 wire readback synchronization (2026-10-14)
 
 The intermittent `xwayland_wire` failure was X `BadMatch` on `GetImage`

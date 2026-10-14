@@ -13,6 +13,22 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Desktop Android library (2026-10-14)
+
+- Replace the launcher table with searchable game cards, bitmap icons, per-game
+  Back-key/window-stat settings and last-session details. Keep CLI and GUI
+  launches on the same session supervisor; developer launch options remain
+  explicit. Retain install metadata and read older base-APK reports.
+- Reject malformed saved settings without crashing the launcher and tolerate
+  non-string icon metadata. Missing/adaptive-only artwork uses a placeholder.
+- Integrate the pending JNI Surface identity fixture with the actual adapter
+  and pinned Bionic/AOSP headers. Both engines pass its controlled-handle checks;
+  this does not test real ART collection or Surface rendering.
+- Focused preflight/launcher/package checks and the signed NativeActivity gate
+  pass, including all six engine/window-backend combinations. Offscreen Qt
+  checks exercise cards, filtering, settings and session details; desktop visual
+  review and gameplay through the redesigned launcher remain unverified.
+
 ### Tier-1 codegen and validation (2026-10-14)
 
 - Remove stale operands from folded constants, fuse W-form ALU/extension

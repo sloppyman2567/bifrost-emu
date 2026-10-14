@@ -66,6 +66,26 @@ Adapter changes require a fresh `--state-root`; the installer deliberately
 rejects replacing different adapters inside an existing app root. Keep the
 original app state when evaluating a new runtime.
 
+## Desktop library
+
+`python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 game
+library using the same install and session supervisor as the CLI. Cards show
+the app label, version, install date and bitmap icon, with Play/Stop actions,
+search, per-game settings and a last-session drawer. Package IDs, library paths,
+interpreter launch and Java call tracing are grouped under Developer.
+
+Install records now retain the base APK's label/version and a bounded launcher
+bitmap; older records recover labels and versions from their saved base report.
+Icon selection prefers a dense daytime bitmap from the declared launcher
+resource. Adaptive/vector icons use that resource's bitmap fallback when present;
+otherwise the card uses a placeholder. This does not compose adaptive icons.
+
+Per-game `launcher-settings.json` stores explicit window-stats and Back-key
+choices. With no saved choice, launches keep the emulator defaults. Changes
+apply on the next start. The last-session drawer shows saved outcome/timing and
+recognized error signatures from at most the final 16 MiB of its log; those
+counts are a bounded log summary, not a diagnosis or gameplay result.
+
 ## Optional real Media NDK bundle
 
 The Media NDK can run as guest ARM64 code through Bionic. Provision the actual

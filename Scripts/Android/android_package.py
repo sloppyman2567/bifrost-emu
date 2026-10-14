@@ -309,6 +309,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None)
                             raise ValueError(f"Conflicting split member: {relative}")
                         candidate.replace(target)
                         files[relative] = checksum
+            icon = copy_icon(next(p for r, p in packages if not r["split"]), base.get("icon"), staging)
             app = state / name
             with app_lock(app):
                 metadata_path = app / "package.json"
@@ -403,10 +404,19 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None)
                         path.chmod(0o555 if path.is_dir() else 0o444)
                     code.rename(destination)
                     destination.chmod(0o555)
+                for old in app.glob("icon.*"):
+                    if old.name != (icon.name if icon else None):
+                        old.unlink()
+                if icon:
+                    icon.replace(app / icon.name)
                 metadata = {
                     "schema_version": 1,
                     "package": name,
+                    "label": base["label"],
                     "version_code": base["version_code"],
+                    "version_name": base["version_name"],
+                    "icon": icon.name if icon else None,
+                    "installed_at": int(time.time()),
                     "signers": certificates,
                     "guest_code": guest_code,
                     "launcher": base["launcher"],
@@ -421,6 +431,30 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None)
                 }
                 publish_json(metadata_path, metadata)
             return metadata
+
+
+ICON_TYPES = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"RIFF", ".webp"))
+
+
+def copy_icon(apk, member, staging):
+    """Copy the launcher bitmap for library display; a missing or odd icon is not an error."""
+    if not member:
+        return None
+    with zipfile.ZipFile(apk) as archive:
+        try:
+            item = archive.getinfo(member)
+        except KeyError:
+            return None
+        if item.file_size > 4 * 1024 * 1024:
+            return None
+        data = archive.read(item)
+    kind = next((suffix for magic, suffix in ICON_TYPES if data.startswith(magic)
+                 and (suffix != ".webp" or data[8:12] == b"WEBP")), None)
+    if kind is None:
+        return None
+    output = staging / ("icon" + kind)
+    output.write_bytes(data)
+    return output
 
 
 def verify_media(root, metadata):
@@ -608,9 +642,16 @@ def installed_apps(state):
             metadata = json.loads((app / "package.json").read_text())
             if metadata["package"] != app.name: raise ValueError("Package directory mismatch")
             session = control(app)
-            result.append({"package": app.name, "label": metadata.get("label", app.name),
-                           "version": metadata["version_code"], "launcher": metadata["launcher"]["kind"],
-                           "session": session})
+            # Records from before label/icon capture still carry the base APK report.
+            base = next((x for x in metadata.get("packages", []) if not x.get("split")), {})
+            icon = metadata.get("icon")
+            result.append({"package": app.name, "label": metadata.get("label") or base.get("label") or app.name,
+                           "version": metadata["version_code"],
+                           "version_name": metadata.get("version_name") or base.get("version_name"),
+                           "icon": str(app / icon) if isinstance(icon, str) and re.fullmatch(r"icon\.(?:png|jpg|webp)", icon)
+                                   and (app / icon).is_file() else None,
+                           "installed_at": metadata.get("installed_at"),
+                           "launcher": metadata["launcher"]["kind"], "session": session})
         except (OSError, ValueError, KeyError) as error:
             result.append({"package": app.name, "label": app.name, "error": str(error),
                            "session": {"state": "invalid"}})

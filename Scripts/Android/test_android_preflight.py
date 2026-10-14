@@ -22,6 +22,25 @@ def elf(align, address=0):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_launcher_icon_density_and_adaptive_bitmap_fallback(self):
+        fields = preflight.badging_fields("package: name='org.bifrost.fixture' versionCode='1'\n"
+                                          "application: label='Fixture' icon='res/mipmap-anydpi-v26/icon.xml'\n"
+                                          "application-icon-160:'res/mipmap-mdpi/icon.png'\n"
+                                          "application-icon-480:'res/mipmap-xxhdpi/icon.png'\n")
+        self.assertEqual(preflight.launcher_icon(fields, Path('unused.apk'), 'unused-aapt2'),
+                         'res/mipmap-xxhdpi/icon.png')
+        resources = '''resource 0x7f010000 mipmap/icon
+          (anydpi-v26) (file) res/mipmap-anydpi-v26/icon.xml
+          (mdpi) (file) res/mipmap-mdpi/icon.png
+          (xxhdpi) (file) res/mipmap-xxhdpi/icon.png
+          (xxxhdpi-night) (file) res/mipmap-xxxhdpi-night/icon.png
+        resource 0x7f010001 mipmap/other
+          (xxxhdpi) (file) res/mipmap-xxxhdpi/other.png
+        '''
+        self.assertEqual(preflight.resource_bitmap(resources, 'res/mipmap-anydpi-v26/icon.xml'),
+                         'res/mipmap-xxhdpi/icon.png')
+        self.assertIsNone(preflight.resource_bitmap(resources, 'res/missing.xml'))
+
     def test_alignment_is_not_runtime_page_size(self):
         with tempfile.TemporaryDirectory() as work:
             path = Path(work)/"library.so"

@@ -26,6 +26,50 @@ ARGS = None
 
 
 class LauncherArgumentTests(unittest.TestCase):
+    def test_library_settings_reject_malformed_values_and_keep_default_launch(self):
+        import json
+        from android_launcher import SETTINGS, load_settings, save_settings, launch_request
+        app = {"package": "org.bifrost.fixture", "launcher": "managed_activity"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for value in ([], {"back_key": []}, {"back_key": {}, "window_stats": "false"}):
+                (root / SETTINGS).write_text(json.dumps(value))
+                self.assertEqual(load_settings(root), {})
+            self.assertEqual(launch_request(app, {}), (["start", app["package"]], {}))
+            settings = {"back_key": "f2", "window_stats": False}
+            save_settings(root, settings)
+            self.assertEqual(load_settings(root), settings)
+            self.assertEqual(launch_request(app, settings, trace=True),
+                             (["start", app["package"], "--no-window-stats", "--trace-apk", "calls"],
+                              {"BIFROST_ANDROID_BACK_KEY": "f2"}))
+            native = dict(app, launcher="native_activity")
+            self.assertNotIn("--trace-apk", launch_request(native, {}, trace=True)[0])
+
+    def test_library_icons_are_bounded_and_legacy_metadata_remains_readable(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            apk = root / "icons.apk"
+            with zipfile.ZipFile(apk, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("res/icon.png", b"\x89PNG\r\n\x1a\nfixture")
+                archive.writestr("res/icon.xml", b"<adaptive-icon/>")
+                archive.writestr("res/large.png", b"\x89PNG\r\n\x1a\n" + bytes(4 * 1024 * 1024))
+            icon = package.copy_icon(apk, "res/icon.png", root)
+            self.assertEqual(icon.name, "icon.png")
+            for member in (None, "res/missing.png", "res/icon.xml", "res/large.png"):
+                self.assertIsNone(package.copy_icon(apk, member, root))
+            app = root / "org.bifrost.fixture"
+            app.mkdir()
+            metadata = {"package": app.name, "version_code": 2,
+                        "launcher": {"kind": "native_activity"},
+                        "packages": [{"split": "", "label": "Legacy Fixture", "version_name": "1.2"}]}
+            for invalid_icon in (None, [], "../icon.png"):
+                metadata["icon"] = invalid_icon
+                (app / "package.json").write_text(json.dumps(metadata))
+                listed = package.installed_apps(root)[0]
+                self.assertEqual((listed["label"], listed["version_name"], listed["icon"]),
+                                 ("Legacy Fixture", "1.2", None))
+
     def test_activity_report_separates_overloads_failures_and_unfinished_calls(self):
         import json
         from android_managed import activity_api_report
@@ -336,6 +380,49 @@ int main(void) {
                     self.assertEqual(resolver.call_count, 4)
             finally:
                 proxy.close()
+
+
+class SurfaceIdentityTests(unittest.TestCase):
+    def test_actual_adapter_reuses_jni_identity_and_retires_collected_handles(self):
+        runtime = ROOT / "Tools/android-runtime/rootfs"
+        if not shutil.which("clang") or not ARGS.emu.is_file() or not (runtime / "system/bin/linker64").is_file():
+            self.skipTest("requires clang, provisioned Bionic and emulator")
+        spec = importlib.util.spec_from_file_location("surface_dependencies",
+                                                     ROOT / "Tools/Android/android_guest_dependencies.py")
+        dependencies = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(dependencies)
+        with tempfile.TemporaryDirectory(prefix="bifrost-surface-identity-") as directory:
+            root = Path(directory)
+            headers = dependencies.prepare_headers(root / "headers")
+            for name in ("apex/com.android.runtime/bin/linker64",
+                         "apex/com.android.runtime/lib64/bionic/libc.so",
+                         "apex/com.android.runtime/lib64/bionic/libdl.so"):
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(runtime / name, target)
+            (root / "system/bin").mkdir(parents=True)
+            (root / "system/bin/linker64").symlink_to("../../apex/com.android.runtime/bin/linker64")
+            bionic = root / "apex/com.android.runtime/lib64/bionic"
+            subprocess.run(["clang", "--target=aarch64-linux-android35", "-fuse-ld=lld",
+                            "-nostdlib", "-ffreestanding", "-fPIE", "-pie", "-O2", "-Wall", "-Wextra",
+                            "-ffunction-sections", "-Wl,--gc-sections", "-Wl,-z,max-page-size=16384",
+                            "-Wl,--dynamic-linker=/system/bin/linker64",
+                            "-Wl,-rpath,/apex/com.android.runtime/lib64/bionic",
+                            "-Wl,--allow-shlib-undefined", *headers,
+                            str(ROOT / "Tests/Unit/android_bionic_start.S"),
+                            str(ROOT / "Tests/Host/android_surface_identity.c"),
+                            str(ROOT / "Guest/Android/Adapters/surface.c"),
+                            str(bionic / "libc.so"), "-o", str(root / "surface_identity")],
+                           check=True, capture_output=True, text=True)
+            environment = dict(os.environ)
+            environment.pop("BIFROST_ROOT", None)
+            environment["BIFROST_GUEST_ENV"] = "LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic"
+            for mode in ([], ["--no-jit"]):
+                result = subprocess.run([str(ARGS.emu.resolve()), *mode, "--android-runtime",
+                                         "--rootfs", str(root), "/surface_identity"],
+                                        env=environment, timeout=30, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("android_surface_identity: checks passed", result.stdout)
 
 
 class PackageTests(unittest.TestCase):
