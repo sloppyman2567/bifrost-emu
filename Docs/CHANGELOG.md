@@ -13,6 +13,45 @@ The runtime version is **2.0.0-alpha.1**: the first pre-release toward the
 work since 1.5.5 (2026-10-04 onward). No release tag is created. Older version
 labels below are historical records.
 
+### Tier-1 codegen and validation (2026-10-14)
+
+- Remove stale operands from folded constants, fuse W-form ALU/extension
+  operations, defer scalar memory-check cold tails, avoid dead exit scratch
+  spills and restore complete five-byte chain slots. Cached-entry loop growth
+  uses branch metadata only as a hint while normal translation records every
+  absorbed instruction and retains all budgets.
+- Fix dead-code compaction accounting: DSE/NOP marking and physical removal
+  no longer double-count stores or underflow the reserve size.
+- Final interleaved CoreMark medians improve from 9,049.03 to 9,893.87
+  iterations/s (9.3%), with every CRC validated. Strict JIT 326/326,
+  interpreter 317/317 (nine JIT-only skips), 87 differential fixtures and
+  seven threaded oracles pass. Game FPS gains remain unmeasured.
+- Make the X11 wire fixture wait for its MapNotify before GetImage readback,
+  satisfying the viewable-window contract under asynchronous window managers.
+
+### User and idle-policy queries (2026-10-14)
+
+- Expand fixed user-0 UserManager/profile/serial/restriction queries with
+  caller checks, redacted personal fields and isolated replies. Add the
+  device-idle service for the existing disabled-Doze profile and complete
+  battery-saver/standby queries in power.
+- UserManager supports 26/104 signatures, device-idle 13/22 and power 18/67;
+  unsupported administration is not advertised as implemented. The complete
+  managed service batch passes 176 assertions in each engine.
+
+### Host Codec2 media and resized native windows (2026-10-14)
+
+- Provision the real Codec2/Goldfish stack and native dependencies. Codec
+  services and Gralloc belong to the Binder realm and survive app exit;
+  host CPU/GPU decoder capabilities are reported only for probed codecs.
+- Bounded realm probes check exact 64x64 codec frames, PTS/EOS and genuine
+  ImageReader/native-window output. Larger streams, extended reconfiguration,
+  HDR and in-game video playback remain unestablished.
+- Aliased ANativeWindow dimensions follow the host SurfaceView geometry
+  instead of the ImageReader's creation size. The user confirmed clean resize;
+  backend checks cover dimension seeding, validation and geometry updates.
+  Full SurfaceView recreation and callback sequences remain unverified.
+
 ### Launcher open-file limit (2026-10-13)
 
 - Raise the emulator/broker host soft open-file limit to its inherited hard
@@ -25,8 +64,8 @@ labels below are historical records.
 - Framework schema 7 provisions the pinned image's real `libmedia_jni.so` and
   its native dependencies, fixing missing-library errors when Android media
   boot classes initialize. A real MediaMuxer probe writes valid AAC MP4 in
-  JIT and interpreter modes; codec services, host CPU/GPU decoder routing and
-  in-game media playback remain unfinished.
+  JIT and interpreter modes. The later host Codec2 checkpoint above adds
+  codec-service/decoder routing; in-game media playback remains unestablished.
 
 ### Asgard Settings and PendingIntent contracts (2026-10-13)
 

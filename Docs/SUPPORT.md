@@ -18,16 +18,27 @@ passing a focused test is not a claim of complete Linux ABI compatibility.
 
 ## Android scope and v2.0 plans
 
-Android surface, activity/looper and audio regression probes were freshly
-checked in both JIT and interpreter modes on October 4, 2026. The host native
-bridge API probe also passes 61/61; it does not run an actual ART instance.
+As of October 14, 2026, Asgard installs signed APK sets and runs native
+NativeActivity and managed Activity/Service paths through the pinned Android
+15 Bionic, ART and framework. The shared Binder realm owns graphics allocation
+and codec services independently of app lifetimes. Focused checks cover JNI,
+manager contracts, Activity/Service lifecycle, process death, audio callbacks,
+surfaces and small exact-frame codec probes in both engines. The final managed
+service batch passes 176 assertions per engine.
 
-The current standalone Android path targets native NativeActivity binaries;
-it does not provide integrated APK/ART execution. The existing native-bridge
-interface is an integration API, not a complete Android framework or runtime.
-Bionic compatibility, integrated ART/JNI, APK loading and selected Android
-game support are planned in the [v2.0 roadmap](../Docs/roadmap.md). Keep those plans
-separate from verified current support.
+SpongeBob has user-confirmed cooking levels and menus through the documented
+child-age path; Google Play-dependent behavior remains incomplete. Azur Lane
+reached its logged login UI with actual host GPU access, but repeated UI delays
+remain and its Google sign-in failure path can exit on unsupported toast
+enqueue. Its gameplay, WebView interaction and sustained performance have not
+been verified by this checkpoint.
+
+Missing or partial areas include IME/text composition and wheel delivery,
+implicit intent/browser resolution, notification posting/toasts, foreground
+services, cross-app background delivery, isolated WebView handshake and extended
+media/Surface recreation. HDR and arbitrary APK compatibility are not claimed.
+See [runtime contracts](Android/ANDROID_RUNTIME.md), [APK tooling](Android/ANDROID_APK.md)
+and the [v2.0 roadmap](roadmap.md) for current checkpoints and remaining work.
 
 ## CI gates
 

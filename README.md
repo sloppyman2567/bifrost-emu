@@ -237,16 +237,24 @@ BIFROST_THUNK_TRACE=1           # trace host GL/audio/display calls
 
 ## Performance
 
-CoreMark, 110,000 iterations, three runs each, CRCs validated, on a Ryzen 7
-5800X3D (2026-10-12):
+Final CoreMark A/B checkpoint (October 14, 2026): 110,000 iterations, one
+warmup and three interleaved measured runs per binary, every CRC validated,
+on a Ryzen 7 5800X3D. The saved pre-batch binary reports a median of 9,049.03
+iterations/s; the current Tier-1 build reports 9,893.87, **9.3% higher**.
+Every measured run exceeds ten seconds. See [changes](Docs/JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
+and [validation](Docs/TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
+
+Earlier emulator comparison (October 12, 2026), three runs each with valid
+CRCs; QEMU was not rerun for the October 14 update:
 
 | Emulator | Median iterations/s |
 |---|---|
 | bifrost-emu 2.0.0-alpha.1 (JIT, Tier-1) | 9,062 |
 | QEMU 11.1.1 user mode (TCG) | 7,898 |
 
-That is about 15% faster on this integer/control-flow benchmark; it does not
-predict game FPS. Earlier development measurements from the `bench_*` programs
+That earlier comparison was about 15% faster on this integer/control-flow
+benchmark. Neither checkpoint predicts game FPS. Earlier development measurements
+from the `bench_*` programs
 (Ryzen 7 5800X3D, GCC -O3, not rerun for this update):
 
 | Benchmark | Interpreter | JIT | Speedup |

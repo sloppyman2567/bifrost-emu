@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
 Status: in progress; the current pre-release is 2.0.0-alpha.1. Updated
-October 12, 2026. Except for checkpoints explicitly marked implemented below,
+October 14, 2026. Except for checkpoints explicitly marked implemented below,
 these are development targets, not compatibility guarantees or a release date.
 
 v2.0 aims to run selected ARM64 Android games through an integrated Android
@@ -21,13 +21,16 @@ base/split installation, native-only NativeActivity launch, extracted assets,
 persistent per-app storage, plugin-backed graphics and a bounded native Binder
 service registry. The packaged fixture passes all six execution-mode/window
 backend combinations. [APK setup and boundaries](Android/ANDROID_APK.md) document
-the exact scope. Managed Activities, ART/JNI, resources and platform services
-remain targets; successful SpongeBob installation does not establish launch.
+the exact scope. Implemented managed checkpoints now include the pinned Android
+15 ART/framework, APK Activity creation, resources, JNI, WindowManager-owned
+Activity windows and a shared Binder realm. SpongeBob has user-confirmed cooking
+levels and menus; Azur Lane has reached its logged login UI. Those checkpoints
+do not establish arbitrary APK compatibility or sustained Azur Lane gameplay.
 
-- Select and document an initial Android API/runtime version. Expand from
-  a tested baseline instead of claiming every Android release works.
-- Support Bionic libc, libm, libdl, pthread/TLS behavior, signals, futexes,
-  memory mapping and relevant Android ioctl/device contracts.
+- Expand the pinned Android 15/API-35 baseline with documented runtime
+  provenance and limits instead of claiming every Android release works.
+- Extend Bionic libc, libm, libdl, pthread/TLS, signal, futex, mapping and
+  Android ioctl/device coverage from the tested contracts.
 - Implement linker namespaces, Android library search rules and
   `android_dlopen_ext` behavior, with isolated per-app library resolution.
   Android's [linker namespace documentation](https://source.android.com/docs/core/architecture/vndk/linker-namespace)
@@ -50,8 +53,8 @@ Integrate ART and the required managed libraries so games with Java/Kotlin
 startup code can reach their ARM64 native engines. ART executes DEX and
 supports compiled execution; see the [AOSP runtime reference](https://source.android.com/docs/core/runtime).
 
-- Start by evaluating a matching guest ARM64 ART/Bionic runtime executed
-  through Bifrost. Reuse the existing native-bridge interface where suitable;
+- Extend the matching guest ARM64 ART/Bionic runtime executed through
+  Bifrost. Reuse the existing native-bridge interface where suitable;
   a host ART route requires a separately validated JNI/ABI bridge.
 - Support class loading, managed exceptions, JNI registration/calls,
   callbacks, thread attachment and managed/native reference lifetimes.
@@ -59,7 +62,7 @@ supports compiled execution; see the [AOSP runtime reference](https://source.and
   with guest signals and JIT execution. Never bypass these for speed.
 - Handle ART-generated executable pages, write/execute protection changes
   and instruction-cache invalidation without stale Bifrost translations.
-- Validate DEX interpretation first, then ART JIT/AOT execution. Keep ART's
+- Broaden DEX interpretation and ART JIT/AOT validation under load. Keep ART's
   generated-code cache distinct from Bifrost's translated-code cache.
 - Implement the framework subset required for app launch, activities,
   lifecycle, resources and the selected game compatibility targets.
@@ -68,12 +71,59 @@ Acceptance: a DEX test calls a native ARM64 library and receives a callback;
 a mixed managed/native Android sample survives GC, pause/resume and thread
 shutdown; a selected game reaches interactive gameplay.
 
-Checkpoint (October 5): the pinned guest ART creates its VM and passes the
+Historical checkpoint (October 5): the pinned guest ART creates its VM and passes the
 DEX/JNI fixture (`Scripts/Android/test_android_jni.py`) in JIT and interpreter modes,
 in ~25 s under the JIT versus ~1 s under QEMU. The framework subset, GC under
-load, pause/resume and Activity launch remain open.
+load, pause/resume and Activity launch were still open at that checkpoint.
+
+Current checkpoint (October 14): the installed-app path uses real guest ART,
+the Android 15 framework and app resources; Activities and local/remote Services
+have creation, lifecycle, binding and process-death regression coverage.
+Settings, PendingIntents, broadcasts and jobs have connected process-local
+contracts. The complete managed service batch passes 176 assertions in each
+engine. Full background execution policy, cross-app framework delivery and the
+isolated WebView handshake remain incomplete. See
+[runtime contracts and limits](Android/ANDROID_RUNTIME.md).
+
+## Common services and background work
+
+Implemented checkpoint (October 14): the service-inventory probe lists 31
+system-facing Java services and two internal entries. That inventory explicitly
+classifies 187 signatures as supported and 954 as unsupported; 1,187 signatures
+remain unclassified. Unclassified handlers can have implementations, so these
+numbers do not measure complete API coverage. Native Binder and codec endpoints
+are additional. UserManager supports 26/104 signatures, device-idle 13/22 and
+power 18/67, following the fixed user-0/device policy with caller checks and
+isolated replies.
+
+- Complete related services through real state, ownership, creation and
+  cleanup; keep unsupported methods explicit and improve coverage reporting.
+- Implement toast enqueue/cancel/render/timeout behavior. Azur Lane's observed
+  Google sign-in failure path currently exits on `notification.enqueueToast`.
+- Connect notification posting, interaction and PendingIntent delivery, then
+  foreground-service notification/deadline behavior and lifecycle policy.
+- Extend current PendingIntent/receiver/alarm/job behavior toward scoped
+  process-restart and cross-app delivery. Current sender records and alarms
+  do not survive process exit or restart stopped applications.
+- Extend Settings only where required: generated defaults, validated per-app
+  System overrides, generations and observers already work. Device-wide
+  shared mutable state, query/cursor APIs, DeviceConfig overrides and privileged
+  administration remain separate work.
+
+Acceptance: manager clients exercise state changes, permission denials, copied
+replies and cleanup, with real callbacks and app lifecycle checks in both
+engines. Concurrent-client claims additionally require distinct UIDs, peer exit
+and continued use of cached Binder handles.
 
 ## Android graphics, audio and lifecycle
+
+Implemented checkpoint (October 14): managed OpenSL ES PCM playback uses
+AAudio/Bionic callbacks; the real Media JNI and Codec2 stacks are provisioned,
+with realm-owned Gralloc5 and host CPU/GPU decoder routing. Bounded codec probes
+check exact 64x64 frames, PTS/EOS, genuine Surface output and service survival
+after client exit. Aliased native-window dimensions now follow SurfaceView
+geometry; the user confirmed clean resizing. These probes do not establish
+video-ad playback or full lifecycle/recreation behavior.
 
 - Extend EGL/OpenGL ES/Vulkan, ANativeWindow and buffer ownership so
   Android game surfaces present correctly through the host graphics path.
@@ -84,6 +134,10 @@ load, pause/resume and Activity launch remain open.
   and device changes, preserving sound during normal gameplay.
 - Test orientation, resize, focus, pause/resume, surface loss/recreation
   and background/foreground transitions.
+- Validate decoded output beyond the small fixtures: flush/reconfigure,
+  B-frames, adaptive streams, supported resolutions and sustained in-game
+  playback. HDR, Wayland readback, full SurfaceView callback/recreation sequences
+  and native EGL into aliased surfaces remain unestablished.
 - Expand graphics ABI and extension coverage based on complete dependency
   audits and reproducible failures rather than one missing import at a time.
 
@@ -131,6 +185,34 @@ MT publication uses revocable data cells. Mixed FP/vector allocation,
 register-layout handoff between regions and general state-recovery maps
 remain planned; Tier-2 remains opt-in.
 
+Implemented Tier-1 checkpoint (October 14): folded constants no longer retain
+dead operands; W-form ALU/extension fusion, deferred scalar guard tails,
+architectural-only exit spills, complete chain-slot restoration and bounded
+known-entry loop growth reduce emitted work. Final interleaved CoreMark medians
+improve from 9,049.03 to 9,893.87 iterations/s (9.3%), with every CRC checked.
+The Android probe also exposed and regression-tested a dead-code compaction
+reserve-accounting underflow. See [implementation](JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
+and [validation](TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
+
+Next, prioritize sampled codegen paths rather than emitted size alone:
+
+- Streamline paired-memory guards while preserving whole-instruction footprint
+  checks, precise faults and register/writeback ordering.
+- Retain useful SIMD values when a block exceeds the current all-or-nothing
+  cache limits; model helper clobbers, aliases and NaN recovery explicitly.
+- Model forwarding barriers sufficiently to optimize safe segments around
+  atomic/acquire operations. Keep the current conservative rules until verified.
+- Remove redundant load extensions and use immediate bitfield/rotate forms
+  where their semantics match the reference.
+
+The corrected Azur Lane audit inspected 24 sampled blocks, about 12.1% of the
+startup profile's cycles. Its first replay had confused ELF file offsets with
+virtual addresses; the earlier 353-byte single-instruction hotspot claim was
+withdrawn. Resolve offsets through PT_LOAD and distinguish a replay from live
+cache/entry-order state. None of these new audit targets is implemented yet;
+the estimated speedups are not measured results. Capture the actual delayed
+login scene before assigning a cause to its repeated UI stutters.
+
 1. **Establish the cost breakdown.** Profile CoreMark and repeatable game
    scenes, separating generated integer code, spills/reloads, flag handling,
    region boundaries, helpers, memory guards and compilation. Record code
@@ -157,11 +239,10 @@ remain planned; Tier-2 remains opt-in.
    the existing publication/invalidation protocol.
 
 CoreMark target: at least **10,000 reported iterations/s** with valid CRCs and
-the benchmark's minimum ten-second duration. The latest recorded fixed
-110,000-iteration run has a 16.0753 s median process wall time (about 6,843
-iterations/s as a wall-time proxy). Reaching the target implies roughly 46%
-higher throughput and 32% less execution time, or about 11 s for that workload.
-This is a target, not a demonstrated gain or a prediction from the FP tests.
+the benchmark's minimum ten-second duration. The latest final three-run median
+is 9,893.87 reported iterations/s for 110,000 iterations after a warmup, about
+1.1% below that throughput target. Keep reported benchmark throughput separate
+from process wall time. The remaining target is not a game-FPS prediction.
 
 The proposed **26% of native** milestone assumes a native reference near
 38,460 iterations/s. Confirm that reference with matched source, seeds,
@@ -249,6 +330,34 @@ Use cold/warm A/B measurements to verify that cache changes reduce stutters.
 
 Acceptance: repeatable input probes and live game checks pass across the
 supported desktop modes and Android lifecycle transitions.
+
+## WebView text input and external webpages
+
+Current boundary: WebView construction and local bitmap rendering are tested,
+but the input-method service models no installed IME. Physical key events are
+forwarded directly; committed text/composition and wheel events are missing,
+and full ViewRoot input stages/focus arbitration are incomplete. Activity starts
+also reject implicit intents, including ordinary external browser links.
+
+1. Reproduce clicks, focus, dragging and scrolling on an attached real WebView
+   page, then the failing app. Missing IME alone does not explain broken clicks.
+2. Connect desktop text input to the focused Android InputConnection: Unicode,
+   composition, selection, deletion, paste and editor actions, with connection
+   cleanup on focus changes and app/Activity exit. Preserve window-plugin ABI
+   compatibility. An on-screen keyboard is a later option.
+3. Resolve manifest intents consistently across PackageManager queries and
+   Activity starts, then route eligible HTTP/HTTPS ACTION_VIEW requests through
+   the desktop default browser using a validated host URI interface. Preserve
+   explicit component/package restrictions and embedded WebViews.
+4. Deliver supported browser callbacks/deep links through the correct app and
+   onNewIntent/lifecycle path. Browser launch, Custom Tabs, verified App Links
+   and Google Play Services authentication have separate contracts; launching
+   a URL does not establish successful sign-in.
+
+Acceptance: real editor/WebView tests cover composition, scrolling, focus swaps,
+resize, browser failure, callback delivery and process exit. Finish by checking
+the requested Azur Lane interaction in the actual window and profiling its
+frame delays; separate input, service, renderer and JIT findings.
 
 ## Delivery gates
 

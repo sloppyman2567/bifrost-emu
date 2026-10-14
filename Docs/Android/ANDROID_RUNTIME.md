@@ -352,6 +352,30 @@ Not yet established:
 On this host VA-API does not decode VP8, so forced GPU mode routes VP8 to
 the software store.
 
+### Azur Lane interaction checkpoint (2026-10-14)
+
+The installed `com.YoStarEN.AzurLane` 9.3.7 was run with the current SDL/GL
+build and normal JIT settings. The app process held an actual amdgpu
+`renderD128` context with increasing GPU engine counters, and the installed
+launcher DEX matched the current build. Completed logs reached Yostar's login
+Activity and emitted repeated Choreographer skipped-frame notifications.
+Desktop visual tools were unavailable; the logged screen and GPU work do not
+establish gameplay, working text input or measured FPS.
+
+One run ended after `APP_HOST_CLOSED` with the app sending itself SIGKILL during
+teardown; another reached its configured time limit. A follow-up session
+(`9638860a0eb24002b3a98c1829713969`) exited with status 1: Google sign-in failure
+invoked `Toast.show`, which reached unsupported `notification.enqueueToast`.
+It ended before the scheduled late-scene profile. This is a concrete service
+failure, not an established cause of the prior stutter.
+
+The [startup codegen audit](../JIT.md#azur-lane-generated-code-audit-2026-10-14)
+precedes the regular login-scene delays. Remaining work is real toast lifecycle,
+input/focus/scroll reproduction on an attached WebView, desktop IME composition,
+implicit browser intent resolution and supported callback delivery. Browser
+launch does not supply Google Play Services authentication. Keep those failures
+separate from JIT, software window drawing and codec compatibility.
+
 ### Common device services (2026-10-13)
 
 Android 15's

@@ -61,6 +61,54 @@ This changes allocation/accounting, not instruction semantics or the
 retained IR. The regression and Android validation are recorded in
 [TESTS.md](TESTS.md#dead-code-compaction-accounting-2026-10-14).
 
+## Azur Lane generated-code audit (2026-10-14)
+
+A 20-second GPU-enabled startup capture with JIT symbols recorded 15,470
+samples and zero lost samples. Generated guest code accounted for 78.34% of
+sampled cycles; guest `libil2cpp.so` accounted for 52.49% and Unity for 10.00%.
+Inclusive block translation was about 5.38% and interpreter fallback 3.46%.
+These categories overlap and are not additive. The capture preceded the later
+login scene's regular UI delays, so it does not identify their cause.
+
+The corrected replay inspected 24 sampled blocks, about 12.13% of sampled
+cycles, using the same MT compiler and each library's ELF PT_LOAD mappings.
+File offsets must be translated through `p_vaddr + offset - p_offset` before
+deriving guest load bias. An initial replay omitted this conversion and
+misattributed a 353-byte single conditional branch to the hot guest PC
+`0x7353ea1908`. That example is withdrawn: the actual PC is a five-instruction
+return sequence and its corrected replay emits 1,619 bytes. A replay does not
+reconstruct all live module, cache or entry-order state. Complete emitted byte
+counts include cold recovery paths and both branch exits.
+
+Source and emitted-code findings, not implemented optimizations:
+
+- Paired-memory function entry/return blocks at `0x735649f400` (0.35%) and
+  `0x735649f4fc` (0.33%) contain seven/nine ARM instructions and emit
+  3,457/3,372 bytes. LDP/STP retain repeated inline page checks and address
+  spills/reloads instead of the streamlined scalar guard path. Any replacement
+  must preserve the whole-instruction footprint and precise writeback state.
+- CRIWARE's `0x74057f26dc` (0.77%) contains 32 ARM instructions, 29 SIMD FP
+  arithmetic operations and 17 distinct vector registers; the replay emits
+  6,239 bytes and 178 vector-state memory operations. An extra DUP-element
+  helper and the cache's register ceiling disqualify all-or-nothing vector
+  retention. Partial allocation requires explicit aliases, helper clobbers and
+  NaN/fault recovery, rather than blindly enlarging the register whitelist.
+- Atomic/LLSC/native-extra operations disable legacy forwarding for their
+  complete blocks; unsupported SSA contracts also limit optimization. The
+  sampled exclusive loop `0x7353eaaf50` (0.40%) and Unity acquire-load block
+  `0x734c397984` (0.34%) expose CPU-state round trips around arithmetic.
+  Optimizing segments requires modeled barriers, not removal of safeguards.
+- `0x735649f688` (0.49%) emits consecutive MOVZX operations for a halfword
+  load. The exclusive-loop block also uses ECX/CL plus count masking for a
+  constant bitfield rotation. x86 immediate rotate forms are documented in
+  [Intel's instruction reference](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf).
+
+No game speedup is established by these inspections. The estimates of 3–8%
+overall improvement for the inspected blocks and 10–25% for broad recurring
+patterns assume substantial reductions in their execution cost; they are
+extrapolations, not benchmark results. Capture the delayed scene and measure
+matched cold/warm frame times before attributing stutter or accepting a fix.
+
 ## Scalar FP scratch preservation (2026-10-13)
 
 Scalar ADD/SUB/MUL/DIV, min/max, SQRT and register MOV use XMM scratch

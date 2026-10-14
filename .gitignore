@@ -59,6 +59,8 @@ Tools/graphics-smoke/
 # Agent workspace data (local tool config, node_modules, plans)
 .kilo/
 .opencode/
+.claude/
+opencode.json
 
 # CMake (if added later)
 build/
