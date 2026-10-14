@@ -41,8 +41,9 @@ dispatch microbenchmark attributed 96%. This batch reduces that code:
   reads and permits the existing self-loop emitter to retain loop state.
 
 Three interleaved 110,000-iteration CoreMark runs per binary, after one
-warm-up each, measured medians of 8,926.40 iterations/s for the saved
-pre-batch binary and 10,005.46 iterations/s after this batch (12.1% higher).
+warm-up each on the final corrected binary, measured medians of 9,049.03
+iterations/s for the saved pre-batch binary and 9,893.87 iterations/s after
+this batch (9.3% higher).
 Every run exceeded ten seconds and validated all CRCs. This measures the
 combined batch on one host, not each change separately or game FPS. See
 [validation and limits](TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).

@@ -49,10 +49,12 @@ for shape and dependencies only, not executed indefinitely.
 
 CoreMark used the saved pre-batch executable, the same guest ELF, normal JIT
 defaults, one warm-up each and three interleaved runs each at exactly 110,000
-iterations. Throughput samples were 8,916.99/8,926.40/9,002.37 before and
-10,005.46/9,923.32/10,030.09 after. All seed/list/matrix/state/final CRCs
+iterations. Throughput samples were 9,054.24/8,928.57/9,049.03 before and
+9,893.87/10,011.83/9,620.43 after. All seed/list/matrix/state/final CRCs
 matched the benchmark runner's QEMU-checked expectations. The combined
-median improvement was 12.1%; it is a local benchmark observation. No new
+median improvement was 9.3%; it is a local benchmark observation. These final
+runs include the compaction-accounting correction below and supersede the
+initial 12.1% three-pair checkpoint. No new
 game FPS/stability, complete FPCR/FPSR, arbitrary concurrent mapping-race or
 cross-host performance claim follows from these checks.
 
