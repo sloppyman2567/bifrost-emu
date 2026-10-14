@@ -117,27 +117,22 @@ with working storage, lifecycle and native library loading.
 
 ## Integrated ART and JNI
 
-Integrate ART and the required managed libraries so games with Java/Kotlin
-startup code can reach their ARM64 native engines. ART executes DEX and
-supports compiled execution; see the [AOSP runtime reference](https://source.android.com/docs/core/runtime).
+ART is already integrated and working. Asgard runs the real Android runtime
+and framework, including DEX execution and JNI calls into ARM64 game engines.
+SpongeBob already uses this path.
 
-- Extend the matching guest ARM64 ART/Bionic runtime executed through
-  Bifrost. Reuse the existing native-bridge interface where suitable;
-  a host ART route requires a separately validated JNI/ABI bridge.
-- Support class loading, managed exceptions, JNI registration/calls,
-  callbacks, thread attachment and managed/native reference lifetimes.
-- Coordinate ART garbage collection, thread suspension and safepoints
-  with guest signals and JIT execution. Never bypass these for speed.
-- Handle ART-generated executable pages, write/execute protection changes
-  and instruction-cache invalidation without stale Bifrost translations.
-- Broaden DEX interpretation and ART JIT/AOT validation under load. Keep ART's
-  generated-code cache distinct from Bifrost's translated-code cache.
-- Implement the framework subset required for app launch, activities,
-  lifecycle, resources and the selected game compatibility targets.
+Next steps:
 
-Acceptance: a DEX test calls a native ARM64 library and receives a callback;
-a mixed managed/native Android sample survives GC, pause/resume and thread
-shutdown; a selected game reaches interactive gameplay.
+- Make managed game startup and runtime faster, guided by real-game profiles.
+- Improve stability during heavy garbage collection, thread activity,
+  pause/resume, shutdown and concurrent apps.
+- Test more games and broaden coverage of class loading, JNI callbacks and
+  ART-generated code. Preserve correct memory protection and code invalidation.
+- Complete the Android framework services needed by additional games.
+
+Acceptance: more games sustain interactive play, survive lifecycle and memory
+stress, and show measured startup/performance improvements without breaking
+existing games.
 
 Historical checkpoint (October 5): the pinned guest ART creates its VM and passes the
 DEX/JNI fixture (`Scripts/Android/test_android_jni.py`) in JIT and interpreter modes,
@@ -431,8 +426,9 @@ frame delays; separate input, service, renderer and JIT findings.
 
 1. Establish trustworthy profiling, cache telemetry and resumable game tests.
 2. Improve Linux game correctness, caching and demanding-scene performance.
-3. Bring up the Bionic/Android profile and packaged native applications.
-4. Integrate ART/JNI and the framework/service subset for selected games.
+3. Extend the existing Bionic/Android profile and packaged native-app coverage.
+4. Broaden the existing ART/JNI integration and framework/service coverage for
+   additional games.
 5. Expand the Android game matrix and complete lifecycle, audio/input and
    extended stability checks before declaring v2.0 compatibility.
 

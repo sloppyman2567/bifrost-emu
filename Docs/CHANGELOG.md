@@ -24,6 +24,8 @@ labels below are historical records.
 - Define proposed alpha.2 compatibility/performance, alpha.3 WebView/media/ad
   investigation and beta.1 setup/library usability priorities with concrete
   acceptance gates. The current runtime version remains 2.0.0-alpha.1.
+- Mark real guest ART/JNI integration as an implemented foundation; remaining
+  roadmap work extends compatibility, stress coverage and performance.
 - Add `LICENSES/` with the project Unlicense, the canonical Apache 2.0 text
   and pinned attribution for six AOSP Settings source inputs. Original Asgard
   integration stays Unlicense; reused Android components retain upstream terms.
