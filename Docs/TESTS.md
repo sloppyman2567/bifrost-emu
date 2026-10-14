@@ -1,5 +1,9 @@
 # Tests
 
+Dated checkpoints record the revision and scope tested at that time. Earlier
+failures and totals remain as history; use later checkpoints for superseding
+results. Passing fixtures do not establish untested application behavior.
+
 ## X11 wire readback synchronization (2026-10-14)
 
 The intermittent `xwayland_wire` failure was X `BadMatch` on `GetImage`

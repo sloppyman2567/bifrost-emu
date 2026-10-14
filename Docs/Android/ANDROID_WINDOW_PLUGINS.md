@@ -1,6 +1,6 @@
 # Android window plugins
 
-## Current interface (2026-10-05)
+## Current interface (2026-10-14)
 
 `AndroidWindowBackend` owns its host window, native EGL binding and input source.
 The default `sdl3-egl` backend uses SDL3. Guest SDL2 thunks, SDL2 surface conversion,
@@ -11,9 +11,10 @@ There is no borrowed `SDL_Window*` in the plugin interface.
 
 Install before opening a window or issuing any guest surface handle. Live backend
 replacement is rejected because it would invalidate existing EGL objects. Calls
-belong to the display thread. The emulator still wires one singleton Android
-runtime and one window; multiple concurrent runtimes and SDL event demultiplexing
-between independent contexts are not implemented.
+belong to the display thread. Each emulator process wires one Android runtime
+and primary display window, with additional managed surfaces and popup layers.
+Multiple runtimes inside one emulator and SDL event demultiplexing between
+independent embedded contexts are not implemented.
 
 The SDL3 backend opens a window without an extra SDL renderer. On Wayland it owns
 its `wl_egl_window` and keeps the helper DSO loaded until wrapper destruction;
@@ -57,8 +58,14 @@ Zeros restore the window's own pixel size, as Android's default buffer size
 follows its window: 800×600 before a window opens, then the native size it
 opened at, updated by host resizes. The adapter supports only
 RGBA8888: other positive formats now return `-ENOTSUP` instead of reporting
-an unsupported format as successful. Separate Android buffer queues, format
-negotiation and independent physical/buffer sizing are still absent.
+an unsupported format as successful. This host window interface does not expose
+general Android buffer-queue or format negotiation. The managed framework's
+real ImageReader/Surface path is described in the
+[host media checkpoint](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
+Aliased native-window width/height queries follow the host surface's resized
+geometry rather than the ImageReader's fixed creation dimensions. Focused
+backend checks and the user's visual resize check cover that change; full
+SurfaceView recreation remains unverified.
 
 ## Loadable host modules
 

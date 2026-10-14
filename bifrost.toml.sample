@@ -26,11 +26,11 @@
 
 # ── JIT / interpreter ─────────────────────────────────────────────────
 [jit]
-enabled     = true        # use FrostJIT (recommended — 6.4x speedup)
+enabled     = true        # use FrostJIT (default)
 threshold   = 0           # 0 = use JIT from start; N = interp for N instrs
 verify      = false       # BIFROST_JIT_VERIFY — slow, debug only
-fwd         = false       # BIFROST_ENABLE_FWD — experimental, has bugs
-thread_jit  = true        # give each thread its own JIT (BIFROST_NO_THREAD_JIT inverts)
+fwd         = true        # register forwarding; BIFROST_NO_FWD=1 opts out
+thread_jit  = true        # multithreaded JIT mode (BIFROST_NO_THREAD_JIT inverts)
 no_chain    = false       # disable lazy block chaining (debug)
 no_selfloop = false       # disable self-loop chaining (debug)
 no_wex      = false       # disable Write XOR Execute (perf vs security)
@@ -52,7 +52,7 @@ dump        = ""          # write WAV here on exit (empty = no dump)
 
 # ── Filesystem paths ──────────────────────────────────────────────────
 [paths]
-rootfs = ""               # BIFROST_ROOT — chroot-like sandbox path
+rootfs = ""               # BIFROST_ROOT — guest VFS root; see Docs/SECURITY.md
 cwd    = "/"              # guest-side current working directory
 
 # ── Signal handling ───────────────────────────────────────────────────

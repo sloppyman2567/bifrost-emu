@@ -30,8 +30,12 @@
 //   enabled = true
 //   threshold = 0           # 0 = use JIT from start
 //   verify = false
-//   fwd = false
+//   fwd = true
 //   thread_jit = true
+//   no_chain = false        # BIFROST_NO_CHAIN
+//   no_selfloop = false     # BIFROST_NO_SELFLOOP
+//   no_wex = false          # BIFROST_NO_WEX (security vs perf)
+//   no_fma3 = false         # BIFROST_NO_FMA3
 //
 //   [fb]
 //   width = 1280
@@ -54,10 +58,7 @@
 //   trace_syscalls = false  # BIFROST_SYSCALL_TRACE
 //
 //   [perf]
-//   no_chain = false        # BIFROST_NO_CHAIN
-//   no_selfloop = false     # BIFROST_NO_SELFLOOP
-//   no_wex = false          # BIFROST_NO_WEX (security vs perf)
-//   no_fma3 = false         # BIFROST_NO_FMA3
+//   stats_interval = 0      # 0 = no periodic instruction statistics
 //
 //   [android]
 //   back_key = "escape"     # BIFROST_ANDROID_BACK_KEY; "none" disables
@@ -91,7 +92,7 @@ struct Config {
     uint8_t  audio_sample_size = 2;
     std::string audio_dump_path;          // WAV path on exit
     // ── [paths] ──────────────────────────────────────────────────────
-    std::string rootfs_path;              // BIFROST_ROOT (empty = no sandbox)
+    std::string rootfs_path;              // BIFROST_ROOT (empty = no VFS root)
     std::string guest_cwd     = "/";
     // ── [signal] ─────────────────────────────────────────────────────
     bool     forward_host_signals = true;

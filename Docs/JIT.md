@@ -4,6 +4,10 @@ This guide maps the AArch64-to-x86_64 JIT and records the steps for changing
 instruction support without letting decode, translation, optimization, and
 code generation drift apart.
 
+Dated sections retain the measurements and failures from their recorded
+revisions. Later checkpoints supersede earlier results where explicitly stated;
+historical benchmark scores are not measurements of the current executable.
+
 The [source map](ARCHITECTURE.md) describes the subsystem layout and split
 boundaries. Compiler prediction/leaf analysis lives in `Compiler/BlockAnalysis.cpp`,
 Tier-1 orchestration in `BlockCompiler.cpp` and differential store-footprint

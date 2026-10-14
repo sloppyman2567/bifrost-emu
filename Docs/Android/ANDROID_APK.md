@@ -11,7 +11,7 @@ one warning and startup continues under the inherited limit. This is a
 host-executable startup policy, not complete guest resource-limit emulation
 or a change to resource limits of library-embedding callers.
 
-Checkpoint: October 5, 2026. Bifrost installs signed APK sets and executes a
+Current tooling scope: October 14, 2026. Bifrost installs signed APK sets and executes a
 `android.app.NativeActivity` through the real guest Bionic linker, and managed
 SurfaceView Activities through the ART/framework
 [managed launcher](ANDROID_RUNTIME.md#managed-apk-launcher-2026-10-08).
@@ -99,16 +99,22 @@ changing the media bundle requires a fresh app state; reinstall with the same
 
 Real `AMediaFormat` allocation, typed fields, copied strings/buffers, format
 copy/clear/description and deletion are exercised in the signed APK gate.
-No Media NDK replacement functions are supplied. Codec/extractor/DRM APIs still
-require Android media services and associated drivers/framework integration;
-calls that wait for unavailable services may block. Codec decoding, playback
-and real Android native-window interoperability are not validated. A future
-host decoder bridge belongs at that service/buffer boundary; the real metadata
-API itself needs no host thunk. The managed framework now has a realm-owned
-software Gralloc5 allocator and guest mapper, verified through AHardwareBuffer
-and AImageReader CPU pixels (see [runtime validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13)).
-This is the allocation/mapping foundation; EGL image import, MediaCodec/JNI and
-actual video playback remain unfinished.
+No Media NDK replacement functions are supplied. The managed framework's later
+[host media checkpoint](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14)
+adds real Codec2 services owned by the Binder realm, host decoding and genuine
+ImageReader/native-window output. Temporary Java MediaCodec probes decoded
+exact 64x64 AVC/HEVC/VP8/VP9 frames with checked timestamps and EOS; separate
+NDK AMediaCodec/native-window probes checked forced-GPU output. These checks
+are separate from the signed APK gate's MediaFormat assertions. Provisioning
+the Media NDK bundle alone does not create those codec services.
+
+The realm-owned software Gralloc5 allocator and guest mapper are also checked
+through AHardwareBuffer and AImageReader CPU pixels (see
+[allocation validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13)).
+`media.player` and `media.extractor` remain absent; unavailable service calls
+may block. Full stream reconfiguration, HDR, native EGL rendering into an aliased
+Surface and in-game video playback remain unverified. This is a bounded media
+implementation, not arbitrary codec/player/DRM compatibility.
 
 ## Package and runtime ownership
 
@@ -209,11 +215,14 @@ mounting are not implemented. Graphics and platform exports cover the existing
 thunk subset; the adapter route does not establish arbitrary NDK or audio
 compatibility. Missing adapter exports fail explicitly.
 
-`--android-services` enables the bounded service-manager subset described in
-[ANDROID_BINDER.md](ANDROID_BINDER.md). No SurfaceFlinger, ActivityManager,
-PackageManager or other framework service is supplied by this checkpoint.
+`--android-services` enables the bounded native service-manager subset described in
+[ANDROID_BINDER.md](ANDROID_BINDER.md). That flag alone does not start the managed
+framework. The managed launcher separately supplies Activity/Package manager
+contracts and limited SurfaceFlinger endpoints; it is not a full Android system.
+See [framework service scope](ANDROID_RUNTIME.md#managed-framework-service-modules-2026-10-09).
 
-The user-provided SpongeBob 5.11.5 set installs successfully: nine signed APKs
+Historical native-loading results: the user-provided SpongeBob
+5.11.5 set installs successfully: nine signed APKs
 and 21 ARM64 libraries. The normal APK runner now launches
 `com.clevertap.unity.CleverTapOverrideActivity` through ManagedLauncher.
 Its SurfaceView path provides a window and input; this remains a bounded
@@ -237,6 +246,11 @@ second call, matching the [pinned Bionic mutex implementation](https://android.g
 The registrations belong to App (`__dso_handle` at `0x3ddb88`) and
 Messaging (`0x139f8`); the shared object resolves to Messaging at `0x140d8`.
 These offsets refer to this packaged version, not a general Firebase ABI.
+
+The current SpongeBob 5.12.0 gameplay and remaining WebView/Google Play gaps
+are recorded in [its application page](../Apps/spongebob.md). The earlier
+19/21-library result above is a native-load diagnostic, not the current managed
+game's compatibility status.
 
 Explicitly loading App first with `RTLD_LOCAL` gives each DSO its own mutex
 address and completes Messaging cleanup under JIT, interpreter and opt-in

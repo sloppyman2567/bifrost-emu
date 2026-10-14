@@ -14,6 +14,13 @@ python3 Scripts/Android/asgard.py --state-root android-state realm status
 python3 Scripts/Android/asgard.py --state-root android-state realm stop
 ```
 
+This guide retains dated implementation and failure checkpoints. Later
+checkpoints supersede earlier limits only for the contracts they cover;
+an old failure report is not automatically a current compatibility claim.
+See [current support](../SUPPORT.md#android-scope-and-v20-plans),
+[host media](#host-media-decoding-2026-10-14) and the
+[roadmap](../roadmap.md) for the latest scope and remaining work.
+
 ### Shared guest processes (October 11, 2026)
 
 Independent emulator OS processes can join the same Binder realm using
