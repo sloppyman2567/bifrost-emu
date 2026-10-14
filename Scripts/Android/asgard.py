@@ -152,7 +152,10 @@ def broker_status(state):
                 try:
                     status['media'] = media_status(path)
                 except (OSError, ValueError):
-                    status['media'] = {'state': 'unavailable', 'reason': 'Broker lacks media status support'}
+                    # Brokers built before STATUS/ENABLE_MEDIA/PROCESS_STATE
+                    # answer the same protocol version but reject these ops.
+                    status['state'] = 'incompatible'
+                    status['media'] = {'state': 'unavailable', 'reason': 'Broker predates media and process-state support'}
             return status
         except (OSError, ValueError):
             pass
@@ -168,7 +171,7 @@ def ensure_broker(state, emu):
         if status["state"] == "running":
             return status
         if status["state"] == "incompatible":
-            raise ValueError("Existing Asgard broker uses an older protocol; stop its app sessions, then run realm stop and realm start")
+            raise ValueError("Existing Asgard broker is older than this emulator; stop its app sessions, then run realm stop and realm start")
         path = Path(status["socket"])
         if path.exists():
             info = path.lstat()

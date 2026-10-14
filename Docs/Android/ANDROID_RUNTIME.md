@@ -264,7 +264,10 @@ decoded on the host; there are no Java or JNI codec substitutes.
   `STOP` reaps every child before acknowledging. Children get
   `PR_SET_PDEATHSIG(SIGKILL)` and are spawned through `/proc/self/exe`.
   `Scripts/Android/asgard.py` (`ensure_media`) attaches a verified root;
-  realm status reports it under `media`.
+  realm status reports it under `media`. A realm broker started from an
+  older emulator rejects the media status op. Realm status then reports
+  it as `incompatible`, and launches stop before any app starts. Stop its
+  apps, then run `realm stop` and `realm start`.
 - **Capability report.** `bifrost-emu --media-capabilities` decodes a 64x64
   black probe for VP8/VP9/AVC/HEVC on the native CPU and forced GPU paths
   (VA-API, CUDA or Vulkan when FFmpeg offers them). It checks every pixel,
