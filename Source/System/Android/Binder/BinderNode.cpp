@@ -74,6 +74,9 @@ void BinderNode::invalidate_mapping(uint64_t addr, uint64_t size) {
         for (const auto& entry : buffer_references_) referenced.push_back(entry.first);
         for (uint64_t address : referenced) drop_buffer_references(address);
         while (!buffer_fds_.empty()) close_buffer_fds(buffer_fds_.begin()->first);
+        for (const auto& entry : async_buffers_) entry.second->async_active = false;
+        async_buffers_.clear();
+        ready_.notify_all();
         mapping_ = mapping_size_ = 0; free_.clear(); buffers_.clear();
         if (driver_mapping_) ::munmap(driver_mapping_, driver_size_);
         driver_mapping_ = nullptr; driver_size_ = 0;
@@ -141,6 +144,12 @@ int BinderNode::free_buffer(Memory& mem, uint64_t addr) {
     if (!mem.guest_to_host_ptr(addr, Memory::GUEST_PROT_READ, size)) return -EFAULT;
     auto host = driver_mapping_ + (addr - mapping_);
     memset(host, 0, size); buffers_.erase(it);
+    auto asynchronous = async_buffers_.find(addr);
+    if (asynchronous != async_buffers_.end()) {
+        asynchronous->second->async_active = false;
+        async_buffers_.erase(asynchronous);
+        ready_.notify_all();
+    }
     drop_buffer_references(addr);
     close_buffer_fds(addr);
     auto next = free_.lower_bound(addr);
@@ -308,6 +317,18 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     int object_error = translate_objects(*target, event, mem, tx, tid, fds, accepts_fds, buffers_size, input);
     if (object_error) { fail(tid, BF_BR_FAILED_REPLY, -object_error); return 0; }
     event.caller = weak_from_this(); event.caller_tid = tid;
+    if (cmd == BF_BC_TRANSACTION && (tx.flags & BF_TF_ONE_WAY)) {
+        if (!destination) {
+            // Context-manager handle zero has the same serialization rule.
+            auto& object = target->owned_objects_[domain_->manager_ptr];
+            if (!object) {
+                object = std::make_shared<Object>(); object->owner = target->weak_from_this();
+                object->pointer = domain_->manager_ptr; object->cookie = domain_->manager_cookie;
+            }
+            destination = object;
+        }
+        event.async_object = destination;
+    }
     if (cmd == BF_BC_REPLY) calls_[tid].pop_back();
     target->queued_bytes_ += required;
     queue.push_back(std::move(event));
@@ -355,9 +376,14 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds,
     }
     if (result) wr.read_consumed = 0;
     if (!result && wr.read_size) {
+        auto next_incoming = [&] {
+            return std::find_if(incoming_.begin(), incoming_.end(), [](const Event& event) {
+                return !event.async_object || !event.async_object->async_active;
+            });
+        };
         auto available = [&] {
             return !replies_[cpu.tid].empty() ||
-                (loopers_.count(cpu.tid) && calls_[cpu.tid].empty() && !incoming_.empty());
+                (loopers_.count(cpu.tid) && calls_[cpu.tid].empty() && next_incoming() != incoming_.end());
         };
         while (!available() && !domain_->stopped && !disconnected_) {
             if (flags_ & O_NONBLOCK) { result = -EAGAIN; break; }
@@ -375,9 +401,10 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds,
             }
             while (!result && available()) {
                 auto& queue = !replies_[cpu.tid].empty() ? replies_[cpu.tid] : incoming_;
-                Event& event = queue.front();
+                auto next = &queue == &incoming_ ? next_incoming() : queue.begin();
+                Event& event = *next;
                 if (event.command == BF_BR_DEAD_BINDER && event.death->cancelled) {
-                    queue.pop_front(); continue;
+                    queue.erase(next); continue;
                 }
                 bool tx = event.command == BF_BR_TRANSACTION || event.command == BF_BR_REPLY;
                 size_t n = 4 + (tx ? sizeof(bf_binder_transaction) : _IOC_SIZE(event.command));
@@ -426,6 +453,10 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds,
                     result = -EFAULT; break;
                 }
                 if (tx && !event.references.empty()) buffer_references_[buffer] = std::move(event.references);
+                if (event.async_object) {
+                    event.async_object->async_active = true;
+                    async_buffers_[buffer] = event.async_object;
+                }
                 for (size_t i = 0; i < installed_fds.size(); ++i)
                     if (event.descriptors[i].auto_close)
                         buffer_fds_[buffer].push_back({&fds, installed_fds[i], event.descriptors[i].node});
@@ -438,7 +469,7 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds,
                 if (tx) queued_bytes_ -= std::max<uint64_t>(8, (event.payload.size() + 7) & ~uint64_t(7));
                 if (synchronous) calls_[cpu.tid].push_back({event.caller, event.caller_tid,
                         !!(event.transaction.flags & BF_TF_ACCEPT_FDS)});
-                wr.read_consumed += n; queue.pop_front();
+                wr.read_consumed += n; queue.erase(next);
                 // Linux stops the read after a death cookie so its recipient
                 // can acknowledge it before processing subsequent work.
                 if (dead || tx) break;

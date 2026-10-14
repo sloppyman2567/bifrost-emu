@@ -1,5 +1,26 @@
 # Tests
 
+## Binder one-way callback ordering (2026-10-14)
+
+The real Codec2 H.264 service decoded five frames on the host, but Android
+received missing/reordered outputs or EOS first. Slowing just that service
+with the interpreter hid the failure. The cause was concurrent dispatch of
+one-way callbacks on the same Binder object, contrary to Android's
+[per-node serialization contract](https://source.android.com/docs/core/architecture/ipc/binder-threading#serialization-of-asynchronous-transactions).
+The transport now holds that object's asynchronous execution slot until
+`BC_FREE_BUFFER`; other objects and synchronous calls can bypass its queue.
+Invalidating the receive mapping releases outstanding slots.
+
+`android_binder_features` now has 95 checks, including a second looper that
+must receive `EAGAIN` while the first call's buffer is held, ordered delivery
+after release, and progress on unrelated objects and synchronous calls.
+The old binary fails that deterministic case; both repaired engines pass.
+The actual all-JIT Java MediaCodec diagnostic then returned five 64x64 H.264
+frames with reference-identical pixels, timestamps 0 through 800000 us and
+EOS, under both forced native CPU and forced VA-API GPU decoding. These
+are diagnostic-root observations, not integrated launcher/Surface playback
+coverage or a complete media-service implementation.
+
 ## ARM64 write-only mappings (2026-10-14)
 
 The real Goldfish H.264 component maps its command/reply arena with

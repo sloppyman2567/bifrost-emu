@@ -21,6 +21,9 @@ and [driver implementation](https://raw.githubusercontent.com/torvalds/linux/v6.
 - Transactions to context handle 0 and service handles, synchronous replies and one-way
   delivery between guest endpoints, including independent emulator processes
   attached to an Asgard realm.
+- One-way calls on each Binder object execute serially until the receiver
+  releases the active transaction's buffer. Other objects and synchronous
+  calls remain independently dispatchable. This includes context handle 0.
 - Per-thread completion/reply queues, synchronous call stacks, and manager
   work delivered to registered loopers.
 - Blocking reads, nonblocking `EAGAIN`, guest-signal interruption with `EINTR`,

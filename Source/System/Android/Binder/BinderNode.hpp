@@ -22,6 +22,7 @@ struct BinderObject {
     uint32_t strong = 0, weak = 0;
     bool alive = true;
     bool accepts_fds = false;
+    bool async_active = false; // one-way execution is serialized per Binder object
     bool reachable() const { return alive && (host_service != HostService::None || !owner.expired()); }
     std::vector<std::weak_ptr<BinderDeath>> deaths;
     uint32_t pending_strong = 0, pending_weak = 0;
@@ -113,6 +114,7 @@ private:
         bf_binder_ptr_cookie object{};
         std::weak_ptr<Node> caller;
         int caller_tid = 0;
+        std::shared_ptr<Object> async_object;
     };
     struct TransactionInput { std::vector<uint8_t> payload; std::vector<uint64_t> offsets; int error = 0; };
     TransactionInput prepare_transaction(const uint8_t*, bool scatter, Memory&);
@@ -133,6 +135,7 @@ private:
     std::map<uint64_t, uint64_t> free_;
     std::map<uint64_t, uint64_t> buffers_;
     std::map<uint64_t, std::vector<Reference>> buffer_references_;
+    std::map<uint64_t, std::shared_ptr<Object>> async_buffers_;
     struct AutoFd { FdTable* table; int number; std::weak_ptr<Node> file; };
     std::map<uint64_t, std::vector<AutoFd>> buffer_fds_;
     std::vector<std::shared_ptr<BinderDeath>> deaths_;

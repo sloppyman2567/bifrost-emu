@@ -28,6 +28,13 @@ static int contains(uint32_t wanted, void* value) {
     }return 0;
 }
 static int free_buffer(int fd, uint64_t buffer) {return send_command(fd,BF_BC_FREE_BUFFER,&buffer,0);}
+static int receive_transaction(int fd, struct bf_binder_transaction* tx) {
+    for (int i=0;i<8;++i) {
+        if (send_command(fd,0,0,1)) return -1;
+        if (contains(BF_BR_TRANSACTION,tx)) return 0;
+    }
+    return -1;
+}
 struct pool_result {int fd, registered, extra, exited;};
 static void* pool_worker(void* argument) {
     struct pool_result* result=argument;
@@ -59,7 +66,70 @@ static int reject(int fd, struct bf_binder_transaction_sg* sg, int expected) {
     return send_command(fd,BF_BC_TRANSACTION_SG,sg,1)==0&&contains(BF_BR_FAILED_REPLY,0)&&
         ioctl(fd,BF_BINDER_GET_EXTENDED_ERROR,&error)==0&&error.param==-expected;
 }
+struct async_reader { int fd, status, error; };
+static void* async_reader(void* argument) {
+    struct async_reader* state=argument;
+    if (send_command(state->fd,BF_BC_ENTER_LOOPER,0,0)) {state->status=99;return 0;}
+    state->status=send_command(state->fd,0,0,1);state->error=errno;
+    send_command(state->fd,BF_BC_EXIT_LOOPER,0,0);
+    return 0;
+}
+static int asynchronous_ordering(void) {
+    int server=open("/dev/vndbinder",O_RDWR|O_NONBLOCK),client=open("/dev/vndbinder",O_RDWR|O_NONBLOCK);
+    CHECK(server>=0&&client>=0);
+    void* server_arena=mmap(0,65536,PROT_READ,MAP_PRIVATE,server,0);
+    void* client_arena=mmap(0,65536,PROT_READ,MAP_PRIVATE,client,0);
+    CHECK(server_arena!=MAP_FAILED&&client_arena!=MAP_FAILED);
+    CHECK(ioctl(server,BF_BINDER_SET_CONTEXT_MGR,0)==0);
+    uint32_t limit=0;CHECK(ioctl(server,BF_BINDER_SET_MAX_THREADS,&limit)==0);
+    CHECK(send_command(server,BF_BC_ENTER_LOOPER,0,0)==0);
+    struct bf_binder_transaction tx={0};tx.flags=BF_TF_ONE_WAY;tx.code=41;
+    CHECK(send_command(client,BF_BC_TRANSACTION,&tx,0)==0);
+    tx.code=42;CHECK(send_command(client,BF_BC_TRANSACTION,&tx,0)==0);
+    CHECK(send_command(server,0,0,1)==0&&contains(BF_BR_TRANSACTION,&tx)&&tx.code==41);
+    uint64_t first=tx.buffer;
+    // A second looper must not execute the next call on this Binder object
+    // while the first call's buffer is held, even though the sender returned.
+    struct async_reader state={server,99,0};pthread_t reader;
+    CHECK(!pthread_create(&reader,0,async_reader,&state)&&!pthread_join(reader,0));
+    CHECK(state.status==-1&&state.error==EAGAIN);
+    // Synchronous work remains independently dispatchable on the same node.
+    tx=(struct bf_binder_transaction){0};tx.code=43;
+    CHECK(send_command(client,BF_BC_TRANSACTION,&tx,0)==0);
+    CHECK(send_command(server,0,0,1)==0&&contains(BF_BR_TRANSACTION,&tx)&&tx.code==43);
+    CHECK(free_buffer(server,tx.buffer)==0);
+    struct bf_flat_binder objects[2]={{BF_BINDER_TYPE_BINDER,0,0x7711,0x9911},
+                                    {BF_BINDER_TYPE_BINDER,0,0x7722,0x9922}};
+    uint64_t offsets[2]={0,sizeof(objects[0])};
+    tx=(struct bf_binder_transaction){0};tx.buffer=(uintptr_t)objects;tx.data_size=sizeof(objects);
+    tx.offsets=(uintptr_t)offsets;tx.offsets_size=sizeof(offsets);
+    CHECK(send_command(server,BF_BC_REPLY,&tx,0)==0);
+    CHECK(send_command(client,0,0,1)==0&&contains(BF_BR_REPLY,&tx));
+    struct bf_flat_binder handles[2];memcpy(handles,(void*)(uintptr_t)tx.buffer,sizeof(handles));
+    CHECK(handles[0].type==BF_BINDER_TYPE_HANDLE&&handles[1].type==BF_BINDER_TYPE_HANDLE);
+    uint32_t a=handles[0].binder,b=handles[1].binder;
+    CHECK(send_command(client,BF_BC_ACQUIRE,&a,0)==0&&send_command(client,BF_BC_ACQUIRE,&b,0)==0);
+    CHECK(free_buffer(client,tx.buffer)==0);
+    // Unrelated Binder objects in the same process must remain concurrent.
+    tx=(struct bf_binder_transaction){0};tx.target=a;tx.flags=BF_TF_ONE_WAY;tx.code=44;
+    CHECK(send_command(client,BF_BC_TRANSACTION,&tx,0)==0);
+    tx.code=45;CHECK(send_command(client,BF_BC_TRANSACTION,&tx,0)==0);
+    tx.target=b;tx.code=46;CHECK(send_command(client,BF_BC_TRANSACTION,&tx,0)==0);
+    CHECK(receive_transaction(server,&tx)==0&&tx.code==44);uint64_t a_buffer=tx.buffer;
+    CHECK(receive_transaction(server,&tx)==0&&tx.code==46&&free_buffer(server,tx.buffer)==0);
+    CHECK(send_command(server,0,0,1)==-1&&errno==EAGAIN);
+    CHECK(free_buffer(server,a_buffer)==0);
+    CHECK(receive_transaction(server,&tx)==0&&tx.code==45&&free_buffer(server,tx.buffer)==0);
+    CHECK(free_buffer(server,first)==0);
+    CHECK(send_command(server,0,0,1)==0&&contains(BF_BR_TRANSACTION,&tx)&&tx.code==42);
+    CHECK(free_buffer(server,tx.buffer)==0);
+    CHECK(send_command(server,0,0,1)==-1&&errno==EAGAIN);
+    CHECK(munmap(server_arena,65536)==0&&munmap(client_arena,65536)==0);
+    CHECK(close(server)==0&&close(client)==0);
+    return 0;
+}
 int main(void) {
+    CHECK(asynchronous_ordering()==0);
     CHECK(sizeof(struct bf_binder_handle_cookie)==12&&sizeof(struct bf_binder_transaction_sg)==72);
     int manager=open("/dev/hwbinder",O_RDWR|O_NONBLOCK),service=open("/dev/hwbinder",O_RDWR|O_NONBLOCK);
     CHECK(manager>=0&&service>=0);
