@@ -383,6 +383,49 @@ alarm checks construct a focused clipboard and wait for a real listener alarm.
 `ManagedServiceBatch` exercises these through the real managers; see
 [the test record](../TESTS.md#common-device-services-2026-10-13).
 
+### User and idle-policy queries (2026-10-14)
+
+`FrameworkUsers` replaces the launcher's partial `user` handler. The existing
+device profile has one full system user (0), running, unlocked, visible and
+administrative, with serial number 0. It now supports profile enumeration,
+profile type, user state/flags, serial lookup and restriction queries through
+the real UserManager. Profile objects, id arrays and restriction Bundles are
+fresh replies. Unprivileged profile replies redact name/icon; user
+administration permissions are independent of the user's admin flag.
+First-user restrictions come from this image's
+`config_defaultFirstUserRestrictions` resource. Application restrictions remain
+empty because no administrator provisions them.
+
+Permission checks follow Android 15's
+[UserManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/pm/UserManagerService.java):
+self/profile-group queries, foreign-user interaction, full user info and
+profile enumeration have separate gates. Missing-user `hasUserRestriction`
+returns false before permission checking, as in AOSP. Application-restriction
+reads enforce package UID/user ownership. Mutations, user creation/removal,
+user switching and restriction listeners remain unsupported.
+
+The new `FrameworkDeviceIdle` registers `deviceidle`, allowing
+`PowerManager.isIgnoringBatteryOptimizations` to use its genuine endpoint.
+Doze remains disabled in this profile, with no provisioned system/user/temp
+power exemptions. Query methods return fresh empty lists or false membership;
+they do not infer an exemption from Doze being disabled. Permanent and
+temporary changes enforce `DEVICE_POWER` and
+`CHANGE_DEVICE_IDLE_TEMP_WHITELIST`, respectively, before declining privileged
+administration. Coverage inventory excludes those unsupported mutations.
+This follows
+[DeviceIdleController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/apex/jobscheduler/service/java/com/android/server/DeviceIdleController.java).
+
+`FrameworkPower` also supplies `getPowerSaveState` and low-power-standby
+exemption/reason/feature queries. Unsupported battery saver returns AOSP's
+default `PowerSaveState.Builder` reply, including brightness factor 0.5;
+unsupported/disabled standby permits the queries. These follow
+[PowerManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/power/PowerManagerService.java)
+and
+[LowPowerStandbyController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/power/LowPowerStandbyController.java).
+They do not alter host suspend policy or implement Doze, exemption scheduling,
+foreground services or notification posting. These are local Java service-cache
+contracts; see [runtime checks](../TESTS.md#user-and-idle-policy-queries-2026-10-14).
+
 ### Settings, PendingIntents and broadcasts (2026-10-13)
 
 `FrameworkSettings` serves `GET_system`, `GET_secure`, `GET_global`,

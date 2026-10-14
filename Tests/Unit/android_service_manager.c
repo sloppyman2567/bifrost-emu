@@ -113,9 +113,17 @@ int main(void) {
         u32(2);u32(-1);u32(0x7fffffff);u32(2);if(method==2)u32(2);
         CHECK(transact(client,method,0,0,&reply));
         const int32_t* values=(void*)(uintptr_t)reply.buffer;
-        CHECK(!reply.flags&&values[0]==0&&values[1]==2&&values[2]==20&&values[3]==20);
-        if(method==2)CHECK(reply.data_size==32&&values[4]==2&&values[5]==-10000&&values[6]==-10000&&values[7]==0);
-        else CHECK(reply.data_size==20&&values[4]==0);
+        uid_t uid = getuid();
+        if (method == 2 && uid != 0 && uid != 1000 && uid != 1013 && uid != 1047) {
+            // The same fixture is included in a real APK under its app UID.
+            // platform.xml grants score access to media/cameraserver, not apps.
+            CHECK(!reply.flags && reply.data_size >= 12 && values[0] == -1);
+            CHECK(values[1] == (int32_t)strlen("Requires GET_PROCESS_STATE_AND_OOM_SCORE"));
+        } else {
+            CHECK(!reply.flags&&values[0]==0&&values[1]==2&&values[2]==20&&values[3]==20);
+            if(method==2)CHECK(reply.data_size==32&&values[4]==2&&values[5]==-10000&&values[6]==-10000&&values[7]==0);
+            else CHECK(reply.data_size==20&&values[4]==0);
+        }
         CHECK(!release_reply(client,&reply));
     }
     length=0;u32(0);u32(-1);u32(0x53595354);string16("android.os.IProcessInfoService");

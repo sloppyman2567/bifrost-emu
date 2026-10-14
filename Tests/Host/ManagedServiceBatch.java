@@ -63,6 +63,64 @@ public final class ManagedServiceBatch {
         field.setAccessible(true); return field.get(null);
     }
 
+    private static void usersAndIdle(Context context) throws Exception {
+        android.os.UserManager users = context.getSystemService(android.os.UserManager.class);
+        check(users != null && users.isUserUnlocked() && users.isUserRunning(android.os.Process.myUserHandle()),
+                "session user is not running and unlocked");
+        check(users.getUserProfiles().equals(Arrays.asList(android.os.Process.myUserHandle()))
+                && !users.isManagedProfile() && !users.isDemoUser(), "single-user profile differs");
+        check(users.getSerialNumberForUser(android.os.Process.myUserHandle()) == 0
+                && android.os.Process.myUserHandle().equals(users.getUserForSerialNumber(0))
+                && users.getUserForSerialNumber(7) == null, "user serial mapping differs");
+        android.os.Bundle restrictions = users.getUserRestrictions();
+        restrictions.putBoolean(android.os.UserManager.DISALLOW_INSTALL_APPS, true);
+        check(users.getUserRestrictions().isEmpty() && !users.hasUserRestriction(android.os.UserManager.DISALLOW_INSTALL_APPS),
+                "restriction replies alias service state");
+        Object remote = endpoint("user", "android.os.IUserManager");
+        check((Boolean) invoke(remote, "isUserForeground", 0) && (Boolean) invoke(remote, "isUserVisible", 0)
+                && (Boolean) invoke(remote, "isAdminUser", 0), "session user flags differ");
+        int[] ids = (int[]) invoke(remote, "getProfileIds", 0, true);
+        ids[0] = 10;
+        check(Arrays.equals((int[]) invoke(remote, "getProfileIds", 0, false), new int[] {0}),
+                "profile id replies alias service state");
+        List<?> profiles = (List<?>) invoke(remote, "getProfiles", 0, true);
+        Object info = profiles.get(0);
+        check(info.getClass().getField("name").get(info) == null && info.getClass().getField("iconPath").get(info) == null,
+                "unprivileged profile reply leaked personal fields");
+        info.getClass().getField("id").setInt(info, 10);
+        Object copied = ((List<?>) invoke(remote, "getProfiles", 0, true)).get(0);
+        check(copied.getClass().getField("id").getInt(copied) == 0,
+                "profile replies alias service state");
+        for (String method : new String[] {"isUserRunning", "isUserUnlocked", "isUserForeground",
+                "isUserVisible", "getUserRestrictions"}) denied(() -> invoke(remote, method, 10));
+        denied(() -> invoke(remote, "getProfileIds", 10, true));
+        denied(() -> invoke(remote, "getUserInfo", 0));
+        check(!(Boolean) invoke(remote, "hasUserRestriction", android.os.UserManager.DISALLOW_INSTALL_APPS, 10),
+                "missing user restriction must be false before permission checking");
+        android.os.PowerManager power = context.getSystemService(android.os.PowerManager.class);
+        check(!power.isIgnoringBatteryOptimizations(NAME) && !power.isDeviceIdleMode(),
+                "device idle state/exemption disagrees");
+        check(power.getLocationPowerSaveMode() == PowerManager.LOCATION_MODE_NO_CHANGE
+                && power.isExemptFromLowPowerStandby()
+                && power.isAllowedInLowPowerStandby(0)
+                && power.isAllowedInLowPowerStandby("org.bifrost.feature"),
+                "disabled power policies disagree across manager queries");
+        Object powerRemote = endpoint("power", "android.os.IPowerManager");
+        Object policy = invoke(powerRemote, "getPowerSaveState", 7);
+        check(!(Boolean) policy.getClass().getField("batterySaverEnabled").get(policy)
+                && !(Boolean) policy.getClass().getField("globalBatterySaverEnabled").get(policy)
+                && policy.getClass().getField("brightnessFactor").getFloat(policy) == 0.5f,
+                "unsupported battery saver did not return AOSP's default builder state");
+        Object idle = endpoint("deviceidle", "android.os.IDeviceIdleController");
+        check(((String[]) invoke(idle, "getFullPowerWhitelist")).length == 0
+                && ((int[]) invoke(idle, "getAppIdTempWhitelist")).length == 0,
+                "power exemptions invented");
+        denied(() -> invoke(idle, "addPowerSaveWhitelistApp", NAME));
+        denied(() -> invoke(idle, "addPowerSaveTempWhitelistApp", NAME, 1000L, 0, 0, "probe"));
+        denied(() -> invoke(idle, "exitIdle", "probe"));
+        System.out.println("MANAGED_USERS_IDLE_OK");
+    }
+
     private static void settings(Context context, Context system, FrameworkPackages packages, PackageInfo pkg) throws Exception {
         check(Settings.System.getInt(context.getContentResolver(), Settings.System.ACCELEROMETER_ROTATION) == 0,
                 "accelerometer_rotation default missing");
@@ -710,6 +768,7 @@ public final class ManagedServiceBatch {
         initial.setAccessible(true); initial.set(thread, context);
         new Thread(() -> {
         try {
+        usersAndIdle(context);
         notifications(context, packages); audio(context); power(context); wifi(context);
         uiMode(context); permissions(context);
         battery(context); vibratorAndKeyguard(context); clipboard(context, packages);

@@ -27,7 +27,11 @@ final class FrameworkPower implements FrameworkServices.Call {
         isLightDeviceIdleMode,
         isLowPowerStandbySupported,
         isLowPowerStandbyEnabled,
-        isBatterySaverSupported
+        isBatterySaverSupported,
+        getPowerSaveState,
+        isExemptFromLowPowerStandby,
+        isReasonAllowedInLowPowerStandby,
+        isFeatureAllowedInLowPowerStandby
     }
 
     @Override public String[] methods() {
@@ -95,6 +99,16 @@ final class FrameworkPower implements FrameworkServices.Call {
         try { contract = Contract.valueOf(method); }
         catch (IllegalArgumentException unknown) { throw new UnsupportedOperationException("power." + method); }
         switch (contract) {
+            case getPowerSaveState: {
+                // AOSP returns the default builder state when battery saver
+                // is unsupported, including its 0.5 brightness factor.
+                Class<?> builder = Class.forName("android.os.PowerSaveState$Builder");
+                return builder.getMethod("build").invoke(builder.getConstructor().newInstance());
+            }
+            case isExemptFromLowPowerStandby:
+            case isReasonAllowedInLowPowerStandby:
+            case isFeatureAllowedInLowPowerStandby:
+                return true; // AOSP permits these while standby is disabled/unsupported.
             case acquireWakeLock: {
                 permission("android.permission.WAKE_LOCK");
                 IBinder token = (IBinder) Objects.requireNonNull(a[0], "wake lock token");

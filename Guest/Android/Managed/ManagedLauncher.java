@@ -121,6 +121,8 @@ public final class ManagedLauncher {
     private static final FrameworkAlarms alarms = new FrameworkAlarms(packages);
     private static final FrameworkAccounts accounts = new FrameworkAccounts(packages);
     private static final FrameworkLocation location = new FrameworkLocation(packages);
+    private static final FrameworkUsers users = new FrameworkUsers(packages);
+    private static final FrameworkDeviceIdle deviceIdle = new FrameworkDeviceIdle(packages);
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
@@ -637,27 +639,8 @@ public final class ManagedLauncher {
         connectivity.install(services);
         wifi.install(services);
         inputMethod.install(services);
-        // The runner exposes both credential and device protected storage
-        // for user 0, so this single user is running and unlocked.
-        services.register("user", "android.os.IUserManager", (method, a) -> {
-            switch (method) {
-                case "isUserUnlockingOrUnlocked":
-                case "isUserUnlocked": return ((Integer) a[0]) == 0;
-                case "getApplicationRestrictions":
-                case "getApplicationRestrictionsForUser": {
-                    int user = method.equals("getApplicationRestrictionsForUser") ? (Integer) a[1] : 0;
-                    if (user != 0 || installed == null || !installed.packageName.equals(a[0])
-                            || installed.applicationInfo.uid != Process.myUid())
-                        throw new SecurityException("Application restrictions for another app/user");
-                    // No system administrator provisions restrictions in this
-                    // profile. AOSP returns a fresh empty Bundle without XML.
-                    return new Bundle();
-                }
-                case "setApplicationRestrictions":
-                    throw new SecurityException("Application restrictions require system/root");
-                default: throw unsupported("user", method);
-            }
-        });
+        users.install(services);
+        deviceIdle.install(services);
         // The runner provisions one writable emulated volume for user 0.
         // Android 15's VolumeInfo.buildStorageVolume uses the same path for
         // both app and internal access to an emulated volume.

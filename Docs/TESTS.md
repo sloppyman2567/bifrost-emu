@@ -59,6 +59,60 @@ additions), removing the native exception on the concrete failing path.
 The final full-suite and service results are recorded below; this fix does
 not repair unrelated mapping races or establish game stability.
 
+## User and idle-policy queries (2026-10-14)
+
+`ManagedServiceBatch.usersAndIdle` drives genuine UserManager and PowerManager
+clients. It checks the running/unlocked user, profiles and serial mapping,
+restriction/profile reply isolation, redacted personal fields, admin versus
+application privileges, foreign-user denial, missing-user restrictions,
+battery-optimization membership, disabled standby policy queries and AOSP's
+default battery-saver Parcelable. Administrative user-info and permanent/temp
+power-exemption requests must throw SecurityException for the ordinary app.
+
+The final complete batch passed 176 assertions in JIT (86.9 s) and interpreter
+(104.3 s), including existing settings, PendingIntent, receiver, service,
+notification-channel, audio, wake-lock, Wi-Fi and two real repeating-alarm
+deliveries. Native exceptions and missing success markers fail the runner.
+The live service inventory passed and reports 26/104 supported UserManager
+signatures, 13/22 device-idle signatures and 18/67 PowerManager signatures.
+Unsupported user-administration and exemption mutations are classified as
+unsupported, rather than being advertised from their permission-denial gates.
+
+The APK suite passed 28/29 initially. Its native Bionic fixture included the
+standalone service-manager test, which incorrectly expected OOM scores under
+an ordinary app UID. The native service correctly returned EX_SECURITY.
+`android_service_manager.c` now checks denial for app UIDs and keeps successful
+queries for root/system/media/cameraserver. Its standalone 104 checks pass in
+both engines; the isolated APK case passes all six JIT/interpreter/Tier-2 and
+builtin/plugin Wayland combinations, including six persistent save increments.
+The other 28 APK cases include real managed Service creation/bind/stop,
+service-process exit, persisted/namespaced jobs and window/surface lifecycle.
+The full 29-case suite was not rerun after this fixture-only correction.
+
+Permission/return contracts were checked against the pinned Android 15 server
+sources linked in the [runtime guide](Android/ANDROID_RUNTIME.md#user-and-idle-policy-queries-2026-10-14).
+The score-query denial was checked against
+[ActivityManagerService.ProcessInfoService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java)
+and the provisioned `platform.xml` grants.
+The numbers above are observed runtime results. They do not cover every
+advertised method, administrative grants/mutations, cross-user operation,
+native wire clients, Doze transitions, foreground services, notification
+posting or gameplay.
+
+```bash
+PATH=/usr/lib/jvm/java-25-openjdk/bin:$PATH python3 -c \
+  'from pathlib import Path; import sys; sys.path.insert(0,"Scripts/Android"); from android_managed import build_launcher; build_launcher(Path("/tmp/bifrost-service-probe"), (Path("Tests/Host/ManagedServiceBatch.java"),))'
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch \
+  --emu build/release-sdl1-gl1/bifrost-emu --timeout 240
+# Repeat with --mode interp.
+JAVAC=/usr/lib/jvm/java-25-openjdk/bin/javac make android-managed-launcher
+PATH=/usr/lib/jvm/java-25-openjdk/bin:$PATH python3 Scripts/Android/test_android_package.py
+# Focused native APK case:
+PATH=/usr/lib/jvm/java-25-openjdk/bin:$PATH python3 Scripts/Android/test_android_package.py \
+  PackageTests.test_signed_split_native_launch_and_persistence
+```
+
 ## Realm-owned host media decoding (2026-10-14)
 
 Two Java MediaCodec clients (UIDs 10000/10001) shared one realm, each
