@@ -141,9 +141,14 @@ uint64_t AndroidSurfaceManager::from_surface(uint64_t identity) {
     return handle;
 }
 
-int AndroidSurfaceManager::bind_native_window(uint64_t guest_window, uint64_t handle) {
+int AndroidSurfaceManager::bind_native_window(uint64_t guest_window, uint64_t handle,
+                                              int32_t width, int32_t height) {
     std::lock_guard<std::mutex> lock(surface_mu_);
-    if (!guest_window || is_shim(guest_window) || !surfaces_.count(handle)) return -EINVAL;
+    auto found = surfaces_.find(handle);
+    if (!guest_window || is_shim(guest_window) || found == surfaces_.end()) return -EINVAL;
+    if (width < 0 || height < 0 || width > 16384 || height > 16384 || (width == 0) != (height == 0))
+        return -EINVAL;
+    if (width) { found->second.width = width; found->second.height = height; }
     native_windows_[guest_window] = handle;
     return 0;
 }

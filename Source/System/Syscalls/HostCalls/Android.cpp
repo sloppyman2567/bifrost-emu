@@ -162,7 +162,9 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(emu.vfs().report_android_process_state(static_cast<int32_t>(cpu.regs[1])));
             }
             else if (cpu.regs[0] == 15) { // Explicit real guest ANativeWindow -> host backing association.
-                ret_host(manager.bind_native_window(cpu.regs[1], cpu.regs[2]));
+                // x3: optional BufferQueue size (width << 32 | height).
+                ret_host(manager.bind_native_window(cpu.regs[1], cpu.regs[2],
+                         static_cast<int32_t>(cpu.regs[3] >> 32), static_cast<int32_t>(cpu.regs[3])));
             }
             else if (cpu.regs[0] == 16) { // Acquired Android image, converted to straight ARGB rows.
                 try {

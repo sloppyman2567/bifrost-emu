@@ -305,6 +305,13 @@ decoded on the host; there are no Java or JNI codec substitutes.
   windows; the GraphicThunk EGL path resolves that alias to its host
   backing. SDR YUV is converted to ARGB on the Java UI thread (matrix and
   range from the dataspace, crop, stride). HDR is reported unsupported.
+  Binding seeds the host surface with the BufferQueue's creation dimensions;
+  subsequent SurfaceView geometry controls its size. For an aliased native
+  window, `ANativeWindow_getWidth/Height` report that host surface size,
+  matching EGL after a resize instead of the ImageReader's fixed creation
+  size. The user confirmed clean game-window resizing on 2026-10-14;
+  automated backend checks cover dimension seeding, validation and geometry
+  updates. Full recreation and callback sequences remain unverified.
   `FrameworkSurfaces` owns each SurfaceView's lifecycle: it detaches
   SurfaceView's pre-draw listener and keeps `mHaveFrame` false. Otherwise
   [`SurfaceView.updateSurface`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/java/android/view/SurfaceView.java)
@@ -335,7 +342,7 @@ Verified (temporary realm probes, not regression gates):
 - An X11 readback checked pixel placement, geometry and stacking.
 
 Not yet established:
-- Full SurfaceView callback, resize and recreation sequences.
+- Full SurfaceView callback and recreation sequences, and automated game resize coverage.
 - Wayland readback.
 - Native EGL rendering into an aliased Surface.
 - Flush/reconfigure, B-frames, adaptive or HDR profiles, and resolutions

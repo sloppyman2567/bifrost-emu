@@ -52,6 +52,9 @@ public:
     state_->host_resize = host;
     return 0;
   }
+  int surface_geometry(int32_t, int32_t, int32_t w, int32_t h) override {
+    return resize(w, h, false);
+  }
   std::unique_ptr<frost::AndroidWindowBackend> create_surface(int32_t w, int32_t h) override {
     auto child = std::make_shared<State>();
     child->binding = state_->binding + state_->children.size() + 1;
@@ -128,6 +131,14 @@ int main() {
   CHECK(manager.bind_native_window(0x7200010000, primary) == 0);
   CHECK(manager.surface_handle(0x7200010000) == primary);
   CHECK(manager.surface_handle(0x7200010001) == 0);
+  CHECK(manager.bind_native_window(0x7200010000, primary, -1, 64) == -EINVAL);
+  CHECK(manager.bind_native_window(0x7200010000, primary, 64, 0) == -EINVAL);
+  CHECK(manager.bind_native_window(0x7200010000, primary, 16385, 64) == -EINVAL);
+  CHECK(manager.width(primary) == 320 && manager.height(primary) == 240);
+  CHECK(manager.bind_native_window(0x7200010000, primary, 64, 64) == 0);
+  CHECK(manager.width(primary) == 64 && manager.height(primary) == 64);
+  CHECK(manager.surface_geometry(primary, 0, 0, 320, 240) == 0);
+  CHECK(manager.width(primary) == 320 && manager.height(primary) == 240);
   auto layer = manager.from_surface(200);
   CHECK(layer != 0 && layer != primary);
   CHECK(!manager.surface_opaque(primary) && !manager.surface_opaque(layer));

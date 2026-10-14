@@ -116,7 +116,8 @@ public:
     // Stable identity supplied by the managed JNI adapter (not a jobject address).
     // Identity zero is reserved for the NativeActivity primary surface.
     uint64_t from_surface(uint64_t identity = 0);
-    int bind_native_window(uint64_t guest_window, uint64_t handle);
+    // width/height (0 when unknown) seed the host surface size reported to the guest.
+    int bind_native_window(uint64_t guest_window, uint64_t handle, int32_t width = 0, int32_t height = 0);
     uint64_t surface_handle(uint64_t guest_window) const;
     int present_pixels(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* pixels);
     int surface_geometry(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h);
