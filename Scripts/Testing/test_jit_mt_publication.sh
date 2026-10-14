@@ -8,7 +8,7 @@ make USE_SDL2=0 USE_THUNK_GL=0 lib > "$task_tmp/build.log" 2>&1 || {
     cat "$task_tmp/build.log" >&2; exit 1;
 }
 "${CXX:-g++}" -O2 -std=c++17 -pthread -IInclude -ISource Tests/Unit/jit_mt_publication.cpp \
-    build/release-sdl0-gl0/libbifrost.a -lffi -o "$task_tmp/test"
+    build/release-sdl0-gl0/libbifrost.a $(sed -n "s/^LDFLAGS=//p" build/release-sdl0-gl0/.build-config) -o "$task_tmp/test"
 for layout in default ordinary; do
     args=()
     [[ "$layout" == ordinary ]] && args+=(BIFROST_NO_CHAIN_SKIP=1)

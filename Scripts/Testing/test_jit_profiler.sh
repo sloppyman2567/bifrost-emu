@@ -9,6 +9,6 @@ make USE_SDL2=1 USE_THUNK_GL=1 lib > "$task_tmp/build.log" 2>&1 || {
 }
 "${CXX:-g++}" -O2 -std=c++17 -pthread -IInclude -ISource \
     Tests/Unit/jit_profiler.cpp build/release-sdl1-gl1/libbifrost.a \
-    -lffi -lSDL2 -lGL -lEGL -o "$task_tmp/test_jit_profiler"
+    $(sed -n "s/^LDFLAGS=//p" build/release-sdl1-gl1/.build-config) -o "$task_tmp/test_jit_profiler"
 BIFROST_PROF=1 BIFROST_JIT_CACHE_MB=1024 \
     "$task_tmp/test_jit_profiler"

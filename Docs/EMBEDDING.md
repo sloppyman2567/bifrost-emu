@@ -7,7 +7,10 @@ Android native-bridge adapter built on that API.
 
 bifrost-emu exposes a stable C API (`Source/System/API/Bifrost.h`) for embedding the
 emulator in host programs. Build it with `make lib` (produces
-`libbifrost.a`; `Source/Main.cpp` is excluded — link your own driver):
+`libbifrost.a`; `Source/Main.cpp` is excluded — link your own driver).
+Link with the `LDFLAGS=` line recorded in that build's
+`build/<config>/.build-config`. Media-enabled builds (`USE_MEDIA=1`) need
+FFmpeg's libraries, and SDL/GL builds need theirs:
 
 ```c
 #include "Bifrost.h"
