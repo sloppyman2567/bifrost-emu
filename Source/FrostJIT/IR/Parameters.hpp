@@ -153,10 +153,14 @@ struct ClzParams {
     uint8_t rd_slot = 0;  // rd (imm; codegen ignores)
 };
 // Crypto extensions (AESE/AESD/AESMC/AESIMC/PMULL/PMULL2): imm=subop
-// only (0..5); src2 is the key (AES) or second operand (PMULL), 0 for
+// only (0..7); src2 is the key (AES) or second operand (PMULL), 0 for
 // the subop-0 group which derives the variant from the encoding.
 struct AesParams {
-    uint8_t subop = 0;  // 0=AESE-group,1=AESD,2=AESMC,3=AESIMC,4=PMULL,5=PMULL2 (imm)
+    uint8_t subop = 0;  // 0..3=AES,4/5=PMULL{2}.1q,6/7=PMULL{2}.8h (imm)
+};
+struct Crc32Params {
+    uint8_t bytes = 1;  // 1/2/4/8 input bytes (width); result is always 32 bits
+    bool castagnoli = false;  // CRC32C rather than IEEE CRC32 (imm)
 };
 // Guest memory access: width=1/2/4/8 bytes, imm=byte offset.
 struct MemParams {

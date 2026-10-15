@@ -27,7 +27,33 @@
 #include "FrostJIT/IR/IR.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <array>
 namespace arm64emu {
+namespace {
+constexpr std::array<uint32_t, 256> crc_table(uint32_t polynomial) {
+    std::array<uint32_t, 256> table{};
+    for (unsigned i = 0; i < table.size(); ++i) {
+        uint32_t crc = i;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((0u - (crc & 1)) & polynomial);
+        table[i] = crc;
+    }
+    return table;
+}
+// The portable backend also handles IEEE CRC, which x86 CRC32 does not
+// implement. No instruction decoding or architectural CPU state is involved.
+uint64_t crc32_software(uint64_t seed, uint64_t data, uint64_t bytes, uint64_t castagnoli) {
+    static constexpr auto ieee = crc_table(0xedb88320u);
+    static constexpr auto cast = crc_table(0x82f63b78u);
+    const auto& table = castagnoli ? cast : ieee;
+    uint32_t crc = static_cast<uint32_t>(seed);
+    for (uint64_t byte = 0; byte < bytes; ++byte) {
+        crc = table[(crc ^ data) & 255] ^ (crc >> 8);
+        data >>= 8;
+    }
+    return crc;
+}
+}
 // ── FrostJIT::compile_ir_alu ───────────────────────────────────────────
 int FrostJIT::compile_ir_alu(const IRInst& inst) {
     // Reuse a consumed scratch value instead of allocating, spilling and
@@ -39,6 +65,40 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         return alloc_reg_excluding(home, excluded);
     };
     switch (inst.op) {
+        case IROp::CRC32: {
+            const auto p = inst.crc32_params();
+            if (p.castagnoli && has_sse42()) {
+                int seed, data;
+                ensure_two_vregs(inst.src1, inst.src2, &seed, &data);
+                int dest = result_reg(inst.src1, seed, data);
+                if (dest != seed) emit_mov_reg(dest, seed);
+                // CRC32C preserves flags and always zero-extends its W result.
+                // A REX prefix selects low byte registers (SIL/DIL/BPL/SPL),
+                // never their legacy high-byte aliases.
+                emit_byte(0xF2);
+                if (p.bytes == 2) emit_byte(0x66);
+                if (p.bytes == 8 || dest >= 8 || data >= 8 || (p.bytes == 1 && data >= 4))
+                    emit_byte(rex(p.bytes == 8, dest >= 8, false, data >= 8));
+                emit_byte(0x0F); emit_byte(0x38); emit_byte(p.bytes == 1 ? 0xF0 : 0xF1);
+                emit_byte(static_cast<uint8_t>(0xC0 | ((dest & 7) << 3) | (data & 7)));
+                set_vreg_reg(inst.dest, dest);
+            } else {
+                clobber_flags();
+                flush_invalidate_host_regs(CALLER_SAVED_MASK);
+                load_vreg_to_reg(RDI, inst.src1);
+                load_vreg_to_reg(RSI, inst.src2);
+                emit_mov_imm32(RDX, p.bytes);
+                emit_mov_imm32(RCX, p.castagnoli);
+                emit_push(WIN_REG);
+                emit_call_aligned(&crc32_software, 1);
+                emit_pop(WIN_REG);
+                invalidate_host_regs(CALLER_SAVED_MASK);
+                int dest = alloc_reg_for(inst.dest, RAX);
+                if (dest != RAX) emit_mov_reg(dest, RAX);
+                set_vreg_reg(inst.dest, dest);
+            }
+            return 0;
+        }
         case IROp::IMM:
             if (inst.dest) {
                 if (inst.dest > 32 && inst.dest < 4096)

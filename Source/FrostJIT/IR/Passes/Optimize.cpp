@@ -89,6 +89,7 @@ static bool is_pure(IROp op) {
         case IROp::SEXT: case IROp::ZEXT:
         case IROp::CLZ: case IROp::CLS:
         case IROp::RBIT: case IROp::REV16: case IROp::REV32: case IROp::REV64:
+        case IROp::CRC32:
             return true;
         // These have side effects (flags, memory, syscall, branch, or
         // write to architectural regs that CALL_INTERP/SVC might read) —
@@ -997,6 +998,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FP_CMP: return "FP_CMP";
                     case IROp::FP_MOVI: return "FP_MOVI";
                     case IROp::UDIV: return "UDIV";
+                    case IROp::CRC32: return "CRC32";
                     case IROp::SDIV: return "SDIV";
                     case IROp::SMADDL: return "SMADDL";
                     case IROp::UMADDL: return "UMADDL";

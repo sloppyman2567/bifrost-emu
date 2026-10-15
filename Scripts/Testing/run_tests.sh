@@ -316,7 +316,7 @@ UNIT_TESTS=(
     "msr_nzcv|Tests/Unit/jit_msr_nzcv.elf||10|64000/64000 checks passed"
     "simd_addlv|Tests/Unit/jit_simd_addlv.elf||5|checks passed"
     "simd_pairlong|Tests/Unit/jit_simd_pairlong.elf||5|3072 checks passed"
-    "simd_pmull|Tests/Unit/jit_simd_pmull.elf||15|6144 checks passed"
+    "simd_pmull|Tests/Unit/jit_simd_pmull.elf||15|10240 checks passed"
     "crc32_instructions|Tests/Unit/jit_crc32.elf||5|checks passed"
     "simd_sat_narrow|Tests/Unit/jit_simd_sat_narrow.elf||5|672 checks passed"
     "simd_sat|Tests/Unit/test_simd_sat.elf||5|ALL PASS"

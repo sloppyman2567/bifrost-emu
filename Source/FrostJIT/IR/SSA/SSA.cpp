@@ -25,6 +25,7 @@ bool shape(const IRInst& i, Shape& s) {
         case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
         case IROp::CSEL: case IROp::EXTR:
         case IROp::UDIV: case IROp::SDIV: case IROp::SMULH: case IROp::UMULH:
+        case IROp::CRC32:
             // CSEL reads implicit NZCV and therefore cannot be CSE'd/DCE'd
             // as ordinary arithmetic by this pass.
             s = {3, true, i.op == IROp::CSEL}; break;
@@ -181,6 +182,11 @@ bool cse_parameter(const IRInst& i, uint64_t& parameter) {
         case IROp::CLZ: parameter = i.clz_params().bits; return true;
         case IROp::REV64: parameter = i.rev64_params().bits; return true;
         case IROp::UDIV: case IROp::SDIV: parameter = i.div_bits(); return true;
+        case IROp::CRC32: {
+            auto p = i.crc32_params();
+            parameter = p.bytes | (uint64_t(p.castagnoli) << 8);
+            return true;
+        }
         default: return false;
     }
 }

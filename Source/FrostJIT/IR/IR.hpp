@@ -66,6 +66,7 @@ enum class IROp : uint8_t {
     REV16,          // dest = byte_reverse_16(src1)
     REV32,          // dest = byte_reverse_32(src1)
     REV64,          // dest = byte_reverse_64(src1)
+    CRC32,          // dest = CRC32/CRC32C(src1.W, low bytes of src2), zero-extended
     // Flag-setting ops (compute result + set NZCV in cpu.pstate)
     ADDS,           // dest = src1 + src2, set flags.   flags_op=0
     SUBS,           // dest = src1 - src2, set flags.   flags_op=1
@@ -418,6 +419,7 @@ enum class IROp : uint8_t {
     //   3 = AESIMC (InvMixColumns)
     //   4 = PMULL  (low 64-bit poly mul → 128-bit)
     //   5 = PMULL2 (high 64-bit poly mul → 128-bit)
+    //   6/7 = PMULL/PMULL2 (eight low/high byte products → eight halfwords)
     // On hosts with AES-NI/PCLMULQDQ, the JIT emits native aesenc/aesdec
     // /aesimc/aesmc / pclmulqdq. On hosts without, it falls back to
     // CALL_INTERP (which calls the interpreter's software table-driven
@@ -577,6 +579,9 @@ struct IRInst {
     static IRInst make_aes(uint16_t dest, uint16_t src1, uint16_t src2,
                            const struct AesParams& p, uint64_t arm_pc);
     struct AesParams aes_params() const;
+    static IRInst make_crc32(uint16_t dest, uint16_t seed, uint16_t data,
+                            const struct Crc32Params& p, uint64_t arm_pc);
+    struct Crc32Params crc32_params() const;
     static IRInst make_load_mem(uint16_t dest, uint16_t base,
                                 const struct MemParams& p, uint64_t arm_pc);
     struct MemParams load_mem_params() const;

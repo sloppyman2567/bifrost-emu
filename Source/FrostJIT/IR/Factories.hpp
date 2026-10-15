@@ -522,6 +522,21 @@ inline IRInst IRInst::make_aes(uint16_t dest, uint16_t src1, uint16_t src2,
 inline AesParams IRInst::aes_params() const {
     return AesParams{static_cast<uint8_t>(imm)};
 }
+inline IRInst IRInst::make_crc32(uint16_t dest, uint16_t seed, uint16_t data,
+                                const Crc32Params& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::CRC32;
+    inst.dest = dest;
+    inst.src1 = seed;
+    inst.src2 = data;
+    inst.width = p.bytes;
+    inst.imm = p.castagnoli ? 1 : 0;
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline Crc32Params IRInst::crc32_params() const {
+    return Crc32Params{width, imm != 0};
+}
 inline IRInst IRInst::make_load_mem(uint16_t dest, uint16_t base,
                                     const MemParams& p, uint64_t arm_pc) {
     IRInst inst{};

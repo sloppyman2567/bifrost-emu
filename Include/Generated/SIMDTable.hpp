@@ -171,6 +171,8 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBFBFFC00U) == 0x2EA0F800U && (Q || size == 2)) return Op{Family::FP_UNARY, 111, 1, "FNEG_VEC"};
     if ((op & 0xBFBFFC00U) == 0x2EA1F800U && (Q || size == 2)) return Op{Family::FP_UNARY, 112, 2, "FSQRT_VEC"};
     if ((op & 0xBF00F400U) == 0x0F009000U && (size >= 2 && (Q || size == 2) && (size == 2 || ((op >> 21) & 1) == 0))) return Op{Family::FP_INDEXED, 113, 2, "FMUL_INDEX"};
+    if ((op & 0xFFE0FC00U) == 0x0E20E000U) return Op{Family::CRYPTO, 114, 6, "PMULL_B"};
+    if ((op & 0xFFE0FC00U) == 0x4E20E000U) return Op{Family::CRYPTO, 115, 7, "PMULL2_B"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

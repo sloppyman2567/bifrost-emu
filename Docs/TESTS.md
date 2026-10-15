@@ -4,6 +4,40 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Polynomial instructions and Wi-Fi display routing (2026-10-15)
+
+`jit_simd_pmull` now checks 10,240 cases: byte/wide PMULL and PMULL2,
+distinct and identical sources, destination aliases and varied lane contents.
+`jit_crc32` checks 8,192 cases across both CRC polynomials, all four input
+widths, register aliases, identical sources, nonzero upper accumulator bits
+and all NZCV combinations. Both pass QEMU, JIT, interpreter and Tier-2 runs.
+JIT fallback inventories record no interpreted instructions for either fixture.
+A temporary emulator built with SSE4.2 detection disabled also passes both,
+covering the portable CRC backend. The distribution's x86-64-v2 glibc prevents
+masking SSE4.2 with qemu-x86_64 before startup, so that method was not used as
+evidence. This does not validate execution on an actual older x86-64 machine.
+
+`FrameworkDisplayProbe` passes 47 checks in each engine through the provisioned
+Android framework. It checks unavailable Wi-Fi display status, fresh replies,
+privileged/unprivileged controls and the real local MediaRouter initialization,
+as well as trusted/untrusted client state, package/user rejection and unregister.
+It retains resize, display-listener and window-context coverage. Remote Binder
+death delivery and wireless display hardware are not covered.
+
+Final broad checks: the SDL/GL build and library, separate headless build,
+`make generated-check`, and `make verify` pass (87 differential fixtures and
+seven threaded oracle runs). The strict JIT suite passes 326/326; the strict
+interpreter suite passes 317/317 with nine suite skips. The headless executable
+also passes both polynomial fixtures, including interpreter CRC execution.
+
+The live Azur Lane captures use the installed game, GPU access, boundary traces
+and per-process fallback inventories. The final profile has 9,451 samples with
+zero loss; see [JIT measurement limits](JIT.md#azur-lane-polynomial-instructions-2026-10-15).
+The native profiling launch used the installed managed root with a temporary
+read-only launcher DEX and a native host DNS bridge, without the normal Python
+session/process supervisor. Cross-process WebView behavior is therefore outside
+this run's coverage. Bounded stops are not crash or gameplay evidence.
+
 ## Desktop Android library and Surface identity fixture (2026-10-14)
 
 `test_android_preflight.py` passes four tests, including dense daytime launcher

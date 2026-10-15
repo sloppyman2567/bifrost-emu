@@ -20,6 +20,13 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
     for (size_t i = 0; i < block.insts.size(); i++) {
         const IRInst& inst = block.insts[i];
         switch (inst.op) {
+            case IROp::CRC32:
+                if ((inst.width != 1 && inst.width != 2 && inst.width != 4 && inst.width != 8)
+                        || inst.imm > 1) {
+                    std::fprintf(out, "[ir-validate] invalid CRC32 descriptor\n");
+                    ok = false;
+                }
+                break;
             case IROp::SIMD_NATIVE_STRUCT: {
                 auto p=inst.native_structure_params();
                 if ((p.size!=1 && p.size!=2 && p.size!=4 && p.size!=8) ||
@@ -1386,12 +1393,11 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 break;
             }
             case IROp::AES_CRYPTO: {
-                // imm=subop 0..5 (0=AESE-group,1=AESD,2=AESMC,3=AESIMC,
-                // 4=PMULL,5=PMULL2).
-                if (inst.imm > 5) {
+                // imm=subop 0..7: AES, 64-bit PMULL{2}, byte PMULL{2}.
+                if (inst.imm > 7) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: AES_CRYPTO "
-                        "subop=%lu out of range (want 0..5, arm_pc=0x%lx)\n",
+                        "subop=%lu out of range (want 0..7, arm_pc=0x%lx)\n",
                         block.start_pc, i, (unsigned long)inst.imm,
                         inst.arm_pc);
                     ok = false;

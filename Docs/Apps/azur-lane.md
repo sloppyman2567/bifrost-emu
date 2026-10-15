@@ -21,6 +21,15 @@ WebView input, battle gameplay or long-session stability.
 
 ## Remaining work
 
+The October 15 trace exposed `display.getWifiDisplayStatus` throwing during
+Unity's `MediaRouter` construction. The no-adapter Wi-Fi display contract and
+connected local audio/router services now let that constructor complete;
+the follow-up trace contains successful calls and no framework-service throws.
+Byte PMULL and CRC instruction fallbacks were also removed from FrostJIT;
+see the [implementation and measurement limits](../JIT.md#azur-lane-polynomial-instructions-2026-10-15).
+The bounded runs and CPU profiles do not establish gameplay or a matched
+before/after FPS improvement.
+
 - Reproduce and profile the user-reported UI stutters in the delayed login
   scene, including input/service, rendering, ART and JIT costs.
 - Implement the toast lifecycle: an observed Google sign-in failure reaches

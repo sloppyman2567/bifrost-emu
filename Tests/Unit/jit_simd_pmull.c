@@ -10,7 +10,9 @@
 #define FORM(base) do { \
     if (alias == 0) { MUL(base, 0); } \
     else if (alias == 1) { MUL(base + 1, 1); } \
-    else { MUL(base + 2, 2); } \
+    else if (alias == 2) { MUL(base + 2, 2); } \
+    else if (alias == 3) { MUL(base - 0x10000, 0); } \
+    else { MUL(base - 0x10000 + 2, 2); } \
 } while (0)
 
 static void multiply(const uint8_t* a, const uint8_t* b, uint8_t* out,
@@ -27,7 +29,7 @@ int main(void) {
     unsigned checks = 0;
     for (int wide = 0; wide < 2; ++wide)
     for (int high = 0; high < 2; ++high)
-    for (int alias = 0; alias < 3; ++alias)
+    for (int alias = 0; alias < 5; ++alias)
     for (unsigned pattern = 0; pattern < 512; ++pattern) {
         const int bytes = wide ? 8 : 1;
         uint8_t a[16], b[16], out[16], expected[16] = {};
@@ -43,7 +45,7 @@ int main(void) {
         for (int lane = 0; lane < 8 / bytes; ++lane) {
             uint64_t x = 0, y = 0;
             memcpy(&x, a + high * 8 + lane * bytes, bytes);
-            memcpy(&y, b + high * 8 + lane * bytes, bytes);
+            memcpy(&y, (alias >= 3 ? a : b) + high * 8 + lane * bytes, bytes);
             __uint128_t product = 0;
             for (int bit = 0; bit < bytes * 8; ++bit)
                 if ((x >> bit) & 1) product ^= (__uint128_t)y << bit;

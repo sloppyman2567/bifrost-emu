@@ -51,6 +51,15 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     }
     if (translate_mem(block, d, cur_pc)) return false;
     switch (d.cls) {
+        case InstClass::CRC32: {
+            uint16_t seed = load_arm_reg(block, d.rn);
+            uint16_t data = load_arm_reg(block, d.rm);
+            uint16_t result = g_alloc.alloc();
+            block.insts.push_back(IRInst::make_crc32(result, seed, data,
+                    Crc32Params{static_cast<uint8_t>(1u << d.imm), d.is_sub}, cur_pc));
+            store_arm_reg(block, d.rd, result);
+            return false;
+        }
         case InstClass::HINT:
             block.insts.push_back(IRInst::make(is_data_memory_barrier(d.raw)
                     ? IROp::MEMORY_BARRIER : IROp::NOP));

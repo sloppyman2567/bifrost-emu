@@ -13,7 +13,7 @@
 #                            0xE FMLA, 0xF FMLS)
 #   SHIFT     = shift kind (0..6 = SHL/USHR/SSHR/USRA/SSRA/SLI/SRI)
 #   DUP       = GPR->vector DUP (native, all element sizes)
-#   CRYPTO    = AES_CRYPTO sub (0..3 AESE..AESIMC, 4 PMULL, 5 PMULL2)
+#   CRYPTO    = AES_CRYPTO sub (0..3 AESE..AESIMC, 4/5 PMULL{2}.1q, 6/7 PMULL{2}.8h)
 
 # ── Integer SIMD_ARITH (mask strips Q(30); matches FloatSIMD.cpp) ──
 ADD     0xBF20FC00   0x0E208400   INT_ARITH   0   -
@@ -278,3 +278,7 @@ FABS_VEC    0xBFBFFC00 0x0EA0F800 FP_UNARY   0   Q || size == 2
 FNEG_VEC    0xBFBFFC00 0x2EA0F800 FP_UNARY   1   Q || size == 2
 FSQRT_VEC   0xBFBFFC00 0x2EA1F800 FP_UNARY   2   Q || size == 2
 FMUL_INDEX  0xBF00F400 0x0F009000 FP_INDEXED 2   size >= 2 && (Q || size == 2) && (size == 2 || ((op >> 21) & 1) == 0)
+
+# Byte polynomial multiply; append to preserve existing classifier opcode ids.
+PMULL_B     0xFFE0FC00 0x0E20E000 CRYPTO     6   -
+PMULL2_B    0xFFE0FC00 0x4E20E000 CRYPTO     7   -

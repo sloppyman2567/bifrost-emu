@@ -1061,7 +1061,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             case simd::Family::CRYPTO:
                 // subop 0 = AESE, which covers AESD/AESMC/AESIMC via
-                // bits[13:12]; subop 4 = PMULL, 5 = PMULL2.
+                // bits[13:12]; subops 4/5 = wide PMULL{2}, 6/7 = byte PMULL{2}.
                 if (ct.subop == 0) {
                     uint8_t sub_op = static_cast<uint8_t>((op >> 12) & 3);
                     AesParams ap;

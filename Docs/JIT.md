@@ -15,6 +15,46 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Azur Lane polynomial instructions (2026-10-15)
+
+An installed Azur Lane 9.3.7 loading/download profile exposed byte PMULL in
+the interpreter (about 13% of sampled user cycles by disassembly attribution).
+The existing native PMULL path covered only 64-bit polynomial products.
+The classifier now also accepts precisely the byte PMULL/PMULL2 encodings;
+SSE2 widens the selected eight source bytes into halfwords and XOR-accumulates
+their shifted products without integer carries. Both inputs are read before
+writing an aliased destination. It preserves NZCV and requires no additional
+host CPU extension. Other sizes retain the decoder's allocation checks.
+
+The follow-up inventory identified CRC32C as another frequent fallback.
+A typed, SSA-classified CRC IR operation handles all eight CRC32/CRC32C
+byte/halfword/word/doubleword forms. SSE4.2 supplies native Castagnoli CRC;
+IEEE CRC and hosts without SSE4.2 call a generated constant-table backend,
+without instruction decoding or interpreter entry. Both preserve NZCV, consume
+only the specified input width and zero-extend the 32-bit result. The
+portable call preserves the guest window register and live caller-saved values.
+
+Semantics were checked against Arm's
+[PMULL](https://www.scs.stanford.edu/~zyedidia/arm64/pmull_advsimd.html) and
+[CRC32C](https://www.scs.stanford.edu/~zyedidia/arm64/crc32c.html) pseudocode,
+LLVM's [x86 CRC32C definitions](https://github.com/llvm/llvm-project/blob/main/clang/lib/Headers/crc32intrin.h)
+and QEMU reference runs. Expanded fixtures pass 10,240 PMULL cases and 8,192
+CRC cases, including register aliases, source identity, widths, CRC
+polynomials and CRC NZCV/upper-bit behavior. Both fixtures run without any
+interpreter entries in the native JIT; the CRC fixture also passes with
+SSE4.2 detection disabled in a temporary build.
+
+The final 25-second game capture contained 9,451 samples and zero lost
+samples. `jit_interp_step` accounted for 4.45% inclusive sampled user cycles;
+`Emulator::step` including direct interpreter dispatch accounted for 6.18%.
+Remaining work includes packed FP rounding conversions (notably FCVTNU) and
+memory/fault paths; the measured PMULL/CRC encodings were absent from the
+fallback inventory. An earlier PMULL-only window measured 2.29% inclusive
+`jit_interp_step`; these different workload phases must not be presented as
+a controlled speedup comparison. Tracing/inventory add overhead, and the
+capture does not establish game FPS, completed login or gameplay. Preserve
+exceptional FP and precise-memory fallbacks when reducing this further.
+
 ## Tier-1 hot-path code reduction (2026-10-14)
 
 CoreMark profiles attributed 99.4% of samples to generated code; the

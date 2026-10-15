@@ -339,6 +339,49 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
         // use PCLMULQDQ natively when available.
         case IROp::AES_CRYPTO: {
             uint8_t sub_op = inst.aes_params().subop;
+            if (sub_op == 6 || sub_op == 7) {
+                // Eight independent polynomial byte products, widened to
+                // halfwords. SSE2 is sufficient; ordinary integer multiply
+                // would propagate carries and produce a different result.
+                // AES_CRYPTO disqualifies the vector/scalar FP caches, so
+                // XMM3 is available as well as the usual XMM0-2 scratch set.
+                // Load BOTH selected halves before writing an aliased Vd.
+                const int32_t source = sub_op == 6 ? V_LO_OFF : V_HI_OFF;
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(0, CPU_REG, source + static_cast<int>(inst.src1) * 8);
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(1, CPU_REG, source + static_cast<int>(inst.src2) * 8);
+                auto sse = [&](uint8_t opcode, int dest, int src) {
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(opcode);
+                    emit_byte(static_cast<uint8_t>(0xC0 | (dest << 3) | src));
+                };
+                auto shift = [&](int reg, int operation, uint8_t amount) {
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x71);
+                    emit_byte(static_cast<uint8_t>(0xC0 | (operation << 3) | reg));
+                    emit_byte(amount);
+                };
+                sse(0xEF, 2, 2);  // pxor xmm2,xmm2: zero, then product
+                sse(0x60, 0, 2);  // punpcklbw xmm0,xmm2: eight uint16 lanes
+                sse(0x60, 1, 2);
+                for (int bit = 0; bit < 8; ++bit) {
+                    sse(0x6F, 3, 1);  // movdqa xmm3,xmm1
+                    shift(3, 6, 15);   // psllw: current multiplier bit to sign
+                    shift(3, 4, 15);   // psraw: expand to a full halfword mask
+                    sse(0xDB, 3, 0);  // pand xmm3,xmm0
+                    sse(0xEF, 2, 3);  // pxor xmm2,xmm3: carry-less addition
+                    if (bit != 7) {
+                        shift(0, 6, 1);
+                        shift(1, 2, 1);
+                    }
+                }
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                emit_modrm_disp(2, CPU_REG, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73);
+                emit_byte(0xDA); emit_byte(0x08);  // psrldq xmm2,8
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                emit_modrm_disp(2, CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+                return true;
+            }
             // PMULL/PMULL2 — use PCLMULQDQ when available.
             if ((sub_op == 4 || sub_op == 5) && has_pclmulqdq()) {
                 clobber_flags();
