@@ -108,7 +108,7 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             clobber_flags();
             load_vec(0, rn);
             if (widen && q) sse2_imm(0x73, 0, 3, 8);
-            size_t special_done;
+            SimdFpGuard special_done;
             if (widen) {
                 if (half) emit_vex3(2, false, 0, 1, 0, 0, true, 0x13); // vcvtph2ps
                 else sse_fp(0x5A, 0, 0);                              // cvtps2pd
@@ -128,7 +128,7 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
                     store_vec(1, rd, true);
                 } else store_vec(0, rd, false);
             }
-            patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+            finish_simd_fp_guard(special_done);
             return true;
         }
         case NativeSimdKind::Extract: {

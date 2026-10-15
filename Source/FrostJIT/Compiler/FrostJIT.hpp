@@ -812,6 +812,9 @@ private:
         int reg_vreg[16];
         uint16_t dirty_mask;
         bool vec_dirty[32];
+        int vec_cache[32], vec_owner[16], vec_pinned[32];
+        int vec_count;
+        bool vec_active;
     };
     struct DeferredGuard {
         IRInst inst;
@@ -824,9 +827,20 @@ private:
     };
     bool defer_guards_ = false;
     std::vector<DeferredGuard> deferred_guards_;
+    struct SimdFpGuard {
+        size_t site = 0;
+        bool deferred = false;
+    };
+    struct DeferredFpStep {
+        IRInst inst;
+        size_t branch, resume;
+        GuardState state;
+    };
+    std::vector<DeferredFpStep> deferred_fp_steps_;
     GuardState capture_guard_state() const;
     void swap_guard_state(GuardState& state);  // exchange with the live state
     void flush_deferred_guards();
+    void flush_deferred_fp_steps();
     static thread_local std::atomic<FrostJIT*> fault_jit_;
     void init_fault_recovery();
     void destroy_fault_recovery();
@@ -1589,6 +1603,7 @@ private:
     // Returns true if the block should end after this op (branch/call),
     // false otherwise.
     bool compile_ir_inst(const IRInst& inst);
+    bool compile_ir_inst_body(const IRInst& inst);
     void emit_memory_guard(const IRInst& inst);
     // FP/SIMD IR-op codegen. Called from compile_ir_inst() for the
     // FP_* and SIMD_* opcodes. Sets fp_handled_ to true if the op was
@@ -1850,18 +1865,11 @@ private:
     std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
     // ── XMM vector register cache ───────────────────
-    // Guest vector regs (0-31) pinned into host XMM3-15 across the whole
-    // block. Only blocks whose vector-touching ops are all cache-aware
-    // (SIMD_FP_FMA / SIMD_FP_ARITH) plus GPR-only ops activate the cache;
-    // translate_block pre-scans the IR and enables it only for such blocks,
-    // so the cache is NEVER flushed mid-block (no body reloads). The
-    // prologue loads (emitted BEFORE block_body_start_off_) run only on cold
-    // entry; self-loop re-entry jumps directly to the body start and skips
-    // them, so the pinned XMM regs act as loop-carried accumulator state.
-    // Dirty vectors are written back to cpu.v_lo/v_hi in the block epilogue.
-    //
-    // XMM0/XMM1/XMM2 stay free as scratch for the (non-cached fallback)
-    // SIMD codegen and for the cached ops' FABD sign-mask.
+    // Tier-1 assigns a fixed hot loop core and, under pressure, a
+    // demand-allocated tail in XMM3-15. Unsupported instructions synchronize
+    // locally. Tier-2 uses a complete fixed layout over the region.
+    // XMM0-2 remain instruction scratch. Deferred fault guards snapshot the
+    // live vector mapping; exits commit all architectural dirty values.
     static constexpr int VEC_XMM_START = 3;
     static constexpr int VEC_XMM_END   = 15;
     int  vec_cache_[32];      // vector reg → host XMM index, or -1
@@ -1871,6 +1879,14 @@ private:
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
+    // Tier-1 keeps a stable loop core and uses the remaining XMMs on
+    // demand. Tier-2 retains the complete fixed layout above.
+    bool vec_allocator_active_ = false;
+    int vec_fixed_count_ = 0;
+    std::vector<uint16_t> vec_uses_[32];
+    uint64_t vec_evictions_ = 0;
+    uint64_t vec_reloads_ = 0;
+    uint64_t vec_spills_ = 0;
     // Scalar-FP cache: the same XMM3-15 pinning machinery
     // reused for scalar FP regs (s0-s31 / d0-d31), which share cpu.v_lo[0..31]
     // with NEON vectors. A block is EITHER a vec-cache block OR an fp-cache
@@ -1890,10 +1906,15 @@ private:
         return (vec_cache_active_ && vreg >= 0 && vreg < 32)
                    ? vec_cache_[vreg] : -1;
     }
-    // Pre-scan `block`: enables the cache iff every vector-touching op is
-    // cache-aware (or GPR-only) AND the distinct vectors used fit in
-    // XMM3-15 AND the host has FMA3 (AVX). Pins the used vectors.
-    bool vec_cache_may_enable(const IRBlock& block);
+    // Shared vector operand/effect scan. Tier-1 admits synchronization
+    // boundaries and pressure; Tier-2 requires a complete fixed layout.
+    // Both paths retain the existing FMA3/AVX host feature requirement.
+    bool vec_cache_may_enable(const IRBlock& block, bool tier1 = false);
+    bool vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const;
+    void vec_prepare_operands(uint32_t operands);
+    void vec_drop_dynamic();
+    void vec_writeback_one(int vreg);
+    void vec_writeback_dynamic();
     // Pre-scan `block` for the scalar-FP cache. Runs only when the vec
     // cache is NOT active for this block (the two are exclusive). Every
     // op must be GPR-only, an FP op with a cache-aware fast path, or a
@@ -1918,7 +1939,8 @@ private:
     void vec_emit_load_lo_hi(int xmm, int vreg);
     void emit_vec_sign_mask(int esize, bool clear_sign);
     void emit_vec_zero_upper(int xmm);
-    size_t emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready = false);
+    SimdFpGuard emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready = false);
+    void finish_simd_fp_guard(SimdFpGuard guard);
     // Scalar FP exceptional results: JCC sites (emit_fp_nan_check or other
     // tests, taken before the commit) reach an interpreter step that
     // emit_fp_cold_tail places after the commit.

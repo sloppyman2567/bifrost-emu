@@ -156,13 +156,18 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     return true;
 }
 // The fault exit reads only the host-register mappings, their dirty bits and
-// the vector cache's dirty flags (layout and block-wide write sets are fixed
-// for the block), so this is the complete state it observes.
+// the vector cache's live layout and dirty flags. Tier-1's demand allocator
+// may reuse an XMM between the access and deferred recovery emission.
 FrostJIT::GuardState FrostJIT::capture_guard_state() const {
     GuardState state;
     for (int r = 0; r < 16; ++r) state.reg_vreg[r] = reg_vreg_[r];
     state.dirty_mask = dirty_host_regs_;
     std::memcpy(state.vec_dirty, vec_dirty_, sizeof(state.vec_dirty));
+    std::memcpy(state.vec_cache, vec_cache_, sizeof(state.vec_cache));
+    std::memcpy(state.vec_owner, vec_xmm_owner_, sizeof(state.vec_owner));
+    std::memcpy(state.vec_pinned, vec_pinned_, sizeof(state.vec_pinned));
+    state.vec_count = vec_pinned_count_;
+    state.vec_active = vec_cache_active_;
     return state;
 }
 void FrostJIT::swap_guard_state(GuardState& state) {
@@ -182,6 +187,11 @@ void FrostJIT::swap_guard_state(GuardState& state) {
     }
     dirty_host_regs_ = state.dirty_mask;
     std::memcpy(vec_dirty_, state.vec_dirty, sizeof(state.vec_dirty));
+    std::memcpy(vec_cache_, state.vec_cache, sizeof(state.vec_cache));
+    std::memcpy(vec_xmm_owner_, state.vec_owner, sizeof(state.vec_owner));
+    std::memcpy(vec_pinned_, state.vec_pinned, sizeof(state.vec_pinned));
+    vec_pinned_count_ = state.vec_count;
+    vec_cache_active_ = state.vec_active;
     state = live;
 }
 // Emit each deferred guard's cold code after the block: the software page

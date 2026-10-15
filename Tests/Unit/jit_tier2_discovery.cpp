@@ -212,6 +212,79 @@ static bool check_region_native_simd(bool mt) {
     return true;
 }
 
+// Tier-1 pressure must keep useful vectors resident even across an op
+// borrowing XMM3-15. A deferred scalar fault guard precedes later XMM
+// reuse, so recovery must use the layout captured at that exact access.
+static bool check_tier1_vector_allocation(bool mt) {
+    constexpr uint64_t head=0x70000, data=0x80000;
+    const uint32_t boundaries[]={
+        0xd503201f, // nop
+        0x4e218a3e, // frintn v30.4s,v17.4s (C++ helper)
+        0x4e205a3e, // cnt v30.16b,v17.16b (borrows high scratch XMMs)
+        0x4ea1da3e, // frecpe v30.4s,v17.4s (interpreter boundary)
+        0x1e3f2a3e, // fadd s30,s17,s31 (mixed scalar/vector aliases)
+    };
+    for (unsigned accumulators : {14u,28u}) for (uint32_t boundary : boundaries) {
+        auto e=std::make_unique<Emulator>();
+        e->mem().map_range(head,4096); e->mem().mprotect_guest(head,4096,7);
+        e->mem().map_range(data,4096);
+        std::vector<uint32_t> code;
+        for (unsigned pass=0;pass<(accumulators==14?2u:1u);++pass)
+        for (unsigned v=0;v<accumulators;++v) {
+            code.push_back(0x4e3fd400u | (v<<5) | v); // fadd vv.4s,vv.4s,v31.4s
+            if (!pass && v==7) code.push_back(0xf9400045); // ldr x5,[x2]
+            if (!pass && v==11) code.push_back(boundary);
+        }
+        code.push_back(0xd1000400);
+        code.push_back(0xb5000000u | ((uint32_t(-int(code.size()))&0x7ffff)<<5));
+        e->mem().write(head,code.data(),code.size()*4);
+        e->enable_jit(); auto* j=e->jit();
+        if (mt) j->enter_multithreaded();
+        auto fn=j->lookup_or_translate(*e,head);
+        const bool cache=Tier2TestAccess::supports_vector_cache(*j) &&
+                         !std::getenv("BIFROST_NO_VEC_CACHE");
+        if (!fn || Tier2TestAccess::vector_cache_active(*j)!=cache ||
+            (cache && (Tier2TestAccess::fixed_vectors(*j)<=0 ||
+                       Tier2TestAccess::fixed_vectors(*j)>=13 ||
+                       (boundary==0xd503201f && !Tier2TestAccess::vector_evictions(*j))))) {
+            std::fprintf(stderr,"Tier-1 vector pressure allocation inactive: op=%08x\n",boundary);
+            return false;
+        }
+        for (unsigned count : {1u,7u,257u}) for (bool nan : {false,true})
+        for (bool fault : {false,true}) {
+            if (fault && (count!=1 || nan)) continue;
+            CPU actual,reference;
+            actual.pc=head; actual.regs[0]=count; actual.regs[2]=data+(fault?4096:0);
+            actual.fpcr=1u<<25;
+            for (unsigned v=0;v<32;++v) {
+                const float value=float(v+1);
+                uint32_t bits; std::memcpy(&bits,&value,4);
+                actual.v_lo[v]=actual.v_hi[v]=uint64_t(bits)|(uint64_t(bits)<<32);
+            }
+            if (nan) actual.v_lo[0]=UINT64_C(0x3f8000007fc12345);
+            reference.copy_arch_state_from(actual);
+            const uint64_t stop=fault ? head+8*4 : head+code.size()*4;
+            while (reference.pc!=stop) e->step(reference);
+            {
+                FrostJIT::FaultScope scope(j);
+                unsigned entries=0;
+                while (actual.running && actual.pc==head && ++entries<=count+2) {
+                    actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+                }
+            }
+            if ((fault ? actual.running || actual.exit_code!=139 : actual.pc!=stop) ||
+                actual.regs[0]!=reference.regs[0] ||
+                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
+                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::fprintf(stderr,"Tier-1 vector mismatch: op=%08x n=%u nan=%d fault=%d\n",
+                    boundary,count,nan,fault);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool check_superblocks(bool mt) {
     constexpr uint64_t head=0x40000,cold=0x41000,stop=0x50000;
     auto e=std::make_unique<Emulator>();
@@ -288,7 +361,8 @@ int main(int argc, char** argv) {
         mt |= std::string(argv[k]) == "mt";
         benchmark |= std::string(argv[k]) == "benchmark";
     }
-    if (!check_region_invariant(mt) || !check_region_vectors(mt,benchmark) ||
+    if (!check_tier1_vector_allocation(mt) ||
+        !check_region_invariant(mt) || !check_region_vectors(mt,benchmark) ||
         !check_region_native_simd(mt)) return 1;
     if (!check_region_fp_memory(mt)) return 1;
     if (!benchmark && !check_superblocks(mt)) return 1;

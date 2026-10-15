@@ -166,6 +166,25 @@ thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in X86Emitter.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
+    if (!vec_allocator_active_) return compile_ir_inst_body(inst);
+    uint32_t reads, writes;
+    if (vec_inst_operands(inst, reads, writes)) {
+        vec_prepare_operands(reads | writes);
+        return compile_ir_inst_body(inst);
+    }
+    // Unknown effects may read/write any architectural vector and borrow
+    // any XMM. Publish the loop core (including loop-carried writes), then
+    // emit with memory authoritative. This is a boundary, not a block veto.
+    vec_cache_writeback_all_pinned();
+    vec_drop_dynamic();
+    vec_cache_active_ = false;
+    const bool ends = compile_ir_inst_body(inst);
+    vec_cache_active_ = true;
+    vec_emit_prologue_loads();
+    return ends;
+}
+
+bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
     if (compile_guarded_mem(inst)) return false;
     emit_memory_guard(inst);
     // FP/SIMD ops are dispatched to

@@ -35,11 +35,11 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                     clobber_flags();
                     emit_vex3(1, false, 0, p.esize == 8 ? 1 : 0,
                               0, xs, true, 0x51); // vsqrtps/pd xmm0 (reserved vvvv)
-                    const size_t special_done = emit_simd_fp_nan_guard(inst, p.esize, p.q);
+                    const SimdFpGuard special_done = emit_simd_fp_nan_guard(inst, p.esize, p.q);
                     emit_vex3(1, false, 0, 0, xd, 0, true, 0x28); // vmovaps
                     if (!p.q) emit_vec_zero_upper(xd);
                     vec_cache_mark_dirty(inst.dest);
-                    patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+                    finish_simd_fp_guard(special_done);
                     return true;
                 } else {
                     emit_vec_sign_mask(p.esize, p.subop == 0);
@@ -61,7 +61,7 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 emit_modrm_disp(1,CPU_REG,V_HI_OFF + inst.src1*8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC1);
             }
-            size_t special_done = 0;
+            SimdFpGuard special_done{};
             if (p.subop == 2) {
                 if (p.esize == 8) emit_byte(0x66);
                 emit_byte(0x0F); emit_byte(0x51); emit_byte(0xC0); // sqrtps/pd
@@ -84,7 +84,7 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,V_HI_OFF + inst.dest*8,RAX);
             }
             if (p.subop == 2)
-                patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+                finish_simd_fp_guard(special_done);
             return true;
         }
         case IROp::SIMD_FP_ARITH: {
@@ -155,7 +155,7 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(0xC2); emit_byte(0xD0); emit_byte(0);
                 emit_byte(0x0F); emit_byte(0x56); emit_byte(0xCA); // orps xmm1,xmm2
             }
-            const size_t special_done = emit_simd_fp_nan_guard(inst, esize, Q, minmax);
+            const SimdFpGuard special_done = emit_simd_fp_nan_guard(inst, esize, Q, minmax);
             if (abd) {
                 // The guard sees the subtraction's NaN before clearing its sign.
                 // XMM0 must retain the result while XMM2 holds the packed mask.
@@ -171,7 +171,7 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 if (!Q) emit_vec_zero_upper(xd);
                 vec_cache_mark_dirty(inst.dest);
             } else store_fp_vector(inst.dest, Q);
-            patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+            finish_simd_fp_guard(special_done);
             return true;
         }
         case IROp::SIMD_FP_FMA: {
@@ -195,13 +195,13 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 load_fp_vector(2, inst.src2, Q);
                 emit_vex_fma(0, 1, 2, is_double, fp.subop == 1);
             }
-            const size_t special_done = emit_simd_fp_nan_guard(inst, esize, Q);
+            const SimdFpGuard special_done = emit_simd_fp_nan_guard(inst, esize, Q);
             if (cached) {
                 emit_vex3(1, false, 0, 0, xd, 0, true, 0x28);
                 if (!Q) emit_vec_zero_upper(xd);
                 vec_cache_mark_dirty(inst.dest);
             } else store_fp_vector(inst.dest, Q);
-            patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+            finish_simd_fp_guard(special_done);
             return true;
         }
         // ── SIMD CMP (integer lane-wise compare) ─────────────────────

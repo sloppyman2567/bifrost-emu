@@ -2,29 +2,13 @@
 #include <cstdlib>
 #include <algorithm>
 #include <vector>
+#include <stdexcept>
 //
-// Guest vector regs (0-31) are pinned into host XMM3-15 across an entire
-// JIT block so that hot SIMD/FMA loops keep their accumulators resident in
-// XMM registers instead of bouncing them through cpu.v_lo/v_hi every
-// instruction (each cached FMLA/FSUB drops from 8 memory ops to a single
-// 128-bit VEX op).
-//
-// Invariants (see vec_cache_may_enable):
-//   - The cache is enabled ONLY for blocks whose vector-touching ops are
-//     all cache-aware (including compatible inline native SIMD); every other op is a
-//     GPR-only op that neither reads cpu.v_lo/v_hi nor clobbers XMM3-15.
-//     Therefore no flush is ever needed mid-block, and — critically for
-//     self-loop blocks — no vector value is ever reloaded from the CPU
-//     struct inside the body. Self-loop re-entry jumps to the body start
-//     (skipping the prologue), so the pinned XMM regs naturally persist
-//     as loop-carried state.
-//   - The prologue loads (vec_emit_prologue_loads) run only on cold entry
-//     (the dispatcher / chain entry calls the block prologue).
-//   - The epilogue writeback (vec_cache_writeback_all) is emitted right
-//     before the block returns, so cpu.v_lo/v_hi are up to date for the
-//     next block (or the interpreter).
-//   - XMM0/XMM1/XMM2 remain scratch (used by the non-cached SIMD codegen
-//     and by the cached FABD sign-mask load).
+// XMM0-2 are instruction scratch. Tier-1 keeps a stable hot loop core
+// in XMM3-15 and allocates the remaining slots by next use under pressure.
+// Unsupported operations synchronize locally; only demand-allocated values
+// are written back on retained loop edges. Tier-2 retains its fixed layout.
+// Precise exits and NaN recovery publish the actual layout at that point.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
 namespace arm64emu {
@@ -33,8 +17,8 @@ namespace arm64emu {
 // Ops that either have a cached fast path for pinned XMM operands
 // (including unary and indexed FP) or are GPR-only
 // ops that neither read cpu.v_lo/v_hi nor clobber XMM3-15. Everything
-// else (any other FP/SIMD op, CALL_INTERP, SVC, BL_CALL, atomic helpers,
-// ...) disqualifies the block — the cache is all-or-nothing per block.
+// else is a synchronization boundary in Tier-1 and disqualifies Tier-2's
+// fixed region layout.
 // (If a whitelisted GPR op does fall through to emit_call_interp, the
 // guard inside emit_call_interp writes back + reloads the pinned XMM
 // regs around the host call, so the cache stays correct.)
@@ -76,108 +60,193 @@ static bool vec_cache_compatible_op(IROp op) {
     }
 }
 
-bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
-    static const bool no_vec_cache_ = (getenv("BIFROST_NO_VEC_CACHE") != nullptr);
-    if (no_vec_cache_) return false;
-    if (!has_fma3()) return false;
-    bool  vec_used[32] = {};
-    bool  vec_written[32] = {};
-    int   used_count = 0;
-    for (const IRInst& inst : block.insts) {
-        if (inst.op == IROp::SIMD_NATIVE_EXTRA) {
+// Vector operands/effects used both by admission and Tier-1's allocator.
+// Unknown operations are synchronization boundaries; no guessed effects.
+bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const {
+    reads = writes = 0;
+    auto read = [&](unsigned v) { reads |= uint32_t(1) << (v & 31); };
+    auto write = [&](unsigned v) { writes |= uint32_t(1) << (v & 31); };
+    switch (inst.op) {
+        case IROp::SIMD_NATIVE_EXTRA: {
             const uint32_t w = inst.native_simd_opcode();
             if (!native_simd_cache_compatible(w)) return false;
             const auto kind = classify_native_simd(w);
-            const int rd = w & 31, rn = (w >> 5) & 31, rm = (w >> 16) & 31;
-            auto touch = [&](int v) {
-                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
-            };
-            touch(rd);
-            vec_written[rd] = true;
-            if (kind != NativeSimdKind::ImmediateFp) touch(rn);
-            if (kind == NativeSimdKind::Extract || kind == NativeSimdKind::CompareFp) touch(rm);
-            continue;
+            write(w & 31);
+            if (kind != NativeSimdKind::ImmediateFp) read((w >> 5) & 31);
+            if (kind == NativeSimdKind::Extract || kind == NativeSimdKind::CompareFp)
+                read((w >> 16) & 31);
+            if ((w & (1u << 30)) && (kind == NativeSimdKind::NarrowShift ||
+                kind == NativeSimdKind::NarrowFp ||
+                (kind == NativeSimdKind::HalfFp && !(w & 0x1000)))) read(w & 31);
+            return true;
         }
-        if (inst.op == IROp::SIMD_CVTF) {
+        case IROp::SIMD_CVTF:
             if (inst.cvtf_params().subop > 1) return false;
-            for (int v : {int(inst.dest), int(inst.src1)}) {
-                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
-            }
-            vec_written[inst.dest] = true;
+            read(inst.src1); write(inst.dest); return true;
+        case IROp::SIMD_FP_FMA:
+            read(inst.dest);
+            [[fallthrough]];
+        case IROp::SIMD_FP_ARITH:
+        case IROp::SIMD_LOGICAL:
+            read(inst.src1); read(inst.src2); write(inst.dest); return true;
+        case IROp::SIMD_FP_UNARY:
+            read(inst.src1); write(inst.dest); return true;
+        case IROp::SIMD_DUP:
+        case IROp::SIMD_MOVI:
+            write(inst.dest); return true;
+        case IROp::SIMD_ORRIMM:
+            read(inst.dest); write(inst.dest); return true;
+        case IROp::SIMD_ST16: {
+            const auto p = inst.st16_params();
+            for (unsigned i = 0; i < (p.count ? p.count : 1); ++i)
+                read(p.broadcast ? inst.src2 : inst.src2 + i);
+            return true;
+        }
+        case IROp::SIMD_LD16: {
+            const auto p = inst.ld16_params();
+            for (unsigned i = 0; i < (p.count ? p.count : 1); ++i) write(inst.dest + i);
+            return true;
+        }
+        case IROp::LOAD_REG:
+            return !inst.is_fp_load();
+        case IROp::STORE_REG:
+            return !inst.is_fp_store();
+        default:
+            return vec_cache_compatible_op(inst.op);
+    }
+}
+
+bool FrostJIT::vec_cache_may_enable(const IRBlock& block, bool tier1) {
+    static const bool no_vec_cache = getenv("BIFROST_NO_VEC_CACHE") != nullptr;
+    if (no_vec_cache || !has_fma3()) return false;
+    uint32_t used = 0, written = 0;
+    unsigned uses[32] = {};
+    std::vector<uint32_t> operand_sets;
+    bool boundary = false, skip = false;
+    for (size_t i = 0; i < block.insts.size(); ++i) {
+        const auto& inst = block.insts[i];
+        uint32_t reads, writes;
+        if (!vec_inst_operands(inst, reads, writes)) {
+            if (!tier1) return false;
+            boundary = true;
             continue;
         }
-        if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
-            inst.op == IROp::SIMD_FP_UNARY || inst.op == IROp::SIMD_LOGICAL ||
-            inst.op == IROp::SIMD_DUP || inst.op == IROp::SIMD_MOVI || inst.op == IROp::SIMD_ORRIMM)
-            vec_written[inst.dest & 31] = true;
-        if (!vec_cache_compatible_op(inst.op)) return false;
-        if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
-            inst.op == IROp::SIMD_LOGICAL) {
-            if (inst.dest < 32 && !vec_used[inst.dest]) {
-                vec_used[inst.dest] = true; used_count++;
-            }
-            if (inst.src1 < 32 && !vec_used[inst.src1]) {
-                vec_used[inst.src1] = true; used_count++;
-            }
-            if (inst.src2 < 32 && !vec_used[inst.src2]) {
-                vec_used[inst.src2] = true; used_count++;
-            }
-        } else if (inst.op == IROp::SIMD_FP_UNARY) {
-            for (int v : {int(inst.dest), int(inst.src1)}) {
-                if (v < 32 && !vec_used[v]) { vec_used[v] = true; used_count++; }
-            }
-        } else if (inst.op == IROp::SIMD_DUP) {
-            // src1 is a GPR vreg (>= 32); only the vector dest is pinned.
-            if (inst.dest < 32 && !vec_used[inst.dest]) {
-                vec_used[inst.dest] = true; used_count++;
-            }
-        } else if (inst.op == IROp::SIMD_MOVI) {
-            // Constant broadcast: dest is the only vector operand.
-            if (inst.dest < 32 && !vec_used[inst.dest]) {
-                vec_used[inst.dest] = true; used_count++;
-            }
-        } else if (inst.op == IROp::SIMD_ORRIMM) {
-            // Read-modify-write: dest is both source and dest.
-            if (inst.dest < 32 && !vec_used[inst.dest]) {
-                vec_used[inst.dest] = true; used_count++;
-            }
-        } else if (inst.op == IROp::SIMD_ST16) {
-            // Guest 16-byte store: src2 is the FIRST vector written to guest
-            // memory; flags_op = register count (1..4), regs contiguous.
-            // cond=1 (broadcast, `stp q0,q0`) keeps src2 constant across all
-            // halves — only that one register needs pinning.
-            const St16Params sp = inst.st16_params();
-            uint32_t n = sp.count ? sp.count : 1;
-            for (uint32_t i = 0; i < n; i++) {
-                int v = (sp.broadcast && i) ? (inst.src2 & 31) : ((inst.src2 + i) & 31);
-                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
-            }
-        } else if (inst.op == IROp::SIMD_LD16) {
-            // Guest 16-byte load: dest is the FIRST vector destination;
-            // flags_op = register count (1..4), regs contiguous.
-            const Ld16Params lp = inst.ld16_params();
-            uint32_t n = lp.count ? lp.count : 1;
-            for (uint32_t i = 0; i < n; i++) {
-                int v = (inst.dest + i) & 31;
-                vec_written[v] = true;
-                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
-            }
+        skip |= inst.op == IROp::BRCOND_SKIP;
+        written |= writes;
+        uint32_t touched = reads | writes;
+        used |= touched;
+        if (touched) operand_sets.push_back(touched);
+        while (touched) {
+            const unsigned v = __builtin_ctz(touched);
+            touched &= touched - 1;
+            ++uses[v];
+            if (tier1) vec_uses_[v].push_back(static_cast<uint16_t>(i));
         }
     }
-    if (used_count == 0) return false;
-    if (used_count > VEC_XMM_END - VEC_XMM_START + 1) return false;
+    const int count = __builtin_popcount(used);
+    if (!count) return false;
+    constexpr int capacity = VEC_XMM_END - VEC_XMM_START + 1;
+    if (!tier1 && count > capacity) return false;
+    // Leaf-inlined conditional skips need one fixed layout at the join.
+    // Retain their existing complete-layout contract until vector CFG
+    // merge copies are represented explicitly.
+    if (skip && (boundary || count > capacity)) return false;
+    vec_allocator_active_ = tier1 && !skip;
     vec_cache_active_ = true;
-    int xmm = VEC_XMM_START;
-    for (int v = 0; v < 32; v++) {
-        if (vec_used[v]) {
-            vec_cache_[v] = xmm;
-            vec_written_this_block_[v] = vec_written[v];
-            vec_xmm_owner_[xmm] = v;
-            vec_pinned_[vec_pinned_count_++] = v;
-            xmm++;
+    // Preserve the complete layout when it fits. Under pressure reserve
+    // only the demand slots this block's simultaneous operands require.
+    // A common broadcast source can leave twelve loop-carried pins; a
+    // four-register load may require four demand slots instead.
+    vec_fixed_count_ = count <= capacity ? count : capacity - 1;
+    std::vector<int> ranked;
+    for (int v = 0; v < 32; ++v) if (used & (uint32_t(1) << v)) ranked.push_back(v);
+    if (count > capacity)
+        std::sort(ranked.begin(), ranked.end(), [&](int a, int b) {
+            return uses[a] != uses[b] ? uses[a] > uses[b] : a < b;
+        });
+    if (count > capacity) {
+        for (; vec_fixed_count_ >= 0; --vec_fixed_count_) {
+            uint32_t fixed = 0;
+            for (int i = 0; i < vec_fixed_count_; ++i) fixed |= uint32_t(1) << ranked[i];
+            bool fits = true;
+            for (uint32_t operands : operand_sets)
+                if (__builtin_popcount(operands & ~fixed) > capacity - vec_fixed_count_) {
+                    fits = false; break;
+                }
+            if (fits) break;
         }
+    }
+    for (int v = 0; v < 32; ++v) vec_written_this_block_[v] = (written >> v) & 1;
+    for (int i = 0; i < vec_fixed_count_; ++i) {
+        const int v = ranked[i], xmm = VEC_XMM_START + i;
+        vec_cache_[v] = xmm;
+        vec_xmm_owner_[xmm] = v;
+        vec_pinned_[vec_pinned_count_++] = v;
     }
     return true;
+}
+
+void FrostJIT::vec_writeback_one(int v) {
+    const int xmm = vec_cache_[v];
+    store_lo(xmm, V_LO_OFF + v * 8);
+    if (!fp_cache_active_) store_hi(xmm, V_HI_OFF + v * 8);
+    ++vec_spills_;
+}
+
+void FrostJIT::vec_prepare_operands(uint32_t operands) {
+    uint32_t pending = operands;
+    while (pending) {
+        const int v = __builtin_ctz(pending);
+        pending &= pending - 1;
+        if (vec_cache_[v] >= 0) continue;
+        int chosen = -1;
+        int farthest = -1;
+        for (int xmm = VEC_XMM_START + vec_fixed_count_; xmm <= VEC_XMM_END; ++xmm) {
+            const int old = vec_xmm_owner_[xmm];
+            if (old < 0) { chosen = xmm; break; }
+            if (operands & (uint32_t(1) << old)) continue;
+            const auto& uses = vec_uses_[old];
+            const auto next = std::upper_bound(uses.begin(), uses.end(), cur_op_index_);
+            const int distance = next == uses.end() ? 0x7fffffff : *next;
+            if (distance > farthest || (distance == farthest && chosen >= 0 &&
+                vec_dirty_[vec_xmm_owner_[chosen]] && !vec_dirty_[old])) {
+                chosen = xmm; farthest = distance;
+            }
+        }
+        // The pre-scan reserved enough slots for this complete operand set.
+        if (chosen < 0) throw std::logic_error("vector allocator exhausted protected operands");
+        const int old = vec_xmm_owner_[chosen];
+        if (old >= 0) {
+            if (vec_dirty_[old]) vec_writeback_one(old);
+            vec_cache_[old] = -1;
+            vec_dirty_[old] = false;
+            ++vec_evictions_;
+        }
+        vec_cache_[v] = chosen;
+        vec_xmm_owner_[chosen] = v;
+        vec_pinned_[chosen - VEC_XMM_START] = v;
+        vec_pinned_count_ = std::max(vec_pinned_count_, chosen - VEC_XMM_START + 1);
+        vec_emit_load_lo_hi(chosen, v);
+        vec_dirty_[v] = false;
+    }
+}
+
+void FrostJIT::vec_drop_dynamic() {
+    for (int i = vec_fixed_count_; i < vec_pinned_count_; ++i) {
+        const int v = vec_pinned_[i];
+        vec_xmm_owner_[vec_cache_[v]] = -1;
+        vec_cache_[v] = -1;
+        vec_dirty_[v] = false;
+    }
+    vec_pinned_count_ = vec_fixed_count_;
+}
+
+void FrostJIT::vec_writeback_dynamic() {
+    if (!vec_allocator_active_) return;
+    for (int i = vec_fixed_count_; i < vec_pinned_count_; ++i) {
+        const int v = vec_pinned_[i];
+        if (vec_dirty_[v]) vec_writeback_one(v);
+    }
 }
 
 // ── Scalar-FP cache (lo-only) ─────────────────────────────────────────
@@ -350,10 +419,15 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
 
 void FrostJIT::vec_cache_reset() {
     vec_cache_active_ = false;
+    vec_allocator_active_ = false;
+    vec_fixed_count_ = 0;
+    vec_evictions_ = vec_reloads_ = vec_spills_ = 0;
+    for (auto& uses : vec_uses_) uses.clear();
     fp_cache_active_ = false;
     vec_pinned_count_ = 0;
     for (int i = 0; i < 32; i++) {
         vec_cache_[i] = -1;
+        vec_pinned_[i] = -1;
         vec_dirty_[i] = false;
         vec_written_this_block_[i] = false;
     }
@@ -363,6 +437,7 @@ void FrostJIT::vec_cache_reset() {
 // ── Prologue / epilogue ────────────────────────────────────────────────
 // movsd xmm, [rbx+lo] + movhpd xmm, [rbx+hi].
 void FrostJIT::vec_emit_load_lo_hi(int xmm, int vreg) {
+    ++vec_reloads_;
     bool r = (xmm >= 8);
     emit_byte(rex(false, r, false, false));
     emit_byte(0x0F); emit_byte(0x10);                  // movsd
@@ -387,6 +462,7 @@ void FrostJIT::vec_emit_prologue_loads() {
             emit_byte(rex(false, r, false, false));
             emit_byte(0x0F); emit_byte(0x10);          // movsd
             emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
+            ++vec_reloads_;
         } else {
             vec_emit_load_lo_hi(vec_cache_[v], v);
         }
@@ -413,6 +489,7 @@ void FrostJIT::vec_cache_writeback_all(bool clear_flags) {
             emit_byte(0x0F); emit_byte(0x17);          // movhpd
             emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
         }
+        ++vec_spills_;
         if (clear_flags) vec_dirty_[v] = false;
     }
 }
@@ -440,6 +517,7 @@ void FrostJIT::vec_cache_writeback_all_pinned(bool clear_flags) {
             emit_byte(0x0F); emit_byte(0x17);          // movhpd
             emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
         }
+        ++vec_spills_;
         if (clear_flags) vec_dirty_[v] = false;
     }
 }

@@ -39,6 +39,10 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // cpu.regs[] first, or the next iteration's LOAD_REG reads the previous
     // iteration's value. Mapping and dirty state stay for the exits below.
     store_dirty_unpinned_arch_regs();
+    // The demand-allocated tail starts empty at the body entry. Publish it
+    // before a retained backedge; fixed loop-core XMMs stay resident.
+    // Keep compile-time mappings/dirtiness intact for the cold exits below.
+    vec_writeback_dynamic();
     if (!mt_active()) {
         selfloop_patch_off_ = code_buf_used_;
         emit_byte(0xE9); emit_u32(0);

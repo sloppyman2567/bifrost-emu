@@ -176,9 +176,10 @@ void FrostJIT::emit_memory_fault_exit(const IRInst& inst, bool recoverable) {
 }
 // XMM0 holds a tentative packed FP result; architectural inputs are intact.
 // A rare ARM-semantic step preserves all live GPRs and reloads pinned vectors.
-// Return its jump patch: the caller must skip the native result's commit on
-// this path. Neither path changes compile-time mappings or dirty flags.
-size_t FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready) {
+// The caller finishes the guard after committing the native result. Tier-1
+// defers the step with its captured register layout; Tier-2 patches an
+// inline cold step. Neither path changes compiler mappings or dirty flags.
+FrostJIT::SimdFpGuard FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready) {
     if (!mask_ready) {
         if (has_fma3()) {
             emit_vex_fp_binop(1, 0, 0, 0xC2, esize == 8);
@@ -202,11 +203,32 @@ size_t FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, b
         emit_byte(0xA9); emit_u32(q ? (esize == 8 ? 3 : 15) : (esize == 8 ? 1 : 3));
         emit_pop(RAX); // POP leaves the TEST flags intact.
     }
+    if (defer_guards_) {
+        const size_t branch = emit_jcc_rel32_placeholder(5); // JNE: exceptional lanes
+        const size_t index = deferred_fp_steps_.size();
+        deferred_fp_steps_.push_back({inst, branch, 0, capture_guard_state()});
+        return {index, true};
+    }
     const size_t hot = emit_jcc_rel32_placeholder(4); // JE: no exceptional lanes
     emit_fp_interp_step(inst);
     const size_t done = emit_jmp_rel32_placeholder();
     patch_jcc_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 6)));
-    return done;
+    return {done, false};
+}
+void FrostJIT::finish_simd_fp_guard(SimdFpGuard guard) {
+    if (guard.deferred) deferred_fp_steps_[guard.site].resume = code_buf_used_;
+    else patch_jmp_rel32(guard.site, static_cast<int32_t>(code_buf_used_ - (guard.site + 5)));
+}
+void FrostJIT::flush_deferred_fp_steps() {
+    for (auto& step : deferred_fp_steps_) {
+        patch_jcc_rel32(step.branch, static_cast<int32_t>(code_buf_used_ - (step.branch + 6)));
+        swap_guard_state(step.state);
+        emit_fp_interp_step(step.inst);
+        const size_t back = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(back, static_cast<int32_t>(step.resume - (back + 5)));
+        swap_guard_state(step.state);
+    }
+    deferred_fp_steps_.clear();
 }
 // Scalar FP: each `cold_sites` JCC was taken before the result's commit,
 // which the caller has just emitted. Hot code jumps past the ARM-semantic

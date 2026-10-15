@@ -572,11 +572,9 @@ if (demote_interp) {
     if (num_stack_slots_ < 1) num_stack_slots_ = 1;
     uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
     // ── Vector register cache pre-scan ─────────────────────────────
-    // Enable the XMM vector cache only if EVERY vector-touching op in the
-    // block is cache-aware (SIMD_FP_FMA / SIMD_FP_ARITH) plus GPR-only ops.
-    // The cache's correctness relies on never flushing mid-block, which the
-    // all-or-nothing scan guarantees.
-    vec_cache_may_enable(ir_block);
+    // Tier-1 allocates vectors on demand under pressure, with a stable hot
+    // loop core. Incompatible operations synchronize the vector file locally.
+    vec_cache_may_enable(ir_block, true);
     // Scalar-FP cache (lo-only): only when the vec cache is NOT active for
     // this block — the two are exclusive (both pin into XMM3-15 and share
     // cpu.v_lo, so a block is either vector-cached or scalar-FP-cached).
@@ -1047,6 +1045,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     jit_consts_.clear();
     // Guarded-access cold paths are emitted after the block (see below).
     deferred_guards_.clear();
+    deferred_fp_steps_.clear();
     defer_guards_ = true;
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
         const IRInst& inst = ir_block.insts[i];
@@ -1102,12 +1101,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         const auto& rs = regalloc_stats_get();
         uint64_t spills = rs.spill_stack + rs.spill_arm;
         uint64_t reloads = rs.reload_stack + rs.reload_arm;
-        fprintf(stderr, "[regalloc] pc=%#llx insts=%zu spill=%llu(%llu/arm %llu) reload=%llu(%llu/arm %llu) evict=%llu\n",
+        fprintf(stderr, "[regalloc] pc=%#llx insts=%zu spill=%llu(%llu/arm %llu) reload=%llu(%llu/arm %llu) evict=%llu vec-spill=%llu vec-reload=%llu vec-evict=%llu\n",
                 (unsigned long long)start_pc, ir_block.insts.size(),
                 (unsigned long long)spills, (unsigned long long)rs.spill_stack,
                 (unsigned long long)rs.spill_arm, (unsigned long long)reloads,
                 (unsigned long long)rs.reload_stack, (unsigned long long)rs.reload_arm,
-                (unsigned long long)rs.evicts);
+                (unsigned long long)rs.evicts, (unsigned long long)vec_spills_,
+                (unsigned long long)vec_reloads_, (unsigned long long)vec_evictions_);
     }
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
@@ -1121,10 +1121,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Write back dirty architectural vregs before returning (so cpu.regs[]
     // is up to date); dead scratch values need no stack store at the exit.
     flush_all_vregs_exit();
-    // Write back dirty cached vectors to cpu.v_lo/v_hi. Self-loop re-entry
-    // skips the epilogue, so loop-carried accumulators stay in XMM; this
-    // runs only when the loop exits (or the block is entered from another
-    // block / the dispatcher).
+    // Write back dirty vectors at the exit. Retained self-loops keep the
+    // fixed loop core in XMM; their demand-allocated tail was committed
+    // before the backedge so body-entry loads see the current values.
     vec_cache_writeback_all();
     if (!rax_holds_next_pc_) {
         // inline blocks' instr_count is not a contiguous
@@ -1226,6 +1225,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Cold software page checks and fault exits of guarded accesses, after
     // all hot code; their registered fault sites get the real stub offsets.
     flush_deferred_guards();
+    flush_deferred_fp_steps();
     defer_guards_ = false;
     if (code_buf_overflow_) {
         rewind_codegen(block_start);

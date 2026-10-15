@@ -4,6 +4,47 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Tier-1 vector allocation under pressure (2026-10-15)
+
+The existing Tier-2 discovery host fixture now also directly compiles
+Tier-1 pressure loops: fourteen accumulators used twice, and twenty-eight
+used once, with a shared source. It requires active partial allocation and
+real evictions, then compares every vector with the interpreter for 1, 7
+and 257 iterations, finite/NaN inputs and FPCR.DN. Variants insert a native
+FP helper, high-XMM scratch code, an interpreter fallback or a scalar FP
+operation into the vector block. A scalar fault guard precedes later XMM
+reuse and checks precise pre-fault vector state. The existing region
+checks continue to verify cache admission, side exits, aliases, NaN steps,
+invalidation and region layouts.
+
+All four ST/MT and ordinary/skip-chain configurations pass. Additional
+cache-disabled, FMA3-disabled and forced-software-guard runs pass. The
+broader SIMD/FP/fault selection passes 41/41 with IR and scalar allocator
+validation. `make verify TARGET=build/release-sdl1-gl1/bifrost-emu` passes
+87 differential fixtures and seven threaded result oracles, and
+`make generated-check` passes. Independent QEMU runs validate both temporary
+pressure benchmarks; [JIT.md](JIT.md#tier-1-vector-allocation-under-pressure-2026-10-15)
+records the FMA gain and the remaining FADD regression explicitly.
+The final strict suite passes 326/326 in JIT and 317/317 in the interpreter
+with nine expected skips. SDL/GL executable/library and separate headless
+executable/library builds pass. `make nativegen-expect` reproduces the
+committed expectations without generated-file changes.
+
+An installed Azur Lane run on the final allocator reaches Unity initialization
+and ends at the configured timeout (status 124), without a logged fatal guest
+exception. Host GPU access was available. Evidence: managed session
+`8a5f9689f0a14c74b6065bebb2f57960`. This does not establish continued rendering,
+login, gameplay or a change in outfit-repacking/GC pause time. Running
+SpongeBob and other existing game processes were preserved.
+
+```sh
+bash Scripts/Testing/test_jit_tier2_discovery.sh
+BIFROST_EMU=build/release-sdl1-gl1/bifrost-emu BIFROST_IR_VALIDATE=1 \
+  BIFROST_REGALLOC_CHECK=1 bash Scripts/Testing/run_tests.sh --strict \
+  --filter 'simd|fp_|round|host_fault|userfaultfd|window_bounds|memory_guard'
+make verify TARGET=build/release-sdl1-gl1/bifrost-emu
+```
+
 ## Inline pixel-conversion helpers (2026-10-15)
 
 `jit_native_simd_inline` passes 137,700 checks under QEMU, JIT and interpreter.

@@ -87,6 +87,8 @@ loop write set. NaN recovery and all exits use existing writeback/reload
 contracts. USHL/SSHL's inline body still borrows XMM3-5 and is excluded;
 helper-called words, FP-to-integer conversions and more than thirteen distinct
 vectors retain the uncached path. Scalar FP and vector layouts remain separate.
+The subsequent Tier-1 allocator below supersedes these block-wide pressure
+and helper exclusions for ordinary Tier-1 blocks.
 
 Five alternating measured runs per configuration, after one warm-up each,
 of a temporary two-million-iteration FCVTL/USHLL/UCVTF/FADD loop gave median
@@ -95,6 +97,64 @@ The new binary with vector caching disabled took 8.895 ms. All output bits
 matched an independent QEMU run. These measure this synthetic conversion mix,
 not a game speedup, outfit-change duration or GC pause reduction. The heap
 alignment issue is outside this change. See [validation](TESTS.md#inline-pixel-conversion-helpers-2026-10-15).
+
+## Tier-1 vector allocation under pressure (2026-10-15)
+
+Tier-1 no longer disables vector retention just because more than thirteen
+guest vectors are used or an incompatible operation appears in the block.
+A shared operand/effect scan records vector reads, writes and next-use lists.
+Blocks that fit retain the existing complete XMM3-15 layout. Larger blocks
+rank vectors by use frequency and keep a stable loop core; the remaining
+XMMs are allocated on demand. The core size is chosen from the actual
+simultaneous operands, rather than a fixed split: a broadcast arithmetic
+block can retain twelve vectors, while a multi-register operation can
+reserve more demand slots. Instruction operands are protected from eviction;
+other demand values are evicted by farthest next use, preferring clean
+values on a tie. Dirty architectural values are committed even when their
+next block-local use is absent.
+
+Compatible arithmetic therefore keeps register operands under pressure.
+Unknown scalar/vector effects and helpers form local synchronization
+boundaries: publish the vectors, emit with architectural memory authoritative,
+drop demand mappings, then reload the fixed core. Later compatible operations
+resume allocation. This does not assume helpers preserve XMM registers or
+guess which architectural vectors an unknown operation changes. The
+[QEMU helper contract](https://www.qemu.org/docs/master/devel/tcg-ops.html#helpers)
+provides the same conservative state-publication precedent; this is not a
+claim that the two allocators have identical policies.
+
+Retained ST/MT loop backedges publish only the demand-allocated tail; the
+fixed core remains resident. Compile-time mappings stay intact for emitting
+the alternate exits. Deferred memory guards now snapshot vector homes,
+owners, resident order, active state and dirty bits, so an XMM reused later
+cannot corrupt fault recovery. Tier-1 vector NaN steps are also emitted
+after the hot code with the captured layout and a continuation after the
+native commit. The cold step still sees original aliased inputs, publishes
+loop-carried writes and reloads the captured layout.
+
+This does not replace scalar SSA or make vector allocation global across
+arbitrary control flow. Leaf-inlined conditional skips retain their complete
+fixed-layout requirement at joins; pressure or incompatible effects in such
+a block still decline vector caching. Tier-2 uses the shared effect scan
+but retains its existing fixed region layout, internal-edge contracts and
+inline NaN steps. Region optimization, publication and measured promotion
+policy are unchanged. The FMA3/AVX feature gate and cache opt-out remain.
+
+Five alternating measured runs per configuration after one warm-up each,
+using two-million-iteration loops and QEMU-checked results, measured:
+
+- Fourteen accumulators updated twice per iteration with FMLA: median
+  thread CPU time 44.051 ms before, 37.208 ms after (18.4% higher throughput).
+  The final binary with vector caching disabled took 44.590 ms.
+- The equivalent simple FADD loop: 34.400 ms before, 36.102 ms after
+  (4.9% more CPU time); cache-disabled final binary 34.230 ms.
+
+These show a workload-dependent tradeoff, not a universal speedup or a game
+FPS result. Precise cold recovery still consumes generated code space, and
+its new metadata/next-use planning has compile-time cost; application cache
+size and loading-time benefits are not established here. Temporary benchmark
+sources, JSON results and code dumps remain in `/tmp`. See
+[validation and scope](TESTS.md#tier-1-vector-allocation-under-pressure-2026-10-15).
 
 ## Tier-1 hot-path code reduction (2026-10-14)
 
