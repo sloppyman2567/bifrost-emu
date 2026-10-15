@@ -4,6 +4,46 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Cached integer SIMD (2026-10-15)
+
+The discovery host fixture now also checks 253 supported arithmetic,
+comparison and immediate-shift forms across element sizes and Q widths.
+Destination aliases cover neither input, Vn, Vm and identical binary inputs.
+Thirteen resident vectors with twelve dirty accumulators exercise high XMM
+registers and assert that only the thirteen prologue reloads are emitted.
+Twenty-five vectors exercise Tier-1
+evictions and Tier-2's retained uncached pressure path. One and seven loop
+iterations compare every vector and architectural NZCV with the interpreter.
+All four ST/MT and ordinary/skip-chain configurations pass. Existing pressure,
+NaN, helper-boundary, early-exit, precise-fault and invalidation checks pass.
+Separate vector-cache-disabled, FMA3-disabled, AVX2-disabled and forced
+software-guard runs of the same host fixture also pass.
+
+`make verify TARGET=build/release-sdl1-gl1/bifrost-emu` passes 87 differential
+fixtures and seven threaded oracles. The full strict JIT suite passes 326/326;
+the focused SIMD/NEON/fault/image selection passes 43/43 in JIT and 42/42 in
+the interpreter with one expected skip. The full interpreter suite was not
+repeated. Independent QEMU runs pass `jit_neon_cmp`, `jit_neon_roundingshift`,
+`jit_simd_mul32` and `jit_neon_pngfix`. `make generated-check` passes, and
+separate SDL/GL and headless executable/library builds succeed.
+
+A temporary harness executes the actual 31-instruction Unity block from the
+SpongeBob capture. Its complete vector outputs, architectural NZCV and written
+memory match QEMU and the interpreter before and after the change. Internal
+JIT `pstate` bit 27 is excluded from the architectural NZCV comparison. The
+[JIT guide](JIT.md#cached-integer-simd-2026-10-15) records generated-code and
+timing results with their scope. The already-running SpongeBob session was
+preserved on its original executable; hat-change latency on the new binary
+has not been measured.
+
+```sh
+bash Scripts/Testing/test_jit_tier2_discovery.sh
+make verify TARGET=build/release-sdl1-gl1/bifrost-emu
+BIFROST_EMU=build/release-sdl1-gl1/bifrost-emu BIFROST_IR_VALIDATE=1 \
+  BIFROST_REGALLOC_CHECK=1 bash Scripts/Testing/run_tests.sh --strict \
+  --filter 'simd|neon|round|host_fault|userfaultfd|window_bounds|memory_guard|jpeg|png'
+```
+
 ## Tier-1 vector allocation under pressure (2026-10-15)
 
 The existing Tier-2 discovery host fixture now also directly compiles

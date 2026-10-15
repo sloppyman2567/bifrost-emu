@@ -285,6 +285,105 @@ static bool check_tier1_vector_allocation(bool mt) {
     return true;
 }
 
+// Integer operations must consume dirty allocated vectors, including high
+// XMM registers, without a publish/reload boundary on every instruction.
+static bool check_cached_integer_simd(bool mt) {
+    constexpr uint64_t head=0x90000, body=0x91000;
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(head,8192); e->mem().mprotect_guest(head,8192,7);
+    e->enable_jit(); auto* j=e->jit(); if (mt) j->enter_multithreaded();
+    std::vector<uint32_t> operations;
+    const uint32_t binary[]={
+        0x0e208400,0x2e208400,0x0e209c00, // add, sub, mul
+        0x2e206c00,0x2e206400,0x0e206c00,0x0e206400, // u/s min/max
+        0x2e208c00,0x0e203400,0x0e203c00,0x2e203400,0x2e203c00, // eq/gt/ge/hi/hs
+    };
+    const uint32_t shifts[]={
+        0x0f005400,0x2f000400,0x0f000400,0x2f001400,0x0f001400,
+        0x2f003400,0x0f003400,0x2f005400,0x2f004400,
+    }; // shl, ushr, sshr, usra, ssra, ursra, srsra, sli, sri
+    for (unsigned size=0;size<4;++size) for (unsigned q=0;q<2;++q) {
+        if (size==3 && !q) continue;
+        for (unsigned k=0;k<sizeof(binary)/sizeof(binary[0]);++k) {
+            if ((k==2 && (size==0 || size==3)) || (k>=3 && k<=6 && size==3)) continue;
+            if ((k==3 || k==4) && size==1) continue; // retained interpreter forms
+            if (!j->has_sse41() && ((k==2 && size==2) ||
+                ((k==3 || k==4) && size==2) || ((k==5 || k==6) && size!=1) ||
+                (k==7 && size==3))) continue;
+            if (k>7 && size==3 && !j->has_sse42()) continue;
+            operations.push_back(binary[k] | (size<<22) | (q<<30));
+        }
+        const unsigned bits=8u<<size;
+        for (unsigned k=0;k<sizeof(shifts)/sizeof(shifts[0]);++k) {
+            if (size==3 && (k==2 || k==4 || k==6)) continue; // retained interpreter forms
+            const bool left=k==0 || k==7;
+            for (unsigned shift : {left ? 0u : 1u, bits/2, left ? bits-1 : bits}) {
+                const unsigned imm=left ? bits+shift : 2*bits-shift;
+                operations.push_back(shifts[k] | (imm<<16) | (q<<30));
+            }
+        }
+    }
+    const bool cache=Tier2TestAccess::supports_vector_cache(*j) &&
+                     !std::getenv("BIFROST_NO_VEC_CACHE");
+    for (unsigned prefix : {12u,24u})
+    for (uint32_t operation : operations) for (unsigned alias=0;alias<4;++alias)
+    for (bool region : {false,true}) {
+        // Thirteen vectors exercise high XMMs; twenty-five also require
+        // Tier-1 evictions. The target aliases neither input, Vn, Vm, or both.
+        const bool shift=(operation&0x0f000000)==0x0f000000;
+        if (shift && alias==3) continue;
+        const unsigned dest=alias==0 ? 9 : alias==2 ? 11 : 10;
+        const unsigned rm=alias==3 ? 10 : 11;
+        std::vector<uint32_t> code;
+        for (unsigned v=0;v<prefix;++v)
+            code.push_back(0x4e3f8400u | (v<<5) | v); // add vv.4s,vv.4s,v31.4s
+        code.push_back(operation | dest | (10<<5) | (shift ? 0 : (rm<<16)));
+        code.push_back(0xd1000400); // sub x0,x0,#1: preserve NZCV
+        const uint64_t back=body+code.size()*4;
+        code.push_back(0xb5000000u | ((uint32_t(((region ? head : body)-back)/4)&0x7ffff)<<5));
+        j->invalidate_all();
+        const uint32_t entry=0x14000400; // b body
+        e->mem().write(head,&entry,4); e->mem().write(body,code.data(),code.size()*4);
+        auto fn=region ? j->compile_tier2_region(*e,j->collect_tier2_trace(*e,head)) :
+                         j->lookup_or_translate(*e,body);
+        const bool expected_cache=cache && (!region || prefix==12);
+        if (!fn || Tier2TestAccess::vector_cache_active(*j)!=expected_cache ||
+            (expected_cache && prefix==12 && Tier2TestAccess::vector_reloads(*j)!=13) ||
+            (expected_cache && prefix==24 && !Tier2TestAccess::vector_evictions(*j))) {
+            std::fprintf(stderr,"integer SIMD cache boundary: word=%08x region=%d prefix=%u\n",
+                code[prefix],region,prefix);
+            return false;
+        }
+        const uint64_t start=region ? head : body, stop=body+code.size()*4;
+        for (unsigned count : {1u,7u}) {
+            CPU actual,reference; actual.pc=start; actual.regs[0]=count;
+            actual.pstate=0xa0000000;
+            for (unsigned v=0;v<32;++v) {
+                actual.v_lo[v]=UINT64_C(0x80ff017fdeadbeef)^(UINT64_C(0x123456789abcdef)*v);
+                actual.v_hi[v]=~actual.v_lo[v];
+            }
+            reference.copy_arch_state_from(actual);
+            while (reference.pc!=stop) e->step(reference);
+            {
+                FrostJIT::FaultScope scope(j);
+                unsigned entries=0;
+                while (actual.pc!=stop && ++entries<=count+1) {
+                    actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+                }
+            }
+            if (actual.pc!=stop || actual.regs[0]!=reference.regs[0] ||
+                ((actual.pstate^reference.pstate)&0xf0000000u) ||
+                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
+                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::fprintf(stderr,"integer SIMD cache mismatch: word=%08x region=%d n=%u\n",
+                    code[prefix],region,count); return false;
+            }
+        }
+    }
+    std::printf("cached integer SIMD: %zu forms, aliases and retained loops PASS\n",operations.size());
+    return true;
+}
+
 static bool check_superblocks(bool mt) {
     constexpr uint64_t head=0x40000,cold=0x41000,stop=0x50000;
     auto e=std::make_unique<Emulator>();
@@ -361,7 +460,7 @@ int main(int argc, char** argv) {
         mt |= std::string(argv[k]) == "mt";
         benchmark |= std::string(argv[k]) == "benchmark";
     }
-    if (!check_tier1_vector_allocation(mt) ||
+    if (!check_cached_integer_simd(mt) || !check_tier1_vector_allocation(mt) ||
         !check_region_invariant(mt) || !check_region_vectors(mt,benchmark) ||
         !check_region_native_simd(mt)) return 1;
     if (!check_region_fp_memory(mt)) return 1;

@@ -126,6 +126,45 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEB);
                 emit_byte(0xC0 | (d << 3) | s);
             };
+            const int xd = vec_xmm(inst.dest), xn = vec_xmm(inst.src1);
+            if (xd >= 0 && xn >= 0) {
+                const bool plain = inst.op == IROp::SIMD_SHL ||
+                                   inst.op == IROp::SIMD_USHR ||
+                                   inst.op == IROp::SIMD_SSHR;
+                if (plain && esize != 1) {
+                    if (xd != xn) movdqa(xd, xn);
+                    sse2_imm(subop, xd, reg_field, shift);
+                    if (!q) emit_vec_zero_upper(xd);
+                    vec_cache_mark_dirty(inst.dest);
+                    return true;
+                }
+                // Full packed vectors stay in XMM registers. Byte shifts
+                // borrow XMM1/2; load the accumulator only after those
+                // scratch uses, and keep Vd intact until all inputs are read.
+                movdqa(0, xn);
+                if (is_rounding) {
+                    movdqa(2, 0);
+                    emit_lane_shift(2, 2, shift - 1);
+                    emit_lane_shift(2, 6, static_cast<uint8_t>(esize * 8) - 1);
+                    emit_lane_shift(2, 2, static_cast<uint8_t>(esize * 8) - 1);
+                }
+                emit_lane_shift(0, reg_field, shift);
+                if (plain) {
+                    store_vec(0, inst.dest, q);
+                    return true;
+                }
+                if (is_rounding) emit_padd(0, 2);
+                movdqa(1, xd);
+                if (inst.op == IROp::SIMD_SLI || inst.op == IROp::SIMD_SRI) {
+                    emit_lane_shift(1, inst.op == IROp::SIMD_SLI ? 6 : 2, insert_shift);
+                    emit_lane_shift(1, inst.op == IROp::SIMD_SLI ? 2 : 6, insert_shift);
+                    emit_por(1, 0);
+                } else {
+                    emit_padd(1, 0);
+                }
+                store_vec(1, inst.dest, q);
+                return true;
+            }
             // VEX 3-byte prefix: C4 <b1> <b2> — mmmmm selects the opcode map
             // (00001=0F, 00011=0F3A), R~=X~=B~=1 (low regs), L=1 (256-bit).
             // `vvvv_nds` is the raw NDS register index; pass 0 for "unused"

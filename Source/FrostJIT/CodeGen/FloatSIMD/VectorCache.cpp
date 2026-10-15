@@ -83,9 +83,23 @@ bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& 
         case IROp::SIMD_CVTF:
             if (inst.cvtf_params().subop > 1) return false;
             read(inst.src1); write(inst.dest); return true;
+        case IROp::SIMD_USRA:
+        case IROp::SIMD_SSRA:
+        case IROp::SIMD_URSRA:
+        case IROp::SIMD_SRSRA:
+        case IROp::SIMD_SLI:
+        case IROp::SIMD_SRI:
+            read(inst.dest);
+            [[fallthrough]];
+        case IROp::SIMD_SHL:
+        case IROp::SIMD_USHR:
+        case IROp::SIMD_SSHR:
+            read(inst.src1); write(inst.dest); return true;
         case IROp::SIMD_FP_FMA:
             read(inst.dest);
             [[fallthrough]];
+        case IROp::SIMD_ARITH:
+        case IROp::SIMD_CMP:
         case IROp::SIMD_FP_ARITH:
         case IROp::SIMD_LOGICAL:
             read(inst.src1); read(inst.src2); write(inst.dest); return true;

@@ -98,6 +98,49 @@ matched an independent QEMU run. These measure this synthetic conversion mix,
 not a game speedup, outfit-change duration or GC pause reduction. The heap
 alignment issue is outside this change. See [validation](TESTS.md#inline-pixel-conversion-helpers-2026-10-15).
 
+## Cached integer SIMD (2026-10-15)
+
+The SpongeBob hat-change capture exposed a cost in the allocator's local
+boundaries: a sampled Unity block retained only four vectors but synchronized
+them around twenty-one operations. Ordinary integer arithmetic, comparisons
+and immediate shifts still used architectural memory. Enabling caching around
+those emitters increased their loads/stores even without register pressure.
+
+Supported `SIMD_ARITH` and `SIMD_CMP` forms now consume allocated XMM operands
+and commit directly to their allocated destinations. Immediate shifts use the
+allocated registers; byte shifts, accumulating/rounding shifts and shift-insert
+forms use only XMM0-2 as scratch and commit after reading every input. The
+operand scan includes the old destination for accumulating and insert forms.
+Aliased inputs, signed/unsigned comparisons, Q=0 upper-half clearing and
+existing SSE4.1/SSE4.2 guards are preserved. Other hosts keep the existing
+uncached paths. The shared effect scan also admits these emitters in Tier-2's
+existing fixed region layout; region allocation and promotion policy are
+unchanged.
+
+Shift behavior was checked against Arm's [USHR](https://www.scs.stanford.edu/~zyedidia/arm64/ushr_advsimd.html),
+[SRSRA](https://www.scs.stanford.edu/~zyedidia/arm64/srsra_advsimd.html) and
+[SLI](https://www.scs.stanford.edu/~zyedidia/arm64/sli_advsimd.html) pseudocode.
+The [regressions](TESTS.md#cached-integer-simd-2026-10-15) check the changed
+register paths against the interpreter, with independent QEMU guest runs.
+
+Replaying the captured 31-instruction Unity block at guest PC `0x736b0c929c`
+through each compiler reduced synchronization boundaries from 21 to 7,
+emitted bytes from 4,013 to 3,128 and static vector-file memory instructions
+from 358 to 262 (including cold guard/recovery code). The original live
+perf-map entry occupied 4,008 bytes; replayed layout is not byte-identical to
+the surrounding live code cache. The first USHR alone fell from 148 to 10
+bytes, with no cache spill or reload. Remaining boundaries include FP-to-int
+conversion, bit-select helpers, narrowing and scalar/structured stores.
+
+Both versions of the complete block match QEMU and the interpreter for the
+temporary harness's vector inputs, architectural NZCV and output memory.
+Five alternating measured one-million-call runs after one warm-up each gave
+median thread CPU times of 681.240 ms before and 91.641 ms after (7.43x
+throughput). This is repeated execution of one captured block with controlled
+inputs, not a measured hat-change speedup. It does not cover real texture
+inputs, surrounding blocks, frame pacing or GC pauses. Scratch traces,
+disassembly, the QEMU harness and timing data remain under `/tmp`.
+
 ## Tier-1 vector allocation under pressure (2026-10-15)
 
 Tier-1 no longer disables vector retention just because more than thirteen

@@ -220,6 +220,17 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
+            const int xd = vec_xmm(inst.dest), xn = vec_xmm(inst.src1),
+                      xm = vec_xmm(inst.src2);
+            if (xd >= 0 && xn >= 0 && xm >= 0) {
+                // VEX.NDS reads both sources before an aliased destination
+                // commits. The existing feature checks also cover this path.
+                emit_vex3(needs_38_prefix ? 2 : 1, false, xn, 1,
+                          xd, xm, true, op_byte);
+                if (!ap.q) emit_vec_zero_upper(xd);
+                vec_cache_mark_dirty(inst.dest);
+                return true;
+            }
             auto emit_arith_half = [&](int32_t off1, int32_t off2, int32_t offd) {
                 // movsd xmm0, [rbx+off1]  (MOVSD = F2 0F 10, 64-bit)
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
@@ -305,6 +316,27 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
                     case 4: sign_mask = 0x8000000080000000ULL; break;
                     default: sign_mask = 0x8000000000000000ULL; break;  // esize 8
                 }
+            }
+            const int xd = vec_xmm(inst.dest), xn = vec_xmm(inst.src1),
+                      xm = vec_xmm(inst.src2);
+            if (xd >= 0 && xn >= 0 && xm >= 0) {
+                int a = ge ? xm : xn, b = ge ? xn : xm;
+                if (uns) {
+                    // Sign-flip both inputs before writing an aliased Vd.
+                    emit_mask(2, sign_mask);
+                    emit_vex3(1, false, a, 1, 0, 2, true, 0xEF);
+                    emit_vex3(1, false, b, 1, 1, 2, true, 0xEF);
+                    a = 0; b = 1;
+                }
+                emit_vex3(needs_38_prefix ? 2 : 1, false, a, 1,
+                          xd, b, true, op_byte);
+                if (ge) {
+                    sse2_op(0x76, 0, 0); // all ones
+                    emit_vex3(1, false, xd, 1, xd, 0, true, 0xEF);
+                }
+                if (!Q) emit_vec_zero_upper(xd);
+                vec_cache_mark_dirty(inst.dest);
+                return true;
             }
             auto emit_cmp_half = [&](int32_t off1, int32_t off2, int32_t offd) {
                 // GE variants compute PCMPGT(b, a): load the operands swapped.

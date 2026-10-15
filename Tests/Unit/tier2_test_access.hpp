@@ -9,6 +9,7 @@ struct Tier2TestAccess {
     static bool supports_vector_cache(const FrostJIT& jit) { return jit.has_fma3(); }
     static uint64_t vector_evictions(const FrostJIT& jit) { return jit.vec_evictions_; }
     static int fixed_vectors(const FrostJIT& jit) { return jit.vec_fixed_count_; }
+    static uint64_t vector_reloads(const FrostJIT& jit) { return jit.vec_reloads_; }
     static bool region_invariants_preserved(FrostJIT& jit,const Tier2Trace& trace) {
         Tier2RegionPlan plan;
         if (!jit.plan_tier2_region(trace,nullptr,plan)) return false;
