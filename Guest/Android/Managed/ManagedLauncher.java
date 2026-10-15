@@ -662,7 +662,7 @@ public final class ManagedLauncher {
             }
             throw unsupported("mount", method);
         });
-        displays.install(services);
+        displays.install(services, packages);
         // No physical input devices exist here, so the id list holds only
         // the virtual keyboard. Host key/touch events do not pass through
         // this service: the play loop pumps them from the window backend and
@@ -720,6 +720,7 @@ public final class ManagedLauncher {
             add.invoke(null, "media.audio_flinger", audioFlinger);
         }
         audio.install(services);
+        new FrameworkMediaRouter(packages).install(services);
         services.register("content", "android.content.IContentService", content::call);
         services.register("window", "android.view.IWindowManager", (method, a) -> {
             switch (method) {

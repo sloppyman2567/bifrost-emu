@@ -361,6 +361,37 @@ Not yet established:
 On this host VA-API does not decode VP8, so forced GPU mode routes VP8 to
 the software store.
 
+### Wi-Fi display and local media routing (2026-10-15)
+
+The display service models Android 15's **absent Wi-Fi display adapter**:
+`getWifiDisplayStatus` returns a fresh `WifiDisplayStatus` with feature
+unavailable, no scan or connection and no devices. Disconnect is unprivileged;
+scan/connect/rename/forget/pause/resume enforce `CONFIGURE_WIFI_DISPLAY`.
+Address validation precedes permission checks where AOSP does; scan requests
+require the process's display callback, are idempotent and are retired on its
+Binder death. No Miracast discovery, connection or remote display is advertised.
+
+Unity's real `MediaRouter` constructor also needs audio route observation and
+the legacy `media_router` service. Audio reports one fixed local speaker route
+and no Bluetooth A2DP, with fresh snapshots and death-tracked observers.
+Legacy router clients have package/user validation, Binder death/unregister
+cleanup, retained discovery/selection state and AOSP's trusted-client filtering.
+There are no remote route providers; group routing and Router2 operations
+still throw explicitly.
+This is local media routing, not wireless casting or arbitrary output-device
+management.
+
+Contracts were compared with Android 15's
+[DisplayManagerService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/display/DisplayManagerService.java),
+[MediaRouter](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/java/android/media/MediaRouter.java)
+and [MediaRouterService](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/media/MediaRouterService.java).
+The real-framework display probe passed 47 checks in each engine, including
+the complete MediaRouter constructor, permission denial/grant, snapshot
+isolation and client registration/unregistration. An installed Azur Lane 9.3.7
+trace returned successfully from Wi-Fi status, audio-route observation and
+router registration/selection with no traced service throws. These checks do
+not establish remote Binder death delivery, casting, login or gameplay.
+
 ### Azur Lane interaction checkpoint (2026-10-14)
 
 The installed `com.YoStarEN.AzurLane` 9.3.7 was run with the current SDL/GL

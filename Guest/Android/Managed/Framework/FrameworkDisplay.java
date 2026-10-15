@@ -11,7 +11,21 @@ import android.graphics.Rect;
 import java.util.HashSet;
 import java.util.Set;
 
-final class FrameworkDisplay {
+final class FrameworkDisplay implements FrameworkServices.Call {
+    private enum Contract {
+        getDisplayInfo, getDisplayIds, registerCallback, registerCallbackWithEventMask,
+        getPreferredWideGamutColorSpaceId, getOverlaySupport, getWifiDisplayStatus,
+        disconnectWifiDisplay, connectWifiDisplay, renameWifiDisplay, forgetWifiDisplay,
+        pauseWifiDisplay, resumeWifiDisplay, startWifiDisplayScan, stopWifiDisplayScan
+    }
+
+    @Override public String[] methods() {
+        Contract[] values = Contract.values();
+        String[] names = new String[values.length];
+        for (int i = 0; i < values.length; i++) names[i] = values[i].name();
+        return names;
+    }
+
     private static final long CHANGED_MASK = 4; // DisplayManager.EVENT_FLAG_DISPLAY_CHANGED
     private static final int CHANGED_EVENT = 2; // DisplayManagerGlobal.EVENT_DISPLAY_CHANGED
     private Object info;
@@ -20,6 +34,8 @@ final class FrameworkDisplay {
     private int densityDpi = 160; // DisplayMetrics.DENSITY_DEFAULT until play mode sizes the display
     private IInterface callback;
     private long eventsMask;
+    private boolean wifiScanRequested;
+    private FrameworkPackages packages;
     private Handler main;
     private Object applicationThread;
     private final Set<IBinder> windowContexts = new HashSet<>();
@@ -150,26 +166,66 @@ final class FrameworkDisplay {
         }
     }
 
-    void install(FrameworkServices services) throws Exception {
+    void install(FrameworkServices services, FrameworkPackages packages) throws Exception {
+        this.packages = packages;
         main = new Handler(Looper.getMainLooper());
         info = displayInfo(width = 480, height = 800, densityDpi);
-        services.register("display", "android.hardware.display.IDisplayManager", (method, args) -> {
-            switch (method) {
-                case "getDisplayInfo": return ((Integer) args[0]) == 0 ? snapshot() : null;
-                case "getDisplayIds": return new int[] {0};
-                case "registerCallback":
-                    register(args[0], 7L); // legacy ADDED | REMOVED | CHANGED
-                    return null;
-                case "registerCallbackWithEventMask":
-                    register(args[0], ((Number) args[1]).longValue());
-                    return null;
-                case "getPreferredWideGamutColorSpaceId": return 0;
-                case "getOverlaySupport":
-                    return Class.forName("android.hardware.OverlayProperties")
-                            .getMethod("getDefault").invoke(null);
-                default: throw new UnsupportedOperationException("display." + method);
-            }
-        });
+        services.register("display", "android.hardware.display.IDisplayManager", this);
+    }
+
+    @Override public Object invoke(String method, Object[] args) throws Exception {
+        Contract contract;
+        try { contract = Contract.valueOf(method); }
+        catch (IllegalArgumentException unknown) { throw new UnsupportedOperationException("display." + method); }
+        switch (contract) {
+            case getDisplayInfo: return ((Integer) args[0]) == 0 ? snapshot() : null;
+            case getDisplayIds: return new int[] {0};
+            case registerCallback:
+                register(args[0], 7L); // legacy ADDED | REMOVED | CHANGED
+                return null;
+            case registerCallbackWithEventMask:
+                register(args[0], ((Number) args[1]).longValue());
+                return null;
+            case getPreferredWideGamutColorSpaceId: return 0;
+            case getOverlaySupport:
+                return Class.forName("android.hardware.OverlayProperties")
+                        .getMethod("getDefault").invoke(null);
+            case getWifiDisplayStatus:
+                // DisplayManagerService without a WifiDisplayAdapter:
+                // FEATURE_STATE_UNAVAILABLE, no scan, no active/remembered displays.
+                return Class.forName("android.hardware.display.WifiDisplayStatus")
+                        .getConstructor().newInstance();
+            case disconnectWifiDisplay:
+                // AOSP permits any app to disconnect; no adapter is present.
+                return null;
+            case connectWifiDisplay:
+            case renameWifiDisplay:
+            case forgetWifiDisplay:
+                if (args[0] == null) throw new IllegalArgumentException("address must not be null");
+                enforceWifiDisplay(packages);
+                return null;
+            case pauseWifiDisplay:
+            case resumeWifiDisplay:
+                enforceWifiDisplay(packages);
+                return null;
+            case startWifiDisplayScan:
+            case stopWifiDisplayScan:
+                enforceWifiDisplay(packages);
+                synchronized (this) {
+                    if (callback == null) throw new IllegalStateException(
+                            "The calling process has not registered an IDisplayManagerCallback.");
+                    // Requests are idempotent per process; without an adapter
+                    // they do not change the advertised SCAN_STATE_NOT_SCANNING.
+                    wifiScanRequested = contract == Contract.startWifiDisplayScan;
+                }
+                return null;
+            default: throw new UnsupportedOperationException("display." + method);
+        }
+    }
+
+    private static void enforceWifiDisplay(FrameworkPackages packages) {
+        if (!packages.granted("android.permission.CONFIGURE_WIFI_DISPLAY"))
+            throw new SecurityException("android.permission.CONFIGURE_WIFI_DISPLAY");
     }
 
     private synchronized Object snapshot() throws Exception {
@@ -185,7 +241,22 @@ final class FrameworkDisplay {
         if (listener == null) throw new IllegalArgumentException("listener must not be null");
         // AOSP retains the first callback per PID and updates its event mask.
         // Every client in this profile belongs to the same guest process.
-        if (callback == null) callback = (IInterface) listener;
+        if (callback == null) {
+            IInterface next = (IInterface) listener;
+            IBinder token = next.asBinder();
+            try {
+                token.linkToDeath(() -> {
+                    synchronized (FrameworkDisplay.this) {
+                        if (callback != null && callback.asBinder() == token) {
+                            callback = null;
+                            eventsMask = 0;
+                            wifiScanRequested = false;
+                        }
+                    }
+                }, 0);
+            } catch (android.os.RemoteException dead) { throw new IllegalStateException(dead); }
+            callback = next;
+        }
         eventsMask = mask;
     }
 

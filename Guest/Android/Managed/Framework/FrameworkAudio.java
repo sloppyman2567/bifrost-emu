@@ -3,12 +3,15 @@
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.os.IBinder;
+import android.os.IInterface;
 import android.os.Process;
 import android.os.RemoteException;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 
 final class FrameworkAudio implements FrameworkServices.Call {
@@ -28,7 +31,9 @@ final class FrameworkAudio implements FrameworkServices.Call {
         areNavigationRepeatSoundEffectsEnabled,
         playSoundEffect,
         playSoundEffectVolume,
-        isMusicActive
+        isMusicActive,
+        isBluetoothA2dpOn,
+        startWatchingRoutes
     }
 
     @Override public String[] methods() {
@@ -45,6 +50,7 @@ final class FrameworkAudio implements FrameworkServices.Call {
     private final int[] maximum = {5, 7, 7, 15, 7, 7, 15, 7, 15, 15, 15, 15};
     private final int[] minimum = {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0};
     private int[] volumes;
+    private final Map<IBinder, IBinder.DeathRecipient> routeObservers = new HashMap<>();
 
     private final class Focus implements IBinder.DeathRecipient {
         final String id, pkg;
@@ -224,6 +230,22 @@ final class FrameworkAudio implements FrameworkServices.Call {
             case playSoundEffect:
             case playSoundEffectVolume: return null;
             case isMusicActive: return !(Boolean) a[0] && ManagedLauncher.hostAudioActive();
+            case isBluetoothA2dpOn: return false;
+            case startWatchingRoutes: {
+                IBinder token = ((IInterface) Objects.requireNonNull(a[0], "observer")).asBinder();
+                synchronized (routeObservers) {
+                    if (!routeObservers.containsKey(token)) {
+                        IBinder.DeathRecipient death = () -> {
+                            synchronized (routeObservers) { routeObservers.remove(token); }
+                        };
+                        try { token.linkToDeath(death, 0); routeObservers.put(token, death); }
+                        catch (RemoteException dead) { /* A dead observer receives no changes. */ }
+                    }
+                }
+                // A fixed local speaker route (MAIN_SPEAKER == 0), no Bluetooth.
+                // Return a fresh snapshot, as the real Binder reply does.
+                return Class.forName("android.media.AudioRoutesInfo").getConstructor().newInstance();
+            }
             default: throw new UnsupportedOperationException("audio." + method);
         }
     }
