@@ -4,6 +4,54 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Inline pixel-conversion helpers (2026-10-15)
+
+`jit_native_simd_inline` passes 137,700 checks under QEMU, JIT and interpreter.
+It covers every binary16 bit pattern with FPCR.DN clear/set, both source
+halves and aliased FCVTL destinations; signed/unsigned widening shifts,
+SHLL/SHRN and FP narrowing aliases; and thirteen-vector loops with NaN
+recovery before this iteration's accumulator writes. Its `--mt` mode starts
+a second guest CPU before the checks. Cache-off, AVX2-off, FMA3-off,
+ordinary chaining, MT and Tier-2-enabled runs also pass. The generated SIMD
+test passes all 1,480 encodings; `make nativegen-expect` reproduced the
+committed QEMU expectations without changing the spec or generated files.
+
+The Tier-2 discovery oracle directly compiles widening/conversion regions,
+asserts cache activation, and compares every vector with the interpreter
+across early exits, aliases and NaN recovery. All four ST/MT and
+ordinary/skip-chain configurations pass. A temporary build forcing F16C
+detection off passes the 137,700-check guest fixture, exercising the retained
+helper path. Running under `qemu-x86_64 -cpu Haswell,-f16c` was rejected by
+the host's x86-64-v3 glibc before startup, so it supplies no compatibility
+evidence. Actual execution on older hardware is untested.
+
+The SDL/GL executable/library and separate headless executable/library build;
+`make generated-check` and `make verify TARGET=build/release-sdl1-gl1/bifrost-emu`
+pass (87 differential fixtures and seven threaded oracle runs). The broader
+SIMD/FP/memory-recovery selection passes 42/42 in JIT and 41/41 in the
+interpreter with one JIT-only skip. Synthetic performance observations and
+their bounds are recorded in [JIT.md](JIT.md#inline-pixel-conversion-helpers-2026-10-15).
+The full strict JIT suite also passes 326/326, including its real-world
+binaries and dynamic-linker checks; the complete interpreter suite was not
+repeated for this change.
+
+An installed Azur Lane run using the rebuilt SDL/GL binary reached Unity
+initialization with host GPU access available and ended with the runner's
+intentional status 124. No fatal guest exception was found in the session
+log. This is bounded startup stress, not verified continued rendering,
+login or gameplay. Evidence: session
+`3374705daa904b5881c9887dbbfb20b3` under the installed package's managed
+sessions directory. The already-running SpongeBob process was preserved;
+outfit-change timing on the new executable remains unmeasured.
+
+```sh
+make cross SRC=Tests/Unit/jit_native_simd_inline.c OUT=Tests/Unit/jit_native_simd_inline.elf
+qemu-aarch64 Tests/Unit/jit_native_simd_inline.elf
+BIFROST_EMU=build/release-sdl1-gl1/bifrost-emu bash Scripts/Testing/run_tests.sh \
+  --strict --filter 'simd|fp_|round|host_fault|userfaultfd|window_bounds|memory_guard|jpeg|png'
+bash Scripts/Testing/test_jit_tier2_discovery.sh
+```
+
 ## Polynomial instructions and Wi-Fi display routing (2026-10-15)
 
 `jit_simd_pmull` now checks 10,240 cases: byte/wide PMULL and PMULL2,

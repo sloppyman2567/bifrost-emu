@@ -162,6 +162,56 @@ static bool check_region_vectors(bool mt, bool benchmark) {
     return true;
 }
 
+// Inline widening/conversions must retain the region layout across a cold
+// NaN step and an exit preceding the next trip's first vector write.
+static bool check_region_native_simd(bool mt) {
+    constexpr uint64_t head=0x40000, body=0x41000, exit=0x42000;
+    for (bool half : {false,true}) {
+        auto e=std::make_unique<Emulator>();
+        e->mem().map_range(head,0x3000); e->mem().mprotect_guest(head,0x3000,7);
+        e->enable_jit(); auto* j=e->jit();
+        if (half && !j->cpu_features().has_f16c()) continue;
+        if (mt) j->enter_multithreaded();
+        const uint32_t entry[]={0xb4010000,0x140003ff};
+        const uint32_t loop[]={
+            half ? 0x0e217862u : 0x2f10a462u, // fcvtl v2.4s,v3.4h / ushll v2.4s,v3.4h,#0
+            0x6e21d844,                      // ucvtf v4.4s,v2.4s
+            0x4e21d400,                      // fadd v0.4s,v0.4s,v1.4s
+            0x4f108484,                      // shrn2 v4.8h,v4.4s,#16 (aliased source)
+            0xd1000400,0x17fffbfb};           // sub x0,#1; b head
+        e->mem().write(head,entry,sizeof(entry)); e->mem().write(body,loop,sizeof(loop));
+        auto trace=j->collect_tier2_trace(*e,head);
+        auto fn=j->compile_tier2_region(*e,trace);
+        const bool expect_cache=Tier2TestAccess::supports_vector_cache(*j) &&
+            !std::getenv("BIFROST_NO_VEC_CACHE");
+        if (!fn || Tier2TestAccess::vector_cache_active(*j)!=expect_cache) return false;
+        for (unsigned n : {0u,1u,7u,257u}) for (bool nan : {false,true}) {
+            CPU actual,reference;
+            actual.pc=head; actual.regs[0]=n;
+            actual.v_lo[1]=UINT64_C(0x400000003f800000);
+            actual.v_hi[1]=UINT64_C(0x4080000040400000);
+            actual.v_lo[3]=nan ? UINT64_C(0x4400420040007d55) : UINT64_C(0x4400420040003c00);
+            actual.fpcr=1u<<25;
+            reference.pc=actual.pc; reference.regs[0]=n; reference.fpcr=actual.fpcr;
+            std::memcpy(reference.v_lo,actual.v_lo,sizeof(actual.v_lo));
+            std::memcpy(reference.v_hi,actual.v_hi,sizeof(actual.v_hi));
+            unsigned entries=0;
+            FrostJIT::FaultScope scope(j);
+            while (actual.pc==head && ++entries<=n+2) {
+                actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+            }
+            while (reference.pc!=exit) e->step(reference);
+            if (actual.pc!=exit || actual.regs[0]!=reference.regs[0] ||
+                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
+                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::fprintf(stderr,"region inline SIMD mismatch: half=%d n=%u nan=%d\n",half,n,nan);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool check_superblocks(bool mt) {
     constexpr uint64_t head=0x40000,cold=0x41000,stop=0x50000;
     auto e=std::make_unique<Emulator>();
@@ -238,7 +288,8 @@ int main(int argc, char** argv) {
         mt |= std::string(argv[k]) == "mt";
         benchmark |= std::string(argv[k]) == "benchmark";
     }
-    if (!check_region_invariant(mt) || !check_region_vectors(mt,benchmark)) return 1;
+    if (!check_region_invariant(mt) || !check_region_vectors(mt,benchmark) ||
+        !check_region_native_simd(mt)) return 1;
     if (!check_region_fp_memory(mt)) return 1;
     if (!benchmark && !check_superblocks(mt)) return 1;
     constexpr uint64_t head = 0x10000, body = 0x11000, exit = 0x12000, stop = 0x20000;

@@ -2,9 +2,8 @@
 // run<KIND> helper in NativeSIMD.cpp lane for lane; the generated
 // jit_native_simd_gen fixture checks both against QEMU. Every source is
 // loaded before Vd is written, so aliased registers keep the helper's
-// semantics. These ops are never vector- or FP-cache pinned (SIMD_NATIVE_EXTRA
-// disqualifies both caches), so cpu.v_lo/v_hi are current and XMM0-5 are
-// scratch. No GPR is read; only FMOV's constant uses RAX via emit_mask.
+// semantics. Cache-compatible bodies use XMM0-2 and cache-aware vector
+// loads/stores. VariableShift uses XMM0-5 and still disqualifies pinning.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
 namespace arm64emu {
@@ -24,7 +23,14 @@ bool FrostJIT::native_simd_inlinable(uint32_t w) const {
         case NativeSimdKind::CompareZeroInt:
         case NativeSimdKind::ImmediateFp:
         case NativeSimdKind::Reverse64:
+        case NativeSimdKind::WidenShift:
+        case NativeSimdKind::WidenHigh:
+        case NativeSimdKind::NarrowShift:
+        case NativeSimdKind::WidenFp:
+        case NativeSimdKind::NarrowFp:
             return true;
+        case NativeSimdKind::HalfFp:
+            return cpu_features_.has_f16c();
         case NativeSimdKind::VariableShift:
             return has_avx2() && shift_lanes_inlinable(w);
         default:
@@ -32,7 +38,14 @@ bool FrostJIT::native_simd_inlinable(uint32_t w) const {
     }
 }
 
-bool FrostJIT::emit_native_simd_inline(uint32_t w) {
+bool FrostJIT::native_simd_cache_compatible(uint32_t w) const {
+    // VariableShift borrows pinned XMM3-5. Every other inline body confines
+    // scratch to XMM0-2 and accesses architectural vectors through load/store_vec.
+    return native_simd_inlinable(w) && classify_native_simd(w) != NativeSimdKind::VariableShift;
+}
+
+bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
+    const uint32_t w = inst.native_simd_opcode();
     if (!native_simd_inlinable(w)) return false;
     const int rd = w & 31, rn = (w >> 5) & 31, rm = (w >> 16) & 31;
     const bool q = (w >> 30) & 1, u = (w >> 29) & 1;
@@ -45,6 +58,79 @@ bool FrostJIT::emit_native_simd_inline(uint32_t w) {
         emit_byte(predicate);
     };
     switch (classify_native_simd(w)) {
+        case NativeSimdKind::WidenShift:
+        case NativeSimdKind::WidenHigh: {
+            const bool high = classify_native_simd(w) == NativeSimdKind::WidenHigh;
+            const unsigned h = (w >> 19) & 15;
+            const unsigned lane = high ? sz : 31u - __builtin_clz(h);
+            const unsigned bits = 8u << lane;
+            const unsigned shift = high ? bits : ((w >> 16) & 127) - bits;
+            load_vec(0, rn);
+            if (q) sse2_imm(0x73, 0, 3, 8);     // selected upper half
+            sse2_op(0xEF, 1, 1);
+            if (!high && !u)
+                sse2_op(0x64 + lane, 1, 0);     // 0 > source: sign extension
+            sse2_op(lane == 0 ? 0x60 : lane == 1 ? 0x61 : 0x62, 0, 1);
+            if (shift) sse2_imm(0x71 + lane, 0, 6, static_cast<uint8_t>(shift));
+            store_vec(0, rd, true);              // Q selects input half, not result width
+            return true;
+        }
+        case NativeSimdKind::NarrowShift: {
+            const unsigned lane = 31u - __builtin_clz((w >> 19) & 15);
+            const unsigned bits = 8u << lane;
+            sse2_op(0x76, 1, 1);                // all ones
+            load_vec(0, rn);
+            sse2_imm(0x71 + lane, 0, 2, static_cast<uint8_t>(2 * bits - ((w >> 16) & 127)));
+            if (lane == 0) {
+                sse2_imm(0x71, 1, 2, 8);        // mask to unsigned byte before packing
+                sse2_op(0xDB, 0, 1);
+                sse2_op(0x67, 0, 0);            // packuswb (no saturation after mask)
+            } else if (lane == 1) {
+                sse2_imm(0x72, 0, 6, 16);
+                sse2_imm(0x72, 0, 4, 16);       // sign extend retained halfword
+                sse2_op(0x6B, 0, 0);            // packssdw
+            } else {
+                sse2_op(0x70, 0, 0); emit_byte(0x88); // low dword of each qword
+            }
+            if (q) {
+                load_vec(1, rd);
+                sse2_op(0x6C, 1, 0);            // preserved low half + narrowed high half
+                store_vec(1, rd, true);
+            } else store_vec(0, rd, false);
+            return true;
+        }
+        case NativeSimdKind::WidenFp:
+        case NativeSimdKind::NarrowFp:
+        case NativeSimdKind::HalfFp: {
+            const auto kind = classify_native_simd(w);
+            const bool half = kind == NativeSimdKind::HalfFp;
+            const bool widen = kind == NativeSimdKind::WidenFp || (half && (w & 0x1000));
+            clobber_flags();
+            load_vec(0, rn);
+            if (widen && q) sse2_imm(0x73, 0, 3, 8);
+            size_t special_done;
+            if (widen) {
+                if (half) emit_vex3(2, false, 0, 1, 0, 0, true, 0x13); // vcvtph2ps
+                else sse_fp(0x5A, 0, 0);                              // cvtps2pd
+                special_done = emit_simd_fp_nan_guard(inst, half ? 4 : 8, true);
+                store_vec(0, rd, true);
+            } else {
+                // Guard original FP lanes before narrowing. A NaN step sees
+                // the original aliased inputs and implements FPCR.DN/payloads.
+                special_done = emit_simd_fp_nan_guard(inst, half ? 4 : 8, true);
+                if (half) {
+                    emit_vex3(3, false, 0, 1, 0, 0, true, 0x1D); // vcvtps2ph
+                    emit_byte(0);                              // nearest-even, independent of MXCSR
+                } else sse2_op(0x5A, 0, 0);                    // cvtpd2ps
+                if (q) {
+                    load_vec(1, rd);
+                    sse2_op(0x6C, 1, 0);
+                    store_vec(1, rd, true);
+                } else store_vec(0, rd, false);
+            }
+            patch_jmp_rel32(special_done, static_cast<int32_t>(code_buf_used_ - (special_done + 5)));
+            return true;
+        }
         case NativeSimdKind::Extract: {
             const uint8_t off = (w >> 11) & 15;
             if (q) {
@@ -54,8 +140,9 @@ bool FrostJIT::emit_native_simd_inline(uint32_t w) {
                 sse2_imm(0x73, 1, 7, static_cast<uint8_t>(16 - off));  // pslldq xmm1, 16-off
                 sse2_op(0xEB, 0, 1);                             // por
             } else {
-                load_lo(0, V_LO_OFF + rn * 8);                   // Vn.8B in bytes 0-7
-                load_hi(0, V_LO_OFF + rm * 8);                   // Vm.8B in bytes 8-15
+                load_vec(0, rn);
+                load_vec(1, rm);
+                sse2_op(0x6C, 0, 1);                            // Vn.8B : Vm.8B
                 sse2_imm(0x73, 0, 3, off);                      // psrldq xmm0, off
             }
             store_vec(0, rd, q);

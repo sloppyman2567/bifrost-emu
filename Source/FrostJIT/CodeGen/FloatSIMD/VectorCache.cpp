@@ -11,7 +11,7 @@
 //
 // Invariants (see vec_cache_may_enable):
 //   - The cache is enabled ONLY for blocks whose vector-touching ops are
-//     all cache-aware (SIMD_FP_FMA / SIMD_FP_ARITH); every other op is a
+//     all cache-aware (including compatible inline native SIMD); every other op is a
 //     GPR-only op that neither reads cpu.v_lo/v_hi nor clobbers XMM3-15.
 //     Therefore no flush is ever needed mid-block, and — critically for
 //     self-loop blocks — no vector value is ever reloaded from the CPU
@@ -26,6 +26,7 @@
 //   - XMM0/XMM1/XMM2 remain scratch (used by the non-cached SIMD codegen
 //     and by the cached FABD sign-mask load).
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
 namespace arm64emu {
 
 // ── Cache enablement pre-scan ──────────────────────────────────────────
@@ -83,6 +84,28 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     bool  vec_written[32] = {};
     int   used_count = 0;
     for (const IRInst& inst : block.insts) {
+        if (inst.op == IROp::SIMD_NATIVE_EXTRA) {
+            const uint32_t w = inst.native_simd_opcode();
+            if (!native_simd_cache_compatible(w)) return false;
+            const auto kind = classify_native_simd(w);
+            const int rd = w & 31, rn = (w >> 5) & 31, rm = (w >> 16) & 31;
+            auto touch = [&](int v) {
+                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
+            };
+            touch(rd);
+            vec_written[rd] = true;
+            if (kind != NativeSimdKind::ImmediateFp) touch(rn);
+            if (kind == NativeSimdKind::Extract || kind == NativeSimdKind::CompareFp) touch(rm);
+            continue;
+        }
+        if (inst.op == IROp::SIMD_CVTF) {
+            if (inst.cvtf_params().subop > 1) return false;
+            for (int v : {int(inst.dest), int(inst.src1)}) {
+                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
+            }
+            vec_written[inst.dest] = true;
+            continue;
+        }
         if (inst.op == IROp::SIMD_FP_FMA || inst.op == IROp::SIMD_FP_ARITH ||
             inst.op == IROp::SIMD_FP_UNARY || inst.op == IROp::SIMD_LOGICAL ||
             inst.op == IROp::SIMD_DUP || inst.op == IROp::SIMD_MOVI || inst.op == IROp::SIMD_ORRIMM)

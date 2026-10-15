@@ -159,9 +159,11 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
         // imm = subop (0=SCVTF s32→f32, 1=UCVTF u32→f32, 2=FCVTZS f32→s32,
         // 3=FCVTZU f32→u32). width is always 4. flags_op = Q.
         case IROp::SIMD_CVTF: {
-            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
             const SimdSubopParams sp = inst.cvtf_params();
             const int subop = static_cast<int>(sp.subop);
+            // Int-to-FP uses only XMM0-2 and cache-aware load/store_vec.
+            // Saturating FP-to-int still borrows pinned XMM registers.
+            if (vec_cache_active_ && subop > 1) { emit_call_interp(inst.arm_pc, false); return true; }
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             switch (subop) {

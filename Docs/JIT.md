@@ -55,6 +55,47 @@ a controlled speedup comparison. Tracing/inventory add overhead, and the
 capture does not establish game FPS, completed login or gameplay. Preserve
 exceptional FP and precise-memory fallbacks when reducing this further.
 
+## Inline pixel-conversion helpers (2026-10-15)
+
+`SIMD_NATIVE_EXTRA` now inlines SSHLL/USHLL (including SXTL/UXTL), SHLL,
+SHRN and their upper-half forms with SSE2 unpack, shift and pack sequences.
+FCVTL/FCVTN between single and double precision use SSE2; half/single
+conversions use F16C only after CPUID and AVX OS-state checks. Older hosts
+keep the specialized C++ half-conversion helper. Inputs remain intact until
+the result commits, including aliased narrowing destinations whose low half
+must be preserved. These are the conversion families implicated in the
+earlier SpongeBob outfit-repacking investigation.
+
+FP conversion NaNs take the existing guarded ARM-semantic step before any
+architectural write, preserving payloads and FPCR.DN. Ordinary values stay
+inline. This retains the existing native FP contract: it does not add full
+FPCR rounding/flush controls, cumulative FP exception flags or enabled traps.
+F16C narrowing explicitly selects nearest-even. Semantics were checked against
+Arm's [SSHLL](https://www.scs.stanford.edu/~zyedidia/arm64/sshll_advsimd.html),
+[SHLL](https://www.scs.stanford.edu/~zyedidia/arm64/shll_advsimd.html),
+[SHRN](https://www.scs.stanford.edu/~zyedidia/arm64/shrn_advsimd.html),
+[FCVTL](https://www.scs.stanford.edu/~zyedidia/arm64/fcvtl_advsimd.html) and
+[FCVTN](https://www.scs.stanford.edu/~zyedidia/arm64/fcvtn_advsimd.html)
+pseudocode; LLVM's
+[F16C intrinsics](https://github.com/llvm/llvm-project/blob/main/clang/lib/Headers/f16cintrin.h)
+document the host conversion and rounding controls.
+
+The vector-cache scan now admits inline native SIMD bodies confined to
+XMM0-2 and 32-bit SCVTF/UCVTF. Shared vector loads/stores read/write pins
+when active, and the scan records raw instruction operands and the complete
+loop write set. NaN recovery and all exits use existing writeback/reload
+contracts. USHL/SSHL's inline body still borrows XMM3-5 and is excluded;
+helper-called words, FP-to-integer conversions and more than thirteen distinct
+vectors retain the uncached path. Scalar FP and vector layouts remain separate.
+
+Five alternating measured runs per configuration, after one warm-up each,
+of a temporary two-million-iteration FCVTL/USHLL/UCVTF/FADD loop gave median
+thread CPU times of 99.042 ms before and 4.181 ms after (23.7x throughput).
+The new binary with vector caching disabled took 8.895 ms. All output bits
+matched an independent QEMU run. These measure this synthetic conversion mix,
+not a game speedup, outfit-change duration or GC pause reduction. The heap
+alignment issue is outside this change. See [validation](TESTS.md#inline-pixel-conversion-helpers-2026-10-15).
+
 ## Tier-1 hot-path code reduction (2026-10-14)
 
 CoreMark profiles attributed 99.4% of samples to generated code; the

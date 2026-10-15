@@ -46,6 +46,7 @@ struct CpuFeatures {
     bool avx          : 1;  // AVX — 256-bit YMM, VEX-encoded SSE
     bool avx2         : 1;  // AVX2 — 256-bit integer SIMD
     bool fma3         : 1;  // FMA3 — vfmadd132/213/231 {ss,sd,ps,pd} (fused mul-add)
+    bool f16c         : 1;  // F16C — packed half/single conversions (requires AVX OS state)
     bool bmi1         : 1;  // BMI1 — andn, blsr, blsi, tzcnt
     bool bmi2         : 1;  // BMI2 — bzhi, pdep, pext, mulx, shlx/shrx/sarx
     bool avx512f      : 1;  // AVX-512 Foundation — 512-bit ZMM, mask registers
@@ -65,6 +66,7 @@ struct CpuFeatures {
     // AVX + AVX2 + OS support; AVX-512 is even more expensive in power
     // and not used by the JIT today.
     bool has_avx2() const { return avx && avx2; }
+    bool has_f16c() const { return avx && f16c; }
     // True iff the JIT can use SSE4.1 codegen (roundss/roundsd,
     // pblendw, etc.). This is the most common "modern" baseline.
     bool has_sse41() const { return sse41; }

@@ -29,10 +29,8 @@ void FrostJIT::store_fp_vector(int v, bool q) {
     }
 }
 // ── Local emit helpers for the memory-path SIMD ops ──
-// The ops below (SIMD_2REG/CVTF/ADDP/XTN/TBL/INS) are NOT in
-// vec_cache_compatible_op, so the vec cache is never active in their
-// blocks and every XMM reg is free scratch. All emit helpers are
-// REX.R/REX.B-aware so XMM0-15 can be used freely.
+// Cache-compatible callers reserve XMM0-2 for scratch. Other callers may
+// use all XMM registers. The encoding helpers handle REX.R/REX.B.
 void FrostJIT::emit_xmm_rex(int dst, int src) {
     uint8_t rex = 0x40;
     if (dst >= 8) rex |= 0x04;   // REX.R
@@ -100,11 +98,23 @@ void FrostJIT::store_hi(int xmm, int off) {
 }
 // Load a full 16-byte vector (v_lo + v_hi) into an XMM reg.
 void FrostJIT::load_vec(int xmm, int vreg) {
+    const int pinned = vec_xmm(vreg);
+    if (pinned >= 0 && !fp_cache_active_) {
+        movdqa(xmm, pinned);
+        return;
+    }
     load_lo(xmm, V_LO_OFF + vreg * 8);
     load_hi(xmm, V_HI_OFF + vreg * 8);
 }
 // Store the low 8 bytes of an XMM reg to a vector, zeroing v_hi for Q=0.
 void FrostJIT::store_vec(int xmm, int vreg, bool q) {
+    const int pinned = vec_xmm(vreg);
+    if (pinned >= 0 && !fp_cache_active_) {
+        movdqa(pinned, xmm);
+        if (!q) emit_vec_zero_upper(pinned);
+        vec_cache_mark_dirty(vreg);
+        return;
+    }
     store_lo(xmm, V_LO_OFF + vreg * 8);
     if (q) store_hi(xmm, V_HI_OFF + vreg * 8);
     else   fp_zero_hi(vreg);

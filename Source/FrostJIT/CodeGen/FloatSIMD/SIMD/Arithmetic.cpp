@@ -11,12 +11,13 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
     switch (inst.op) {
         case IROp::SIMD_NATIVE_EXTRA: {
             const uint32_t opcode = inst.native_simd_opcode();
-            if (emit_native_simd_inline(opcode)) return true;
+            if (emit_native_simd_inline(inst)) return true;
             auto fn = native_simd_helper(classify_native_simd(opcode));
             if (!fn) { emit_call_interp(inst.arm_pc, false); return true; }
             clobber_flags();
-            // These helpers use the CPU vector file. Blocks containing this
-            // IR op are never cache-pinned; flush GPRs for INS-general inputs.
+            // These helpers use the CPU vector file. Blocks containing
+            // helper-called words are never cache-pinned; flush GPRs for
+            // INS-general inputs.
             flush_all_vregs();
             emit_mov_reg(RDI, CPU_REG);
             emit_mov_imm32_zext(RSI, opcode);

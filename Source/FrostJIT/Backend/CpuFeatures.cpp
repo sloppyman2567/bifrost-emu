@@ -89,6 +89,7 @@ CpuFeatures detect_cpu_features() {
             if (ymm_enabled) {
                 f.avx  = (c & ecx_avx)  != 0;
                 f.fma3 = (c & ecx_fma3) != 0;
+                f.f16c = (c & (1u << 29)) != 0;
             }
         }
     }
@@ -183,6 +184,7 @@ const char* cpu_features_string(const CpuFeatures& f) {
     if (f.avx)       append("avx");
     if (f.avx2)      append("avx2");
     if (f.fma3)      append("fma3");
+    if (f.f16c)      append("f16c");
     if (f.bmi1)      append("bmi1");
     if (f.bmi2)      append("bmi2");
     if (f.avx512f)   append("avx512f");
