@@ -10,18 +10,21 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 namespace arm64emu {
+thread_local InterpretedProfileReason interpreted_profile_reason = InterpretedProfileReason::General;
 namespace {
 struct Key {
     uint64_t pc;
     uint32_t opcode;
     int tid;
+    InterpretedProfileReason reason;
     bool operator==(const Key& other) const {
-        return pc == other.pc && opcode == other.opcode && tid == other.tid;
+        return pc == other.pc && opcode == other.opcode && tid == other.tid && reason == other.reason;
     }
 };
 struct Hash {
     size_t operator()(const Key& k) const {
-        return std::hash<uint64_t>{}(k.pc ^ (uint64_t(k.opcode) << 32) ^ uint32_t(k.tid));
+        return std::hash<uint64_t>{}(k.pc ^ (uint64_t(k.opcode) << 32) ^ uint32_t(k.tid)) ^
+               (static_cast<size_t>(k.reason) << 1);
     }
 };
 struct Entry {
@@ -50,7 +53,7 @@ struct ThreadCache {
 }
 void record_interpreted_instruction(int tid, uint64_t pc, uint32_t op, unsigned cls) {
     thread_local ThreadCache cache;
-    Key key{pc, op, tid};
+    Key key{pc, op, tid, interpreted_profile_reason};
     Entry* entry = cache.last;
     if (!entry || !(entry->key == key)) {
         auto found = cache.entries.find(key);
@@ -92,11 +95,12 @@ void dump_interpreted_profile() {
     std::string temp = path + ".tmp." + std::to_string(::getpid());
     FILE* out = std::fopen(temp.c_str(), "w");
     if (!out) { std::perror("fallback profile"); return; }
-    std::fprintf(out, "guest_tid\thost_tid\tpc\topcode\tclass\tcount\n");
+    std::fprintf(out, "guest_tid\thost_tid\tpc\topcode\tclass\tcount\treason\n");
     for (const auto& e : rows)
-        std::fprintf(out, "%d\t%ld\t0x%llx\t%08x\t%u\t%llu\n", e.key.tid, e.host,
+        std::fprintf(out, "%d\t%ld\t0x%llx\t%08x\t%u\t%llu\t%s\n", e.key.tid, e.host,
                      static_cast<unsigned long long>(e.key.pc), e.key.opcode, e.cls,
-                     static_cast<unsigned long long>(e.count));
+                     static_cast<unsigned long long>(e.count),
+                     e.key.reason == InterpretedProfileReason::FpSpecial ? "fp-special" : "general");
     bool good = !std::ferror(out);
     if (std::fclose(out)) good = false;
     if (good) {

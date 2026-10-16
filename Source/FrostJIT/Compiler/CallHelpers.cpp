@@ -261,7 +261,7 @@ void FrostJIT::emit_fp_interp_step(const IRInst& inst) {
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_load(RDI, RBP, emu_slot_off());
     emit_mov_reg(RSI, CPU_REG);
-    emit_call_aligned(&jit_interp_step, 9);
+    emit_call_aligned(&jit_fp_interp_step, 9);
     emit_load(RAX, CPU_REG, PC_OFF);
     emit_mov_imm64(RCX, inst.arm_pc + 4);
     emit_cmp_reg(RAX, RCX);

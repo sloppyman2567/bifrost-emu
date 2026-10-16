@@ -109,6 +109,8 @@ void regalloc_stats_reset();
 const regalloc_stats_t& regalloc_stats_get();
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
+// The native FP correctness guard, separately attributed in fallback profiles.
+extern "C" void jit_fp_interp_step(Emulator* emu, CPU* cpu);
 // BIFROST_FAULT_TRACE memory-guard exit: jit_interp_step with the block's
 // start pc recorded for the [fault] line (InterpreterBridge.cpp).
 extern "C" void jit_guard_step(Emulator* emu, CPU* cpu, uint64_t block_pc);

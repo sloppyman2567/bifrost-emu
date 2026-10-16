@@ -1806,6 +1806,22 @@ is insufficient: check actual generated execution and host capability gates.
 
 ## Dispatch cache and worker profiling (2026-10-04)
 
+### Interpreter recovery reasons (2026-10-16)
+
+`BIFROST_FALLBACK_PROFILE=/tmp/fallback-%p.tsv` retains the original six
+inventory columns and appends `reason`: `general` for ordinary interpreter
+entry and `fp-special` for a generated FP special-value recovery step.
+The key includes the reason, so the same PC can have separate rows. The
+classification describes the entry path: `fp-special` does not mean every
+input was a NaN, and `general` does not by itself establish missing native
+instruction support. The FP guards and interpreter semantics are unchanged.
+
+The reason is scoped to one step and restored on nested calls and exceptions;
+it is thread-local. No per-step scope is installed when inventory collection
+is disabled. `jit_fp_interp_step` also gives native stack profilers a separate
+entry from `jit_interp_step`. Use inventories with a sampling profile and
+action markers; counts alone do not measure the duration or cause of a hitch.
+
 The thread-local dispatch cache uses 8,192 two-way sets (16,384 entries,
 512 KiB per dispatching thread). It is allocated on a thread's first
 dispatch and freed at thread exit (pthread key), so host threads that never
