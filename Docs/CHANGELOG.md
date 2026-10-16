@@ -13,15 +13,6 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
-### Interpreter recovery profiling (2026-10-16)
-
-- Append scoped, thread-local `general`/`fp-special` reasons to fallback
-  inventories and expose a distinct generated FP recovery entry to profilers.
-  Preserve the first six TSV columns and the existing FP recovery semantics.
-- Check concurrent counts, nested and exceptional scope restoration, and
-  actual generated FP recovery classification. Counts do not establish the
-  cause or duration of a game hitch.
-
 ### Android screenshots, release priorities and licenses (2026-10-14)
 
 - Add all six distinct user-supplied Android screenshots: SpongeBob cooking,

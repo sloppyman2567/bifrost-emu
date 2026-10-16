@@ -20,7 +20,6 @@
 #include "System/Graphics/Thunks/DisplayThunk.hpp"
 #include "Bifrost/Types.hpp"
 #include "System/Core/DebugFlags.hpp"
-#include "FrostJIT/Runtime/FallbackProfile.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -39,8 +38,7 @@ extern "C" {
 // CRITICAL: this is extern "C" — C++ exceptions cannot propagate
 // through it. The interpreter's step() may throw UnmappedMemory; we
 // catch it here and translate to SIGSEGV delivery.
-static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
-                        arm64emu::InterpretedProfileReason reason) {
+extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
     // Cache the env lookup — this runs on every CALL_INTERP fallback.
     static const bool step_trace_ = (getenv("BIFROST_STEP_TRACE") != nullptr);
     if (step_trace_) {
@@ -54,12 +52,7 @@ static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
                 cpu->pstate);
     }
     try {
-        if (!dbg().fallback_profile.empty()) {
-            arm64emu::InterpretedProfileScope profile(reason);
-            emu->step(*cpu);
-        } else {
-            emu->step(*cpu);
-        }
+        emu->step(*cpu);
     } catch (arm64emu::UnmappedMemory& e) {
         // Deliver SIGSEGV with the fault address and proper si_code.
         int si_code = e.segv_code();
@@ -86,12 +79,6 @@ static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
                 static_cast<unsigned long long>(cpu->regs[24]),
                 cpu->pstate);
     }
-}
-extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
-    interp_step(emu, cpu, arm64emu::InterpretedProfileReason::General);
-}
-extern "C" void jit_fp_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
-    interp_step(emu, cpu, arm64emu::InterpretedProfileReason::FpSpecial);
 }
 // BIFROST_FAULT_TRACE: memory-guard exits call this instead of
 // jit_interp_step so a fault delivered by the step names its block.
