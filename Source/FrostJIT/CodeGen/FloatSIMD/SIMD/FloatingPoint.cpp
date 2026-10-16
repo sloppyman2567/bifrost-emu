@@ -131,16 +131,24 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 if (!is_double) emit_byte(fp.lane * 0x55);
                 b = 2;
             }
-            if (minmax) {
-                // x86 MIN/MAX can hide a NaN by selecting its second input.
-                // Test both inputs, rather than just the tentative result.
+            // xmm1 = cmpps(a, b, predicate), keeping both inputs.
+            auto compare_inputs = [&](uint8_t predicate) {
                 if (cached) emit_vex_fp_binop(1, a, b, 0xC2, is_double);
                 else {
                     emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC8);
                     if (is_double) emit_byte(0x66);
                     emit_byte(0x0F); emit_byte(0xC2); emit_byte(0xCA);
                 }
-                emit_byte(3); // unordered
+                emit_byte(predicate);
+            };
+            SimdFpGuard special_done;
+            if (minmax) {
+                // x86 MIN/MAX can hide a NaN by selecting its second input:
+                // NaN inputs take the cold step. Equal signed zeros are fixed
+                // inline below, so ordinary clamps to zero stay native.
+                compare_inputs(3); // unordered
+                special_done = emit_simd_fp_nan_guard(inst, esize, Q, true);
+                compare_inputs(0); // equal: the only lanes where x86 and Arm differ
             }
             if (cached) emit_vex_fp_binop(0, a, b, opcode, is_double);
             else {
@@ -148,14 +156,33 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(opcode); emit_byte(0xC2);
             }
             if (minmax) {
-                // Equal signed zeros also differ between ARM and x86. A zero
-                // result takes the same cold path; other finite results stay native.
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF); emit_byte(0xD2);
-                if (is_double) emit_byte(0x66);
-                emit_byte(0x0F); emit_byte(0xC2); emit_byte(0xD0); emit_byte(0);
-                emit_byte(0x0F); emit_byte(0x56); emit_byte(0xCA); // orps xmm1,xmm2
+                // x86 returns b on equal lanes. Arm's FMAX/FMAXNM of +0 and -0
+                // is +0 (a AND b) and FMIN/FMINNM is -0 (a OR b); equal
+                // non-zero inputs are bit-identical. The uncached path reloads
+                // a, which XMM0 no longer holds.
+                const bool is_max = fp.subop == 4 || fp.subop == 6;
+                if (cached) {
+                    if (is_max) {
+                        emit_vex_fp_binop(2, a, 1, 0x55, false); // vandnps xmm2,a,xmm1: ~a & eq
+                        emit_vex_fp_binop(0, 2, 0, 0x55, false); // vandnps xmm0,xmm2,xmm0
+                    } else {
+                        emit_vex_fp_binop(2, a, 1, 0x54, false); // vandps xmm2,a,xmm1: a & eq
+                        emit_vex_fp_binop(0, 0, 2, 0x56, false); // vorps xmm0,xmm0,xmm2
+                    }
+                } else {
+                    load_fp_vector(2, inst.src1, Q);
+                    if (is_max) {
+                        emit_byte(0x0F); emit_byte(0x55); emit_byte(0xD1); // andnps xmm2,xmm1
+                        emit_byte(0x0F); emit_byte(0x55); emit_byte(0xD0); // andnps xmm2,xmm0
+                        emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC2); // movaps xmm0,xmm2
+                    } else {
+                        emit_byte(0x0F); emit_byte(0x54); emit_byte(0xD1); // andps xmm2,xmm1
+                        emit_byte(0x0F); emit_byte(0x56); emit_byte(0xC2); // orps xmm0,xmm2
+                    }
+                }
+            } else {
+                special_done = emit_simd_fp_nan_guard(inst, esize, Q, false);
             }
-            const SimdFpGuard special_done = emit_simd_fp_nan_guard(inst, esize, Q, minmax);
             if (abd) {
                 // The guard sees the subtraction's NaN before clearing its sign.
                 // XMM0 must retain the result while XMM2 holds the packed mask.

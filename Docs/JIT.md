@@ -15,6 +15,23 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Vector FMAX/FMIN signed zeros inline (2026-10-16)
+
+A SpongeBob fallback profile over repeated avatar switches recorded 243
+million interpreted guest instructions. 56% were FP cold steps, nearly all
+vector FMINNM/FMIN/FMAX `.4s`. Their guard sent any lane with a zero result
+to the interpreter, so clamps such as `fmax(x, 0)` stepped the interpreter
+almost every time. The guard now covers NaN inputs only. Signed-zero ties
+are resolved with an equal-lane mask and AND/OR (see the native vector FP
+special cases below). The uncached path reloads the first input from
+`cpu.v`, which is current there. A loop of zero-heavy FMAX/FMIN/FMINNM
+clamps drops from about 302 ms to 5.4 ms with the same result as QEMU.
+Scalar FMAX/FMIN still take the cold step for zero results.
+
+The same profile also lists UMIN/UMAX `.8h`, FCVTNU, four-register TBL,
+URSHR, FRECPS/FRECPE and plain stores (`stp q`, `stur x`) as interpreted.
+These remain fallbacks.
+
 ## Cold-path reloads keep vector validity (2026-10-16)
 
 The allocation checkpoint below tracks whether each cached vector slot holds
@@ -753,8 +770,9 @@ fallback. Neither path changes a live GPR. The verifier's one-iteration
 self-loop exits also commit cached state when the normal back-edge is disabled.
 
 MIN/MAX also guard their inputs: x86 can hide a NaN by selecting a numeric
-second operand. Zero results take the cold path to preserve ARM's signed-zero
-ordering. Other finite results remain native. FMLA/FMLS use a single FMA3
+second operand. Equal lanes, the only other difference from Arm, are fixed
+inline: x86 returns the second input, so FMAX/FMAXNM select `a AND b` (+0
+above -0) and FMIN/FMINNM `a OR b`. Only NaN inputs take the cold path. FMLA/FMLS use a single FMA3
 operation; hosts without FMA3 use the fused interpreter operation, rather than
 separate multiply and add. These changes cover NaN priority/payload/sign,
 default NaNs for invalid arithmetic, and FMULX infinity-times-zero results.

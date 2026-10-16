@@ -4,6 +4,19 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Vector FMAX/FMIN signed zeros (2026-10-16)
+
+`jit_simd_fminmax_zero` checks FMAX/FMIN/FMAXNM/FMINNM in `.4s`, `.2s`
+(inactive lanes hold NaNs) and `.2d` over every pair of signed zeros, ±1,
+subnormals, infinities and quiet/signalling NaNs: 3,456 lanes against an
+Arm ARM reference. The reference passes on qemu-aarch64. The fixture passes
+on the JIT with the vector cache (cached path) and with
+`BIFROST_NO_VEC_CACHE=1` (uncached path), on the interpreter, and with
+`BIFROST_JIT_VERIFY=1`. `make verify` passes 89 differential fixtures and
+seven threaded oracles. Strict suites pass JIT 328/328 and interpreter 319
+with nine expected skips. The clamp micro-benchmark is not a game frame-time
+measurement.
+
 ## Batched DONTUNMAP protection (2026-10-16)
 
 `test_userfaultfd` adds a read-only DONTUNMAP move: contents arrive intact,

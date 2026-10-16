@@ -13,6 +13,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Vector FMAX/FMIN signed zeros inline (2026-10-16)
+
+- Resolve signed-zero ties in native vector FMAX/FMIN/FMAXNM/FMINNM with an
+  equal-lane mask instead of an interpreter step. Only NaN inputs still take
+  the cold path. These clamps were most of the interpreted instructions in
+  SpongeBob avatar switches; a zero-heavy clamp loop runs about 56× faster.
+- Add `jit_simd_fminmax_zero` (3,456 lanes, reference checked on qemu-aarch64).
+
 ### Batched DONTUNMAP protection (2026-10-16)
 
 - Change host protection once per run of equal permissions in
