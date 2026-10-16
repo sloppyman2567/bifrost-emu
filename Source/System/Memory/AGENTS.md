@@ -30,7 +30,9 @@ State shared between them goes in `MemoryInternal.hpp`.
 - userfaultfd SIGBUS mode supports ART's CMC GC. Preserve MISSING/REGISTERED
   bits, missing-page JIT guards, registration lifetime and precise retry state.
   DONTUNMAP moves sparse contents without touching every page of ART's large
-  pools; keep its RSS regression and native-kernel comparison.
+  pools; keep its RSS regression and native-kernel comparison. Change host
+  protection once per run of equal permissions, not per page; page flags and
+  userfaultfd bits stay per page.
 - Android leaves guest page zero unmapped for implicit null checks. Linux
   profiles retain their separate zero-page behavior.
 - Allocation reuses freed holes while respecting live mappings and tracked

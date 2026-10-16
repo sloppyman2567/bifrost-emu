@@ -4,6 +4,22 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Batched DONTUNMAP protection (2026-10-16)
+
+`test_userfaultfd` adds a read-only DONTUNMAP move: contents arrive intact,
+both ranges keep read-only permissions (a forked writer faults) and the
+source reads zero. It passes on the host kernel (84 checks) and in both
+engines (138 checks). A sparse 512 MiB MREMAP_FIXED|DONTUNMAP move takes
+about 240 ms before and 29 ms after (three runs each, `BIFROST_NO_ASLR=1`).
+The read/write case now makes no protection calls; the old loop made four
+per page. This count comes from reading the code: perf syscall tracepoints
+were unavailable. A 60-second SpongeBob profile showed no remap work among
+the hot functions; kernel time and GC pause durations were not captured.
+
+A guest killed by a fatal signal reports `exit(139)` to its parent instead
+of a signalled wait status. The regression's child therefore reports the
+SIGSEGV through its own handler.
+
 ## Cold-path vector validity (2026-10-16)
 
 `jit_vector_cold_step` fails on the unfixed allocator commit (`9309076`) and

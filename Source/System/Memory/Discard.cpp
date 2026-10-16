@@ -214,29 +214,46 @@ int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed
     if (!dst) return -ENOMEM;
     std::unique_lock<std::shared_mutex> g(mu_);
     const bool track = uffd_tracking_.load(std::memory_order_acquire);
-    for (uint64_t i = 0; i < pages; ++i) {
-        const uint64_t from = old_addr + i * PAGE_SIZE, to = dst + i * PAGE_SIZE;
-        const uint8_t prot = prots[i];
-        if (prot != first_prot) set_mapping_locked(to, to + PAGE_SIZE, prot, false);
-        (void)set_direct_prot(from, from + PAGE_SIZE, PROT_READ | PROT_WRITE);
-        (void)set_direct_prot(to, to + PAGE_SIZE, PROT_READ | PROT_WRITE);
-        if (!page_is_zero(direct_window_ + from))
-            std::memcpy(direct_window_ + to, direct_window_ + from, PAGE_SIZE);
-        // The moved page keeps its permissions; a missing page stays
-        // missing. The new VMA is not registered (no UFFD_FEATURE_EVENT_REMAP).
-        const uint8_t missing = flags[i] & GUEST_PAGE_UFFD_MISSING;
-        direct_page_flags_[to / PAGE_SIZE].store(
-            static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) | missing),
-            std::memory_order_release);
-        (void)set_direct_prot(to, to + PAGE_SIZE, prot);
-        // The old range keeps its permissions and registration, now empty
-        // (released below).
-        direct_page_flags_[from / PAGE_SIZE].store(
-            static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) |
-                                 (flags[i] & GUEST_PAGE_UFFD_REGISTERED) |
-                                 (track ? GUEST_PAGE_UFFD_MISSING : 0)),
-            std::memory_order_release);
-        (void)set_direct_prot(from, from + PAGE_SIZE, prot);
+    // Change host protection once per run of equal permissions, not four
+    // times per page: ART remaps 512 MiB-1 GiB pools on every collection.
+    // Userfaultfd state is software page flags, so host protection already
+    // matches each run's permissions and read/write runs need no change.
+    for (uint64_t run = 0; run < pages;) {
+        const uint8_t prot = prots[run];
+        uint64_t run_end = run + 1;
+        while (run_end < pages && prots[run_end] == prot) ++run_end;
+        const uint64_t from = old_addr + run * PAGE_SIZE, to = dst + run * PAGE_SIZE;
+        const uint64_t bytes = (run_end - run) * PAGE_SIZE;
+        if (prot != first_prot) set_mapping_locked(to, to + bytes, prot, false);
+        const bool raise = !(prot & GUEST_PROT_WRITE) ||
+                           !(prot & (GUEST_PROT_READ | GUEST_PROT_EXEC));
+        if (raise) {
+            (void)set_direct_prot(from, from + bytes, PROT_READ | PROT_WRITE);
+            (void)set_direct_prot(to, to + bytes, PROT_READ | PROT_WRITE);
+        }
+        for (uint64_t i = run; i < run_end; ++i) {
+            const uint64_t page_from = old_addr + i * PAGE_SIZE, page_to = dst + i * PAGE_SIZE;
+            if (!page_is_zero(direct_window_ + page_from))
+                std::memcpy(direct_window_ + page_to, direct_window_ + page_from, PAGE_SIZE);
+            // The moved page keeps its permissions; a missing page stays
+            // missing. The new VMA is not registered (no UFFD_FEATURE_EVENT_REMAP).
+            const uint8_t missing = flags[i] & GUEST_PAGE_UFFD_MISSING;
+            direct_page_flags_[page_to / PAGE_SIZE].store(
+                static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) | missing),
+                std::memory_order_release);
+            // The old range keeps its permissions and registration, now empty
+            // (released below).
+            direct_page_flags_[page_from / PAGE_SIZE].store(
+                static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) |
+                                     (flags[i] & GUEST_PAGE_UFFD_REGISTERED) |
+                                     (track ? GUEST_PAGE_UFFD_MISSING : 0)),
+                std::memory_order_release);
+        }
+        if (raise) {
+            (void)set_direct_prot(to, to + bytes, prot);
+            (void)set_direct_prot(from, from + bytes, prot);
+        }
+        run = run_end;
     }
     // Private anonymous pages read back as zero, as after Linux's move.
     (void)::madvise(direct_window_ + old_addr, len, MADV_DONTNEED);

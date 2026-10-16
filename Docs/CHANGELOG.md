@@ -13,6 +13,15 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Batched DONTUNMAP protection (2026-10-16)
+
+- Change host protection once per run of equal permissions in
+  `MREMAP_DONTUNMAP`, instead of four `mprotect` calls per page. Read/write
+  runs need none. ART's CMC GC remaps 512 MiB–1 GiB pools; a sparse 512 MiB
+  move fell from about 240 ms to 29 ms. Page flags and userfaultfd state are
+  unchanged.
+- Add a read-only move to `test_userfaultfd`, checked on the host kernel.
+
 ### Cold-path vector validity (2026-10-16)
 
 - Keep the compile-time vector-slot validity after FP NaN cold steps and

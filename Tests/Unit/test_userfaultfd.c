@@ -159,6 +159,42 @@ static void check_sparse_move(void) {
     munmap(target, len);
 }
 
+// A write must fault: probe it in a child whose handler reports the SIGSEGV.
+static void on_write_fault(int sig) { (void)sig; _exit(77); }
+static int write_faults(volatile char *p) {
+    pid_t child = fork();
+    if (child == 0) {
+        signal(SIGSEGV, on_write_fault);
+        *p = 1;
+        _exit(0);
+    }
+    int status = 0;
+    return child > 0 && waitpid(child, &status, 0) == child &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 77;
+}
+
+// A read-only move needs temporary write access for the copy; both ranges
+// must end with their original permissions and the contents moved.
+static void check_readonly_move(void) {
+    const size_t len = 8 * page;
+    char *space = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(space != MAP_FAILED);
+    if (space == MAP_FAILED) return;
+    for (size_t i = 0; i < len / page; i += 2) memset(space + i * page, 0x40 + (int)i, page);
+    CHECK(mprotect(space, len, PROT_READ) == 0);
+    char *moved = mremap(space, len, len, MREMAP_MAYMOVE | MREMAP_DONTUNMAP, NULL);
+    CHECK(moved != MAP_FAILED);
+    if (moved == MAP_FAILED) return;
+    int exact = 1;
+    for (size_t i = 0; i < len / page; ++i)
+        exact &= moved[i * page] == (i % 2 ? 0 : 0x40 + (int)i) &&
+                 moved[i * page + page - 1] == moved[i * page] && space[i * page] == 0;
+    CHECK(exact);
+    CHECK(write_faults(moved) && write_faults(space + len - 1));
+    munmap(space, len);
+    munmap(moved, len);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     page = (size_t)sysconf(_SC_PAGESIZE);
@@ -414,6 +450,7 @@ int main(void) {
     CHECK(bad_faults == 0);
     close(uffd);
     check_sparse_move();
+    check_readonly_move();
     printf("userfaultfd: %d checks %s\n", checks, failures ? "FAILED" : "ALL PASS");
     return failures ? 1 : 0;
 }
