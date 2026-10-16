@@ -25,131 +25,15 @@
 //   vreg_fast_keep_candidate (liveness), load_vreg_to_reg /
 //   store_reg_to_vreg, verify_dirty_host_regs_ + check_* guards
 #include "FrostJIT/Compiler/FrostJIT.hpp"
-#include "System/Core/DebugFlags.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>   // getenv, abort
 #include <cstdint>   // UINT32_MAX
 #include <climits>    // INT_MAX
-#include <algorithm>
-#include <array>
-#include <mutex>
-#include <unistd.h>
 namespace arm64emu {
-void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
-                                       bool region) {
-    if (!allocation_profile_active_ || code_buf_overflow_) return;
-    static std::mutex output_mutex;
-    static FILE* output = nullptr;
-    static bool attempted = false;
-    std::lock_guard<std::mutex> lock(output_mutex);
-    if (!attempted) {
-        attempted = true;
-        std::string path = dbg().regalloc_profile;
-        if (const auto pos = path.find("%p"); pos != std::string::npos)
-            path.replace(pos, 2, std::to_string(getpid()));
-        output = std::fopen(path.c_str(), "a");
-        if (!output) { std::perror("register allocation profile"); return; }
-        if (std::ftell(output) == 0)
-            std::fprintf(output, "block_pc\tguest_pc\thost_begin\thost_end\tkind\tir_op\t"
-                "gpr_spill\tgpr_reload\tgpr_evict\trematerialize\tvector_spill\tvector_reload\tvector_evict\treason\tcounter_scope\n");
-    }
-    if (!output) return;
-    auto emit = [&](uint64_t pc, size_t first, size_t last, const char* kind, unsigned op,
-                    const regalloc_stats_t& rs, uint64_t spills, uint64_t reloads,
-                    uint64_t evictions, const char* reason, bool counted = true) {
-        if (first == last) return;
-        std::fprintf(output, "0x%llx\t0x%llx\t0x%llx\t0x%llx\t%s\t%u\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n",
-            (unsigned long long)current_start_pc_, (unsigned long long)pc,
-            (unsigned long long)(reinterpret_cast<uintptr_t>(code_buf_) + first),
-            (unsigned long long)(reinterpret_cast<uintptr_t>(code_buf_) + last), kind, op,
-            (unsigned long long)(rs.spill_stack + rs.spill_arm),
-            (unsigned long long)(rs.reload_stack + rs.reload_arm),
-            (unsigned long long)rs.evicts, (unsigned long long)rs.rematerialized,
-            (unsigned long long)spills, (unsigned long long)reloads,
-            (unsigned long long)evictions, reason, counted ? "ir-delta" : "range-only");
-    };
-    for (const auto& e : allocation_events_)
-        emit(e.pc, e.begin, e.end, region ? "region-ir" : "tier1-ir", e.op, e.scalar,
-             e.vector_spills, e.vector_reloads, e.vector_evictions,
-             e.boundary ? "synchronize" : "allocate");
-    const size_t body = allocation_events_.empty() ? hot_end : allocation_events_.front().begin;
-    emit(current_start_pc_, begin, body, "entry", 0, {}, 0, 0, 0, "canonical-layout", false);
-    emit(current_start_pc_, hot_end, cold_begin, "exit", 0, {}, 0, 0, 0, "publish-state", false);
-    emit(current_start_pc_, cold_begin, code_buf_used_, "cold", 0, {}, 0, 0, 0, "recovery-or-exit", false);
-    std::fflush(output);
-}
-// Constants are recovered with flag-neutral MOVs. Architectural values are
-// never rematerialized: their canonical state must remain observable at exits.
-bool FrostJIT::rematerialize_vreg(int v, int reg) {
-    if (v <= 32) return false;
-    const auto found = jit_consts_.find(v);
-    if (found == jit_consts_.end()) return false;
-    if (found->second <= UINT32_MAX) emit_mov_imm32_zext(reg, found->second);
-    else emit_mov_imm64(reg, found->second);
-    ++regalloc_stats_.rematerialized;
-    return true;
-}
-
-void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
-    std::array<int, 32> first_read, first_write, benefit{};
-    std::array<bool, 32> direct{};
-    std::array<int, 4096> last_use;
-    first_read.fill(INT_MAX); first_write.fill(INT_MAX); last_use.fill(-1);
-    for (size_t i = 0; i < instructions.size(); ++i) {
-        const auto& inst = instructions[i];
-        if (inst.op == IROp::STORE_REG && !inst.is_fp_store()) {
-            if (inst.dest < 31) {
-                first_write[inst.dest] = std::min(first_write[inst.dest], int(i));
-                ++benefit[inst.dest];
-            }
-            if (inst.src1 < 31) {
-                first_read[inst.src1] = std::min(first_read[inst.src1], int(i));
-                ++benefit[inst.src1];
-            }
-        } else if (inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 < 31) {
-            first_read[inst.src1] = std::min(first_read[inst.src1], int(i));
-            ++benefit[inst.src1];
-        } else if (writes_arch_gpr_directly(inst) && inst.dest < 32) direct[inst.dest] = true;
-        for (unsigned v : {inst.src1, inst.src2, inst.aux})
-            if (v > 32 && v < 4096) last_use[v] = i;
-    }
-    // Estimate simultaneous scalar temporaries, not the total number of
-    // definitions. At most four candidate prefixes are scored; no search
-    // through register permutations on Tier-1's compilation path.
-    std::array<bool, 4096> live{};
-    int live_count = 0, peak = 0;
-    for (size_t i = 0; i < instructions.size(); ++i) {
-        const auto& inst = instructions[i];
-        if (inst.dest > 32 && inst.dest < 4096 && last_use[inst.dest] >= int(i) && !live[inst.dest]) {
-            live[inst.dest] = true; ++live_count;
-        }
-        peak = std::max(peak, live_count);
-        for (unsigned v : {inst.src1, inst.src2, inst.aux})
-            if (v > 32 && v < 4096 && last_use[v] == int(i) && live[v]) {
-                live[v] = false; --live_count;
-            }
-    }
-    std::vector<int> candidates;
-    for (int a = 0; a < 31; ++a)
-        if (!direct[a] && first_read[a] != INT_MAX && first_read[a] <= first_write[a])
-            candidates.push_back(a);
-    std::sort(candidates.begin(), candidates.end(), [&](int a, int b) {
-        return benefit[a] != benefit[b] ? benefit[a] > benefit[b] : a < b;
-    });
-    int best = 0, score = 0, best_score = 0;
-    for (int k = 1; k <= NUM_PIN_REGS && k <= int(candidates.size()); ++k) {
-        score += benefit[candidates[k - 1]];
-        const int extra_pressure = std::max(0, peak - (NUM_ALLOC_REGS - k)) -
-                                   std::max(0, peak - NUM_ALLOC_REGS);
-        const int value = score - 2 * extra_pressure;
-        if (value > best_score) { best = k; best_score = value; }
-    }
-    for (int k = 0; k < best; ++k) {
-        arch_pin_[candidates[k]] = PIN_REGS[k];
-        pinned_host_regs_ |= 1u << PIN_REGS[k];
-    }
-}
+static regalloc_stats_t g_rs;
+void regalloc_stats_reset() { g_rs = regalloc_stats_t{}; }
+const regalloc_stats_t& regalloc_stats_get() { return g_rs; }
 // Bounds-check helper: ensures vreg index is within the fixed-size arrays.
 // If a block exceeds MAX_VREGS, we'd have a buffer overflow. This check
 // catches it at the earliest point (vreg allocation) instead of silently
@@ -221,17 +105,15 @@ void FrostJIT::check_fp_reg_index(int idx, const char* context) const {
 void FrostJIT::evict_vreg(int v) {
     int r = vreg_home_[v];
     if (r < 0) return;
-    regalloc_stats_.evicts++;
-    if (vreg_dirty_[v] && v > 32 && jit_consts_.count(v)) {
-        ++regalloc_stats_.rematerializable_spills_avoided;
-    } else if (vreg_dirty_[v]) {
+    g_rs.evicts++;
+    if (vreg_dirty_[v]) {
         if (v <= 31) {
             emit_store_arm(v, r);  // write back to cpu.regs[]/sp
-            regalloc_stats_.spill_arm++;
+            g_rs.spill_arm++;
         } else {
             int32_t off = vreg_stack_slot(v);
             emit_store(RBP, off, r);
-            regalloc_stats_.spill_stack++;
+            g_rs.spill_stack++;
         }
     }
     vreg_home_[v] = -1;
@@ -280,11 +162,11 @@ void FrostJIT::drop_vreg(int v) {
         // Value is dirty — preserve it by spilling to memory first.
         if (v <= 31) {
             emit_store_arm(v, r);
-            regalloc_stats_.spill_arm++;
+            g_rs.spill_arm++;
         } else {
             int32_t off = vreg_stack_slot(v);
             emit_store(RBP, off, r);
-            regalloc_stats_.spill_stack++;
+            g_rs.spill_stack++;
         }
     }
     vreg_home_[v] = -1;
@@ -303,11 +185,11 @@ void FrostJIT::clobber_host_reg(int host_reg) {
         // Preserve the dirty value by spilling to memory.
         if (v <= 31) {
             emit_store_arm(v, host_reg);
-            regalloc_stats_.spill_arm++;
+            g_rs.spill_arm++;
         } else {
             int32_t off = vreg_stack_slot(v);
             emit_store(RBP, off, host_reg);
-            regalloc_stats_.spill_stack++;
+            g_rs.spill_stack++;
         }
     }
     vreg_home_[v] = -1;
@@ -345,9 +227,7 @@ int FrostJIT::alloc_reg(int preferred) {
         if (v < 0) continue;
         int nu = next_use_after(v, cur_op_index_);
         int score = (nu < 0) ? INT_MAX : nu;
-        if (score > best_score || (score == best_score && best_r >= 0 &&
-            vreg_dirty_[reg_vreg_[best_r]] &&
-            (!vreg_dirty_[v] || (v > 32 && jit_consts_.count(v))))) {
+        if (score > best_score) {
             best_score = score;
             best_r = r;
         }
@@ -383,9 +263,7 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         if (v < 0) continue;
         int nu = next_use_after(v, cur_op_index_);
         int score = (nu < 0) ? INT_MAX : nu;
-        if (score > best_score || (score == best_score && best_r >= 0 &&
-            vreg_dirty_[reg_vreg_[best_r]] &&
-            (!vreg_dirty_[v] || (v > 32 && jit_consts_.count(v))))) {
+        if (score > best_score) {
             best_score = score;
             best_r = r;
         }
@@ -420,9 +298,7 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         if (v < 0) { best_r = r; break; }  // free beats any eviction
         int nu = next_use_after(v, cur_op_index_);
         int score = (nu < 0) ? INT_MAX : nu;
-        if (score > best_score || (score == best_score && best_r >= 0 &&
-            vreg_dirty_[reg_vreg_[best_r]] &&
-            (!vreg_dirty_[v] || (v > 32 && jit_consts_.count(v))))) {
+        if (score > best_score) {
             best_score = score;
             best_r = r;
         }
@@ -444,15 +320,13 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
     // Need to load. Try preferred first, then any free reg.
     int r = alloc_reg(preferred);
     // Load v into r.
-    if (rematerialize_vreg(v, r)) {
-        // No stack home is required for a recoverable constant.
-    } else if (v <= 31) {
+    if (v <= 31) {
         emit_load_arm(r, v);
-        regalloc_stats_.reload_arm++;
+        g_rs.reload_arm++;
     } else {
         int32_t off = vreg_stack_slot(v);
         emit_load(r, RBP, off);
-        regalloc_stats_.reload_stack++;
+        g_rs.reload_stack++;
     }
     vreg_home_[v] = r;
     reg_vreg_[r] = v;
@@ -700,7 +574,7 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
                 // Dirty scratch: spill to its stack slot.
                 int32_t off = vreg_stack_slot(v);
                 emit_store(RBP, off, r);
-                regalloc_stats_.spill_stack++;
+                g_rs.spill_stack++;
             }
             // Mark as non-dirty (we just wrote it to its home — or it
             // already was).
@@ -853,16 +727,13 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
         return;
     }
     // Not cached — load from memory (cpu.regs[] or stack slot).
-    if (rematerialize_vreg(v, dst)) {
-        return;
-    }
     if (v <= 31) {
         emit_load_arm(dst, v);
-        regalloc_stats_.reload_arm++;
+        g_rs.reload_arm++;
     } else {
         int32_t off = vreg_stack_slot(v);
         emit_load(dst, RBP, off);
-        regalloc_stats_.reload_stack++;
+        g_rs.reload_stack++;
     }
 }
 void FrostJIT::store_reg_to_vreg(int v, int src) {
@@ -968,9 +839,7 @@ void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
         if (was_dirty) dirty_host_regs_ &= ~(1u << home);
     } else {
         // v is spilled — load from memory (not dirty after load).
-        if (rematerialize_vreg(v, host_reg)) {
-            // Reconstruct the constant instead of reading an absent spill.
-        } else if (v <= 31) {
+        if (v <= 31) {
             emit_load_arm(host_reg, v);
         } else {
             int32_t off = vreg_stack_slot(v);
@@ -1027,9 +896,7 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
         if (was_dirty2) dirty_host_regs_ &= ~(1u << home2);
     } else {
         // src2 is spilled — load from memory.
-        if (rematerialize_vreg(src2, host_reg2)) {
-            // Reconstruct the constant instead of reading an absent spill.
-        } else if (src2 <= 31) {
+        if (src2 <= 31) {
             emit_load_arm(host_reg2, src2);
         } else {
             int32_t off = vreg_stack_slot(src2);

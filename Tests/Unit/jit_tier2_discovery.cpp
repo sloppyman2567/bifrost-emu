@@ -221,7 +221,6 @@ static bool check_tier1_vector_allocation(bool mt) {
         0xd503201f, // nop
         0x4e218a3e, // frintn v30.4s,v17.4s (C++ helper)
         0x4e205a3e, // cnt v30.16b,v17.16b (borrows high scratch XMMs)
-        0x4e3f463e, // sshl v30.4s,v17.4s,v31.4s (XMM3-5 or C++ helper)
         0x4ea1da3e, // frecpe v30.4s,v17.4s (interpreter boundary)
         0x1e3f2a3e, // fadd s30,s17,s31 (mixed scalar/vector aliases)
     };
@@ -245,7 +244,7 @@ static bool check_tier1_vector_allocation(bool mt) {
         const bool cache=Tier2TestAccess::supports_vector_cache(*j) &&
                          !std::getenv("BIFROST_NO_VEC_CACHE");
         if (!fn || Tier2TestAccess::vector_cache_active(*j)!=cache ||
-            (cache && (Tier2TestAccess::fixed_vectors(*j)<0 ||
+            (cache && (Tier2TestAccess::fixed_vectors(*j)<=0 ||
                        Tier2TestAccess::fixed_vectors(*j)>=13 ||
                        (boundary==0xd503201f && !Tier2TestAccess::vector_evictions(*j))))) {
             std::fprintf(stderr,"Tier-1 vector pressure allocation inactive: op=%08x\n",boundary);
@@ -288,112 +287,6 @@ static bool check_tier1_vector_allocation(bool mt) {
 
 // Integer operations must consume dirty allocated vectors, including high
 // XMM registers, without a publish/reload boundary on every instruction.
-// Full overwrites must not reload old destinations. Mixing scalar writes
-// with vector consumers must still clear the architectural upper lanes, and
-// a faulting load must leave its old destination intact.
-static bool check_allocation_definitions(bool mt) {
-    constexpr uint64_t head=0xa0000, stop=0xa1000;
-    for (bool mixed : {false,true}) for (bool fault : {false,true}) {
-        auto e=std::make_unique<Emulator>();
-        e->mem().map_range(head,4096); e->mem().mprotect_guest(head,4096,7);
-        std::vector<uint32_t> code;
-        if (fault) {
-            for (unsigned v=0;v<14;++v) code.push_back(0x4f02e6a0u|v); // movi vv.16b,#0x55
-            code.push_back(0x3dc0005f); // ldr q31,[x2]: unmapped
-        } else {
-            code={0x4f02e6a0,0x4f05e541,0x4e218402}; // movi 55/aa; add v2,v0,v1
-            if (mixed) {
-                code.push_back(0x1e222820); // fadd s0,s1,s2 (NaN input, zero upper)
-                code.push_back(0x9e6700a3); // fmov d3,x5 (zero upper)
-                code.push_back(0x4ea11c64); // orr v4.16b,v3.16b,v1.16b
-            }
-        }
-        code.push_back(0xd65f03c0);
-        e->mem().write(head,code.data(),code.size()*4); e->enable_jit();
-        auto* j=e->jit(); if (mt) j->enter_multithreaded();
-        auto fn=j->lookup_or_translate(*e,head);
-        if (!fn) return false;
-        if (!fault && !mixed && Tier2TestAccess::vector_cache_active(*j) &&
-            Tier2TestAccess::vector_reloads(*j)!=0) {
-            std::fputs("write-only vector destinations were preloaded\n",stderr); return false;
-        }
-        CPU actual,reference; actual.pc=head; actual.regs[30]=stop;
-        actual.regs[2]=0xbeef000; actual.regs[5]=UINT64_C(0xfedcba9876543210);
-        actual.fpcr=1u<<25;
-        for (unsigned v=0;v<32;++v) {
-            actual.v_lo[v]=UINT64_C(0x1122334455667788)^v;
-            actual.v_hi[v]=UINT64_C(0xdeadbeef98765432)^v;
-        }
-        reference.copy_arch_state_from(actual);
-        const uint64_t reference_stop=fault?head+14*4:stop;
-        while (reference.pc!=reference_stop) e->step(reference);
-        {
-            FrostJIT::FaultScope scope(j);
-            actual.pc=fn(&actual,e.get());
-        }
-        if ((fault?actual.running || actual.exit_code!=139:actual.pc!=stop) ||
-            std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-            std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
-            std::fprintf(stderr,"allocation definition mismatch: mixed=%d fault=%d\n",mixed,fault);
-            return false;
-        }
-    }
-    return true;
-}
-
-// Entry demand values are read, evicted, then defined later. On the next
-// trip those early reads must see the carried definition, even though the
-// allocator had not reached its first write when it emitted the eviction.
-// The region variant also exits before any writes on its final trip.
-static bool check_demand_entry_carry(bool mt) {
-    constexpr uint64_t head=0xb0000, body=0xb1000, stop=0xb2000;
-    for (bool region : {false,true}) {
-        auto e=std::make_unique<Emulator>();
-        e->mem().map_range(head,0x3000); e->mem().mprotect_guest(head,0x3000,7);
-        const uint32_t entry[]={0xb4010000,0x140003ff}; // cbz x0,stop; b body
-        std::vector<uint32_t> code{0x4f00e41e}; // movi v30.16b,#0
-        for (unsigned v=0;v<14;++v)
-            code.push_back(0x6e201c00u|(v<<16)|(30<<5)|30); // eor v30,v30,vv
-        if (region) for (unsigned v=0;v<14;++v)
-            code.push_back(0x6e201c00u|(v<<16)|(30<<5)|30); // read again after eviction
-        for (unsigned n=14;n>0;--n) {
-            const unsigned v=n-1;
-            code.push_back(0x4f00e400u|((v+1)<<5)|v); // movi vv.16b,#v+1
-        }
-        code.push_back(0xd1000400); // sub x0,x0,#1
-        code.push_back(region ? 0x14000000u|((uint32_t(-1024-int(code.size())))&0x3ffffff) :
-            0xb5000000u|((uint32_t(-int(code.size()))&0x7ffff)<<5));
-        if (region) e->mem().write(head,entry,sizeof(entry));
-        const uint64_t start=region?body:head;
-        e->mem().write(start,code.data(),code.size()*4); e->enable_jit();
-        auto* j=e->jit(); if (mt) j->enter_multithreaded();
-        auto fn=region?j->compile_tier2_region(*e,j->collect_tier2_trace(*e,head)):
-                       j->lookup_or_translate(*e,head);
-        if (!fn) return false;
-        for (unsigned count : {1u,2u,7u}) {
-            CPU actual,reference; actual.pc=head; actual.regs[0]=count;
-            for (unsigned v=0;v<32;++v) {
-                actual.v_lo[v]=UINT64_C(0x123456789abcdef0)^v;
-                actual.v_hi[v]=UINT64_C(0xfedcba9876543210)^(v<<8);
-            }
-            reference.copy_arch_state_from(actual);
-            const uint64_t end=region?stop:start+code.size()*4;
-            while (reference.pc!=end) e->step(reference);
-            unsigned entries=0;
-            while (actual.pc==head && ++entries<=count+2) {
-                actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
-            }
-            if (actual.pc!=end || actual.regs[0]!=reference.regs[0] ||
-                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
-                std::fprintf(stderr,"demand entry carry mismatch: region=%d n=%u\n",region,count);
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 static bool check_cached_integer_simd(bool mt) {
     constexpr uint64_t head=0x90000, body=0x91000;
     auto e=std::make_unique<Emulator>();
@@ -436,8 +329,7 @@ static bool check_cached_integer_simd(bool mt) {
     for (uint32_t operation : operations) for (unsigned alias=0;alias<4;++alias)
     for (bool region : {false,true}) {
         // Thirteen vectors exercise high XMMs; twenty-five also require
-        // evictions in Tier-1 and regions. The target aliases neither input,
-        // Vn, Vm, or both.
+        // Tier-1 evictions. The target aliases neither input, Vn, Vm, or both.
         const bool shift=(operation&0x0f000000)==0x0f000000;
         if (shift && alias==3) continue;
         const unsigned dest=alias==0 ? 9 : alias==2 ? 11 : 10;
@@ -454,7 +346,7 @@ static bool check_cached_integer_simd(bool mt) {
         e->mem().write(head,&entry,4); e->mem().write(body,code.data(),code.size()*4);
         auto fn=region ? j->compile_tier2_region(*e,j->collect_tier2_trace(*e,head)) :
                          j->lookup_or_translate(*e,body);
-        const bool expected_cache=cache;
+        const bool expected_cache=cache && (!region || prefix==12);
         if (!fn || Tier2TestAccess::vector_cache_active(*j)!=expected_cache ||
             (expected_cache && prefix==12 && Tier2TestAccess::vector_reloads(*j)!=13) ||
             (expected_cache && prefix==24 && !Tier2TestAccess::vector_evictions(*j))) {
@@ -568,7 +460,7 @@ int main(int argc, char** argv) {
         mt |= std::string(argv[k]) == "mt";
         benchmark |= std::string(argv[k]) == "benchmark";
     }
-    if (!check_demand_entry_carry(mt) || !check_allocation_definitions(mt) || !check_cached_integer_simd(mt) || !check_tier1_vector_allocation(mt) ||
+    if (!check_cached_integer_simd(mt) || !check_tier1_vector_allocation(mt) ||
         !check_region_invariant(mt) || !check_region_vectors(mt,benchmark) ||
         !check_region_native_simd(mt)) return 1;
     if (!check_region_fp_memory(mt)) return 1;

@@ -104,8 +104,9 @@ struct regalloc_stats_t {
     uint64_t spill_stack = 0, spill_arm = 0;    // write-backs to stack / cpu.regs[]
     uint64_t reload_stack = 0, reload_arm = 0;  // loads from stack / cpu.regs[]
     uint64_t evicts = 0;                        // evict_vreg calls (dirty or not)
-    uint64_t rematerialized = 0, rematerializable_spills_avoided = 0;
 };
+void regalloc_stats_reset();
+const regalloc_stats_t& regalloc_stats_get();
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
 // The native FP correctness guard, separately attributed in fallback profiles.
@@ -813,7 +814,6 @@ private:
         int reg_vreg[16];
         uint16_t dirty_mask;
         bool vec_dirty[32];
-        bool vec_valid[32];
         int vec_cache[32], vec_owner[16], vec_pinned[32];
         int vec_count;
         bool vec_active;
@@ -1352,23 +1352,6 @@ private:
     // every loop iteration otherwise pays for its loop-carried arch values.
     static constexpr int PIN_REGS[4] = {R12, R13, R14, R15};
     static constexpr int NUM_PIN_REGS = 4;
-    void select_arch_pins(const std::vector<IRInst>& instructions);
-    bool rematerialize_vreg(int v, int reg);
-    regalloc_stats_t regalloc_stats_;
-    void regalloc_stats_reset() { regalloc_stats_ = {}; }
-    const regalloc_stats_t& regalloc_stats_get() const { return regalloc_stats_; }
-    struct AllocationEvent {
-        uint64_t pc;
-        size_t begin, end;
-        unsigned op;
-        regalloc_stats_t scalar;
-        uint64_t vector_spills, vector_reloads, vector_evictions;
-        bool boundary;
-    };
-    std::vector<AllocationEvent> allocation_events_;
-    bool allocation_profile_active_ = false;
-    void write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
-                                  bool region);
     // Returns true if `r` is caller-saved (clobbered by C calls).
     // R12/R13/R14/R15 are callee-saved → preserved across calls.
     static constexpr bool is_caller_saved(int r) {
@@ -1886,7 +1869,7 @@ private:
     // ── XMM vector register cache ───────────────────
     // Tier-1 assigns a fixed hot loop core and, under pressure, a
     // demand-allocated tail in XMM3-15. Unsupported instructions synchronize
-    // locally. Tier-2 uses the same allocator over the complete region.
+    // locally. Tier-2 uses a complete fixed layout over the region.
     // XMM0-2 remain instruction scratch. Deferred fault guards snapshot the
     // live vector mapping; exits commit all architectural dirty values.
     static constexpr int VEC_XMM_START = 3;
@@ -1894,16 +1877,14 @@ private:
     int  vec_cache_[32];      // vector reg → host XMM index, or -1
     int  vec_xmm_owner_[16];  // host XMM index → vector reg, or -1
     bool vec_dirty_[32];      // XMM holds newer value than cpu.v_lo/v_hi
-    bool vec_valid_[32];      // reserved destinations need not contain a value yet
     bool vec_written_this_block_[32];  // pinned reg written by ANY op in this block (fp-cache pre-scan)
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
     // Tier-1 keeps a stable loop core and uses the remaining XMMs on
-    // demand. Loop edges reconcile the initial demand layout explicitly.
+    // demand. Tier-2 retains the complete fixed layout above.
     bool vec_allocator_active_ = false;
     int vec_fixed_count_ = 0;
-    int vec_entry_cache_[32]; // canonical loop-head layout, including demand values
     std::vector<uint16_t> vec_uses_[32];
     uint64_t vec_evictions_ = 0;
     uint64_t vec_reloads_ = 0;
@@ -1927,22 +1908,12 @@ private:
         return (vec_cache_active_ && vreg >= 0 && vreg < 32)
                    ? vec_cache_[vreg] : -1;
     }
-    // Shared vector operand/effect scan admits synchronization boundaries
-    // and pressure in both Tier-1 blocks and Tier-2 regions.
+    // Shared vector operand/effect scan. Tier-1 admits synchronization
+    // boundaries and pressure; Tier-2 requires a complete fixed layout.
     // Both paths retain the existing FMA3/AVX host feature requirement.
-    bool vec_cache_may_enable(const IRBlock& block);
+    bool vec_cache_may_enable(const IRBlock& block, bool tier1 = false);
     bool vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const;
-    struct VectorEffects {
-        uint32_t reads = 0, writes = 0;
-        // Old destinations remain observable on a scalar FP cold exit even
-        // when the arithmetic itself does not read them.
-        uint32_t recovery_reads = 0;
-        bool scalar = false;
-        bool memory_operands = false;
-        uint16_t xmm_clobbers = 0;
-    };
-    bool vec_inst_effects(const IRInst& inst, VectorEffects& effects) const;
-    void vec_prepare_operands(uint32_t reads, uint32_t writes);
+    void vec_prepare_operands(uint32_t operands);
     void vec_drop_dynamic();
     void vec_writeback_one(int vreg);
     void vec_writeback_dynamic();

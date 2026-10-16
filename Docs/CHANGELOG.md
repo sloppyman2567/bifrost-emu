@@ -22,20 +22,6 @@ labels below are historical records.
   actual generated FP recovery classification. Counts do not establish the
   cause or duration of a game hitch.
 
-### Allocation effects and region demand layouts (2026-10-16)
-
-- Share pressure-aware GPR pin selection, rematerialize scratch constants,
-  avoid demand-destination preloads and score bounded vector-core candidates.
-- Retain mixed scalar/vector state with correct upper lanes and explicit
-  known-helper clobbers. Reload synchronized values only when read again.
-- Extend demand allocation to Tier-2, snapshot branch layouts and reconcile
-  loop-entry demand values with parallel copies after revocation/trial checks.
-  Preserve canonical external exits, precise guards and MT publication rules.
-- Add optional per-PC allocation TSV ranges/deltas, compiler-local counters
-  and complete block diagnostic totals including deferred recovery.
-- Reduce CPU time of the captured Unity block replay by 30.6%; broader
-  benchmarks are roughly unchanged. Actual game stutter gains are unmeasured.
-
 ### Android screenshots, release priorities and licenses (2026-10-14)
 
 - Add all six distinct user-supplied Android screenshots: SpongeBob cooking,

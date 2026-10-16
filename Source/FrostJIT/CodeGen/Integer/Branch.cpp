@@ -39,8 +39,11 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // cpu.regs[] first, or the next iteration's LOAD_REG reads the previous
     // iteration's value. Mapping and dirty state stay for the exits below.
     store_dirty_unpinned_arch_regs();
+    // The demand-allocated tail starts empty at the body entry. Publish it
+    // before a retained backedge; fixed loop-core XMMs stay resident.
+    // Keep compile-time mappings/dirtiness intact for the cold exits below.
+    vec_writeback_dynamic();
     if (!mt_active()) {
-        vec_writeback_dynamic();
         selfloop_patch_off_ = code_buf_used_;
         emit_byte(0xE9); emit_u32(0);
         return true;
@@ -67,9 +70,6 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     emit_load(RAX, RAX, 0);
     emit_test_reg(RAX, RAX);
     size_t empty = emit_jcc_rel32_placeholder(0x4);
-    // Only reconcile the loop layout after every revocation/lease check.
-    // A cold exit below still observes the original branch-point layout.
-    vec_writeback_dynamic();
     emit_byte(0xFF); emit_byte(0xE0); // jmp rax (body entry, same frame)
     for (size_t p : {stop, budget, empty})
         patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));

@@ -163,7 +163,6 @@ FrostJIT::GuardState FrostJIT::capture_guard_state() const {
     for (int r = 0; r < 16; ++r) state.reg_vreg[r] = reg_vreg_[r];
     state.dirty_mask = dirty_host_regs_;
     std::memcpy(state.vec_dirty, vec_dirty_, sizeof(state.vec_dirty));
-    std::memcpy(state.vec_valid, vec_valid_, sizeof(state.vec_valid));
     std::memcpy(state.vec_cache, vec_cache_, sizeof(state.vec_cache));
     std::memcpy(state.vec_owner, vec_xmm_owner_, sizeof(state.vec_owner));
     std::memcpy(state.vec_pinned, vec_pinned_, sizeof(state.vec_pinned));
@@ -188,7 +187,6 @@ void FrostJIT::swap_guard_state(GuardState& state) {
     }
     dirty_host_regs_ = state.dirty_mask;
     std::memcpy(vec_dirty_, state.vec_dirty, sizeof(state.vec_dirty));
-    std::memcpy(vec_valid_, state.vec_valid, sizeof(state.vec_valid));
     std::memcpy(vec_cache_, state.vec_cache, sizeof(state.vec_cache));
     std::memcpy(vec_xmm_owner_, state.vec_owner, sizeof(state.vec_owner));
     std::memcpy(vec_pinned_, state.vec_pinned, sizeof(state.vec_pinned));
