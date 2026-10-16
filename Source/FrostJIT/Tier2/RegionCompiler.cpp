@@ -14,24 +14,6 @@
 #include <vector>
 #include "FrostJIT/Tier2/Tier2Internal.hpp"
 namespace arm64emu {
-namespace {
-// Codegen-state snapshot captured at each terminating-branch JCC so the
-// deferred side-exit / loop-back-edge epilogues can be emitted LATER (after
-// the whole region body) with the exact regalloc/flags state of that branch
-// point. The region body is one flat code stream with NO branch-patch jumps
-// between its blocks (internal fall-through edges keep the codegen state
-// live), so the only state a deferred epilogue needs is the state at its own
-// branch — restored here, then materialize/flush/store emit as-of that point.
-struct RegionSnapshot {
-    bool   flags_in_host_ = false;
-    bool   flags_from_sub_ = false;
-    bool   need_cmc_ = false;   // the branch needed a `cmc` before its JCC
-    uint16_t dirty_host_regs_ = 0;
-    int    reg_vreg_[16];
-    std::vector<int>     vreg_home_;
-    std::vector<uint8_t> vreg_dirty_;
-};
-}  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tier-2 Phase 1 step 3 / M1: compile a collected trace as ONE x86 function
@@ -62,6 +44,23 @@ struct RegionSnapshot {
 uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
                                           uint64_t (**chain_out)(CPU*, Emulator*),
                                           Tier2RegionMonitor* monitor_override))(CPU*, Emulator*) {
+    // Codegen-state snapshot captured at each terminating-branch JCC so the
+    // deferred side-exit / loop-back-edge epilogues can be emitted LATER (after
+    // the whole region body) with the exact regalloc/flags state of that branch
+    // point. The region body is one flat code stream with NO branch-patch jumps
+    // between its blocks (internal fall-through edges keep the codegen state
+    // live), so the only state a deferred epilogue needs is the state at its own
+    // branch — restored here, then materialize/flush/store emit as-of that point.
+    struct RegionSnapshot {
+        GuardState layout;
+        bool   flags_in_host_ = false;
+        bool   flags_from_sub_ = false;
+        bool   need_cmc_ = false;   // the branch needed a `cmc` before its JCC
+        uint16_t dirty_host_regs_ = 0;
+        int    reg_vreg_[16];
+        std::vector<int>     vreg_home_;
+        std::vector<uint8_t> vreg_dirty_;
+    };
     (void)emu;
     if (chain_out) *chain_out = nullptr;
     // Shape checks, region SSA, pin selection and DCE/LICM live in
@@ -102,9 +101,12 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // retain XMM state; cold entries reload it and every external exit commits
     // the region-wide write set, including writes from a previous loop trip.
     IRBlock cache_ir;
+    cache_ir.start_pc = trace.head_pc;
     cache_ir.insts = region_ir;
     if (!vec_cache_may_enable(cache_ir)) fp_cache_may_enable(cache_ir);
     regalloc_stats_reset();
+    allocation_events_.clear();
+    allocation_profile_active_ = !dbg().regalloc_profile.empty();
     // Regions keep guarded-access cold paths inline (Tier-1 only defers).
     defer_guards_ = false;
     deferred_guards_.clear();
@@ -396,7 +398,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     if (!(pinned_host_regs_ & (1u << pr))) { r = pr; break; }
                 }
                 if (r < 0) break;  // all callee-saved regs are arch pins
-                emit_load(r, RBP, vreg_slot_[c.v]);
+                if (!rematerialize_vreg(c.v, r)) emit_load(r, RBP, vreg_slot_[c.v]);
                 vreg_home_[c.v] = r;
                 reg_vreg_[r] = c.v;
                 vreg_dirty_[c.v] = false;  // read-only: slot stays current
@@ -582,6 +584,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                         emit_ssa_backedge_state();
                         emit_completion_credit();
                         emit_trial_backedge();
+                        vec_writeback_dynamic();
                         int32_t rel = static_cast<int32_t>(
                             body_start - (code_buf_used_ + 5));
                         emit_byte(0xE9);
@@ -599,6 +602,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             // Snapshot the codegen state AT THE JCC (pre fall-through cmc
             // restore) so the deferred taken-edge epilogue emits as-of here.
             RegionSnapshot snap;
+            snap.layout = capture_guard_state();
             snap.flags_in_host_ = flags_in_host_;
             snap.flags_from_sub_ = flags_from_sub_;
             snap.need_cmc_ = need_cmc;
@@ -659,6 +663,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
     }
 
+    const size_t hot_end = code_buf_used_;
     // ── Cold fall-through exit (L_exit), live state ─────────────────
     // The last block's not-taken path falls through here. exit_pc is the
     // guest PC right after the last block (the walker stopped there) — or
@@ -743,6 +748,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
     }
 
+    const size_t cold_begin = code_buf_used_;
     // ── Deferred side-exit epilogues (one per non-last block) ───────
     // Restore each block's branch-point codegen state, then emit the
     // materialize / flush / pc-store with that state. At runtime the JCC
@@ -754,6 +760,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     for (const auto& c : cold) {
         cold_off.push_back(code_buf_used_);
         const RegionSnapshot& s = c.rs;
+        auto layout = s.layout;
+        swap_guard_state(layout);
         flags_in_host_ = s.flags_in_host_;
         flags_from_sub_ = s.flags_from_sub_;
         dirty_host_regs_ = s.dirty_host_regs_;
@@ -838,6 +846,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     size_t lback_off = code_buf_used_;
     if (!skip_exit_sections && last_is_backedge && has_back_snap) {
         const RegionSnapshot& s = back_snap;
+        auto layout = s.layout;
+        swap_guard_state(layout);
         flags_in_host_ = s.flags_in_host_;
         flags_from_sub_ = s.flags_from_sub_;
         dirty_host_regs_ = s.dirty_host_regs_;
@@ -862,6 +872,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         emit_ssa_backedge_state();
         emit_completion_credit();
         emit_trial_backedge();
+        vec_writeback_dynamic();
         int32_t rel = static_cast<int32_t>(body_start - (code_buf_used_ + 5));
         emit_byte(0xE9);
         emit_u32(static_cast<uint32_t>(rel));  // jmp body_start
@@ -878,6 +889,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     }
 
     // ── Publish the region ───────────────────────────────────────────
+    write_allocation_profile(block_start, hot_end, cold_begin, true);
     size_t size = code_buf_used_ - block_start;
     make_executable();
     prev_max_vreg_ = max_vreg_;  // next translate_block's clear_limit (BlockCompiler.cpp:326)

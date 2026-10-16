@@ -4,6 +4,47 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Allocator effects and region demand layouts (2026-10-16)
+
+The expanded discovery fixture compares all vector bits against the
+interpreter for demand-only full overwrites, mixed scalar/vector upper lanes,
+NaN recovery, aliased inputs, helper boundaries and precise pre-load fault
+state. Integer SIMD pressure now checks cached Tier-2 regions with 25 vectors.
+An early-exit region reads demand entry values twice before late definitions;
+its second trip detects stale loop-carried homes. Linking a temporary object
+with only the entry-dirtiness fix removed fails at `region=1 n=2`; the fixed
+compiler passes. All four ST/MT and ordinary/skip-chain configurations pass.
+Separate ST/MT runs pass with vector caching disabled, FMA3 disabled and
+software memory guards forced; AVX2-disabled runs pass all four modes.
+
+`test_jit_profiler.sh` checks real compiled output and nonzero guest provenance
+through translation/SSA as well as the existing per-thread sampler ranges.
+The opt-in allocation TSV distinguishes measured IR deltas from range-only
+entry/exit/recovery rows. `make verify` passes 87 differential fixtures and
+seven threaded oracles. Full strict suites pass JIT 326/326 and interpreter
+317/317, with nine expected JIT-only skips. Generated checks and separate
+desktop SDL/GL and headless executable/library builds pass. The final
+schema and focused regression refinements were rechecked with their focused
+tests; they do not change guest arithmetic semantics.
+
+Five alternating measured one-million-call Unity-block replays, after one
+warm-up per executable, have median thread CPU times 91.012 ms before and
+63.127 ms after. Complete vector, NZCV and output-memory dumps have the same
+SHA-256 as the independent QEMU oracle. Emitted bytes fall 3,128 to 1,463;
+tracked vector spills/reloads fall 27/99 to 8/15, including cold code.
+This replays the saved block with controlled inputs, not a live outfit action.
+
+The earlier 14-accumulator loops were rebuilt and independently passed QEMU:
+FADD medians 36.074/36.431 ms before/after, FMLA 37.207/37.143 ms. Five
+alternating measured samples follow warm-up. Three measured alternating
+CoreMark pairs at 110,000 iterations validate all five CRCs, with median
+scores 9,971.897/9,911.696 iterations/s. Five measured zstd compression
+pairs on a deterministic 16 MiB input take median process CPU
+177.342/179.026 ms; each decompression round trip matches SHA-256. Compile
+time and measurement limits are in the [JIT guide](JIT.md#allocation-costs-mixed-fp-and-region-layouts-2026-10-16).
+Temporary harnesses, logs, binaries and JSON results remain under `/tmp`.
+Actual gameplay and hitch reduction on this executable are not established.
+
 ## Scoped interpreter profile reasons (2026-10-16)
 
 `bash Scripts/Testing/test_fallback_profile.sh` passes 384 distinct inventory

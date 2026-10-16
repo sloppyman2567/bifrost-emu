@@ -37,6 +37,15 @@ thread_local bool blr_call_disabled_ = false;
 // ── translate_to_ir ────────────────────────────────────────────────────
 // ── Translator ──────────────────────────────────────────────────────────
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
+    struct SourcePC {
+        IRBlock& block;
+        size_t begin;
+        uint64_t pc;
+        ~SourcePC() {
+            for (size_t i = begin; i < block.insts.size(); ++i)
+                if (!block.insts[i].arm_pc) block.insts[i].arm_pc = pc;
+        }
+    } source_pc{block, block.insts.size(), cur_pc};
     // FP/SIMD and memory load/store cases are split into separate
     // files (FloatSIMD.cpp, Memory.cpp) to keep this
     // file under 1000 lines. Both helpers return `true` if they

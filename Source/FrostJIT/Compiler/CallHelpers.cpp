@@ -307,7 +307,7 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         // memory, mark it dirty, and zero v_hi in memory as usual. The
         // G2FHI form (fp_field=1) always uses the memory path — v_hi is
         // never cached in fp-cache blocks.
-        if (fp_cache_active_ && fp_field == 0) {
+        if (vec_cache_active_ && fp_field == 0) {
             int xd = vec_xmm(idx);
             if (xd >= 0) {
                 emit_vmovq_gpr_to_xmm(xd, s);
