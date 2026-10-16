@@ -21,6 +21,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   configurations must agree. Process, Activity and bind configurations take
   `uiMode` from `FrameworkUiMode.CONFIGURATION_UI_MODE`. New `Framework*.java`
   modules go in `LAUNCHER_SOURCES` (`Scripts/Android/android_managed.py`).
+- App processes register their code and profile paths with ART
+  (`registerProfiles`) and run from `dexopt`'s install-time odex. Keep the
+  odex accepted: `PCL[]` context, the image's boot classpath and ISA props.
+  `MANAGED_FIXTURE_ODEX`/`_PROFILE_SAVER` in `test_android_package.py` check it.
 - Settings defaults are generated from pinned AOSP inputs with
   `Tools/Android/generate-settings-defaults.py`; regenerate rather than edit
   `FrameworkSettingsDefaults.java`. Preserve System overrides through runtime

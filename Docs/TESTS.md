@@ -2480,6 +2480,11 @@ NZCV, FP/SIMD state and signal masks, nested alternate stacks, and nine
 malformed signal-frame cases. These exercise the Linux AArch64 ABI; they
 are not a complete Arm architecture conformance suite.
 
+`Tests/Unit/test_thread_fault_signal.c` faults three times on an unmapped page
+from a worker thread. Each fault must reach that thread's SIGSEGV handler with
+the page as `si_addr`, and the thread must keep running. Under the interpreter,
+such faults used to end the worker silently.
+
 For independent QEMU runs, see the
 [reference signal-mask patch](../Tools/Reference/QemuReference/README.md). It fixes
 QEMU's handling of unblockable mask bits while keeping the Linux assertions

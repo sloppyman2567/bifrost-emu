@@ -154,6 +154,22 @@ Each package has an independent rootfs under ignored `android-state/`:
 - `/storage/emulated/0/Android/data/<package>/files` provides external app storage.
 - The root contains copied, verified Bionic libraries and guest adapter DSOs.
 
+Managed apps also get what installd and ART Service provide on a device.
+`/data/misc/profiles/{cur/0,ref}/<package>` exist and survive runtime
+replacement. The launcher registers the app's code paths with ART
+(`LoadedApk.registerAppInfoToArt`, which `systemMain()` otherwise skips), so
+ART's ProfileSaver and androidx ProfileInstaller write `primary.prof`. Before each
+launch, `dexopt` in `Scripts/Android/android_managed.py` runs the image's
+`profman` and `dex2oat64` under Bifrost, as
+[artd](https://android.googlesource.com/platform/art/+/refs/heads/android15-release/artd/artd.cc)
+does. It merges the current profile into the reference profile and writes
+`<code>/oat/arm64/base.{odex,vdex,art}`: `speed-profile` with an app image once
+a reference profile exists, otherwise `verify` (the image's install filter
+without a profile). `managed/dexopt.json` records the inputs; unchanged inputs
+and failures are not recompiled until an input changes. A failed compile leaves
+the app on ART's JIT. Split APK dex is not compiled. SpongeBob (68 MB of dex)
+compiles in about 15 s with `verify` and 25 s with a synthetic 5% profile.
+
 An install lock and atomic metadata publication keep failed validation from
 replacing the active package. Reinstalling a reordered set is idempotent and
 preserves saves. Launch verifies stored package/runtime/adapter hashes before

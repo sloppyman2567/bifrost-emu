@@ -978,6 +978,15 @@ public final class ManagedLauncher {
         });
     }
 
+    /**
+     * LoadedApk skips registerAppInfoToArt on the systemMain() thread this
+     * launcher uses. An app process registers its code paths and profiles so
+     * ART's ProfileSaver records what background dexopt compiles.
+     */
+    private static void registerProfiles(Object loaded) throws Exception {
+        call(loaded, "registerAppInfoToArt", new Class<?>[0]);
+    }
+
     private static Object call(Object target, String name, Class<?>[] types, Object... arguments)
             throws Exception {
         Class<?> type = target instanceof Class ? (Class<?>) target : target.getClass();
@@ -1208,6 +1217,7 @@ public final class ManagedLauncher {
                 new Class<?>[] {ApplicationInfo.class, compatibility}, app,
                 compatibility.getField("DEFAULT_COMPATIBILITY_INFO").get(null));
         ClassLoader loader = (ClassLoader) call(loaded, "getClassLoader", new Class<?>[0]);
+        registerProfiles(loaded);
         Class<?> launcherClass = loader.loadClass(launcher);
         System.out.println("APP_CLASSLOADER_OK " + launcherClass.getName());
 
@@ -1507,6 +1517,7 @@ public final class ManagedLauncher {
             Class<?> compat = Class.forName("android.content.res.CompatibilityInfo");
             Object loaded = call(thread, "getPackageInfoNoCheck", new Class<?>[] {ApplicationInfo.class, compat},
                     app, compat.getField("DEFAULT_COMPATIBILITY_INFO").get(null));
+            registerProfiles(loaded);
             bindApplicationMetadata(thread, context, app, loaded);
             Application application = (Application) call(loaded, "makeApplicationInner",
                     new Class<?>[] {boolean.class, Instrumentation.class}, false, null);

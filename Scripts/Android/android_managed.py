@@ -643,8 +643,119 @@ def remove_runtime(root):
 def ensure_app_data(root, package):
     # installd creates CE/DE app data at every start; ContextImpl only creates
     # subdirectories and fails with ENOENT when the package directory is gone.
-    for relative in ("data/user/0", "data/user_de/0"):
+    # It also creates the profile directories. ART's ProfileSaver and androidx
+    # ProfileInstaller create primary.prof there, never the directory itself.
+    for relative in ("data/user/0", "data/user_de/0", "data/misc/profiles/cur/0",
+                     "data/misc/profiles/ref"):
         (root / relative / package).mkdir(parents=True, exist_ok=True)
+
+
+def image_properties(root, names):
+    """Read build properties with init's partition precedence (later file wins)."""
+    values = {}
+    for relative in ("system/build.prop", "system_ext/etc/build.prop", "vendor/default.prop",
+                     "vendor/build.prop", "product/etc/build.prop"):
+        path = root / relative
+        if not path.is_file(): continue
+        for line in path.read_text(errors="replace").splitlines():
+            key, separator, value = line.strip().partition("=")
+            if separator and key in names: values[key] = value
+    return values
+
+
+def run_guest_tool(root, emu, guest_env, no_jit, binary, *args, timeout):
+    """Run one image command-line tool (profman, dex2oat64) in the app root."""
+    environment = dict(os.environ, BIFROST_GUEST_ENV=";".join(f"{k}={v}" for k, v in guest_env.items()))
+    environment.pop("BIFROST_ROOT", None)
+    command = [str(emu), *(["--no-jit"] if no_jit else []), "--android-runtime",
+               "--rootfs", str(root), binary, *args]
+    return subprocess.run(command, env=environment, capture_output=True, timeout=timeout)
+
+
+def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
+    """ART Service's install/background dexopt of the base APK (artd/artd.cc).
+
+    profman merges the current profile into the reference profile; dex2oat then
+    writes <code>/oat/arm64/base.{odex,vdex,art}. Without a reference profile the
+    image's speed-profile install filter degrades to verify, as on a device.
+    Split APK code stays with ART's JIT. Caller holds the package lock.
+    """
+    package = metadata["package"]
+    apk = code + "/base.apk"
+    current = f"/data/misc/profiles/cur/0/{package}/primary.prof"
+    reference = f"/data/misc/profiles/ref/{package}/primary.prof"
+    oat = code + "/oat/arm64"
+
+    def run(binary, *args, timeout):
+        return run_guest_tool(root, emu, guest_env, no_jit, binary, *args, timeout=timeout)
+
+    profile = root / reference.lstrip("/")
+    if (root / current.lstrip("/")).is_file() and (root / current.lstrip("/")).stat().st_size:
+        # profman locks an existing reference by path; artd creates it first.
+        profile.touch(exist_ok=True)
+        merge = run("/apex/com.android.art/bin/profman", "--profile-file=" + current,
+                    "--reference-profile-file=" + reference, "--apk=" + apk, "--dex-location=" + apk,
+                    timeout=300)
+        # 0 success, 1 merged, 2 small delta, 7 empty/outdated (profman_result.h).
+        if merge.returncode not in (0, 1, 2, 7):
+            print(f"profman failed ({merge.returncode}); keeping the previous reference profile",
+                  file=sys.stderr)
+    profiled = profile.is_file() and profile.stat().st_size > 0
+    compiler_filter = "speed-profile" if profiled else "verify"
+    stamp_path = managed / "dexopt.json"
+    stamp = {"runtime": file_hash(managed / "runtime.json"), "apk": metadata["files"]["base.apk"],
+             "filter": compiler_filter, "profile": file_hash(profile) if profiled else None}
+    outputs = [root / oat.lstrip("/") / name for name in ("base.odex", "base.vdex", "base.art")]
+    saved = json.loads(stamp_path.read_text()) if stamp_path.is_file() else {}
+    # A failure is not retried until an input changes.
+    if {k: v for k, v in saved.items() if k != "failed"} == stamp and (
+            saved.get("failed") or all(path.is_file() for path in outputs[:2])):
+        return
+    properties = image_properties(root, {
+        "dalvik.vm.isa.arm64.variant", "dalvik.vm.isa.arm64.features", "dalvik.vm.dex2oat-Xms",
+        "dalvik.vm.dex2oat-Xmx", "dalvik.vm.appimageformat", "dalvik.vm.dex2oat-max-image-block-size",
+        "dalvik.vm.dex2oat-resolve-startup-strings"})
+    arguments = ["--dex-file=" + apk, "--dex-location=" + apk, "--oat-file=" + oat + "/base.odex",
+                 "--instruction-set=arm64",
+                 "--instruction-set-variant=" + properties.get("dalvik.vm.isa.arm64.variant", "generic"),
+                 "--instruction-set-features=" + properties.get("dalvik.vm.isa.arm64.features", "default"),
+                 "--compiler-filter=" + compiler_filter, "--class-loader-context=PCL[]",
+                 "--compilation-reason=" + ("bg-dexopt" if profiled else "install")]
+    for option in ("Xms", "Xmx"):
+        if properties.get("dalvik.vm.dex2oat-" + option):
+            arguments += ["--runtime-arg", f"-{option}{properties['dalvik.vm.dex2oat-' + option]}"]
+    if profiled:
+        arguments += ["--profile-file=" + reference, "--app-image-file=" + oat + "/base.art"]
+        if properties.get("dalvik.vm.appimageformat"):
+            arguments.append("--image-format=" + properties["dalvik.vm.appimageformat"])
+        if properties.get("dalvik.vm.dex2oat-max-image-block-size"):
+            arguments.append("--max-image-block-size=" + properties["dalvik.vm.dex2oat-max-image-block-size"])
+        if properties.get("dalvik.vm.dex2oat-resolve-startup-strings"):
+            arguments.append("--resolve-startup-const-strings=" +
+                             properties["dalvik.vm.dex2oat-resolve-startup-strings"])
+    directory = root / code.lstrip("/")
+    mode = directory.stat().st_mode
+    print(f"Compiling {package} ({compiler_filter})", flush=True)
+    try:
+        directory.chmod(mode | stat.S_IWUSR)
+        (directory / "oat/arm64").mkdir(parents=True, exist_ok=True)
+        for path in outputs: path.unlink(missing_ok=True)
+        try:
+            result = run("/apex/com.android.art/bin/dex2oat64", *arguments, timeout=3600)
+            failed = result.returncode != 0
+        except subprocess.TimeoutExpired:
+            result, failed = None, True
+        if failed:
+            for path in outputs: path.unlink(missing_ok=True)
+            detail = result.stderr.decode(errors="replace")[-2000:] if result else "timed out"
+            print(f"dex2oat failed; {package} runs from ART's JIT:\n{detail}", file=sys.stderr)
+        for path in outputs:
+            if path.exists(): path.chmod(0o444)
+    finally:
+        directory.chmod(mode)
+    pending = managed / ".dexopt.json"
+    pending.write_text(json.dumps(dict(stamp, failed=failed), sort_keys=True) + "\n")
+    pending.replace(stamp_path)
 
 
 def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex, media_mask=15):
@@ -708,7 +819,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         # Guest writes are live in this root, including if the host crashes.
         # Copy them into a replacement root before exchanging runtimes.
         data_source = root if root.is_dir() else installed_root
-        for relative in ("data/user", "data/user_de", "storage"):
+        for relative in ("data/user", "data/user_de", "data/misc/profiles", "storage"):
             source = data_source / relative
             target = fresh / relative
             if source.is_dir():
@@ -758,6 +869,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                       ROOT / "build/android-art/rootfs",
                                       ROOT / "build/android-adapters", dex, media_mask)
         guest_env = dict(guest_env, **network.result())
+    dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
     trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;

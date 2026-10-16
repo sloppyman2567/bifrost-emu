@@ -13,6 +13,18 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Install-time dexopt and ART profiles for managed apps (2026-10-16)
+
+- Before launch, compile the base APK with the image's `profman` and
+  `dex2oat64`, as ART Service does: `verify` until a profile exists, then
+  `speed-profile` with an app image. Previously all app Java was verified and
+  interpreted at runtime (SpongeBob ships 68 MB of dex).
+- Create installd's profile directories and register app code paths with ART,
+  so ProfileSaver and androidx ProfileInstaller record profiles.
+- Interpreter worker threads now receive memory faults as guest signals.
+  Previously the thread ended silently, and ART's thread suspension then
+  waited on it or aborted. Add `test_thread_fault_signal` (checked on QEMU).
+
 ### Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
 
 - Compile BSL/BIT/BIF, DUP (element), ADDV, MLA and FRINTN/M/P/Z inline

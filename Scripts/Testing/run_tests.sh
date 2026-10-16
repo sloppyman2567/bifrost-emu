@@ -362,6 +362,7 @@ UNIT_TESTS=(
     # delivery through the per-CPU pending queue + per-CPU signal frames.
     "test_signal_semantics|Tests/Unit/test_signal_semantics.elf||20|ALL PASS"
     "test_sigreturn_context|Tests/Unit/test_sigreturn_context.elf||20|ALL PASS"
+    "test_thread_fault_signal|Tests/Unit/test_thread_fault_signal.elf||20|ALL PASS"
     # rt_sigtimedwait blocks/dequeues instead of always returning EAGAIN.
     "test_sigtimedwait|Tests/Unit/test_sigtimedwait.elf||20|15/15 checks passed"
     # FUTEX_CMP_REQUEUE takes nr_requeue from the timeout slot, not val3.

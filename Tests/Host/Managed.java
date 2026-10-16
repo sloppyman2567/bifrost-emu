@@ -112,6 +112,25 @@ public final class Managed extends Activity {
         if (!prefs.edit().putInt("starts", starts).commit())
             throw new IllegalStateException("preference commit failed");
         System.out.println("MANAGED_FIXTURE_START " + starts);
+        // ART maps the install-time odex only after its checksum, boot class
+        // path and class loader context checks accept it.
+        boolean odex = false;
+        try (java.io.BufferedReader maps = new java.io.BufferedReader(new java.io.FileReader("/proc/self/maps"))) {
+            for (String line; (line = maps.readLine()) != null && !odex; )
+                odex = line.endsWith(getApplicationInfo().sourceDir.replace("base.apk", "oat/arm64/base.odex"));
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
+        System.out.println("MANAGED_FIXTURE_ODEX " + odex);
+        // ART starts its "Profile Saver" thread when the app registers its profiles.
+        // Runtime-attached threads join the system group; enumerate without suspending them.
+        ThreadGroup group = Thread.currentThread().getThreadGroup();
+        while (group.getParent() != null) group = group.getParent();
+        Thread[] threads = new Thread[group.activeCount() + 16];
+        boolean saver = false;
+        for (int i = 0, n = group.enumerate(threads); i < n; i++)
+            saver |= "Profile Saver".equals(threads[i].getName());
+        System.out.println("MANAGED_FIXTURE_PROFILE_SAVER " + saver);
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(new SurfaceHolder.Callback() {
             public void surfaceCreated(SurfaceHolder holder) {

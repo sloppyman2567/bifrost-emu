@@ -1007,6 +1007,20 @@ class PackageTests(unittest.TestCase):
             "keytool", "-exportcert", "-keystore", str(self.key),
             "-storepass", "bifrost-test", "-alias", "fixture"])
         for starts in (1, 2, 3):
+            if starts == 2:
+                # Stand in for ProfileSaver: start 2 must merge it and run speed-profile.
+                import json
+                from android_managed import run_guest_tool
+                root = app / "managed/rootfs"
+                code = json.loads((app / "package.json").read_text())["guest_code"]
+                environment = json.loads((root / "bifrost-framework.json").read_text())["environment"]
+                result = run_guest_tool(
+                    root, ARGS.emu.resolve(), environment, False, "/apex/com.android.art/bin/profman",
+                    "--generate-test-profile=/data/misc/profiles/cur/0/org.bifrost.fixture/primary.prof",
+                    "--apk=" + code + "/base.apk", "--dex-location=" + code + "/base.apk",
+                    "--generate-test-profile-method-percentage=100",
+                    "--generate-test-profile-class-percentage=100", timeout=120)
+                self.assertEqual(result.returncode, 0, result.stderr[-4000:])
             if starts == 3:
                 settings = app / "managed/rootfs/data/system/users/0/bifrost-system-settings.xml"
                 settings.write_text('<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1024,6 +1038,13 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(status, 0, text[-30000:])
             self.assertIn("APP_WINDOW_IDENTITY Managed Fixture icon=", text)
             self.assertIn(f"MANAGED_FIXTURE_START {starts}", text)
+            self.assertIn("MANAGED_FIXTURE_ODEX true", text)
+            self.assertIn("MANAGED_FIXTURE_PROFILE_SAVER true", text)
+            if starts >= 2:  # Start 3 also checks profiles survive runtime replacement.
+                import json
+                stamp = json.loads((app / "managed/dexopt.json").read_text())
+                self.assertEqual((stamp["filter"], stamp["failed"]), ("speed-profile", False))
+            self.assertTrue((app / "managed/rootfs/data/misc/profiles/cur/0/org.bifrost.fixture").is_dir())
             markers = ["MANAGED_FIXTURE_PROVIDER_CREATED", "APP_PROVIDERS_STARTED 2",
                        "MANAGED_FIXTURE_APPLICATION_AFTER_PROVIDERS", "MANAGED_FIXTURE_PROVIDER_ALIASES_OK"]
             positions = [text.index(marker) for marker in markers]

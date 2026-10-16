@@ -89,14 +89,35 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     uint64_t count = 0;
     try {
         while (cpu.running) {
-            if (use_jit) {
-                // JIT dispatch — uses either the per-thread FrostJIT
-                // (BIFROST_NO_SHARED_JIT=1) or the shared main FrostJIT
-                // (default, Task 3). The shared mode serializes run_block
-                // via blocks_mutex_; the per-thread mode is lock-free.
-                thread_jit->run_block(cpu, *emu);
-            } else {
-                emu->step(cpu);
+            try {
+                if (use_jit) {
+                    // JIT dispatch — uses either the per-thread FrostJIT
+                    // (BIFROST_NO_SHARED_JIT=1) or the shared main FrostJIT
+                    // (default, Task 3). The shared mode serializes run_block
+                    // via blocks_mutex_; the per-thread mode is lock-free.
+                    thread_jit->run_block(cpu, *emu);
+                } else {
+                    emu->step(cpu);
+                }
+            } catch (UnmappedMemory& e) {
+                // A fault is a synchronous signal for this thread, as on the
+                // main thread (Lifecycle.cpp). Without a handler the default
+                // action has already ended the process through group_exit.
+                if (!deliver_signal(*emu, cpu, emu->signals(), e.signo(), e.segv_code(), e.addr)) {
+                    std::string mod;
+                    uint64_t off = 0;
+                    try {
+                        if (auto* dl = emu->dyn_linker()) {
+                            if (const LoadedObject* obj = dl->find_object_by_addr(cpu.pc)) {
+                                mod = obj->name;
+                                off = cpu.pc - obj->base_addr;
+                            }
+                        }
+                    } catch (...) {}
+                    report_crash(cpu, emu->mem(), "thread unmapped memory", e.addr, nullptr,
+                                 mod.empty() ? nullptr : mod.c_str(), off);
+                    break;
+                }
             }
             count++;
             // Same-PC hang watchdog.
