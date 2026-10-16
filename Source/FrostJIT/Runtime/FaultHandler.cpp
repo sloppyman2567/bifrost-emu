@@ -165,7 +165,7 @@ extern "C" void jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc) {
         // the host memcpy would fault again outside registered native code.
         const int code = pending_code.load(std::memory_order_relaxed);
         if (dbg().fault_trace) fault_trace_block_pc() = block_pc;
-        deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGBUS,
+        force_signal(*emu, *cpu, emu->signals(), BIFROST_SIGBUS,
                        code, pending_address.load(std::memory_order_relaxed));
         if (dbg().fault_trace) fault_trace_block_pc() = 0;
     } else if (dbg().fault_trace) {

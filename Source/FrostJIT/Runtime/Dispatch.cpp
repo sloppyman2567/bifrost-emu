@@ -902,13 +902,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         next_pc = entry.fn(&cpu, &emu);
     } catch (UnmappedMemory& e) {
         // Deliver SIGSEGV to the guest with fault address + si_code.
-        // If a handler is installed, deliver_signal sets up the handler
-        // frame and returns true; we resume at the handler's PC. If no
-        // handler, it sets cpu.running = false and exit_code = 139.
+        // If a handler is installed, force_signal sets up the handler
+        // frame and returns true; we resume at the handler's PC. Otherwise
+        // the default action ends the process (cpu.running is false).
         int si_code = e.segv_code();
-        deliver_signal(emu, cpu, emu.signals(), e.signo(),
-                       si_code, e.addr);
-        // cpu.pc may have been changed by deliver_signal (handler entry)
+        force_signal(emu, cpu, emu.signals(), e.signo(),
+                     si_code, e.addr);
+        // cpu.pc may have been changed by force_signal (handler entry)
         // or left unchanged (no handler — cpu.running is now false).
         next_pc = cpu.pc;
     }

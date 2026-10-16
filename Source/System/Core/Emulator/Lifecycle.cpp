@@ -184,7 +184,7 @@ int Emulator::run() {
             // signal with the fault address and si_code (MAPERR for an
             // unmapped page, ACCERR for permissions) and continue.
             int si_code = e.segv_code();
-            if (deliver_signal(*this, main_cpu_, signals_, e.signo(),
+            if (force_signal(*this, main_cpu_, signals_, e.signo(),
                                si_code, e.addr)) {
                 count++;
                 continue;
@@ -225,15 +225,14 @@ int Emulator::run() {
             uint64_t fault_pc = main_cpu_.pc;
             if (fault_pc < 4096) {
                 // NULL pointer execution / jump into zero page → SIGSEGV
-                if (deliver_signal(*this, main_cpu_, signals_,
+                if (force_signal(*this, main_cpu_, signals_,
                                    BIFROST_SIGSEGV, SEGV_MAPERR_EMU,
                                    fault_pc)) {
                     count++;
                     continue;
                 }
-                // No handler — default disposition terminates with SIGSEGV
-                // (exit code 128+11=139). deliver_signal already set
-                // cpu.running=false and cpu.exit_code=139.
+                // No handler — the default disposition already ended the
+                // process by SIGSEGV through signal_exit.
                 // throw site is quiet by default, so this is the crash line.
                 {
                     std::string mod;
@@ -247,7 +246,7 @@ int Emulator::run() {
             // Genuinely illegal instruction at a valid PC → SIGILL.
             // This lets JITs and dynamic code generators that use SIGILL
             // for trap-on-overflow patterns to work.
-            if (deliver_signal(*this, main_cpu_, signals_,
+            if (force_signal(*this, main_cpu_, signals_,
                                BIFROST_SIGILL, ILL_ILLOPC_EMU, fault_pc)) {
                 count++;
                 continue;

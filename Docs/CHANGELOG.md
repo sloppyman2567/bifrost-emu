@@ -13,6 +13,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Synchronous faults cannot be blocked or ignored (2026-10-16)
+
+- Memory faults (SIGSEGV/SIGBUS), undefined instructions (SIGILL) and a bad
+  `rt_sigreturn` frame now use `force_signal` in the interpreter, JIT
+  helpers, fault handler and every run loop. A blocked or ignored fault
+  signal reverts to the default and ends the process, as Linux
+  `force_sig_fault` does. Before, a blocked fault was queued and the
+  instruction re-faulted forever; an ignored one was dropped.
+- Add three cases to `test_group_exit`.
+
 ### BRK raises SIGTRAP (2026-10-16)
 
 - `BRK` delivers a forced SIGTRAP (`TRAP_BRKPT`, `si_addr` and saved pc at

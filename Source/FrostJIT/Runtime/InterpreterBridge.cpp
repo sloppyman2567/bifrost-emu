@@ -63,7 +63,7 @@ static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
     } catch (arm64emu::UnmappedMemory& e) {
         // Deliver SIGSEGV with the fault address and proper si_code.
         int si_code = e.segv_code();
-        arm64emu::deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+        arm64emu::force_signal(*emu, *cpu, emu->signals(), e.signo(),
                        si_code, e.addr);
     } catch (arm64emu::DecodeError& e) {
         if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());
@@ -73,10 +73,10 @@ static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
         // std::terminate and killed the emulator instead of the guest.
         const uint64_t fault_pc = cpu->pc;
         if (fault_pc < 4096)
-            arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGSEGV,
+            arm64emu::force_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGSEGV,
                                      arm64emu::SEGV_MAPERR_EMU, fault_pc);
         else
-            arm64emu::deliver_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGILL,
+            arm64emu::force_signal(*emu, *cpu, emu->signals(), arm64emu::BIFROST_SIGILL,
                                      arm64emu::ILL_ILLOPC_EMU, fault_pc);
     }
     if (step_trace_) {

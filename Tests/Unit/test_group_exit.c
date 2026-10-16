@@ -92,6 +92,27 @@ static void protected_store(void) {
     *(volatile int*)page = 1;
 }
 
+// A synchronous fault cannot be blocked or ignored (force_sig_info_to_task):
+// it reverts to the default action instead of looping or being dropped.
+static void block_signal(int signo) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, signo);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+}
+static void never_called(int signo) { (void)signo; _exit(4); }
+static void blocked_handled_segv(void) {
+    signal(SIGSEGV, never_called);
+    block_signal(SIGSEGV);
+    protected_store();
+    _exit(0);
+}
+static void ignored_segv(void) {
+    signal(SIGSEGV, SIG_IGN);
+    protected_store();
+    _exit(0);
+}
+
 static void main_sigkill(void) {
     pthread_t t1, t2;
     pthread_create(&t1, NULL, sleeper, NULL);
@@ -174,11 +195,13 @@ static void brk_handled(void) {
     _exit(0);
 }
 static void brk_blocked(void) {
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGTRAP);
-    sigprocmask(SIG_BLOCK, &set, NULL);
+    block_signal(SIGTRAP);
     brk_now();
+    _exit(0);
+}
+static void blocked_sigill(void) {
+    block_signal(SIGILL);
+    __asm__ volatile("udf #0");
     _exit(0);
 }
 #endif
@@ -190,7 +213,11 @@ int main(void) {
           "worker kill(getpid(), SIGTERM) ends the process");
     check(died_by(run(protected_store), SIGSEGV),
           "an unhandled SIGSEGV is reported to the parent as a signal death");
+    check(died_by(run(blocked_handled_segv), SIGSEGV),
+          "a blocked SIGSEGV with a handler still terminates");
+    check(died_by(run(ignored_segv), SIGSEGV), "an ignored SIGSEGV still terminates");
 #ifdef __aarch64__
+    check(died_by(run(blocked_sigill), SIGILL), "a blocked SIGILL still terminates");
     check(died_by(run(worker_brk_default), SIGTRAP), "a worker's BRK ends the process by SIGTRAP");
     int brk = run(brk_handled);
     check(brk != -1 && WIFEXITED(brk) && WEXITSTATUS(brk) == 0,

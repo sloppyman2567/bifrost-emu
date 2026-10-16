@@ -541,9 +541,9 @@ uint8_t FrostJIT::resolve_arm_cond_with_carry(uint8_t arm_cond, bool& need_cmc) 
 // through them back into JIT'd code (which has no DWARF unwind info).
 // Catch UnmappedMemory here and deliver SIGSEGV directly to the guest
 // via the CPU pointer (passed as the 4th arg from the JIT). If a
-// handler is installed, deliver_signal sets up the handler frame and
-// the JIT run loop resumes at the handler's PC. If not, it sets
-// cpu->running = false and cpu->exit_code = 139.
+// handler is installed, force_signal sets up the handler frame and
+// the JIT run loop resumes at the handler's PC. Otherwise (or when the
+// signal is blocked/ignored) the default action ends the process.
 extern "C" {
     uint64_t jit_load_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, int width) {
         uint64_t val = 0;
@@ -551,7 +551,7 @@ extern "C" {
             emu->mem().read(addr, &val, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+            force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return 0;  // cpu->running is now false (or handler installed)
         }
@@ -572,7 +572,7 @@ extern "C" {
             emu->mem().read(addr, buf, 16);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+            force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return;
         }
@@ -586,7 +586,7 @@ extern "C" {
             emu->mem().write(addr, buf, 16);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+            force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
         }
     }
@@ -601,7 +601,7 @@ extern "C" {
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+            force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
         }
     }
@@ -624,7 +624,7 @@ extern "C" {
             emu->mem().read(addr, &v, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+            force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return 0;
         }
@@ -652,7 +652,7 @@ extern "C" {
             ok = emu->mem().compare_exchange(addr, cpu->excl_value, val, width);
         } catch (UnmappedMemory& e) {
                 int si_code = e.segv_code();
-                deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+                force_signal(*emu, *cpu, emu->signals(), e.signo(),
                                si_code, e.addr);
                 return 1;
             }
@@ -684,7 +684,7 @@ extern "C" {
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
-            deliver_signal(*emu, *cpu, emu->signals(), e.signo(),
+            force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
             return;
         }

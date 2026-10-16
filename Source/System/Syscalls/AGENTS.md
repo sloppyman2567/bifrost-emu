@@ -13,8 +13,10 @@
   default-fatal signals use Emulator::signal_exit, never `group_exit(128+n)`
   directly. Signal delivery uses
   the shared reporter/recovery path, not uncaught worker exceptions.
-  Instruction traps the thread cannot block or ignore (BRK's SIGTRAP) use
-  `force_signal`, which reverts a blocked or ignored signal to SIG_DFL.
+  Synchronous faults and traps (memory faults, SIGILL, BRK's SIGTRAP, a bad
+  sigreturn frame) use `force_signal`, which reverts a blocked or ignored
+  signal to SIG_DFL; only asynchronous kill/tgkill/queued signals use
+  `deliver_signal` directly.
 - Process identity comes from `Yggdrasil::process_ids()`: the PID-1 model of
   a plain run, or the host process's identity for fork children and
   Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and

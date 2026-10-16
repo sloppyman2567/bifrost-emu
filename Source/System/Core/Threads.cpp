@@ -106,7 +106,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                 // A fault is a synchronous signal for this thread, as on the
                 // main thread (Lifecycle.cpp). Without a handler the default
                 // action has already ended the process through group_exit.
-                if (!deliver_signal(*emu, cpu, emu->signals(), e.signo(), e.segv_code(), e.addr)) {
+                if (!force_signal(*emu, cpu, emu->signals(), e.signo(), e.segv_code(), e.addr)) {
                     std::string mod;
                     uint64_t off = 0;
                     try {
@@ -179,7 +179,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         uint64_t fault_pc = cpu.pc;
         int signo = (fault_pc < 4096) ? BIFROST_SIGSEGV : BIFROST_SIGILL;
         int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
-        if (!deliver_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
+        if (!force_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
             // No handler installed — default disposition terminates the
             // process: deliver_signal already called group_exit with
             // 128+signo. throw site is quiet by default, so this is the
@@ -996,7 +996,7 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
         uint64_t fault_pc = cpu.pc;
         int signo = (fault_pc < 4096) ? BIFROST_SIGSEGV : BIFROST_SIGILL;
         int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
-        if (!deliver_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
+        if (!force_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
             fprintf(stderr,
                 "[%s] SDL thread 0x%llx: %s at pc=0x%llx (no handler — terminating)\n",
                 CODENAME, static_cast<unsigned long long>(st->handle_addr),

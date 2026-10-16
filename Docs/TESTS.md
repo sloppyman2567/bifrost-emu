@@ -4,6 +4,15 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Forced synchronous faults (2026-10-16)
+
+`test_group_exit` adds a blocked SIGSEGV with a handler installed, an
+ignored SIGSEGV and a blocked SIGILL (`udf #0`); each must kill the child by
+that signal. They pass on qemu-aarch64 and in both engines; the previous
+source fails all three. Strict suites pass JIT 333/333 and interpreter 324
+with nine expected skips; `make verify` passes 90 differential fixtures and
+seven threaded oracles. No game was run on this change.
+
 ## BRK SIGTRAP (2026-10-16)
 
 `test_group_exit` adds three aarch64 cases: a worker's default BRK ends the
@@ -13,7 +22,7 @@ SIGTRAP still terminates. They pass on qemu-aarch64 and in both engines.
 Rebuilding with the previous `BranchSystem.cpp` fails all three. Strict
 suites pass JIT 333/333 and interpreter 324 with nine expected skips; `make
 verify` passes 90 differential fixtures and seven threaded oracles. Only
-BRK uses `force_signal`; other synchronous faults still queue when blocked.
+BRK used `force_signal` at this checkpoint (superseded above).
 
 ## Rootfs cwd, signal deaths, thread names and input times (2026-10-16)
 
@@ -1868,6 +1877,7 @@ Focused additions:
   deaths, including a default-disposition SIGSEGV from a `PROT_NONE`
   store, must reach the parent as `WIFSIGNALED`, not exit 128+n. On
   aarch64 it also checks BRK's SIGTRAP (default, handled and blocked).
+  Blocked or ignored SIGSEGV and a blocked SIGILL must still terminate.
 - `test_fcntl_lock`: POSIX `F_SETLK`/`F_SETLKW` input marshalling and
   `F_GETLK` writeback, unmapped/read-only buffers, forked lock contention,
   blocking unlock, signed offsets and ranges above 4 GiB. Passes on native

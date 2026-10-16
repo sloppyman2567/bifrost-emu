@@ -218,9 +218,7 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
                 // A bad signal frame raises SIGSEGV, rather than returning
                 // a syscall error or silently using the private snapshot.
                 signals_.pop_frame(cpu, frame);
-                cpu.sigmask &= ~(1ULL << (BIFROST_SIGSEGV - 1));
-                deliver_signal(emu, cpu, signals_, BIFROST_SIGSEGV,
-                               SI_KERNEL_EMU);
+                force_signal(emu, cpu, signals_, BIFROST_SIGSEGV, SI_KERNEL_EMU, 0);  // force_sig
                 return 0;
             }
             if (signals_.pop_frame(cpu, frame)) {
