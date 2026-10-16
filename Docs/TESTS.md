@@ -4,6 +4,16 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Scoped interpreter profile reasons (2026-10-16)
+
+`bash Scripts/Testing/test_fallback_profile.sh` passes 384 distinct inventory
+rows and 768,000 counts, with concurrent writers, separate reasons at the same
+PC, nested scopes and exception restoration. The script includes the current
+`Source/` header root. A real JIT run of `jit_simd_fp_nan.elf` also records 25
+`fp-special` steps and three `general` steps, checking the generated recovery
+bridge rather than only the standalone inventory. These are execution counts,
+not elapsed-time attribution or game frame-pacing evidence.
+
 ## Cached integer SIMD (2026-10-15)
 
 The discovery host fixture now also checks 253 supported arithmetic,
