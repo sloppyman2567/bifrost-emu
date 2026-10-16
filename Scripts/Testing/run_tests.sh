@@ -590,6 +590,10 @@ INTEGRATION_TESTS=(
     # a texture-sourced EGLImage (readback pin). Needs host EGL + GLES 2;
     # exit 77 = skip.
     "gles_egl_image|Tests/Apps/test_gles_egl_image.elf||30|ALL PASS"
+    # ES extension queries agree after filtering, hidden extensions stay
+    # hidden, common extensions' entry points resolve and alias rows run.
+    # Needs host EGL + GLES 3; exit 77 = skip.
+    "gles_extensions|Tests/Apps/test_gles_extensions.elf||60|ALL PASS"
     # VAO + EBO + multidraw + indirect draws with readback pins
     # (needs DISPLAY + host GL). Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_vao|Tests/Apps/test_sdl_gl_vao.elf||60|ALL PASS"

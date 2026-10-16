@@ -205,18 +205,32 @@ public:
     //   svc #0                    ; trap to host
     //   ret                       ; return to guest caller (x30)
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
-    static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
+    static constexpr uint64_t MAX_SYMBOLS      = 8192;  // two id banks; 128 KiB of trampolines
     // per-thunk ID base to avoid collisions.
     // Each thunk type gets a non-overlapping range of symbol_ids.
     // The dispatch handler checks the range to route to the correct
     // thunk without trying each one sequentially.
-    //   GraphicThunk: 0x0000 - 0x0FFF  (4096 symbols)
+    //   GraphicThunk: 0x0000 - 0x0FFF and 0x3000 - 0x3FFF  (8192 symbols)
     //   AudioThunk:   0x1000 - 0x1FFF  (4096 symbols)
     //   DisplayThunk: 0x2000 - 0x2FFF  (4096 symbols)
+    // Ids stay below 0x4000, inside the trampoline's 16-bit MOVZ.
     static constexpr uint32_t ID_BASE_GRAPHICS = 0x0000;
     static constexpr uint32_t ID_BASE_AUDIO    = 0x1000;
     static constexpr uint32_t ID_BASE_DISPLAY  = 0x2000;
+    static constexpr uint32_t ID_BASE_GRAPHICS_HIGH = 0x3000;  // second graphics bank
     static constexpr uint32_t ID_MASK          = 0x3000;  // range selector
+    static constexpr uint32_t ID_BANK_SIZE     = 0x1000;
+    static constexpr uint32_t graphics_symbol_id(uint32_t local) {
+        return local < ID_BANK_SIZE ? ID_BASE_GRAPHICS + local
+                                    : ID_BASE_GRAPHICS_HIGH + (local - ID_BANK_SIZE);
+    }
+    // Local index of a graphics symbol id, or UINT32_MAX for another thunk's id.
+    static constexpr uint32_t graphics_local_index(uint32_t id) {
+        if (id >= 0x4000) return UINT32_MAX;
+        if ((id & ID_MASK) == ID_BASE_GRAPHICS) return id - ID_BASE_GRAPHICS;
+        if ((id & ID_MASK) == ID_BASE_GRAPHICS_HIGH) return ID_BANK_SIZE + (id - ID_BASE_GRAPHICS_HIGH);
+        return UINT32_MAX;
+    }
 private:
     std::unique_ptr<GraphicThunkImpl> impl_;
     // dispatch() stages that fully handle a symbol: a value means "return

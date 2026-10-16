@@ -58,6 +58,12 @@ fetched to exercise behavior beyond the synthetic tests:
   `Tests/Apps/voxelspace/libs/libfixmath/LICENSE`.
 - **Vulkan headers:** upstream license information remains under
   `ThirdParty/VulkanHeaders/LICENSE.md` and `ThirdParty/VulkanHeaders/LICENSES/`.
+- **OpenGL registry:** `ThirdParty/GLRegistry/gl.xml` is Apache-2.0 (header in the
+  file), from [KhronosGroup/OpenGL-Registry](https://github.com/KhronosGroup/OpenGL-Registry)
+  `xml/gl.xml` at commit `6af574a14089ccfee87efe230ebcdd8742859813`
+  (2026-10-06, SHA-256 `b9ca2cfa5c676e901c20d34af3407f1687cde0f1336a5ff7a8974d04c7494ad3`).
+  `Tools/CodeGen/glcoverage.py` derives thunk rows and the hidden ES
+  extension list from it.
 - **Android runtime and packaging tools:** the ignored Bionic runtime is
   checksum-pinned to AOSP `prebuilts/runtime` and retains `NOTICE.html.gz`;
   each installed app root receives a copy. The packaging fetchers download

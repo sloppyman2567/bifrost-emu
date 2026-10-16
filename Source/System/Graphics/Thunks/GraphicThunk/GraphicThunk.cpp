@@ -127,7 +127,7 @@ void GraphicThunk::register_function_(const std::string& lib,
                 impl_->id_to_idx_.size());
         return;
     }
-    uint32_t sym_id = GraphicThunk::ID_BASE_GRAPHICS + local_id;
+    uint32_t sym_id = GraphicThunk::graphics_symbol_id(local_id);
     uint64_t addr = impl_->trampoline_base + local_id * GraphicThunk::TRAMPOLINE_SIZE;
     write_trampoline_(*impl_->mem, addr, sym_id);
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
@@ -152,8 +152,8 @@ void GraphicThunk::register_function_(const std::string& lib,
 //   svc #0                  ; trap to host
 //   nop                     ; pad to 16 bytes (alignment)
 void GraphicThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id) {
-    // Truncation: sym_id is bounded by MAX_SYMBOLS (4096), so it always
-    // fits in 16 bits.
+    // Truncation: graphics ids stay below 0x4000 (graphics_symbol_id), so
+    // they always fit in 16 bits.
     uint32_t buf[4];
     buf[0] = trampoline_enc::MOVZ_Xd_IMM16(9, static_cast<uint16_t>(sym_id));
     buf[1] = trampoline_enc::MOVZ_Xd_IMM16(8,

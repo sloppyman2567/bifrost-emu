@@ -2467,6 +2467,14 @@ target back. The thunk used to return NULL for the advertised target entry
 point, which Android WebView called. It skips without host EGL/GLES 2 or the
 extensions; it does not cover AHardwareBuffer or dma-buf image sources.
 
+`Tests/Apps/test_gles_extensions.c` checks, on a host ES 3 context, that the
+filtered `glGetString(GL_EXTENSIONS)`, `GL_NUM_EXTENSIONS` and `glGetStringi`
+agree and that an index past the list is `GL_INVALID_VALUE`. Hidden fd-import
+extensions must stay hidden, and every entry point of 12 common extensions
+must resolve when advertised. It calls OES vertex-array, discard-framebuffer
+and KHR debug-group alias rows. It checks resolution of the other generated rows,
+not their behavior.
+
 ## Memory and signal regressions
 
 `Tests/Unit/test_mem_guard.c` checks wrapping `munmap`, stack overlap rejection,

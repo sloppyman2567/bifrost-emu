@@ -56,7 +56,8 @@ Large host adapters are divided by the APIs or protocols they implement:
   Pulse, OpenAL, OpenSL and AAudio backends.
 - `Graphics/Thunks/GraphicThunk/`: lifecycle and registration in
   `GraphicThunk.cpp`, generic dispatch, special policies, floating-point ABI
-  handling and callback bridges.
+  handling, callback bridges and the guest-visible ES extension list
+  (`ExtensionFilter.cpp`).
 - `Graphics/Thunks/DisplayThunk/`: lifecycle and registration in
   `DisplayThunk.cpp`, generic dispatch, proxy calls, Wayland forwarding,
   Vulkan dispatch and Vulkan staging.

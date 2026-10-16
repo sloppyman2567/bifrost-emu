@@ -1,15 +1,16 @@
 // GraphicThunk::dispatch — SVC entry: runs the policy stages, then the generic
 // integer/pointer path (bounces, state tracking, writeback, presentation).
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
+#include "System/Graphics/Thunks/GraphicThunk/ExtensionFilter.hpp"
 namespace arm64emu {
 int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    if ((symbol_id & GraphicThunk::ID_MASK) != GraphicThunk::ID_BASE_GRAPHICS) {
+    const uint32_t local_id = GraphicThunk::graphics_local_index(symbol_id);
+    if (local_id == UINT32_MAX) {
         return -ENOENT;
     }
-    uint32_t local_id = symbol_id - GraphicThunk::ID_BASE_GRAPHICS;
     if (local_id >= impl_->id_to_idx_.size()) {
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: unknown symbol_id=%u\n", symbol_id);
@@ -1512,6 +1513,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                   static_cast<unsigned int>(args[0]))
             : nullptr;
         ret = reinterpret_cast<uint64_t>(s);
+        if (s && args[0] == GL::EXTENSIONS) {
+            if (const char* guest_list = gl_extensions::filtered_string())
+                ret = reinterpret_cast<uint64_t>(guest_list);
+        }
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] %s pname=0x%x host='%.*s'\n",
                     entry.name.c_str(),
@@ -1520,12 +1525,21 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     } else if (is_get_string) {         // "ii" — glGetStringi
         using GetStringIFn = const unsigned char* (*)(unsigned int, unsigned int);
-        const unsigned char* s = entry.host_fn
-            ? reinterpret_cast<GetStringIFn>(entry.host_fn)(
-                  static_cast<unsigned int>(args[0]),
-                  static_cast<unsigned int>(args[1]))
-            : nullptr;
-        ret = reinterpret_cast<uint64_t>(s);
+        const char* name = nullptr;
+        const bool filtered = args[0] == GL::EXTENSIONS &&
+            gl_extensions::filtered_at(static_cast<uint32_t>(args[1]), &name);
+        if (name) {
+            ret = reinterpret_cast<uint64_t>(name);
+        } else {
+            // Past the filtered list, query an index past the host list so
+            // the host raises GL_INVALID_VALUE and returns NULL.
+            const unsigned char* s = entry.host_fn
+                ? reinterpret_cast<GetStringIFn>(entry.host_fn)(
+                      static_cast<unsigned int>(args[0]),
+                      filtered ? 0xFFFFFFFFu : static_cast<unsigned int>(args[1]))
+                : nullptr;
+            ret = reinterpret_cast<uint64_t>(s);
+        }
     } else if (entry.n_stack >= 7) {
         using Fn15 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                    uint64_t, uint64_t, uint64_t, uint64_t,
@@ -1583,6 +1597,13 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 static_cast<long long>(finished - present_started));
     }
 
+    // The extension count must match the filtered glGetStringi list. args[1]
+    // is the host-side result buffer; the writeback below copies it out.
+    if (is_gl_query && args[0] == GL::NUM_EXTENSIONS && args[1]) {
+        int32_t count;
+        if (gl_extensions::filtered_count(&count))
+            *reinterpret_cast<int32_t*>(args[1]) = count;
+    }
     // Write bounced pointer args back into guest memory (clamped to the
     // enclosing live allocation — see safe_writeback_all above).
     safe_writeback_all();

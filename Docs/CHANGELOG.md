@@ -13,6 +13,20 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### GL extension entry points from the registry (2026-10-16)
+
+- The host advertised extensions with 241 entry points that the thunk resolved
+  to NULL (on Mesa 26.2, Radeon). `glcoverage.py` now generates rows for
+  registry extension commands: aliases and promoted commands copy the core row
+  (policy included), others get generic rows. 2,266 rows in total.
+- OpenGL ES contexts hide extensions with commands that cannot be thunked
+  (host fds, untyped data buffers, callbacks), so advertised functions
+  resolve. Desktop GL keeps the host list.
+- Update the vendored `gl.xml` from 2018 to Khronos commit `6af574a`.
+- Graphics symbol ids gain a second bank (8192 entries); registration had
+  reached the old 4096 limit.
+- Add `gles_extensions`.
+
 ### OES_EGL_image entry points for GLES guests (2026-10-16)
 
 - Add thunk rows for `glEGLImageTargetTexture2DOES` and
