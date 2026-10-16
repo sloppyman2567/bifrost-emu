@@ -114,13 +114,15 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             }
             return;
         case InstClass::BRK_IMM: {
-            // BRK #imm16 → deliver SIGTRAP. We follow the shell
-            // convention for signal-terminated processes: exit code
-            // = 128 + signal. BRK raises SIGTRAP (signal 5), so exit
-            // 133. This matches real Linux behavior and prevents
-            // libc's abort() from falling through into unrelated
-            // code paths (was happening with glibc 2.36+ static
-            // binaries hitting the getrandom vDSO assertion).
+            // BRK #imm16 → forced SIGTRAP/TRAP_BRKPT with si_addr and the
+            // saved pc at the BRK itself (Linux do_el0_brk64; QEMU
+            // EXCP_BKPT). A handler resumes wherever it sets the pc; the
+            // default disposition ends the whole process by SIGTRAP.
+            if (force_signal(*this, cpu, signals_, BIFROST_SIGTRAP, TRAP_BRKPT_EMU, cpu.pc)) {
+                next_pc = cpu.pc;
+                return;
+            }
+            next_pc = cpu.pc;
             uint16_t imm = (d.raw >> 5) & 0xFFFF;
             if (brk_verbose_) {
                 fprintf(stderr, "[emu] BRK #%u at pc=0x%llx (terminating)\n",
@@ -224,8 +226,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
                 }
                 fflush(stderr);
             }
-            cpu.running = false;
-            cpu.exit_code = 128 + 5;  // SIGTRAP
             return;
         }
         case InstClass::HLT_IMM: {

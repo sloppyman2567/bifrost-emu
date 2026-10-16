@@ -117,6 +117,7 @@ constexpr int SEGV_MAPERR_EMU = 1;
 constexpr int SEGV_ACCERR_EMU = 2;
 constexpr int ILL_ILLOPC_EMU  = 1;
 constexpr int FPE_INTDIV_EMU  = 1;
+constexpr int TRAP_BRKPT_EMU  = 1;
 // Fixed guest address where we map the sigreturn trampoline.
 // Chosen to be far from the stack (Memory::STACK_TOP) and heap mmap
 // region (MMAP_BASE_MIN+) so it never collides. It is unmapped until
@@ -278,6 +279,11 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr);
 // if the default disposition was applied.
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code = SI_USER_EMU, uint64_t fault_addr = 0);
+// A synchronous trap the thread cannot block or ignore (Linux
+// force_sig_info_to_task): a blocked or ignored `signo` reverts to SIG_DFL
+// and is unblocked before delivery, so it terminates instead of re-trapping.
+bool force_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
+                  int si_code, uint64_t fault_addr);
 // BIFROST_FAULT_TRACE: start pc of the JIT block whose memory guard is
 // interpreting the current instruction on this thread (0 otherwise), so a
 // fault line can name the block that was left mid-way.

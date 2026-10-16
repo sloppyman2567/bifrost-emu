@@ -143,6 +143,46 @@ static void main_thread_exits_first(void) {
     pthread_exit(NULL);
 }
 
+#ifdef __aarch64__
+#include <ucontext.h>
+// BRK raises SIGTRAP/TRAP_BRKPT with si_addr and the saved pc at the BRK.
+static void brk_now(void) { __asm__ volatile("brk #0x123"); }
+static void* worker_brk(void* arg) {
+    (void)arg;
+    brk_now();
+    return NULL;
+}
+static void worker_brk_default(void) {
+    pthread_t t;
+    pthread_create(&t, NULL, worker_brk, NULL);
+    for (;;) sleep(1);
+}
+static void on_brk(int signo, siginfo_t* info, void* context) {
+    ucontext_t* uc = context;
+    const unsigned long pc = uc->uc_mcontext.pc;
+    if (signo != SIGTRAP || info->si_code != TRAP_BRKPT || (unsigned long)info->si_addr != pc ||
+        *(const unsigned*)pc != 0xd4202460u)  // brk #0x123
+        _exit(3);
+    uc->uc_mcontext.pc = pc + 4;
+}
+static void brk_handled(void) {
+    struct sigaction sa = {0};
+    sa.sa_sigaction = on_brk;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGTRAP, &sa, NULL);
+    brk_now();
+    _exit(0);
+}
+static void brk_blocked(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGTRAP);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    brk_now();
+    _exit(0);
+}
+#endif
+
 int main(void) {
     check(died_by(run(main_sigkill), SIGKILL),
           "main thread SIGKILLs itself with live threads");
@@ -150,6 +190,13 @@ int main(void) {
           "worker kill(getpid(), SIGTERM) ends the process");
     check(died_by(run(protected_store), SIGSEGV),
           "an unhandled SIGSEGV is reported to the parent as a signal death");
+#ifdef __aarch64__
+    check(died_by(run(worker_brk_default), SIGTRAP), "a worker's BRK ends the process by SIGTRAP");
+    int brk = run(brk_handled);
+    check(brk != -1 && WIFEXITED(brk) && WEXITSTATUS(brk) == 0,
+          "a SIGTRAP handler sees TRAP_BRKPT at the BRK and resumes past it");
+    check(died_by(run(brk_blocked), SIGTRAP), "a blocked SIGTRAP from BRK still terminates");
+#endif
     int status = run(worker_group_exit);
     check(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 7,
           "worker exit_group(7) while main sleeps");

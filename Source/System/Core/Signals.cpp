@@ -524,6 +524,16 @@ void fault_trace_sigreturn(const CPU& restored, const SignalFrame& frame) {
 void Emulator::unblock_host_wakeup(sigset_t& mask) {
     sigdelset(&mask, KICK_SIGNAL);
 }
+bool force_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
+                  int si_code, uint64_t fault_addr) {
+    const std::optional<SigAction> act = sigtab.lookup(signo);
+    const bool blocked = SignalTable::is_blocked(cpu, signo);
+    if (blocked || (act && act->handler == 1)) {
+        sigtab.clear_handler(signo);
+        if (blocked) cpu.sigmask.fetch_and(~sig_bit(signo));
+    }
+    return deliver_signal(emu, cpu, sigtab, signo, si_code, fault_addr);
+}
 
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {

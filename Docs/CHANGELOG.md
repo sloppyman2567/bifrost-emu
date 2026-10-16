@@ -13,6 +13,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### BRK raises SIGTRAP (2026-10-16)
+
+- `BRK` delivers a forced SIGTRAP (`TRAP_BRKPT`, `si_addr` and saved pc at
+  the BRK), as Linux `do_el0_brk64` does. A handler can resume; a blocked or
+  ignored SIGTRAP reverts to the default, which ends the whole process by
+  SIGTRAP. Before, BRK stopped only the trapping thread with exit 133, so a
+  worker's `__builtin_trap` or musl `a_crash` left the process running.
+- Add `force_signal` (Linux `force_sig_info_to_task`) and three BRK cases to
+  `test_group_exit`.
+
 ### Rootfs cwd, signal deaths, thread names and input times (2026-10-16)
 
 - A guest whose executable lives inside `BIFROST_ROOT` starts with its cwd
