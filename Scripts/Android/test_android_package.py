@@ -17,12 +17,36 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import urllib.request
 import zipfile
 
 import android_package as package
 
 ROOT = package.ROOT
 ARGS = None
+# Google's play-services-basement (GoogleApiAvailabilityLight) for the microG fixture.
+BASEMENT = ("https://dl.google.com/android/maven2/com/google/android/gms/play-services-basement/"
+            "18.12.0/play-services-basement-18.12.0.aar", 451993,
+            "30e9df7012c15ef31a4b288b3d77eb4550b195a0581675cad121b0b4bbc47b76")
+
+
+def play_services_basement(work):
+    """Return the pinned basement classes.jar, downloading the AAR on first use."""
+    url, size, sha256 = BASEMENT
+    cache = ROOT / "build/play-services-basement" / url.rsplit("/", 1)[1]
+    if not cache.is_file():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url, timeout=60) as response:
+            data = response.read(size + 1)
+        if len(data) != size or hashlib.sha256(data).hexdigest() != sha256:
+            raise ValueError("play-services-basement does not match its pin")
+        cache.write_bytes(data)
+    if hashlib.sha256(cache.read_bytes()).hexdigest() != sha256:
+        raise ValueError("Cached play-services-basement does not match its pin")
+    jar = work / "play-services-basement.jar"
+    with zipfile.ZipFile(cache) as archive:
+        jar.write_bytes(archive.read("classes.jar"))
+    return jar
 
 
 class LauncherArgumentTests(unittest.TestCase):
@@ -550,6 +574,9 @@ class PackageTests(unittest.TestCase):
                           'android:authorities="org.bifrost.fixture.disabled" android:enabled="false" android:exported="false"/>')
             component += (f'<provider android:name="{activity}$RemoteProvider" '
                           'android:authorities="org.bifrost.fixture.remote" android:process=":provider" android:exported="false"/>')
+        if managed == "ManagedPlayServices" and not split:
+            # The client library checks this against its own version code.
+            component += '<meta-data android:name="com.google.android.gms.version" android:value="12451000"/>'
         if managed == "ManagedActivities" and not split:
             component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
             component += (f'<activity android:name="{activity}$Translucent" android:exported="false" '
@@ -590,14 +617,16 @@ class PackageTests(unittest.TestCase):
             classes.mkdir()
             dex = cls.work / (name + "-dex")
             dex.mkdir()
+            libraries = [play_services_basement(cls.work)] if managed == "ManagedPlayServices" else []
             subprocess.run([os.environ.get("JAVAC", "javac"), "--release", "8", "-cp",
-                            str(cls.tools / "android.jar"), "-d", str(classes),
+                            os.pathsep.join(map(str, [cls.tools / "android.jar", *libraries])), "-d", str(classes),
                             str(ROOT / "Tests/Host" / (activity.rsplit(".", 1)[-1] + ".java"))],
                            check=True, capture_output=True)
             subprocess.run(["java", "-cp", str(cls.tools / "d8.jar"),
                             "com.android.tools.r8.D8", "--min-api", "26", "--lib",
                             str(cls.tools / "android.jar"), "--output", str(dex),
-                            *map(str, classes.rglob("*.class"))], check=True, capture_output=True)
+                            *map(str, classes.rglob("*.class")), *map(str, libraries)],
+                           check=True, capture_output=True)
             with zipfile.ZipFile(apk, "a") as archive:
                 archive.write(dex / "classes.dex", "classes.dex")
         if native:
@@ -1116,6 +1145,21 @@ class PackageTests(unittest.TestCase):
         self.assertRegex(text, r"APP_POPUP_SHOWN \d+ \[0,0\]\[\d+,\d+\] visible=\d+ text=Overlay button")
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_CREATED"), 2)
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
+
+    def test_managed_play_services_available(self):
+        # Google's own client check accepts the provisioned microG packages:
+        # both are present with spoofed Google certificates (0 = SUCCESS).
+        state = self.work / "play-services-state"
+        bundle = self.work / "play-services.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("play-services", managed="ManagedPlayServices"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=180)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        self.assertRegex(text, r"MANAGED_PLAY_SERVICES status=0 apk=252432034 client=\d+", text[-30000:])
 
     def test_managed_activity_stack(self):
         state = self.work / "activities-state"

@@ -23,6 +23,38 @@ See [current support](../SUPPORT.md#android-scope-and-v20-plans),
 [host media](#host-media-decoding-2026-10-14) and the
 [roadmap](../roadmap.md) for the latest scope and remaining work.
 
+### microG Play services packages (2026-10-16)
+
+Every managed app root carries microG's `com.google.android.gms` (GmsCore)
+and `com.android.vending` (Play Store companion) as privileged system apps:
+`/system/priv-app/GmsCore/GmsCore.apk` and `/system/priv-app/Phonesky/Phonesky.apk`,
+with arm64 libraries extracted beside them (`extractNativeLibs="true"`).
+`Tools/Android/android_microg.py` downloads and pins them; see
+[third-party provenance](../THIRD_PARTY.md). They use UIDs 19998 and 19999,
+which `android_sessions.app_id` never assigns to an installed app.
+
+`ManagedLauncher.installMicroG` registers both as lazily loaded system
+packages. An archive is parsed on the first lookup that needs it (about
+1.8 s for GmsCore and 0.2 s for the companion in the JIT, far longer in the
+interpreter); UID-to-name queries do not parse. Service child processes
+receive the parent's already parsed snapshots in the BOOTSTRAP reply. `FrameworkPackages` reports the certificate in each
+package's `fake-signature` meta-data, as microG's
+[framework patch](https://github.com/microg/patches) does: the package must
+target an API above 22, declare the meta-data and hold
+`android.permission.FAKE_PACKAGE_SIGNATURE`, which the provisioned system
+packages are granted. The spoofed certificate replaces `signatures` for
+`GET_SIGNATURES` and `signingInfo` for `GET_SIGNING_CERTIFICATES`; the patch
+itself only replaces `signatures`. `getPackagesForUid` and `getNameForUid`
+now also resolve system packages.
+
+Google's own `play-services-basement` 18.12.0 requires both packages with
+Google certificates. Without microG it logs "requires the Google Play Store,
+but it is missing" and returns `SERVICE_INVALID` (9), the status SpongeBob's
+Firebase gate reported. With microG it returns `SUCCESS` with apk version
+252432034. Only package identity is provided so far. microG processes are not
+started, so binding its services, querying its content providers and its
+broadcasts are not implemented yet.
+
 ### Shared guest processes (October 11, 2026)
 
 Independent emulator OS processes can join the same Binder realm using

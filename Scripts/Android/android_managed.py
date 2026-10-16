@@ -23,6 +23,7 @@ import threading
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
 import android_framework
+import android_microg
 from android_processes import ProcessHost
 
 PRIORITIES = "??VDIWEFS"
@@ -776,6 +777,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     settings_key = settings_user_key(app.parent)
     identity = {"schema": 3, "code": code, "files": metadata["files"], "media_mask": media_mask,
                 "framework": file_hash(framework / "bifrost-framework.json"),
+                "microg": {package: value[3] for package, value in android_microg.PACKAGES.items()},
                 "adapters": {n: adapter_manifest["files"][n] for n in adapter_names},
                 "launcher": file_hash(dex), "settings_key": hashlib.sha256(settings_key).hexdigest()}
     managed = app / "managed"
@@ -805,6 +807,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     with tempfile.TemporaryDirectory(prefix=".prepare-", dir=managed) as temporary:
         fresh = Path(temporary) / "rootfs"
         shutil.copytree(framework, fresh, symlinks=True)
+        android_microg.install(fresh)
         from asgard import configure_media
         configure_media(fresh, media_mask)
         local = fresh / "data/local/tmp"

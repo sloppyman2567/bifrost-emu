@@ -21,6 +21,15 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   configurations must agree. Process, Activity and bind configurations take
   `uiMode` from `FrameworkUiMode.CONFIGURATION_UI_MODE`. New `Framework*.java`
   modules go in `LAUNCHER_SOURCES` (`Scripts/Android/android_managed.py`).
+- microG (`Tools/Android/android_microg.py`, pinned) is a privileged system
+  package set in every managed root: GmsCore UID 19998, Play Store companion
+  UID 19999, reserved in `android_sessions.app_id`. `FrameworkPackages` applies
+  microG's `fake-signature` rule to both `signatures` and `signingInfo`; keep
+  it limited to packages declaring the meta-data and permission. Their
+  archives load lazily (`installSystemLazily`): app startup must not pay
+  the GmsCore parse. Children get the parent's already parsed snapshots
+  (`FrameworkProcessRuntime.SHARED_SYSTEM_PACKAGES`).
+  `test_managed_play_services_available` runs Google's own basement check.
 - App processes register their code and profile paths with ART
   (`registerProfiles`) and run from `dexopt`'s install-time odex. Keep the
   odex accepted: `PCL[]` context, the image's boot classpath and ISA props.

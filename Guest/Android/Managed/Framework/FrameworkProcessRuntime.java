@@ -23,6 +23,9 @@ import org.json.JSONObject;
 final class FrameworkProcessRuntime {
     private static final String DESCRIPTOR = "org.asgard.ServiceProcesses";
     private static final int BOOTSTRAP = 1, READY = 2, PUBLISH = 3, DONE = 4, UNBIND = 5;
+    // Provisioned system packages a child receives as parsed snapshots when
+    // the parent has already parsed them (ManagedLauncher.installMicroG).
+    static final String[] SHARED_SYSTEM_PACKAGES = {"com.google.android.gms", "com.android.vending"};
     private final FrameworkPackages packages;
     private final FrameworkServiceRuntime services;
     private final Map<String, Child> children = new HashMap<>();
@@ -114,6 +117,12 @@ final class FrameworkProcessRuntime {
                             reply.writeNoException();
                             reply.writeTypedObject(pkg, 0);
                             reply.writeTypedObject(packages.systemPackage("com.android.webview"), 0);
+                            List<PackageInfo> provisioned = new ArrayList<>();
+                            for (String name : SHARED_SYSTEM_PACKAGES) {
+                                PackageInfo system = packages.loadedSystemPackage(name);
+                                if (system != null) provisioned.add(system);
+                            }
+                            reply.writeTypedList(provisioned);
                             return true;
                         }
                         case READY: {
@@ -210,6 +219,7 @@ final class FrameworkProcessRuntime {
         final IBinder controller;
         final String key;
         PackageInfo webViewProvider;
+        List<PackageInfo> systemPackages;
         Remote(String name, String key) throws Exception {
             controller = (IBinder) Class.forName("android.os.ServiceManager")
                     .getMethod("getService", String.class).invoke(null, name);
@@ -233,6 +243,7 @@ final class FrameworkProcessRuntime {
             try {
                 PackageInfo result = reply.readTypedObject(PackageInfo.CREATOR);
                 webViewProvider = reply.readTypedObject(PackageInfo.CREATOR);
+                systemPackages = reply.createTypedArrayList(PackageInfo.CREATOR);
                 return result;
             } finally { reply.recycle(); }
         }

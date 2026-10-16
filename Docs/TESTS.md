@@ -4,6 +4,32 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## microG Play services packages (2026-10-16)
+
+`test_managed_play_services_available` builds a fixture APK with Google's
+`play-services-basement` 18.12.0 and runs `GoogleApiAvailabilityLight`
+in a managed launch: status 0 (SUCCESS) with apk version 252432034. With
+microG provisioning removed from `prepare_root` the same fixture logs
+"requires the Google Play Store, but it is missing" and returns 9
+(SERVICE_INVALID), as SpongeBob's logs do. `test_android_framework.py
+--services --microg --main-class ActivityProbe` reaches
+`ACTIVITY_MICROG_PACKAGES_OK` (spoofed `signatures`/`signingInfo`, UID
+lookups, system flag through the real PackageManager client).
+
+The full `test_android_package.py` suite passes 33/33. Eager parsing at
+startup had failed two launches: the interpreter-mode persistence start
+exceeded its 180 s bound. Lazy loading fixed it. The `ActivityProbe`
+services probe fails with or without microG, and with the committed
+launcher, at `checkSensorService`: `registerReceiver` from the system
+context is rejected as a foreign receiver package. That failure is
+unrelated and not fixed here. No game was run.
+
+```bash
+JAVAC=/usr/lib/jvm/java-25-openjdk/bin/javac python3 Scripts/Android/test_android_package.py \
+  --emu $PWD/bifrost-emu --plugin $PWD/build/release-sdl1-gl1/plugins/android-window-sdl.so \
+  PackageTests.test_managed_play_services_available
+```
+
 ## Forced synchronous faults (2026-10-16)
 
 `test_group_exit` adds a blocked SIGSEGV with a handler installed, an

@@ -1502,6 +1502,8 @@ public final class ManagedLauncher {
         // Reuse its parcel snapshot so cold child startup fits Chromium's bind deadline.
         if (parent == null) installWebView(context);
         else if (parent.webViewProvider != null) installWebView(context, parent.webViewProvider);
+        if (parent != null) for (PackageInfo system : parent.systemPackages) packages.installSystem(system);
+        installMicroG(context);
         if (diagnostic) checkRuntimeServices(context, false);
         // ActivityThread.handleBindApplication's fallback when no serialized
         // font map arrives (lazy Typeface initialization). This probe has
@@ -1783,6 +1785,51 @@ public final class ManagedLauncher {
             }
             System.out.println("ACTIVITY_WEBVIEW_PACKAGE_OK " + pkg.versionName);
         }
+    }
+
+    // microG Services and its Play Store companion, provisioned by
+    // Tools/Android/android_microg.py; UIDs are reserved in android_sessions.
+    private static final String[][] MICROG = {
+            {"com.google.android.gms", "/system/priv-app/GmsCore", "19998"},
+            {"com.android.vending", "/system/priv-app/Phonesky", "19999"}};
+
+    // Registered lazily: the archive is parsed on the first lookup that needs it.
+    private static void installMicroG(Context system) throws Exception {
+        boolean provisioned = false;
+        for (String[] entry : MICROG) {
+            String directory = entry[1];
+            String apk = directory + "/" + new File(directory).getName() + ".apk";
+            if (!new File(apk).isFile()) continue;
+            provisioned = true;
+            packages.installSystemLazily(entry[0], Integer.parseInt(entry[2]),
+                    () -> parseMicroG(system, entry[0], directory, apk, Integer.parseInt(entry[2])));
+        }
+        if (diagnostic && provisioned) packages.checkMicroG(system);
+    }
+
+    private static PackageInfo parseMicroG(Context system, String name, String directory, String apk, int uid)
+            throws Exception {
+        PackageInfo pkg = system.getPackageManager().getPackageArchiveInfo(apk,
+                PackageManager.GET_ACTIVITIES | PackageManager.GET_RECEIVERS | PackageManager.GET_SERVICES
+                        | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
+                        | PackageManager.GET_PERMISSIONS | PackageManager.GET_SIGNATURES
+                        | PackageManager.GET_SIGNING_CERTIFICATES | PackageManager.MATCH_DISABLED_COMPONENTS);
+        if (pkg == null || !name.equals(pkg.packageName))
+            throw new IllegalStateException("Invalid microG package: " + apk);
+        ApplicationInfo app = pkg.applicationInfo;
+        app.sourceDir = app.publicSourceDir = apk;
+        app.nativeLibraryDir = directory + "/lib/arm64";
+        setField(app, "nativeLibraryRootDir", directory + "/lib");
+        setField(app, "primaryCpuAbi", "arm64-v8a");
+        app.dataDir = "/data/user/0/" + pkg.packageName;
+        setField(app, "credentialProtectedDataDir", app.dataDir);
+        setField(app, "deviceProtectedDataDir", "/data/user_de/0/" + pkg.packageName);
+        app.uid = uid;
+        app.flags |= ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_HAS_CODE | ApplicationInfo.FLAG_INSTALLED;
+        for (android.content.pm.ComponentInfo[] group : new android.content.pm.ComponentInfo[][] {
+                pkg.activities, pkg.receivers, pkg.services, pkg.providers})
+            if (group != null) for (android.content.pm.ComponentInfo component : group) component.applicationInfo = app;
+        return pkg;
     }
 
     public static void main(String[] args) {

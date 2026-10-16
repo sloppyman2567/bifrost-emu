@@ -29,12 +29,16 @@ from android_managed import (LogdReceiver, install_managed_graphics, installed_a
 
 def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), properties=(), services=False,
         libraries=(), main_class="FrameworkProbe", app=None, probe_args=(), managed_graphics=None,
-        trace_apk=None, trace_after=0, trace_duration=15, binder_mode="broker", binder_broker=None, app_id=None):
+        trace_apk=None, trace_after=0, trace_duration=15, binder_mode="broker", binder_broker=None, app_id=None,
+        microg=False):
     metadata = install(runtime, art_root)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bifrost-framework-run-") as temporary:
         root = Path(temporary) / "rootfs"
         shutil.copytree(runtime, root, symlinks=True)
+        if microg:
+            import android_microg
+            android_microg.install(root)
         install_settings_key(root, os.urandom(32))
         (root / "data/local/tmp").mkdir(parents=True)
         (root / "data/dalvik-cache/arm64").mkdir(parents=True)
@@ -150,6 +154,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         if main_class == "ActivityProbe$MediaJniProbe":
             markers += ("ANDROID_MEDIA_JNI_OK", "ANDROID_MEDIA_MUXER_OK")
         if services and main_class == "ActivityProbe":
+            if microg:
+                markers += ("ACTIVITY_MICROG_PACKAGES_OK",)
             markers += ("ACTIVITY_SERVICE_REGISTRATION_OK", "ACTIVITY_SENSOR_SERVICE_OK",
                         "ACTIVITY_TELEPHONY_SERVICE_OK", "ACTIVITY_SHARED_MEMORY_OK", "ACTIVITY_AUDIO_SERVICE_OK",
                         "ACTIVITY_EXIT_HISTORY_OK", "ACTIVITY_START_HISTORY_OK")
@@ -215,6 +221,8 @@ if __name__ == "__main__":
     parser.add_argument("--binder-broker", type=Path,
                         help="Use an existing broker for concurrent framework-client tests")
     parser.add_argument("--app-id", type=int, help="Guest Android UID for a framework-client test")
+    parser.add_argument("--microg", action="store_true",
+                        help="Provision microG system packages (Tools/Android/android_microg.py)")
     parser.add_argument("--library", type=Path, action="append", default=[], help="Copy a probe JNI library into /data/local/tmp")
     parser.add_argument("--main-class", default="FrameworkProbe", help="Probe class to run (e.g. ActivityProbe)")
     parser.add_argument("--app", type=Path, help="Installed /data/app/<package>-<id> directory to copy into the root")
@@ -277,4 +285,5 @@ if __name__ == "__main__":
                       args.app.resolve() if args.app else None, args.probe_arg,
                       args.managed_graphics.resolve() if args.managed_graphics else None,
                       args.trace_apk, args.trace_after, args.trace_duration, args.binder_mode,
-                      args.binder_broker.resolve() if args.binder_broker else None, args.app_id) else 1)
+                      args.binder_broker.resolve() if args.binder_broker else None, args.app_id,
+                      args.microg) else 1)

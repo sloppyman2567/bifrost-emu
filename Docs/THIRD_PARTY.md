@@ -83,6 +83,17 @@ fetched to exercise behavior beyond the synthetic tests:
   These downloads retain their upstream terms and are not redistributed by
   the source commit. Generated regression APKs use a temporary test key and
   original fixture code; commercial APKs and installed app state stay local.
+- **microG:** `Tools/Android/android_microg.py` downloads the Apache-2.0
+  [microG GmsCore](https://github.com/microg/GmsCore) `v0.3.17.252432`
+  release APKs (`com.google.android.gms`, `com.android.vending`) into
+  `build/microg/`, pinned by size and SHA-256. The hashes match microG's
+  signed F-Droid index (repository certificate SHA-256
+  `9BD06727E62796C0130EB6DAB39B73157451582CBD138E86C468ACC395D14165`).
+  Each managed app root receives a copy. The Play services availability
+  test downloads Google's `play-services-basement` 18.12.0 AAR (Android SDK
+  terms) from Google Maven into `build/play-services-basement/`, pinned by
+  SHA-256 `30e9df7012c15ef31a4b288b3d77eb4550b195a0581675cad121b0b4bbc47b76`;
+  it is only linked into a generated test APK.
 
 This lists the main fixture bundles, not a complete dependency/license audit.
 Preserve per-file notices and inspect the exact upstream revision and linked

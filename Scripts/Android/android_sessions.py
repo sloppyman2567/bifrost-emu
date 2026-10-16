@@ -59,6 +59,11 @@ def publish(path, value):
             pending.unlink(missing_ok=True)
 
 
+# System packages provisioned into every app root: WebView (ManagedLauncher)
+# and microG (Tools/Android/android_microg.py UIDS).
+RESERVED_APP_IDS = frozenset({10001, 19998, 19999})
+
+
 def app_id(state, package):
     """Persist package identity independently of code updates and process IDs."""
     state.mkdir(parents=True, exist_ok=True)
@@ -67,12 +72,12 @@ def app_id(state, package):
         path = state / ".app-ids.json"
         ids = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(ids, dict) or any(type(v) is not int or not 10000 <= v <= 19999
-                                            or v == 10001 for v in ids.values()) \
+                                            or v in RESERVED_APP_IDS for v in ids.values()) \
                 or len(set(ids.values())) != len(ids):
             raise ValueError("Invalid app ID registry")
         if package not in ids:
-            # 10001 belongs to the provisioned WebView package.
-            available = next((v for v in range(10000, 20000) if v != 10001 and v not in ids.values()), None)
+            available = next((v for v in range(10000, 20000)
+                              if v not in RESERVED_APP_IDS and v not in ids.values()), None)
             if available is None: raise ValueError("Android app ID range exhausted")
             ids[package] = available
             publish(path, ids)

@@ -13,6 +13,21 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### microG Play services packages (2026-10-16)
+
+- Managed app roots carry microG v0.3.17.252432 (`com.google.android.gms`,
+  `com.android.vending`) as privileged system apps, pinned by SHA-256 from
+  microG's signed release (`Tools/Android/android_microg.py`). UIDs 19998 and
+  19999 are reserved. Their archives are parsed on first lookup, so apps
+  that never query Play services pay no startup cost.
+- PackageManager reports their `fake-signature` certificates in
+  `signatures` and `signingInfo`, following microG's signature-spoofing
+  rule, and resolves system packages by UID. Google's own Play services
+  check now returns SUCCESS instead of SERVICE_INVALID ("Play Store is
+  missing"). microG's services, providers and broadcasts do not run yet.
+- Add `test_managed_play_services_available` (Google `play-services-basement`
+  18.12.0) and `test_android_framework.py --microg`.
+
 ### Synchronous faults cannot be blocked or ignored (2026-10-16)
 
 - Memory faults (SIGSEGV/SIGBUS), undefined instructions (SIGILL) and a bad

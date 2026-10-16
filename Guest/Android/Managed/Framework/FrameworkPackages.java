@@ -13,6 +13,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
+import android.content.pm.Signature;
 import android.os.Process;
 import android.os.Parcel;
 import java.lang.reflect.Method;
@@ -57,23 +58,101 @@ final class FrameworkPackages {
     void installSystem(PackageInfo pkg) {
         if ((pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0)
             throw new IllegalArgumentException("Not a system package: " + pkg.packageName);
+        Signature fake = fakeSignature(pkg);
+        if (fake != null) fakeSignatures.put(pkg.packageName, fake);
+        else fakeSignatures.remove(pkg.packageName);
         systemPackages.put(pkg.packageName, copy(pkg, PackageInfo.CREATOR));
         providerFilters.remove(pkg.packageName);
     }
 
+    // microG signature spoofing (github.com/microg/patches, PackageManagerService
+    // mayFakeSignature): a package targeting API > 22 that declares
+    // "fake-signature" meta-data and holds FAKE_PACKAGE_SIGNATURE is reported
+    // with that certificate. Provisioned system packages receive the grant, as
+    // microG-enabled images give their privileged microG apps.
+    private static final String FAKE_SIGNATURE_PERMISSION = "android.permission.FAKE_PACKAGE_SIGNATURE";
+    private final Map<String, Signature> fakeSignatures = new ConcurrentHashMap<>();
+
+    private static Signature fakeSignature(PackageInfo pkg) {
+        String value = pkg.applicationInfo.metaData == null ? null
+                : pkg.applicationInfo.metaData.getString("fake-signature");
+        if (value == null || pkg.applicationInfo.targetSdkVersion <= android.os.Build.VERSION_CODES.LOLLIPOP_MR1
+                || pkg.requestedPermissions == null) return null;
+        for (int i = 0; i < pkg.requestedPermissions.length; i++) {
+            if (!FAKE_SIGNATURE_PERMISSION.equals(pkg.requestedPermissions[i])) continue;
+            pkg.requestedPermissionsFlags[i] |= PackageInfo.REQUESTED_PERMISSION_GRANTED;
+            return new Signature(value);
+        }
+        return null;
+    }
+
+    private static android.content.pm.SigningInfo signingInfo(Signature signature) {
+        try {
+            // Hidden in Android 15: SigningDetails(Signature[], scheme) and
+            // SigningInfo(SigningDetails). Scheme 2 is APK Signature Scheme v2.
+            Class<?> details = Class.forName("android.content.pm.SigningDetails");
+            Object value = details.getConstructor(Signature[].class, int.class)
+                    .newInstance(new Signature[] {signature}, 2);
+            return android.content.pm.SigningInfo.class.getConstructor(details).newInstance(value);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Android 15 SigningInfo construction unavailable", error);
+        }
+    }
+
+    // A provisioned system package whose archive is parsed on first lookup
+    // (GmsCore takes about 1.8 s in the JIT); most apps never ask for it.
+    private final Map<String, java.util.concurrent.Callable<PackageInfo>> pendingSystem = new ConcurrentHashMap<>();
+    private final Map<Integer, String> pendingUids = new ConcurrentHashMap<>();
+
+    void installSystemLazily(String name, int uid, java.util.concurrent.Callable<PackageInfo> loader) {
+        if (systemPackages.containsKey(name)) return;
+        pendingSystem.put(name, loader);
+        pendingUids.put(uid, name);
+    }
+
+    private PackageInfo system(String name) {
+        if (name != null && pendingSystem.containsKey(name)) materialize(name);
+        return name == null ? null : systemPackages.get(name);
+    }
+
+    private java.util.Collection<PackageInfo> allSystem() {
+        for (String name : new ArrayList<>(pendingSystem.keySet())) materialize(name);
+        return systemPackages.values();
+    }
+
+    private synchronized void materialize(String name) {
+        java.util.concurrent.Callable<PackageInfo> loader = pendingSystem.get(name);
+        if (loader == null) return;
+        try {
+            PackageInfo pkg = loader.call();
+            if (!name.equals(pkg.packageName)) throw new IllegalStateException("Package name changed: " + name);
+            installSystem(pkg);
+        } catch (Exception error) {
+            throw new IllegalStateException("Cannot load system package " + name, error);
+        }
+        pendingSystem.remove(name);
+        pendingUids.values().remove(name);
+    }
+
     PackageInfo systemPackage(String name) {
+        PackageInfo pkg = system(name);
+        return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
+    }
+
+    // A parsed system package, without parsing a pending one.
+    PackageInfo loadedSystemPackage(String name) {
         PackageInfo pkg = systemPackages.get(name);
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
     // Uid of the installed or a system package, or -1 when it does not exist.
     int packageUid(String name) {
-        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : systemPackages.get(name);
+        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : system(name);
         return pkg == null ? -1 : pkg.applicationInfo.uid;
     }
 
     PackageInfo processPackage(String name) {
-        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : systemPackages.get(name);
+        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : system(name);
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
@@ -147,6 +226,7 @@ final class FrameworkPackages {
                 case "getInstalledPackages":
                 case "getInstalledApplications": {
                     List<Object> values = new ArrayList<>();
+                    allSystem();
                     List<String> names = new ArrayList<>(systemPackages.keySet());
                     if (installed != null) names.add(installed.packageName);
                     java.util.Collections.sort(names);
@@ -161,12 +241,12 @@ final class FrameworkPackages {
                     PackageInfo pkg = findPackage((String) a[0], ((Number) a[1]).longValue(), (Integer) a[2]);
                     return pkg == null ? -1 : pkg.applicationInfo.uid;
                 }
-                case "getPackagesForUid":
-                    return installed != null && (Integer) a[0] == installed.applicationInfo.uid
-                            ? new String[] {installed.packageName} : null;
+                case "getPackagesForUid": {
+                    String name = packageForUid((Integer) a[0]);
+                    return name == null ? null : new String[] {name};
+                }
                 case "getNameForUid":
-                    return installed != null && (Integer) a[0] == installed.applicationInfo.uid
-                            ? installed.packageName : null;
+                    return packageForUid((Integer) a[0]);
                 case "getReceiverInfo":
                     return activityInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2], installed == null ? null : installed.receivers);
@@ -249,6 +329,17 @@ final class FrameworkPackages {
         return component;
     }
 
+    // Every package here has its own UID (no shared user IDs).
+    private String packageForUid(int uid) {
+        PackageInfo pkg = installed;
+        if (pkg != null && pkg.applicationInfo.uid == uid) return pkg.packageName;
+        String pending = pendingUids.get(uid);
+        if (pending != null) return pending;
+        for (PackageInfo system : systemPackages.values())
+            if (system.applicationInfo.uid == uid) return system.packageName;
+        return null;
+    }
+
     private boolean packageMatches(String name, long flags, int userId) {
         return findPackage(name, flags, userId) != null;
     }
@@ -256,7 +347,7 @@ final class FrameworkPackages {
     private PackageInfo findPackage(String name, long flags, int userId) {
         if (name == null) return null;
         PackageInfo pkg = installed != null && installed.packageName.equals(name)
-                ? installed : systemPackages.get(name);
+                ? installed : system(name);
         return pkg != null && userId == pkg.applicationInfo.uid / 100000
                 && ((flags & PackageManager.MATCH_SYSTEM_ONLY) == 0
                     || (pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0) ? pkg : null;
@@ -360,8 +451,11 @@ final class FrameworkPackages {
             result.reqFeatures = null;
             result.featureGroups = null;
         }
+        Signature fake = fakeSignatures.get(name);
         if ((flags & PackageManager.GET_SIGNATURES) == 0) result.signatures = null;
+        else if (fake != null) result.signatures = new Signature[] {fake};
         if ((flags & PackageManager.GET_SIGNING_CERTIFICATES) == 0) result.signingInfo = null;
+        else if (fake != null) result.signingInfo = signingInfo(fake);
         if ((flags & PackageManager.GET_PERMISSIONS) == 0) {
             result.permissions = null;
             result.requestedPermissions = null;
@@ -483,7 +577,7 @@ final class FrameworkPackages {
             }
             return results;
         }
-        List<PackageInfo> packages = new ArrayList<>(systemPackages.values());
+        List<PackageInfo> packages = new ArrayList<>(allSystem());
         if (installed != null) packages.add(installed);
         for (PackageInfo pkg : packages) {
             if (findPackage(pkg.packageName, flags, userId) == null || pkg.providers == null
@@ -625,7 +719,7 @@ final class FrameworkPackages {
 
     // Whether the installed or a system package declares `authority`.
     boolean declaresProvider(String authority) {
-        java.util.List<PackageInfo> all = new ArrayList<>(systemPackages.values());
+        java.util.List<PackageInfo> all = new ArrayList<>(allSystem());
         if (installed != null) all.add(installed);
         for (PackageInfo pkg : all) {
             if (pkg.providers == null) continue;
@@ -647,6 +741,34 @@ final class FrameworkPackages {
             return result;
         }
         return null;
+    }
+
+    // Spoofed microG identities through the real PackageManager client.
+    void checkMicroG(Context context) throws Exception {
+        PackageManager manager = context.getPackageManager();
+        int checked = 0;
+        for (String name : new String[] {"com.google.android.gms", "com.android.vending"}) {
+            if (system(name) == null) continue;
+            Signature fake = new Signature(manager.getApplicationInfo(name, PackageManager.GET_META_DATA)
+                    .metaData.getString("fake-signature"));
+            PackageInfo legacy = manager.getPackageInfo(name, PackageManager.GET_SIGNATURES);
+            PackageInfo current = manager.getPackageInfo(name, PackageManager.GET_SIGNING_CERTIFICATES);
+            if (legacy.signatures == null || legacy.signatures.length != 1 || !fake.equals(legacy.signatures[0])
+                    || current.signingInfo == null || current.signingInfo.hasMultipleSigners()
+                    || !fake.equals(current.signingInfo.getApkContentsSigners()[0])
+                    || legacy.signingInfo != null || current.signatures != null)
+                throw new AssertionError("microG signature spoofing failed: " + name);
+            if (manager.getPackageInfo(name, 0).signatures != null)
+                throw new AssertionError("signatures returned without query flags: " + name);
+            int uid = legacy.applicationInfo.uid;
+            String[] owners = manager.getPackagesForUid(uid);
+            if (owners == null || owners.length != 1 || !name.equals(owners[0]) || !name.equals(manager.getNameForUid(uid))
+                    || (legacy.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0)
+                throw new AssertionError("microG package identity failed: " + name);
+            checked++;
+        }
+        if (checked != 2) throw new AssertionError("microG packages missing: " + checked);
+        System.out.println("ACTIVITY_MICROG_PACKAGES_OK");
     }
 
     void checkPackageServices(Context context) throws Exception {
