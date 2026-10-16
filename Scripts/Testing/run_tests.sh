@@ -275,6 +275,7 @@ UNIT_TESTS=(
     "scalar_dup|Tests/Unit/jit_scalar_dup.elf||5|scalar_dup: ALL PASS"
     "vector_cold_step|Tests/Unit/jit_vector_cold_step.elf||5|vector_cold_step: ALL PASS"
     "simd_fminmax_zero|Tests/Unit/jit_simd_fminmax_zero.elf||10|ALL PASS"
+    "native_simd_alias|Tests/Unit/jit_native_simd_alias.elf||5|ALL PASS"
     "simd_unary_fp|Tests/Unit/jit_simd_unary_fp.elf||5|simd_unary_fp: ALL PASS"
     "simd_fp_indexed|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS"
     "round_away|Tests/Unit/jit_round_away.elf||5|round_away: ALL PASS"

@@ -15,6 +15,19 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
+
+After the FMAX/FMIN fix below, a SpongeBob avatar-switch profile still spent
+about 19% of the main thread in native SIMD helper calls for 3-4 seconds per
+switch. The helper kinds were MultiplyAdd, ReduceAdd, RoundFp, Select and
+Dup. Their inline bodies are listed under
+[inline native SIMD kinds](#inline-native-simd-kinds-2026-10-13). They are
+cache-compatible: `vec_inst_operands` declares Vm and Vd as reads for
+BSL/BIT/BIF and MLA, so the allocator loads the accumulator and selector
+before the body reads them. A guest loop mixing these instructions drops
+from about 624 ms to 5.3 ms with the same result as QEMU. That loop is an
+upper bound for this instruction mix, not a frame-time measurement.
+
 ## Vector FMAX/FMIN signed zeros inline (2026-10-16)
 
 A SpongeBob fallback profile over repeated avatar switches recorded 243
@@ -1832,6 +1845,17 @@ bodies alone were 3.5% of sampled CPU. The inline kinds and their x86 forms:
   `srl(n ^ sign, c) ^ sign`, which gives the sign for large counts, and it
   is selected only in lanes whose count byte is negative. 8/16-bit lanes and
   hosts without AVX2 keep the helper.
+- **BSL/BIT/BIF:** `base ^ ((base ^ other) & mask)` with `pxor`/`pand`, after
+  loading Vn, Vm and Vd.
+- **DUP (element):** `pshufd` for 32/64-bit lanes; 8/16-bit lanes shift the
+  lane to byte 0 (`psrldq`, `punpcklbw` for bytes), then `pshuflw`/`pshufd`.
+- **ADDV:** shift-and-add halving with `psrldq` and `padd{b,w,d}` (Q=0
+  clears the upper half first), then a byte-shift mask keeps lane 0.
+- **MLA:** `pmullw` (16-bit), `pmulld` (32-bit, SSE4.1) or, for bytes, the
+  low bytes of word products of the even and of the shifted odd bytes; then
+  `padd` with Vd. MLS is not in this row.
+- **FRINTN/M/P/Z:** SSE4.1 `roundps`/`roundpd` modes 0-3. A NaN lane takes
+  the interpreter step (payloads, FPCR.DN). FRINTA/I/X keep the helper.
 
 Every source is loaded before Vd is written, so aliased registers behave as
 in the helper. Both caches already refuse blocks containing this op, so

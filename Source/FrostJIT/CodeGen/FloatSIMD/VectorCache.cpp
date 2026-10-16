@@ -72,8 +72,11 @@ bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& 
             const auto kind = classify_native_simd(w);
             write(w & 31);
             if (kind != NativeSimdKind::ImmediateFp) read((w >> 5) & 31);
-            if (kind == NativeSimdKind::Extract || kind == NativeSimdKind::CompareFp)
+            if (kind == NativeSimdKind::Extract || kind == NativeSimdKind::CompareFp ||
+                kind == NativeSimdKind::Select || kind == NativeSimdKind::MultiplyAdd)
                 read((w >> 16) & 31);
+            if (kind == NativeSimdKind::Select || kind == NativeSimdKind::MultiplyAdd)
+                read(w & 31);
             if ((w & (1u << 30)) && (kind == NativeSimdKind::NarrowShift ||
                 kind == NativeSimdKind::NarrowFp ||
                 (kind == NativeSimdKind::HalfFp && !(w & 0x1000)))) read(w & 31);

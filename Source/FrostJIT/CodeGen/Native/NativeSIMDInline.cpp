@@ -29,6 +29,16 @@ bool FrostJIT::native_simd_inlinable(uint32_t w) const {
         case NativeSimdKind::WidenFp:
         case NativeSimdKind::NarrowFp:
             return true;
+        case NativeSimdKind::Select:
+        case NativeSimdKind::Dup:
+        case NativeSimdKind::ReduceAdd:
+            return true;
+        case NativeSimdKind::MultiplyAdd:
+            return ((w >> 22) & 3) != 2 || has_sse41();  // .4s/.2s need pmulld
+        case NativeSimdKind::RoundFp:
+            // FRINTN/M/P/Z map to ROUNDPS modes; FRINTA/I/X (U=1) need ties-away
+            // or FPCR.RMode and keep the helper.
+            return !((w >> 29) & 1) && has_sse41();
         case NativeSimdKind::HalfFp:
             return cpu_features_.has_f16c();
         case NativeSimdKind::VariableShift:
@@ -261,6 +271,97 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             sse2_op(0xDF, 5, 3);                                 // pandn: ~mask & left
             sse2_op(0xEB, 0, 5);                                 // por
             store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::Select: {
+            // BSL d ? n : m, BIT m ? n : d, BIF m ? d : n, as base ^ ((base ^ other) & mask).
+            const unsigned which = sz;  // 1 BSL, 2 BIT, 3 BIF
+            const int base = which == 1 ? 1 : which == 2 ? 2 : 0;   // m, d, n
+            const int other = which == 1 ? 0 : which == 2 ? 0 : 2;  // n, n, d
+            const int mask = which == 1 ? 2 : 1;                    // d, m, m
+            load_vec(0, rn);
+            load_vec(1, rm);
+            load_vec(2, rd);
+            const int t = base == 0 ? other : 0;  // a scratch that is not base
+            if (t != other) movdqa(t, other);
+            sse2_op(0xEF, t, base);  // pxor: base ^ other
+            sse2_op(0xDB, t, mask);  // pand
+            sse2_op(0xEF, t, base);  // pxor
+            store_vec(t, rd, q);
+            return true;
+        }
+        case NativeSimdKind::Dup: {
+            const unsigned imm5 = (w >> 16) & 31, shift = __builtin_ctz(imm5);
+            const unsigned lane = imm5 >> (shift + 1);
+            load_vec(0, rn);
+            if (shift == 3) {
+                sse2_op(0x70, 0, 0); emit_byte(lane ? 0xEE : 0x44);      // pshufd: qword
+            } else if (shift == 2) {
+                sse2_op(0x70, 0, 0); emit_byte(static_cast<uint8_t>(lane * 0x55));
+            } else {
+                if (lane) sse2_imm(0x73, 0, 3, static_cast<uint8_t>(lane << shift)); // psrldq
+                if (shift == 0) sse2_op(0x60, 0, 0);                     // punpcklbw: byte pair
+                sse_f2(0x70, 0, 0); emit_byte(0);                        // pshuflw: word 0
+                sse2_op(0x70, 0, 0); emit_byte(0);                       // pshufd: dword 0
+            }
+            store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::ReduceAdd: {
+            // ADDV: wrapping sum of the active lanes into lane 0, zero above.
+            const unsigned bytes = 1u << sz;
+            const int add = 0xFC + static_cast<int>(sz);                 // paddb/w/d
+            load_vec(0, rn);
+            if (!q) { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0); } // movq
+            for (unsigned step = q ? 8 : 4; step >= bytes; step /= 2) {
+                movdqa(1, 0);
+                sse2_imm(0x73, 1, 3, static_cast<uint8_t>(step));        // psrldq
+                sse2_op(add, 0, 1);
+            }
+            sse2_imm(0x73, 0, 7, static_cast<uint8_t>(16 - bytes));      // pslldq
+            sse2_imm(0x73, 0, 3, static_cast<uint8_t>(16 - bytes));      // psrldq
+            store_vec(0, rd, true);
+            return true;
+        }
+        case NativeSimdKind::MultiplyAdd: {
+            // MLA: d + n * m per lane, modulo the lane width.
+            load_vec(0, rn);
+            load_vec(1, rm);
+            if (sz == 0) {
+                // No byte multiply: even bytes are the low bytes of word
+                // products, odd bytes the products of the shifted high bytes.
+                movdqa(2, 0);
+                sse2_op(0xD5, 2, 1);                                     // pmullw: even
+                sse2_imm(0x71, 0, 2, 8);                                 // psrlw
+                sse2_imm(0x71, 1, 2, 8);
+                sse2_op(0xD5, 0, 1);                                     // pmullw: odd
+                sse2_imm(0x71, 0, 6, 8);                                 // psllw: to high bytes
+                sse2_imm(0x71, 2, 6, 8);                                 // keep even low bytes
+                sse2_imm(0x71, 2, 2, 8);
+                sse2_op(0xEB, 0, 2);                                     // por
+            } else if (sz == 1) {
+                sse2_op(0xD5, 0, 1);                                     // pmullw
+            } else {
+                sse2_38(0x40, 0, 1);                                     // pmulld
+            }
+            load_vec(1, rd);
+            sse2_op(0xFC + static_cast<int>(sz), 0, 1);                  // paddb/w/d
+            store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::RoundFp: {
+            // FRINTN/M/P/Z: (sz bit 23, opcode bit 12) is ROUNDPS mode 0-3.
+            // NaN lanes take the exact interpreter step (payloads, FPCR.DN).
+            const bool is_double = (w >> 22) & 1;
+            const uint8_t mode = static_cast<uint8_t>((((w >> 23) & 1) << 1) | ((w >> 12) & 1));
+            clobber_flags();
+            load_vec(0, rn);
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
+            emit_byte(is_double ? 0x09 : 0x08); emit_byte(0xC0);             // roundp{s,d} xmm0,xmm0
+            emit_byte(mode | 8);                                             // precision exception off
+            const SimdFpGuard special_done = emit_simd_fp_nan_guard(inst, is_double ? 8 : 4, q);
+            store_vec(0, rd, q);
+            finish_simd_fp_guard(special_done);
             return true;
         }
         default:

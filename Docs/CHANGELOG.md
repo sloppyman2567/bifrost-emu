@@ -13,6 +13,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
+
+- Compile BSL/BIT/BIF, DUP (element), ADDV, MLA and FRINTN/M/P/Z inline
+  instead of calling C++ helpers that synchronize the vector cache. These
+  were most of the remaining helper time in SpongeBob avatar switches.
+  32-bit MLA and FRINT need SSE4.1; FRINTA/I/X keep the helper.
+- Add `jit_native_simd_alias` for aliased destinations (checked on QEMU).
+
 ### Vector FMAX/FMIN signed zeros inline (2026-10-16)
 
 - Resolve signed-zero ties in native vector FMAX/FMIN/FMAXNM/FMINNM with an

@@ -4,6 +4,21 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
+
+`jit_native_simd_gen` runs all 1,480 encodings of the native SIMD rows,
+including every new inline form, against QEMU hashes. Swapping the BSL
+selector made two encodings fail, which confirms the test covers the
+bodies. `jit_native_simd_alias` adds 29 forms whose Vd aliases Vn or Vm
+(the generated test uses distinct registers), against a QEMU hash. Both
+pass on the JIT with and without the vector cache, on the interpreter and
+under `BIFROST_JIT_VERIFY=1`. `jit_native_simd_inline`,
+`jit_simd_widen_reduce` and `jit_simd_fp_lanes` pass unchanged. `make
+verify` passes 90 differential fixtures and seven threaded oracles. Strict
+suites pass JIT 329/329 and interpreter 320 with nine expected skips. The
+headless build passes the alias fixture. Hosts without SSE4.1 keep the
+helper for 32-bit MLA and FRINT; that path was not run here.
+
 ## Vector FMAX/FMIN signed zeros (2026-10-16)
 
 `jit_simd_fminmax_zero` checks FMAX/FMIN/FMAXNM/FMINNM in `.4s`, `.2s`
