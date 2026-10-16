@@ -12,6 +12,16 @@
   and operate on the O_PATH fd (`AT_EMPTY_PATH`) or its `proc_fd_path`.
   Unsandboxed paths keep their direct host call. `test_sandbox` and the
   host-side canary check in `run_tests.sh` cover each call.
+- Relative `AT_FDCWD` lookups follow the host cwd. A guest whose executable
+  lies inside the root starts with the host cwd inside it
+  (`enter_root_cwd`: the in-root launch directory, else the root), and
+  `BIFROST_ROOT` is made absolute first. Host paths the emulator itself
+  writes after loading must be absolute by then (`DebugFlags`, `Main.cpp`).
+  Only an executable outside the root keeps the legacy host cwd.
+- Task names belong to the Emulator: `/proc/self/comm` is the leader's,
+  `/proc/self/task/<tid>/comm` (and `/proc/thread-self/comm`, rewritten in
+  `open_guest_at`) reads and renames one guest TID with `comm_write`
+  semantics. Guest TIDs are not host TIDs; never pass those through.
 - `/proc` mappings and main-stack views describe real guest mappings without
   overlaps. `/proc/self/maps` follows `fs/proc/task_mmu.c` `show_map_vma`:
   real permissions, `s`/`p`, file offset, `major:minor` and inode of the file,

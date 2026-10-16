@@ -9,7 +9,9 @@
 // cached as strings.
 #pragma once
 
+#include <climits>
 #include <cstdlib>
+#include <unistd.h>
 #include <algorithm>
 #include <string>
 #include <cstdint>
@@ -124,6 +126,13 @@ struct DebugFlags {
     }
 
  private:
+    // Output files stay where the user launched from: a rootfs guest's
+    // startup moves the host cwd into BIFROST_ROOT (enter_root_cwd).
+    static std::string host_path(const char* path) {
+        char cwd[PATH_MAX];
+        if (path[0] == '/' || path[0] == '\0' || !::getcwd(cwd, sizeof(cwd))) return path;
+        return std::string(cwd) + "/" + path;
+    }
     // "lo-hi[,lo-hi...]" (any strtoull base, e.g. 0x70000000-0x71000000).
     // Parsing stops at the first malformed or empty range.
     static Ranges parse_ranges(const char* p) {
@@ -165,8 +174,8 @@ struct DebugFlags {
             if (end != initial && *end == '\0' && mb >= 1 && mb <= 1024)
                 f.jit_cache_initial_mb = static_cast<size_t>(mb);
         }
-        if (const char* path = std::getenv("BIFROST_FALLBACK_PROFILE")) f.fallback_profile = path;
-        if (const char* path = std::getenv("BIFROST_REGALLOC_PROFILE")) f.regalloc_profile = path;
+        if (const char* path = std::getenv("BIFROST_FALLBACK_PROFILE")) f.fallback_profile = host_path(path);
+        if (const char* path = std::getenv("BIFROST_REGALLOC_PROFILE")) f.regalloc_profile = host_path(path);
         const bool all = env("BIFROST_TRACE");
         f.xtrace    = all || env("BIFROST_XTRACE");
         f.xfull     = all || env("BIFROST_XFULL");
@@ -237,10 +246,10 @@ struct DebugFlags {
         f.media_trace = env("BIFROST_MEDIA_TRACE");
         f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");
         f.watch_trap = all || env("BIFROST_WATCH_TRAP");
-        if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;
-        if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = p;
+        if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = host_path(p);
+        if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = host_path(p);
         if (const char* p = std::getenv("BIFROST_WATCH"))   f.watch   = p;
-        if (const char* p = std::getenv("BIFROST_WRITE_TRACE")) f.write_trace = p;
+        if (const char* p = std::getenv("BIFROST_WRITE_TRACE")) f.write_trace = host_path(p);
         if (const char* p = std::getenv("BIFROST_WRITE_TRACE_RANGE")) f.write_trace_range = p;
         return f;
     }

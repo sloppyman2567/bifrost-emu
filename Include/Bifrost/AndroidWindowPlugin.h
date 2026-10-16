@@ -20,7 +20,7 @@ enum bifrost_android_window_event_type {
 };
 /* Input uses Android keycodes/actions/meta bits; pointer coordinates are in
  * surface pixels. One pointer per event (v2 is single-touch). No SDL enums.
- * time_ms is monotonic milliseconds. Zero-initialize unused fields. */
+ * time_ms is CLOCK_MONOTONIC milliseconds. Zero-initialize unused fields. */
 typedef struct bifrost_android_window_event_v2 {
     uint32_t type;
     int32_t width, height;

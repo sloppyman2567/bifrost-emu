@@ -28,7 +28,10 @@
 #include <exception>
 #include <mutex>
 #include <pthread.h>
+#include <signal.h>
 #include <string>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <thread>
 #include <vector>
 namespace arm64emu {
@@ -395,6 +398,7 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     if (child_tid == main_cpu_.tid) child_tid = next_tid_.fetch_add(1);
     gt->cpu.tid = child_tid;
     gt->tid = child_tid;
+    inherit_task_comm(parent_cpu.tid, child_tid);
     if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
         mem_.store<uint32_t>(ctid_ptr, child_tid);
     }
@@ -488,7 +492,11 @@ void Emulator::join_threads() {
         }
     }
 }
-void Emulator::group_exit(CPU& caller, int code) {
+// Fatal guest signal that ended this process (0: ordinary exit). One
+// Emulator runs per host process, so it is process state; fork children
+// start at 0 because it is only set while the process is ending.
+static std::atomic<int> g_guest_exit_signal{0};
+void Emulator::group_exit(CPU& caller, int code, int signo) {
     if (dbg().process_trace || dbg().fault_trace)
         fprintf(stderr, "[guest-exit] tid=%d code=%d pc=0x%llx sp=0x%llx last-svc=%llu at=0x%llx\n",
                 caller.tid, code, (unsigned long long)caller.pc, (unsigned long long)caller.sp,
@@ -498,6 +506,7 @@ void Emulator::group_exit(CPU& caller, int code) {
     bool expected = false;
     if (!group_exit_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;  // another thread already ended the process
+    g_guest_exit_signal.store(signo, std::memory_order_release);
     group_exit_code_.store(code, std::memory_order_release);
     if (&caller != &main_cpu_) {
         main_cpu_.exit_code = code;
@@ -519,7 +528,7 @@ void Emulator::group_exit(CPU& caller, int code) {
 }
 void Emulator::signal_exit(CPU& caller, int signo) {
     if (signo != BIFROST_SIGKILL) {
-        group_exit(caller, 128 + signo);
+        group_exit(caller, 128 + signo, signo);
         return;
     }
     // A cooperative group exit waits for every thread to notice; one that
@@ -527,8 +536,30 @@ void Emulator::signal_exit(CPU& caller, int signo) {
     // alive. Keep the exit status of the cooperative path.
     if (dbg().process_trace || dbg().fault_trace)
         fprintf(stderr, "[guest-exit] tid=%d SIGKILL\n", caller.tid);
+    g_guest_exit_signal.store(BIFROST_SIGKILL, std::memory_order_release);
     std::fflush(nullptr);
     std::quick_exit(128 + BIFROST_SIGKILL);
+}
+void Emulator::exit_by_guest_signal() {
+    const int signo = g_guest_exit_signal.load(std::memory_order_acquire);
+    // Guest and host Linux share signal numbers (asm-generic and x86_64).
+    if (signo <= 0 || signo >= NSIG) return;
+    std::fflush(nullptr);
+    // The guest died, not the emulator: never write a host core of it.
+    struct rlimit nodump;
+    if (::getrlimit(RLIMIT_CORE, &nodump) == 0) {
+        nodump.rlim_cur = 0;
+        ::setrlimit(RLIMIT_CORE, &nodump);
+    }
+    struct sigaction act {};
+    act.sa_handler = SIG_DFL;
+    sigfillset(&act.sa_mask);
+    ::sigaction(signo, &act, nullptr);
+    ::kill(::getpid(), signo);
+    // Every thread may block it; unblock only while waiting here.
+    sigdelset(&act.sa_mask, signo);
+    ::sigsuspend(&act.sa_mask);
+    ::_exit(128 + signo);
 }
 void Emulator::reap_finished_threads() {
     // Detached SDL threads are joined + freed here too.
@@ -552,6 +583,10 @@ void Emulator::reap_finished_threads() {
     }
     for (auto& gt : dead) {
         if (gt->host_thread.joinable()) gt->host_thread.join();
+    }
+    if (!dead.empty()) {
+        std::lock_guard<std::mutex> g(comm_mu_);
+        for (auto& gt : dead) task_comms_.erase(gt->tid);
     }
 }
 void Emulator::excl_remove_cpu(CPU* cpu) {
@@ -702,6 +737,61 @@ void Emulator::kick_cpu_wait(CPU& target) {
     }
 }
 
+// ── Task names (comm) ─────────────────────────────────────────────────
+void Emulator::set_guest_comm(const std::string& name) {
+    std::lock_guard<std::mutex> g(comm_mu_);
+    guest_comm_ = name.substr(0, 15);  // TASK_COMM_LEN - 1
+    task_comms_.clear();
+}
+bool Emulator::find_task_comm(int tid, std::string& name) const {
+    std::lock_guard<std::mutex> g(comm_mu_);
+    if (tid != vfs_.self_pid()) {
+        auto it = task_comms_.find(tid);
+        if (it != task_comms_.end()) {
+            name = it->second;
+            return true;
+        }
+        name = guest_comm_;
+        return false;
+    }
+    name = guest_comm_;
+    return true;
+}
+void Emulator::inherit_task_comm(int parent_tid, int child_tid) {
+    std::string name = task_comm(parent_tid);
+    std::lock_guard<std::mutex> g(comm_mu_);
+    task_comms_[child_tid] = std::move(name);
+}
+bool Emulator::set_task_comm(int tid, const std::string& requested) {
+    const std::string name = requested.substr(0, 15);
+    const bool leader = tid == vfs_.self_pid();
+    {
+        std::lock_guard<std::mutex> g(comm_mu_);
+        if (leader) {
+            guest_comm_ = name;
+        } else {
+            auto it = task_comms_.find(tid);
+            if (it == task_comms_.end()) return false;
+            it->second = name;
+        }
+    }
+    // Host thread name: SDL threads and a leader without a run() thread
+    // keep theirs; the guest-visible name above is authoritative.
+    if (leader) {
+        if (main_host_thread_set_.load(std::memory_order_acquire))
+            ::pthread_setname_np(main_host_thread_, name.c_str());
+        return true;
+    }
+    std::lock_guard<std::mutex> g(threads_mu_);
+    for (auto& gt : threads_) {
+        if (gt->tid == tid && gt->host_thread.joinable() &&
+            !gt->finished.load(std::memory_order_acquire)) {
+            ::pthread_setname_np(gt->host_thread.native_handle(), name.c_str());
+            break;
+        }
+    }
+    return true;
+}
 std::shared_ptr<CPU> Emulator::find_cpu_by_tid(int tid) {
     if (tid == main_cpu_.tid) return std::shared_ptr<CPU>(&main_cpu_, [](CPU*){});
     std::lock_guard<std::mutex> g(threads_mu_);
@@ -731,11 +821,22 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     // unflushed buffer data and prints it again on exit.
     fflush(stdout);
     fflush(stderr);
+    // A leaf lock: holding it across fork keeps the child from inheriting
+    // it locked by a thread that does not exist there.
+    std::unique_lock<std::mutex> comm_lock(comm_mu_);
     pid_t child_pid = ::fork();
     if (child_pid < 0) {
         return -1;
     }
+    if (child_pid > 0) comm_lock.unlock();
     if (child_pid == 0) {
+        // The forking thread is the child's only task (copy_process).
+        if (parent_cpu.tid != vfs_.self_pid()) {
+            auto it = task_comms_.find(parent_cpu.tid);
+            if (it != task_comms_.end()) guest_comm_ = it->second;
+        }
+        task_comms_.clear();
+        comm_lock.unlock();
         // ── Child process ──
         // Set up the child's CPU state: return value 0.
         // The child returns from clone() just like the parent — it
@@ -963,6 +1064,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     st->cpu.tid = next_tid_.fetch_add(1);
     if (st->cpu.tid == main_cpu_.tid) st->cpu.tid = next_tid_.fetch_add(1);
     st->tid = static_cast<uint64_t>(st->cpu.tid);
+    inherit_task_comm(vfs_.self_pid(), st->cpu.tid);
     st->stack_top = stack + STACK_SIZE;
     st->stack_size = STACK_SIZE;
     st->tls = tls;

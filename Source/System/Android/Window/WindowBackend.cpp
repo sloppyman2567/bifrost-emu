@@ -41,7 +41,7 @@ namespace {
   X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
-  X(GetDisplayForWindow) X(GetDisplayBounds)
+  X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -781,10 +781,17 @@ public:
         last_pump_log_ms_ = now;
       }
     }
+    // SDL timestamps count from SDL initialization; the plugin ABI and
+    // Android (System.nanoTime) use CLOCK_MONOTONIC, i.e. steady_clock.
+    const int64_t sdl_to_monotonic_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count() -
+        static_cast<int64_t>(sdl_.GetTicksNS());
     // Bound discarded events as well as delivered ones.
     for (unsigned i = 0; i < 256 && sdl_.PollEvent(&e); ++i) {
       out = {};
-      out.time_ms = static_cast<int64_t>(e.common.timestamp / 1000000);
+      out.time_ms = std::max<int64_t>(
+          0, (static_cast<int64_t>(e.common.timestamp) + sdl_to_monotonic_ns) / 1000000);
       if (dbg().input_trace && e.type >= SDL_EVENT_WINDOW_FIRST &&
           e.type <= SDL_EVENT_WINDOW_LAST && e.window.windowID == id) {
         const char *name = "other";

@@ -203,7 +203,7 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
                 case 55: // PR_SET_TAGGED_ADDR_CTRL: MTE remains unsupported.
                 case 56: // PR_GET_TAGGED_ADDR_CTRL
                     ret_err(EINVAL); return 0;
-                case PR_SET_NAME: {  // 15 — set process name (comm)
+                case PR_SET_NAME: {  // 15 — name the calling thread (comm)
                     // Read the name from guest memory (a1). Max 16 bytes
                     // (15 + NUL). The kernel truncates, doesn't error.
                     char name[17] = {0};
@@ -218,16 +218,16 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_err(EFAULT);
                         return 0;
                     }
-                    emu.set_guest_comm(name);
+                    emu.set_task_comm(cpu.tid, name);
                     ret_host(0);
                     return 0;
                 }
-                case PR_GET_NAME: {  // 16 — get process name (comm)
+                case PR_GET_NAME: {  // 16 — the calling thread's name (comm)
                     // Write the name to guest memory (a1). Always 16 bytes
                     // (NUL-padded).
                     if (a1 == 0) { ret_err(EFAULT); return 0; }
                     char buf[16] = {0};
-                    const std::string& comm = emu.guest_comm();
+                    const std::string comm = emu.task_comm(cpu.tid);
                     size_t n = comm.size() > 15 ? 15 : comm.size();
                     memcpy(buf, comm.data(), n);
                     try { mem_.write(a1, buf, 16); }

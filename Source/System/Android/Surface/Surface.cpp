@@ -819,8 +819,8 @@ ANDROID_EVENT_GETTER(event_device_id, ev->device_id, int32_t)
 ANDROID_EVENT_GETTER(event_source, ev->source, int32_t)
 ANDROID_EVENT_GETTER(motion_action, ev->action, int32_t)
 ANDROID_EVENT_GETTER(motion_pointer_count, ev->pointer_count, int32_t)
-ANDROID_EVENT_GETTER(motion_down_time, ev->down_time_ms, int64_t)
-ANDROID_EVENT_GETTER(motion_event_time, ev->event_time_ms, int64_t)
+ANDROID_EVENT_GETTER(motion_down_time, ev->down_time_ns, int64_t)
+ANDROID_EVENT_GETTER(motion_event_time, ev->event_time_ns, int64_t)
 ANDROID_EVENT_GETTER(key_action, ev->type == IE_TYPE_KEY ? ev->action : -1,
                      int32_t)
 ANDROID_EVENT_GETTER(key_code, ev->key_code, int32_t)
@@ -828,8 +828,8 @@ ANDROID_EVENT_GETTER(key_meta_state, ev->meta_state, int32_t)
 ANDROID_EVENT_GETTER(key_repeat_count, ev->repeat_count, int32_t)
 ANDROID_EVENT_GETTER(key_scan_code, ev->scan_code, int32_t)
 ANDROID_EVENT_GETTER(key_flags, ev->flags, int32_t)
-ANDROID_EVENT_GETTER(key_down_time, ev->down_time_ms, int64_t)
-ANDROID_EVENT_GETTER(key_event_time, ev->event_time_ms, int64_t)
+ANDROID_EVENT_GETTER(key_down_time, ev->down_time_ns, int64_t)
+ANDROID_EVENT_GETTER(key_event_time, ev->event_time_ns, int64_t)
 #undef ANDROID_EVENT_GETTER
 
 #define ANDROID_EVENT_GETTER_IDX(name, expr, ret)                          \
@@ -876,18 +876,16 @@ void AndroidSurfaceManager::inject_test_tap() {
     if (tap_injected_) return;
     tap_injected_ = true;
     float cx = width_ * 0.5f, cy = height_ * 0.5f;
-    next_time_ms_ += 16;
-    int64_t t_down = next_time_ms_;
-    next_time_ms_ += 40;
-    int64_t t_up = next_time_ms_;
+    const int64_t t_down = monotonic_ns();
+    const int64_t t_up = t_down + 40000000;  // a 40 ms tap
     InputEvent down{}, up{};
     down.type = up.type = IE_TYPE_MOTION;
     down.source = up.source = SRC_TOUCHSCREEN;
     down.action = ACT_DOWN;
     up.action = ACT_UP;
-    down.down_time_ms = down.event_time_ms = t_down;
-    up.down_time_ms = t_down;
-    up.event_time_ms = t_up;
+    down.down_time_ns = down.event_time_ns = t_down;
+    up.down_time_ns = t_down;
+    up.event_time_ns = t_up;
     down.pointer_count = up.pointer_count = 1;
     down.pointers[0] = TouchPointer{cx, cy, 1.0f, 1.0f, 0};
     up.pointers[0] = down.pointers[0];
@@ -953,10 +951,11 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
     } else { return; }
     std::lock_guard<std::mutex> lk(mu_);
     if (pending_.size() >= 256) pending_.pop_front();
+    const int64_t time_ns = e.time_ms * 1000000;
     if (e.type == BIFROST_WINDOW_POINTER && e.action == ACT_DOWN)
-        pointer_down_time_ms_ = e.time_ms;
-    ev.down_time_ms = e.type == BIFROST_WINDOW_POINTER ? pointer_down_time_ms_ : e.time_ms;
-    ev.event_time_ms = e.time_ms;
+        pointer_down_time_ns_ = time_ns;
+    ev.down_time_ns = e.type == BIFROST_WINDOW_POINTER ? pointer_down_time_ns_ : time_ns;
+    ev.event_time_ns = time_ns;
     pending_.push_back(ev);
 }
 

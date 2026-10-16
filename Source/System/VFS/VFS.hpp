@@ -114,8 +114,17 @@ public:
     // internally and by execve/chdir which need the fd, not a Node.
     static int open_host_fd(const std::string& guest_path, int flags,
                             mode_t mode = 0);
+    // Startup cwd for a guest whose executable (host path) lives inside
+    // BIFROST_ROOT: the host cwd moves into the root, as after chroot(2)
+    // and chdir("/"), unless it already lies inside; BIFROST_ROOT becomes
+    // absolute first. Sets `guest_cwd` to the guest view of the new cwd.
+    // An executable outside the root (an app beside its assets) keeps the
+    // host cwd and leaves `guest_cwd` empty. Returns 0 or -errno.
+    static int enter_root_cwd(const std::string& host_executable,
+                              std::string& guest_cwd);
     // Confined open relative to a host directory fd or AT_FDCWD. A cwd
-    // outside the configured root retains legacy host-relative access.
+    // outside the configured root (an executable outside it) retains
+    // legacy host-relative access.
     static int open_host_at(int host_dirfd, const std::string& relpath,
                             int flags, mode_t mode = 0);
     // Confined O_RDONLY|O_DIRECTORY open for chdir preparation.
@@ -224,6 +233,13 @@ public:
     void set_comm_provider(std::function<std::string()> cb) {
         comm_provider_ = std::move(cb);
     }
+    // Per-task names for /proc/self/task/<tid>/comm. Both hooks return
+    // false when <tid> is not a task of this process.
+    void set_task_comm_hooks(std::function<bool(int, std::string&)> get,
+                             std::function<bool(int, const std::string&)> set) {
+        task_comm_get_ = std::move(get);
+        task_comm_set_ = std::move(set);
+    }
     // ── Guest cwd tracking (chdir/getcwd) ──────────────────────────
     // The Emulator registers the guest's current working directory
     // here so the getcwd syscall can return the real path (the host
@@ -269,6 +285,8 @@ private:
     ::arm64emu::Audio* audio_ = nullptr;
     std::function<std::vector<MapEntry>()> maps_provider_;
     std::function<std::string()> comm_provider_;
+    std::function<bool(int, std::string&)> task_comm_get_;
+    std::function<bool(int, const std::string&)> task_comm_set_;
     std::function<std::string()> cwd_getter_;
     std::function<bool(const std::string&)> cwd_setter_;
     std::string guest_cwd_ = "/";

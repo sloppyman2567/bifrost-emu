@@ -9,8 +9,7 @@
 // kill(getpid(), ...) from them targeted no process.
 //
 // Each case runs in a forked child; the parent allows 10 s. A fatal signal
-// may show up as death by that signal (Linux) or as exit status 128+signo
-// (Bifrost's convention for guest signal deaths).
+// must show up as death by that signal, never as exit status 128+signo.
 //
 // Plain C: build it natively as well to compare with the host kernel.
 #define _GNU_SOURCE
@@ -18,6 +17,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -84,9 +84,12 @@ static int run(void (*child)(void)) {
 }
 
 static int died_by(int status, int signo) {
-    return status != -1 &&
-           ((WIFSIGNALED(status) && WTERMSIG(status) == signo) ||
-            (WIFEXITED(status) && WEXITSTATUS(status) == 128 + signo));
+    return status != -1 && WIFSIGNALED(status) && WTERMSIG(status) == signo;
+}
+
+static void protected_store(void) {
+    void* page = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    *(volatile int*)page = 1;
 }
 
 static void main_sigkill(void) {
@@ -145,6 +148,8 @@ int main(void) {
           "main thread SIGKILLs itself with live threads");
     check(died_by(run(worker_sigterm), SIGTERM),
           "worker kill(getpid(), SIGTERM) ends the process");
+    check(died_by(run(protected_store), SIGSEGV),
+          "an unhandled SIGSEGV is reported to the parent as a signal death");
     int status = run(worker_group_exit);
     check(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 7,
           "worker exit_group(7) while main sleeps");

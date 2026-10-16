@@ -64,7 +64,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
         case 56: { // openat
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int err = 0;
-            auto node = open_guest_at(emu, a0, path, static_cast<int>(a2),
+            auto node = open_guest_at(emu, cpu.tid, a0, path, static_cast<int>(a2),
                                       static_cast<mode_t>(a3), &err);
             if (!node) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(err != 0 ? err : -ENOENT));
@@ -89,7 +89,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             // Same resolution as openat: guest flag translation, umask,
             // dirfd and /proc/self/fd. struct open_how's resolve field is
             // not modeled.
-            auto node = open_guest_at(emu, a0, path, static_cast<int>(flags),
+            auto node = open_guest_at(emu, cpu.tid, a0, path, static_cast<int>(flags),
                                       static_cast<mode_t>(mode), &err);
             if (!node) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(err ? err : -ENOENT)));

@@ -4,6 +4,28 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Rootfs cwd, signal deaths, thread names and input times (2026-10-16)
+
+`test_sandbox_in_root` runs a copy of `test_sandbox.elf` from inside the
+scratch root while launched from the repository: the guest starts at `/`,
+its relative create lands in the root, and `run_tests.sh` checks that no
+`cwd-canary` reached the launch directory. A manual run with a relative
+`BIFROST_ROOT=../root` passed in both engines. `test_group_exit` now
+requires `WIFSIGNALED` deaths and adds a default-disposition SIGSEGV from a
+`PROT_NONE` store. `test_prctl` adds eight per-thread name checks
+(inheritance, leader isolation, `/proc/self/comm`, `/proc/thread-self/comm`,
+task comm read/rename, unknown TID). Both fixtures pass on qemu-aarch64
+(host kernel; `test_prctl`'s existing basename check fails there because
+qemu's comm is `qemu-aarch64`). `test-android-window-plugin` checks that a
+1234 ms plugin pointer event reads back as 1,234,000,000 ns from the NDK
+getters.
+
+Strict suites pass JIT 333/333 and interpreter 324 with nine expected
+skips. `make verify` passes 90 differential fixtures and seven threaded
+oracles; `make generated-check` and the headless build pass. The new checks
+were not run against the pre-change binary. No game or managed app was run,
+so touch gestures and the Android cwd change are untested in real apps.
+
 ## Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
 
 `jit_native_simd_gen` runs all 1,480 encodings of the native SIMD rows,
@@ -1831,7 +1853,9 @@ Focused additions:
   `exit_group(7)` (main sleeping or spinning) each end the process within
   10 s; a fork child's new thread reports the child's pid; main's
   `pthread_exit` keeps the process until a worker's `exit(5)`. Passes
-  natively on the host kernel; the pre-change binary fails all 6.
+  natively on the host kernel; the pre-change binary fails all 6. Signal
+  deaths, including a default-disposition SIGSEGV from a `PROT_NONE`
+  store, must reach the parent as `WIFSIGNALED`, not exit 128+n.
 - `test_fcntl_lock`: POSIX `F_SETLK`/`F_SETLKW` input marshalling and
   `F_GETLK` writeback, unmapped/read-only buffers, forked lock contention,
   blocking unlock, signed offsets and ranges above 4 GiB. Passes on native

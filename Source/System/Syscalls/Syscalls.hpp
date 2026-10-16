@@ -87,7 +87,8 @@ int64_t syscall_linker_services(Emulator& emu, CPU& cpu, uint64_t num);  // Dyna
 // openat()/openat2() path resolution with GUEST flags and mode: flag
 // translation, umask, dirfd, and /proc/{self,thread-self,1}/fd/N[/rest]
 // through GUEST fd N; everything else goes through the VFS. Returns
-// nullptr with *err set to a negative errno on failure.
-std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, uint64_t guest_dirfd,
+// nullptr with *err set to a negative errno on failure. `tid` is the
+// caller's (for /proc/thread-self/comm).
+std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, int tid, uint64_t guest_dirfd,
     const std::string& path, int guest_flags, mode_t guest_mode, int* err);
 } // namespace arm64emu

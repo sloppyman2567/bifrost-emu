@@ -47,6 +47,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `make test-android-goldfish-media`. Keep `--media-capabilities` limited to
   what it decodes. Do not report codec, Surface or playback readiness from
   64x64 probes.
+- Input events keep `System.nanoTime()` (CLOCK_MONOTONIC) nanoseconds, as
+  the NDK `AKeyEvent`/`AMotionEvent` time getters return them; the managed
+  launcher converts to framework milliseconds. Window plugins report
+  monotonic milliseconds; backends rebase their own clocks onto it.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

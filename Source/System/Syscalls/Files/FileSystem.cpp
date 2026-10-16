@@ -129,8 +129,12 @@ int proc_link_fd(const std::string& path, std::string* rest) {
     }
     return -2;
 }
-std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, uint64_t guest_dirfd,
-    const std::string& path, int guest_flags, mode_t guest_mode, int* err) {
+std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, int tid, uint64_t guest_dirfd,
+    const std::string& requested, int guest_flags, mode_t guest_mode, int* err) {
+    // /proc/thread-self links to /proc/self/task/<caller's TID>.
+    static const std::string thread_self_comm = "/proc/thread-self/comm";
+    const std::string path = requested == thread_self_comm
+        ? "/proc/self/task/" + std::to_string(tid) + "/comm" : requested;
     auto& vfs = emu.vfs();
     auto& fds = emu.fds();
     const int host_flags = open_flags_to_host(guest_flags);

@@ -674,7 +674,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     try {
         build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
     } catch (const UnmappedMemory&) {
-        emu.group_exit(cpu, 128 + BIFROST_SIGSEGV);
+        emu.signal_exit(cpu, BIFROST_SIGSEGV);  // Linux force_sigsegv
         return false;
     }
     // Save full CPU state in our internal frame for rt_sigreturn.

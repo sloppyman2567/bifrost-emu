@@ -36,7 +36,19 @@ static int checks = 0;
     if (!(cond)) { fails++; printf("FAIL: %s (line %d)\n", msg, __LINE__); } \
 } while (0)
 
-int main(void) {
+int main(int argc, char **argv) {
+    // 0. With --in-root this ELF runs from inside the root while the host
+    // launches it from elsewhere: its cwd starts at "/" and a relative
+    // create lands in the root (run_tests.sh checks the launch directory).
+    if (argc > 1 && strcmp(argv[1], "--in-root") == 0) {
+        char cwd[64];
+        CHECK(getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0, "rootfs guest starts at /");
+        int f = open("cwd-canary", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        CHECK(f >= 0, "relative create from the startup cwd");
+        if (f >= 0) close(f);
+        struct stat st;
+        CHECK(stat("/cwd-canary", &st) == 0, "relative create lands in the root");
+    }
     // 1. Symlink escape via open(): must FAIL (ENOENT/ELOOP/EACCES/EPERM).
     {
         errno = 0;

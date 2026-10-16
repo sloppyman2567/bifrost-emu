@@ -1589,8 +1589,8 @@ IDs, return values and call durations. An unmatched begin can locate a blocked
 host call; a zero swap result is failure. The existing `[frame]` summary counts
 calls, including failed swaps, and does not establish visible rendering.
 `[android-window]` records SDL window events before filtering and a two-second
-event-pump heartbeat. Event timestamps use SDL's clock; pump and EGL timestamps
-use the host monotonic clock. These diagnostics observe restore/expose events;
+event-pump heartbeat. Event, pump and EGL timestamps use the host monotonic
+clock (SDL event times are rebased onto it). These diagnostics observe restore/expose events;
 they do not implement lifecycle recovery. Error state is not consumed by the
 logger. Add `BIFROST_THUNK_TRACE=1` for the GL call stream. Avoid blanket
 `BIFROST_TRACE=1` here: it also enables instruction logging and diagnostic modes

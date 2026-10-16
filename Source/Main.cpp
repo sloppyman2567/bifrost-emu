@@ -179,6 +179,13 @@ static std::string host_path_for(const std::string& guest_path,
     while (root.size() > 1 && root.back() == '/') root.pop_back();
     return root + guest_path;
 }
+// Host paths used after loading stay relative to the launch directory:
+// a rootfs guest's startup moves the host cwd into BIFROST_ROOT.
+static std::string absolute_host_path(const std::string& path) {
+    char cwd[PATH_MAX];
+    if (path.empty() || path[0] == '/' || !getcwd(cwd, sizeof(cwd))) return path;
+    return std::string(cwd) + "/" + path;
+}
 // ── Main ─────────────────────────────────────────────────────────────────
 static bool install_android_window_plugin(const std::string& path) {
     if (path.empty()) return true;
@@ -215,6 +222,10 @@ static bool bind_asgard_parent(const char* argument) {
 }
 
 int main(int argc, char** argv) {
+    // First registration runs last: after the emulator's destructors and
+    // every later handler (terminal restore, profile dumps).
+    std::atexit(Emulator::exit_by_guest_signal);
+    std::at_quick_exit(Emulator::exit_by_guest_signal);
     raise_open_file_limit();
     if (argc == 2 && std::string(argv[1]) == "--media-capabilities") {
         puts(arm64emu::yggdrasil::HostDecoder::capabilities_json().c_str());
@@ -334,7 +345,7 @@ int main(int argc, char** argv) {
         }
         if (a == "--android-binder-broker") {
             if (arg_i + 1 >= argc) { fprintf(stderr, "Asgard: --android-binder-broker requires a socket path\n"); return 2; }
-            android_binder_broker = argv[arg_i + 1]; arg_i += 2; continue;
+            android_binder_broker = absolute_host_path(argv[arg_i + 1]); arg_i += 2; continue;
         }
         if (a == "--android-app-id") {
             if (arg_i + 1 >= argc) { fprintf(stderr, "bifrost-emu: --android-app-id requires N\n"); return 2; }
@@ -493,6 +504,8 @@ int main(int argc, char** argv) {
     if (jit_threshold)       cfg.jit_threshold = jit_threshold;
     if (!fb_dump_path.empty())     cfg.fb_dump_path = fb_dump_path;
     if (!audio_dump_path.empty())  cfg.audio_dump_path = audio_dump_path;
+    cfg.fb_dump_path = absolute_host_path(cfg.fb_dump_path);
+    cfg.audio_dump_path = absolute_host_path(cfg.audio_dump_path);
     cfg.validate();
     // --print-config: dump the resolved config and exit. Useful for
     // debugging "why isn't my config taking effect?"

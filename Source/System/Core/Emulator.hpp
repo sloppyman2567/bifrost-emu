@@ -196,13 +196,27 @@ public:
         guest_env_ = envs;
     }
     const std::vector<std::string>& guest_env() const { return guest_env_; }
-    // Guest process name (comm). Set by prctl(PR_SET_NAME), returned by
-    // prctl(PR_GET_NAME) and /proc/self/comm.
-    void set_guest_comm(const std::string& name) {
-        // Linux kernel truncates to 16 bytes (15 + NUL).
-        guest_comm_ = name.size() > 15 ? name.substr(0, 15) : name;
+    // Task names (comm, at most 15 bytes) are per thread, as in Linux:
+    // prctl(PR_SET_NAME/PR_GET_NAME) and /proc/self/task/<tid>/comm act
+    // on one thread; /proc/self/{comm,stat,status} report the leader
+    // (the task whose TID is the process PID). A new thread starts with
+    // its creator's name (copy_process). Renames also name the host
+    // thread so host profilers and debuggers tell guest threads apart.
+    // set_guest_comm resets the leader to its exec name and forgets
+    // the other tasks (begin_new_exec).
+    void set_guest_comm(const std::string& name);
+    std::string guest_comm() const { return task_comm(vfs_.self_pid()); }
+    // Name of `tid`; false (and the leader's name) when `tid` is not a
+    // task of this process.
+    bool find_task_comm(int tid, std::string& name) const;
+    std::string task_comm(int tid) const {
+        std::string name;
+        find_task_comm(tid, name);
+        return name;
     }
-    const std::string& guest_comm() const { return guest_comm_; }
+    // False when `tid` is not a task of this process.
+    bool set_task_comm(int tid, const std::string& name);
+    void inherit_task_comm(int parent_tid, int child_tid);
     // Guest umask (tracked separately from host for sandbox isolation
     // and JIT verify-mode correctness).
     // Linux do_group_exit: exit_group or a fatal default signal on ANY
@@ -210,13 +224,21 @@ public:
     // wins). Stops the caller, the main CPU and every guest thread, wakes
     // futex sleepers and kicks blocked host threads. run() then joins
     // everything and returns the code. Callable from any guest thread.
-    void group_exit(CPU& caller, int code);
+    void group_exit(CPU& caller, int code) { group_exit(caller, code, 0); }
     // A fatal default signal ends the process. SIGKILL is not cooperative
     // in Linux: no guest or host thread gets to run again, so it flushes
     // host stdio and leaves through quick_exit(137) (at_quick_exit
     // handlers restore host state such as the terminal). Other signals
-    // use group_exit(caller, 128 + signo).
+    // use group_exit with code 128 + signo. Either way the signal is
+    // recorded for exit_by_guest_signal.
     void signal_exit(CPU& caller, int signo);
+    // atexit/at_quick_exit hook for the bifrost-emu binary: when a fatal
+    // guest signal ended the process, the host process dies by the same
+    // signal so a waiting parent sees WIFSIGNALED instead of exit(128+n)
+    // (QEMU linux-user die_with_signal). Register it before any other
+    // exit handler so it runs last. Embedders that skip it keep run()'s
+    // 128+n code.
+    static void exit_by_guest_signal();
     bool group_exit_requested() const {
         return group_exit_.load(std::memory_order_acquire);
     }
@@ -430,16 +452,20 @@ private:
     // set_guest_env() or by build_initial_stack() using
     // build_default_guest_env() when empty.
     std::vector<std::string> guest_env_;
-    // Guest process name (set by prctl(PR_SET_NAME), returned by
-    // prctl(PR_GET_NAME) and /proc/self/comm). Max 16 bytes (15 + NUL)
-    // per Linux kernel. Defaults to the ELF basename.
+    // Leader's task name (/proc/self/comm). Max 16 bytes (15 + NUL) per
+    // Linux kernel. Defaults to the ELF basename.
     std::string guest_comm_ = "bifrost";
+    // Names of non-leader tasks, keyed by guest TID; guarded by comm_mu_
+    // together with guest_comm_.
+    std::unordered_map<int, std::string> task_comms_;
+    mutable std::mutex comm_mu_;
     // Guest umask (tracked separately from host so JIT verify mode
     // doesn't see false-positive divergences from the host umask being
     // changed twice). Also provides sandbox isolation.
     mode_t guest_umask_ = 0022;  // default: rwxr-xr-x → rw-r--r--
     std::atomic<bool> group_exit_{false};
     std::atomic<int> group_exit_code_{0};
+    void group_exit(CPU& caller, int code, int signo);
     // Host thread running run()'s main loop, kicked by a worker's
     // group_exit. Unset in a fork child created from a worker thread.
     pthread_t main_host_thread_{};

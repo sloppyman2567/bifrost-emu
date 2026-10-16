@@ -34,5 +34,8 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 `Emulator::group_exit` stops every guest CPU, wakes blocking operations and
 preserves the requested exit status. Fatal signals go through
 `Emulator::signal_exit`. SIGKILL is not cooperative: it flushes stdio and
-quick-exits with 137 (terminal restore via `at_quick_exit`). Crash handling must use the shared reporter
+quick-exits (terminal restore via `at_quick_exit`). After every exit handler,
+`Emulator::exit_by_guest_signal` (registered first in `main`) makes the host
+process die by the guest's fatal signal, so parents see a signal death;
+`run()` keeps returning 128+n. Crash handling must use the shared reporter
 and terminate coherently; a worker failure must not leave the main CPU running.

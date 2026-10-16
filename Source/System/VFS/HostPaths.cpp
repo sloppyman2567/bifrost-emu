@@ -285,7 +285,8 @@ std::unique_ptr<Node> Yggdrasil::open_host(const std::string& guest_path,
 // Central choke point for every guest-controlled host open (open/openat,
 // execve, chdir). Absolute sandboxed paths resolve under the cached root
 // fd with RESOLVE_IN_ROOT; relative paths are confined when cwd is inside
-// the root. A cwd outside the root keeps legacy game-asset access.
+// the root (always, for an executable inside it: enter_root_cwd). A cwd
+// outside the root keeps legacy access for executables beside their assets.
 // Returns a host fd or -1 with errno set (O_DIRECT retry included).
 int Yggdrasil::open_host_fd(const std::string& guest_path, int flags,
                             mode_t mode) {
@@ -347,6 +348,24 @@ int Yggdrasil::open_host_at(int host_dirfd, const std::string& relpath,
 #endif
     }
     return ::openat(host_dirfd, relpath.c_str(), flags, mode);
+}
+int Yggdrasil::enter_root_cwd(const std::string& host_executable,
+                              std::string& guest_cwd) {
+    guest_cwd.clear();
+    const std::string root = sandbox_root_canonical();
+    if (root.empty() || !path_inside_root(host_executable.c_str())) return 0;
+    // Later lookups re-read BIFROST_ROOT; a relative value would follow
+    // the cwd change below.
+    if (sandbox_root_str() != root && ::setenv("BIFROST_ROOT", root.c_str(), 1) != 0)
+        return -errno;
+    char cwd[PATH_MAX];
+    if (!::getcwd(cwd, sizeof(cwd)) || !path_inside_root(cwd)) {
+        if (::chdir(root.c_str()) != 0) return -errno;
+        guest_cwd = "/";
+        return 0;
+    }
+    guest_cwd = guest_view_of_host_path(cwd);
+    return 0;
 }
 // Confined open of a directory for chdir/fchdir preparation. Always
 // O_RDONLY|O_DIRECTORY so the result is fchdir-able.

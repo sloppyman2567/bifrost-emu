@@ -308,8 +308,10 @@ public:
         int32_t repeat_count = 0;
         int32_t edge_flags = 0;
         int32_t flags = 0;
-        int64_t down_time_ms = 0;
-        int64_t event_time_ms = 0;
+        // CLOCK_MONOTONIC nanoseconds (System.nanoTime), as the NDK
+        // AKeyEvent/AMotionEvent time getters return them.
+        int64_t down_time_ns = 0;
+        int64_t event_time_ns = 0;
         float x_precision = 1.0f, y_precision = 1.0f;
         TouchPointer pointers[8];
         int32_t pointer_count = 0;
@@ -370,7 +372,7 @@ public:
     void translate_window_event_(const AndroidWindowEvent& event);
 
     bool window_open_ = false;
-    int64_t pointer_down_time_ms_ = 0;
+    int64_t pointer_down_time_ns_ = 0;
     std::unique_ptr<AndroidWindowBackend> window_backend_;
     struct Surface {
         uint64_t identity = 0;
@@ -444,7 +446,6 @@ public:
     std::deque<InputEvent> pending_;
     struct Slot { bool used = false; InputEvent ev; };
     Slot slots_[32];
-    uint64_t next_time_ms_ = 1000;
     int32_t last_pump_w_ = -1, last_pump_h_ = -1;
 
     uint64_t alloc_event_slot_(const InputEvent& ev);  // caller holds mu_

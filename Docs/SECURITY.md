@@ -6,6 +6,9 @@
 a selected root directory. The sandbox regression suite checks representative
 read, write, `openat`, directory-fd, symlink, cwd, procfs, and namespace
 operations. Use it to provide a controlled guest filesystem for tests.
+A guest whose executable lives inside the root starts with its working
+directory inside it, so its relative paths stay there too. An executable
+loaded from outside the root keeps the host working directory.
 
 It is a VFS path boundary inside the emulator. It is not an operating-system
 security boundary and does not create Linux mount, PID, user, or network

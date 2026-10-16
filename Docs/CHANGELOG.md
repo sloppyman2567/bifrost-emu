@@ -13,6 +13,34 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Rootfs cwd, signal deaths, thread names and input times (2026-10-16)
+
+- A guest whose executable lives inside `BIFROST_ROOT` starts with its cwd
+  in the root (the launch directory when that is inside, otherwise `/`), as
+  after `chroot` and `chdir("/")`. Its relative paths followed the host cwd,
+  so an Android game wrote `arm64/base.art` into the directory bifrost-emu
+  was started from. A relative `BIFROST_ROOT` becomes absolute, and
+  emulator output paths (`--fb-dump`, `--audio-dump`, `BIFROST_XCAP`,
+  `BIFROST_XSEQLOG`, `BIFROST_WRITE_TRACE`, `BIFROST_*_PROFILE`, the Binder
+  broker socket) stay relative to the launch directory. An executable
+  outside the root keeps the host cwd, as before.
+- A process ended by a fatal guest signal now dies by that host signal
+  (QEMU's `die_with_signal`, without a host core file), so its parent sees
+  a signal death instead of exit status 128+n. `run()` still returns 128+n
+  to library embedders.
+- Task names are per thread. `PR_SET_NAME`/`PR_GET_NAME` name the calling
+  thread, threads inherit their creator's name, `/proc/self/comm` is the
+  leader's, and `/proc/self/task/<tid>/comm` and `/proc/thread-self/comm`
+  read and rename one guest thread (Bionic's `pthread_setname_np` for other
+  threads). Renames also name the host thread for host profilers. `execve`
+  resets the name to the new program's basename.
+- Native `AKeyEvent`/`AMotionEvent` time getters return `System.nanoTime()`
+  nanoseconds, not milliseconds. The managed launcher divided those values by
+  10^6, so framework MotionEvents and KeyEvents had times near zero. SDL
+  event timestamps are rebased from SDL's clock onto `CLOCK_MONOTONIC`.
+- Extend `test_sandbox` (`--in-root`), `test_group_exit`, `test_prctl` and
+  `test-android-window-plugin`.
+
 ### GL extension entry points from the registry (2026-10-16)
 
 - The host advertised extensions with 241 entry points that the thunk resolved

@@ -16,6 +16,7 @@
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Graphics/Display/Graphics.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -50,6 +51,64 @@ static bool is_proc_exe_path(const std::string& p) {
     if (pid.empty() || pid.find_first_not_of("0123456789") != std::string::npos) return false;
     std::string tail = p.substr(slash + 1);
     return tail == "exe" || tail == "exe/";
+}
+// /proc/self/task/<tid>/comm (fs/proc/base.c comm_show/comm_write): a
+// read shows the name and '\n' as of open; each write renames the task
+// to its first 15 bytes and consumes the whole buffer.
+class TaskCommNode : public Node {
+public:
+    TaskCommNode(int tid, std::string content, int flags,
+                 std::function<bool(int, const std::string&)> set)
+        : tid_(tid), content_(std::move(content)), flags_(flags), set_(std::move(set)) {}
+    ssize_t read(uint64_t off, void* buf, size_t n) override {
+        const uint64_t at = off == UINT64_MAX ? pos_ : off;
+        if (at >= content_.size()) return 0;
+        n = std::min<size_t>(n, content_.size() - at);
+        std::memcpy(buf, content_.data() + at, n);
+        if (off == UINT64_MAX) pos_ += n;
+        return static_cast<ssize_t>(n);
+    }
+    ssize_t write(uint64_t, const void* buf, size_t n) override {
+        std::string name(static_cast<const char*>(buf), std::min<size_t>(n, 15));
+        name.resize(std::strlen(name.c_str()));
+        if (!set_ || !set_(tid_, name)) return -ESRCH;
+        return static_cast<ssize_t>(n);
+    }
+    ssize_t lseek(int64_t off, int whence) override {
+        int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? static_cast<int64_t>(pos_)
+                     : whence == SEEK_END ? static_cast<int64_t>(content_.size()) : -1;
+        if (base < 0 || base + off < 0) return -EINVAL;
+        pos_ = static_cast<uint64_t>(base + off);
+        return static_cast<ssize_t>(pos_);
+    }
+    int fstat(struct stat* st) override {
+        std::memset(st, 0, sizeof(*st));
+        st->st_mode = S_IFREG | 0644;
+        st->st_nlink = 1;
+        st->st_blksize = 1024;
+        return 0;
+    }
+    int flags() const override { return flags_; }
+    void set_flags(int f) override { flags_ = f; }
+private:
+    int tid_;
+    std::string content_;
+    int flags_;
+    uint64_t pos_ = 0;
+    std::function<bool(int, const std::string&)> set_;
+};
+// <tid> of "/proc/self/task/<tid>/comm", or -1.
+static int task_comm_tid(const std::string& p) {
+    static const std::string prefix = "/proc/self/task/";
+    if (p.compare(0, prefix.size(), prefix) != 0) return -1;
+    const size_t slash = p.find('/', prefix.size());
+    if (slash == std::string::npos || p.compare(slash, std::string::npos, "/comm") != 0)
+        return -1;
+    const std::string digits = p.substr(prefix.size(), slash - prefix.size());
+    if (digits.empty() || digits.size() > 9 ||
+        digits.find_first_not_of("0123456789") != std::string::npos)
+        return -1;
+    return std::stoi(digits);
 }
 // ── /proc directory listing ──────────────────────────────────────────
 // We expose a subset of /proc that real Linux guests can handle. The
@@ -130,6 +189,10 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
     // which prctl(PR_SET_NAME) can override. Tools like `ps`, `top`,
     // and `htop` display this field.
     if (path == "/proc/self/comm") {
+        // The thread-group leader's task file: writes rename the leader.
+        std::string name;
+        if (task_comm_get_ && task_comm_get_(self_pid_, name))
+            return std::make_unique<TaskCommNode>(self_pid_, name + '\n', flags, task_comm_set_);
         // Use lazy so changes via prctl(PR_SET_NAME) are reflected.
         return serve_lazy([this]() -> std::string {
             std::string comm;
@@ -145,6 +208,17 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             comm.push_back('\n');
             return comm;
         }, flags);
+    }
+    // ── /proc/self/task/<tid>/comm → one thread's name ──────────────
+    // Bionic pthread_setname_np/getname_np use it for other threads.
+    // Guest TIDs are not host TIDs, so it is never host passthrough.
+    if (int tid = task_comm_tid(path); tid >= 0) {
+        std::string name;
+        if (!task_comm_get_ || !task_comm_get_(tid, name)) {
+            *err_out = -ENOENT;
+            return nullptr;
+        }
+        return std::make_unique<TaskCommNode>(tid, name + '\n', flags, task_comm_set_);
     }
     // Bionic finds the main stack via stat field 28, then /proc/self/maps.
     // Host passthrough supplied the emulator's host SP, outside guest maps.

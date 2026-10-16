@@ -212,8 +212,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // Wire up /proc/self/comm — returns the guest process name (set by
     // prctl PR_SET_NAME, defaults to ELF basename).
     vfs_.set_comm_provider([this]() -> std::string {
-        return guest_comm_;
+        return guest_comm();
     });
+    vfs_.set_task_comm_hooks(
+        [this](int tid, std::string& name) { return find_task_comm(tid, name); },
+        [this](int tid, const std::string& name) { return set_task_comm(tid, name); });
     // Open the ELF through the BIFROST_ROOT sandbox: `path` is the guest
     // path (what /proc/self/exe reports), so the host file is the remapped
     // "$BIFROST_ROOT/<path>". Relative paths pass through unchanged, so
@@ -242,6 +245,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
         }
         vfs_.set_elf_path(elf_path_, backing_path);
+        // A rootfs guest's relative paths must never reach the launcher's
+        // directory. Diagnostic output paths are made absolute first.
+        (void)dbg();
+        std::string cwd;
+        if (int error = yggdrasil::Yggdrasil::enter_root_cwd(backing_path, cwd)) {
+            if (f) fclose(f);
+            throw EmuError("cannot enter BIFROST_ROOT: " + std::string(strerror(-error)));
+        }
+        if (!cwd.empty()) guest_cwd_ = cwd;
     }
 
     std::vector<uint8_t> data;

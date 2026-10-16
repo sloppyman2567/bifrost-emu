@@ -60,6 +60,14 @@ int main(int argc, char **argv) {
     CHECK(manager.host_native_window() == (uint64_t(800) << 32 | 600));
     CHECK(contents(log).find("unload") == std::string::npos);
     CHECK(manager.from_surface() != 0);
+    // NDK event times are System.nanoTime nanoseconds; the plugin reports ms.
+    mode("poll-pointer-down");
+    manager.pump_host_events(nullptr);
+    mode("");
+    uint64_t input = 0;
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) == 0);
+    CHECK(manager.motion_event_time(input) == 1234000000);
+    CHECK(manager.motion_down_time(input) == 1234000000);
     CHECK(!manager.install_window_backend(frost::make_sdl_android_window_backend()));
     // Destructor must close the owned window while the DSO is resident.
   }

@@ -27,7 +27,7 @@
 # Fully provisioned suite (313 selected test runs):
 #   Unit        132  — focused guest and host JIT regressions
 #   Integration  87  — Tests/Apps/*.elf + Tests/Asm/*.elf
-#   Sandbox       1  — BIFROST_ROOT path-boundary regression
+#   Sandbox       2  — BIFROST_ROOT path boundary; rootfs guest startup cwd
 #   Per-thread JIT 1 — cross-thread invalidation without the shared JIT
 #   Toybox        9  — Tests/Apps/toybox subcommands
 #   Real-world   49  — static BusyBox/Toybox commands
@@ -245,7 +245,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite includes 57 unit, 84 integration, 1 sandbox, 9 Toybox, 5 interactive,
+# Standard suite includes 57 unit, 84 integration, 2 sandbox, 9 Toybox, 5 interactive,
 # 49 static real-world, 5 benchmark, and optional rootfs-dependent tests.
 
 # Unit tests (Tests/Unit/ — focused JIT regression tests)
@@ -1199,6 +1199,16 @@ if [ "$RUN_INTEGRATION" = "1" ]; then
             OLD_RUN_ENV=("${RUN_ENV[@]}")
             RUN_ENV=("BIFROST_ROOT=$SBX/root" "${RUN_ENV[@]}")
             run_category "Sandbox" "test_sandbox|Tests/Unit/test_sandbox.elf||10|checks passed"
+            # An executable inside the root starts with its cwd there: its
+            # relative writes must not reach this (launch) directory. A
+            # relative host path names it (absolute ones are guest paths).
+            if cp Tests/Unit/test_sandbox.elf "$SBX/root/test_sandbox.elf" 2>/dev/null; then
+                run_category "Sandbox" "test_sandbox_in_root|$(realpath --relative-to=. "$SBX/root/test_sandbox.elf") --in-root||10|checks passed"
+                if [ ! -f "$SBX/root/cwd-canary" ] || [ -e cwd-canary ]; then
+                    record_failure "test_sandbox_in_root" "relative guest write escaped the root"
+                fi
+                rm -f cwd-canary
+            fi
             RUN_ENV=("${OLD_RUN_ENV[@]}")
             # The guest only sees its failures; confirm on the host that no
             # escaping call modified, renamed or linked the outside canary.

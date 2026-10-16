@@ -64,6 +64,11 @@ static int32_t poll_window(void *instance, bifrost_android_window_event_v2 *out)
     if (mode("poll-positive")) return 2;
     if (mode("poll-nan")) { out->type = BIFROST_WINDOW_POINTER; out->x = NAN; return 1; }
     if (mode("poll-key-invalid")) { out->type = BIFROST_WINDOW_KEY; out->action = 9; return 1; }
+    if (mode("poll-pointer-down")) {
+        out->type = BIFROST_WINDOW_POINTER; out->x = 10; out->y = 20; out->pressure = 1;
+        out->time_ms = 1234;
+        return 1;
+    }
     return 0;
 }
 static int32_t show_popup(void *instance, uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,

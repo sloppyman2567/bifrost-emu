@@ -621,6 +621,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
             memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
             cpu.tid = emu.vfs().process_ids().pid;  // exec keeps the PID; the leader TID equals it
+            // begin_new_exec: comm becomes the basename of the exec'd path.
+            emu.set_guest_comm(path.substr(path.find_last_of('/') + 1));
             // the new binary loads at the same addresses as the old one
             // (e.g., 0x400000). The decode cache matches on PC, so stale
             // entries from the old binary would match new PCs but return
