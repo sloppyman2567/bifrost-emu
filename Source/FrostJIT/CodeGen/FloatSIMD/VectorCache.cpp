@@ -6,8 +6,8 @@
 //
 // XMM0-2 are instruction scratch. Tier-1 keeps a stable hot loop core
 // in XMM3-15 and allocates the remaining slots by next use under pressure.
-// Unsupported operations synchronize locally; only demand-allocated values
-// are written back on retained loop edges. Tier-2 retains its fixed layout.
+// Unsupported operations synchronize locally. Retained loop edges reconcile
+// demand values with the entry layout, including parallel-copy cycles.
 // Precise exits and NaN recovery publish the actual layout at that point.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
@@ -17,8 +17,7 @@ namespace arm64emu {
 // Ops that either have a cached fast path for pinned XMM operands
 // (including unary and indexed FP) or are GPR-only
 // ops that neither read cpu.v_lo/v_hi nor clobber XMM3-15. Everything
-// else is a synchronization boundary in Tier-1 and disqualifies Tier-2's
-// fixed region layout.
+// else is a synchronization boundary unless vec_inst_effects describes it.
 // (If a whitelisted GPR op does fall through to emit_call_interp, the
 // guard inside emit_call_interp writes back + reloads the pinned XMM
 // regs around the host call, so the cache stays correct.)
@@ -130,42 +129,105 @@ bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& 
     }
 }
 
-bool FrostJIT::vec_cache_may_enable(const IRBlock& block, bool tier1) {
+bool FrostJIT::vec_inst_effects(const IRInst& inst, VectorEffects& effects) const {
+    effects = {};
+    if (vec_inst_operands(inst, effects.reads, effects.writes)) return true;
+    auto read = [&](unsigned v) { effects.reads |= uint32_t(1) << (v & 31); };
+    auto write = [&](unsigned v) { effects.writes |= uint32_t(1) << (v & 31); };
+    if (inst.op == IROp::SIMD_NATIVE_EXTRA) {
+        const uint32_t word = inst.native_simd_opcode();
+        const auto kind = classify_native_simd(word);
+        // These specialized bodies only access the stated vector operands
+        // and FP control/status; they neither access guest memory nor change
+        // control flow. Other helpers retain the unknown-effects boundary.
+        if (kind != NativeSimdKind::Select && kind != NativeSimdKind::RoundFp &&
+            kind != NativeSimdKind::VariableShift) return false;
+        read((word >> 5) & 31);
+        if (kind != NativeSimdKind::RoundFp) read((word >> 16) & 31);
+        if (kind == NativeSimdKind::Select) read(word & 31);
+        write(word & 31);
+        effects.memory_operands = true;
+        // Inline variable shifts borrow XMM0-5. A C++ helper has the full
+        // SysV XMM clobber set, irrespective of the compiler used to build it.
+        effects.xmm_clobbers = native_simd_inlinable(word) ? 0x003f : 0xffff;
+        return true;
+    }
+    effects.scalar = true;
+    switch (inst.op) {
+        case IROp::FP_BINOP: case IROp::FP_CSEL:
+            read(inst.src2); [[fallthrough]];
+        case IROp::FP_UNOP: case IROp::FP_MOV:
+        case IROp::FRINT: case IROp::FCVT_S2D: case IROp::FCVT_D2S:
+            read(inst.src1); write(inst.dest); break;
+        case IROp::FMADD: case IROp::FMSUB: case IROp::FNMADD: case IROp::FNMSUB:
+            read(inst.src1); read(inst.src2); read(inst.fp_fused_params().acc);
+            write(inst.dest); break;
+        case IROp::FP_MOVI: case IROp::FP_I2F:
+            write(inst.dest); break;
+        case IROp::FP_F2I:
+            read(inst.src1); break;
+        case IROp::FP_CMP:
+            read(inst.src1);
+            if (!inst.fp_cmp_params().with_zero) read(inst.src2);
+            break;
+        case IROp::FP_F2I_FIXED:
+            read(inst.src1);
+            if (inst.fp_f2i_fixed_params().fp_reg) write(inst.dest);
+            break;
+        case IROp::FP_I2F_FIXED:
+            if (inst.fp_i2f_fixed_params().fp_reg) read(inst.src1);
+            write(inst.dest); break;
+        case IROp::FMOV_G2F:
+            write(inst.dest); break;
+        default:
+            return false;
+    }
+    // Scalar cold steps currently rejoin inline after the commit. Keep their
+    // original destinations resident until they have committed; unlike
+    // vector guards they do not yet have a deferred pre-commit snapshot.
+    if (inst.op != IROp::FP_MOV && inst.op != IROp::FP_MOVI && inst.op != IROp::FMOV_G2F)
+        effects.recovery_reads = effects.writes;
+    return true;
+}
+
+bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     static const bool no_vec_cache = getenv("BIFROST_NO_VEC_CACHE") != nullptr;
     if (no_vec_cache || !has_fma3()) return false;
     uint32_t used = 0, written = 0;
     unsigned uses[32] = {};
     std::vector<uint32_t> operand_sets;
-    bool boundary = false, skip = false;
+    std::vector<VectorEffects> effects_by_op;
+    bool boundary = false, skip = false, has_vector = false;
     for (size_t i = 0; i < block.insts.size(); ++i) {
         const auto& inst = block.insts[i];
-        uint32_t reads, writes;
-        if (!vec_inst_operands(inst, reads, writes)) {
-            if (!tier1) return false;
+        VectorEffects effects;
+        if (!vec_inst_effects(inst, effects)) {
             boundary = true;
+            effects_by_op.push_back({UINT32_MAX, UINT32_MAX, 0, false});
             continue;
         }
+        effects_by_op.push_back(effects);
         skip |= inst.op == IROp::BRCOND_SKIP;
-        written |= writes;
-        uint32_t touched = reads | writes;
+        written |= effects.writes;
+        uint32_t touched = effects.reads | effects.writes | effects.recovery_reads;
+        has_vector |= touched && !effects.scalar;
         used |= touched;
         if (touched) operand_sets.push_back(touched);
         while (touched) {
             const unsigned v = __builtin_ctz(touched);
             touched &= touched - 1;
             ++uses[v];
-            if (tier1) vec_uses_[v].push_back(static_cast<uint16_t>(i));
+            vec_uses_[v].push_back(static_cast<uint16_t>(i));
         }
     }
     const int count = __builtin_popcount(used);
-    if (!count) return false;
+    if (!count || !has_vector) return false;
     constexpr int capacity = VEC_XMM_END - VEC_XMM_START + 1;
-    if (!tier1 && count > capacity) return false;
     // Leaf-inlined conditional skips need one fixed layout at the join.
     // Retain their existing complete-layout contract until vector CFG
     // merge copies are represented explicitly.
     if (skip && (boundary || count > capacity)) return false;
-    vec_allocator_active_ = tier1 && !skip;
+    vec_allocator_active_ = !skip;
     vec_cache_active_ = true;
     // Preserve the complete layout when it fits. Under pressure reserve
     // only the demand slots this block's simultaneous operands require.
@@ -174,7 +236,7 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block, bool tier1) {
     vec_fixed_count_ = count <= capacity ? count : capacity - 1;
     std::vector<int> ranked;
     for (int v = 0; v < 32; ++v) if (used & (uint32_t(1) << v)) ranked.push_back(v);
-    if (count > capacity)
+    if (!skip)
         std::sort(ranked.begin(), ranked.end(), [&](int a, int b) {
             return uses[a] != uses[b] ? uses[a] > uses[b] : a < b;
         });
@@ -190,6 +252,78 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block, bool tier1) {
             if (fits) break;
         }
     }
+    if (vec_allocator_active_) {
+        // Compare only three layouts: the maximum legal core, half of it,
+        // and demand-only. Estimate read/overwrite traffic with protected
+        // operands and next use. Helpers and loop tails are conservatively
+        // charged full publication; entry-layout copies can cost less.
+        // This is a bounded static heuristic, not a runtime layout search.
+        const auto& last = block.insts.back();
+        const bool loop = (last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO ||
+                           last.op == IROp::BRCOND_BIT || last.op == IROp::BRCOND_FALLTHRU) &&
+                          last.branch_target() == block.start_pc;
+        auto estimate = [&](int fixed_count) {
+            bool mapped[32] = {}, valid[32] = {}, dirty[32] = {}, fixed[32] = {};
+            unsigned cost = 2 * fixed_count;
+            for (int i = 0; i < fixed_count; ++i)
+                mapped[ranked[i]] = valid[ranked[i]] = fixed[ranked[i]] = true;
+            for (unsigned trip = 0; trip < (loop ? 2u : 1u); ++trip) {
+                for (size_t i = 0; i < effects_by_op.size(); ++i) {
+                    const auto& e = effects_by_op[i];
+                    if (e.reads == UINT32_MAX || e.memory_operands) {
+                        for (int v = 0; v < 32; ++v) {
+                            if (valid[v] && (dirty[v] || (loop && fixed[v] && (written & (1u << v))))) cost += 2;
+                            valid[v] = dirty[v] = false; mapped[v] = fixed[v];
+                        }
+                        continue;
+                    }
+                    const uint32_t reads = e.reads | e.recovery_reads;
+                    const uint32_t operands = reads | e.writes;
+                    uint32_t pending = operands;
+                    while (pending) {
+                        const int v = __builtin_ctz(pending); pending &= pending - 1;
+                        if (!mapped[v]) {
+                            int resident = 0;
+                            for (bool m : mapped) resident += m;
+                            if (resident == capacity) {
+                                int victim = -1, farthest = -1;
+                                for (int old = 0; old < 32; ++old) {
+                                    if (!mapped[old] || fixed[old] || (operands & (1u << old))) continue;
+                                    const auto& u = vec_uses_[old];
+                                    const auto next = std::upper_bound(u.begin(), u.end(), i);
+                                    const int distance = next == u.end() ? INT32_MAX : *next;
+                                    if (distance > farthest || (distance == farthest && victim >= 0 &&
+                                        dirty[victim] && !dirty[old])) { victim = old; farthest = distance; }
+                                }
+                                if (victim < 0) return UINT32_MAX;
+                                if (dirty[victim]) cost += 2;
+                                mapped[victim] = valid[victim] = dirty[victim] = false;
+                            }
+                            mapped[v] = true;
+                        }
+                        if ((reads & (1u << v)) && !valid[v]) { cost += 2; valid[v] = true; }
+                    }
+                    for (int v = 0; v < 32; ++v)
+                        if (e.writes & (1u << v)) valid[v] = dirty[v] = true;
+                }
+                if (loop) for (int v = 0; v < 32; ++v) {
+                    if (!fixed[v]) {
+                        if (dirty[v]) cost += 2;
+                        mapped[v] = valid[v] = dirty[v] = false;
+                    } else if (!valid[v]) { cost += 2; valid[v] = true; }
+                }
+            }
+            for (int v = 0; v < 32; ++v) if (dirty[v]) cost += 2;
+            return cost;
+        };
+        int best = vec_fixed_count_;
+        unsigned best_cost = estimate(best);
+        for (int candidate : {vec_fixed_count_ / 2, 0}) {
+            const unsigned cost = estimate(candidate);
+            if (cost < best_cost) { best = candidate; best_cost = cost; }
+        }
+        vec_fixed_count_ = best;
+    }
     for (int v = 0; v < 32; ++v) vec_written_this_block_[v] = (written >> v) & 1;
     for (int i = 0; i < vec_fixed_count_; ++i) {
         const int v = ranked[i], xmm = VEC_XMM_START + i;
@@ -197,6 +331,27 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block, bool tier1) {
         vec_xmm_owner_[xmm] = v;
         vec_pinned_[vec_pinned_count_++] = v;
     }
+    // Seed demand slots with values read before their first definition.
+    // Their layout is a loop-entry contract, not another set of pins: body
+    // allocation may evict them. Backedges reconcile this layout explicitly.
+    if (vec_allocator_active_) {
+        uint32_t defined = 0;
+        int next_xmm = VEC_XMM_START + vec_fixed_count_;
+        for (const auto& effects : effects_by_op) {
+            if (effects.reads == UINT32_MAX || effects.memory_operands) break;
+            uint32_t live_in = (effects.reads | effects.recovery_reads) & ~defined;
+            while (live_in && next_xmm <= VEC_XMM_END) {
+                const int v = __builtin_ctz(live_in); live_in &= live_in - 1;
+                if (vec_cache_[v] >= 0) continue;
+                vec_cache_[v] = next_xmm;
+                vec_xmm_owner_[next_xmm++] = v;
+                vec_pinned_[vec_pinned_count_++] = v;
+            }
+            defined |= effects.writes;
+            if (next_xmm > VEC_XMM_END) break;
+        }
+    }
+    for (int v = 0; v < 32; ++v) vec_entry_cache_[v] = vec_cache_[v];
     return true;
 }
 
@@ -207,12 +362,17 @@ void FrostJIT::vec_writeback_one(int v) {
     ++vec_spills_;
 }
 
-void FrostJIT::vec_prepare_operands(uint32_t operands) {
+void FrostJIT::vec_prepare_operands(uint32_t reads, uint32_t writes) {
+    const uint32_t operands = reads | writes;
     uint32_t pending = operands;
     while (pending) {
         const int v = __builtin_ctz(pending);
         pending &= pending - 1;
-        if (vec_cache_[v] >= 0) continue;
+        if (vec_cache_[v] >= 0) {
+            if (!vec_valid_[v] && (reads & (uint32_t(1) << v)))
+                vec_emit_load_lo_hi(vec_cache_[v], v);
+            continue;
+        }
         int chosen = -1;
         int farthest = -1;
         for (int xmm = VEC_XMM_START + vec_fixed_count_; xmm <= VEC_XMM_END; ++xmm) {
@@ -240,7 +400,8 @@ void FrostJIT::vec_prepare_operands(uint32_t operands) {
         vec_xmm_owner_[chosen] = v;
         vec_pinned_[chosen - VEC_XMM_START] = v;
         vec_pinned_count_ = std::max(vec_pinned_count_, chosen - VEC_XMM_START + 1);
-        vec_emit_load_lo_hi(chosen, v);
+        vec_valid_[v] = false;
+        if (reads & (uint32_t(1) << v)) vec_emit_load_lo_hi(chosen, v);
         vec_dirty_[v] = false;
     }
 }
@@ -251,6 +412,7 @@ void FrostJIT::vec_drop_dynamic() {
         vec_xmm_owner_[vec_cache_[v]] = -1;
         vec_cache_[v] = -1;
         vec_dirty_[v] = false;
+        vec_valid_[v] = false;
     }
     vec_pinned_count_ = vec_fixed_count_;
 }
@@ -259,7 +421,46 @@ void FrostJIT::vec_writeback_dynamic() {
     if (!vec_allocator_active_) return;
     for (int i = vec_fixed_count_; i < vec_pinned_count_; ++i) {
         const int v = vec_pinned_[i];
-        if (vec_dirty_[v]) vec_writeback_one(v);
+        if (vec_dirty_[v] && vec_entry_cache_[v] < 0) vec_writeback_one(v);
+    }
+    struct Copy { int target, source, v; };
+    std::vector<Copy> copies;
+    for (int v = 0; v < 32; ++v) {
+        const int target = vec_entry_cache_[v];
+        if (target < VEC_XMM_START + vec_fixed_count_) continue;
+        const int source = vec_valid_[v] ? vec_cache_[v] : -1;
+        if (source != target) copies.push_back({target, source, v});
+    }
+    // Parallel copies preserve all sources, including cycles. XMM0 is
+    // instruction scratch and is not part of any entry or recovery layout.
+    while (!copies.empty()) {
+        auto ready = std::find_if(copies.begin(), copies.end(), [&](const Copy& copy) {
+            return std::none_of(copies.begin(), copies.end(), [&](const Copy& other) {
+                return other.source == copy.target;
+            });
+        });
+        if (ready == copies.end()) {
+            const int source = copies.front().source;
+            movdqa(0, source);
+            for (auto& copy : copies) if (copy.source == source) copy.source = 0;
+            continue;
+        }
+        if (ready->source < 0) {
+            const bool valid = vec_valid_[ready->v];
+            vec_emit_load_lo_hi(ready->target, ready->v);
+            vec_valid_[ready->v] = valid;
+        } else movdqa(ready->target, ready->source);
+        copies.erase(ready);
+    }
+    // The retained loop entry expects the fixed layout to be valid. A
+    // helper followed only by overwrites may have left some pins unloaded.
+    // Re-establish that entry contract without changing fall-through state.
+    for (int i = 0; i < vec_fixed_count_; ++i) {
+        const int v = vec_pinned_[i];
+        if (!vec_valid_[v]) {
+            vec_emit_load_lo_hi(vec_cache_[v], v);
+            vec_valid_[v] = false; // The alternate fall-through did not reload it.
+        }
     }
 }
 
@@ -441,8 +642,10 @@ void FrostJIT::vec_cache_reset() {
     vec_pinned_count_ = 0;
     for (int i = 0; i < 32; i++) {
         vec_cache_[i] = -1;
+        vec_entry_cache_[i] = -1;
         vec_pinned_[i] = -1;
         vec_dirty_[i] = false;
+        vec_valid_[i] = false;
         vec_written_this_block_[i] = false;
     }
     for (int i = 0; i < 16; i++) vec_xmm_owner_[i] = -1;
@@ -451,6 +654,7 @@ void FrostJIT::vec_cache_reset() {
 // ── Prologue / epilogue ────────────────────────────────────────────────
 // movsd xmm, [rbx+lo] + movhpd xmm, [rbx+hi].
 void FrostJIT::vec_emit_load_lo_hi(int xmm, int vreg) {
+    vec_valid_[vreg] = true;
     ++vec_reloads_;
     bool r = (xmm >= 8);
     emit_byte(rex(false, r, false, false));
@@ -480,7 +684,12 @@ void FrostJIT::vec_emit_prologue_loads() {
         } else {
             vec_emit_load_lo_hi(vec_cache_[v], v);
         }
-        vec_dirty_[v] = false;
+        // Demand entry values can carry a write from the previous loop
+        // trip even before their first definition on this trip. An early
+        // eviction must publish them before losing their only current copy.
+        vec_dirty_[v] = vec_allocator_active_ && i >= vec_fixed_count_ &&
+                        vec_written_this_block_[v];
+        vec_valid_[v] = true;
     }
 }
 
@@ -518,7 +727,7 @@ void FrostJIT::vec_cache_writeback_all_pinned(bool clear_flags) {
         // clean at this codegen point, but dirty at runtime on the next
         // self-loop iteration. It is always safe to flush a clean reg
         // (its XMM value equals its slot).
-        if (!vec_dirty_[v] && !vec_written_this_block_[v]) continue;
+        if (!vec_valid_[v] || (!vec_dirty_[v] && !vec_written_this_block_[v])) continue;
         int xmm = vec_cache_[v];
         bool r = (xmm >= 8);
         // MOVSD (F2 0F 11) — 64-bit store (see vec_cache_writeback_all).
@@ -537,7 +746,7 @@ void FrostJIT::vec_cache_writeback_all_pinned(bool clear_flags) {
 }
 
 void FrostJIT::vec_cache_mark_dirty(int vreg) {
-    if (vreg >= 0 && vreg < 32) vec_dirty_[vreg] = true;
+    if (vreg >= 0 && vreg < 32) vec_dirty_[vreg] = vec_valid_[vreg] = true;
 }
 
 // ── VEX 3-byte helpers ────────────────────────────────────────────────
@@ -675,6 +884,12 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
 // v_hi is never cached in fp-cache blocks, so this is always a memory
 // store. MUST run after the lo result is stored.
 void FrostJIT::fp_zero_hi(int vreg) {
+    const int pinned = vec_xmm(vreg);
+    if (pinned >= 0 && !fp_cache_active_) {
+        emit_vec_zero_upper(pinned);
+        vec_cache_mark_dirty(vreg);
+        return;
+    }
     emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF); emit_byte(0xC0);  // pxor xmm0, xmm0
     emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);                    // movsd [hi], xmm0
     emit_modrm_disp(0, CPU_REG, V_HI_OFF + vreg * 8);

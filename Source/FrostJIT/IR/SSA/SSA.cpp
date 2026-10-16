@@ -449,7 +449,8 @@ bool lower_ssa(const SSAFunction& f, std::vector<SSASourceBlock>& result,
         // Keep IMM -> consumer adjacency: the backend skips a constant's
         // mov only when its single consumer immediately follows it.
         while (at > 0 && entry[at - 1].ir.op == IROp::IMM) --at;
-        input_loads[at].push_back(IRInst::make_load_reg(home(input.first), slot, fp));
+        const uint64_t pc = entry.empty() ? 0 : entry[at].ir.arm_pc;
+        input_loads[at].push_back(IRInst::make_load_reg(home(input.first), slot, fp, pc));
     }
     for (size_t b = 0; b < f.blocks.size(); ++b) {
         out[b].successors = f.blocks[b].successors;
@@ -458,7 +459,9 @@ bool lower_ssa(const SSAFunction& f, std::vector<SSASourceBlock>& result,
                 return fail(error, "temporary phi requires edge copies");
             bool fp = phi.variable >= SSA_FP;
             auto slot = static_cast<uint16_t>(phi.variable - (fp ? SSA_FP : SSA_GPR));
-            out[b].ir.insts.push_back(IRInst::make_load_reg(home(phi.result), slot, fp));
+            const uint64_t pc = f.blocks[b].instructions.empty() ? 0 :
+                                f.blocks[b].instructions.front().ir.arm_pc;
+            out[b].ir.insts.push_back(IRInst::make_load_reg(home(phi.result), slot, fp, pc));
         }
         for (size_t j = 0; j < f.blocks[b].instructions.size(); ++j) {
             if (b == 0)
@@ -472,7 +475,7 @@ bool lower_ssa(const SSAFunction& f, std::vector<SSASourceBlock>& result,
             if (rematerialize(node)) {
                 if (next >= 4096) return fail(error, "SSA lowering exceeds vreg budget");
                 i.src2 = static_cast<uint16_t>(next++);
-                out[b].ir.insts.push_back(IRInst::make_imm(i.src2, constants[node.inputs[1]]));
+                out[b].ir.insts.push_back(IRInst::make_imm(i.src2, constants[node.inputs[1]], i.arm_pc));
             }
             if (node.input_mask & 4) i.aux = home(node.inputs[2]);
             out[b].ir.insts.push_back(i);

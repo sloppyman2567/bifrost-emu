@@ -11,4 +11,5 @@ make USE_SDL2=1 USE_THUNK_GL=1 lib > "$task_tmp/build.log" 2>&1 || {
     Tests/Unit/jit_profiler.cpp build/release-sdl1-gl1/libbifrost.a \
     $(sed -n "s/^LDFLAGS=//p" build/release-sdl1-gl1/.build-config) -o "$task_tmp/test_jit_profiler"
 BIFROST_PROF=1 BIFROST_JIT_CACHE_MB=1024 \
+    BIFROST_REGALLOC_PROFILE="$task_tmp/allocation.tsv" \
     "$task_tmp/test_jit_profiler"

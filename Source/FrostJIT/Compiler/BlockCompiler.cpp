@@ -114,6 +114,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     num_stack_slots_ = 0;
     vec_cache_reset();
     regalloc_stats_reset();
+    allocation_events_.clear();
+    allocation_profile_active_ = !dbg().regalloc_profile.empty();
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
     // not all 4096 entries. This saves ~12KB of writes per block
     // translation when blocks are small (typical: max_vreg_ ≈ 33-100).
@@ -574,7 +576,7 @@ if (demote_interp) {
     // ── Vector register cache pre-scan ─────────────────────────────
     // Tier-1 allocates vectors on demand under pressure, with a stable hot
     // loop core. Incompatible operations synchronize the vector file locally.
-    vec_cache_may_enable(ir_block, true);
+    vec_cache_may_enable(ir_block);
     // Scalar-FP cache (lo-only): only when the vec cache is NOT active for
     // this block — the two are exclusive (both pin into XMM3-15 and share
     // cpu.v_lo, so a block is either vector-cached or scalar-FP-cached).
@@ -824,50 +826,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 }
             }
             if (!has_call) {
-                uint16_t first_write[32];
-                uint16_t first_read[32];
-                bool direct_write[32];
-                for (int i = 0; i < 32; i++) {
-                    first_write[i] = 0xFFFF;
-                    first_read[i] = 0xFFFF;
-                    direct_write[i] = false;
-                }
-                size_t n = ir_block.insts.size();
-                for (size_t i = 0; i < n; i++) {
-                    const IRInst& inst = ir_block.insts[i];
-                    if (inst.op == IROp::STORE_REG) {
-                        if (inst.dest <= 30 && first_write[inst.dest] == 0xFFFF)
-                            first_write[inst.dest] = static_cast<uint16_t>(i);
-                        // src1 is the source VALUE vreg; if it names an arch
-                        // reg (mov xN, xA) that is a READ of arch reg src1.
-                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
-                            first_read[inst.src1] = static_cast<uint16_t>(i);
-                    } else if (inst.op == IROp::LOAD_REG) {
-                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
-                            first_read[inst.src1] = static_cast<uint16_t>(i);
-                    } else if (writes_arch_gpr_directly(inst)) {
-                        // Bypasses STORE_REG: never pin it (see the helper).
-                        direct_write[inst.dest] = true;
-                    }
-                }
-                int n_pins = 0;
-                // Loop-carried vregs (read before first write, or loop-
-                // invariant reads) get pinned — the value persists across the
-                // back-edge in the register (bench_mips x0/x2). Written-then-
-                // read vregs are NOT pinned: pinning them occupies a scratch
-                // register for the whole loop and measured ~6% SLOWER on
-                // bench_mips (the body's LOAD_MEM needs the spare register;
-                // a single extra spill per iteration costs more than the
-                // store→load round trip it removes).
-                for (int a = 0; a <= 30 && n_pins < NUM_PIN_REGS; a++) {
-                    if (direct_write[a]) continue;
-                    if (first_read[a] == 0xFFFF) continue;  // never read — dead
-                    if (first_write[a] != 0xFFFF && first_write[a] < first_read[a])
-                        continue;  // written before first read — not carried
-                    arch_pin_[a] = PIN_REGS[n_pins];
-                    pinned_host_regs_ |= (1u << PIN_REGS[n_pins]);
-                    n_pins++;
-                }
+                select_arch_pins(ir_block.insts);
                 keep_store_dest_ = true;
             }
         }
@@ -1093,22 +1052,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     zext32_fused_.clear();
     vreg_last_use_op_.clear();
     reset_vreg_uses();
-    // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
-    // Counts the spill/reload instruction density of THIS block. A high
-    // reload:spill ratio for the same vreg within a block is the bloat
-    // signal (stack round-trips the allocator should have avoided).
-    if (dbg().regalloc_stats) {
-        const auto& rs = regalloc_stats_get();
-        uint64_t spills = rs.spill_stack + rs.spill_arm;
-        uint64_t reloads = rs.reload_stack + rs.reload_arm;
-        fprintf(stderr, "[regalloc] pc=%#llx insts=%zu spill=%llu(%llu/arm %llu) reload=%llu(%llu/arm %llu) evict=%llu vec-spill=%llu vec-reload=%llu vec-evict=%llu\n",
-                (unsigned long long)start_pc, ir_block.insts.size(),
-                (unsigned long long)spills, (unsigned long long)rs.spill_stack,
-                (unsigned long long)rs.spill_arm, (unsigned long long)reloads,
-                (unsigned long long)rs.reload_stack, (unsigned long long)rs.reload_arm,
-                (unsigned long long)rs.evicts, (unsigned long long)vec_spills_,
-                (unsigned long long)vec_reloads_, (unsigned long long)vec_evictions_);
-    }
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
     // Materialize pending host flags to cpu.pstate before returning.
@@ -1224,9 +1167,31 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     // Cold software page checks and fault exits of guarded accesses, after
     // all hot code; their registered fault sites get the real stub offsets.
+    const size_t recovery_start = code_buf_used_;
     flush_deferred_guards();
     flush_deferred_fp_steps();
+    // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
+    // Counts the spill/reload instruction density of THIS block. A high
+    // reload:spill ratio for the same vreg within a block is the bloat
+    // signal (stack round-trips the allocator should have avoided).
+    if (dbg().regalloc_stats) {
+        const auto& rs = regalloc_stats_get();
+        uint64_t spills = rs.spill_stack + rs.spill_arm;
+        uint64_t reloads = rs.reload_stack + rs.reload_arm;
+        fprintf(stderr, "[regalloc] pc=%#llx insts=%zu spill=%llu(%llu/arm %llu) reload=%llu(%llu/arm %llu) evict=%llu vec-spill=%llu vec-reload=%llu vec-evict=%llu remat=%llu remat-spill-avoided=%llu hot-bytes=%zu cold-bytes=%zu\n",
+                (unsigned long long)start_pc, ir_block.insts.size(),
+                (unsigned long long)spills, (unsigned long long)rs.spill_stack,
+                (unsigned long long)rs.spill_arm, (unsigned long long)reloads,
+                (unsigned long long)rs.reload_stack, (unsigned long long)rs.reload_arm,
+                (unsigned long long)rs.evicts, (unsigned long long)vec_spills_,
+                (unsigned long long)vec_reloads_, (unsigned long long)vec_evictions_,
+                (unsigned long long)rs.rematerialized,
+                (unsigned long long)rs.rematerializable_spills_avoided,
+                recovery_start - block_start, code_buf_used_ - recovery_start);
+    }
+
     defer_guards_ = false;
+    write_allocation_profile(block_start, epilogue_off, recovery_start, false);
     if (code_buf_overflow_) {
         rewind_codegen(block_start);
         // The budget is fixed for this JIT. Cache the failure so every

@@ -267,48 +267,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
                 // stale/deferred) would hold a stale value after the call.
                 // No pins.
             } else {
-                uint16_t first_write[32];
-                uint16_t first_read[32];
-                bool direct_write[32];
-                for (int i = 0; i < 32; i++) {
-                    first_write[i] = 0xFFFF;
-                    first_read[i] = 0xFFFF;
-                    direct_write[i] = false;
-                }
-                size_t n = region_ir.size();
-                for (size_t i = 0; i < n; i++) {
-                    const IRInst& inst = region_ir[i];
-                    if (inst.op == IROp::STORE_REG) {
-                        if (inst.dest <= 30 && first_write[inst.dest] == 0xFFFF)
-                            first_write[inst.dest] = static_cast<uint16_t>(i);
-                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
-                            first_read[inst.src1] = static_cast<uint16_t>(i);
-                    } else if (inst.op == IROp::LOAD_REG) {
-                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
-                            first_read[inst.src1] = static_cast<uint16_t>(i);
-                    } else if (writes_arch_gpr_directly(inst)) {
-                        // Bypasses STORE_REG: never pin it. LOAD_MEM/ATOMIC
-                        // results would otherwise land in a scratch register
-                        // the next iteration clobbers (CoreMark region CRCs).
-                        direct_write[inst.dest] = true;
-                    }
-                }
-                int n_pins = 0;
-                // Loop-carried vregs (read before first write, or loop-
-                // invariant reads) get pinned — the value persists across the
-                // back-edge in the register. Written-then-read vregs are NOT
-                // pinned (measured ~6% slower on bench_mips: the pin occupies
-                // a scratch register for the whole loop and the body's
-                // LOAD_MEM needs the spare register).
-                for (int a = 0; a <= 30 && n_pins < NUM_PIN_REGS; a++) {
-                    if (direct_write[a]) continue;
-                    if (first_read[a] == 0xFFFF) continue;  // never read — dead
-                    if (first_write[a] != 0xFFFF && first_write[a] < first_read[a])
-                        continue;  // written before first read — not carried
-                    arch_pin_[a] = PIN_REGS[n_pins];
-                    pinned_host_regs_ |= (1u << PIN_REGS[n_pins]);
-                    n_pins++;
-                }
+                select_arch_pins(region_ir);
                 keep_store_dest_ = true;
             }
         }

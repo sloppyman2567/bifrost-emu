@@ -166,21 +166,61 @@ thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in X86Emitter.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
-    if (!vec_allocator_active_) return compile_ir_inst_body(inst);
-    uint32_t reads, writes;
-    if (vec_inst_operands(inst, reads, writes)) {
-        vec_prepare_operands(reads | writes);
-        return compile_ir_inst_body(inst);
+    auto compile = [&]() {
+        if (!vec_allocator_active_) return compile_ir_inst_body(inst);
+        VectorEffects effects;
+        if (vec_inst_effects(inst, effects)) {
+            if (effects.memory_operands) {
+                for (int i = 0; i < vec_pinned_count_; ++i) {
+                    const int v = vec_pinned_[i], xmm = vec_cache_[v];
+                    const bool clobbered = (effects.xmm_clobbers >> xmm) & 1;
+                    if (vec_valid_[v] && (vec_dirty_[v] || vec_written_this_block_[v]) &&
+                        (clobbered || (effects.reads & (1u << v)))) vec_writeback_one(v);
+                }
+                vec_cache_active_ = false;
+                const bool ends = compile_ir_inst_body(inst);
+                vec_cache_active_ = true;
+                for (int i = 0; i < vec_pinned_count_; ++i) {
+                    const int v = vec_pinned_[i];
+                    if ((effects.writes & (1u << v)) ||
+                        ((effects.xmm_clobbers >> vec_cache_[v]) & 1))
+                        vec_valid_[v] = vec_dirty_[v] = false;
+                }
+                return ends;
+            }
+            vec_prepare_operands(effects.reads | effects.recovery_reads, effects.writes);
+            return compile_ir_inst_body(inst);
+        }
+        // Unknown effects may read/write any architectural vector and borrow
+        // any XMM. Publish the loop core (including loop-carried writes), then
+        // emit with memory authoritative. This is a boundary, not a block veto.
+        vec_cache_writeback_all_pinned();
+        vec_drop_dynamic();
+        vec_cache_active_ = false;
+        const bool ends = compile_ir_inst_body(inst);
+        vec_cache_active_ = true;
+        // The helper may have destroyed every XMM. Their memory homes are now
+        // authoritative; reload fixed values only if a later instruction reads
+        // them, rather than eagerly loading values about to be overwritten.
+        for (int i = 0; i < vec_fixed_count_; ++i) vec_valid_[vec_pinned_[i]] = false;
+        return ends;
+    };
+    if (!allocation_profile_active_) return compile();
+    const size_t begin = code_buf_used_;
+    const auto before = regalloc_stats_;
+    const uint64_t spills = vec_spills_, reloads = vec_reloads_, evictions = vec_evictions_;
+    const bool ends = compile();
+    if (allocation_profile_active_) {
+        VectorEffects effects;
+        const bool boundary = !vec_inst_effects(inst, effects) || effects.memory_operands;
+        regalloc_stats_t delta = regalloc_stats_;
+        delta.spill_arm -= before.spill_arm; delta.spill_stack -= before.spill_stack;
+        delta.reload_arm -= before.reload_arm; delta.reload_stack -= before.reload_stack;
+        delta.evicts -= before.evicts; delta.rematerialized -= before.rematerialized;
+        delta.rematerializable_spills_avoided -= before.rematerializable_spills_avoided;
+        allocation_events_.push_back({inst.arm_pc, begin, code_buf_used_, unsigned(inst.op), delta,
+            vec_spills_ - spills, vec_reloads_ - reloads, vec_evictions_ - evictions, boundary});
     }
-    // Unknown effects may read/write any architectural vector and borrow
-    // any XMM. Publish the loop core (including loop-carried writes), then
-    // emit with memory authoritative. This is a boundary, not a block veto.
-    vec_cache_writeback_all_pinned();
-    vec_drop_dynamic();
-    vec_cache_active_ = false;
-    const bool ends = compile_ir_inst_body(inst);
-    vec_cache_active_ = true;
-    vec_emit_prologue_loads();
     return ends;
 }
 
