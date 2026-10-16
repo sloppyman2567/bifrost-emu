@@ -586,6 +586,10 @@ INTEGRATION_TESTS=(
     # readback pin; control offset-0 draw isolates ES setup failures.
     # Exit 77 = skip when SDL/ES3 unavailable.
     "sdl_gles_ebo|Tests/Apps/test_sdl_gles_ebo.elf||30|ALL PASS"
+    # OES_EGL_image entry points resolve through eglGetProcAddress and bind
+    # a texture-sourced EGLImage (readback pin). Needs host EGL + GLES 2;
+    # exit 77 = skip.
+    "gles_egl_image|Tests/Apps/test_gles_egl_image.elf||30|ALL PASS"
     # VAO + EBO + multidraw + indirect draws with readback pins
     # (needs DISPLAY + host GL). Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_vao|Tests/Apps/test_sdl_gl_vao.elf||60|ALL PASS"

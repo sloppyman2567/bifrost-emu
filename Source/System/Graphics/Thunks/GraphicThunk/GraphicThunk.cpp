@@ -435,9 +435,12 @@ void GraphicThunk::register_known_symbols_() {
         } else if (fd.have) {
             host_fn = dlsym(RTLD_DEFAULT, spec.name);
         }
-        // libEGL exports only core symbols; extension entry points come
-        // from eglGetProcAddress (EGL 1.5 §3.10).
-        if (!host_fn && spec.lib == thunk::LibFamily::EGL && fd.have) {
+        // libEGL exports only core symbols, and glvnd's GL/GLES libraries
+        // omit extension entry points; both come from eglGetProcAddress
+        // (EGL 1.5 §3.10).
+        if (!host_fn && fd.have && (spec.lib == thunk::LibFamily::EGL ||
+                                    spec.lib == thunk::LibFamily::GLES ||
+                                    spec.lib == thunk::LibFamily::GL)) {
             using GetProc = void* (*)(const char*);
             static const auto egl_get_proc = reinterpret_cast<GetProc>(
                 dlsym(RTLD_DEFAULT, "eglGetProcAddress"));

@@ -457,6 +457,8 @@ inline constexpr Spec specs[] = {
     {LibFamily::GLES, "glDebugMessageCallback", "ip", RetKind::PLAIN, Policy::GL_DEBUG_CB, SizeKind::NONE, false},
     {LibFamily::GLES, "glLabelObjectEXT", "iiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::GLES, "glGetObjectLabelEXT", "iiipp", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
+    {LibFamily::GLES, "glEGLImageTargetTexture2DOES", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
+    {LibFamily::GLES, "glEGLImageTargetRenderbufferStorageOES", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::GLES, "glDrawArraysIndirect", "ip", RetKind::PLAIN, Policy::INDIRECT_PTR, SizeKind::NONE, true},
     {LibFamily::GLES, "glDrawElementsBaseVertex", "iiiii", RetKind::PLAIN, Policy::EL_PTR, SizeKind::NONE, true},
     {LibFamily::GLES, "glDrawElementsIndirect", "iip", RetKind::PLAIN, Policy::INDIRECT_PTR, SizeKind::NONE, true},

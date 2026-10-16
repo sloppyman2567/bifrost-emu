@@ -418,6 +418,12 @@ glDebugMessageCallback     GLES   ip            -     GL_DEBUG_CB    -
 # EXT_debug_label has its own object enums; forward the real EXT entry points.
 glLabelObjectEXT           GLES   iiip          -     -              -
 glGetObjectLabelEXT        GLES   iiipp         -     -              -
+# OES_EGL_image: hosts advertise it, so guests (Chromium's GL bindings) call
+# the entry points unchecked. The EGLImage is the host's opaque handle from
+# eglCreateImage(KHR). glvnd's libGLESv2 does not export these; the host
+# resolves them through eglGetProcAddress.
+glEGLImageTargetTexture2DOES           GLES ii -  -  -
+glEGLImageTargetRenderbufferStorageOES GLES ii -  -  -
 glDrawArraysIndirect       GLES   ip            -     INDIRECT_PTR   -       SYNC
 glDrawElementsBaseVertex   GLES   iiiii         -     EL_PTR         -       SYNC
 glDrawElementsIndirect     GLES   iip           -     INDIRECT_PTR   -       SYNC

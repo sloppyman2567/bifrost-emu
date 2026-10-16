@@ -2460,6 +2460,13 @@ output bounces, alongside GL ABI and Vulkan mapped-memory upload/readback
 checks. These focused tests do not establish correct interactive vkQuake
 sensitivity; see [vkQuake status](Apps/vkquake.md).
 
+`Tests/Apps/test_gles_egl_image.c` resolves `eglCreateImageKHR` and
+`glEGLImageTargetTexture2DOES` through `eglGetProcAddress` on a host EGL
+pbuffer context. It shares a 2x2 texture through an EGLImage and reads the
+target back. The thunk used to return NULL for the advertised target entry
+point, which Android WebView called. It skips without host EGL/GLES 2 or the
+extensions; it does not cover AHardwareBuffer or dma-buf image sources.
+
 ## Memory and signal regressions
 
 `Tests/Unit/test_mem_guard.c` checks wrapping `munmap`, stack overlap rejection,

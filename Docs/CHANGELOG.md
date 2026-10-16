@@ -13,6 +13,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### OES_EGL_image entry points for GLES guests (2026-10-16)
+
+- Add thunk rows for `glEGLImageTargetTexture2DOES` and
+  `glEGLImageTargetRenderbufferStorageOES`, and resolve host GL/GLES symbols
+  that glvnd does not export through host `eglGetProcAddress`. The guest got
+  NULL for these advertised functions; SpongeBob's WebView GPU thread called
+  it. Once worker faults became guest signals, Chromium's crash handler ended
+  the game at 22% loading (`exit_group(191)`).
+- Add `gles_egl_image` (EGLImage texture sharing with readback).
+
 ### Install-time dexopt and ART profiles for managed apps (2026-10-16)
 
 - Before launch, compile the base APK with the image's `profman` and
@@ -21,9 +31,11 @@ labels below are historical records.
   interpreted at runtime (SpongeBob ships 68 MB of dex).
 - Create installd's profile directories and register app code paths with ART,
   so ProfileSaver and androidx ProfileInstaller record profiles.
-- Interpreter worker threads now receive memory faults as guest signals.
-  Previously the thread ended silently, and ART's thread suspension then
-  waited on it or aborted. Add `test_thread_fault_signal` (checked on QEMU).
+- Worker threads now receive faults raised outside generated code
+  (interpreted instructions, instruction fetch from an unmapped PC) as guest
+  signals, in both engines. Previously
+  the thread ended silently, and ART's thread suspension then waited on it or
+  aborted. Add `test_thread_fault_signal` (checked on QEMU).
 
 ### Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
 
