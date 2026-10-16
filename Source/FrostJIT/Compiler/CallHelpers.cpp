@@ -272,10 +272,16 @@ void FrostJIT::emit_fp_interp_step(const IRInst& inst) {
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
     emit_ret();
     patch_jcc_rel32(resume, static_cast<int32_t>(code_buf_used_ - (resume + 6)));
+    // Reload every slot (memory is current after the step, including a
+    // vector guard's destination), but keep compile-time validity: the hot
+    // path skips this reload, so slots it left memory-authoritative after a
+    // helper clobber must stay invalid.
     if (vec_cache_active_)
         for (int i = 0; i < vec_pinned_count_; ++i) {
             const int v = vec_pinned_[i];
+            const bool valid = vec_valid_[v];
             vec_emit_load_lo_hi(vec_cache_[v], v);
+            vec_valid_[v] = valid;
         }
     for (int i = 8; i >= 0; --i) emit_pop(saved[i]);
 }

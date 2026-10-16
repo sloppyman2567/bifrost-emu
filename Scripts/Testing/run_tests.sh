@@ -273,6 +273,7 @@ UNIT_TESTS=(
     "simd_mul32|Tests/Unit/jit_simd_mul32.elf||5|simd_mul32: ALL PASS"
     "simd_fmov_imm|Tests/Unit/jit_simd_fmov_imm.elf||5|simd_fmov_imm: ALL PASS"
     "scalar_dup|Tests/Unit/jit_scalar_dup.elf||5|scalar_dup: ALL PASS"
+    "vector_cold_step|Tests/Unit/jit_vector_cold_step.elf||5|vector_cold_step: ALL PASS"
     "simd_unary_fp|Tests/Unit/jit_simd_unary_fp.elf||5|simd_unary_fp: ALL PASS"
     "simd_fp_indexed|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS"
     "round_away|Tests/Unit/jit_round_away.elf||5|round_away: ALL PASS"

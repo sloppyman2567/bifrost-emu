@@ -72,6 +72,8 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   translation retains all limits and records every absorbed instruction word.
 - Tier-1 deferred guard tails must restore the allocator/vector dirty state
   captured before the access and finalize fault-site offsets before publication.
+  Inline cold and slow paths that the hot path skips may reload XMMs at
+  runtime but must leave compile-time vector validity and dirtiness unchanged.
   Tier-2 keeps inline guards. W-form fusion is Tier-1-only and must scope its
   encoding width to the ALU operation, preserving operand setup and lazy NZCV.
 - Restore the complete ST chain-skip slot through `write_unpatched_slot`;

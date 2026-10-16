@@ -13,6 +13,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Cold-path vector validity (2026-10-16)
+
+- Keep the compile-time vector-slot validity after FP NaN cold steps and
+  SIMD 16-byte slow paths. These paths reload XMMs that the hot path skips.
+  After a native vector helper and a scalar FP operation, the hot path read
+  stale vector registers and broke touch input in Android games.
+- Add the `jit_vector_cold_step` regression (checked against qemu-aarch64).
+
 ### Interpreter recovery profiling (2026-10-16)
 
 - Append scoped, thread-local `general`/`fp-special` reasons to fallback

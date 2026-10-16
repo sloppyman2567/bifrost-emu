@@ -96,9 +96,13 @@ bool FrostJIT::compile_simd_memory_(const IRInst& inst) {
                     emit_pop(WIN_REG);
                 }
                 if (vec_cache_active_) {
+                    // Likewise for validity: the fast path skips these reloads,
+                    // so slots it left memory-authoritative stay invalid.
                     for (int pi = 0; pi < vec_pinned_count_; pi++) {
                         int v = vec_pinned_[pi];
+                        const bool valid = vec_valid_[v];
                         vec_emit_load_lo_hi(vec_cache_[v], v);
+                        vec_valid_[v] = valid;
                     }
                 }
                 jmp_past = emit_jmp_rel32_placeholder();
@@ -200,7 +204,9 @@ bool FrostJIT::compile_simd_memory_(const IRInst& inst) {
                 if (vec_cache_active_) {
                     for (int pi = 0; pi < vec_pinned_count_; pi++) {
                         int v = vec_pinned_[pi];
+                        const bool valid = vec_valid_[v];
                         vec_emit_load_lo_hi(vec_cache_[v], v);
+                        vec_valid_[v] = valid;
                     }
                 }
                 jmp_past = emit_jmp_rel32_placeholder();

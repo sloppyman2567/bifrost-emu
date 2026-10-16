@@ -15,6 +15,27 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Cold-path reloads keep vector validity (2026-10-16)
+
+The allocation checkpoint below tracks whether each cached vector slot holds
+its current value. Helper clobbers and boundaries leave slots invalid and
+memory-authoritative until their next read. Code emitted on a path that the
+hot path skips must not change that compile-time state. The FP NaN cold step
+(`emit_fp_interp_step`) and the SIMD 16-byte load/store slow paths reload
+every pinned slot after their host call. `vec_emit_load_lo_hi` marked each
+slot valid, so after an inline scalar FP cold tail the hot path treated
+clobbered slots as resident and read stale XMMs. These paths now restore each
+slot's validity after the reload. They still reload every slot at runtime:
+a vector guard's step writes the destination that rejoins after its commit.
+
+In Android games this corrupted values after a native vector helper (for
+example a USHL or BSL helper) followed by a scalar FP operation, and broke
+touch input. `jit_vector_cold_step` reproduces it with an inline USHL and a
+scalar FADD in a loop. The values were checked against qemu-aarch64. A first
+attempt that reloaded only valid slots broke vector guard destinations
+(`native_simd_inline` `FCVTL` Inf/NaN rows) and showed as green sprite
+corruption; the full suite catches that variant.
+
 ## Allocation costs, mixed FP and region layouts (2026-10-16)
 
 This checkpoint supersedes the earlier fixed-layout Tier-2 restriction and

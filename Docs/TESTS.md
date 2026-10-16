@@ -4,6 +4,17 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Cold-path vector validity (2026-10-16)
+
+`jit_vector_cold_step` fails on the unfixed allocator commit (`9309076`) and
+passes on the fixed JIT, the interpreter and qemu-aarch64. `make verify`
+passes 88 differential fixtures and seven threaded oracles. The strict JIT
+suite passes 327/327, including `native_simd_inline` (137,700 checks) and
+`jit_simd_fp_nan`. The strict interpreter suite passes 318 with nine expected
+JIT-only skips. A manual SpongeBob session on the fixed build had working
+touch input and no sprite corruption. That observation does not establish
+other games or long-session playability.
+
 ## Allocator effects and region demand layouts (2026-10-16)
 
 The expanded discovery fixture compares all vector bits against the
