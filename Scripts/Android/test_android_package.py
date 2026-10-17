@@ -1115,10 +1115,24 @@ class PackageTests(unittest.TestCase):
                    # A dialog created on an engine Looper thread draws there
                    # (ViewRootImpl.checkThread) and its click runs there.
                    "text=Engine dialog", "MANAGED_DIALOG_ENGINE_POSITIVE FixtureEngine",
-                   "MANAGED_DIALOG_ENGINE_DISMISSED", "MANAGED_DIALOG_DESTROYED")
+                   "MANAGED_DIALOG_ENGINE_DISMISSED",
+                   # SurfaceViews in its windows get host surfaces; their
+                   # callbacks run there with the Surface still valid, when
+                   # the window is removed and when the app stops it.
+                   "MANAGED_DIALOG_ENGINE_SURFACE_CREATED removed FixtureEngine",
+                   "MANAGED_DIALOG_ENGINE_SURFACE_CHANGED removed FixtureEngine 320x180",
+                   "APP_SURFACE android.view.SurfaceView 320x180",
+                   "MANAGED_DIALOG_ENGINE_SURFACE_DESTROYED removed FixtureEngine valid=true",
+                   "MANAGED_DIALOG_ENGINE_SURFACE_CREATED stopped FixtureEngine",
+                   "MANAGED_DIALOG_ENGINE_SURFACE_CHANGED stopped FixtureEngine 320x180",
+                   "APP_PAUSED", "MANAGED_DIALOG_ENGINE_SURFACE_DESTROYED stopped FixtureEngine valid=true",
+                   "APP_STOPPED", "MANAGED_DIALOG_DESTROYED",
+                   # The root then closes the window it leaked (closeAll).
+                   "WindowLeaked: Activity org.bifrost.fixture.ManagedDialog has leaked window")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
         self.assertNotIn("CalledFromWrongThreadException", text)
+        self.assertEqual(text.count("MANAGED_DIALOG_ENGINE_SURFACE_DESTROYED"), 2, text[-30000:])
         # The dialog shown from onResume holds focus before the Activity's
         # window exists, so the Activity first gains focus when the dialog
         # goes; the non-focusable PopupWindow leaves it focused.
@@ -1128,13 +1142,14 @@ class PackageTests(unittest.TestCase):
         self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
         # The Activity window (its action bar) drew on the GPU; the dialogs,
         # the PopupWindow and the unaccelerated Engine Activity reached the
-        # host as software layers, at framework-computed frames. All five
-        # were removed.
+        # host as software layers, at framework-computed frames. All but the
+        # leaked one, which dies asynchronously at exit, were removed.
         self.assertEqual(text.count("APP_WINDOW_GPU"), 1, text[-30000:])
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
-        self.assertEqual(len(shown), 4, text[-30000:])
+        self.assertEqual(len(shown), 6, text[-30000:])
         self.assertEqual(shown[1][1], "[40,60][280,140]")
-        self.assertEqual(text.count("APP_POPUP_REMOVED"), 5, text[-30000:])
+        removed = {line.split()[1] for line in text.splitlines() if line.startswith("APP_POPUP_REMOVED")}
+        self.assertLessEqual({"1", "2", "3", "4", "5", "6"}, removed, text[-30000:])
 
     def test_managed_view_window_and_surface_lifecycle(self):
         state = self.work / "views-state"

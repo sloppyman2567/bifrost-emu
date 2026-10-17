@@ -67,8 +67,9 @@ final class FrameworkWindows {
         // appearing after that thread removed the window.
         boolean removed;
         volatile boolean drawing;
+        volatile boolean updating;  // a SurfaceView update is posted (updateSurfaces)
         boolean drawn;  // the owner drew pixels not yet shown
-        Exception failure;  // the owner's draw failed
+        volatile Exception failure;  // the owner's draw or SurfaceView update failed
         String text;  // visible text at the first draw, for the first-show log line
         Popup(IBinder token, Object window, int id) { this.token = token; this.window = window; this.id = id; }
     }
@@ -316,10 +317,11 @@ final class FrameworkWindows {
     }
 
     // The app is stopping: like ViewRootImpl.setWindowStopped, every
-    // SurfaceView loses its surface and none is created again.
+    // SurfaceView loses its surface, on its window's thread, and none is
+    // created again.
     void stop() throws Exception {
         synchronized (this) { stopped = true; }
-        surfaces.destroy(null);
+        surfaces.stop();
     }
 
     // A display resize: every window lays out again against the new bounds
@@ -371,12 +373,15 @@ final class FrameworkWindows {
         }
         for (int index = 0; index < stack.size(); index++) {
             Popup popup = stack.get(index);
+            if (popup.failure != null) throw popup.failure;
             View root = root(popup);
+            Object viewRoot = viewRoot(popup);
             int w = popup.frame.width(), h = popup.frame.height();
             boolean showing = popup.visibility == View.VISIBLE && root != null && w > 0 && h > 0
                     && root.getWidth() > 0 && root.getHeight() > 0;
             if (!showing) {
-                surfaces.update(popup, null, false);
+                if (viewRoot == null || owned(viewRoot)) surfaces.update(popup, null, false);
+                else if (!popup.updating && surfaces.has(popup)) updateSurfaces(popup, viewRoot, null, false);
                 releaseLayer(popup);
                 if (popup.onHost) { removePopup(popup.id); popup.onHost = false; }
                 popup.shown.setEmpty();
@@ -384,11 +389,34 @@ final class FrameworkWindows {
                 continue;
             }
             if (root.isLayoutRequested()) continue;  // ViewRootImpl lays out before the next draw
-            Object viewRoot = viewRoot(popup);
             if (viewRoot == null) continue;
+            if (popup.observed != root) {
+                popup.observed = root;
+                onOwner(viewRoot, () -> {
+                    android.view.ViewTreeObserver observer = root.getViewTreeObserver();
+                    observer.addOnPreDrawListener(() -> {
+                        popup.traversed = true;
+                        return true;
+                    });
+                    // ViewRootImpl reports the window detaching before its
+                    // views detach, and SurfaceView.onDetachedFromWindow
+                    // destroys its Surface: deliver surfaceDestroyed first, as
+                    // SurfaceView's own updateSurface does.
+                    observer.addOnWindowAttachListener(new android.view.ViewTreeObserver.OnWindowAttachListener() {
+                        @Override public void onWindowAttached() {}
+                        @Override public void onWindowDetached() {
+                            try { surfaces.destroy(popup); }
+                            catch (Exception error) { popup.failure = error; }
+                        }
+                    });
+                });
+                popup.traversed = true;
+            }
+            if (popup.traversed && !popup.updating) {
+                popup.traversed = false;
+                updateSurfaces(popup, viewRoot, root, true);
+            }
             if (!owned(viewRoot)) {
-                // Their SurfaceViews would need FrameworkSurfaces on that
-                // thread too; none get host surfaces.
                 synchronized (this) {
                     if (popup.removed) continue;
                     if (dim(popup)) restackAbove(stack, index);
@@ -396,18 +424,6 @@ final class FrameworkWindows {
                         popup.drawn = false;
                 }
                 continue;
-            }
-            if (popup.observed != root) {
-                popup.observed = root;
-                root.getViewTreeObserver().addOnPreDrawListener(() -> {
-                    popup.traversed = true;
-                    return true;
-                });
-                popup.traversed = true;
-            }
-            if (popup.traversed) {
-                popup.traversed = false;
-                surfaces.update(popup, root, true);
             }
             if (dim(popup)) restackAbove(stack, index);
             // ViewRootImpl accumulates invalidations in mDirty and clears it
@@ -469,7 +485,6 @@ final class FrameworkWindows {
     // current size are ready to show. A moved window shows retained pixels.
     private boolean drawForeign(Popup popup, View root, Object viewRoot, int w, int h) throws Exception {
         if (popup.drawing) return false;
-        if (popup.failure != null) throw popup.failure;
         boolean sized = popup.bitmap != null && popup.bitmap.getWidth() == w && popup.bitmap.getHeight() == h;
         if (sized && (popup.drawn || !popup.shown.equals(popup.frame))) return true;
         if (sized && !root.isDirty() && ((Rect) hiddenField(viewRoot, "mDirty")).isEmpty()) return false;
@@ -487,6 +502,26 @@ final class FrameworkWindows {
             }
         });
         return false;
+    }
+
+    // SurfaceViews follow each traversal on the window's own thread, where
+    // SurfaceHolder callbacks run; one update per window is in flight.
+    private void updateSurfaces(Popup popup, Object viewRoot, View root, boolean shown) throws Exception {
+        if (owned(viewRoot)) {
+            surfaces.update(popup, root, shown);
+            return;
+        }
+        popup.updating = true;
+        ((android.os.Handler) hiddenField(viewRoot, "mHandler")).post(() -> {
+            try {
+                synchronized (this) { if (popup.removed) return; }  // remove() ran on this thread first
+                surfaces.update(popup, root, shown);
+            } catch (Exception error) {
+                popup.failure = error;
+            } finally {
+                popup.updating = false;
+            }
+        });
     }
 
     // Shows a window's software pixels in its host layer; blank windows have

@@ -6,6 +6,12 @@
 // surface is created when that becomes true, reported again when its size or
 // format changes, and destroyed when it becomes false or its window goes.
 // Callbacks run in SurfaceView's order: surfaceCreated, then surfaceChanged.
+//
+// Each window's surfaces are updated and destroyed on the thread that owns
+// the window (ViewRootImpl.mThread), where Android delivers SurfaceHolder
+// callbacks; frames are consumed on the main Looper. The lock on this object
+// guards the entries and every host call on an entry's window, never the
+// app's callbacks, so a released host window is never presented again.
 import android.graphics.PixelFormat;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
@@ -37,13 +43,15 @@ final class FrameworkSurfaces {
     private static final class Entry {
         final SurfaceView view;
         final Object owner;  // the framework window holding the view
+        final Handler thread;  // the window's ViewRootImpl handler, kept past detach
         final long window;
         final ImageReader reader;
-        int width, height, format;
+        int width, height, format;  // guarded by FrameworkSurfaces
         int x = Integer.MIN_VALUE, y = Integer.MIN_VALUE;
         boolean closed;
         Entry(SurfaceView view, Object owner, long window, ImageReader reader) {
             this.view = view; this.owner = owner; this.window = window; this.reader = reader;
+            this.thread = view.getHandler();
         }
     }
 
@@ -57,6 +65,7 @@ final class FrameworkSurfaces {
 
     private final Host host;
     private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
+    private boolean stopped;  // ViewRootImpl.setWindowStopped: no surface is created again
     private static native int present(long window, int x, int y, int width, int height, int[] argb);
     private static native int geometry(long window, int x, int y, int width, int height);
 
@@ -100,14 +109,19 @@ final class FrameworkSurfaces {
     private static native int placeBelow(long window, long sibling);
 
     // The host surfaces of one framework window's SurfaceViews.
-    List<Long> windows(Object owner) {
+    synchronized List<Long> windows(Object owner) {
         List<Long> result = new ArrayList<>();
         for (Entry entry : entries.values()) if (entry.owner == owner && !entry.closed) result.add(entry.window);
         return result;
     }
 
+    synchronized boolean has(Object owner) {
+        for (Entry entry : entries.values()) if (entry.owner == owner) return true;
+        return false;
+    }
+
     // Stack host surfaces bottom to top in `order`.
-    void restack(List<Long> order) {
+    synchronized void restack(List<Long> order) {
         for (int i = order.size() - 2; i >= 0; i--) {
             int result = placeBelow(order.get(i), order.get(i + 1));
             if (result != 0) throw new IllegalStateException("surface order: " + result);
@@ -141,11 +155,17 @@ final class FrameworkSurfaces {
 
     // Brings the surfaces of one window up to date with its laid-out view
     // tree. `shown` is false while the window is hidden or being removed.
+    // Runs on the thread that owns the window.
     void update(Object owner, View root, boolean shown) throws Exception {
         List<SurfaceView> visible = new ArrayList<>();
         if (shown && root != null) collect(root, visible);
-        for (Entry entry : new ArrayList<>(entries.values()))
-            if (entry.owner == owner && !visible.contains(entry.view)) destroy(entry);
+        List<Entry> gone = new ArrayList<>();
+        synchronized (this) {
+            if (stopped) visible.clear();
+            for (Entry entry : entries.values())
+                if (entry.owner == owner && !visible.contains(entry.view)) gone.add(entry);
+        }
+        for (Entry entry : gone) destroy(entry, true);
         for (SurfaceView view : visible) {
             // This class is the SurfaceView's compositor. Its own updateSurface()
             // treats our host-drawn window (no valid ViewRootImpl surface) as
@@ -156,13 +176,17 @@ final class FrameworkSurfaces {
             view.getViewTreeObserver().removeOnPreDrawListener(
                     (ViewTreeObserver.OnPreDrawListener) DRAW_LISTENER.get(view));
             HAVE_FRAME.setBoolean(view, false);
-            Entry entry = entries.get(view);
             int format = REQUESTED_FORMAT.getInt(view);
             int width = view.getWidth(), height = view.getHeight();
             int[] location = new int[2]; view.getLocationInWindow(location);
-            boolean changed = entry == null || entry.width != width || entry.height != height || entry.format != format;
-            if (!changed && entry.x == location[0] && entry.y == location[1])
-                continue;
+            Entry entry;
+            boolean changed;
+            synchronized (this) {
+                entry = entries.get(view);
+                changed = entry == null || entry.width != width || entry.height != height || entry.format != format;
+                if (!changed && entry.x == location[0] && entry.y == location[1])
+                    continue;
+            }
             ((android.graphics.Rect) SURFACE_FRAME.get(view)).set(0, 0, width, height);
             boolean created = entry == null;
             if (created) {
@@ -180,16 +204,24 @@ final class FrameworkSurfaces {
                     reader.close(); target.release(); throw error;
                 }
                 entry = new Entry(view, owner, window, reader);
-                entries.put(view, entry);
+                synchronized (this) {
+                    if (stopped) {  // stopped while this one was prepared
+                        reader.close(); host.release(window); target.release();
+                        continue;
+                    }
+                    entries.put(view, entry);
+                }
                 final Entry consumer = entry;
                 reader.setOnImageAvailableListener(available -> consume(consumer), new Handler(Looper.getMainLooper()));
             }
-            entry.width = width;
-            entry.height = height;
-            entry.format = format;
-            entry.x = location[0]; entry.y = location[1];
-            int positioned = geometry(entry.window, entry.x, entry.y, width, height);
-            if (positioned != 0) throw new IllegalStateException("Surface geometry: " + positioned);
+            synchronized (this) {
+                entry.width = width;
+                entry.height = height;
+                entry.format = format;
+                entry.x = location[0]; entry.y = location[1];
+                int positioned = geometry(entry.window, entry.x, entry.y, width, height);
+                if (positioned != 0) throw new IllegalStateException("Surface geometry: " + positioned);
+            }
             SurfaceHolder holder = view.getHolder();
             for (SurfaceHolder.Callback callback : callbacks(view)) {
                 if (created) callback.surfaceCreated(holder);
@@ -243,13 +275,13 @@ final class FrameworkSurfaces {
         return out;
     }
 
-    private static void consume(Entry entry) {
+    // Main Looper. The view's position comes from its last update, made on
+    // the window's own thread.
+    private synchronized void consume(Entry entry) {
         if (entry.closed) return;
         try (Image image = entry.reader.acquireLatestImage()) {
             if (image == null) return;
-            int[] location = new int[2];
-            entry.view.getLocationInWindow(location);
-            int result = present(entry.window, location[0], location[1], entry.width, entry.height,
+            int result = present(entry.window, entry.x, entry.y, entry.width, entry.height,
                                  pixels(image, entry.width, entry.height));
             if (result != 0 && result != -11) throw new IllegalStateException("Surface presentation: " + result);
         }
@@ -267,10 +299,51 @@ final class FrameworkSurfaces {
                 collect(((ViewGroup) view).getChildAt(i), out);
     }
 
-    // Destroys every surface of one window, or of all windows when owner is null.
+    // Destroys every surface of one window, on the thread that owns it.
     void destroy(Object owner) throws Exception {
-        for (Entry entry : new ArrayList<>(entries.values()))
-            if (owner == null || entry.owner == owner) destroy(entry);
+        List<Entry> gone = new ArrayList<>();
+        synchronized (this) {
+            for (Entry entry : entries.values()) if (entry.owner == owner) gone.add(entry);
+        }
+        for (Entry entry : gone) destroy(entry, true);
+    }
+
+    // The app is stopping (ViewRootImpl.setWindowStopped): every surface is
+    // destroyed and none is created again. Like WindowManagerGlobal's
+    // setStoppedState, windows owned by other threads stop synchronously on
+    // their Looper (Handler.runWithScissors, no timeout). A window whose
+    // thread has quit its Looper gets no callbacks; its host surfaces go.
+    void stop() throws Exception {
+        List<Entry> all;
+        synchronized (this) {
+            stopped = true;
+            all = new ArrayList<>(entries.values());
+        }
+        for (Entry entry : all) {
+            // Through the owner's queue even while its window dies there.
+            Handler owner = entry.thread;
+            if (owner == null || owner.getLooper() == Looper.myLooper()) {
+                destroy(entry, true);
+                continue;
+            }
+            Exception[] failure = new Exception[1];
+            Runnable task = () -> {
+                try { destroy(entry, true); }
+                catch (Exception error) { failure[0] = error; }
+            };
+            if (!(Boolean) RUN_WITH_SCISSORS.invoke(owner, task, 0L)) destroy(entry, false);
+            if (failure[0] != null) throw failure[0];
+        }
+    }
+
+    private static final Method RUN_WITH_SCISSORS;
+    static {
+        try {
+            RUN_WITH_SCISSORS = Handler.class.getDeclaredMethod("runWithScissors", Runnable.class, long.class);
+            RUN_WITH_SCISSORS.setAccessible(true);
+        } catch (NoSuchMethodException error) {
+            throw new ExceptionInInitializerError(error);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -278,18 +351,24 @@ final class FrameworkSurfaces {
         return new ArrayList<>((List<SurfaceHolder.Callback>) CALLBACKS.get(view));
     }
 
-    private void destroy(Entry entry) throws Exception {
-        entries.remove(entry.view);
-        DRAW_FINISHED.setBoolean(entry.view, false);
+    // surfaceDestroyed runs while the host surface is still valid, as the
+    // app may read it back (Unity copies its last frame).
+    private void destroy(Entry entry, boolean callbacks) throws Exception {
+        synchronized (this) {
+            if (entries.remove(entry.view) != entry) return;  // destroyed by another path
+        }
+        if (callbacks) DRAW_FINISHED.setBoolean(entry.view, false);
         try {
-            for (SurfaceHolder.Callback callback : callbacks(entry.view)) {
-                callback.surfaceDestroyed(entry.view.getHolder());
-            }
+            if (callbacks)
+                for (SurfaceHolder.Callback callback : callbacks(entry.view))
+                    callback.surfaceDestroyed(entry.view.getHolder());
         } finally {
-            entry.closed = true;
-            entry.reader.setOnImageAvailableListener(null, null);
-            entry.reader.close();
-            host.release(entry.window);
+            synchronized (this) {
+                entry.closed = true;
+                entry.reader.setOnImageAvailableListener(null, null);
+                entry.reader.close();
+                host.release(entry.window);
+            }
             entry.view.getHolder().getSurface().release();
         }
         System.out.println("APP_SURFACE_DESTROYED " + entry.view.getClass().getName());

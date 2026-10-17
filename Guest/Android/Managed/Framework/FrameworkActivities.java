@@ -404,12 +404,25 @@ final class FrameworkActivities {
         System.out.println("APP_ACTIVITY_DESTROYED " + activity.getClass().getName());
     }
 
-    // handleDestroyActivity: an added decor window is removed after onDestroy.
+    // handleDestroyActivity: an added decor window is removed after onDestroy,
+    // then every window the Activity left open (dialogs on its token, panels
+    // on its decor's) is closed as leaked. WindowManagerGlobal.closeAll lets
+    // each window die on the thread that owns it.
     static void removeWindow(Activity activity) throws Exception {
         Field added = Activity.class.getDeclaredField("mWindowAdded");
         added.setAccessible(true);
-        if (added.getBoolean(activity) && activity.getWindow() != null)
-            activity.getWindowManager().removeViewImmediate(activity.getWindow().getDecorView());
+        IBinder decorToken = null;
+        if (activity.getWindow() != null) {
+            View decor = activity.getWindow().peekDecorView();
+            if (decor != null) decorToken = decor.getWindowToken();
+            if (added.getBoolean(activity) && decor != null)
+                activity.getWindowManager().removeViewImmediate(decor);
+        }
+        Object global = Class.forName("android.view.WindowManagerGlobal").getMethod("getInstance").invoke(null);
+        Method closeAll = global.getClass().getMethod("closeAll", IBinder.class, String.class, String.class);
+        String name = activity.getClass().getName();
+        if (decorToken != null) closeAll.invoke(global, decorToken, name, "Activity");
+        closeAll.invoke(global, method(Activity.class, "getActivityToken").invoke(activity), name, "Activity");
     }
 
     static boolean resumedState(Activity activity) throws Exception {

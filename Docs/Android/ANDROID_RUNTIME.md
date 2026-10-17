@@ -50,16 +50,53 @@ does the same for windows that thread owns:
 - `remove()` marks the window removed under the window lock, so no host
   layer appears for it afterwards.
 
-Main-thread windows keep the inline path. `test_managed_dialog_and_popup_windows`
-adds an unaccelerated `$Engine` Activity whose `HandlerThread` shows an
-AlertDialog, resizes its button and clicks it. With the previous launcher
-the fixture exits with the same exception; with the fix it passes.
+SurfaceViews in those windows get host surfaces too. SurfaceHolder
+callbacks run on the window's own thread, where SurfaceView delivers them:
+- `FrameworkWindows.updateSurfaces` posts each window's `FrameworkSurfaces.update`
+  to its owner, one at a time per window. The ViewTreeObserver listeners are
+  added on that thread.
+- `FrameworkSurfaces` takes one lock for its entries and for every host call
+  on an entry's window (`geometry`, `present`, `release`). The app's callbacks
+  never run under that lock. Frames are still consumed on the main Looper, at
+  the position from the last update, and a released window is never presented.
+- Window removal: `ViewRootImpl.dispatchDetachedFromWindow` reports the window
+  detaching before its views detach, and `SurfaceView.onDetachedFromWindow`
+  destroys its Surface (`releaseSurfaces`). `FrameworkWindows` therefore
+  destroys the window's surfaces from `OnWindowAttachListener.onWindowDetached`,
+  while `surfaceDestroyed` still sees a valid Surface. This applies to
+  main-thread windows too.
+- Window close: `FrameworkSurfaces.stop` follows
+  `WindowManagerGlobal.setStoppedState`. Windows owned by other threads stop on
+  their Looper with `Handler.runWithScissors(…, 0)`, through the handler
+  recorded when the surface was created. If that thread has quit its Looper,
+  its host surfaces are released without callbacks.
 
-Limits: SurfaceViews inside windows owned by other threads get no host
-surface (`FrameworkSurfaces` is main-thread only). An owner thread that never
-runs its Looper never draws its window, as on Android. Real touch delivery
-to such a window is covered by code review only: the fixture clicks with
-`performClick` on the owner thread.
+`FrameworkActivities.removeWindow` now ends like `handleDestroyActivity`.
+After removing the decor, `WindowManagerGlobal.closeAll` closes the windows
+the Activity leaked (on its decor's token, then on its own token). This logs
+`WindowLeaked`, and each window dies on its owning thread. A destroyed stacked
+Activity's open dialogs used to stay registered.
+
+Main-thread windows keep the inline path. `test_managed_dialog_and_popup_windows`
+adds an unaccelerated `$Engine` Activity whose `HandlerThread` does three things:
+1. Shows an AlertDialog, resizes its button and clicks it. With the launcher
+   before this change, the fixture exits with the same exception.
+2. Shows a SurfaceView dialog and dismisses it.
+3. Shows a SurfaceView dialog on the root Activity, which is still open when
+   the app closes.
+
+Every SurfaceHolder callback must run on `FixtureEngine`, with a valid
+Surface in `surfaceDestroyed`. On the first windows-thread commit (no
+foreign surfaces), the SurfaceView never gets a surface and the launch times
+out.
+
+Limits:
+- An owner thread that never runs its Looper never draws its window, as on
+  Android. Window close then waits for it, as `setStoppedState` does.
+- Pixels presented to a SurfaceView in such a window are untested: the
+  fixture checks only the surface lifecycle and the host surface.
+- Real touch delivery to such a window is covered by code review only: the
+  fixture clicks with `performClick` on the owner thread.
 
 ### microG Play services packages (2026-10-16)
 
@@ -1839,7 +1876,9 @@ the SurfaceView drawn (`performDrawFinished`), so the window punches its hole
 with `Canvas.punchHole` in drawing order and Views drawn after it stay
 visible above the surface. Host resizes relayout every window
 (`ViewRootImpl.forceWmRelayout`). Window close stops all windows, delivering
-`surfaceDestroyed` before `onStop`. The log records
+`surfaceDestroyed` before `onStop`; a removed window delivers it when the
+window detaches, before SurfaceView releases its Surface. Both happen on the
+window's own thread. The log records
 `APP_SURFACE <class> <w>x<h> at <x>,<y> format=<f>` and
 `APP_SURFACE_DESTROYED <class>`.
 
