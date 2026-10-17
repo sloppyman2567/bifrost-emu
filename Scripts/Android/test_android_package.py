@@ -1093,6 +1093,8 @@ class PackageTests(unittest.TestCase):
             self.assertIn("MANAGED_FIXTURE_PREFS_LISTENER background main=true", text)
             self.assertIn("MANAGED_FIXTURE_TELEPHONY_REGISTRY_OK", text)
             self.assertIn("MANAGED_FIXTURE_NETWORK_INTERFACES_OK", text)
+            self.assertIn("MANAGED_FIXTURE_PACKAGE_QUERIES_OK", text)
+            self.assertIn("MANAGED_FIXTURE_APP_TASKS_OK", text)
             key = (state / ".settings/user-0.key").read_bytes()
             expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,
                                    hashlib.sha256).hexdigest()[:16]

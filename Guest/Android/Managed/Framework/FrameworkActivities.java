@@ -439,6 +439,83 @@ final class FrameworkActivities {
         return stack.contains(record);
     }
 
+    // The one launcher task: activity_client.getTaskForActivity reports it.
+    static final int TASK_ID = 1;
+    private Object appTask;  // IAppTask, created on first request
+
+    // ActivityTaskManagerService.getAppTasks: tasks of the caller's UID whose
+    // base package is `callingPackage` (RecentTasks.getAppTasksList).
+    List<IBinder> appTasks(String callingPackage, FrameworkServices services) throws Exception {
+        if (packages.packageUid(callingPackage) != android.os.Process.myUid())  // assertPackageMatchesCallingUid
+            throw new SecurityException("Calling uid " + android.os.Process.myUid()
+                    + " cannot match package " + callingPackage);
+        List<IBinder> tasks = new ArrayList<>();
+        Record root;
+        synchronized (this) { root = stack.isEmpty() ? null : stack.get(0); }
+        if (root == null || !callingPackage.equals(root.activity.getPackageName())) return tasks;
+        synchronized (this) {
+            // AppTaskImpl: only getTaskInfo is implemented; the task's
+            // finish/move/start/exclude operations remain unsupported.
+            if (appTask == null) appTask = services.local("app_task", "android.app.IAppTask",
+                    new FrameworkServices.Call() {
+                @Override public String[] methods() { return new String[] {"getTaskInfo"}; }
+                @Override public Object invoke(String method, Object[] a) throws Exception {
+                    if (method.equals("getTaskInfo")) return taskInfo();
+                    throw new UnsupportedOperationException("app_task." + method);
+                }
+            });
+        }
+        tasks.add(((android.os.IInterface) appTask).asBinder());
+        return tasks;
+    }
+
+    // RecentTasks.createRecentTaskInfo / Task.fillTaskInfo for the launcher
+    // task: base and top Activities from the stack, one display, visible and
+    // focused. The task description is the default (no setTaskDescription
+    // tracking); window-organizer, PiP and cutout fields keep their defaults.
+    private android.app.ActivityManager.RecentTaskInfo taskInfo() throws Exception {
+        List<Record> records;
+        synchronized (this) { records = new ArrayList<>(stack); }
+        if (records.isEmpty()) throw new IllegalArgumentException("Unable to find task ID " + TASK_ID);
+        Activity root = records.get(0).activity, top = records.get(records.size() - 1).activity;
+        android.app.ActivityManager.RecentTaskInfo info = new android.app.ActivityManager.RecentTaskInfo();
+        Intent base = new Intent(root.getIntent());
+        info.taskId = TASK_ID;
+        info.baseIntent = base;
+        info.isRunning = true;
+        info.baseActivity = root.getComponentName();
+        info.topActivity = top.getComponentName();
+        info.origActivity = null;
+        info.numActivities = records.size();
+        info.taskDescription = new android.app.ActivityManager.TaskDescription();
+        info.id = TASK_ID;
+        info.persistentId = TASK_ID;
+        setHidden(info, "realActivity", root.getComponentName());
+        setHidden(info, "userId", android.os.Process.myUid() / 100000);
+        setHidden(info, "displayId", 0);
+        setHidden(info, "lastActiveTime", android.os.SystemClock.elapsedRealtime());
+        setHidden(info, "isFocused", true);
+        setHidden(info, "isVisible", true);
+        setHidden(info, "topActivityInfo", application.getPackageManager().getActivityInfo(top.getComponentName(), 0));
+        ((android.content.res.Configuration) hiddenField(info, "configuration"))
+                .setTo(top.getResources().getConfiguration());
+        return info;
+    }
+
+    private static Field taskInfoField(Object target, String name) throws Exception {
+        Field field = Class.forName("android.app.TaskInfo").getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
+    }
+
+    private static void setHidden(Object target, String name, Object value) throws Exception {
+        taskInfoField(target, name).set(target, value);
+    }
+
+    private static Object hiddenField(Object target, String name) throws Exception {
+        return taskInfoField(target, name).get(target);
+    }
+
     private synchronized Record top() {
         return stack.isEmpty() ? null : stack.get(stack.size() - 1);
     }

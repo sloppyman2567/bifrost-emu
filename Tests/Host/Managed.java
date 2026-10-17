@@ -110,6 +110,8 @@ public final class Managed extends Activity {
         checkBackgroundPreferenceCommit();
         checkTelephonyRegistry();
         checkNetworkInterfaces();
+        checkPackageQueries();
+        checkAppTasks();
         int starts = prefs.getInt("starts", 0) + 1;
         if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
             throw new AssertionError("System defaults or preserved override incorrect");
@@ -224,6 +226,65 @@ public final class Managed extends Activity {
             throw new AssertionError(error);
         }
         System.out.println("MANAGED_FIXTURE_NETWORK_INTERFACES_OK");
+    }
+
+    // PackageManager queries ad SDKs make: queryIntentActivities,
+    // getApplicationEnabledSetting and requestChecksums (whole-file SHA-256,
+    // fs-verity root and 1 MiB partial root of the base APK).
+    private void checkPackageQueries() {
+        android.content.pm.PackageManager pm = getPackageManager();
+        java.util.List<android.content.pm.ResolveInfo> main = pm.queryIntentActivities(
+                new android.content.Intent(android.content.Intent.ACTION_MAIN).setPackage(getPackageName()),
+                android.content.pm.PackageManager.GET_SIGNATURES);
+        if (main.size() != 1 || !Managed.class.getName().equals(main.get(0).activityInfo.name))
+            throw new AssertionError("queryIntentActivities incorrect: " + main);
+        if (pm.getApplicationEnabledSetting(getPackageName())
+                != android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT)
+            throw new AssertionError("application enabled setting incorrect");
+        try {
+            pm.getApplicationEnabledSetting("org.bifrost.fixture.missing");
+            throw new AssertionError("unknown package has an enabled setting");
+        } catch (IllegalArgumentException expected) {
+        }
+        int required = android.content.pm.Checksum.TYPE_WHOLE_SHA256
+                | android.content.pm.Checksum.TYPE_WHOLE_MERKLE_ROOT_4K_SHA256
+                | android.content.pm.Checksum.TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256;
+        java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(1);
+        java.util.Map<Integer, byte[]> found = new java.util.concurrent.ConcurrentHashMap<>();
+        try {
+            pm.requestChecksums(getPackageName(), false, required,
+                    android.content.pm.PackageManager.TRUST_NONE, checksums -> {
+                        for (android.content.pm.ApkChecksum checksum : checksums)
+                            if (checksum.getSplitName() == null) found.put(checksum.getType(), checksum.getValue());
+                        ready.countDown();
+                    });
+            if (!ready.await(60, java.util.concurrent.TimeUnit.SECONDS))
+                throw new AssertionError("checksums were not delivered");
+            java.security.MessageDigest sha256 = java.security.MessageDigest.getInstance("SHA-256");
+            try (java.io.InputStream in = new java.io.FileInputStream(getApplicationInfo().sourceDir)) {
+                byte[] buffer = new byte[65536];
+                for (int read; (read = in.read(buffer)) != -1; ) sha256.update(buffer, 0, read);
+            }
+            if (!java.util.Arrays.equals(found.get(android.content.pm.Checksum.TYPE_WHOLE_SHA256), sha256.digest())
+                    || found.get(android.content.pm.Checksum.TYPE_WHOLE_MERKLE_ROOT_4K_SHA256) == null
+                    || found.get(android.content.pm.Checksum.TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256) == null)
+                throw new AssertionError("package checksums incorrect: " + found.keySet());
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        }
+        System.out.println("MANAGED_FIXTURE_PACKAGE_QUERIES_OK");
+    }
+
+    // ActivityManager.getAppTasks: the launcher task, matching getTaskId().
+    private void checkAppTasks() {
+        java.util.List<android.app.ActivityManager.AppTask> tasks =
+                ((android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE)).getAppTasks();
+        if (tasks.size() != 1) throw new AssertionError("app tasks: " + tasks.size());
+        android.app.ActivityManager.RecentTaskInfo info = tasks.get(0).getTaskInfo();
+        if (info.taskId != getTaskId() || info.numActivities < 1
+                || !new android.content.ComponentName(this, Managed.class).equals(info.baseActivity))
+            throw new AssertionError("app task info incorrect");
+        System.out.println("MANAGED_FIXTURE_APP_TASKS_OK");
     }
 
     @Override public void onResume() {

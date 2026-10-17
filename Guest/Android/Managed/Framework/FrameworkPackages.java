@@ -37,6 +37,7 @@ final class FrameworkPackages {
     private final Map<String, Map<ComponentName, List<IntentFilter>>> receiverFilters = new ConcurrentHashMap<>();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> serviceFilters = new ConcurrentHashMap<>();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> activityFilters = new ConcurrentHashMap<>();
+    private final FrameworkPackageChecksums checksums = new FrameworkPackageChecksums();
     private java.util.Set<String> protectedBroadcasts;
 
     synchronized boolean protectedBroadcast(String action) throws Exception {
@@ -288,6 +289,21 @@ final class FrameworkPackages {
                             (Integer) a[2], installed == null ? null : installed.activities);
                 case "resolveIntent":
                     return resolveActivity((Intent) a[0], (String) a[1], ((Number) a[2]).longValue(), (Integer) a[3]);
+                case "queryIntentActivities":
+                    return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
+                            .newInstance(queryActivities((Intent) a[0], (String) a[1],
+                                    ((Number) a[2]).longValue(), (Integer) a[3]));
+                case "getApplicationEnabledSetting":
+                    return applicationEnabledSetting((String) a[0], (Integer) a[1]);
+                // (packageName, includeSplits, optional, required, trustedInstallers, listener, userId)
+                case "requestPackageChecksums": {
+                    ApplicationInfo info = applicationInfo((String) a[0], 0, (Integer) a[6]);
+                    if (info == null) throw (RuntimeException) Class.forName("android.os.ParcelableException")
+                            .getConstructor(Throwable.class)
+                            .newInstance(new PackageManager.NameNotFoundException((String) a[0]));
+                    checksums.request(info, (Boolean) a[1], (Integer) a[2], (Integer) a[3], a[5]);
+                    return null;
+                }
                 case "resolveService":
                     return resolveService((Intent) a[0], (String) a[1], ((Number) a[2]).longValue(), (Integer) a[3]);
                 case "queryIntentServices":
@@ -342,6 +358,15 @@ final class FrameworkPackages {
         // Reading a visible system package's override is allowed; changing
         // another UID's components still goes through ownComponent below.
         return componentStates.getOrDefault(component, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+    }
+
+    // ComputerEngine.getApplicationEnabledSetting: a visible package's
+    // state; no application-level state is ever changed in this profile.
+    private int applicationEnabledSetting(String name, int userId) {
+        if (userId != Process.myUid() / 100000)
+            throw new SecurityException("Foreign package user: " + userId);
+        if (findPackage(name, 0, userId) == null) throw new IllegalArgumentException("Unknown package: " + name);
+        return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
     }
 
     private ComponentName ownComponent(Object argument, int userId, boolean declared) {

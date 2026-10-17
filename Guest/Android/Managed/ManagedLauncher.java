@@ -847,6 +847,7 @@ public final class ManagedLauncher {
             // startActivityAsUser appends the user id to the same arguments.
             if (method.equals("startActivity") || method.equals("startActivityAsUser"))
                 return activities.start(a);
+            if (method.equals("getAppTasks")) return activities.appTasks((String) a[0], services);
             throw unsupported("activity_task", method);
         });
         Object provider = services.register("bifrost.settings", "android.content.IContentProvider",

@@ -62,11 +62,35 @@ carrying pointers and every set request still return `-ENOTTY`.
 `socket_msg_layout` checks loopback by name, index and flags in both engines
 and under qemu-aarch64.
 
+A `--trace-apk calls` session then showed the strict stubs the ad SDKs still
+hit, and caught, while preparing a request. They now follow Android 15:
+- **`package.queryIntentActivities`**: the Google Mobile Ads signal collector
+  queries `MAIN` in its own package with `GET_SIGNATURES`, and `VIEW` with
+  `MATCH_DEFAULT_ONLY`. This uses the same `queryActivities` as `resolveIntent`.
+- **`package.requestPackageChecksums`**: Google Mobile Ads' app-integrity
+  signal. `FrameworkPackageChecksums` follows `requestChecksumsInternal` and
+  `ApkChecksums` on the pinned framework's APK classes:
+  - **Optional types:** only the v2/v3 content digests are readily available.
+  - **Required types:** computed, i.e. whole-file digests, the fs-verity 4K
+    root and the 1 MiB partial roots.
+  - **Delivery:** the listener is called once, from a background thread.
+  - **Not modelled:** fs-verity hashes, IncFS and installer digests.
+- **`package.getApplicationEnabledSetting`**: AppLovin's Play Store check.
+  It returns `DEFAULT` for a visible package (application state never
+  changes here) and throws `IllegalArgumentException` for an unknown one.
+- **`activity_task.getAppTasks`**: Facebook Audience Network. It returns the
+  launcher task (ID 1, as `getTaskForActivity`) when its base package is the
+  caller. `IAppTask.getTaskInfo` fills the base and top activities, count,
+  base intent, display 0, focus/visibility, top `ActivityInfo` and
+  configuration. The task description stays default. The other `IAppTask`
+  operations stay unsupported.
+
 The `Managed` fixture checks all three on every start: resolution
 (explicit, implicit in-package, `MATCH_DEFAULT_ONLY`, none), a worker-thread
 commit whose listener runs on main, and telephony registration (a display-info
-listener registers and unregisters; cell info without location throws), and
-that `NetworkInterface` lists a loopback interface. With
+listener registers and unregisters; cell info without location throws),
+that `NetworkInterface` lists a loopback interface, the package queries above
+(checksums against an independent SHA-256 of the APK) and `getAppTasks`. With
 the previous launcher the fixture fails at `package.resolveIntent` and never
 reaches the later checks. The rewarded videos themselves are untested.
 
