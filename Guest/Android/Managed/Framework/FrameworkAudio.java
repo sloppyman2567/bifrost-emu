@@ -45,7 +45,13 @@ final class FrameworkAudio implements FrameworkServices.Call {
         stopLoudnessCodecUpdates,
         addLoudnessCodecInfo,
         removeLoudnessCodecInfo,
-        getLoudnessParams
+        getLoudnessParams,
+        getSpatializerImmersiveAudioLevel,
+        isSpatializerEnabled,
+        isSpatializerAvailable,
+        canBeSpatialized,
+        registerSpatializerCallback,
+        unregisterSpatializerCallback
     }
 
     @Override public String[] methods() {
@@ -368,6 +374,19 @@ final class FrameworkAudio implements FrameworkServices.Call {
                 }
                 return null;
             case getLoudnessParams: return loudnessParams(Objects.requireNonNull(a[0], "codecInfo"));
+            // SpatializerHelper without a spatializer effect: STATE_NOT_SUPPORTED,
+            // SPATIALIZATION_LEVEL_NONE. That state never changes, so the state
+            // callbacks it registers are never called.
+            case getSpatializerImmersiveAudioLevel: return 0;
+            case isSpatializerEnabled:
+            case isSpatializerAvailable: return false;
+            case canBeSpatialized:
+                Objects.requireNonNull(a[0], "attributes"); Objects.requireNonNull(a[1], "format");
+                return false;
+            case registerSpatializerCallback:
+            case unregisterSpatializerCallback:
+                Objects.requireNonNull(a[0], "callback");
+                return null;
             default: throw new UnsupportedOperationException("audio." + method);
         }
     }

@@ -22,7 +22,9 @@ labels below are historical records.
 - `IAudioService` loudness methods follow Android 15's LoudnessCodecHelper
   for the built-in speaker (CTA-2075 "small" AAC parameters), so
   ExoPlayer's `LoudnessCodecController` no longer fails ad video precaching.
-  The ad video then crashed in HWUI's RenderThread; playback is not working.
+  The `IAudioService` Spatializer queries report no spatializer
+  (`STATE_NOT_SUPPORTED`). ExoPlayer still lacks Java `AudioTrack`, so the
+  ad plays in its WebView: audio and taps work, but the window turns black.
 
 ### Nested Binder callbacks (2026-10-17)
 

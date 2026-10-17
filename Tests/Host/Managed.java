@@ -324,6 +324,19 @@ public final class Managed extends Activity {
             if (codec != null) codec.release();
         }
         System.out.println("MANAGED_FIXTURE_LOUDNESS_OK");
+        // ExoPlayer watches the Spatializer: none exists, and it stays so.
+        android.media.Spatializer spatializer = ((android.media.AudioManager) getSystemService(AUDIO_SERVICE)).getSpatializer();
+        android.media.Spatializer.OnSpatializerStateChangedListener listener =
+                new android.media.Spatializer.OnSpatializerStateChangedListener() {
+                    @Override public void onSpatializerEnabledChanged(android.media.Spatializer s, boolean enabled) {}
+                    @Override public void onSpatializerAvailableChanged(android.media.Spatializer s, boolean available) {}
+                };
+        spatializer.addOnSpatializerStateChangedListener(Runnable::run, listener);
+        if (spatializer.getImmersiveAudioLevel() != android.media.Spatializer.SPATIALIZER_IMMERSIVE_LEVEL_NONE
+                || spatializer.isAvailable() || spatializer.isEnabled())
+            throw new AssertionError("spatializer state");
+        spatializer.removeOnSpatializerStateChangedListener(listener);
+        System.out.println("MANAGED_FIXTURE_SPATIALIZER_OK");
     }
 
     @Override public void onResume() {

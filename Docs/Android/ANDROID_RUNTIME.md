@@ -126,10 +126,19 @@ does for a fixed built-in speaker:
   registered dispatchers on a worker (both calls are one-way). No playback
   configurations are reported, so no route-change updates follow.
 
+ExoPlayer also watches the `Spatializer`. Without a spatializer effect,
+[SpatializerHelper](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/audio/SpatializerHelper.java)
+stays `STATE_NOT_SUPPORTED`: level `NONE`, neither enabled nor available,
+nothing spatialized, and its state callbacks never run.
+
 The `Managed` fixture checks the controller with a configured AAC decoder
-and `ManagedPlayServices` that the ad request bind fails. In the game the ad
-Activity then showed video frames before the process died on a guest
-SIGSEGV in HWUI's RenderThread; playback is not established.
+and the Spatializer; `ManagedPlayServices` checks that the ad request bind
+fails. ExoPlayer still cannot play: it needs Java `AudioTrack`
+(`generateAudioSessionId` returns -1 and AudioFlinger has no track
+creation), so GMA plays the rewarded video in its WebView, whose audio uses
+AAudio. The ad's audio and input work there, but the ad window turns black
+once the video starts. One earlier attempt died on a guest SIGSEGV in HWUI's
+RenderThread. Visible playback is not established.
 
 ### Windows owned by other threads (2026-10-17)
 
