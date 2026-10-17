@@ -484,6 +484,12 @@ public:
   }
   ~WaylandSurfaceBackend() override { close(); }
   const char* name() const noexcept override { return "wayland-surface"; }
+  uintptr_t layer() const override { return pixels_ ? pixels_->native_layer() : 0; }
+  int place_below(uintptr_t sibling) override {
+    if (!pixels_ || !sibling) return -EINVAL;
+    pixels_->below(sibling);
+    return 0;
+  }
   int open(const char*, int32_t, int32_t) override { return window_ ? 0 : -ENODEV; }
   void close() noexcept override {
     if (window_) egl_.destroy(window_);
@@ -521,6 +527,12 @@ public:
   }
   ~X11SurfaceBackend() override { close(); }
   const char* name() const noexcept override { return "x11-surface"; }
+  uintptr_t layer() const override { return pixels_ ? pixels_->native_layer() : 0; }
+  int place_below(uintptr_t sibling) override {
+    if (!pixels_ || !sibling) return -EINVAL;
+    pixels_->below(sibling);
+    return 0;
+  }
   int open(const char*, int32_t, int32_t) override { return pixels_ && pixels_->window() ? 0 : -ENODEV; }
   void close() noexcept override { pixels_.reset(); }
   int resize(int32_t width, int32_t height, bool) override {

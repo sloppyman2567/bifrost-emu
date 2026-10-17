@@ -177,6 +177,15 @@ int AndroidSurfaceManager::surface_geometry(uint64_t handle, int32_t x, int32_t 
     return result;
 }
 
+int AndroidSurfaceManager::surface_place_below(uint64_t handle, uint64_t sibling) {
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    auto found = surfaces_.find(handle), above = surfaces_.find(sibling);
+    if (handle == sibling || found == surfaces_.end() || above == surfaces_.end()
+            || !found->second.backend || !above->second.backend) return -ENODEV;
+    uintptr_t layer = above->second.backend->layer();
+    return layer ? found->second.backend->place_below(layer) : -ENOTSUP;
+}
+
 void AndroidSurfaceManager::acquire(uint64_t handle) {
     std::lock_guard<std::mutex> lock(surface_mu_);
     auto it = surfaces_.find(handle);

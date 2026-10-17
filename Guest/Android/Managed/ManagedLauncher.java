@@ -213,7 +213,7 @@ public final class ManagedLauncher {
     private static final Binder audioFlinger = new FrameworkNativeServices.AudioFlinger();
     private static final Binder sensorService = new FrameworkNativeServices.SensorService();
     private static boolean sensorServiceRegistered;
-    private static final Binder surfaceComposer = new FrameworkNativeServices.SurfaceComposer();
+    private static final Binder surfaceComposer = new FrameworkNativeServices.SurfaceComposer(displays);
     private static final Binder transactionComposer = new FrameworkNativeServices.TransactionComposer();
 
     private static ByteBuffer readDisplayEvent(ParcelFileDescriptor channel, boolean wait) throws Exception {

@@ -1117,11 +1117,13 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("MANAGED_DIALOG_ACTIVITY_FOCUS false", text[:regained], text[-30000:])
         self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)
         self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
-        # The Activity window (its action bar), the dialog and the PopupWindow
-        # reached the host, at framework-computed frames, and were removed.
+        # The Activity window (its action bar) drew on the GPU; the dialog
+        # and the PopupWindow reached the host as software layers, at
+        # framework-computed frames. All three were removed.
+        self.assertEqual(text.count("APP_WINDOW_GPU"), 1, text[-30000:])
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
-        self.assertEqual(len(shown), 3, text[-30000:])
-        self.assertEqual(shown[2][1], "[40,60][280,140]")
+        self.assertEqual(len(shown), 2, text[-30000:])
+        self.assertEqual(shown[1][1], "[40,60][280,140]")
         self.assertEqual(text.count("APP_POPUP_REMOVED"), 3, text[-30000:])
 
     def test_managed_view_window_and_surface_lifecycle(self):
@@ -1138,16 +1140,37 @@ class PackageTests(unittest.TestCase):
         # An Activity without a SurfaceView launches and its button reaches
         # the host; the SurfaceView's surface follows its attachment and
         # visibility, created once per visible period.
-        markers = ("MANAGED_VIEWS_RESUMED", "APP_WINDOW_ADDED", "APP_POPUP_SHOWN",
+        markers = ("MANAGED_VIEWS_RESUMED", "APP_WINDOW_ADDED", "APP_WINDOW_GPU",
                    "MANAGED_VIEWS_SURFACE_CREATED", "MANAGED_VIEWS_SURFACE_CHANGED 400x300",
                    "MANAGED_VIEWS_SURFACE_DESTROYED", "MANAGED_VIEWS_SURFACE_CREATED",
                    "MANAGED_VIEWS_SURFACE_DESTROYED", "MANAGED_VIEWS_DESTROYED", "APP_POPUP_REMOVED")
         position = 0
         for marker in markers:
             position = text.index(marker, position) + len(marker)
-        self.assertRegex(text, r"APP_POPUP_SHOWN \d+ \[0,0\]\[\d+,\d+\] visible=\d+ text=Overlay button")
+        self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[0,0\]\[\d+,\d+\] opaque=\w+ text=Overlay button")
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_CREATED"), 2)
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
+
+    def test_managed_hardware_canvas(self):
+        # HWUI's RenderThread, Skia GL and EGL draw through the GL thunk onto
+        # a SurfaceView's host-backed surface.
+        state = self.work / "hardware-state"
+        bundle = self.work / "hardware.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("hardware", managed="ManagedHardware"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        self.assertRegex(text, r"MANAGED_HARDWARE_SURFACE \d+x\d+")
+        self.assertIn("MANAGED_HARDWARE_FRAMES 30", text)
+        # The Activity window draws through its own ThreadedRenderer into a
+        # host layer: frame metrics report frames HWUI swapped.
+        self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[0,0\]\[\d+,\d+\] opaque=\w+ text=Managed Fixture")
+        frames = int(re.search(r"MANAGED_HARDWARE_WINDOW accelerated=true frames=(\d+)", text).group(1))
+        self.assertGreaterEqual(frames, 10, text[-30000:])
 
     def test_managed_play_services_available(self):
         # Google's own client check accepts the provisioned microG packages:
@@ -1228,7 +1251,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("caller=ComponentInfo{org.bifrost.fixture/org.bifrost.fixture.ManagedActivities}", text)
         width, height = re.search(r"APP_WINDOW_OPEN (\d+)x(\d+)", text).groups()
         self.assertIn(f"MANAGED_ACTIVITIES_SECOND_WINDOW {width}x{height}", text)
-        self.assertRegex(text, rf"APP_POPUP_SHOWN \d+ \[0,0\]\[{width},{height}\] visible=\d+ text=.*Close second")
+        self.assertRegex(text, rf"APP_WINDOW_GPU \d+ \[0,0\]\[{width},{height}\] opaque=\w+ text=.*Close second")
 
 
 if __name__ == "__main__":

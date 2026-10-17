@@ -57,6 +57,10 @@ final class FrameworkWindows {
         // attachment, visibility or layout may have changed.
         volatile boolean traversed = true;
         View observed;
+        // Hardware-accelerated windows: the host layer their ViewRootImpl's
+        // ThreadedRenderer draws into, instead of `bitmap`.
+        FrameworkSurfaces.Layer layer;
+        Object renderer;
         Popup(IBinder token, Object window, int id) { this.token = token; this.window = window; this.id = id; }
     }
 
@@ -67,6 +71,7 @@ final class FrameworkWindows {
     private int nextId;
     private Popup touchTarget;
     private boolean stopped;
+    private List<Long> stacked = new ArrayList<>();  // host surface order last applied
 
     FrameworkWindows(FrameworkDisplay displays, FrameworkSurfaces surfaces) {
         this.displays = displays;
@@ -244,6 +249,7 @@ final class FrameworkWindows {
         // ViewRootImpl detaches the tree before removing its window, as
         // SurfaceView.onDetachedFromWindow ends its surface.
         surfaces.destroy(popup);
+        releaseLayer(popup);
         popup.observed = null;
         if (popup.onHost) removePopup(popup.id);
         hideDim(popup);
@@ -345,6 +351,7 @@ final class FrameworkWindows {
                     && root.getWidth() > 0 && root.getHeight() > 0;
             if (!showing) {
                 surfaces.update(popup, null, false);
+                releaseLayer(popup);
                 if (popup.onHost) { removePopup(popup.id); popup.onHost = false; }
                 popup.shown.setEmpty();
                 hideDim(popup);
@@ -364,19 +371,35 @@ final class FrameworkWindows {
                 surfaces.update(popup, root, true);
             }
             if (dim(popup)) restackAbove(stack, index);
-            if (popup.shown.equals(popup.frame) && !root.isDirty()) continue;
+            // ViewRootImpl accumulates invalidations in mDirty and clears it
+            // only when it draws itself, which it never does without a valid
+            // Surface: redraw that region of the retained bitmap, as its
+            // software path does (a full window when moved or resized).
+            Rect dirty = takeDirty(popup);
+            Object viewRoot = viewRoot(popup);
+            Object attachInfo = viewRoot == null ? null : hiddenField(viewRoot, "mAttachInfo");
+            Object renderer = attachInfo == null ? null : hiddenField(attachInfo, "mThreadedRenderer");
+            if (renderer != null && popup.attrs.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION) {
+                drawHardware(popup, root, viewRoot, attachInfo, renderer, w, h, !dirty.isEmpty() || root.isDirty());
+                continue;
+            }
+            releaseLayer(popup);
+            if (popup.shown.equals(popup.frame) && !root.isDirty() && dirty.isEmpty()) continue;
+            boolean full = !popup.shown.equals(popup.frame);
             if (popup.bitmap == null || popup.bitmap.getWidth() != w || popup.bitmap.getHeight() != h) {
                 if (popup.bitmap != null) popup.bitmap.recycle();
                 popup.bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
                 popup.pixels = new int[w * h];
+                full = true;
             }
-            popup.bitmap.eraseColor(0);
+            if (full || dirty.isEmpty() || !dirty.intersect(0, 0, w, h)) dirty.set(0, 0, w, h);
             Canvas canvas = new Canvas(popup.bitmap);
-            canvas.clipRect(0, 0, w, h);
+            canvas.clipRect(dirty);
+            canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
             root.draw(canvas);
-            popup.bitmap.getPixels(popup.pixels, 0, w, 0, 0, w, h);
-            int visible = visible(popup.pixels, w * h);
-            if (visible == 0) {
+            popup.bitmap.getPixels(popup.pixels, dirty.top * w + dirty.left, w,
+                    dirty.left, dirty.top, dirty.width(), dirty.height());
+            if (!anyVisible(popup.pixels)) {
                 if (popup.onHost) {
                     removePopup(popup.id);
                     popup.onHost = false;
@@ -392,7 +415,7 @@ final class FrameworkWindows {
                         StringBuilder text = new StringBuilder();
                         collectText(root, text);
                         System.out.println("APP_POPUP_SHOWN " + popup.id + " " + popup.frame.toShortString()
-                                + " visible=" + visible + (text.length() > 0 ? " text=" + text : ""));
+                                + " visible=" + visible(popup.pixels, w * h) + (text.length() > 0 ? " text=" + text : ""));
                         popup.announced = true;
                     }
                     popup.onHost = true;
@@ -404,9 +427,114 @@ final class FrameworkWindows {
                 throw new IllegalStateException("popup window " + popup.id + ": host error " + result);
             }
         }
+        // SurfaceFlinger's window order: each window's SurfaceViews directly
+        // below its own layer (SurfaceView's default Z), windows bottom to top.
+        // Host layers otherwise stack in creation order.
+        List<Long> order = new ArrayList<>();
+        for (Popup popup : stack) {
+            if (popup.layer == null) continue;
+            order.addAll(surfaces.windows(popup));
+            order.add(popup.layer.window);
+        }
+        if (!order.equals(stacked)) {
+            surfaces.restack(order);
+            stacked = order;
+        }
     }
 
-    // Pixels with nonzero alpha; zero means the window shows nothing.
+    // An Activity window whose ViewRootImpl created a ThreadedRenderer
+    // (FLAG_HARDWARE_ACCELERATED) draws on the GPU into its own host layer,
+    // created after the window's SurfaceViews so it stacks above them.
+    // ViewRootImpl's own Surface stays invalid (no SurfaceFlinger), so it
+    // never initializes or draws with the renderer itself; this compositor
+    // makes ViewRootImpl's hardware draw call (ThreadedRenderer.draw) for it.
+    private void drawHardware(Popup popup, View root, Object viewRoot, Object attachInfo, Object renderer,
+            int w, int h, boolean dirty) throws Exception {
+        if (popup.onHost) { removePopup(popup.id); popup.onHost = false; }
+        boolean created = false;
+        if (popup.layer == null || popup.layer.width != w || popup.layer.height != h || popup.renderer != renderer) {
+            releaseLayer(popup);
+            WindowManager.LayoutParams attrs = popup.attrs;
+            Rect insets = (Rect) hiddenField(attrs, "surfaceInsets");
+            boolean opaque = attrs.format == android.graphics.PixelFormat.OPAQUE
+                    && insets.left == 0 && insets.top == 0 && insets.right == 0 && insets.bottom == 0;
+            popup.layer = surfaces.createLayer(w, h, opaque);
+            popup.renderer = renderer;
+            RENDERER_INITIALIZE.invoke(renderer, popup.layer.surface);
+            RENDERER_SETUP.invoke(renderer, w, h, attachInfo, insets);
+            created = true;
+        }
+        surfaces.positionLayer(popup.layer, popup.frame.left, popup.frame.top);
+        if (!dirty && !created) return;
+        RENDERER_DRAW.invoke(renderer, root, attachInfo, viewRoot);
+        popup.shown.set(popup.frame);
+        if (!popup.announced) {
+            StringBuilder text = new StringBuilder();
+            collectText(root, text);
+            System.out.println("APP_WINDOW_GPU " + popup.id + " " + popup.frame.toShortString()
+                    + " opaque=" + popup.layer.opaque + (text.length() > 0 ? " text=" + text : ""));
+            popup.announced = true;
+        }
+    }
+
+    private void releaseLayer(Popup popup) {
+        if (popup.layer == null) return;
+        surfaces.releaseLayer(popup.layer);
+        popup.layer = null;
+        popup.renderer = null;
+    }
+
+    private static Object hiddenField(Object target, String name) throws Exception {
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException next) {
+                // Declared by a superclass.
+            }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    private static final Method RENDERER_INITIALIZE, RENDERER_SETUP, RENDERER_DRAW;
+    static {
+        try {
+            Class<?> renderer = Class.forName("android.view.ThreadedRenderer");
+            Class<?> attachInfo = Class.forName("android.view.View$AttachInfo");
+            RENDERER_INITIALIZE = renderer.getDeclaredMethod("initialize", android.view.Surface.class);
+            RENDERER_SETUP = renderer.getDeclaredMethod("setup", int.class, int.class, attachInfo, Rect.class);
+            RENDERER_DRAW = renderer.getDeclaredMethod("draw", View.class, attachInfo,
+                    Class.forName("android.view.ThreadedRenderer$DrawCallbacks"));
+            for (Method method : new Method[] {RENDERER_INITIALIZE, RENDERER_SETUP, RENDERER_DRAW})
+                method.setAccessible(true);
+        } catch (ReflectiveOperationException error) {
+            throw new ExceptionInInitializerError(error);
+        }
+    }
+
+    // Whether any pixel has nonzero alpha: a blank window needs no host layer.
+    private static boolean anyVisible(int[] argb) {
+        for (int pixel : argb) if ((pixel >>> 24) != 0) return true;
+        return false;
+    }
+
+    // ViewRootImpl.mDirty, taken and cleared like its draw() does.
+    private static Rect takeDirty(Popup popup) throws Exception {
+        Field ancestor = popup.window.getClass().getDeclaredField("mViewAncestor");
+        ancestor.setAccessible(true);
+        Object viewRoot = ((WeakReference<?>) ancestor.get(popup.window)).get();
+        Rect result = new Rect();
+        if (viewRoot == null) return result;
+        Field field = viewRoot.getClass().getDeclaredField("mDirty");
+        field.setAccessible(true);
+        Rect dirty = (Rect) field.get(viewRoot);
+        result.set(dirty);
+        dirty.setEmpty();
+        return result;
+    }
+
+    // Pixels with nonzero alpha, for the first-show log line.
     private static int visible(int[] argb, int count) {
         int visible = 0;
         for (int i = 0; i < count; i++) if ((argb[i] >>> 24) != 0) visible++;

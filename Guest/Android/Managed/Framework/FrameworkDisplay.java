@@ -78,6 +78,11 @@ final class FrameworkDisplay implements FrameworkServices.Call {
         return new Rect(0, 0, width, height);
     }
 
+    // Pixel width, height and density dpi, as one snapshot.
+    synchronized int[] metrics() {
+        return new int[] {width, height, densityDpi};
+    }
+
     private Object windowContextInfo() throws Exception {
         Configuration config = globalConfiguration();
         setScreen(config);

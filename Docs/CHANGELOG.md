@@ -13,6 +13,18 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### GPU-rendered Activity windows (2026-10-17)
+
+- Hardware-accelerated Activity windows draw through their own HWUI
+  `ThreadedRenderer` into a host layer instead of a main-thread software
+  bitmap; SurfaceViews are restacked below their window (host op 19).
+  Software popups redraw only ViewRootImpl's dirty region.
+- HWUI runs on the GL thunk: a libGLESv1_CM adapter (libhwui binds
+  `glGetString` there first), SurfaceFlinger display queries for HWUI's
+  `DeviceInfo`, and the Android-private `eglBeginFrame` in the EGL adapter.
+- Add `test_managed_hardware_canvas` (HWUI on a SurfaceView, and an Activity
+  window whose frame metrics report GPU-rendered frames).
+
 ### microG processes and remote content providers (2026-10-17)
 
 - microG runs in its own managed processes (GmsCore UID 19998, its

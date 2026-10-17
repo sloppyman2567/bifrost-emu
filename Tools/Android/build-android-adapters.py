@@ -95,6 +95,16 @@ def shim(library, names, hidden=(), resolver=None):
     return "\n".join(lines) + "\n"
 
 
+def gles1_commands():
+    """OpenGL ES 1.x common-profile commands from the vendored Khronos registry."""
+    import xml.etree.ElementTree as ElementTree
+    registry = ElementTree.parse(ROOT / "ThirdParty/GLRegistry/gl.xml").getroot()
+    return {command.get("name")
+            for feature in registry.iter("feature") if feature.get("api") == "gles1"
+            for require in feature.iter("require") if require.get("profile") in (None, "common")
+            for command in require.iter("command")}
+
+
 def platform_forwards(staging, thunked):
     """Public LIBANDROID exports the managed libandroid forwards to the image's
     real library. A linked public-library namespace exposes only libandroid.so
@@ -259,6 +269,10 @@ def build(runtime, output):
             ("libEGL.so", "libEGL.so", groups["libEGL.so"]),
             ("libGLESv2.so", "libGLESv2.so", groups["libGLESv2.so"]),
             ("libGLESv3.so", "libGLESv2.so", groups["libGLESv2.so"]),
+            # libhwui needs libGLESv1_CM before libGLESv2, so shared entry
+            # points (glGetString) bind there first. Its fixed-function-only
+            # commands have no host thunk and stay with the real library.
+            ("libGLESv1_CM.so", "libGLESv2.so", sorted(gles1_commands() & set(groups["libGLESv2.so"]))),
         ):
             real = "re_" + soname[3:]
             stub = staging / real

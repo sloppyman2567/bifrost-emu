@@ -121,6 +121,8 @@ public:
     uint64_t surface_handle(uint64_t guest_window) const;
     int present_pixels(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* pixels);
     int surface_geometry(uint64_t handle, int32_t x, int32_t y, int32_t w, int32_t h);
+    // Stack surface `handle` directly below surface `sibling` (window order).
+    int surface_place_below(uint64_t handle, uint64_t sibling);
     static bool is_shim(uint64_t handle) {
         return handle >= kHandleBase && handle <= kHandleBase + 0xFFFF;
     }

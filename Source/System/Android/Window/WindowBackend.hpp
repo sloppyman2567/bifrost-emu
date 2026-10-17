@@ -24,6 +24,10 @@ public:
   // Pixels for this surface's own backing, below framework window layers.
   virtual int present_pixels(int32_t, int32_t, int32_t, int32_t, const uint32_t*) { return -ENOTSUP; }
   virtual int surface_geometry(int32_t, int32_t, int32_t, int32_t) { return -ENOTSUP; }
+  // Restack this surface directly below another surface of the same window
+  // (its native layer handle). Layers otherwise stack in creation order.
+  virtual uintptr_t layer() const { return 0; }
+  virtual int place_below(uintptr_t) { return -ENOTSUP; }
   // Software-drawn framework windows (dialogs, popup menus) above every
   // surface, in creation order. Pixels are unpremultiplied 0xAARRGGBB words
   // at window-pixel x/y. Popups never take host input: the primary window

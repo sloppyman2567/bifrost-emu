@@ -151,6 +151,14 @@ Image eglCreateImageKHR(Display d, void *c, unsigned target, void *buffer, const
     if (target == 0x3140 || target == 0x3270 || target == 0x30B0) { fail(BAD_PARAMETER); return NULL; }
     return thunk_eglCreateImageKHR(d, c, target, buffer, attrs);
 }
+// Android-private frame hint (C++ linkage in libEGL; HWUI's EglManager calls
+// it every frame). AOSP eglBeginFrameImpl only validates the display and
+// surface; let the host report an invalid one.
+void egl_begin_frame(Display d, Surface s) __asm__("_Z13eglBeginFramePvS_");
+void egl_begin_frame(Display d, Surface s) {
+    int width;
+    (void)eglQuerySurface(d, s, 0x3057, &width);  // EGL_WIDTH
+}
 uint64_t eglGetSystemTimeFrequencyNV(void) { return 1000000000; }
 uint64_t eglGetSystemTimeNV(void) {
     struct timespec t;

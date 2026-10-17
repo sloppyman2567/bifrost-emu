@@ -348,14 +348,92 @@ final class FrameworkNativeServices {
         }
     }
 
+    // android.gui.ISurfaceComposer (AOSP 15 ISurfaceComposer.aidl; codes are
+    // FIRST_CALL_TRANSACTION + declaration index). The physical display is
+    // FrameworkDisplay's: libnativedisplay (HWUI's DeviceInfo) and Java see
+    // the same pixel size, density and 60 Hz mode.
     static final class SurfaceComposer extends Binder {
         static final String DESCRIPTOR = "android.gui.ISurfaceComposer";
+        static final int CREATE_DISPLAY_EVENT_CONNECTION = 2, GET_PHYSICAL_DISPLAY_IDS = 6,
+                GET_STATIC_DISPLAY_INFO = 12, GET_DYNAMIC_DISPLAY_INFO_FROM_ID = 13,
+                GET_COMPOSITION_PREFERENCE = 33;
+        private static final int DISPLAY_MODE_ID = 1;  // Display.Mode id in FrameworkDisplay
+        private static final int DATASPACE_V0_SRGB = 142671872, PIXEL_FORMAT_RGBA_8888 = 1;
+        private final FrameworkDisplay display;
         private DisplayClock clock;
-        SurfaceComposer() { attachInterface(null, DESCRIPTOR); }
+        SurfaceComposer(FrameworkDisplay display) { this.display = display; attachInterface(null, DESCRIPTOR); }
+
+        // Stable AIDL parcelable framing: a non-null marker, then the body
+        // prefixed by its total size (generated writeToParcel).
+        private static int begin(Parcel reply) { reply.writeInt(1); int start = reply.dataPosition(); reply.writeInt(0); return start; }
+        private static void end(Parcel reply, int start) {
+            int end = reply.dataPosition();
+            reply.setDataPosition(start); reply.writeInt(end - start); reply.setDataPosition(end);
+        }
+
+        private void displayQuery(int code, Parcel data, Parcel reply) {
+            if (code != GET_PHYSICAL_DISPLAY_IDS && code != GET_COMPOSITION_PREFERENCE && data.readLong() != PHYSICAL_DISPLAY_ID)
+                throw new IllegalArgumentException("unknown physical display");
+            data.enforceNoDataAvail();
+            int[] metrics = display.metrics();
+            reply.writeNoException();
+            switch (code) {
+                case GET_PHYSICAL_DISPLAY_IDS: reply.writeLongArray(new long[] {PHYSICAL_DISPLAY_ID}); return;
+                case GET_STATIC_DISPLAY_INFO: {
+                    int start = begin(reply);
+                    reply.writeInt(0);                        // DisplayConnectionType.Internal
+                    reply.writeFloat(metrics[2] / 160f);      // density
+                    reply.writeBoolean(true);                 // secure
+                    reply.writeInt(0);                        // deviceProductInfo: null
+                    reply.writeInt(0);                        // Rotation.Rotation0
+                    end(reply, start);
+                    return;
+                }
+                case GET_DYNAMIC_DISPLAY_INFO_FROM_ID: {
+                    long period = DISPLAY_PERIOD_NS;
+                    int start = begin(reply);
+                    reply.writeInt(1);                        // supportedDisplayModes
+                    int mode = begin(reply);
+                    reply.writeInt(DISPLAY_MODE_ID);
+                    int size = begin(reply); reply.writeInt(metrics[0]); reply.writeInt(metrics[1]); end(reply, size);
+                    reply.writeFloat(metrics[2]); reply.writeFloat(metrics[2]);  // x/y dpi
+                    reply.writeIntArray(new int[0]);          // supportedHdrTypes
+                    reply.writeFloat(60f); reply.writeFloat(60f);  // peak refresh, vsync rate
+                    reply.writeLong(0); reply.writeLong(0);   // app/sf vsync offsets
+                    reply.writeLong(period);                  // presentation deadline
+                    reply.writeInt(0);                        // group
+                    end(reply, mode);
+                    reply.writeInt(DISPLAY_MODE_ID);          // activeDisplayModeId
+                    reply.writeFloat(60f);                    // renderFrameRate
+                    reply.writeIntArray(new int[] {0});       // ColorMode.NATIVE
+                    reply.writeInt(0);                        // activeColorMode
+                    int hdr = begin(reply);
+                    reply.writeIntArray(new int[0]); reply.writeFloat(0); reply.writeFloat(0); reply.writeFloat(0);
+                    end(reply, hdr);
+                    reply.writeBoolean(false); reply.writeBoolean(false);  // ALLM, game content type
+                    reply.writeInt(-1);                       // preferredBootDisplayMode
+                    end(reply, start);
+                    return;
+                }
+                default: {  // GET_COMPOSITION_PREFERENCE: sRGB only, no wide color gamut
+                    int start = begin(reply);
+                    reply.writeInt(DATASPACE_V0_SRGB); reply.writeInt(PIXEL_FORMAT_RGBA_8888);
+                    reply.writeInt(DATASPACE_V0_SRGB); reply.writeInt(PIXEL_FORMAT_RGBA_8888);
+                    end(reply, start);
+                }
+            }
+        }
+
         @Override protected synchronized boolean onTransact(int code, Parcel data,
                 Parcel reply, int flags) throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != 2) return super.onTransact(code, data, reply, flags);
+            if (code == GET_PHYSICAL_DISPLAY_IDS || code == GET_STATIC_DISPLAY_INFO
+                    || code == GET_DYNAMIC_DISPLAY_INFO_FROM_ID || code == GET_COMPOSITION_PREFERENCE) {
+                data.enforceInterface(DESCRIPTOR);
+                displayQuery(code, data, reply);
+                return true;
+            }
+            if (code != CREATE_DISPLAY_EVENT_CONNECTION) return super.onTransact(code, data, reply, flags);
             data.enforceInterface(DESCRIPTOR);
             int source = data.readInt(), registration = data.readInt();
             IBinder layer = data.readStrongBinder();

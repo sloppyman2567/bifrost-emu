@@ -64,6 +64,61 @@ final class FrameworkSurfaces {
         this.host = host;
     }
 
+    // A framework window's own host layer: HWUI's ThreadedRenderer draws the
+    // window through EGL straight into it. The ImageReader keeps the
+    // framework's real BufferQueue behind the Surface, as for SurfaceViews.
+    static final class Layer {
+        final ImageReader reader;
+        final Surface surface;
+        final long window;
+        final int width, height;
+        final boolean opaque;
+        int x = Integer.MIN_VALUE, y = Integer.MIN_VALUE;
+        Layer(ImageReader reader, long window, int width, int height, boolean opaque) {
+            this.reader = reader; this.surface = reader.getSurface(); this.window = window;
+            this.width = width; this.height = height; this.opaque = opaque;
+        }
+    }
+
+    Layer createLayer(int width, int height, boolean opaque) {
+        ImageReader reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
+        long window = host.prepare(reader.getSurface(), opaque);
+        if (window <= 0) {
+            reader.close();
+            throw new IllegalStateException("window layer preparation: " + window);
+        }
+        return new Layer(reader, window, width, height, opaque);
+    }
+
+    void positionLayer(Layer layer, int x, int y) {
+        if (layer.x == x && layer.y == y) return;
+        int result = geometry(layer.window, x, y, layer.width, layer.height);
+        if (result != 0) throw new IllegalStateException("window layer geometry: " + result);
+        layer.x = x; layer.y = y;
+    }
+
+    private static native int placeBelow(long window, long sibling);
+
+    // The host surfaces of one framework window's SurfaceViews.
+    List<Long> windows(Object owner) {
+        List<Long> result = new ArrayList<>();
+        for (Entry entry : entries.values()) if (entry.owner == owner && !entry.closed) result.add(entry.window);
+        return result;
+    }
+
+    // Stack host surfaces bottom to top in `order`.
+    void restack(List<Long> order) {
+        for (int i = order.size() - 2; i >= 0; i--) {
+            int result = placeBelow(order.get(i), order.get(i + 1));
+            if (result != 0) throw new IllegalStateException("surface order: " + result);
+        }
+    }
+
+    void releaseLayer(Layer layer) {
+        host.release(layer.window);
+        layer.reader.close();
+    }
+
     private static Field field(String name) {
         try {
             Field field = SurfaceView.class.getDeclaredField(name);

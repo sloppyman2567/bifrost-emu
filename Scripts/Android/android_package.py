@@ -175,7 +175,7 @@ def verify_adapters(adapters, runtime):
         "libz.so.LICENSE",
     }
     managed = {"libbifrost-activity.so", "managed/libandroid.so", "managed/libEGL.so",
-               "managed/libGLESv2.so", "managed/libGLESv3.so", "managed/libaaudio.so",
+               "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so", "managed/libaaudio.so",
                "managed/libOpenSLES.so", "managed/mapper.bifrost.so"}
     files = set(metadata.get("files", {}))
     if (

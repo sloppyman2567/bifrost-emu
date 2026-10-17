@@ -4,6 +4,21 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## GPU-rendered Activity windows (2026-10-17)
+
+`test_managed_hardware_canvas` draws 30 frames with `lockHardwareCanvas` on a
+SurfaceView (HWUI RenderThread, Skia GL and EGL over the thunk) and animates
+the Activity window's label. The window must report `APP_WINDOW_GPU` and at
+least 10 frames through `Window.addOnFrameMetricsAvailableListener`, which
+counts only frames HWUI swapped; the run reported 30 of 30. Before the
+fixes it died with SIGSEGV at 0xdd0 in libGLESv1_CM's `glGetString`, then
+aborted in HWUI's `DeviceInfo`, then logged `EGL_BAD_DISPLAY` from
+`eglBeginFrame` every frame (found with `debug.egl.callstack` in a kept
+fixture root's `debug_ramdisk/adb_debug.prop`). The view, dialog and
+activity-stack tests now expect `APP_WINDOW_GPU` for Activity windows.
+Frame metrics prove HWUI swapped; no host-pixel readback checks the layer
+content, and the game's ad window is not yet observed on this path.
+
 ## microG processes and remote providers (2026-10-17)
 
 `test_managed_play_services_available` now binds

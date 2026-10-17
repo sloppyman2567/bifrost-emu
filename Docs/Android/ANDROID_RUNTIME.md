@@ -53,6 +53,45 @@ but it is missing" and returns `SERVICE_INVALID` (9), the status SpongeBob's
 Firebase gate reported. With microG it returns `SUCCESS` with apk version
 252432034.
 
+### GPU-rendered Activity windows (2026-10-17)
+
+Full-window WebView ads skipped about 3,500 frames a minute: each dirty frame,
+the launcher's main thread drew the whole 2560x1384 view tree in software
+(Chromium's software draw included), copied every pixel and scanned it for
+alpha. Two changes address this:
+
+- Software popups redraw only ViewRootImpl's accumulated `mDirty` region
+  (ViewRootImpl never clears it without a valid Surface) and stop at the
+  first visible pixel instead of counting all of them.
+- Activity windows whose ViewRootImpl created a `ThreadedRenderer`
+  (`FLAG_HARDWARE_ACCELERATED`) get an ImageReader-backed Surface bound to
+  their own host layer. The compositor calls `ThreadedRenderer.initialize`,
+  `setup` and `draw(view, attachInfo, viewRoot)` — ViewRootImpl's own
+  hardware draw — when the tree is dirty. ViewRootImpl's own Surface stays
+  invalid, so its traversal never initializes or destroys the renderer, and
+  `destroySurface` only clears the renderer's SurfaceControl. Host layers
+  restack (op 19, Wayland `place_below`/X11 `Below`) so each window's
+  SurfaceViews sit directly below it, windows in stacking order.
+
+HWUI needed three runtime fixes, each checked against Android 15 sources:
+libhwui lists libGLESv1_CM before libGLESv2, so `glGetString` reached the
+real GLES1 wrapper with no guest hooks (a null read at 0xdd0); a
+libGLESv1_CM adapter now thunks the 58 GLES 1.0 commands shared with the
+GLES table (from the Khronos registry), while fixed-function-only commands
+keep the real library. HWUI's `DeviceInfo` aborts without
+`ISurfaceComposer.getPhysicalDisplayIds`, `getStaticDisplayInfo`,
+`getDynamicDisplayInfoFromId` and `getCompositionPreference`, now answered
+from `FrameworkDisplay` (display id 1, one 60 Hz mode, sRGB). EglManager calls
+the C++-linkage `eglBeginFrame` every frame; the EGL adapter now exports it.
+`egl_set_cache_filename` and `egl_get_init_count` still resolve to the real
+libEGL.
+
+Limits: dialogs, popup menus and dim layers remain software layers above all
+surfaces, so a dialog under a later Activity would cover it. Whether WebView
+takes its GPU (draw functor) path in the game is not yet observed, and video
+still needs AHardwareBuffer import (`eglCreateImage` with
+`EGL_NATIVE_BUFFER_ANDROID` is rejected by the adapter).
+
 ### microG processes, remote providers and service resolution (2026-10-17)
 
 SpongeBob's `GoogleApiHandler` crashed on `activity.getContentProvider`:

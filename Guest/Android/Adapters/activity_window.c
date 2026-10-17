@@ -271,6 +271,12 @@ JNIEXPORT jint JNICALL Java_FrameworkSurfaces_geometry(JNIEnv *env, jclass type,
     return bifrost_window(18, (long)record, 0);
 }
 
+// Window order: host surface `window` directly below `sibling` (op 19).
+JNIEXPORT jint JNICALL Java_FrameworkSurfaces_placeBelow(JNIEnv *env, jclass type, jlong window, jlong sibling) {
+    (void)env; (void)type;
+    return bifrost_window(19, (long)window, (long)sibling);
+}
+
 JNIEXPORT jint JNICALL Java_ManagedLauncher_setWindowIdentity(JNIEnv *env, jclass type,
         jbyteArray title, jintArray argb, jint width, jint height) {
     (void)type;

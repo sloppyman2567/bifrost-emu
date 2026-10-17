@@ -200,6 +200,10 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                              record[1], record[2], record[3], record[4]));
                 } catch (const EmuError&) { ret_host(-EFAULT); }
             }
+            else if (cpu.regs[0] == 19) { // Managed window order: surface x1 directly below surface x2.
+                ret_host(manager.surface_place_below(manager.surface_handle(cpu.regs[1]),
+                                                     manager.surface_handle(cpu.regs[2])));
+            }
             else ret_host(-EINVAL);
             return 0;
         }
