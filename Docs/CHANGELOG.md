@@ -13,6 +13,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Nested Binder callbacks (2026-10-17)
+
+- A synchronous Binder transaction sent while serving one now goes to the
+  waiting caller thread on the sender chain, as Linux's transaction stack
+  routes it, instead of the target's pool. Google Mobile Ads deadlocked
+  with microG's ad service (a pool thread blocked on a lock the waiting
+  caller held) and every ad request timed out after 60 s; requests now
+  complete with microG's "Not supported" answer. Calls queued for a thread
+  fail with `BR_DEAD_REPLY` when it exits or its endpoint closes.
+
 ### App-ops active watchers (2026-10-17)
 
 - `appops.startWatchingActive`/`stopWatchingActive` follow AOSP 15

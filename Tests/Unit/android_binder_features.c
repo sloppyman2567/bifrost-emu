@@ -1,4 +1,5 @@
-// Binder protocol-8 death recipients, scatter/gather fixups and pool limits.
+// Binder protocol-8 death recipients, scatter/gather fixups, pool limits and
+// nested synchronous callback routing.
 #define _GNU_SOURCE
 #include "../../Include/Bifrost/BinderABI.h"
 #include <errno.h>
@@ -128,8 +129,48 @@ static int asynchronous_ordering(void) {
     CHECK(close(server)==0&&close(client)==0);
     return 0;
 }
+// A synchronous callback made while serving a call goes to the thread waiting
+// for that call's reply, as Linux's transaction stack routes it. The client
+// thread is no looper, so only work aimed at that thread can reach it.
+static int nested_callback(void) {
+    int server=open("/dev/vndbinder",O_RDWR|O_NONBLOCK),client=open("/dev/vndbinder",O_RDWR|O_NONBLOCK);
+    CHECK(server>=0&&client>=0);
+    void* server_arena=mmap(0,65536,PROT_READ,MAP_PRIVATE,server,0);
+    void* client_arena=mmap(0,65536,PROT_READ,MAP_PRIVATE,client,0);
+    CHECK(server_arena!=MAP_FAILED&&client_arena!=MAP_FAILED);
+    CHECK(ioctl(server,BF_BINDER_SET_CONTEXT_MGR,0)==0);
+    CHECK(send_command(server,BF_BC_ENTER_LOOPER,0,0)==0);
+    struct bf_flat_binder callback={BF_BINDER_TYPE_BINDER,0,0x5511,0x6611};
+    uint64_t zero=0;
+    struct bf_binder_transaction tx={0};tx.code=51;tx.buffer=(uintptr_t)&callback;tx.data_size=sizeof(callback);
+    tx.offsets=(uintptr_t)&zero;tx.offsets_size=8;
+    CHECK(send_command(client,BF_BC_TRANSACTION,&tx,1)==0&&contains(BF_BR_TRANSACTION_COMPLETE,0));
+    CHECK(send_command(server,0,0,1)==0&&contains(BF_BR_TRANSACTION,&tx)&&tx.code==51);
+    uint64_t call=tx.buffer;
+    struct bf_flat_binder handle;memcpy(&handle,(void*)(uintptr_t)call,sizeof(handle));
+    CHECK(handle.type==BF_BINDER_TYPE_HANDLE);
+    // One-way work has no sender thread: it waits for the client's pool.
+    struct bf_binder_transaction nested={0};nested.target=handle.binder;nested.flags=BF_TF_ONE_WAY;nested.code=52;
+    CHECK(send_command(server,BF_BC_TRANSACTION,&nested,0)==0);
+    CHECK(send_command(client,0,0,1)==-1&&errno==EAGAIN);
+    nested.flags=0;nested.code=53;
+    CHECK(send_command(server,BF_BC_TRANSACTION,&nested,0)==0);
+    CHECK(send_command(client,0,0,1)==0&&contains(BF_BR_TRANSACTION,&tx)&&tx.code==53&&tx.cookie==0x6611);
+    CHECK(free_buffer(client,tx.buffer)==0);
+    struct bf_binder_transaction reply={0};
+    CHECK(send_command(client,BF_BC_REPLY,&reply,0)==0);
+    CHECK(send_command(server,0,0,1)==0&&contains(BF_BR_REPLY,&tx)&&free_buffer(server,tx.buffer)==0);
+    // The server still serves the first call; its reply ends the client's wait.
+    CHECK(send_command(server,BF_BC_REPLY,&reply,0)==0);
+    CHECK(send_command(client,0,0,1)==0&&contains(BF_BR_REPLY,&tx)&&free_buffer(client,tx.buffer)==0);
+    CHECK(free_buffer(server,call)==0);
+    CHECK(munmap(server_arena,65536)==0&&munmap(client_arena,65536)==0);
+    CHECK(close(server)==0&&close(client)==0);
+    return 0;
+}
 int main(void) {
     CHECK(asynchronous_ordering()==0);
+    CHECK(nested_callback()==0);
     CHECK(sizeof(struct bf_binder_handle_cookie)==12&&sizeof(struct bf_binder_transaction_sg)==72);
     int manager=open("/dev/hwbinder",O_RDWR|O_NONBLOCK),service=open("/dev/hwbinder",O_RDWR|O_NONBLOCK);
     CHECK(manager>=0&&service>=0);

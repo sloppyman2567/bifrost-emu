@@ -107,6 +107,11 @@ private:
     // Receiver fd numbers are allocated only when BR_TRANSACTION/REPLY is read.
     struct Descriptor { uint64_t offset; std::shared_ptr<Node> node; uint32_t width = 8; bool auto_close = false; };
     struct Fixup { uint64_t offset, target; };
+    // A synchronous transaction's sender thread. Senders lists the thread that
+    // sent it, then the senders of the calls that thread was serving (Linux
+    // binder_transaction's from/from_parent chain).
+    struct Sender { std::weak_ptr<Node> node; int tid; };
+    using Senders = std::vector<Sender>;
     struct Event {
         explicit Event(uint32_t value = 0) : command(value) {}
         uint32_t command;
@@ -119,11 +124,12 @@ private:
         bf_binder_ptr_cookie object{};
         std::weak_ptr<Node> caller;
         int caller_tid = 0;
+        Senders senders;
         std::shared_ptr<Object> async_object;
     };
     struct TransactionInput { std::vector<uint8_t> payload; std::vector<uint64_t> offsets; int error = 0; };
     TransactionInput prepare_transaction(const uint8_t*, bool scatter, Memory&);
-    struct Call { std::weak_ptr<Node> caller; int tid; bool accepts_fds = false; };
+    struct Call { std::weak_ptr<Node> caller; int tid; bool accepts_fds = false; Senders senders; };
     std::shared_ptr<BinderDomain> domain_;
     std::atomic<int> flags_;
     uint32_t max_threads_ = 15;

@@ -623,6 +623,20 @@ None of this covers SurfaceView recreation/resize, Wayland readback,
 native EGL into an aliased Surface, flush/reconfigure, B-frames, HDR or
 large resolutions, malformed-transport fuzzing, or game playback.
 
+## Binder nested synchronous callbacks (2026-10-17)
+
+Hungry Shark World's Google Mobile Ads requests timed out after 60 s (error
+2). GMA's GmsClient thread calls microG's `IAdRequestService` synchronously
+while holding a lock; microG answers with a synchronous listener callback.
+That callback went to an app pool thread, which blocked on the same lock: a
+deadlock that lasted until the session ended. Linux delivers such a callback
+to the waiting caller thread. `android_binder_features` now has 115 checks:
+a non-looper client thread must read the nested synchronous callback while
+waiting for its reply (the previous binary gets `EAGAIN`), a one-way
+callback must not reach it, and both replies must complete. It passes in
+both engines; `test_asgard.py` passes. In the game, ad requests then
+completed within about 100 ms with microG's "Not supported" (error 8).
+
 ## Binder one-way callback ordering (2026-10-14)
 
 The real Codec2 H.264 service decoded five frames on the host, but Android

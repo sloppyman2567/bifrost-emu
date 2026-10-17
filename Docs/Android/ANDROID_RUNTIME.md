@@ -92,7 +92,22 @@ listener registers and unregisters; cell info without location throws),
 that `NetworkInterface` lists a loopback interface, the package queries above
 (checksums against an independent SHA-256 of the APK) and `getAppTasks`. With
 the previous launcher the fixture fails at `package.resolveIntent` and never
-reaches the later checks. The rewarded videos themselves are untested.
+reaches the later checks.
+
+The rewarded videos still failed with error 2, exactly 60 s after each
+request; host sockets showed the game never sent the request. GMA's
+`RemoteAdRequestClientTask` binds Play services' `ads.service.START` and
+calls `IAdRequestService` synchronously from its GmsClient thread while
+holding a lock; microG's
+[AdRequestService](https://github.com/microg/GmsCore/blob/master/play-services-ads/core/src/main/kotlin/org/microg/gms/ads/AdRequestService.kt)
+answers through a synchronous listener callback. The Binder transport gave
+that callback to an app pool thread, which blocked on the same lock, so
+neither returned (see [Binder boundaries](ANDROID_BINDER.md#boundaries)).
+With Linux's caller-thread targeting the answer now arrives in about 100 ms.
+microG implements no ad requests: it answers every one with "Not supported"
+(`CommonStatusCodes.INTERNAL_ERROR`), which GMA reports as error 8. GMA uses
+its local request path only when the bind itself fails, so the rewarded
+videos still show "No advert is available".
 
 ### Windows owned by other threads (2026-10-17)
 

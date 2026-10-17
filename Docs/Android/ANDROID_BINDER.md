@@ -132,8 +132,14 @@ component store. Media decoding and Surface contracts are described in
 
 This is a transport foundation, not a complete Android Binder driver. It does
 not yet implement transaction security contexts, Binder polling/epoll, process
-freezing or Android zygote/isolated-service process launch. Reentrant synchronous
-callbacks do not yet have Linux's full transaction-stack thread targeting. Cross-process descriptor transfer requires
+freezing or Android zygote/isolated-service process launch. A synchronous
+transaction sent while serving one goes to the first thread on the served
+call's sender chain that belongs to the target, as Linux's
+[`binder_transaction`](https://github.com/torvalds/linux/blob/v6.12/drivers/android/binder.c)
+walks `from`/`from_parent`; that waiting thread reads it from its own queue.
+One-way transactions and calls from threads serving nothing go to the
+process's loopers. Calls queued for a thread receive `BR_DEAD_REPLY` when it
+exits or its endpoint closes. Sender chains are capped at 64 threads. Cross-process descriptor transfer requires
 host-backed descriptors. Unsupported ioctls return `ENOTTY`; unsupported command
 streams return `EINVAL`; transactions with unsupported objects receive
 `BR_FAILED_REPLY` and an `ENOTSUP` extended error. Malformed object offsets return
@@ -241,8 +247,10 @@ JIT/interpreter combinations of independent server/client processes with nested
 SG buffers and descriptors, killed-server death recipients in both engines,
 and eight concurrent clients completing 1,600 checked request/reply calls.
 The observed stress duration is a local test measurement, not a comparison to
-kernel Binder. These tests do not cover every nested synchronous callback,
-Binder epoll integration, or a Chromium renderer process.
+kernel Binder. `android_binder_features` checks one nested synchronous
+callback reaching a waiting non-looper thread and a one-way callback that
+does not; deeper cross-process chains, Binder epoll integration and a
+Chromium renderer process are not covered.
 
 The Binder fixture checks 61 behaviors including data round-trip, reply routing,
 read-only protection, malformed requests, isolated device contexts, peer close,

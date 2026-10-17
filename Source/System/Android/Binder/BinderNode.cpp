@@ -50,16 +50,22 @@ void BinderNode::disconnect() {
         })) domain_->processes.erase(sender_pid_);
     if (domain_->manager == this) domain_->manager = nullptr;
     release_all_references();
-    auto abandon = [&](const Call& call) {
-        if (auto node = domain_->promote(call.caller)) {
+    auto abandon = [&](const std::weak_ptr<Node>& weak, int tid) {
+        if (auto node = domain_->promote(weak)) {
             auto caller = static_cast<BinderNode*>(node.get());
-            caller->replies_[call.tid].push_back(Event{BF_BR_DEAD_REPLY});
+            caller->replies_[tid].push_back(Event{BF_BR_DEAD_REPLY});
             caller->ready_.notify_all();
         }
     };
-    for (const auto& e : incoming_)
-        if (!(e.transaction.flags & BF_TF_ONE_WAY)) abandon({e.caller, e.caller_tid});
-    for (const auto& entry : calls_) for (const auto& call : entry.second) abandon(call);
+    auto abandon_calls = [&](const std::deque<Event>& queue) {
+        for (const auto& e : queue)
+            if (e.command == BF_BR_TRANSACTION && !(e.transaction.flags & BF_TF_ONE_WAY))
+                abandon(e.caller, e.caller_tid);
+    };
+    // Synchronous calls aimed at a waiting thread are queued with its replies.
+    abandon_calls(incoming_);
+    for (const auto& entry : replies_) abandon_calls(entry.second);
+    for (const auto& entry : calls_) for (const auto& call : entry.second) abandon(call.caller, call.tid);
     ready_.notify_all();
 }
 int BinderNode::fstat(struct stat* st) {
@@ -294,7 +300,30 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
         target = static_cast<BinderNode*>(caller.get());
         accepts_fds = stack.back().accepts_fds;
     }
-    auto& queue = cmd == BF_BC_REPLY ? target->replies_[reply_tid] : target->incoming_;
+    // Linux binder_transaction: a synchronous call made while serving one goes
+    // to the first thread on the served call's sender chain that belongs to
+    // the target. That thread is blocked waiting for its reply and runs the
+    // callback itself, re-entering the locks it holds; a pool thread could not.
+    Senders senders;
+    int target_tid = 0;
+    if (cmd == BF_BC_TRANSACTION && !(tx.flags & BF_TF_ONE_WAY)) {
+        senders.push_back({weak_from_this(), tid});
+        auto serving = calls_.find(tid);
+        if (serving != calls_.end() && !serving->second.empty()) {
+            const Senders& chain = serving->second.back().senders;
+            std::weak_ptr<Node> owner = target->weak_from_this();
+            for (const Sender& sender : chain) {
+                if (!sender.node.owner_before(owner) && !owner.owner_before(sender.node)) {
+                    target_tid = sender.tid;
+                    break;
+                }
+            }
+            senders.insert(senders.end(), chain.begin(), chain.end());
+            if (senders.size() > 64) senders.resize(64);
+        }
+    }
+    auto& queue = cmd == BF_BC_REPLY ? target->replies_[reply_tid]
+        : target_tid ? target->replies_[target_tid] : target->incoming_;
     if (!target->mapping_ || target->disconnected_ || queue.size() >= MAX_EVENTS ||
         replies_[tid].size() >= MAX_EVENTS || calls_[tid].size() >= 64) {
         fail(tid, BF_BR_FAILED_REPLY, ENOMEM); return 0;
@@ -323,7 +352,7 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     }
     int object_error = translate_objects(*target, event, mem, tx, tid, fds, accepts_fds, buffers_size, input);
     if (object_error) { fail(tid, BF_BR_FAILED_REPLY, -object_error); return 0; }
-    event.caller = weak_from_this(); event.caller_tid = tid;
+    event.caller = weak_from_this(); event.caller_tid = tid; event.senders = std::move(senders);
     if (cmd == BF_BC_TRANSACTION && (tx.flags & BF_TF_ONE_WAY)) {
         if (!destination) {
             // Context-manager handle zero has the same serialization rule.
@@ -475,7 +504,7 @@ int BinderNode::write_read(uint64_t arg, Memory& mem, CPU& cpu, FdTable& fds,
                 }
                 if (tx) queued_bytes_ -= std::max<uint64_t>(8, (event.payload.size() + 7) & ~uint64_t(7));
                 if (synchronous) calls_[cpu.tid].push_back({event.caller, event.caller_tid,
-                        !!(event.transaction.flags & BF_TF_ACCEPT_FDS)});
+                        !!(event.transaction.flags & BF_TF_ACCEPT_FDS), std::move(event.senders)});
                 wr.read_consumed += n; queue.erase(next);
                 // Linux stops the read after a death cookie so its recipient
                 // can acknowledge it before processing subsequent work.
@@ -510,6 +539,15 @@ int BinderNode::ioctl_broker(uint32_t request, uint64_t arg, Memory& mem, CPU& c
         }
         case BF_BINDER_THREAD_EXIT:
             if (!calls_[cpu.tid].empty()) return -EBUSY;
+            // binder_thread_release: calls aimed at this thread fail.
+            for (const auto& e : replies_[cpu.tid]) {
+                if (e.command != BF_BR_TRANSACTION || (e.transaction.flags & BF_TF_ONE_WAY)) continue;
+                if (auto node = domain_->promote(e.caller)) {
+                    auto caller = static_cast<BinderNode*>(node.get());
+                    caller->replies_[e.caller_tid].push_back(Event{BF_BR_DEAD_REPLY});
+                    caller->ready_.notify_all();
+                }
+            }
             loopers_.erase(cpu.tid); registered_loopers_.erase(cpu.tid); waiting_loopers_.erase(cpu.tid); replies_.erase(cpu.tid); calls_.erase(cpu.tid); errors_.erase(cpu.tid); return 0;
         case BF_BINDER_SET_CONTEXT_MGR:
         case BF_BINDER_SET_CONTEXT_MGR_EXT: {
