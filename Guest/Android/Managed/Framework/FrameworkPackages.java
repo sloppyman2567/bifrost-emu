@@ -36,6 +36,7 @@ final class FrameworkPackages {
     private final Map<String, Map<ComponentName, List<IntentFilter>>> providerFilters = new ConcurrentHashMap<>();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> receiverFilters = new ConcurrentHashMap<>();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> serviceFilters = new ConcurrentHashMap<>();
+    private final Map<String, Map<ComponentName, List<IntentFilter>>> activityFilters = new ConcurrentHashMap<>();
     private java.util.Set<String> protectedBroadcasts;
 
     synchronized boolean protectedBroadcast(String action) throws Exception {
@@ -285,6 +286,8 @@ final class FrameworkPackages {
                 case "getActivityInfo":
                     return activityInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2], installed == null ? null : installed.activities);
+                case "resolveIntent":
+                    return resolveActivity((Intent) a[0], (String) a[1], ((Number) a[2]).longValue(), (Integer) a[3]);
                 case "resolveService":
                     return resolveService((Intent) a[0], (String) a[1], ((Number) a[2]).longValue(), (Integer) a[3]);
                 case "queryIntentServices":
@@ -541,20 +544,30 @@ final class FrameworkPackages {
     }
 
     private void parseFiltersLocked(PackageInfo pkg) throws Exception {
-        if (providerFilters.containsKey(pkg.packageName) && serviceFilters.containsKey(pkg.packageName)) return;
-        Map<ComponentName, List<IntentFilter>> providers = new java.util.HashMap<>(), services = new java.util.HashMap<>();
+        if (providerFilters.containsKey(pkg.packageName) && serviceFilters.containsKey(pkg.packageName)
+                && activityFilters.containsKey(pkg.packageName)) return;
+        Map<ComponentName, List<IntentFilter>> providers = new java.util.HashMap<>(), services = new java.util.HashMap<>(),
+                activities = new java.util.HashMap<>();
         java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
         boolean declared = pkg.providers != null && pkg.providers.length != 0
-                || pkg.services != null && pkg.services.length != 0;
+                || pkg.services != null && pkg.services.length != 0
+                || pkg.activities != null && pkg.activities.length != 0;
         if (base.isFile() && declared) {
             java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
                     && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
             Object parsed = parseArchive(archive);
             componentFilters(pkg, parsed, "getProviders", providers);
             componentFilters(pkg, parsed, "getServices", services);
+            componentFilters(pkg, parsed, "getActivities", activities);  // activity-aliases included
         }
         providerFilters.putIfAbsent(pkg.packageName, providers);
         serviceFilters.putIfAbsent(pkg.packageName, services);
+        activityFilters.putIfAbsent(pkg.packageName, activities);
+    }
+
+    private Map<ComponentName, List<IntentFilter>> activityFilters(PackageInfo pkg) throws Exception {
+        if (!activityFilters.containsKey(pkg.packageName)) parseFilters(pkg);
+        return activityFilters.get(pkg.packageName);
     }
 
     private static void componentFilters(PackageInfo pkg, Object parsed, String getter,
@@ -797,6 +810,85 @@ final class FrameworkPackages {
             }
         }
         return false;
+    }
+
+    // ResolveIntentHelper.resolveIntentInternal (not for a start) and
+    // chooseBestActivity: no match, the only match, or a first match with a
+    // higher priority or a different default. An even tie asks the user
+    // through the platform ResolverActivity, which this profile does not
+    // model (no preferred activities, no "android" package).
+    private android.content.pm.ResolveInfo resolveActivity(Intent intent, String type, long flags, int userId)
+            throws Exception {
+        List<android.content.pm.ResolveInfo> query = queryActivities(intent, type, flags, userId);
+        if (query.isEmpty()) return null;
+        if (query.size() == 1) return query.get(0);
+        android.content.pm.ResolveInfo first = query.get(0), second = query.get(1);
+        if (first.priority != second.priority || first.preferredOrder != second.preferredOrder
+                || first.isDefault != second.isDefault) return first;
+        throw new UnsupportedOperationException("package.resolveIntent: ResolverActivity for " + intent);
+    }
+
+    // ComputerEngine.queryIntentActivitiesInternal: an explicit component, or
+    // every enabled activity whose filters match (only CATEGORY_DEFAULT
+    // filters with MATCH_DEFAULT_ONLY, as ActivityIntentResolver), restricted
+    // to the Intent's package and ordered like queryServices.
+    private List<android.content.pm.ResolveInfo> queryActivities(Intent original, String type, long flags, int userId)
+            throws Exception {
+        Intent intent = original.getComponent() == null && original.getSelector() != null
+                ? original.getSelector() : original;
+        List<android.content.pm.ResolveInfo> results = new ArrayList<>();
+        if (intent.getComponent() != null) {
+            PackageInfo owner = findPackage(intent.getComponent().getPackageName(), flags, userId);
+            ActivityInfo info = owner == null ? null : activityInfo(intent.getComponent(), flags, userId, owner.activities);
+            if (info != null) {
+                android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+                result.activityInfo = info;
+                results.add(result);
+            }
+            return results;
+        }
+        List<PackageInfo> candidates = new ArrayList<>();
+        if (intent.getPackage() != null) {
+            PackageInfo pkg = findPackage(intent.getPackage(), flags, userId);
+            if (pkg != null) candidates.add(pkg);
+        } else {
+            candidates.addAll(allSystem());
+            candidates.addAll(peers.values());
+            if (installed != null) candidates.add(installed);
+        }
+        boolean defaultOnly = (flags & PackageManager.MATCH_DEFAULT_ONLY) != 0;
+        for (PackageInfo pkg : candidates) {
+            if (pkg.activities == null || findPackage(pkg.packageName, flags, userId) == null) continue;
+            Map<ComponentName, List<IntentFilter>> filters = activityFilters(pkg);
+            for (ActivityInfo info : pkg.activities) {
+                if (!componentMatches(info, flags, userId)) continue;
+                ComponentName component = new ComponentName(pkg.packageName, info.name);
+                android.content.pm.ResolveInfo best = null;
+                for (IntentFilter filter : filters.getOrDefault(component, java.util.Collections.emptyList())) {
+                    boolean isDefault = filter.hasCategory(Intent.CATEGORY_DEFAULT);
+                    if (defaultOnly && !isDefault) continue;
+                    int match = filter.match(intent.getAction(), type, intent.getScheme(), intent.getData(),
+                            intent.getCategories(), "BifrostPackageResolver");
+                    if (match < 0) continue;
+                    android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+                    result.activityInfo = activityInfo(component, flags, userId, pkg.activities);
+                    result.priority = filter.getPriority();
+                    result.match = match;
+                    result.isDefault = isDefault;
+                    if ((flags & PackageManager.GET_RESOLVED_FILTER) != 0) result.filter = new IntentFilter(filter);
+                    if (best == null || result.priority > best.priority
+                            || (result.priority == best.priority && result.match > best.match)) best = result;
+                }
+                if (best != null) results.add(best);
+            }
+        }
+        results.sort((a, b) -> {
+            int order = Integer.compare(b.priority, a.priority);
+            if (order == 0) order = Boolean.compare(b.isDefault, a.isDefault);
+            if (order == 0) order = Integer.compare(b.match, a.match);
+            return order;
+        });
+        return results;
     }
 
     private android.content.pm.ResolveInfo resolveService(Intent intent, String type, long flags, int userId) throws Exception {

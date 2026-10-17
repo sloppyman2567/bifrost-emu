@@ -111,6 +111,7 @@ public final class ManagedLauncher {
     private static final FrameworkPermissions permissions = new FrameworkPermissions(packages);
     private static final FrameworkUiMode uiMode = new FrameworkUiMode(packages);
     private static final FrameworkBattery battery = new FrameworkBattery(packages);
+    private static final FrameworkTelephony telephony = new FrameworkTelephony(packages);
     private static final FrameworkSettings settings = new FrameworkSettings(packages, content);
     private static final FrameworkBroadcasts broadcasts = new FrameworkBroadcasts(packages, battery);
     private static final FrameworkPendingIntents pendingIntents =
@@ -744,6 +745,7 @@ public final class ManagedLauncher {
         permissions.install(services);
         uiMode.install(services);
         battery.install(services);
+        telephony.install(services);
         vibrator.install(services);
         keyguard.install(services);
         clipboard.install(services);
@@ -1518,6 +1520,15 @@ public final class ManagedLauncher {
         if (diagnostic && !play) checkFrameworkVsync();
         System.out.println("ACTIVITY_BOOTSTRAP_BEGIN");
         Object thread = threadType.getMethod("systemMain").invoke(null);
+        // ActivityThread.main publishes the main thread's handler after attach;
+        // SharedPreferences commits from other threads notify listeners through it.
+        Field mainHandler = threadType.getDeclaredField("sMainThreadHandler");
+        mainHandler.setAccessible(true);
+        if (mainHandler.get(null) == null) {
+            Method getHandler = threadType.getDeclaredMethod("getHandler");
+            getHandler.setAccessible(true);
+            mainHandler.set(null, getHandler.invoke(thread));
+        }
         Context context = (Context) threadType.getMethod("getSystemContext").invoke(thread);
         System.out.println("ACTIVITY_CONTEXT_OK " + context);
         FrameworkProcessRuntime.Remote parent = serviceChild

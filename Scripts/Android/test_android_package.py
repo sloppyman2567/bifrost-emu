@@ -1087,6 +1087,11 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(positions, sorted(positions), text[-30000:])
             self.assertIn("MANAGED_FIXTURE_PENDING_LOOKUP_OK", text)
             self.assertIn("MANAGED_FIXTURE_PENDING_CREATE_OK", text)
+            # PackageManager.resolveActivity, a SharedPreferences commit from
+            # another thread (listener on main) and TelephonyRegistry.
+            self.assertIn("MANAGED_FIXTURE_RESOLVE_ACTIVITY_OK", text)
+            self.assertIn("MANAGED_FIXTURE_PREFS_LISTENER background main=true", text)
+            self.assertIn("MANAGED_FIXTURE_TELEPHONY_REGISTRY_OK", text)
             key = (state / ".settings/user-0.key").read_bytes()
             expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,
                                    hashlib.sha256).hexdigest()[:16]

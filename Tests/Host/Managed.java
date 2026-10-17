@@ -106,6 +106,9 @@ public final class Managed extends Activity {
                 || Settings.Secure.getInt(getContentResolver(), "bifrost.missing", 37) != 37)
             throw new IllegalStateException("Settings missing/default semantics incorrect");
         System.out.println("MANAGED_FIXTURE_SETTINGS_OK " + id);
+        checkActivityResolution();
+        checkBackgroundPreferenceCommit();
+        checkTelephonyRegistry();
         int starts = prefs.getInt("starts", 0) + 1;
         if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
             throw new AssertionError("System defaults or preserved override incorrect");
@@ -143,6 +146,71 @@ public final class Managed extends Activity {
         });
         setContentView(view);
     }
+    // PackageManager.resolveActivity: explicit, implicit within the package,
+    // MATCH_DEFAULT_ONLY (the launcher filter has no DEFAULT category), none.
+    private void checkActivityResolution() {
+        android.content.pm.PackageManager pm = getPackageManager();
+        android.content.Intent launcher = new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER).setPackage(getPackageName());
+        android.content.pm.ResolveInfo main = pm.resolveActivity(launcher, 0);
+        android.content.pm.ResolveInfo explicit = pm.resolveActivity(new android.content.Intent(this, Managed.class), 0);
+        if (main == null || !Managed.class.getName().equals(main.activityInfo.name)
+                || explicit == null || !Managed.class.getName().equals(explicit.activityInfo.name)
+                || pm.resolveActivity(launcher, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY) != null
+                || pm.resolveActivity(new android.content.Intent("org.bifrost.fixture.NOTHING")
+                        .setPackage(getPackageName()), 0) != null)
+            throw new AssertionError("activity resolution incorrect");
+        System.out.println("MANAGED_FIXTURE_RESOLVE_ACTIVITY_OK");
+    }
+
+    // SharedPreferences holds listeners weakly.
+    private SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
+
+    // A commit from another thread notifies listeners on the main thread
+    // (ActivityThread.sMainThreadHandler).
+    private void checkBackgroundPreferenceCommit() {
+        SharedPreferences watched = getSharedPreferences("fixture-listener", MODE_PRIVATE);
+        Thread main = Thread.currentThread();
+        preferenceListener = (shared, key) -> System.out.println("MANAGED_FIXTURE_PREFS_LISTENER " + key
+                + " main=" + (Thread.currentThread() == main));
+        watched.registerOnSharedPreferenceChangeListener(preferenceListener);
+        Thread writer = new Thread(() -> {
+            if (!watched.edit().putLong("background", System.nanoTime()).commit())
+                throw new AssertionError("background preference commit failed");
+        }, "FixturePrefsWriter");
+        writer.start();
+        try { writer.join(); } catch (InterruptedException error) { throw new AssertionError(error); }
+    }
+
+    private static final class DisplayInfo extends android.telephony.TelephonyCallback
+            implements android.telephony.TelephonyCallback.DisplayInfoListener {
+        @Override public void onDisplayInfoChanged(android.telephony.TelephonyDisplayInfo info) {
+            throw new AssertionError("radio-less device reported display info");
+        }
+    }
+
+    private static final class CellInfo extends android.telephony.TelephonyCallback
+            implements android.telephony.TelephonyCallback.CellInfoListener {
+        @Override public void onCellInfoChanged(java.util.List<android.telephony.CellInfo> info) {
+            throw new AssertionError("cell info delivered without location permission");
+        }
+    }
+
+    // TelephonyRegistry on a device without a radio: callbacks register and
+    // unregister without events; cell info needs a location permission.
+    private void checkTelephonyRegistry() {
+        android.telephony.TelephonyManager telephony = getSystemService(android.telephony.TelephonyManager.class);
+        DisplayInfo display = new DisplayInfo();
+        telephony.registerTelephonyCallback(getMainExecutor(), display);
+        telephony.unregisterTelephonyCallback(display);
+        try {
+            telephony.registerTelephonyCallback(getMainExecutor(), new CellInfo());
+            throw new AssertionError("cell info listener registered without location permission");
+        } catch (SecurityException expected) {
+            System.out.println("MANAGED_FIXTURE_TELEPHONY_REGISTRY_OK");
+        }
+    }
+
     @Override public void onResume() {
         super.onResume();
         new Handler().postDelayed(() -> finish(), 1000);

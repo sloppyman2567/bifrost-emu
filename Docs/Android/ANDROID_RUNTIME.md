@@ -23,6 +23,40 @@ See [current support](../SUPPORT.md#android-scope-and-v20-plans),
 [host media](#host-media-decoding-2026-10-14) and the
 [roadmap](../roadmap.md) for the latest scope and remaining work.
 
+### Ad SDK framework gaps (2026-10-17)
+
+Hungry Shark World's rewarded videos failed with "No advert is available":
+the Google Mobile Ads request ended with error 2 although the network worked.
+Its mediation adapters hit three gaps, each now closed against Android 15
+sources:
+- AppLovin's bid token calls `PackageManager.resolveActivity`. The strict
+  `package` stub had no `resolveIntent`. `FrameworkPackages` now resolves like
+  `ResolveIntentHelper.resolveIntentInternal`:
+  - **Query:** an explicit component, or every enabled activity whose parsed
+    filters match. `MATCH_DEFAULT_ONLY` keeps only `CATEGORY_DEFAULT` filters,
+    as `ActivityIntentResolver` does.
+  - **Choice** (`chooseBestActivity`): no match, the only match, or a first
+    match with a higher priority or a different default.
+  - **Tie:** an even tie, which needs the platform `ResolverActivity`, stays
+    an explicit `UnsupportedOperationException`. Neither preferred
+    activities nor the `android` package are modelled.
+  - **Scope:** only the observed `resolveIntent` is wired;
+    `queryIntentActivities` remains strict.
+- Google's consent SDK commits `SharedPreferences` from a worker thread.
+  `EditorImpl.notifyListeners` posts to `ActivityThread.sMainThreadHandler`,
+  which `ActivityThread.main` sets after `attach`; `systemMain()` does not. The
+  launcher now sets it from the `systemMain()` thread's handler.
+- Fyber/Inneractive registers a `TelephonyCallback`. SystemServer starts
+  `TelephonyRegistry` on every device, so `telephony.registry` is now
+  published (see the device-services table above).
+
+The `Managed` fixture checks all three on every start: resolution
+(explicit, implicit in-package, `MATCH_DEFAULT_ONLY`, none), a worker-thread
+commit whose listener runs on main, and telephony registration (a display-info
+listener registers and unregisters; cell info without location throws). With
+the previous launcher the fixture fails at `package.resolveIntent` and never
+reaches the later checks. The rewarded videos themselves are untested.
+
 ### Windows owned by other threads (2026-10-17)
 
 Hungry Shark World exited with status 1 when a round ended. Unity's
@@ -617,7 +651,7 @@ Binder up in the manager constructor. Without the service,
 `getSystemService` logs `ServiceNotFoundException` and returns null; Hungry
 Shark Evolution then dereferenced a null `UiModeManager`, and session logs held
 40 null `PermissionManager` dereferences from `PackageManager.checkPermission`.
-Eleven services now let the real managers construct. Each declares its
+These services let the real managers construct. Each declares its
 contract enum; other methods throw. Semantics follow the linked Android 15
 server classes, for one app, user 0 and the default device:
 
@@ -632,6 +666,7 @@ server classes, for one app, user 0 and the default device:
 | `alarm` | Listener and PendingIntent alarms on a scheduler thread, at least 5 s ahead (`MIN_FUTURITY`), RTC converted to elapsed time. PendingIntent repeats clamp to at least 60 s; `remove(operation)` cancels them. Exact PendingIntent alarms enforce the target-SDK permission policy; exact listener alarms remain exempt. Alarms never restart a stopped process; AlarmClockInfo scheduling is unsupported. |
 | `account` | No accounts or authenticators (no Play services); secret reads and explicit additions are rejected. |
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
+| `telephony.registry` | No modem (`getActiveModemCount()` 0): `listenWithEventList` records or removes listeners and never notifies. It keeps TelephonyRegistry's package check, `checkListenerPermission` (location, phone-state, precise, emergency and privileged event sets) and 50-listener limit (`FrameworkTelephony`). |
 
 `notification` also accepts `cancelAll`, `cancel` and `getActiveNotifications`
 for its own package: nothing is posted, so they find nothing. Clipboard and
