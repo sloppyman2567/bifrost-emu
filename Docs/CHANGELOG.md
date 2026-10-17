@@ -13,6 +13,17 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Per-context GL state (2026-10-17)
+
+- GraphicThunk keeps one GL state tracker per EGL context, selected by each
+  thread's `eglMakeCurrent`. A shared tracker mixed the bindings of the
+  app's, HWUI's and WebView's contexts, so an unpack-buffer upload at offset
+  0 was treated as a NULL client pointer and the host driver crashed
+  (Hungry Shark World's ad window froze black). `gles_contexts` covers it.
+- A fatal host SIGSEGV/SIGBUS outside guest accesses now prints one
+  `[host-fault]` line (signal, address, host PC and its mapping) before the
+  process dies with the original signal.
+
 ### Local Google Mobile Ads requests (2026-10-17)
 
 - microG's `AdRequestService`, which answers every ad request "Not
@@ -24,7 +35,7 @@ labels below are historical records.
   ExoPlayer's `LoudnessCodecController` no longer fails ad video precaching.
   The `IAudioService` Spatializer queries report no spatializer
   (`STATE_NOT_SUPPORTED`). ExoPlayer still lacks Java `AudioTrack`, so the
-  ad plays in its WebView: audio and taps work, but the window turns black.
+  ad plays in its WebView (its black window: see Per-context GL state).
 
 ### Nested Binder callbacks (2026-10-17)
 

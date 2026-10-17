@@ -136,9 +136,21 @@ and the Spatializer; `ManagedPlayServices` checks that the ad request bind
 fails. ExoPlayer still cannot play: it needs Java `AudioTrack`
 (`generateAudioSessionId` returns -1 and AudioFlinger has no track
 creation), so GMA plays the rewarded video in its WebView, whose audio uses
-AAudio. The ad's audio and input work there, but the ad window turns black
-once the video starts. One earlier attempt died on a guest SIGSEGV in HWUI's
-RenderThread. Visible playback is not established.
+AAudio.
+
+The ad window then froze black a few seconds in: the emulator was dumping
+core after a host SIGSEGV, a NULL read in glibc's `memcpy` on HWUI's
+RenderThread or WebView's GPU thread. GraphicThunk tracked GL bindings in
+one tracker for every context, and the app, HWUI and WebView render with
+their own EGL contexts on different threads. Another context's unbind made a
+pixel-unpack-buffer upload at offset 0 look like a NULL client pointer.
+Trackers are now per EGL context (see the
+[graphics guide](../../Source/System/Graphics/AGENTS.md)). Afterwards a
+Mintegral rewarded video (mediated) played to the end, its store link
+opened Mintegral's web store page (there is no Play Store app), and the game
+resumed. That session then ended by real-time signal 63 (status 191), which
+is not yet explained. A Google WebView ad has not been retested, and the
+Play page's SVG logo drew only one of its four paths.
 
 ### Windows owned by other threads (2026-10-17)
 

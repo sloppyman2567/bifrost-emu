@@ -8,8 +8,11 @@
 #include <cerrno>
 #include <cstdio>
 #include <new>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 namespace arm64emu {
 thread_local std::atomic<FrostJIT*> FrostJIT::fault_jit_{nullptr};
@@ -26,6 +29,82 @@ static struct sigaction previous_segv, previous_bus;
 static std::once_flag install_once;
 static bool handlers_installed = false;
 
+static void append(char*& out, char* end, const char* text) {
+    while (*text && out < end) *out++ = *text++;
+}
+static void append_number(char*& out, char* end, uint64_t value, unsigned base) {
+    char digits[20];
+    int n = 0;
+    do { digits[n++] = "0123456789abcdef"[value % base]; value /= base; } while (value);
+    if (base == 16) append(out, end, "0x");
+    while (n && out < end) *out++ = digits[--n];
+}
+static uint64_t parse_hex(const char*& p) {
+    uint64_t value = 0;
+    for (;; ++p) {
+        unsigned c = static_cast<unsigned char>(*p);
+        if (c - '0' < 10) value = value * 16 + (c - '0');
+        else if ((c | 32) - 'a' < 6) value = value * 16 + ((c | 32) - 'a' + 10);
+        else return value;
+    }
+}
+// The /proc/self/maps line containing `pc`, as "path+0xoffset" (async-signal-safe).
+static void append_mapping(char*& out, char* end, uint64_t pc) {
+    int fd = ::open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    char buffer[4096], line[512];
+    size_t used = 0;
+    bool found = false;
+    ssize_t n;
+    while (!found && (n = ::read(fd, buffer, sizeof(buffer))) > 0) {
+        for (ssize_t i = 0; i < n && !found; ++i) {
+            if (buffer[i] != '\n') { if (used < sizeof(line) - 1) line[used++] = buffer[i]; continue; }
+            line[used] = 0;
+            used = 0;
+            const char* p = line;
+            uint64_t start = parse_hex(p);
+            if (*p++ != '-') continue;
+            uint64_t stop = parse_hex(p);
+            if (pc < start || pc >= stop) continue;
+            found = true;
+            while (*p == ' ') ++p;  // permissions
+            while (*p && *p != ' ') ++p;
+            while (*p == ' ') ++p;
+            uint64_t offset = parse_hex(p);  // then device, inode and path
+            for (int field = 0; field < 2 && *p; ++field) { while (*p == ' ') ++p; while (*p && *p != ' ') ++p; }
+            while (*p == ' ') ++p;
+            append(out, end, " map=");
+            append(out, end, *p ? p : "[anonymous]");
+            append(out, end, "+");
+            append_number(out, end, pc - start + offset, 16);
+        }
+    }
+    ::close(fd);
+}
+// A host fault outside registered guest accesses (a host library, thunk or
+// the emulator itself) terminates the process. Name its PC first: the
+// re-raised signal alone leaves only the raise() frame in a core dump.
+static void report_host_fault(int signo, const siginfo_t* info, const void* context) {
+    const uint64_t pc = context
+        ? static_cast<uint64_t>(static_cast<const ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]) : 0;
+    char text[768];
+    char* out = text;
+    char* end = text + sizeof(text) - 1;
+    append(out, end, "[host-fault] sig=");
+    append_number(out, end, static_cast<unsigned>(signo), 10);
+    append(out, end, " code=");
+    append_number(out, end, info ? static_cast<uint64_t>(static_cast<uint32_t>(info->si_code)) : 0, 10);
+    append(out, end, " addr=");
+    append_number(out, end, info ? reinterpret_cast<uint64_t>(info->si_addr) : 0, 16);
+    append(out, end, " pc=");
+    append_number(out, end, pc, 16);
+    append(out, end, " tid=");
+    append_number(out, end, static_cast<uint64_t>(::syscall(SYS_gettid)), 10);
+    if (pc) append_mapping(out, end, pc);
+    *out++ = '\n';
+    (void)!::write(STDERR_FILENO, text, static_cast<size_t>(out - text));
+}
+
 static void native_fault_handler(int signo, siginfo_t* info, void* context) {
     const int saved_errno = errno;
     if (FrostJIT::redirect_memory_fault(signo, info, context)) {
@@ -36,6 +115,7 @@ static void native_fault_handler(int signo, siginfo_t* info, void* context) {
     // accesses. Default faults still terminate with the original host signal.
     const auto& previous = signo == SIGBUS ? previous_bus : previous_segv;
     if (previous.sa_handler == SIG_DFL || previous.sa_handler == SIG_IGN) {
+        report_host_fault(signo, info, context);
         ::sigaction(signo, &previous, nullptr);
         ::raise(signo);
     } else {

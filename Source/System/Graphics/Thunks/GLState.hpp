@@ -209,8 +209,8 @@ public:
     void set_program(uint32_t program);
     // Redundant-bind elision support: exact-state getters plus VAO binding
     // and delete-mirroring. Elision is only valid because every GL call
-    // flows through dispatch (single context assumed — contexts have
-    // per-context state and would need a keyed tracker).
+    // flows through dispatch. One tracker mirrors one context: GraphicThunk
+    // keys trackers by the calling thread's current EGL context.
     uint32_t current_program() const;
     uint32_t active_texture() const;
     uint32_t texture_binding(uint32_t target) const;
@@ -317,8 +317,8 @@ private:
     float point_size_ = 1.0f;
     // Hot elision states are lock-free atomics (relaxed): the elision
     // check runs per bind call and a mutex there costs ~15ns of the
-    // ~75ns round trip. GL is single-threaded in every current target,
-    // so relaxed is exact in practice; the map paths below keep mu_.
+    // ~75ns round trip. A context is current on one thread at a time, so
+    // its tracker's relaxed accesses are exact; the map paths keep mu_.
     std::atomic<uint32_t> active_texture_{0x84C0}; // GL_TEXTURE0
     uint32_t blend_src_rgb_ = 0x0302; // GL_SRC_ALPHA
     uint32_t blend_dst_rgb_ = 0x0303; // GL_ONE_MINUS_SRC_ALPHA

@@ -129,8 +129,19 @@ struct GraphicThunkImpl {
     // sync/UNMAP/wake sites already do. Separate from mu so registry
     // paths never interact with per-call state.
     std::mutex state_mu;
-    // GL state tracker for consistent query results.
+    // GL state tracker for consistent query results, for GL made current
+    // outside EGL (SDL/GLFW windows).
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
+    // Binding state belongs to a context. An Android process renders with
+    // several EGL contexts on different threads at once (the app, HWUI's
+    // RenderThread, WebView's GPU thread), so each host EGLContext has its
+    // own tracker, selected by the calling thread's eglMakeCurrent. A
+    // destroyed context's tracker lives while a thread keeps it current.
+    std::mutex context_trackers_mu_;
+    std::unordered_map<uint64_t, std::shared_ptr<GLStateTracker>> context_trackers_;
+    GLStateTracker* tracker() const;
+    void make_current(uint64_t context);
+    void destroy_context(uint64_t context);
     // SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
     // pixel buffer can be bounced at its full size (pitch * height)
     // instead of the 64 KiB default (which truncates larger frames).

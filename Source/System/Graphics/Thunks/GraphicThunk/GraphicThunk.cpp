@@ -28,6 +28,34 @@
 // thunked — enough to run trivial programs (clear the screen, draw a
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
 namespace arm64emu {
+namespace {
+// The calling thread's current EGL context tracker (owner disambiguates
+// thunk instances); empty when no EGL context is current here.
+struct CurrentContextTracker {
+    const GraphicThunkImpl* owner = nullptr;
+    std::shared_ptr<GLStateTracker> tracker;
+};
+thread_local CurrentContextTracker current_context_tracker;
+}  // namespace
+GLStateTracker* GraphicThunkImpl::tracker() const {
+    const auto& current = current_context_tracker;
+    return current.owner == this && current.tracker ? current.tracker.get() : gl_state_tracker_.get();
+}
+// After a successful eglMakeCurrent: EGL_NO_CONTEXT (0) releases the thread.
+void GraphicThunkImpl::make_current(uint64_t context) {
+    auto& current = current_context_tracker;
+    if (!context) { current = {}; return; }
+    std::lock_guard<std::mutex> g(context_trackers_mu_);
+    auto& tracker = context_trackers_[context];
+    if (!tracker) tracker = std::make_shared<GLStateTracker>();
+    current = {this, tracker};
+}
+// eglDestroyContext defers destruction while the context is current; the
+// thread's shared reference keeps its tracker until it switches.
+void GraphicThunkImpl::destroy_context(uint64_t context) {
+    std::lock_guard<std::mutex> g(context_trackers_mu_);
+    context_trackers_.erase(context);
+}
 // ── GraphicThunk method implementations ───────────────────────────────
 GraphicThunk::GraphicThunk() {
     impl_ = std::make_unique<GraphicThunkImpl>();

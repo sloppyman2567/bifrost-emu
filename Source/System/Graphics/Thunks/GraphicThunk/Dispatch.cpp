@@ -215,14 +215,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t offset = is_range ? args[1] : 0;
             uint64_t length = is_range ? args[2] : 0;
             cpu.regs[0] = 0;
-            if (!impl_->mem || !impl_->gl_state_tracker_ ||
+            if (!impl_->mem || !impl_->tracker() ||
                 !impl_->gl_get_buffer_parameteriv_fn_) {
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] %s: unavailable (mem/tracker/host fns)\n",
                             entry.name.c_str());
                 return 0;
             }
-            uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
+            uint32_t buffer = impl_->tracker()->buffer_binding(target);
             if (buffer == 0) {
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] %s: no buffer bound to target 0x%x\n",
@@ -312,8 +312,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         if (mpol == thunk::Policy::UNMAP_BUFFER) {
             uint32_t target = static_cast<uint32_t>(args[0]);
-            if (impl_->mem && impl_->gl_state_tracker_ && impl_->gl_buffer_subdata_fn_) {
-                uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
+            if (impl_->mem && impl_->tracker() && impl_->gl_buffer_subdata_fn_) {
+                uint32_t buffer = impl_->tracker()->buffer_binding(target);
                 GraphicThunkImpl::BufferMapping m{};
                 bool found = false;
                 bool persistent = false;
@@ -356,8 +356,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint32_t target = static_cast<uint32_t>(args[0]);
             uint64_t offset = args[1];
             uint64_t length = args[2];
-            if (impl_->mem && impl_->gl_state_tracker_ && impl_->gl_buffer_subdata_fn_) {
-                uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
+            if (impl_->mem && impl_->tracker() && impl_->gl_buffer_subdata_fn_) {
+                uint32_t buffer = impl_->tracker()->buffer_binding(target);
                 GraphicThunkImpl::BufferMapping m{};
                 bool found = false;
                 {
@@ -530,10 +530,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         auto pixel_extent_ = [&](bool upload, uint64_t h,
                                  uint64_t row_bytes) -> uint64_t {
             int align = 4;
-            if (impl_->gl_state_tracker_) {
+            if (impl_->tracker()) {
                 align = upload
-                    ? impl_->gl_state_tracker_->pixel_store_unpack_alignment()
-                    : impl_->gl_state_tracker_->pixel_store_pack_alignment();
+                    ? impl_->tracker()->pixel_store_unpack_alignment()
+                    : impl_->tracker()->pixel_store_pack_alignment();
             }
             uint64_t stride = (row_bytes + align - 1) & ~(uint64_t)(align - 1);
             return h ? (h - 1) * stride + row_bytes : 0;
@@ -842,23 +842,23 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         starts_with("glGetTextureImage") ||
         starts_with("glGetCompressedTextureImage");
     bool pixel_data_is_pbo_offset = false;
-    if (impl_->gl_state_tracker_) {
+    if (impl_->tracker()) {
         constexpr uint32_t pixel_pack_buffer_target = 0x88EB;
         constexpr uint32_t pixel_unpack_buffer_target = 0x88EC;
         if (pixel_unpack_call)
             pixel_data_is_pbo_offset =
-                impl_->gl_state_tracker_->buffer_binding(pixel_unpack_buffer_target) != 0;
+                impl_->tracker()->buffer_binding(pixel_unpack_buffer_target) != 0;
         else if (pixel_pack_call)
             pixel_data_is_pbo_offset =
-                impl_->gl_state_tracker_->buffer_binding(pixel_pack_buffer_target) != 0;
+                impl_->tracker()->buffer_binding(pixel_pack_buffer_target) != 0;
     }
     // ── DELETE_TRACK: mirror deletes into the state tracker ──────
     // Deleting a bound object unbinds it; without mirroring, name reuse
     // would observe a stale "already bound" and elide a real bind.
     // Rare calls (resource teardown, not per-frame). Falls through.
     if (entry.spec && entry.spec->policy == thunk::Policy::DELETE_TRACK &&
-        impl_->gl_state_tracker_ && impl_->mem) {
-        auto* trk = impl_->gl_state_tracker_.get();
+        impl_->tracker() && impl_->mem) {
+        auto* trk = impl_->tracker();
         if (entry.name == "glDeleteTextures") {
             uint64_t n = args[0] & 0xFFFFFFFFu;
             if (n > 0 && n <= 4096 && args[1]) {
@@ -892,13 +892,13 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // functions whose effect is exactly "binding point = name" with no
     // capture semantics (buffer binds excluded: ARRAY/element state is
     // captured into VAOs at attrib-pointer time). All return void.
-    // BIFROST_NO_ELIDE=1 disables. Single-context assumption (same as
-    // the tracker itself).
+    // BIFROST_NO_ELIDE=1 disables. Valid per context: tracker() is the
+    // calling thread's current EGL context's (or the non-EGL default).
     static const bool no_elide_ = getenv("BIFROST_NO_ELIDE") != nullptr;
     if (!no_elide_ && entry.spec &&
         entry.spec->policy == thunk::Policy::ELIDE_BIND &&
-        impl_->gl_state_tracker_) {
-        auto* trk = impl_->gl_state_tracker_.get();
+        impl_->tracker()) {
+        auto* trk = impl_->tracker();
         bool elided = false;
         if (entry.name == "glUseProgram") {
             elided = (trk->current_program() == static_cast<uint32_t>(args[0]));
@@ -1023,7 +1023,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // NOT be translated) when a buffer is bound, but a real guest pointer
     // for client-side vertex / index arrays (must be translated).
     // GLStateTracker knows the binding; the policy comes from the spec.
-    if (impl_->gl_state_tracker_ && entry.spec) {
+    if (impl_->tracker() && entry.spec) {
         if (entry.spec->policy == thunk::Policy::VA_PTR) {
             // Pointer-arg position differs per function:
             //   glVertexAttribPointer*(index,...,stride,ptr) -> arg5
@@ -1043,11 +1043,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (vaptr_dbg && (!strcmp(nm, "glVertexPointer") ||
                               !strcmp(nm, "glTexCoordPointer")))
                 fprintf(stderr, "[vaptr] %s binding=%u arg=%llx -> %s\n",
-                        nm, impl_->gl_state_tracker_->array_buffer_binding(),
+                        nm, impl_->tracker()->array_buffer_binding(),
                         (unsigned long long)args[pi],
-                        impl_->gl_state_tracker_->array_buffer_binding() ?
+                        impl_->tracker()->array_buffer_binding() ?
                             "OFFSET" : "translate");
-            if (impl_->gl_state_tracker_->array_buffer_binding() == 0 &&
+            if (impl_->tracker()->array_buffer_binding() == 0 &&
                 args[pi] != 0) {
                 translate_ptr(args[pi], pi, &bounce_bufs[pi],
                               &bounce_guest[pi], &bounce_wb[pi]);
@@ -1060,7 +1060,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             int pi = 3;
             if (entry.name == "glDrawRangeElements" ||
                 entry.name == "glDrawRangeElementsBaseVertex") pi = 5;
-            if (impl_->gl_state_tracker_->element_array_buffer_binding() == 0 &&
+            if (impl_->tracker()->element_array_buffer_binding() == 0 &&
                 args[pi] != 0) {
                 translate_ptr(args[pi], pi, &bounce_bufs[pi],
                               &bounce_guest[pi], &bounce_wb[pi]);
@@ -1082,7 +1082,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 case 0x1405: isz = 4; break;  // UNSIGNED_INT
                 default: break;
                 }
-                bool ebo = impl_->gl_state_tracker_->
+                bool ebo = impl_->tracker()->
                     element_array_buffer_binding() != 0;
                 // BaseVertex form has a 6th arg: int32 basevertex array.
                 bool has_bv = entry.spec->args &&
@@ -1183,7 +1183,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 bool is_elem = entry.name == "glDrawElementsIndirect";
                 int pi = is_elem ? 2 : 1;
                 size_t sz = is_elem ? 20 : 16;
-                if (impl_->gl_state_tracker_->
+                if (impl_->tracker()->
                         draw_indirect_buffer_binding() != 0 ||
                     args[pi] == 0)
                     break;  // bound offset or NULL: pass through raw
@@ -1328,11 +1328,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     bool is_gl_query = (entry.spec &&
                         entry.spec->policy == thunk::Policy::QUERY);
     bool handled_by_tracker = false;
-    if (is_gl_query && impl_->gl_state_tracker_) {
+    if (is_gl_query && impl_->tracker()) {
         // Pass the post-translation `args` so the tracker writes query
         // results into the host buffer (direct-window alias or bounce)
         // that dispatch() will write back to guest memory.
-        handled_by_tracker = impl_->gl_state_tracker_->try_handle_query(entry.name, args, cpu);
+        handled_by_tracker = impl_->tracker()->try_handle_query(entry.name, args, cpu);
     }
     // ── Writeback with LIVE-RANGE CLAMP (heap-shredder fix) ───────────
     // Each bounced pointer arg is written back only up to the end of the
@@ -1597,6 +1597,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 static_cast<long long>(finished - present_started));
     }
 
+    // Select the thread's per-context GL state (see GraphicThunkImpl::tracker).
+    if (static_cast<uint32_t>(ret) && entry.name == "eglMakeCurrent") impl_->make_current(args[3]);
+    else if (static_cast<uint32_t>(ret) && entry.name == "eglDestroyContext") impl_->destroy_context(args[1]);
+
     // The extension count must match the filtered glGetStringi list. args[1]
     // is the host-side result buffer; the writeback below copies it out.
     if (is_gl_query && args[0] == GL::NUM_EXTENSIONS && args[1]) {
@@ -1758,8 +1762,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             // unbinds it (else a later re-generated name would observe a
             // stale "already bound" and get elided). args[1] is host-
             // readable here (bounce or window alias).
-            if (impl_->gl_state_tracker_)
-                impl_->gl_state_tracker_->unbind_buffers(names, n);
+            if (impl_->tracker())
+                impl_->tracker()->unbind_buffers(names, n);
         }
     }
 
@@ -1828,8 +1832,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 #endif
     }
     cpu.regs[0] = ret;
-    if (impl_->gl_state_tracker_ && entry.tracks_state) {
-        impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);
+    if (impl_->tracker() && entry.tracks_state) {
+        impl_->tracker()->track_state_change(entry.name, args, nullptr, 0);
     }
     // Lightweight frame counter: print every 5 present/swap calls when
     // BIFROST_FRAME_TRACE=1 (avoids the heavy per-call dispatch trace).

@@ -189,8 +189,8 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         }
         }
         cpu.regs[0] = 0;
-        if (impl_->gl_state_tracker_ && entry.tracks_state) {
-            impl_->gl_state_tracker_->track_state_change(entry.name, local_args, fv, entry.n_float);
+        if (impl_->tracker() && entry.tracks_state) {
+            impl_->tracker()->track_state_change(entry.name, local_args, fv, entry.n_float);
         }
         return 0;
     }
@@ -283,10 +283,10 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
             }
         }
         cpu.regs[0] = 0;
-        if (impl_->gl_state_tracker_ && entry.tracks_state) {
+        if (impl_->tracker() && entry.tracks_state) {
             uint64_t mixed_args[12] = {0};
             mixed_args[0] = iv[0];
-            impl_->gl_state_tracker_->track_state_change(entry.name, mixed_args, fv, entry.n_float);
+            impl_->tracker()->track_state_change(entry.name, mixed_args, fv, entry.n_float);
         }
         return 0;
     }

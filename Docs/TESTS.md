@@ -2609,6 +2609,15 @@ target back. The thunk used to return NULL for the advertised target entry
 point, which Android WebView called. It skips without host EGL/GLES 2 or the
 extensions; it does not cover AHardwareBuffer or dma-buf image sources.
 
+`Tests/Apps/test_gles_contexts.c` checks that GL binding state is per EGL
+context. Context A keeps a pixel unpack buffer bound; thread B, in its own
+context, unbinds the target and uploads client memory; then A uploads from
+the buffer at offset 0. Both textures must read back. The previous binary,
+with one tracker for all contexts, fails A's upload (in Hungry Shark World
+the same pattern crashed in the host driver's `memcpy` from NULL). It passes
+in both engines and skips without host EGL/GLES 3. Threads without an EGL
+context (SDL/GLFW) still share the default tracker.
+
 `Tests/Apps/test_gles_extensions.c` checks, on a host ES 3 context, that the
 filtered `glGetString(GL_EXTENSIONS)`, `GL_NUM_EXTENSIONS` and `glGetStringi`
 agree and that an index past the list is `GL_INVALID_VALUE`. Hidden fd-import

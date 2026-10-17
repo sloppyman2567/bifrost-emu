@@ -18,6 +18,11 @@
   them from the guest's `glGetString`, `glGetStringi` and `GL_NUM_EXTENSIONS`.
   Desktop GL keeps the host list. Regenerate with `glcoverage.py`, then
   `make opgen-thunk`; host symbols fall back from `dlsym` to `eglGetProcAddress`.
+- GL binding state is per context. `GraphicThunkImpl::tracker()` returns the
+  calling thread's current EGL context's `GLStateTracker` (switched after a
+  successful `eglMakeCurrent`), else the default tracker for SDL/GLFW GL.
+  Pointer-vs-buffer-offset decisions, query answers and bind elision must
+  use it, never a shared tracker; `gles_contexts` checks this.
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);
   every soname registration takes one.
 - Preserve stack/FP argument ABI, nested pointer arrays and string returns.

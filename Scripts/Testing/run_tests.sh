@@ -590,6 +590,10 @@ INTEGRATION_TESTS=(
     # a texture-sourced EGLImage (readback pin). Needs host EGL + GLES 2;
     # exit 77 = skip.
     "gles_egl_image|Tests/Apps/test_gles_egl_image.elf||30|ALL PASS"
+    # Binding state is per EGL context: a PBO upload at offset 0 in one
+    # context after another thread's context unbinds its unpack buffer.
+    # Needs host EGL + GLES 3; exit 77 = skip.
+    "gles_contexts|Tests/Apps/test_gles_contexts.elf||30|ALL PASS"
     # ES extension queries agree after filtering, hidden extensions stay
     # hidden, common extensions' entry points resolve and alias rows run.
     # Needs host EGL + GLES 3; exit 77 = skip.
