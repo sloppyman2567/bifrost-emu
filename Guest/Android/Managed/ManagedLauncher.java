@@ -929,15 +929,37 @@ public final class ManagedLauncher {
             if (method.equals("getContentProvider") && Arrays.asList(a).contains("settings"))
                 return holder;
             if (method.equals("getContentProvider")) {
-                Object local = content.publishedProvider((String) a[2], (String) a[1], (Integer) a[3]);
+                String authority = (String) a[2];
+                Object local = content.publishedProvider(authority, (String) a[1], (Integer) a[3]);
                 if (local != null) return local;
+                if (Process.myUid() % 100000 >= 99000)
+                    throw new SecurityException("Isolated process not allowed to call getContentProvider");
+                // AOSP ContentProviderHelper returns no holder when no package
+                // declares an enabled provider for the authority; ActivityThread
+                // then logs "Failed to find provider info" and ContentResolver
+                // returns null.
+                ProviderInfo info = packages.resolveProvider(authority, PackageManager.GET_SHARED_LIBRARY_FILES
+                        | PackageManager.GET_URI_PERMISSION_PATTERNS, (Integer) a[3]);
+                if (info == null) {
+                    System.out.println("APP_PROVIDER_MISSING " + authority);
+                    return null;
+                }
+                packages.enforceProviderPermission(info, Process.myUid());
+                String process = info.processName == null ? info.packageName : info.processName;
+                // canRunHere: the caller instantiates its own instance.
+                if (info.applicationInfo.uid == Process.myUid()
+                        && (info.multiprocess || process.equals(Application.getProcessName())))
+                    return FrameworkContent.localHolder(info);
+                return content.acquireRemote(info, authority, (Boolean) a[4]);
             }
-            // AOSP ContentProviderHelper returns no holder when no package
-            // declares the authority (e.g. Play services providers that
-            // Firebase probes); ActivityThread then logs "Failed to find
-            // provider info" and ContentResolver returns null.
-            if (method.equals("getContentProvider") && !packages.declaresProvider((String) a[2])) {
-                System.out.println("APP_PROVIDER_MISSING " + a[2]);
+            if (method.equals("refContentProvider"))
+                return content.refProvider(a[0], (Integer) a[1], (Integer) a[2]);
+            if (method.equals("removeContentProvider")) {
+                content.removeProvider(a[0], (Boolean) a[1]);
+                return null;
+            }
+            if (method.equals("unstableProviderDied")) {
+                content.unstableProviderDied(a[0]);
                 return null;
             }
             // Log.wtf report; false means "do not kill this process".
@@ -1460,6 +1482,9 @@ public final class ManagedLauncher {
         boolean serviceChild = args.length == 3 && args[0].equals("--service-child");
         if (diagnostic) checkServiceRegistration();
         installServices(serviceChild || inventory);
+        serviceRuntime.processes().content(content);
+        // Only the session's supervisor capability can start provider processes.
+        if (!serviceChild) content.processes(serviceRuntime.processes());
         if (!inventory) reportProcessState(serviceChild ? 10 : 19);
         if (gralloc) {
             ActivityProbe.GrallocProbe.checkDeclarations();
@@ -1503,6 +1528,7 @@ public final class ManagedLauncher {
         if (parent == null) installWebView(context);
         else if (parent.webViewProvider != null) installWebView(context, parent.webViewProvider);
         if (parent != null) for (PackageInfo system : parent.systemPackages) packages.installSystem(system);
+        if (parent != null && parent.session != null) packages.installPeer(parent.session);
         installMicroG(context);
         if (diagnostic) checkRuntimeServices(context, false);
         // ActivityThread.handleBindApplication's fallback when no serialized
@@ -1527,6 +1553,12 @@ public final class ManagedLauncher {
             serviceRuntime.attach(thread, app); serviceRuntime.remote(parent);
             broadcasts.attach(thread, app.packageName);
             jobs.attach(application);
+            // handleBindApplication: this process's providers, published to
+            // the session, then Application.onCreate.
+            content.remote(parent);
+            content.installProviders(thread, application, pkg);
+            ((Instrumentation) call(thread, "getInstrumentation", new Class<?>[0]))
+                    .callApplicationOnCreate(application);
             parent.ready(call(thread, "getApplicationThread", new Class<?>[0]));
             Looper.loop();
             return;

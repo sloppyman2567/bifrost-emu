@@ -13,6 +13,24 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### microG processes and remote content providers (2026-10-17)
+
+- microG runs in its own managed processes (GmsCore UID 19998, its
+  `:persistent` process, the Play Store companion UID 19999). Content
+  providers in other processes are started and acquired as Android 15's
+  `ContentProviderHelper` does, with permission checks and connection
+  reference counts. SpongeBob no longer crashes in `GoogleApiHandler` on
+  `activity.getContentProvider`.
+- Child processes install their process's providers before
+  `Application.onCreate`, which they now run. Implicit service Intents
+  resolve through manifest intent filters, so Play services SDKs bind
+  microG services by action.
+- microG sees the calling app's package, uid and grants. System packages
+  hold the signature permissions of same-signer packages, which Firebase's
+  Play services permission check requires.
+- `test_managed_play_services_available` also binds microG's measurement
+  service, queries its GServices provider and runs basement's chimera lookup.
+
 ### microG Play services packages (2026-10-16)
 
 - Managed app roots carry microG v0.3.17.252432 (`com.google.android.gms`,
@@ -24,7 +42,7 @@ labels below are historical records.
   `signatures` and `signingInfo`, following microG's signature-spoofing
   rule, and resolves system packages by UID. Google's own Play services
   check now returns SUCCESS instead of SERVICE_INVALID ("Play Store is
-  missing"). microG's services, providers and broadcasts do not run yet.
+  missing"). microG's services, providers and broadcasts did not run yet.
 - Add `test_managed_play_services_available` (Google `play-services-basement`
   18.12.0) and `test_android_framework.py --microg`.
 

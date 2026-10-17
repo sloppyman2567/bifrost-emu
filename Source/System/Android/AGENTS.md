@@ -28,8 +28,14 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   it limited to packages declaring the meta-data and permission. Their
   archives load lazily (`installSystemLazily`): app startup must not pay
   the GmsCore parse. Children get the parent's already parsed snapshots
-  (`FrameworkProcessRuntime.SHARED_SYSTEM_PACKAGES`).
-  `test_managed_play_services_available` runs Google's own basement check.
+  (`FrameworkProcessRuntime.SHARED_SYSTEM_PACKAGES`) and the session app as
+  a peer package. microG runs in managed children: providers in other
+  processes go through `FrameworkContent.acquireRemote` (only the session
+  starts processes; children forward), and children install their process's
+  providers before `Application.onCreate`. Keep provider publication to
+  names and Binders: holders are rebuilt from the session's manifest records.
+  `test_managed_play_services_available` runs Google's own basement check,
+  a microG service bind, a GServices query and the chimera lookup.
 - App processes register their code and profile paths with ART
   (`registerProfiles`) and run from `dexopt`'s install-time odex. Keep the
   odex accepted: `PCL[]` context, the image's boot classpath and ISA props.

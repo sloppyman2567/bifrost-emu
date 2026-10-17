@@ -8,7 +8,15 @@ As of 2026-10-14 the user plays cooking levels, completes them, opens Settings
 and Help Center, and the main HUD stays after closing Settings. Play renders
 at the host display's native density (2560x1384 or 3440x1384 px, 320 dpi on a
 200%-scaled 3440x1440 monitor). The child-age path is required: the adult path
-still stalls at 73% on Firebase/Google Play services.
+stalled at 73% on Firebase/Google Play services.
+
+On 2026-10-17 the `GoogleApiHandler` crash on `activity.getContentProvider`
+was fixed by running microG in its own processes (see the runtime guide).
+A 180 s JIT run on the saved child-age profile reached the Unity tracker
+setup with GmsCore, its `:persistent` process and the Play Store companion
+running, without a fatal exception or the earlier FirebaseInstanceId
+"Google Play services missing" error. The adult-age path has not been
+retested on this build.
 
 ## Screenshots (2026-10-14)
 

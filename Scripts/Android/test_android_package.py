@@ -587,6 +587,9 @@ class PackageTests(unittest.TestCase):
         required = ' android:isSplitRequired="true"' if not split else ""
         application_class = f' android:name="{activity}$App"' if managed is True and not split else ""
         job_permission = '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>' if managed == "ManagedServices" else ""
+        if managed == "ManagedPlayServices":
+            # microG's GServicesProvider checks that its caller requests this.
+            job_permission = '<uses-permission android:name="com.google.android.providers.gsf.permission.READ_GSERVICES"/>'
         if managed == "ManagedActivities":
             # Normal (granted at install) and runtime (denied without a permission UI).
             job_permission = ('<uses-permission android:name="android.permission.INTERNET"/>'
@@ -1160,6 +1163,15 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(status, 0, text[-30000:])
         self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
         self.assertRegex(text, r"MANAGED_PLAY_SERVICES status=0 apk=252432034 client=\d+", text[-30000:])
+        # microG runs in its own process and UID; the app binds its service
+        # by action and reaches its providers there.
+        self.assertIn("ASGARD_PROCESS_READY pid=", text)
+        self.assertRegex(text, r"uid=19998 process=com\.google\.android\.gms\n")
+        self.assertIn("MANAGED_PLAY_SERVICES_CONNECTED com.google.android.gms/org.microg.gms.measurement."
+                      "MeasurementService com.google.android.gms.common.internal.IGmsServiceBroker alive=true", text)
+        self.assertRegex(text, r"MANAGED_PLAY_SERVICES_GSERVICES rows=0 uid=1\d{4}\n")
+        self.assertIn("MANAGED_PLAY_SERVICES_CHIMERA com.google.android.gms/org.microg.gms.measurement."
+                      "MeasurementService", text)
 
     def test_managed_activity_stack(self):
         state = self.work / "activities-state"

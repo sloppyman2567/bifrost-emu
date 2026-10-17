@@ -50,7 +50,16 @@ final class FrameworkContent {
         System.out.println("APP_PROVIDERS_STARTED " + providers.size());
     }
 
-    synchronized void publishProviders(Object caller, List<?> holders) throws Exception {
+    void remote(FrameworkProcessRuntime.Remote remote) { this.remote = remote; }
+    void processes(FrameworkProcessRuntime processes) { this.processes = processes; }
+
+    void publishProviders(Object caller, List<?> holders) throws Exception {
+        publishLocal(caller, holders);
+        // A child process publishes to the session, which hands out its providers.
+        if (remote != null) remote.publishProviders(holders);
+    }
+
+    private synchronized void publishLocal(Object caller, List<?> holders) throws Exception {
         if (!(caller instanceof IInterface)
                 || ((IInterface) caller).asBinder() != applicationThread)
             throw new SecurityException("Foreign provider publisher");
@@ -77,6 +86,172 @@ final class FrameworkContent {
                 || !Objects.equals(packageName, caller)))
             throw new SecurityException("Foreign provider caller");
         return holder;
+    }
+
+    // ContentProviderHelper for providers hosted by child processes. Each
+    // child installs its process's providers before Application.onCreate, as
+    // bindApplication does, and publishes them on a Binder thread; acquirers
+    // wait for that publication. One connection per provider carries this
+    // client process's stable/unstable counts.
+    private static final class Hosted {
+        final FrameworkProcessRuntime.Child child;
+        final IBinder provider;
+        Hosted(FrameworkProcessRuntime.Child child, IBinder provider) { this.child = child; this.provider = provider; }
+    }
+    private static final class Connection {
+        final android.os.Binder token = new android.os.Binder();
+        final Hosted hosted;
+        int stable, unstable;
+        boolean dead;
+        Connection(Hosted hosted) { this.hosted = hosted; }
+    }
+    private final Map<String, Hosted> hosted = new LinkedHashMap<>();
+    private final Map<Hosted, Connection> connectionsByProvider = new LinkedHashMap<>();
+    private final Map<IBinder, Connection> connections = new LinkedHashMap<>();
+    private FrameworkProcessRuntime processes;
+    private FrameworkProcessRuntime.Remote remote;
+
+    private static Object holder(ProviderInfo info, Object provider, IBinder connection, boolean local, boolean noRelease)
+            throws Exception {
+        Class<?> type = Class.forName("android.app.ContentProviderHolder");
+        Object holder = type.getConstructor(ProviderInfo.class).newInstance(new ProviderInfo(info));
+        type.getField("provider").set(holder, provider);
+        type.getField("connection").set(holder, connection);
+        type.getField("mLocal").setBoolean(holder, local);
+        type.getField("noReleaseNeeded").setBoolean(holder, noRelease);
+        return holder;
+    }
+
+    // A same-uid multiprocess provider: the caller instantiates it itself
+    // (ContentProviderHelper.getContentProviderImpl, canRunHere).
+    static Object localHolder(ProviderInfo info) throws Exception { return holder(info, null, null, true, false); }
+
+    // Starts (or reuses) the provider's process and waits for its publication.
+    // null, as AOSP returns, when the process dies or the wait times out.
+    Object acquireRemote(ProviderInfo info, String authority, boolean stable) throws Exception {
+        if (remote != null) {
+            // A child cannot start processes: the session acquires for it.
+            IBinder[] reply = remote.acquireProvider(authority, stable);
+            if (reply[0] == null) return null;
+            Object provider = Class.forName("android.content.ContentProviderNative")
+                    .getMethod("asInterface", IBinder.class).invoke(null, reply[0]);
+            return holder(info, provider, reply[1], false, reply[1] == null);
+        }
+        long deadline = android.os.SystemClock.uptimeMillis() + android.content.ContentResolver.class
+                .getField("CONTENT_PROVIDER_READY_TIMEOUT_MILLIS").getInt(null);
+        FrameworkProcessRuntime.Child child;
+        try {
+            child = processes.start(info, null);
+        } catch (Exception error) {
+            // ContentProviderHelper: "Unable to launch app ... for provider".
+            android.util.Log.w("AsgardContent", "Unable to launch " + info.packageName + " for provider " + authority, error);
+            return null;
+        }
+        synchronized (this) {
+            Hosted provider;
+            while ((provider = hosted.get(child.key + "/" + info.name)) == null) {
+                long wait = deadline - android.os.SystemClock.uptimeMillis();
+                if (child.dead) {
+                    android.util.Log.w("AsgardContent", "Provider process died before publishing " + authority);
+                    return null;
+                }
+                if (wait <= 0) {
+                    android.util.Log.wtf("AsgardContent", "Timeout waiting for provider "
+                            + info.packageName + "/" + info.applicationInfo.uid + " for provider " + authority);
+                    return null;
+                }
+                wait(wait);
+            }
+            Connection connection = connectionsByProvider.get(provider);
+            if (connection == null) {
+                connection = new Connection(provider);
+                connectionsByProvider.put(provider, connection);
+                connections.put(connection.token, connection);
+            }
+            if (stable) connection.stable++; else connection.unstable++;
+            Object binder = Class.forName("android.content.ContentProviderNative")
+                    .getMethod("asInterface", IBinder.class).invoke(null, provider.provider);
+            return holder(info, binder, connection.token, false, false);
+        }
+    }
+
+    // PROVIDERS from a child: provider class names and their Binders. The
+    // session builds each holder from its own manifest record (the child's
+    // ProviderInfo copies carry its whole ApplicationInfo, megabytes for
+    // GmsCore); a name the session never resolves is never handed out.
+    synchronized void publishRemote(FrameworkProcessRuntime.Child child, android.os.Parcel data) {
+        int count = data.readInt();
+        if (count < 0 || count > 1024) throw new SecurityException("Invalid child provider publication");
+        for (int i = 0; i < count; i++) {
+            String name = data.readString();
+            IBinder binder = data.readStrongBinder();
+            if (name == null || binder == null) throw new SecurityException("Invalid child provider publication");
+            hosted.put(child.key + "/" + name, new Hosted(child, binder));
+        }
+        notifyAll();
+    }
+
+    synchronized void processDied(FrameworkProcessRuntime.Child child) {
+        hosted.values().removeIf(entry -> entry.child == child);
+        for (Connection connection : connections.values())
+            if (connection.hosted.child == child) connection.dead = true;
+        notifyAll();
+    }
+
+    synchronized boolean hosting(FrameworkProcessRuntime.Child child) {
+        for (Connection connection : connections.values())
+            if (connection.hosted.child == child && !connection.dead
+                    && connection.stable + connection.unstable > 0) return true;
+        return false;
+    }
+
+    // A child's connection is the session's: forward its counts there.
+    private Connection connection(Object token, String method) {
+        if (token == null) throw new NullPointerException("connection is null");
+        Connection connection = connections.get((IBinder) token);
+        if (connection == null && remote == null)
+            throw new IllegalArgumentException(method + ": " + token + " not a ContentProviderConnection");
+        return connection;
+    }
+
+    boolean refProvider(Object token, int stable, int unstable) throws Exception {
+        synchronized (this) {
+            Connection connection = connection(token, "refContentProvider");
+            if (connection != null) {
+                connection.stable = Math.max(0, connection.stable + stable);
+                connection.unstable = Math.max(0, connection.unstable + unstable);
+                return !connection.dead;
+            }
+        }
+        return remote.refProvider((IBinder) token, stable, unstable);
+    }
+
+    void removeProvider(Object token, boolean stable) throws Exception {
+        synchronized (this) {
+            Connection connection = connection(token, "removeContentProvider");
+            if (connection != null) {
+                if (stable && connection.stable > 0) connection.stable--;
+                else if (!stable && connection.unstable > 0) connection.unstable--;
+                return;
+            }
+        }
+        remote.refProvider((IBinder) token, stable ? -1 : 0, stable ? 0 : -1);
+    }
+
+    // The client saw a DeadObjectException; believe it only if the binder is dead.
+    void unstableProviderDied(Object token) throws Exception {
+        Connection connection;
+        synchronized (this) { connection = connection(token, "unstableProviderDied"); }
+        if (connection == null) { remote.providerDied((IBinder) token); return; }
+        if (connection.hosted.provider.pingBinder()) return;
+        processes.lost(connection.hosted.child);
+    }
+
+    // A provider the session app itself published, for a child's acquisition.
+    synchronized IBinder sessionProvider(String authority) throws Exception {
+        Object holder = publishedProviders.get(authority);
+        return holder == null ? null
+                : ((IInterface) holder.getClass().getField("provider").get(holder)).asBinder();
     }
 
     private final List<Observer> observers = new ArrayList<>();

@@ -74,6 +74,7 @@ final class FrameworkServiceRuntime {
     }
 
     void remote(FrameworkProcessRuntime.Remote remote) { this.remote = remote; }
+    FrameworkProcessRuntime processes() { return processes; }
 
     synchronized void attach(Object thread, ApplicationInfo application) throws Exception {
         this.application = new ApplicationInfo(application);
@@ -109,7 +110,8 @@ final class FrameworkServiceRuntime {
         else processes.schedule(record.child, method, types, args);
     }
 
-    private ServiceInfo resolve(Object caller, Intent intent, String callingPackage, int user) {
+    private ServiceInfo resolve(Object caller, Intent intent, String type, String callingPackage, int user)
+            throws Exception {
         if (application == null || shuttingDown)
             throw new IllegalStateException("Service runtime is not accepting requests");
         if (application.uid >= 99000) throw new SecurityException("Isolated processes cannot start or bind services");
@@ -117,15 +119,20 @@ final class FrameworkServiceRuntime {
                 || user != application.uid / 100000)
             throw new SecurityException("Foreign service caller or user");
         if (intent == null) throw new IllegalArgumentException("null service Intent");
-        if (intent.getComponent() == null && intent.getPackage() != null
-                && !application.packageName.equals(intent.getPackage())) return null;
-        if (intent.getComponent() == null)
-            throw new UnsupportedOperationException("Service intent-filter resolution is not implemented");
+        // ActiveServices.retrieveServiceLocked resolves an implicit Intent
+        // (Context requires its package) through PackageManager's filters.
+        ComponentName component = intent.getComponent();
+        if (component == null) {
+            List<android.content.pm.ResolveInfo> matches = packages.queryServices(intent, type,
+                    PackageManager.GET_META_DATA, user);
+            if (matches.isEmpty()) return null;
+            component = new ComponentName(matches.get(0).serviceInfo.packageName, matches.get(0).serviceInfo.name);
+        }
         // ActiveServices checks its existing records before consulting PackageManager.
         // A component disabled with DONT_KILL_APP must remain stoppable while alive.
-        Record existing = names.get(intent.getComponent());
+        Record existing = names.get(component);
         if (existing != null) return existing.info;
-        ServiceInfo info = packages.serviceInfo(intent.getComponent(), PackageManager.GET_META_DATA, user);
+        ServiceInfo info = packages.serviceInfo(component, PackageManager.GET_META_DATA, user);
         if (info == null) return null;
         if (info.applicationInfo.uid != application.uid && (!info.exported
                 || (info.permission != null && packages.checkPermission(info.permission,
@@ -170,7 +177,7 @@ final class FrameworkServiceRuntime {
 
     synchronized ComponentName start(Object[] a) throws Exception {
         Intent intent = copy((Intent) a[1]);
-        ServiceInfo info = resolve(a[0], intent, (String) a[4], (Integer) a[6]);
+        ServiceInfo info = resolve(a[0], intent, (String) a[2], (String) a[4], (Integer) a[6]);
         if (info == null) return null;
         if ((Boolean) a[3])
             throw new UnsupportedOperationException("Foreground-service notification/deadline support is not implemented");
@@ -188,7 +195,7 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized int stop(Object[] a) throws Exception {
-        ServiceInfo info = resolve(a[0], (Intent) a[1],
+        ServiceInfo info = resolve(a[0], (Intent) a[1], (String) a[2],
                 application == null ? null : application.packageName, (Integer) a[3]);
         if (info == null) return 0;
         Record record = names.get(new ComponentName(info.packageName, info.name));
@@ -209,7 +216,7 @@ final class FrameworkServiceRuntime {
 
     synchronized int bind(Object[] a, boolean instance) throws Exception {
         Intent intent = copy((Intent) a[2]);
-        ServiceInfo info = resolve(a[0], intent, (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
+        ServiceInfo info = resolve(a[0], intent, (String) a[3], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
         if (info == null) return 0;
         // ActiveServices returns 0 when bringUpServiceLocked cannot start
         // the hosting process. Context.bindService then returns false.

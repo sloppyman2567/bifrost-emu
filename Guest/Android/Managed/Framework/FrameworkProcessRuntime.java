@@ -1,6 +1,9 @@
 // Fresh ART service processes, controlled through the realm's real Binder transport.
 import android.content.Intent;
+import android.content.pm.ComponentInfo;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
@@ -22,7 +25,8 @@ import org.json.JSONObject;
 
 final class FrameworkProcessRuntime {
     private static final String DESCRIPTOR = "org.asgard.ServiceProcesses";
-    private static final int BOOTSTRAP = 1, READY = 2, PUBLISH = 3, DONE = 4, UNBIND = 5;
+    private static final int BOOTSTRAP = 1, READY = 2, PUBLISH = 3, DONE = 4, UNBIND = 5, PROVIDERS = 6,
+            ACQUIRE = 7, REF = 8, PROVIDER_DIED = 9;
     // Provisioned system packages a child receives as parsed snapshots when
     // the parent has already parsed them (ManagedLauncher.installMicroG).
     static final String[] SHARED_SYSTEM_PACKAGES = {"com.google.android.gms", "com.android.vending"};
@@ -31,22 +35,26 @@ final class FrameworkProcessRuntime {
     private final Map<String, Child> children = new HashMap<>();
     private Handler main;
     private String registryName;
+    private FrameworkContent content;
 
     static final class Child {
         final String key = UUID.randomUUID().toString().replace("-", "");
-        final ServiceInfo info;
+        // The component whose start created the process (a service or provider).
+        final ComponentInfo info;
         final List<Runnable> pending = new ArrayList<>();
         final String processName;
         int pid, uid;
         Object applicationThread;
-        boolean dead;
-        Child(ServiceInfo info, String processName) { this.info = info; this.processName = processName; }
+        volatile boolean dead;
+        Child(ComponentInfo info, String processName) { this.info = info; this.processName = processName; }
     }
 
     FrameworkProcessRuntime(FrameworkPackages packages, FrameworkServiceRuntime services) {
         this.packages = packages;
         this.services = services;
     }
+
+    void content(FrameworkContent content) { this.content = content; }
 
     static void binderPool() throws Exception {
         Thread thread = new Thread(() -> {
@@ -123,6 +131,11 @@ final class FrameworkProcessRuntime {
                                 if (system != null) provisioned.add(system);
                             }
                             reply.writeTypedList(provisioned);
+                            // A child hosting another package (microG) knows
+                            // the session app that calls it.
+                            PackageInfo session = packages.installedPackage();
+                            reply.writeTypedObject(session == null
+                                    || session.packageName.equals(child.info.packageName) ? null : session, 0);
                             return true;
                         }
                         case READY: {
@@ -147,6 +160,38 @@ final class FrameworkProcessRuntime {
                         case DONE: services.done(data.readStrongBinder(), data.readInt(), data.readTypedObject(Intent.CREATOR)); break;
                         case UNBIND: services.unbindFinished(data.readStrongBinder(),
                                 data.readTypedObject(Intent.CREATOR), data.readBoolean()); break;
+                        case PROVIDERS: content.publishRemote(child, data); break;
+                        case ACQUIRE: {
+                            // The child resolved the provider itself; the session
+                            // re-checks it for the child's uid before starting its host.
+                            String authority = data.readString();
+                            boolean stable = data.readBoolean();
+                            ProviderInfo info = packages.resolveProvider(authority, PackageManager.GET_SHARED_LIBRARY_FILES
+                                    | PackageManager.GET_URI_PERMISSION_PATTERNS, child.uid / 100000);
+                            IBinder provider = null, connection = null;
+                            if (info != null) {
+                                packages.enforceProviderPermission(info, child.uid);
+                                provider = content.sessionProvider(authority);
+                                if (provider == null) {
+                                    Object holder = content.acquireRemote(info, authority, stable);
+                                    if (holder != null) {
+                                        provider = ((IInterface) holder.getClass().getField("provider").get(holder)).asBinder();
+                                        connection = (IBinder) holder.getClass().getField("connection").get(holder);
+                                    }
+                                }
+                            }
+                            reply.writeNoException();
+                            reply.writeStrongBinder(provider);
+                            reply.writeStrongBinder(connection);
+                            return true;
+                        }
+                        case REF: {
+                            boolean live = content.refProvider(data.readStrongBinder(), data.readInt(), data.readInt());
+                            reply.writeNoException();
+                            reply.writeBoolean(live);
+                            return true;
+                        }
+                        case PROVIDER_DIED: content.unstableProviderDied(data.readStrongBinder()); break;
                         default: return false;
                     }
                     reply.writeNoException();
@@ -159,9 +204,10 @@ final class FrameworkProcessRuntime {
                 .invoke(null, registryName, controller);
     }
 
-    synchronized Child start(ServiceInfo info, String instance) throws Exception {
+    synchronized Child start(ComponentInfo info, String instance) throws Exception {
         register();
-        boolean isolated = (info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) != 0;
+        boolean isolated = info instanceof ServiceInfo
+                && (((ServiceInfo) info).flags & ServiceInfo.FLAG_ISOLATED_PROCESS) != 0;
         String process = info.processName == null ? info.packageName : info.processName;
         if (instance != null) process += ":" + instance;
         for (Child child : children.values())
@@ -203,6 +249,8 @@ final class FrameworkProcessRuntime {
             if (child.dead) return;
             child.dead = true; child.pending.clear();
         }
+        // Provider waiters may block the main thread: wake them directly.
+        if (content != null) content.processDied(child);
         main.post(() -> {
             try {
                 host(new JSONObject().put("operation", "stop").put("key", child.key));
@@ -213,13 +261,20 @@ final class FrameworkProcessRuntime {
         });
     }
 
-    void stop(Child child) { died(child); }
+    // A process whose providers have clients stays cached, as LRU-ranked
+    // provider hosts do; the session's exit stops it.
+    void lost(Child child) { died(child); }
+
+    void stop(Child child) {
+        if (content == null || !content.hosting(child)) died(child);
+    }
 
     static final class Remote {
         final IBinder controller;
         final String key;
         PackageInfo webViewProvider;
         List<PackageInfo> systemPackages;
+        PackageInfo session;
         Remote(String name, String key) throws Exception {
             controller = (IBinder) Class.forName("android.os.ServiceManager")
                     .getMethod("getService", String.class).invoke(null, name);
@@ -244,6 +299,7 @@ final class FrameworkProcessRuntime {
                 PackageInfo result = reply.readTypedObject(PackageInfo.CREATOR);
                 webViewProvider = reply.readTypedObject(PackageInfo.CREATOR);
                 systemPackages = reply.createTypedArrayList(PackageInfo.CREATOR);
+                session = reply.readTypedObject(PackageInfo.CREATOR);
                 return result;
             } finally { reply.recycle(); }
         }
@@ -263,6 +319,30 @@ final class FrameworkProcessRuntime {
         void unbind(IBinder token, Intent intent, boolean rebind) throws Exception {
             Parcel data = request(); data.writeStrongBinder(token); data.writeTypedObject(intent, 0);
             data.writeBoolean(rebind); call(UNBIND, data).recycle();
+        }
+        void publishProviders(List<?> holders) throws Exception {
+            Parcel data = request();
+            data.writeInt(holders.size());
+            for (Object holder : holders) {
+                ProviderInfo info = (ProviderInfo) holder.getClass().getField("info").get(holder);
+                data.writeString(info.name);
+                data.writeStrongBinder(((IInterface) holder.getClass().getField("provider").get(holder)).asBinder());
+            }
+            call(PROVIDERS, data).recycle();
+        }
+        IBinder[] acquireProvider(String authority, boolean stable) throws Exception {
+            Parcel data = request(); data.writeString(authority); data.writeBoolean(stable);
+            Parcel reply = call(ACQUIRE, data);
+            try { return new IBinder[] {reply.readStrongBinder(), reply.readStrongBinder()}; }
+            finally { reply.recycle(); }
+        }
+        boolean refProvider(IBinder connection, int stable, int unstable) throws Exception {
+            Parcel data = request(); data.writeStrongBinder(connection); data.writeInt(stable); data.writeInt(unstable);
+            Parcel reply = call(REF, data);
+            try { return reply.readBoolean(); } finally { reply.recycle(); }
+        }
+        void providerDied(IBinder connection) throws Exception {
+            Parcel data = request(); data.writeStrongBinder(connection); call(PROVIDER_DIED, data).recycle();
         }
     }
 }

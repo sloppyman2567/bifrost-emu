@@ -51,9 +51,53 @@ Google's own `play-services-basement` 18.12.0 requires both packages with
 Google certificates. Without microG it logs "requires the Google Play Store,
 but it is missing" and returns `SERVICE_INVALID` (9), the status SpongeBob's
 Firebase gate reported. With microG it returns `SUCCESS` with apk version
-252432034. Only package identity is provided so far. microG processes are not
-started, so binding its services, querying its content providers and its
-broadcasts are not implemented yet.
+252432034.
+
+### microG processes, remote providers and service resolution (2026-10-17)
+
+SpongeBob's `GoogleApiHandler` crashed on `activity.getContentProvider`:
+`play-services-basement` asks microG's `com.google.android.gms.chimera`
+provider (`serviceIntentCall`) for the Intent of a Play services action, and
+the launcher had no remote provider path. microG now runs in its own managed
+processes, under its own UIDs:
+
+- `getContentProvider` follows Android 15's
+  [ContentProviderHelper](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/am/ContentProviderHelper.java):
+  isolated callers are rejected, the authority resolves over every known
+  package with `STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS`, then
+  `checkContentProviderPermission` (owner app id, or exported with an absent
+  or held read/write/path permission; no URI grants). `canRunHere` (same uid,
+  multiprocess or same process) returns a local holder; anything else starts
+  the provider's process and waits up to `CONTENT_PROVIDER_READY_TIMEOUT_MILLIS`
+  for publication, returning null when the host dies or the wait times out.
+  One connection per provider carries this client's stable/unstable counts
+  (`refContentProvider`, `removeContentProvider`, `unstableProviderDied`).
+  A child process whose providers have clients stays running until the session exits.
+- A service child is bound like `handleBindApplication`: it installs its
+  process's providers, publishes them to the session, then runs
+  `Application.onCreate`. Publication sends only provider class names and
+  Binders; the session builds holders from its own manifest records (the
+  child's `ProviderInfo` copies carried GmsCore's whole `ApplicationInfo`,
+  1.4 MB, which the Binder driver rejected). Children cannot start processes,
+  so their provider acquisitions and connection counts go through the session,
+  which re-checks the permission for the child's uid.
+- Implicit service Intents resolve through manifest intent filters
+  (`ComputerEngine.queryIntentServicesInternal`: package restriction, priority
+  order), as `ActiveServices.retrieveServiceLocked` does. Provider and service
+  filters come from one archive parse per package.
+- A child hosting another package receives the session app as a peer
+  package (`FrameworkPackages.installPeer`): microG checks its callers by uid,
+  name, requested permissions and grants.
+- System packages hold requested normal permissions and the signature
+  permissions declared by a same-signer package (both microG APKs share
+  certificate SHA-256 9bd06727…14165). Firebase's `c2dm.permission.SEND`
+  check on GmsCore and the companion's read of microG's settings provider
+  need this. Privileged allowlists and runtime grants are not modelled.
+
+Limits: microG's cold start takes about 11 s in the JIT, so the first
+`AdvertisingIdClient` request (10 s timeout) can still fail. Each child
+bootstrap carries the parsed GmsCore snapshot (about 650 KB replies). microG
+broadcasts, its `:ui` Activities and account sign-in are untested.
 
 ### Shared guest processes (October 11, 2026)
 
@@ -1860,8 +1904,8 @@ were checked against Android 15's
 and priority sorting against
 [ComputerEngine](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/ComputerEngine.java).
 Disabled providers and declarations for another process are skipped. Remote
-provider acquisition, provider startup in service-only child processes and
-multi-process provider policy are not implemented by this change.
+provider acquisition and provider startup in child processes were added
+later; see [microG processes](#microg-processes-remote-providers-and-service-resolution-2026-10-17).
 
 Starting the previously omitted AndroidX WorkManager provider exposed its
 force-stop check: `PendingIntent.getBroadcast(..., FLAG_NO_CREATE, ...)`.

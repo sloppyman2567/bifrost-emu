@@ -4,6 +4,33 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## microG processes and remote providers (2026-10-17)
+
+`test_managed_play_services_available` now binds
+`com.google.android.gms.measurement.START` by action, which starts GmsCore in
+its own process (uid 19998, `ASGARD_PROCESS_READY`). It then receives
+microG's `MeasurementService` broker Binder alive, queries
+`content://com.google.android.gsf.gservices` (microG accepts the fixture
+because it requests `READ_GSERVICES`) and runs basement's chimera
+`serviceIntentCall`, which resolves to `MeasurementService`. Before the change
+the bind returned false and the chimera acquisition threw
+`activity.getContentProvider`, as in SpongeBob's crash.
+
+The full `PackageTests` class passes 13/13 in its final run. In an earlier run,
+`test_managed_launcher_persists_data_and_finishes_activity` timed out in its
+180 s interpreter start, inside the WebView APK parse before any changed
+code. It timed out the same way with the committed launcher, so it is a
+timing margin, not a regression. `test_android_framework.py --services
+--microg --main-class ActivityProbe --probe build/android-managed-launcher/classes.dex`
+reaches `ACTIVITY_MICROG_PACKAGES_OK` and then the known `checkSensorService`
+failure. No native code changed, so the strict suites and `make verify` were not rerun.
+
+Game: two 180 s JIT SpongeBob runs on the saved child-age profile reached Unity
+tracker setup with no fatal exception. The second run, after the signature-grant and child
+forwarding fixes, had no FirebaseInstanceId "Play services missing" error and
+no exceptions in microG's child processes. The adult-age path, microG
+broadcasts and account sign-in are untested.
+
 ## microG Play services packages (2026-10-16)
 
 `test_managed_play_services_available` builds a fixture APK with Google's

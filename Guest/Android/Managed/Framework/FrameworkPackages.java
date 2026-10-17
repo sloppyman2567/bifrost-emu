@@ -35,6 +35,7 @@ final class FrameworkPackages {
     private final java.util.Set<String> serviceFeatures = ConcurrentHashMap.newKeySet();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> providerFilters = new ConcurrentHashMap<>();
     private final Map<String, Map<ComponentName, List<IntentFilter>>> receiverFilters = new ConcurrentHashMap<>();
+    private final Map<String, Map<ComponentName, List<IntentFilter>>> serviceFilters = new ConcurrentHashMap<>();
     private java.util.Set<String> protectedBroadcasts;
 
     synchronized boolean protectedBroadcast(String action) throws Exception {
@@ -52,6 +53,7 @@ final class FrameworkPackages {
         installed = copy(pkg, PackageInfo.CREATOR);
         componentStates.clear();
         providerFilters.remove(pkg.packageName);
+        serviceFilters.remove(pkg.packageName);
         receiverFilters.remove(pkg.packageName);
     }
 
@@ -63,6 +65,34 @@ final class FrameworkPackages {
         else fakeSignatures.remove(pkg.packageName);
         systemPackages.put(pkg.packageName, copy(pkg, PackageInfo.CREATOR));
         providerFilters.remove(pkg.packageName);
+        serviceFilters.remove(pkg.packageName);
+    }
+
+    // The session app as seen from one of its child processes hosting
+    // another package (microG): PackageManagerService knows every package,
+    // and that package's code checks its callers by uid, name and request.
+    // Its install-time grants travel in requestedPermissionsFlags.
+    private final Map<String, PackageInfo> peers = new ConcurrentHashMap<>();
+
+    void installPeer(PackageInfo pkg) {
+        if ((pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0
+                || systemPackages.containsKey(pkg.packageName) || pendingSystem.containsKey(pkg.packageName))
+            throw new IllegalArgumentException("Not an app package: " + pkg.packageName);
+        peers.put(pkg.packageName, copy(pkg, PackageInfo.CREATOR));
+    }
+
+    PackageInfo installedPackage() {
+        PackageInfo pkg = installed;
+        return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
+    }
+
+    // Installed app, then system packages, then peers: the names are unique.
+    private PackageInfo known(String name) {
+        if (name == null) return null;
+        PackageInfo pkg = installed;
+        if (pkg != null && pkg.packageName.equals(name)) return pkg;
+        pkg = system(name);
+        return pkg != null ? pkg : peers.get(name);
     }
 
     // microG signature spoofing (github.com/microg/patches, PackageManagerService
@@ -145,14 +175,14 @@ final class FrameworkPackages {
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
-    // Uid of the installed or a system package, or -1 when it does not exist.
+    // Uid of a known (installed, system or peer) package, or -1 when it does not exist.
     int packageUid(String name) {
-        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : system(name);
+        PackageInfo pkg = known(name);
         return pkg == null ? -1 : pkg.applicationInfo.uid;
     }
 
     PackageInfo processPackage(String name) {
-        PackageInfo pkg = installed != null && installed.packageName.equals(name) ? installed : system(name);
+        PackageInfo pkg = known(name);
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
@@ -256,10 +286,11 @@ final class FrameworkPackages {
                     return activityInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2], installed == null ? null : installed.activities);
                 case "resolveService":
-                    return resolveService((android.content.Intent) a[0], ((Number) a[2]).longValue(), (Integer) a[3]);
+                    return resolveService((Intent) a[0], (String) a[1], ((Number) a[2]).longValue(), (Integer) a[3]);
                 case "queryIntentServices":
-                    return listSlice(resolveService((android.content.Intent) a[0],
-                            ((Number) a[2]).longValue(), (Integer) a[3]));
+                    return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
+                            .newInstance(queryServices((Intent) a[0], (String) a[1],
+                                    ((Number) a[2]).longValue(), (Integer) a[3]));
                 case "getServiceInfo":
                     return serviceInfo((ComponentName) a[0], ((Number) a[1]).longValue(),
                             (Integer) a[2]);
@@ -337,6 +368,8 @@ final class FrameworkPackages {
         if (pending != null) return pending;
         for (PackageInfo system : systemPackages.values())
             if (system.applicationInfo.uid == uid) return system.packageName;
+        for (PackageInfo peer : peers.values())
+            if (peer.applicationInfo.uid == uid) return peer.packageName;
         return null;
     }
 
@@ -346,8 +379,7 @@ final class FrameworkPackages {
 
     private PackageInfo findPackage(String name, long flags, int userId) {
         if (name == null) return null;
-        PackageInfo pkg = installed != null && installed.packageName.equals(name)
-                ? installed : system(name);
+        PackageInfo pkg = known(name);
         return pkg != null && userId == pkg.applicationInfo.uid / 100000
                 && ((flags & PackageManager.MATCH_SYSTEM_ONLY) == 0
                     || (pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0) ? pkg : null;
@@ -362,11 +394,6 @@ final class FrameworkPackages {
         } finally {
             parcel.recycle();
         }
-    }
-
-    private static Object listSlice(Object value) throws Exception {
-        return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
-                .newInstance(value == null ? java.util.Collections.emptyList() : Arrays.asList(value));
     }
 
     private ApplicationInfo applicationInfo(String name, long flags, int userId) {
@@ -494,25 +521,50 @@ final class FrameworkPackages {
     }
 
     private Map<ComponentName, List<IntentFilter>> providerFilters(PackageInfo pkg) throws Exception {
-        Map<ComponentName, List<IntentFilter>> cached = providerFilters.get(pkg.packageName);
-        if (cached != null) return cached;
-        Map<ComponentName, List<IntentFilter>> filters = new java.util.HashMap<>();
-        // PackageInfo omits intent filters. Reuse the image's manifest parser
-        // for their full action/category/type/URI semantics rather than guess
-        // from provider authorities. Parse the installed cluster, including splits.
+        if (!providerFilters.containsKey(pkg.packageName)) parseFilters(pkg);
+        return providerFilters.get(pkg.packageName);
+    }
+
+    private Map<ComponentName, List<IntentFilter>> serviceFilters(PackageInfo pkg) throws Exception {
+        if (!serviceFilters.containsKey(pkg.packageName)) parseFilters(pkg);
+        return serviceFilters.get(pkg.packageName);
+    }
+
+    // PackageInfo omits intent filters. Reuse the image's manifest parser
+    // for their full action/category/type/URI semantics rather than guess
+    // from component names. Parse the installed cluster, including splits,
+    // once for both kinds: GmsCore takes seconds to parse.
+    private final Object filterParse = new Object();
+
+    private void parseFilters(PackageInfo pkg) throws Exception {
+        synchronized (filterParse) { parseFiltersLocked(pkg); }
+    }
+
+    private void parseFiltersLocked(PackageInfo pkg) throws Exception {
+        if (providerFilters.containsKey(pkg.packageName) && serviceFilters.containsKey(pkg.packageName)) return;
+        Map<ComponentName, List<IntentFilter>> providers = new java.util.HashMap<>(), services = new java.util.HashMap<>();
         java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
-        if (base.isFile() && pkg.providers != null && pkg.providers.length != 0) {
+        boolean declared = pkg.providers != null && pkg.providers.length != 0
+                || pkg.services != null && pkg.services.length != 0;
+        if (base.isFile() && declared) {
             java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
                     && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
-            for (Object provider : (List<?>) invoke(parseArchive(archive), "getProviders")) {
-                List<IntentFilter> intents = new ArrayList<>();
-                for (Object intent : (List<?>) invoke(provider, "getIntents"))
-                    intents.add(new IntentFilter((IntentFilter) invoke(intent, "getIntentFilter")));
-                filters.put(new ComponentName(pkg.packageName, (String) invoke(provider, "getName")), intents);
-            }
+            Object parsed = parseArchive(archive);
+            componentFilters(pkg, parsed, "getProviders", providers);
+            componentFilters(pkg, parsed, "getServices", services);
         }
-        Map<ComponentName, List<IntentFilter>> previous = providerFilters.putIfAbsent(pkg.packageName, filters);
-        return previous == null ? filters : previous;
+        providerFilters.putIfAbsent(pkg.packageName, providers);
+        serviceFilters.putIfAbsent(pkg.packageName, services);
+    }
+
+    private static void componentFilters(PackageInfo pkg, Object parsed, String getter,
+            Map<ComponentName, List<IntentFilter>> filters) throws Exception {
+        for (Object component : (List<?>) invoke(parsed, getter)) {
+            List<IntentFilter> intents = new ArrayList<>();
+            for (Object intent : (List<?>) invoke(component, "getIntents"))
+                intents.add(new IntentFilter((IntentFilter) invoke(intent, "getIntentFilter")));
+            filters.put(new ComponentName(pkg.packageName, (String) invoke(component, "getName")), intents);
+        }
     }
 
     // ParsingPackageUtils.parseDefault, the one-off parse outside
@@ -616,7 +668,8 @@ final class FrameworkPackages {
     private synchronized void installPermissions(Context system, PackageInfo pkg) {
         // The single-app profile grants manifest-requested normal permissions
         // at install time, including WRITE_SETTINGS's pre-M compatibility
-        // grant. Other runtime/signature grants require unavailable services;
+        // grant, and signature permissions of same-signer packages (below).
+        // Other runtime/privileged grants require unavailable services;
         // unknown permission names stay denied.
         // The runtime image is immutable. Retain its definitions independently
         // of app installation/grants, as PackageManager's permission registry
@@ -641,7 +694,7 @@ final class FrameworkPackages {
             PermissionInfo definition = definitions.get(name);
             boolean legacySettings = name.equals("android.permission.WRITE_SETTINGS") && pkg.applicationInfo.targetSdkVersion < 23;
             if (definition != null && ((definition.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE)
-                    == PermissionInfo.PROTECTION_NORMAL || legacySettings)) {
+                    == PermissionInfo.PROTECTION_NORMAL || legacySettings) || signatureGranted(pkg, name)) {
                 grantedPermissions.add(name);
                 pkg.requestedPermissionsFlags[i] |= PackageInfo.REQUESTED_PERMISSION_GRANTED;
             }
@@ -684,22 +737,129 @@ final class FrameworkPackages {
     }
 
     int checkPermission(String permission, int uid, int deviceId) {
-        return permission != null && installed != null && uid == installed.applicationInfo.uid
-                && deviceId == Context.DEVICE_ID_DEFAULT
-                && grantedPermissions.contains(permission)
-                ? PackageManager.PERMISSION_GRANTED : PackageManager.PERMISSION_DENIED;
+        if (permission == null || deviceId != Context.DEVICE_ID_DEFAULT) return PackageManager.PERMISSION_DENIED;
+        PackageInfo pkg = installed;
+        if (pkg != null && uid == pkg.applicationInfo.uid)
+            return grantedPermissions.contains(permission) ? PackageManager.PERMISSION_GRANTED
+                    : PackageManager.PERMISSION_DENIED;
+        String pending = pendingUids.get(uid);
+        if (pending != null) materialize(pending);
+        for (PackageInfo system : systemPackages.values())
+            if (system.applicationInfo.uid == uid && (pkg == null || !pkg.packageName.equals(system.packageName)))
+                return systemGranted(system, permission) ? PackageManager.PERMISSION_GRANTED
+                        : PackageManager.PERMISSION_DENIED;
+        for (PackageInfo peer : peers.values()) {
+            if (peer.applicationInfo.uid != uid || peer.requestedPermissions == null) continue;
+            for (int i = 0; i < peer.requestedPermissions.length; i++)
+                if (permission.equals(peer.requestedPermissions[i])
+                        && (peer.requestedPermissionsFlags[i] & PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0)
+                    return PackageManager.PERMISSION_GRANTED;
+        }
+        return PackageManager.PERMISSION_DENIED;
     }
 
-    private android.content.pm.ResolveInfo resolveService(android.content.Intent intent, long flags, int userId) {
-        if (intent != null && intent.getComponent() == null && intent.getPackage() != null
-                && (installed == null || !intent.getPackage().equals(installed.packageName))) return null;
-        if (intent == null || intent.getComponent() == null)
-            throw new UnsupportedOperationException("Service intent-filter resolution is not implemented");
-        ServiceInfo info = serviceInfo(intent.getComponent(), flags, userId);
-        if (info == null) return null;
-        android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
-        result.serviceInfo = info;
-        return result;
+    // A provisioned system package's install-time grants, as
+    // PermissionManagerService computes them: requested permissions that are
+    // normal, or signature permissions declared by a package with the same
+    // signing certificates (microG declares its own and shares its key with
+    // the Play Store companion). Privileged allowlists and runtime grants are
+    // not modelled.
+    private boolean systemGranted(PackageInfo pkg, String permission) {
+        int index = pkg.requestedPermissions == null ? -1
+                : Arrays.asList(pkg.requestedPermissions).indexOf(permission);
+        if (index < 0) return false;
+        if ((pkg.requestedPermissionsFlags[index] & PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0) return true;
+        PermissionInfo definition = platformPermissions == null ? null : platformPermissions.get(permission);
+        if (definition != null && (definition.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE)
+                == PermissionInfo.PROTECTION_NORMAL) return true;
+        return signatureGranted(pkg, permission);
+    }
+
+    // A normal or signature permission declared by `pkg` itself or by a known
+    // package with the same signing certificates (PermissionManagerService's
+    // signature grant, without the platform-key case). A normal permission
+    // declared by an unrelated package is not granted: system packages load
+    // lazily, so that grant would depend on parse order.
+    private boolean signatureGranted(PackageInfo pkg, String permission) {
+        List<PackageInfo> declarers = new ArrayList<>();
+        declarers.add(pkg);
+        declarers.addAll(systemPackages.values());
+        declarers.addAll(peers.values());
+        if (installed != null) declarers.add(installed);
+        for (PackageInfo owner : declarers) {
+            if (owner.permissions == null) continue;
+            for (PermissionInfo declared : owner.permissions) {
+                if (!declared.name.equals(permission)) continue;
+                int base = declared.protectionLevel & PermissionInfo.PROTECTION_MASK_BASE;
+                boolean signer = owner == pkg || owner.packageName.equals(pkg.packageName)
+                        || owner.signatures != null && Arrays.equals(owner.signatures, pkg.signatures);
+                return signer && (base == PermissionInfo.PROTECTION_NORMAL || base == PermissionInfo.PROTECTION_SIGNATURE);
+            }
+        }
+        return false;
+    }
+
+    private android.content.pm.ResolveInfo resolveService(Intent intent, String type, long flags, int userId) throws Exception {
+        List<android.content.pm.ResolveInfo> results = queryServices(intent, type, flags, userId);
+        return results.isEmpty() ? null : results.get(0);
+    }
+
+    // ComputerEngine.queryIntentServicesInternal: an explicit component, or
+    // every enabled service whose filters match, restricted to the Intent's
+    // package and ordered by priority.
+    List<android.content.pm.ResolveInfo> queryServices(Intent original, String type, long flags, int userId) throws Exception {
+        if (original == null) throw new IllegalArgumentException("Null service intent");
+        Intent intent = original.getComponent() == null && original.getSelector() != null
+                ? original.getSelector() : original;
+        List<android.content.pm.ResolveInfo> results = new ArrayList<>();
+        if (intent.getComponent() != null) {
+            ServiceInfo info = serviceInfo(intent.getComponent(), flags, userId);
+            if (info != null) {
+                android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+                result.serviceInfo = info;
+                results.add(result);
+            }
+            return results;
+        }
+        List<PackageInfo> candidates = new ArrayList<>();
+        if (intent.getPackage() != null) {
+            PackageInfo pkg = findPackage(intent.getPackage(), flags, userId);
+            if (pkg != null) candidates.add(pkg);
+        } else {
+            candidates.addAll(allSystem());
+            candidates.addAll(peers.values());
+            if (installed != null) candidates.add(installed);
+        }
+        for (PackageInfo pkg : candidates) {
+            if (pkg.services == null || findPackage(pkg.packageName, flags, userId) == null) continue;
+            Map<ComponentName, List<IntentFilter>> filters = serviceFilters(pkg);
+            for (ServiceInfo info : pkg.services) {
+                if (!componentMatches(info, flags, userId)) continue;
+                android.content.pm.ResolveInfo best = null;
+                for (IntentFilter filter : filters.getOrDefault(new ComponentName(pkg.packageName, info.name),
+                        java.util.Collections.emptyList())) {
+                    int match = filter.match(intent.getAction(), type,
+                            intent.getScheme(), intent.getData(), intent.getCategories(), "BifrostPackageResolver");
+                    if (match < 0) continue;
+                    android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
+                    result.serviceInfo = serviceInfo(new ComponentName(pkg.packageName, info.name), flags, userId);
+                    result.priority = filter.getPriority();
+                    result.match = match;
+                    result.isDefault = filter.hasCategory(Intent.CATEGORY_DEFAULT);
+                    if ((flags & PackageManager.GET_RESOLVED_FILTER) != 0) result.filter = new IntentFilter(filter);
+                    if (best == null || result.priority > best.priority
+                            || (result.priority == best.priority && result.match > best.match)) best = result;
+                }
+                if (best != null) results.add(best);
+            }
+        }
+        results.sort((a, b) -> {
+            int order = Integer.compare(b.priority, a.priority);
+            if (order == 0) order = Boolean.compare(b.isDefault, a.isDefault);
+            if (order == 0) order = Integer.compare(b.match, a.match);
+            return order;
+        });
+        return results;
     }
 
     ServiceInfo serviceInfo(ComponentName component, long flags, int userId) {
@@ -717,30 +877,57 @@ final class FrameworkPackages {
         return null;
     }
 
-    // Whether the installed or a system package declares `authority`.
-    boolean declaresProvider(String authority) {
-        java.util.List<PackageInfo> all = new ArrayList<>(allSystem());
+    // The installed app's own declaration first: it needs no system parse.
+    private ProviderInfo declaredProvider(String authority) {
+        if (authority == null) return null;
+        List<PackageInfo> all = new ArrayList<>();
         if (installed != null) all.add(installed);
-        for (PackageInfo pkg : all) {
+        if (findDeclared(all, authority) == null) {
+            all.clear(); all.addAll(allSystem()); all.addAll(peers.values());
+        }
+        return findDeclared(all, authority);
+    }
+
+    private static ProviderInfo findDeclared(List<PackageInfo> packages, String authority) {
+        for (PackageInfo pkg : packages) {
             if (pkg.providers == null) continue;
             for (ProviderInfo provider : pkg.providers)
                 if (provider.authority != null
-                        && Arrays.asList(provider.authority.split(";")).contains(authority)) return true;
-        }
-        return false;
-    }
-
-    private ProviderInfo resolveProvider(String authority, long flags, int userId) {
-        if (installed == null || installed.providers == null || authority == null) return null;
-        for (ProviderInfo provider : installed.providers) {
-            if (provider.authority == null
-                    || !Arrays.asList(provider.authority.split(";")).contains(authority)) continue;
-            if (!componentMatches(provider, flags, userId)) return null;
-            ProviderInfo result = copy(provider, ProviderInfo.CREATOR);
-            installedComponentInfo(result, flags);
-            return result;
+                        && Arrays.asList(provider.authority.split(";")).contains(authority)) return provider;
         }
         return null;
+    }
+
+    // ComputerEngine.resolveContentProvider over every known package:
+    // authorities are unique, and a disabled declaration resolves to null.
+    ProviderInfo resolveProvider(String authority, long flags, int userId) {
+        ProviderInfo provider = declaredProvider(authority);
+        if (provider == null || !componentMatches(provider, flags, userId)) return null;
+        ProviderInfo result = copy(provider, ProviderInfo.CREATOR);
+        installedComponentInfo(result, flags);
+        return result;
+    }
+
+    // ContentProviderHelper.checkContentProviderPermission through
+    // ActivityManagerService.checkComponentPermission: the owner's app id,
+    // or an exported provider whose read, write or a path permission is
+    // absent or held by `uid`. No URI permission grants exist in this profile.
+    void enforceProviderPermission(ProviderInfo info, int uid) {
+        if (uid % 100000 == info.applicationInfo.uid % 100000) return;
+        if (info.exported) {
+            List<String> permissions = new ArrayList<>(Arrays.asList(info.readPermission, info.writePermission));
+            if (permissions.contains(null)) return;
+            if (info.pathPermissions != null) for (android.content.pm.PathPermission path : info.pathPermissions) {
+                if (path.getReadPermission() != null) permissions.add(path.getReadPermission());
+                if (path.getWritePermission() != null) permissions.add(path.getWritePermission());
+            }
+            for (String permission : permissions)
+                if (checkPermission(permission, uid, Context.DEVICE_ID_DEFAULT) == PackageManager.PERMISSION_GRANTED)
+                    return;
+        }
+        throw new SecurityException("Permission Denial: opening provider " + info.name + " (uid=" + uid + ")"
+                + (!info.exported ? " that is not exported from UID " + info.applicationInfo.uid
+                        : " requires " + info.readPermission + " or " + info.writePermission));
     }
 
     // Spoofed microG identities through the real PackageManager client.
