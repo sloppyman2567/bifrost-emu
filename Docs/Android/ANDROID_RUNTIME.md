@@ -50,10 +50,23 @@ sources:
   `TelephonyRegistry` on every device, so `telephony.registry` is now
   published (see the device-services table above).
 
+With those fixed, AppLovin still failed "Unable to check Network Interfaces":
+`NetworkInterface.getNetworkInterfaces()` returned null. libcore keeps only
+interfaces whose `if_nametoindex` is nonzero, and bionic answers that,
+`if_indextoname` and app `getifaddrs` flags with `struct ifreq` ioctls
+(`SIOCGIFINDEX`, `SIOCGIFNAME`, `SIOCGIFFLAGS`) on an `AF_INET` socket.
+Host sockets returned `-ENOTTY` for every non-terminal ioctl, so every
+interface was dropped. `HostNode` now marshals the fixed-layout `ifreq` get
+requests through guest memory (`VFS/Nodes/InterfaceIoctls.hpp`). Requests
+carrying pointers and every set request still return `-ENOTTY`.
+`socket_msg_layout` checks loopback by name, index and flags in both engines
+and under qemu-aarch64.
+
 The `Managed` fixture checks all three on every start: resolution
 (explicit, implicit in-package, `MATCH_DEFAULT_ONLY`, none), a worker-thread
 commit whose listener runs on main, and telephony registration (a display-info
-listener registers and unregisters; cell info without location throws). With
+listener registers and unregisters; cell info without location throws), and
+that `NetworkInterface` lists a loopback interface. With
 the previous launcher the fixture fails at `package.resolveIntent` and never
 reaches the later checks. The rewarded videos themselves are untested.
 

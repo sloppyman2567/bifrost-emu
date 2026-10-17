@@ -109,6 +109,7 @@ public final class Managed extends Activity {
         checkActivityResolution();
         checkBackgroundPreferenceCommit();
         checkTelephonyRegistry();
+        checkNetworkInterfaces();
         int starts = prefs.getInt("starts", 0) + 1;
         if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
             throw new AssertionError("System defaults or preserved override incorrect");
@@ -209,6 +210,20 @@ public final class Managed extends Activity {
         } catch (SecurityException expected) {
             System.out.println("MANAGED_FIXTURE_TELEPHONY_REGISTRY_OK");
         }
+    }
+
+    // libcore's NetworkInterface keeps only interfaces bionic's
+    // if_nametoindex (SIOCGIFINDEX) resolves; none gives a null enumeration.
+    private void checkNetworkInterfaces() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> all = java.net.NetworkInterface.getNetworkInterfaces();
+            boolean loopback = false;
+            while (all != null && all.hasMoreElements()) loopback |= all.nextElement().isLoopback();
+            if (!loopback) throw new AssertionError("no loopback network interface");
+        } catch (java.net.SocketException error) {
+            throw new AssertionError(error);
+        }
+        System.out.println("MANAGED_FIXTURE_NETWORK_INTERFACES_OK");
     }
 
     @Override public void onResume() {

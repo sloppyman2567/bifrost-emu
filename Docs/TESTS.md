@@ -4,6 +4,20 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Socket interface ioctls (2026-10-17)
+
+`socket_msg_layout` adds `struct ifreq` queries on an `AF_INET` socket:
+loopback by `SIOCGIFINDEX`, `if_nametoindex`, `SIOCGIFFLAGS` and
+`SIOCGIFNAME`, and `ENODEV` for an unknown name. It passes in both engines
+and under qemu-aarch64; the previous emulator fails at `SIOCGIFINDEX`
+(`-ENOTTY`). Strict suites pass JIT 333/333 and interpreter 324 (9 skipped).
+The `Managed` fixture's `NetworkInterface` loopback check passes. Ad delivery
+in Hungry Shark World is not established by these checks.
+
+```bash
+make cross SRC=Tests/Unit/socket_msg_layout.c OUT=Tests/Unit/socket_msg_layout.elf
+```
+
 ## GPU-rendered Activity windows (2026-10-17)
 
 `test_managed_hardware_canvas` draws 30 frames with `lockHardwareCanvas` on a

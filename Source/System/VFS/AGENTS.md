@@ -32,6 +32,9 @@
 - `/dev/random` and `/dev/urandom` use host entropy, not deterministic counters.
   Synthetic `/sys` CPU topology shares the emulator's configured guest CPU count
   with sysconf/getcpu/affinity interfaces; do not hardcode the developer's host.
+- Node ioctls marshal fixed-layout structs through guest Memory
+  (`Nodes/TerminalIoctls.hpp`, `Nodes/InterfaceIoctls.hpp`); never hand a guest
+  pointer to a host ioctl. Unknown requests stay `-ENOTTY`.
 - Keep virtual nodes separate from host path translation. Preserve errno,
   symlink, directory iteration and host device behavior across that boundary.
 - Run filesystem sandbox regressions and the affected proc/sys/device probes.

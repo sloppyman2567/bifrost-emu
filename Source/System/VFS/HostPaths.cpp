@@ -10,6 +10,7 @@
 #include "System/VFS/VFS.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/VFS/Nodes/TerminalIoctls.hpp"  // shared ioctl dispatch
+#include "System/VFS/Nodes/InterfaceIoctls.hpp"
 #include "System/Memory/Memory.hpp"
 #include <cerrno>
 #include <cstdio>
@@ -614,6 +615,8 @@ int HostNode::fstat(struct stat* st) {
 // dispatch_terminal_ioctl() helper (was duplicated in StdioNode).
 int HostNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
     int r = dispatch_terminal_ioctl(fd_, request, argp, mem);
+    if (r != Node::IOCTL_NOT_HANDLED) return r;
+    r = dispatch_interface_ioctl(fd_, request, argp, mem);  // sockets' struct ifreq queries
     if (r != Node::IOCTL_NOT_HANDLED) return r;
     // Anything else: pass through to the host. The host will return
     // -ENOTTY for unrecognized ioctls, which is what we want.

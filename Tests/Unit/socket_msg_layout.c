@@ -10,7 +10,10 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 _Static_assert(offsetof(struct msghdr, msg_flags) == 48, "ARM64 LP64 flags offset");
+_Static_assert(sizeof(struct ifreq) == 40, "ARM64 LP64 ifreq size");
 _Static_assert(sizeof(struct msghdr) == 56, "ARM64 LP64 message size");
 #define CHECK(x) do { if (!(x)) { printf("socket message check failed: %s\n", #x); return 1; } } while (0)
 int main(void) {
@@ -76,5 +79,18 @@ int main(void) {
     int invalid = -1; memcpy(CMSG_DATA(header), &invalid, sizeof(invalid));
     errno = 0; CHECK(sendmsg(sockets[0], &rights, 0) == -1 && errno == EBADF);
     close(sockets[0]); close(sockets[1]);
+    // struct ifreq interface queries, as bionic's getifaddrs, if_nametoindex
+    // and if_indextoname issue them: loopback exists on every Linux host.
+    int inet = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0); CHECK(inet >= 0);
+    struct ifreq ifr; memset(&ifr, 0, sizeof(ifr)); strcpy(ifr.ifr_name, "lo");
+    CHECK(ioctl(inet, SIOCGIFINDEX, &ifr) == 0 && ifr.ifr_ifindex > 0);
+    int index = ifr.ifr_ifindex;
+    CHECK(if_nametoindex("lo") == (unsigned)index);
+    CHECK(ioctl(inet, SIOCGIFFLAGS, &ifr) == 0 && (ifr.ifr_flags & IFF_LOOPBACK));
+    memset(&ifr, 0, sizeof(ifr)); ifr.ifr_ifindex = index;
+    CHECK(ioctl(inet, SIOCGIFNAME, &ifr) == 0 && !strcmp(ifr.ifr_name, "lo"));
+    memset(&ifr, 0, sizeof(ifr)); strcpy(ifr.ifr_name, "bifrostnone0");
+    errno = 0; CHECK(ioctl(inet, SIOCGIFINDEX, &ifr) == -1 && errno == ENODEV);
+    close(inet);
     puts("socket_msg_layout: checks passed");
 }
