@@ -35,7 +35,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   providers before `Application.onCreate`. Keep provider publication to
   names and Binders: holders are rebuilt from the session's manifest records.
   `test_managed_play_services_available` runs Google's own basement check,
-  a microG service bind, a GServices query and the chimera lookup.
+  a microG service bind, a GServices query and the chimera lookup. microG's
+  `AdRequestService` stub is never bound (`FrameworkServiceRuntime`), so
+  Google Mobile Ads uses its local request path; see the runtime guide.
 - App processes register their code and profile paths with ART
   (`registerProfiles`) and run from `dexopt`'s install-time odex. Keep the
   odex accepted: `PCL[]` context, the image's boot classpath and ISA props.

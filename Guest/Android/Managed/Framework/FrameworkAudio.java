@@ -4,15 +4,20 @@ import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.os.IBinder;
 import android.os.IInterface;
+import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.RemoteException;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class FrameworkAudio implements FrameworkServices.Call {
     private enum Contract {
@@ -33,7 +38,14 @@ final class FrameworkAudio implements FrameworkServices.Call {
         playSoundEffectVolume,
         isMusicActive,
         isBluetoothA2dpOn,
-        startWatchingRoutes
+        startWatchingRoutes,
+        registerLoudnessCodecUpdatesDispatcher,
+        unregisterLoudnessCodecUpdatesDispatcher,
+        startLoudnessCodecUpdates,
+        stopLoudnessCodecUpdates,
+        addLoudnessCodecInfo,
+        removeLoudnessCodecInfo,
+        getLoudnessParams
     }
 
     @Override public String[] methods() {
@@ -200,6 +212,72 @@ final class FrameworkAudio implements FrameworkServices.Call {
         dispatchPending();
     }
 
+    // LoudnessCodecHelper: AAC loudness parameters for the media route. The
+    // only route is the built-in speaker, CTA-2075 SPL range "small" on a
+    // phone or tablet unless audio.loudness.builtin-speaker-spl-range-size
+    // names one. No playback configurations are reported and the route never
+    // changes, so addLoudnessCodecInfo's initial update is the only one.
+    private final Map<IBinder, IInterface> loudnessDispatchers = new HashMap<>();
+    private final Map<Integer, Set<Object>> loudnessSessions = new HashMap<>();
+    private ExecutorService loudnessUpdates;
+
+    private static PersistableBundle loudnessParams(Object info) throws Exception {
+        int metadata = info.getClass().getField("metadataType").getInt(info);
+        boolean downmixing = info.getClass().getField("isDownmixing").getBoolean(info);
+        String range = (String) Class.forName("android.os.SystemProperties")
+                .getMethod("get", String.class, String.class)
+                .invoke(null, "audio.loudness.builtin-speaker-spl-range-size", "unknown");
+        if (range.equals("unknown")) range = "small"; // phone/tablet default; other names are unknown
+        boolean mpeg4 = metadata == 1, mpegD = metadata == 2; // LoudnessCodecInfo.CodecMetadataType
+        PersistableBundle params = new PersistableBundle();
+        switch (range) {
+            case "large":
+                params.putInt(android.media.MediaFormat.KEY_AAC_DRC_TARGET_REFERENCE_LEVEL, 124);
+                if (mpeg4) params.putInt(android.media.MediaFormat.KEY_AAC_DRC_HEAVY_COMPRESSION, 0);
+                else if (mpegD) params.putInt(android.media.MediaFormat.KEY_AAC_DRC_EFFECT_TYPE, 6);
+                break;
+            case "small":
+                params.putInt(android.media.MediaFormat.KEY_AAC_DRC_TARGET_REFERENCE_LEVEL, 64);
+                if (mpeg4) params.putInt(android.media.MediaFormat.KEY_AAC_DRC_HEAVY_COMPRESSION, 1);
+                else if (mpegD) params.putInt(android.media.MediaFormat.KEY_AAC_DRC_EFFECT_TYPE, 3);
+                break;
+            default: // medium and unknown
+                params.putInt(android.media.MediaFormat.KEY_AAC_DRC_TARGET_REFERENCE_LEVEL, 96);
+                if (mpeg4) params.putInt(android.media.MediaFormat.KEY_AAC_DRC_HEAVY_COMPRESSION, downmixing ? 1 : 0);
+                else if (mpegD) params.putInt(android.media.MediaFormat.KEY_AAC_DRC_EFFECT_TYPE, 6);
+                break;
+        }
+        return params;
+    }
+
+    // ILoudnessCodecUpdatesDispatcher and addLoudnessCodecInfo are one-way:
+    // deliver in order on a worker, never inside the caller's own call.
+    private void dispatchLoudness(int session, PersistableBundle params) {
+        List<IInterface> targets;
+        synchronized (loudnessDispatchers) {
+            targets = new ArrayList<>(loudnessDispatchers.values());
+            if (loudnessUpdates == null) loudnessUpdates = Executors.newSingleThreadExecutor(work -> {
+                Thread thread = new Thread(work, "AudioLoudness");
+                thread.setDaemon(true);
+                return thread;
+            });
+        }
+        loudnessUpdates.execute(() -> {
+            for (IInterface target : targets) {
+                try {
+                    Class.forName("android.media.ILoudnessCodecUpdatesDispatcher")
+                            .getMethod("dispatchLoudnessCodecParameterChange", int.class, PersistableBundle.class)
+                            .invoke(target, session, params);
+                } catch (ReflectiveOperationException error) {
+                    Throwable cause = error instanceof InvocationTargetException
+                            ? ((InvocationTargetException) error).getCause() : error;
+                    if (!(cause instanceof RemoteException))
+                        throw new IllegalStateException("Loudness update failed", cause);
+                }
+            }
+        });
+    }
+
     @Override public Object invoke(String method, Object[] a) throws Exception {
         Contract contract;
         try { contract = Contract.valueOf(method); }
@@ -246,6 +324,50 @@ final class FrameworkAudio implements FrameworkServices.Call {
                 // Return a fresh snapshot, as the real Binder reply does.
                 return Class.forName("android.media.AudioRoutesInfo").getConstructor().newInstance();
             }
+            case registerLoudnessCodecUpdatesDispatcher: {
+                IInterface dispatcher = (IInterface) Objects.requireNonNull(a[0], "dispatcher");
+                IBinder token = dispatcher.asBinder();
+                synchronized (loudnessDispatchers) {
+                    if (loudnessDispatchers.containsKey(token)) return null;
+                    try {
+                        token.linkToDeath(() -> {
+                            synchronized (loudnessDispatchers) { loudnessDispatchers.remove(token); }
+                        }, 0);
+                    } catch (RemoteException dead) { return null; }
+                    loudnessDispatchers.put(token, dispatcher);
+                }
+                return null;
+            }
+            case unregisterLoudnessCodecUpdatesDispatcher:
+                synchronized (loudnessDispatchers) {
+                    loudnessDispatchers.remove(((IInterface) Objects.requireNonNull(a[0], "dispatcher")).asBinder());
+                }
+                return null;
+            case startLoudnessCodecUpdates:
+                synchronized (loudnessSessions) { loudnessSessions.putIfAbsent((Integer) a[0], new HashSet<>()); }
+                return null;
+            case stopLoudnessCodecUpdates:
+                synchronized (loudnessSessions) { loudnessSessions.remove((Integer) a[0]); }
+                return null;
+            case addLoudnessCodecInfo: {
+                Object info = Objects.requireNonNull(a[2], "codecInfo");
+                synchronized (loudnessSessions) {
+                    Set<Object> infos = loudnessSessions.get((Integer) a[0]);
+                    if (infos == null) return null; // a stopped session gets no updates
+                    infos.add(info);
+                }
+                PersistableBundle update = new PersistableBundle();
+                update.putPersistableBundle(Integer.toString((Integer) a[1]), loudnessParams(info));
+                dispatchLoudness((Integer) a[0], update);
+                return null;
+            }
+            case removeLoudnessCodecInfo:
+                synchronized (loudnessSessions) {
+                    Set<Object> infos = loudnessSessions.get((Integer) a[0]);
+                    if (infos != null) infos.remove(a[1]);
+                }
+                return null;
+            case getLoudnessParams: return loudnessParams(Objects.requireNonNull(a[0], "codecInfo"));
             default: throw new UnsupportedOperationException("audio." + method);
         }
     }

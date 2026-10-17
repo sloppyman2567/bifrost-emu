@@ -112,6 +112,7 @@ public final class Managed extends Activity {
         checkNetworkInterfaces();
         checkPackageQueries();
         checkAppTasks();
+        checkLoudness();
         int starts = prefs.getInt("starts", 0) + 1;
         if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
             throw new AssertionError("System defaults or preserved override incorrect");
@@ -285,6 +286,44 @@ public final class Managed extends Activity {
                 || !new android.content.ComponentName(this, Managed.class).equals(info.baseActivity))
             throw new AssertionError("app task info incorrect");
         System.out.println("MANAGED_FIXTURE_APP_TASKS_OK");
+    }
+
+    // LoudnessCodecController (ExoPlayer on Android 15): an AAC-LC decoder on
+    // the built-in speaker gets CTA-2075 "small" parameters, from the
+    // controller's query and from the update addMediaCodec triggers.
+    private void checkLoudness() {
+        android.media.MediaCodec codec = null;
+        try {
+            java.util.concurrent.CountDownLatch updated = new java.util.concurrent.CountDownLatch(1);
+            Bundle[] update = new Bundle[1];
+            android.media.LoudnessCodecController controller = android.media.LoudnessCodecController.create(1,
+                    Runnable::run, new android.media.LoudnessCodecController.OnLoudnessCodecUpdateListener() {
+                        @Override public Bundle onLoudnessCodecUpdate(android.media.MediaCodec mediaCodec, Bundle params) {
+                            update[0] = new Bundle(params);
+                            updated.countDown();
+                            return params;
+                        }
+                    });
+            android.media.MediaFormat format = android.media.MediaFormat.createAudioFormat(
+                    android.media.MediaFormat.MIMETYPE_AUDIO_AAC, 44100, 2);
+            format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(new byte[] {0x12, 0x10})); // AAC-LC 44.1 kHz stereo
+            codec = android.media.MediaCodec.createDecoderByType(android.media.MediaFormat.MIMETYPE_AUDIO_AAC);
+            codec.configure(format, null, null, 0);
+            if (!controller.addMediaCodec(codec)) throw new AssertionError("loudness codec rejected");
+            Bundle params = controller.getLoudnessCodecParams(codec);
+            if (!updated.await(10, java.util.concurrent.TimeUnit.SECONDS)) throw new AssertionError("no loudness update");
+            for (Bundle bundle : new Bundle[] {params, update[0]})
+                if (bundle.getInt(android.media.MediaFormat.KEY_AAC_DRC_TARGET_REFERENCE_LEVEL) != 64
+                        || bundle.getInt(android.media.MediaFormat.KEY_AAC_DRC_HEAVY_COMPRESSION) != 1)
+                    throw new AssertionError("loudness parameters " + bundle);
+            controller.removeMediaCodec(codec);
+            controller.close();
+        } catch (java.io.IOException | InterruptedException error) {
+            throw new AssertionError("loudness check failed", error);
+        } finally {
+            if (codec != null) codec.release();
+        }
+        System.out.println("MANAGED_FIXTURE_LOUDNESS_OK");
     }
 
     @Override public void onResume() {

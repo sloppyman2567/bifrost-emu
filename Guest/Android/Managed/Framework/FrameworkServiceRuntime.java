@@ -214,10 +214,18 @@ final class FrameworkServiceRuntime {
         return true;
     }
 
+    // microG's AdRequestService answers every ad request "Not supported".
+    // Google Mobile Ads builds its requests itself only when this bind fails
+    // (RemoteAdRequestClientTask.onConnectionFailed), as without Play
+    // services, so the stub is never bound.
+    private static final ComponentName MICROG_AD_REQUESTS =
+            new ComponentName("com.google.android.gms", "org.microg.gms.ads.AdRequestService");
+
     synchronized int bind(Object[] a, boolean instance) throws Exception {
         Intent intent = copy((Intent) a[2]);
         ServiceInfo info = resolve(a[0], intent, (String) a[3], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
         if (info == null) return 0;
+        if (MICROG_AD_REQUESTS.equals(new ComponentName(info.packageName, info.name))) return 0;
         // ActiveServices returns 0 when bringUpServiceLocked cannot start
         // the hosting process. Context.bindService then returns false.
         // An unavailable process must not become an uncaught SDK exception.

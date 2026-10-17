@@ -105,9 +105,31 @@ that callback to an app pool thread, which blocked on the same lock, so
 neither returned (see [Binder boundaries](ANDROID_BINDER.md#boundaries)).
 With Linux's caller-thread targeting the answer now arrives in about 100 ms.
 microG implements no ad requests: it answers every one with "Not supported"
-(`CommonStatusCodes.INTERNAL_ERROR`), which GMA reports as error 8. GMA uses
-its local request path only when the bind itself fails, so the rewarded
-videos still show "No advert is available".
+(`CommonStatusCodes.INTERNAL_ERROR`), which GMA reports as error 8. GMA's
+listener turns that answer into a final error; only a `zzdyp` failure,
+which `onConnectionFailed` produces, makes `zzdwm` retry through the local
+request path, as on devices without Play services. `FrameworkServiceRuntime`
+therefore never binds `com.google.android.gms/org.microg.gms.ads.AdRequestService`:
+`bindService` returns false and GMA requests the ad itself. Other microG
+services bind normally.
+
+The local path then loaded an ad and precached its video with GMA's
+ExoPlayer, which calls Android 15's `LoudnessCodecController`. `FrameworkAudio`
+now serves the `IAudioService` loudness methods as
+[LoudnessCodecHelper](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/audio/LoudnessCodecHelper.java)
+does for a fixed built-in speaker:
+- **Range:** CTA-2075 "small" (phone/tablet), or
+  `audio.loudness.builtin-speaker-spl-range-size`.
+- **Parameters:** AAC target reference level 64; heavy compression for
+  MPEG-4, effect type 3 for MPEG-D.
+- **Updates:** `addLoudnessCodecInfo` sends its one initial update to the
+  registered dispatchers on a worker (both calls are one-way). No playback
+  configurations are reported, so no route-change updates follow.
+
+The `Managed` fixture checks the controller with a configured AAC decoder
+and `ManagedPlayServices` that the ad request bind fails. In the game the ad
+Activity then showed video frames before the process died on a guest
+SIGSEGV in HWUI's RenderThread; playback is not established.
 
 ### Windows owned by other threads (2026-10-17)
 

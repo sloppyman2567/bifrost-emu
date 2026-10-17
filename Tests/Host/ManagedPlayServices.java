@@ -44,6 +44,18 @@ public final class ManagedPlayServices extends Activity {
         System.out.println("MANAGED_PLAY_SERVICES status=" + status
                 + " apk=" + GooglePlayServicesUtilLight.getApkVersion(this)
                 + " client=" + GooglePlayServicesUtilLight.GOOGLE_PLAY_SERVICES_VERSION_CODE);
+        // microG's ad request stub is not bound, so Google Mobile Ads falls
+        // back to building its requests itself.
+        ServiceConnection ads = new ServiceConnection() {
+            @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+                throw new IllegalStateException("microG ad request stub was bound");
+            }
+            @Override public void onServiceDisconnected(ComponentName name) {}
+        };
+        boolean adsBound = bindService(new Intent("com.google.android.gms.ads.service.START")
+                .setPackage("com.google.android.gms"), ads, BIND_AUTO_CREATE);
+        unbindService(ads);
+        System.out.println("MANAGED_PLAY_SERVICES_ADS_BIND " + adsBound);
         // Firebase Analytics binds this action when Play services is available.
         Intent intent = new Intent("com.google.android.gms.measurement.START").setPackage("com.google.android.gms");
         boolean bound = bindService(intent, connection, BIND_AUTO_CREATE);

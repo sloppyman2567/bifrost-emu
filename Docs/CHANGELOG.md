@@ -13,6 +13,17 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Local Google Mobile Ads requests (2026-10-17)
+
+- microG's `AdRequestService`, which answers every ad request "Not
+  supported", is no longer bound. Google Mobile Ads falls back to its own
+  request path, as without Play services; Hungry Shark World's rewarded
+  video ads now load.
+- `IAudioService` loudness methods follow Android 15's LoudnessCodecHelper
+  for the built-in speaker (CTA-2075 "small" AAC parameters), so
+  ExoPlayer's `LoudnessCodecController` no longer fails ad video precaching.
+  The ad video then crashed in HWUI's RenderThread; playback is not working.
+
 ### Nested Binder callbacks (2026-10-17)
 
 - A synchronous Binder transaction sent while serving one now goes to the

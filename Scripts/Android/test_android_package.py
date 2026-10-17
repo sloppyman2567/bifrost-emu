@@ -1095,6 +1095,7 @@ class PackageTests(unittest.TestCase):
             self.assertIn("MANAGED_FIXTURE_NETWORK_INTERFACES_OK", text)
             self.assertIn("MANAGED_FIXTURE_PACKAGE_QUERIES_OK", text)
             self.assertIn("MANAGED_FIXTURE_APP_TASKS_OK", text)
+            self.assertIn("MANAGED_FIXTURE_LOUDNESS_OK", text)
             key = (state / ".settings/user-0.key").read_bytes()
             expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,
                                    hashlib.sha256).hexdigest()[:16]
@@ -1219,6 +1220,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(status, 0, text[-30000:])
         self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
         self.assertRegex(text, r"MANAGED_PLAY_SERVICES status=0 apk=252432034 client=\d+", text[-30000:])
+        self.assertIn("MANAGED_PLAY_SERVICES_ADS_BIND false\n", text)
         # microG runs in its own process and UID; the app binds its service
         # by action and reaches its providers there.
         self.assertIn("ASGARD_PROCESS_READY pid=", text)
