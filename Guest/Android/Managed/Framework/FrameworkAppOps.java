@@ -7,6 +7,13 @@ final class FrameworkAppOps {
     private static final int INVALID_UID = -1, ROOT_UID = 0, SHELL_UID = 2000,
             MEDIA_UID = 1013, AUDIOSERVER_UID = 1041, CAMERASERVER_UID = 1047;  // Process
     private final FrameworkPackages packages;
+    private final java.util.Set<android.os.IBinder> activeWatchers = new java.util.HashSet<>();
+    private static final int NUM_OP = numOps();  // AppOpsManager._NUM_OP (hidden)
+
+    private static int numOps() {
+        try { return android.app.AppOpsManager.class.getField("_NUM_OP").getInt(null); }
+        catch (ReflectiveOperationException error) { throw new ExceptionInInitializerError(error); }
+    }
 
     FrameworkAppOps(FrameworkPackages packages) { this.packages = packages; }
 
@@ -24,6 +31,23 @@ final class FrameworkAppOps {
                 if ((Integer) a[0] != 23) throw new UnsupportedOperationException("appops.checkOperation " + a[0]);
                 if (checkPackage((Integer) a[1], (String) a[2]) != MODE_ALLOWED) return MODE_ERRORED;
                 return 3; // MODE_DEFAULT
+            // AppOpsService.startWatchingActive/stopWatchingActive (Google ads
+            // SDK). Watchers hear when an op becomes active; this service
+            // starts no ops, so registered callbacks are never called.
+            case "startWatchingActive": {
+                int[] ops = (int[]) a[0];
+                if (ops != null) for (int op : ops)
+                    if (op < 0 || op >= NUM_OP)
+                        throw new IllegalArgumentException("Invalid op code in: " + java.util.Arrays.toString(ops));
+                if (a[1] == null) return null;
+                if (ops == null) throw new NullPointerException("ops");
+                synchronized (activeWatchers) { activeWatchers.add(((android.os.IInterface) a[1]).asBinder()); }
+                return null;
+            }
+            case "stopWatchingActive":
+                if (a[0] != null)
+                    synchronized (activeWatchers) { activeWatchers.remove(((android.os.IInterface) a[0]).asBinder()); }
+                return null;
             default:
                 System.out.println("APPOPS_UNSUPPORTED " + method);
                 throw new UnsupportedOperationException("appops." + method);

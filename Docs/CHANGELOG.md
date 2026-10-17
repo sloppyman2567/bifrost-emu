@@ -13,6 +13,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### App-ops active watchers (2026-10-17)
+
+- `appops.startWatchingActive`/`stopWatchingActive` follow AOSP 15
+  AppOpsService (op range check, callback registry). Google's ads SDK
+  (play-services-ads 24.4.0) called it on an `AdWorker` thread and Hungry
+  Shark World died with UnsupportedOperationException; a 150 s JIT run now
+  has no fatal exception. No op becomes active here, so watchers are never
+  called. AppLovin's `package.resolveIntent` remains unsupported (caught by
+  the SDK).
+
 ### GPU-rendered Activity windows (2026-10-17)
 
 - Hardware-accelerated Activity windows draw through their own HWUI
