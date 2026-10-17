@@ -1,7 +1,7 @@
 // Every WindowManager.addView window: Activity windows, dialogs, popup menus.
 // Android composes them in SurfaceFlinger; here IWindowSession lays them out
-// like WindowLayout, the launcher draws each view tree in software when it is
-// dirty, and the host shows the pixels as a layer above every surface
+// like WindowLayout, each view tree is drawn in software when it is dirty, on
+// the thread that owns it, and the host shows the pixels as a layer above every surface
 // (activity_window.c op 9). A fully transparent window, such as an Activity
 // whose SurfaceView punches a hole through all of it, needs no host layer.
 // SurfaceViews in these windows get host surfaces from FrameworkSurfaces.
@@ -61,6 +61,15 @@ final class FrameworkWindows {
         // ThreadedRenderer draws into, instead of `bitmap`.
         FrameworkSurfaces.Layer layer;
         Object renderer;
+        // Windows created on another thread draw on its Looper (drawForeign):
+        // `drawing` hands `bitmap` and `pixels` between the threads, and
+        // `removed` (guarded by FrameworkWindows) stops host layers from
+        // appearing after that thread removed the window.
+        boolean removed;
+        volatile boolean drawing;
+        boolean drawn;  // the owner drew pixels not yet shown
+        Exception failure;  // the owner's draw failed
+        String text;  // visible text at the first draw, for the first-show log line
         Popup(IBinder token, Object window, int id) { this.token = token; this.window = window; this.id = id; }
     }
 
@@ -244,6 +253,7 @@ final class FrameworkWindows {
             popup = find(token);
             if (popup == null) return;
             popups.remove(popup);
+            popup.removed = true;
             if (touchTarget == popup) touchTarget = null;
         }
         // ViewRootImpl detaches the tree before removing its window, as
@@ -322,8 +332,24 @@ final class FrameworkWindows {
             if (viewRoot == null) continue;
             Method relayout = viewRoot.getClass().getDeclaredMethod("forceWmRelayout");
             relayout.setAccessible(true);
-            relayout.invoke(viewRoot);
+            onOwner(viewRoot, () -> {
+                try { relayout.invoke(viewRoot); }
+                catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+            });
         }
+    }
+
+    // ViewRootImpl.mThread created the window's views and only it may touch
+    // them (checkThread): Android runs each window's traversals, drawing and
+    // input on that thread's Looper. Engines such as Unity show dialogs from
+    // their own Looper thread.
+    private static boolean owned(Object viewRoot) throws Exception {
+        return hiddenField(viewRoot, "mThread") == Thread.currentThread();
+    }
+
+    private static void onOwner(Object viewRoot, Runnable task) throws Exception {
+        if (owned(viewRoot)) task.run();
+        else ((android.os.Handler) hiddenField(viewRoot, "mHandler")).post(task);
     }
 
     private static void focus(Popup popup, boolean focused) throws Exception {
@@ -358,6 +384,19 @@ final class FrameworkWindows {
                 continue;
             }
             if (root.isLayoutRequested()) continue;  // ViewRootImpl lays out before the next draw
+            Object viewRoot = viewRoot(popup);
+            if (viewRoot == null) continue;
+            if (!owned(viewRoot)) {
+                // Their SurfaceViews would need FrameworkSurfaces on that
+                // thread too; none get host surfaces.
+                synchronized (this) {
+                    if (popup.removed) continue;
+                    if (dim(popup)) restackAbove(stack, index);
+                    if (drawForeign(popup, root, viewRoot, w, h) && show(popup, stack, index, w, h))
+                        popup.drawn = false;
+                }
+                continue;
+            }
             if (popup.observed != root) {
                 popup.observed = root;
                 root.getViewTreeObserver().addOnPreDrawListener(() -> {
@@ -376,8 +415,7 @@ final class FrameworkWindows {
             // Surface: redraw that region of the retained bitmap, as its
             // software path does (a full window when moved or resized).
             Rect dirty = takeDirty(popup);
-            Object viewRoot = viewRoot(popup);
-            Object attachInfo = viewRoot == null ? null : hiddenField(viewRoot, "mAttachInfo");
+            Object attachInfo = hiddenField(viewRoot, "mAttachInfo");
             Object renderer = attachInfo == null ? null : hiddenField(attachInfo, "mThreadedRenderer");
             if (renderer != null && popup.attrs.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION) {
                 drawHardware(popup, root, viewRoot, attachInfo, renderer, w, h, !dirty.isEmpty() || root.isDirty());
@@ -385,47 +423,8 @@ final class FrameworkWindows {
             }
             releaseLayer(popup);
             if (popup.shown.equals(popup.frame) && !root.isDirty() && dirty.isEmpty()) continue;
-            boolean full = !popup.shown.equals(popup.frame);
-            if (popup.bitmap == null || popup.bitmap.getWidth() != w || popup.bitmap.getHeight() != h) {
-                if (popup.bitmap != null) popup.bitmap.recycle();
-                popup.bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-                popup.pixels = new int[w * h];
-                full = true;
-            }
-            if (full || dirty.isEmpty() || !dirty.intersect(0, 0, w, h)) dirty.set(0, 0, w, h);
-            Canvas canvas = new Canvas(popup.bitmap);
-            canvas.clipRect(dirty);
-            canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
-            root.draw(canvas);
-            popup.bitmap.getPixels(popup.pixels, dirty.top * w + dirty.left, w,
-                    dirty.left, dirty.top, dirty.width(), dirty.height());
-            if (!anyVisible(popup.pixels)) {
-                if (popup.onHost) {
-                    removePopup(popup.id);
-                    popup.onHost = false;
-                    System.out.println("APP_POPUP_HIDDEN " + popup.id + " transparent");
-                }
-                popup.shown.set(popup.frame);
-                continue;
-            }
-            int result = showPopup(popup.id, popup.frame.left, popup.frame.top, w, h, popup.pixels);
-            if (result == 0) {
-                if (!popup.onHost) {
-                    if (!popup.announced) {
-                        StringBuilder text = new StringBuilder();
-                        collectText(root, text);
-                        System.out.println("APP_POPUP_SHOWN " + popup.id + " " + popup.frame.toShortString()
-                                + " visible=" + visible(popup.pixels, w * h) + (text.length() > 0 ? " text=" + text : ""));
-                        popup.announced = true;
-                    }
-                    popup.onHost = true;
-                    restackAbove(stack, index);
-                }
-                popup.shown.set(popup.frame);
-            }
-            else if (result != -11) {  // EAGAIN: host buffers busy, retry next frame
-                throw new IllegalStateException("popup window " + popup.id + ": host error " + result);
-            }
+            drawSoftware(popup, root, dirty, w, h, !popup.shown.equals(popup.frame));
+            show(popup, stack, index, w, h);
         }
         // SurfaceFlinger's window order: each window's SurfaceViews directly
         // below its own layer (SurfaceView's default Z), windows bottom to top.
@@ -440,6 +439,83 @@ final class FrameworkWindows {
             surfaces.restack(order);
             stacked = order;
         }
+    }
+
+    // ViewRootImpl's software draw into the retained bitmap: redraws `dirty`
+    // (all of it when `full`, empty or resized) and copies it to `pixels`.
+    private static void drawSoftware(Popup popup, View root, Rect dirty, int w, int h, boolean full) {
+        if (popup.bitmap == null || popup.bitmap.getWidth() != w || popup.bitmap.getHeight() != h) {
+            if (popup.bitmap != null) popup.bitmap.recycle();
+            popup.bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            popup.pixels = new int[w * h];
+            full = true;
+        }
+        if (full || dirty.isEmpty() || !dirty.intersect(0, 0, w, h)) dirty.set(0, 0, w, h);
+        Canvas canvas = new Canvas(popup.bitmap);
+        canvas.clipRect(dirty);
+        canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+        root.draw(canvas);
+        popup.bitmap.getPixels(popup.pixels, dirty.top * w + dirty.left, w,
+                dirty.left, dirty.top, dirty.width(), dirty.height());
+        if (!popup.announced) {
+            StringBuilder text = new StringBuilder();
+            collectText(root, text);
+            popup.text = text.toString();
+        }
+    }
+
+    // A window owned by another thread: its Looper draws the bitmap while
+    // this compositor skips the window; returns true when pixels of the
+    // current size are ready to show. A moved window shows retained pixels.
+    private boolean drawForeign(Popup popup, View root, Object viewRoot, int w, int h) throws Exception {
+        if (popup.drawing) return false;
+        if (popup.failure != null) throw popup.failure;
+        boolean sized = popup.bitmap != null && popup.bitmap.getWidth() == w && popup.bitmap.getHeight() == h;
+        if (sized && (popup.drawn || !popup.shown.equals(popup.frame))) return true;
+        if (sized && !root.isDirty() && ((Rect) hiddenField(viewRoot, "mDirty")).isEmpty()) return false;
+        popup.drawn = false;
+        popup.drawing = true;
+        ((android.os.Handler) hiddenField(viewRoot, "mHandler")).post(() -> {
+            try {
+                synchronized (this) { if (popup.removed) return; }  // remove() ran on this thread first
+                drawSoftware(popup, root, takeDirty(popup), w, h, false);
+                popup.drawn = true;
+            } catch (Exception error) {
+                popup.failure = error;
+            } finally {
+                popup.drawing = false;
+            }
+        });
+        return false;
+    }
+
+    // Shows a window's software pixels in its host layer; blank windows have
+    // none. Returns false when the host is busy (EAGAIN) and it must retry.
+    private boolean show(Popup popup, List<Popup> stack, int index, int w, int h) {
+        if (!anyVisible(popup.pixels)) {
+            if (popup.onHost) {
+                removePopup(popup.id);
+                popup.onHost = false;
+                System.out.println("APP_POPUP_HIDDEN " + popup.id + " transparent");
+            }
+            popup.shown.set(popup.frame);
+            return true;
+        }
+        int result = showPopup(popup.id, popup.frame.left, popup.frame.top, w, h, popup.pixels);
+        if (result == -11) return false;  // EAGAIN: host buffers busy, retry next frame
+        if (result != 0) throw new IllegalStateException("popup window " + popup.id + ": host error " + result);
+        if (!popup.onHost) {
+            if (!popup.announced) {
+                String text = popup.text != null ? popup.text : "";
+                System.out.println("APP_POPUP_SHOWN " + popup.id + " " + popup.frame.toShortString()
+                        + " visible=" + visible(popup.pixels, w * h) + (text.length() > 0 ? " text=" + text : ""));
+                popup.announced = true;
+            }
+            popup.onHost = true;
+            restackAbove(stack, index);
+        }
+        popup.shown.set(popup.frame);
+        return true;
     }
 
     // An Activity window whose ViewRootImpl created a ThreadedRenderer
@@ -648,16 +724,19 @@ final class FrameworkWindows {
     }
 
     private static boolean deliver(Popup popup, MotionEvent event, boolean generic) throws Exception {
+        Object viewRoot = viewRoot(popup);
         View root = root(popup);
-        if (root == null) return true;
+        if (viewRoot == null || root == null) return true;
         MotionEvent local = MotionEvent.obtain(event);
         local.offsetLocation(-popup.frame.left, -popup.frame.top);
-        try {
-            if (generic) root.dispatchGenericMotionEvent(local);
-            else root.dispatchTouchEvent(local);
-        } finally {
-            local.recycle();
-        }
+        onOwner(viewRoot, () -> {
+            try {
+                if (generic) root.dispatchGenericMotionEvent(local);
+                else root.dispatchTouchEvent(local);
+            } finally {
+                local.recycle();
+            }
+        });
         return true;
     }
 
@@ -666,8 +745,9 @@ final class FrameworkWindows {
         Popup top;
         synchronized (this) { top = topFocusable(); }
         if (top == null) return false;
+        Object viewRoot = viewRoot(top);
         View root = root(top);
-        if (root != null) root.dispatchKeyEvent(event);
+        if (viewRoot != null && root != null) onOwner(viewRoot, () -> root.dispatchKeyEvent(event));
         return true;
     }
 

@@ -82,7 +82,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   draw through their ViewRootImpl's own ThreadedRenderer into a host layer
   (`FrameworkWindows.drawHardware`); each window's SurfaceViews are restacked
   directly below it (host op 19). Dialogs, menus and dim layers stay
-  software popup layers above every surface. An Activity covered by an
+  software popup layers above every surface. Only a window's
+  `ViewRootImpl.mThread` may touch its views: windows owned by other threads
+  (Unity's `UnityMain` dialogs) draw and take input on that Looper
+  (`drawForeign`, `onOwner`); the compositor keeps host calls on `main`. An Activity covered by an
   opaque one must still stop and hide its window
   (`EnsureActivitiesVisibleHelper`); only translucent/floating themes leave it
   visible. Only the session process publishes device

@@ -577,6 +577,10 @@ class PackageTests(unittest.TestCase):
         if managed == "ManagedPlayServices" and not split:
             # The client library checks this against its own version code.
             component += '<meta-data android:name="com.google.android.gms.version" android:value="12451000"/>'
+        if managed == "ManagedDialog" and not split:
+            # As Unity's player Activity declares it.
+            component += (f'<activity android:name="{activity}$Engine" android:exported="false" '
+                          'android:hardwareAccelerated="false"/>')
         if managed == "ManagedActivities" and not split:
             component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
             component += (f'<activity android:name="{activity}$Translucent" android:exported="false" '
@@ -1107,9 +1111,14 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(status, 0, text[-30000:])
         markers = ("MANAGED_DIALOG_SHOWN", "text=Bifrost dialog", "MANAGED_DIALOG_POSITIVE",
                    "MANAGED_DIALOG_DISMISSED", "MANAGED_DIALOG_POPUP_SHOWN",
-                   "MANAGED_DIALOG_POPUP_DISMISSED", "MANAGED_DIALOG_DESTROYED")
+                   "MANAGED_DIALOG_POPUP_DISMISSED",
+                   # A dialog created on an engine Looper thread draws there
+                   # (ViewRootImpl.checkThread) and its click runs there.
+                   "text=Engine dialog", "MANAGED_DIALOG_ENGINE_POSITIVE FixtureEngine",
+                   "MANAGED_DIALOG_ENGINE_DISMISSED", "MANAGED_DIALOG_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
+        self.assertNotIn("CalledFromWrongThreadException", text)
         # The dialog shown from onResume holds focus before the Activity's
         # window exists, so the Activity first gains focus when the dialog
         # goes; the non-focusable PopupWindow leaves it focused.
@@ -1117,14 +1126,15 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("MANAGED_DIALOG_ACTIVITY_FOCUS false", text[:regained], text[-30000:])
         self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)
         self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
-        # The Activity window (its action bar) drew on the GPU; the dialog
-        # and the PopupWindow reached the host as software layers, at
-        # framework-computed frames. All three were removed.
+        # The Activity window (its action bar) drew on the GPU; the dialogs,
+        # the PopupWindow and the unaccelerated Engine Activity reached the
+        # host as software layers, at framework-computed frames. All five
+        # were removed.
         self.assertEqual(text.count("APP_WINDOW_GPU"), 1, text[-30000:])
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
-        self.assertEqual(len(shown), 2, text[-30000:])
+        self.assertEqual(len(shown), 4, text[-30000:])
         self.assertEqual(shown[1][1], "[40,60][280,140]")
-        self.assertEqual(text.count("APP_POPUP_REMOVED"), 3, text[-30000:])
+        self.assertEqual(text.count("APP_POPUP_REMOVED"), 5, text[-30000:])
 
     def test_managed_view_window_and_surface_lifecycle(self):
         state = self.work / "views-state"

@@ -3,14 +3,16 @@ package org.bifrost.fixture;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.view.Gravity;
 import android.view.SurfaceView;
 import android.widget.PopupWindow;
 import android.widget.TextView;
 
-/** Framework popup windows over a SurfaceView: AlertDialog, focus, PopupWindow. */
+/** Framework popup windows over a SurfaceView: AlertDialog, focus, PopupWindow, engine-thread dialog. */
 public final class ManagedDialog extends Activity {
     private final Handler main = new Handler();
     private boolean dialogDone;
@@ -58,12 +60,51 @@ public final class ManagedDialog extends Activity {
         PopupWindow popup = new PopupWindow(text, 240, 80);
         popup.setOnDismissListener(() -> {
             System.out.println("MANAGED_DIALOG_POPUP_DISMISSED");
-            main.postDelayed(this::finish, 300);
+            main.postDelayed(() -> startActivityForResult(new Intent(this, Engine.class), 1), 300);
         });
         popup.showAtLocation(getWindow().getDecorView(), Gravity.TOP | Gravity.START, 40, 60);
         System.out.println("MANAGED_DIALOG_POPUP_SHOWN");
         main.postDelayed(popup::dismiss, 1000);
     }
 
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        main.postDelayed(this::finish, 300);
+    }
+
     @Override public void onDestroy() { super.onDestroy(); System.out.println("MANAGED_DIALOG_DESTROYED"); }
+
+    /**
+     * Unity's layout: an Activity without hardware acceleration whose engine
+     * thread, with its own Looper (UnityMain), shows a dialog. The dialog's
+     * views belong to that thread, and as a software window its
+     * invalidations reach ViewRootImpl.checkThread.
+     */
+    public static final class Engine extends Activity {
+        @Override public void onCreate(Bundle state) {
+            super.onCreate(state);
+            HandlerThread thread = new HandlerThread("FixtureEngine");
+            thread.start();
+            Handler engine = new Handler(thread.getLooper());
+            Handler main = new Handler();
+            engine.post(() -> {
+                AlertDialog dialog = new AlertDialog.Builder(this)
+                        .setTitle("Engine dialog")
+                        .setMessage("Owned by an engine thread")
+                        .setPositiveButton("OK", (d, which) -> System.out.println(
+                                "MANAGED_DIALOG_ENGINE_POSITIVE " + Thread.currentThread().getName()))
+                        .create();
+                dialog.setOnDismissListener(d -> {
+                    System.out.println("MANAGED_DIALOG_ENGINE_DISMISSED");
+                    thread.quitSafely();
+                    main.postDelayed(this::finish, 300);
+                });
+                dialog.show();
+                // Resizing a drawn button moves its ripple background's
+                // bounds at the next draw, which invalidates it from that draw.
+                engine.postDelayed(() -> dialog.getButton(DialogInterface.BUTTON_POSITIVE)
+                        .setText("Continue with the engine"), 800);
+                engine.postDelayed(() -> dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick(), 1800);
+            });
+        }
+    }
 }

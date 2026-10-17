@@ -23,6 +23,44 @@ See [current support](../SUPPORT.md#android-scope-and-v20-plans),
 [host media](#host-media-decoding-2026-10-14) and the
 [roadmap](../roadmap.md) for the latest scope and remaining work.
 
+### Windows owned by other threads (2026-10-17)
+
+Hungry Shark World exited with status 1 when a round ended. Unity's
+`UnityMain` thread, which runs its own Looper, showed a dialog, and the
+launcher's UI loop drew it from `main`. The dialog's `UnityPlayerActivity`
+declares `android:hardwareAccelerated="false"`, so the window is software.
+A button's `RippleDrawable` got new bounds during `View.draw` and invalidated
+it. Software windows take `ViewGroup.invalidateChild`'s parent walk, which
+ends in `ViewRootImpl.invalidateChildInParent` → `checkThread`, so the draw
+threw `CalledFromWrongThreadException` (Expected: UnityMain Calling: main).
+Hardware-accelerated windows take `onDescendantInvalidated`, which has no
+thread check. A dialog inherits its parent Activity's flag
+(`Window.adjustLayoutParamsForSubWindow`). All checked against
+[Android 15 ViewRootImpl](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/java/android/view/ViewRootImpl.java),
+`View`, `ViewGroup` and `Window`.
+
+Android runs each window's traversals, drawing and input on the Looper of
+the thread that created its ViewRootImpl (`mThread`). `FrameworkWindows` now
+does the same for windows that thread owns:
+- Their software draw (`drawForeign`) is posted to `ViewRootImpl.mHandler`.
+  The main-thread compositor shows the pixels once that draw finishes; a
+  volatile `drawing` flag hands the bitmap over between the threads.
+- Touches, keys and `forceWmRelayout` are posted to that thread too.
+  `windowFocusChanged` already posts to the owner itself.
+- `remove()` marks the window removed under the window lock, so no host
+  layer appears for it afterwards.
+
+Main-thread windows keep the inline path. `test_managed_dialog_and_popup_windows`
+adds an unaccelerated `$Engine` Activity whose `HandlerThread` shows an
+AlertDialog, resizes its button and clicks it. With the previous launcher
+the fixture exits with the same exception; with the fix it passes.
+
+Limits: SurfaceViews inside windows owned by other threads get no host
+surface (`FrameworkSurfaces` is main-thread only). An owner thread that never
+runs its Looper never draws its window, as on Android. Real touch delivery
+to such a window is covered by code review only: the fixture clicks with
+`performClick` on the owner thread.
+
 ### microG Play services packages (2026-10-16)
 
 Every managed app root carries microG's `com.google.android.gms` (GmsCore)
@@ -1763,8 +1801,11 @@ in WindowManagerService (a dialog shown from `onResume` is added first).
   current configuration, so no configuration change is invented.
 - `remove` drops the host layer and returns focus.
 
-Android composes these windows in SurfaceFlinger. Here the UI loop draws each
-view tree in software when it is dirty and sends the pixels through private
+Android composes these windows in SurfaceFlinger. Here each view tree is
+drawn in software when it is dirty, on the UI loop or on the Looper of the
+thread that owns the window (see
+[windows owned by other threads](#windows-owned-by-other-threads-2026-10-17)),
+and the UI loop sends the pixels through private
 op 9 to a host layer above every surface (op 10 removes it); see
 [window plugins](ANDROID_WINDOW_PLUGINS.md). A fully transparent window gets
 no host layer. Host layers stack in creation order, so when a window or dim
