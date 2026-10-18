@@ -70,6 +70,24 @@ def main():
                     if struct.unpack('<qIIQIIi', data) != (0, 1, 0, 0x10000, 4, 1, 8):
                         raise RuntimeError('persistent Binder channel returned an invalid version reply')
             print('Asgard: 1000 ioctls on one persistent RPC connection passed', flush=True)
+            # A busy realm (app, Play services, Play Store, WebView, codecs)
+            # holds many endpoints at once; each mirrors a 512 GiB guest.
+            held = []
+            try:
+                for index in range(32):
+                    endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    held.append(endpoint)
+                    endpoint.settimeout(3)
+                    endpoint.connect(broker['socket'])
+                    endpoint.sendall(HEADER.pack(MAGIC, VERSION, 1, len(opening), 0, 0) + opening)
+                    try:
+                        receive(endpoint, HEADER.unpack(receive(endpoint, HEADER.size))[3])
+                    except ConnectionError:
+                        raise RuntimeError(f'broker refused endpoint {index + 1} of 32') from None
+            finally:
+                for endpoint in held:
+                    endpoint.close()
+            print('Asgard: 32 simultaneous endpoints passed', flush=True)
             for mode in ('jit', 'interp'):
                 result = subprocess.run(base + ([] if mode == 'jit' else ['--no-jit']) +
                     ['/data/local/tmp/android_binder_features'], env=env, text=True,

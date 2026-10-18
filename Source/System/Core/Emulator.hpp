@@ -89,7 +89,8 @@ void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst);
 struct SimdDpFields;
 class Emulator {
 public:
-    Emulator();
+    // guest_window_max caps the guest address space (see Memory::Memory).
+    explicit Emulator(uint64_t guest_window_max = Memory::WINDOW_SIZE_MAX);
     ~Emulator();
     Emulator(const Emulator&) = delete;
     Emulator& operator=(const Emulator&) = delete;

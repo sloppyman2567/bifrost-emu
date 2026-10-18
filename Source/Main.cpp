@@ -51,6 +51,7 @@
 #include <climits>
 #include <unistd.h>
 using arm64emu::Emulator;
+using arm64emu::Memory;
 using arm64emu::VERSION;
 // ── Banner (shown on no-args, --help) ────────────────────────────────────
 static void print_banner() {
@@ -455,7 +456,7 @@ int main(int argc, char** argv) {
             guest_argv.push_back(android_so);
             for (int i = arg_i + 2; i < argc; i++) guest_argv.push_back(argv[i]);
             if (raw_tty) set_raw_terminal();
-            Emulator emu;
+            Emulator emu(android_binder_broker.empty() ? Memory::WINDOW_SIZE_MAX : Memory::BINDER_REALM_WINDOW_SIZE);
             if (!android_binder_broker.empty()) {
                 emu.vfs().set_binder_broker(android_binder_broker);
                 emu.vfs().set_self_pid(::getpid());
@@ -546,7 +547,7 @@ int main(int argc, char** argv) {
     if (android_app_id_set && !android_runtime) {
         fprintf(stderr, "bifrost-emu: --android-app-id requires --android-runtime\n"); return 2;
     }
-    Emulator emu;
+    Emulator emu(android_binder_broker.empty() ? Memory::WINDOW_SIZE_MAX : Memory::BINDER_REALM_WINDOW_SIZE);
     emu.set_android_runtime(android_runtime);
     if (android_runtime) emu.vfs().set_process_identity(android_app_id, android_app_id);
     if (!android_binder_broker.empty()) {

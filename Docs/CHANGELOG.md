@@ -13,6 +13,15 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Binder realm address space (2026-10-18)
+
+- A shared Binder realm served at most eight endpoints: each broker mirror
+  reserved the largest guest window, exhausting the host's 47-bit user
+  space. Realm processes and mirrors now use a 512 GiB (39-bit) guest
+  address space, so the broker reaches its 128-endpoint limit. Hungry Shark
+  World's Play Store process no longer dies opening `/dev/binder`
+  (`ECONNREFUSED`), which had stalled startup at the age-signals check.
+
 ### Audio player tracking (2026-10-18)
 
 - `IAudioService` player tracking (`trackPlayer` with unique piids, plus

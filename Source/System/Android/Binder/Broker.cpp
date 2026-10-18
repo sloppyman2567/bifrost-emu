@@ -341,7 +341,8 @@ public:
     }
 };
 struct Endpoint {
-    Memory memory;
+    // Mirrors the client's guest addresses: its window has the same size.
+    Memory memory{false, Memory::BINDER_REALM_WINDOW_SIZE};
     FdTable files;
     std::shared_ptr<BinderNode> node;
     std::mutex mutex;

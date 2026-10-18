@@ -130,13 +130,14 @@ void Memory::memstats_reporter(uint64_t period_secs) {
     }
 }
 
-Memory::Memory(bool start_reporter) {
-    // Reserve the largest guest address space the host grants. PROT_NONE +
+Memory::Memory(bool start_reporter, uint64_t window_max) {
+    // Reserve the largest guest address space the host grants, up to
+    // window_max (a power of two, WINDOW_SIZE_MIN..WINDOW_SIZE_MAX). PROT_NONE +
     // MAP_NORESERVE costs only virtual address space (RLIMIT_AS still
     // counts it). The flag mirror is a lazily committed byte per page.
     // One extra readable page precedes the window: it holds the JIT's
     // sticky software-check flag (see JIT_SOFTWARE_CHECKS_OFF).
-    for (uint64_t size = WINDOW_SIZE_MAX; size >= WINDOW_SIZE_MIN; size >>= 1) {
+    for (uint64_t size = std::min(window_max, WINDOW_SIZE_MAX); size >= WINDOW_SIZE_MIN; size >>= 1) {
         void* window = ::mmap(nullptr, size + PAGE_SIZE, PROT_NONE,
                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (window == MAP_FAILED) continue;

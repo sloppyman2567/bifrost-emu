@@ -73,6 +73,22 @@ FD patch widths and buffer lifetimes. The CLI detects protocol-1 brokers and
 requires their app sessions to stop before a realm restart; it does not silently
 replace a live older broker.
 
+The broker mirrors each endpoint's guest memory in its own `Memory` window,
+all in one host process, and accepts up to 128 endpoints. Every process
+started with `--android-binder-broker` therefore runs with a 512 GiB guest
+address space, and each mirror
+has the same size. Mirrors sized like a standalone guest (64 TiB, halving
+when refused) used up x86-64's 128 TiB user space after eight endpoints;
+later opens were closed and the guest saw `ECONNREFUSED` from `/dev/binder`.
+In Hungry Shark World this killed the Play Store process that answers the
+age-signals check, so startup stalled. 512 GiB is the user address space of
+Android 15's arm64
+[GKI kernel](https://android.googlesource.com/kernel/common/+/refs/heads/android15-6.6/arch/arm64/configs/gki_defconfig):
+4 KiB pages and no `CONFIG_ARM64_VA_BITS` override, so
+[Kconfig](https://android.googlesource.com/kernel/common/+/refs/heads/android15-6.6/arch/arm64/Kconfig)
+selects `ARM64_VA_BITS_39`. Apps already run within it on such devices.
+`test_asgard.py` holds 32 endpoints at once.
+
 Metadata updates and receive-arena allocation/copy still serialize within a
 domain. The broker still uses one host worker per connected channel, bounded by
 its connection limit. These changes remove per-operation connection/thread churn

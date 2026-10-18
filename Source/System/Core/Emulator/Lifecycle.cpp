@@ -32,7 +32,7 @@
 namespace arm64emu {
 // ── Static active-emu pointer (defined in Source/System/Core/Signals.cpp) ────────
 // Emulator* Emulator::g_active_emu_ = nullptr;  // defined in Signals.cpp
-Emulator::Emulator() = default;
+Emulator::Emulator(uint64_t guest_window_max) : mem_(true, guest_window_max) {}
 Emulator::~Emulator() {
     // Clear the active-emu pointer so host signal handlers don't
     // dereference freed memory. Without this, a signal arriving after

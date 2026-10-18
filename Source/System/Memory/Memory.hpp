@@ -74,6 +74,12 @@ public:
     // Reservation sizes tried at startup, largest first.
     static constexpr uint64_t WINDOW_SIZE_MAX = 1ULL << 46;  // 64 TiB
     static constexpr uint64_t WINDOW_SIZE_MIN = 1ULL << 39;  // 512 GiB
+    // Every process of a shared Binder realm, and the broker's mirror of
+    // each one, uses the 39-bit user address space of Android 15's GKI
+    // kernel (4 KiB pages, ARM64_VA_BITS_39 by default). The broker holds
+    // up to 128 mirrors in one host process; a
+    // full-size window each would exhaust x86-64's 47-bit user space.
+    static constexpr uint64_t BINDER_REALM_WINDOW_SIZE = WINDOW_SIZE_MIN;
     // ASLR: per-process randomized load bias for ET_DYN executables and
     // jittered stack top. The PIE band ends well below MMAP_BASE_MIN so the
     // brk arena keeps ≥124 MiB of headroom. ET_EXEC loads at its preferred
@@ -81,7 +87,7 @@ public:
     static constexpr uint64_t PIE_BASE_MIN = 0x400000ULL;
     static constexpr uint64_t PIE_JITTER = 128ull * 1024 * 1024;
     static constexpr uint64_t STACK_JITTER = 16ull * 1024 * 1024;
-    Memory(bool start_reporter = true);
+    explicit Memory(bool start_reporter = true, uint64_t window_max = WINDOW_SIZE_MAX);
     ~Memory();
     Memory(const Memory&) = delete;
     Memory& operator=(const Memory&) = delete;

@@ -8,6 +8,11 @@ State shared between them goes in `MemoryInternal.hpp`.
 - Guest memory is one host reservation: translate through the actual
   `window_base`/`window_size`, never a hardcoded address limit. Keep bounds,
   permission and crossing-page checks, including host-address overflow checks.
+- The window is the largest power of two the host grants, 512 GiB to 64 TiB,
+  capped by the constructor's `window_max`. Binder realm processes and the
+  broker's per-endpoint mirrors use `BINDER_REALM_WINDOW_SIZE` (512 GiB, a
+  Android 15 GKI's 39-bit address space): one broker process holds up to 128 mirrors,
+  and full-size windows exhaust the host's 47-bit user space after eight.
 - The readable page before the window holds the JIT's sticky software-check
   flag and per-width window limits (`JIT_WINDOW_LIMITS_OFF`); generated code
   reads both through the window register, so keep their offsets and contents
