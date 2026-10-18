@@ -1165,6 +1165,18 @@ duplicate/invalid-argument errors, proc-address identity, platform selection,
 clock and terminate/reinitialize checks (`ANDROID_EGL_CONTRACT_OK`). Generated
 EGL signatures also pass `make opgen-thunk-check egl-check`.
 
+Display initialization is reference-counted, as in Android 15's
+[egl_display_t](https://android.googlesource.com/platform/frameworks/native/+/refs/heads/android15-release/opengl/libs/EGL/egl_display.cpp):
+`eglTerminate` terminates the host display only when it releases the last
+`eglInitialize`. A process's GL renderer, HWUI and WebView share one display,
+and HWUI's
+[EglManager::destroy](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/libs/hwui/renderthread/EglManager.cpp)
+terminates it when its last hardware window goes. In Hungry Shark World that
+was the ad's window: the host display died under Unity (software-drawn
+Activity, own GL renderer), which then failed every surface call with
+`EGL_NOT_INITIALIZED` and left the ad's last frame on screen. `EglProbe`
+checks that a second user's terminate leaves the display initialized.
+
 ### Input methods (October 11, 2026)
 
 `FrameworkInputMethod` publishes the process-local `input_method` service using

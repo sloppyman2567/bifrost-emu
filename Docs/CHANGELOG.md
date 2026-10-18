@@ -13,6 +13,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Shared EGL display lifetime (2026-10-18)
+
+- `eglInitialize`/`eglTerminate` are reference-counted per display, as in
+  Android's libEGL. Closing a rewarded ad (HWUI terminates the display with
+  its last hardware window) no longer terminates Unity's display, which had
+  left Hungry Shark World showing the ad's last frame
+  (`EGL_NOT_INITIALIZED` on every Unity surface call).
+
 ### Binder realm address space (2026-10-18)
 
 - A shared Binder realm served at most eight endpoints: each broker mirror

@@ -352,6 +352,12 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_00024EglProbe_check(JNIEnv *env, jclas
     CHECK(eglTerminate(display) && eglInitialize(display, NULL, NULL));
     eglSetBlobCacheFuncsANDROID(display, (void *)cache_set, (void *)cache_get);
     CHECK(eglGetError() == 0x3000);
+    // Android ref-counts initialization: another user's terminate leaves the
+    // display initialized; the last one terminates it (EGL_NOT_INITIALIZED).
+    CHECK(eglInitialize(display, NULL, NULL) && eglTerminate(display));
+    CHECK(eglQueryString(display, 0x3054) && eglGetError() == 0x3000);  // EGL_VERSION
+    CHECK(eglTerminate(display));
+    CHECK(!eglQueryString(display, 0x3054) && eglGetError() == 0x3001);
     CHECK(eglTerminate(display));
 #undef CHECK
 #undef FN

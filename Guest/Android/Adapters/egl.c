@@ -14,6 +14,7 @@ typedef void (*Proc)(void);
 extern const char *thunk_eglQueryString(Display, int);
 extern Proc thunk_eglGetProcAddress(const char *);
 extern int thunk_eglGetError(void);
+extern unsigned thunk_eglInitialize(Display, int *, int *);
 extern unsigned thunk_eglTerminate(Display);
 extern Image thunk_eglCreateImage(Display, void *, unsigned, void *, const intptr_t *);
 extern Image thunk_eglCreateImageKHR(Display, void *, unsigned, void *, const int *);
@@ -28,6 +29,7 @@ static _Thread_local int error;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 struct display_state {
     Display display;
+    unsigned references;
     int cache_registered;
     Proc set, get;
     char *extensions;
@@ -98,14 +100,34 @@ const char *eglQueryString(Display display, int name) {
     return result;
 }
 const char *eglQueryStringImplementationANDROID(Display d, int n) { return eglQueryString(d, n); }
+// Android's libEGL reference-counts display initialization (egl_display_t):
+// eglTerminate only terminates the driver display when it releases the last
+// eglInitialize. An app's GL renderer, HWUI and WebView share one display,
+// so one component's teardown must not terminate it under the others.
+unsigned eglInitialize(Display display, int *major, int *minor) {
+    pthread_mutex_lock(&mutex);
+    unsigned result = thunk_eglInitialize(display, major, minor);
+    struct display_state *s = result ? state(display) : NULL;
+    if (s) ++s->references;
+    else if (result) { fail(BAD_ALLOC); result = 0; }
+    pthread_mutex_unlock(&mutex);
+    return result;
+}
 unsigned eglTerminate(Display display) {
-    unsigned result = thunk_eglTerminate(display);
-    if (!result) return result;
     pthread_mutex_lock(&mutex);
     struct display_state **link = &displays;
     while (*link && (*link)->display != display) link = &(*link)->next;
-    if (*link) {
-        struct display_state *s = *link; *link = s->next;
+    struct display_state *s = *link;
+    if (s && s->references > 1) {
+        --s->references;
+        pthread_mutex_unlock(&mutex);
+        return 1;
+    }
+    // The last reference, or none: the driver terminates (or validates and
+    // accepts an uninitialized display, as the EGL spec requires).
+    unsigned result = thunk_eglTerminate(display);
+    if (result && s) {
+        *link = s->next;
         free(s->extensions); free(s);
     }
     pthread_mutex_unlock(&mutex);
@@ -221,6 +243,7 @@ Proc eglGetProcAddress(const char *name) {
     EGL_WRAPPER(eglGetProcAddress)
     EGL_WRAPPER(eglQueryString)
     EGL_WRAPPER(eglQueryStringImplementationANDROID)
+    EGL_WRAPPER(eglInitialize)
     EGL_WRAPPER(eglTerminate)
     EGL_WRAPPER(eglSetBlobCacheFuncsANDROID)
     EGL_WRAPPER(eglGetPlatformDisplay)
