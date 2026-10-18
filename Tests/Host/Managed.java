@@ -337,6 +337,13 @@ public final class Managed extends Activity {
             throw new AssertionError("spatializer state");
         spatializer.removeOnSpatializerStateChangedListener(listener);
         System.out.println("MANAGED_FIXTURE_SPATIALIZER_OK");
+        // GMA's video view creates a MediaPlayer: PlayerBase registers with
+        // IAudioService and reports attribute changes and release there.
+        android.media.MediaPlayer player = new android.media.MediaPlayer();
+        player.setAudioAttributes(new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA).build());
+        player.release();
+        System.out.println("MANAGED_FIXTURE_PLAYER_TRACKING_OK");
     }
 
     @Override public void onResume() {

@@ -13,6 +13,13 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Audio player tracking (2026-10-18)
+
+- `IAudioService` player tracking (`trackPlayer` with unique piids, plus
+  the one-way player state reports and `releasePlayer`). Creating a
+  `MediaPlayer`, as Google Mobile Ads' video view does in Hungry Shark
+  World, no longer ends the app.
+
 ### Per-context GL state (2026-10-17)
 
 - GraphicThunk keeps one GL state tracker per EGL context, selected by each

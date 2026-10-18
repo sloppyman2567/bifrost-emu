@@ -152,6 +152,17 @@ resumed. That session then ended by real-time signal 63 (status 191), which
 is not yet explained. A Google WebView ad has not been retested, and the
 Play page's SVG logo drew only one of its four paths.
 
+A later Google rewarded video used GMA's `MediaPlayer` video view, whose
+`PlayerBase` registers with `IAudioService.trackPlayer`; the unsupported
+call ended the app. `FrameworkAudio` now follows
+[PlaybackActivityMonitor](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/services/core/java/com/android/server/audio/PlaybackActivityMonitor.java)
+for player IDs: each player gets a unique piid, and `playerAttributes`,
+`playerEvent`, `playerSessionId`, `playerHasOpPlayAudio` and
+`releasePlayer` are accepted without reporting playback configurations.
+The `Managed` fixture creates, configures and releases a `MediaPlayer`.
+There is no `media.player` service, so the video itself is not expected to
+play through `MediaPlayer`; how GMA handles that failure is untested.
+
 ### Windows owned by other threads (2026-10-17)
 
 Hungry Shark World exited with status 1 when a round ended. Unity's

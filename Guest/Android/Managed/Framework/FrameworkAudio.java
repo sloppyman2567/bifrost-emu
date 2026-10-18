@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class FrameworkAudio implements FrameworkServices.Call {
     private enum Contract {
@@ -51,7 +52,13 @@ final class FrameworkAudio implements FrameworkServices.Call {
         isSpatializerAvailable,
         canBeSpatialized,
         registerSpatializerCallback,
-        unregisterSpatializerCallback
+        unregisterSpatializerCallback,
+        trackPlayer,
+        playerAttributes,
+        playerEvent,
+        playerSessionId,
+        playerHasOpPlayAudio,
+        releasePlayer
     }
 
     @Override public String[] methods() {
@@ -69,6 +76,7 @@ final class FrameworkAudio implements FrameworkServices.Call {
     private final int[] minimum = {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0};
     private int[] volumes;
     private final Map<IBinder, IBinder.DeathRecipient> routeObservers = new HashMap<>();
+    private final AtomicInteger players = new AtomicInteger();
 
     private final class Focus implements IBinder.DeathRecipient {
         final String id, pkg;
@@ -387,6 +395,18 @@ final class FrameworkAudio implements FrameworkServices.Call {
             case unregisterSpatializerCallback:
                 Objects.requireNonNull(a[0], "callback");
                 return null;
+            // PlaybackActivityMonitor: every PlayerBase (MediaPlayer, AudioTrack,
+            // SoundPool) registers for a unique piid, never PLAYER_PIID_INVALID.
+            // Playback configurations are not reported, so the one-way state
+            // reports that follow are accepted without being kept.
+            case trackPlayer:
+                Objects.requireNonNull(a[0], "player id card");
+                return players.incrementAndGet();
+            case playerAttributes:
+            case playerEvent:
+            case playerSessionId:
+            case playerHasOpPlayAudio:
+            case releasePlayer: return null;
             default: throw new UnsupportedOperationException("audio." + method);
         }
     }
