@@ -122,7 +122,13 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_00024NativeLooperProbe_finish(JNIEnv *
 
 void *ANativeWindow_fromSurface(JNIEnv *, jobject);
 void *bifrost_surface_prepare(JNIEnv *, jobject) __attribute__((weak));
+void bifrost_surface_release(void *) __attribute__((weak));
 void ANativeWindow_release(void *);
+
+static void release_surface(void *window) {
+    if (bifrost_surface_release) bifrost_surface_release(window);
+    else ANativeWindow_release(window);
+}
 
 // ActivityProbe's JNI bridge to the managed-window ops of Bifrost's private
 // Android syscall 0x100E. Op 2 opens the host window and prepares this
@@ -175,16 +181,16 @@ JNIEXPORT jlong JNICALL Java_ActivityProbe_prepareSurface(JNIEnv *env, jclass ty
     void *window = bifrost_surface_prepare ? bifrost_surface_prepare(env, surface) : ANativeWindow_fromSurface(env, surface);
     if (!window) return -19; // ENODEV
     long result = bifrost_window(5, (long)window, opaque != JNI_FALSE);
-    if (result) { ANativeWindow_release(window); return result; }
-    // The Activity owns this reference until its window closes. EGL and the
-    // app take their own references to the same JNI Surface identity.
+    if (result) { release_surface(window); return result; }
+    // The Activity owns this reference until its window closes. EGL surfaces
+    // take their own host references to the same JNI Surface identity.
     return (jlong)(uintptr_t)window;
 }
 
 JNIEXPORT void JNICALL Java_ActivityProbe_releaseSurface(JNIEnv *env, jclass type, jlong window) {
     (void)env;
     (void)type;
-    ANativeWindow_release((void *)(uintptr_t)window);
+    release_surface((void *)(uintptr_t)window);
 }
 
 // Framework popup windows (dialogs, popup menus): ops 9/10 copy straight-alpha
@@ -363,4 +369,30 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_00024EglProbe_check(JNIEnv *env, jclas
 #undef FN
     dlclose(lib);
     return 0;
+}
+JNIEXPORT jlong JNICALL Java_ActivityProbe_00024EglProbe_prepare(JNIEnv *env, jclass type, jobject surface) {
+    return Java_ActivityProbe_prepareSurface(env, type, surface, JNI_TRUE);
+}
+JNIEXPORT void JNICALL Java_ActivityProbe_00024EglProbe_release(JNIEnv *env, jclass type, jlong window) {
+    Java_ActivityProbe_releaseSurface(env, type, window);
+}
+// HWUI's setSurface (android_graphics_HardwareRenderer.cpp): the window
+// comes from libandroid's ANativeWindow_fromSurface and goes back through
+// libnativewindow's ANativeWindow_release.
+JNIEXPORT jint JNICALL Java_ActivityProbe_00024EglProbe_hwuiSurface(JNIEnv *env, jclass type, jobject surface) {
+    (void)type;
+    void *android = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    void *nativewindow = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+    void *(*from)(JNIEnv *, jobject) = android ? (void *(*)(JNIEnv *, jobject))dlsym(android, "ANativeWindow_fromSurface") : NULL;
+    void (*release)(void *) = nativewindow ? (void (*)(void *))dlsym(nativewindow, "ANativeWindow_release") : NULL;
+    void *window = from && release ? from(env, surface) : NULL;
+    if (window) release(window);
+    if (android) dlclose(android);
+    if (nativewindow) dlclose(nativewindow);
+    return window ? 0 : __LINE__;
+}
+// Whether a prepared window still has its host backing (op 17 query).
+JNIEXPORT jboolean JNICALL Java_ActivityProbe_00024EglProbe_attached(JNIEnv *env, jclass type, jlong window) {
+    (void)env; (void)type;
+    return bifrost_window(17, (long)window, 0) > 0;
 }

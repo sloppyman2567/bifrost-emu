@@ -112,11 +112,30 @@ public final class ActivityProbe {
 
     public static final class EglProbe {
         private static native int check();
+        private static native long prepare(android.view.Surface surface);
+        private static native void release(long window);
+        private static native boolean attached(long window);
+        private static native int hwuiSurface(android.view.Surface surface);
         public static void main(String[] args) {
             System.load("/data/local/tmp/libbifrost-activity.so");
             int line = check();
             if (line != 0) throw new AssertionError("EGL contract failed at activity_window.c:" + line);
             System.out.println("ANDROID_EGL_CONTRACT_OK");
+            // HWUI's setSurface takes its window through libandroid's
+            // ANativeWindow_fromSurface and releases it through
+            // libnativewindow. The host layer of a framework window must
+            // still go once its preparation is released.
+            android.media.ImageReader reader = android.media.ImageReader.newInstance(
+                    64, 64, android.graphics.PixelFormat.RGBA_8888, 3);
+            long window = prepare(reader.getSurface());
+            if (window <= 0) throw new AssertionError("surface preparation: " + window);
+            line = hwuiSurface(reader.getSurface());
+            if (line != 0) throw new AssertionError("HWUI window pattern failed at activity_window.c:" + line);
+            if (!attached(window)) throw new AssertionError("host layer released before its window");
+            release(window);
+            if (attached(window)) throw new AssertionError("host layer outlived its window");
+            reader.close();
+            System.out.println("ANDROID_SURFACE_RELEASE_OK");
             System.out.println("FRAMEWORK_OK");
             System.exit(0);
         }

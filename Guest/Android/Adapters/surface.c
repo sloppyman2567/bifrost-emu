@@ -25,6 +25,8 @@ static void *platform_surface(JNIEnv *env, jobject object) {
     return get(env, object);
 }
 void *bifrost_surface_prepare(JNIEnv *env, jobject object);
+void bifrost_surface_release(void *window);
+void ANativeWindow_release(void *window);
 
 void *bifrost_surface_prepare(JNIEnv *env, jobject object) {
     if (!env || !object) return NULL;
@@ -73,26 +75,28 @@ void *bifrost_surface_prepare(JNIEnv *env, jobject object) {
     return bifrost_surface_prepare(env, object);
 }
 
+// Drops the host reference bifrost_surface_prepare took, then its window.
+void bifrost_surface_release(void *window) {
+    if (!shim(window)) window_call(17, (long)window, 2);
+    ANativeWindow_release(window);
+}
+
 // A real Android Surface always yields the image's genuine ANativeWindow.
-// Only managed window preparation attaches it to a host EGL/pixel backing.
+// Only managed window preparation attaches it to a host EGL/pixel backing,
+// owned by that preparation and by EGL surfaces. App references are not
+// mirrored to the host: they also change through libnativewindow and
+// sp<Surface> (HWUI's setSurface releases its fromSurface window there).
 void *ANativeWindow_fromSurface(JNIEnv *env, jobject object) {
     if (!env || !object) return NULL;
-    void *native = platform_surface(env, object);
-    if (native) {
-        long host = window_call(17, (long)native, 0);
-        if (host > 0) window_call(17, (long)native, 1);
-        return native;
-    }
-    return NULL;
+    return platform_surface(env, object);
 }
 void ANativeWindow_acquire(void *window) {
     if (shim(window)) { extern void thunk_ANativeWindow_acquire(void *); thunk_ANativeWindow_acquire(window); return; }
     void (*call)(void *) = bifrost_platform_symbol("ANativeWindow_acquire");
-    call(window); window_call(17, (long)window, 1);
+    call(window);
 }
 void ANativeWindow_release(void *window) {
     if (shim(window)) { extern void thunk_ANativeWindow_release(void *); thunk_ANativeWindow_release(window); return; }
-    window_call(17, (long)window, 2);
     void (*call)(void *) = bifrost_platform_symbol("ANativeWindow_release");
     call(window);
 }

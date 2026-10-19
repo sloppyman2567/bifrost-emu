@@ -83,7 +83,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   ActivityThread's lifecycle order. Hardware-accelerated Activity windows
   draw through their ViewRootImpl's own ThreadedRenderer into a host layer
   (`FrameworkWindows.drawHardware`); each window's SurfaceViews are restacked
-  directly below it (host op 19). Dialogs, menus and dim layers stay
+  directly below it (host op 19). A host surface is owned only by its
+  preparation (released with `bifrost_surface_release`) and its host EGL
+  surfaces. Never mirror app `ANativeWindow` references to it, because HWUI
+  releases its windows through libnativewindow. Dialogs, menus and dim layers stay
   software popup layers above every surface. Only a window's
   `ViewRootImpl.mThread` may touch its views: windows owned by other threads
   (Unity's `UnityMain` dialogs) draw, take input and get SurfaceHolder

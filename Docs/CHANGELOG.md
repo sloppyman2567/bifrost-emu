@@ -13,6 +13,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Hardware window layers after close (2026-10-19)
+
+- A hardware-drawn (HWUI) Android window's host layer now goes away when the
+  window closes. Before, it stayed on screen: closing a rewarded ad in Hungry
+  Shark World left the ad's end card covering the game, which was still
+  running. Host surfaces are now owned only by their framework preparation
+  and EGL surfaces. App `ANativeWindow` references are no longer mirrored,
+  because HWUI releases its window through libnativewindow, which the adapter
+  cannot see.
+
 ### Shared EGL display lifetime (2026-10-18)
 
 - `eglInitialize`/`eglTerminate` are reference-counted per display, as in

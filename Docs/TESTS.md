@@ -4,6 +4,30 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Hardware window layer release (2026-10-19)
+
+`ActivityProbe$EglProbe` prepares an ImageReader surface and replays HWUI's
+`setSurface` window handling. HWUI looks up `ANativeWindow_fromSurface` in
+libandroid and releases the window through libnativewindow. The probe then
+checks that releasing the preparation removes the host backing
+(`ANDROID_SURFACE_RELEASE_OK`). It passes with the fixed adapter and fails
+with the previous one ("host layer outlived its window"). A gdb trace of the
+host refcount during `test_managed_activity_stack` showed every GPU window
+layer reaching zero and hidden only with the fix. Hungry Shark World's
+rewarded ad now returns to gameplay on close (user-confirmed).
+`test_android_package.py` passes 35 of 37. Both failures also occur with the
+previous adapter:
+
+- `test_managed_activity_api_report` still expects
+  `ActivityManager.getAppTasks` to be unsupported.
+- `test_managed_dialog_and_popup_windows` reaches all its markers, then
+  never exits (timeout 124).
+
+```bash
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe build/android-managed-launcher/classes.dex --main-class 'ActivityProbe$EglProbe'
+```
+
 ## Socket interface ioctls (2026-10-17)
 
 `socket_msg_layout` adds `struct ifreq` queries on an `AF_INET` socket:

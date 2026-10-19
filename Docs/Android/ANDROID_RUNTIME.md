@@ -1174,8 +1174,24 @@ and HWUI's
 terminates it when its last hardware window goes. In Hungry Shark World that
 was the ad's window: the host display died under Unity (software-drawn
 Activity, own GL renderer), which then failed every surface call with
-`EGL_NOT_INITIALIZED` and left the ad's last frame on screen. `EglProbe`
-checks that a second user's terminate leaves the display initialized.
+`EGL_NOT_INITIALIZED`. `EglProbe` checks that a second user's terminate
+leaves the display initialized.
+
+A host surface lives while it has owners: the framework's preparation
+(`bifrost_surface_prepare`, released by `bifrost_surface_release` when a
+SurfaceView's surface or a window's HWUI layer goes) and each host EGL surface
+created on it. App `ANativeWindow` references are not mirrored to the host.
+They also change through libnativewindow and `sp<Surface>`, which the libandroid
+adapter never sees. HWUI's
+[setSurface](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/libs/hwui/jni/android_graphics_HardwareRenderer.cpp)
+looks up `ANativeWindow_fromSurface` in libandroid but calls
+`ANativeWindow_release@LIBNATIVEWINDOW`. When the adapter counted the first and
+not the second, every hardware-drawn window's host layer leaked one reference
+and stayed on screen after the window closed. In Hungry Shark World the
+rewarded ad's end card covered Unity, which kept rendering at 60 FPS
+underneath. `EglProbe` replays HWUI's two calls on a prepared surface and
+checks that releasing the preparation removes the host backing
+(`ANDROID_SURFACE_RELEASE_OK`).
 
 ### Input methods (October 11, 2026)
 
