@@ -17,6 +17,9 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
             const SimdDupParams dp = inst.dup_params();
             const int esize = dp.esize ? static_cast<int>(dp.esize) : 8;
             const bool q = dp.q;
+            // The replicate chain's SHL/SHR/OR kill RFLAGS: commit lazy NZCV
+            // first, before src1 is placed in RAX (materializing uses RAX/RCX/RDX).
+            if (esize < 8) clobber_flags();
             auto emit_dup_qword = [&]() {
                 if (esize >= 8) return;
                 clobber_host_reg(RCX);

@@ -13,6 +13,15 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Vector UCVTF rounding and DUP flags (2026-10-19)
+
+- JIT vector `UCVTF` (32-bit lanes) rounds once, as Arm specifies. It
+  converted `x>>1` and `x&1` separately and rounded twice, so some odd inputs
+  came out one ULP low (`0x324500a1` gave `0x4e491402`, not `0x4e491403`).
+- JIT `DUP` (general) of 8/16/32-bit elements commits a preceding
+  comparison's lazy NZCV before its shift chain overwrites the host flags;
+  a following `CSET`/`B.cond` read the wrong condition.
+
 ### TextureView and video frames (2026-10-19)
 
 - Android apps can sample gralloc buffers as GPU textures

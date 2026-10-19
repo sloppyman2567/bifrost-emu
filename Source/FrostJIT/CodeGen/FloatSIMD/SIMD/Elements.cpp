@@ -170,16 +170,19 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
                 case 0:  // SCVTF
                     sse_fp(0x5B, 0, 0);           // cvtdq2ps xmm0, xmm0
                     break;
-                case 1: {  // UCVTF — (float)(x>>1)*2 + (float)(x&1)
-                    emit_mask(1, 0x0000000100000001ULL);
+                case 1: {  // UCVTF — (float)(x>>16)*65536 + (float)(x&0xFFFF)
+                    // Both halves and the power-of-two scale are exact, so the
+                    // add is the only rounding. (x>>1)*2+(x&1) rounded twice:
+                    // 843382945 gave 0x4e491402 instead of 0x4e491403.
                     movdqa(2, 0);
-                    sse2_imm(0x72, 2, 2, 1);      // psrld xmm2, 1
-                    sse_fp(0x5B, 2, 2);           // cvtdq2ps xmm2, xmm2
-                    sse_fp(0x58, 2, 2);           // addps xmm2, xmm2
-                    sse2_op(0xDB, 0, 1);          // pand xmm0, 1
-                    sse_fp(0x5B, 0, 0);           // cvtdq2ps xmm0, xmm0
-                    sse_fp(0x58, 2, 0);           // addps xmm2, xmm0
-                    movdqa(0, 2);
+                    sse2_imm(0x72, 2, 2, 16);     // psrld xmm2, 16
+                    sse_fp(0x5B, 2, 2);           // cvtdq2ps xmm2, xmm2 (exact)
+                    emit_mask(1, 0x4780000047800000ULL);  // 65536.0f
+                    sse_fp(0x59, 2, 1);           // mulps xmm2, xmm1 (exact)
+                    emit_mask(1, 0x0000FFFF0000FFFFULL);
+                    sse2_op(0xDB, 0, 1);          // pand xmm0, 0xFFFF
+                    sse_fp(0x5B, 0, 0);           // cvtdq2ps xmm0, xmm0 (exact)
+                    sse_fp(0x58, 0, 2);           // addps xmm0, xmm2 (one rounding)
                     break;
                 }
                 case 2: {  // FCVTZS — truncate; NaN → 0; ±inf and range saturate

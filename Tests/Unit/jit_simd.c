@@ -109,9 +109,47 @@ static void check_unity_colors(void) {
     CHECK(ok, "unity_rgba_pack");
 }
 
+/* DUP (general) of 8/16/32-bit elements replicates with SHL/SHR/OR, which
+ * kills the host flags still holding a preceding CMP's lazy NZCV. */
+#define DUP_FLAGS_CASE(name, arr) \
+static __attribute__((noinline)) uint64_t name(uint64_t a, uint64_t b, uint64_t v, \
+                                               uint64_t out[2]) { \
+    uint64_t lt; \
+    asm volatile("cmp %1, %2\n dup v0." arr ", %w3\n cset %0, lo\n" \
+                 " st1 {v0.2d}, [%4]" \
+                 : "=&r"(lt) : "r"(a), "r"(b), "r"(v), "r"(out) : "v0", "memory", "cc"); \
+    return lt; \
+}
+DUP_FLAGS_CASE(dup_flags_16b, "16b")
+DUP_FLAGS_CASE(dup_flags_8h, "8h")
+DUP_FLAGS_CASE(dup_flags_4s, "4s")
+
+static void check_dup_flags(void) {
+    static const uint64_t bcast[3] = {
+        0x8181818181818181ULL, 0x8281828182818281ULL, 0x8483828184838281ULL};
+    int ok = 1;
+    for (int repeat = 0; repeat < 64; repeat++)
+        for (int lower = 0; lower < 2; lower++)
+            for (int e = 0; e < 3; e++) {
+                uint64_t out[2] = {0, 0};
+                const uint64_t a = lower ? 1 : 2, v = 0x1234567884838281ULL;
+                const uint64_t lt = e == 0 ? dup_flags_16b(a, 2, v, out)
+                                  : e == 1 ? dup_flags_8h(a, 2, v, out)
+                                           : dup_flags_4s(a, 2, v, out);
+                if (lt != (uint64_t)lower || out[0] != bcast[e] || out[1] != bcast[e]) {
+                    if (ok) printf("dup esize %d lower %d: cset %llu %016llx %016llx\n",
+                                   1 << e, lower, (unsigned long long)lt,
+                                   (unsigned long long)out[0], (unsigned long long)out[1]);
+                    ok = 0;
+                }
+            }
+    CHECK(ok, "dup_keeps_flags");
+}
+
 int main(void) {
     check_logical();
     check_unity_colors();
+    check_dup_flags();
     /* ── Vectorized memset (uses MOVI + ST1) ──────────────────────── */
     /* The compiler should vectorize this loop into NEON stores. */
     static uint8_t buf[64];

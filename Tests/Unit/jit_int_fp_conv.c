@@ -42,6 +42,26 @@ static int fails = 0;
     else      { printf("NG %s\n", tag); fails++; } \
 } while (0)
 
+/* ── Vector UCVTF (u32 lanes → f32), one rounding ─────────────────
+ * The JIT's (float)(x>>1)*2 + (float)(x&1) rounded twice: odd inputs whose
+ * half is a tie came out one ULP low (0x324500a1 gave 0x4e491402). The
+ * expected bits are host round-to-nearest conversions. */
+__attribute__((noinline)) void ucvtf_4s(const uint32_t in[4], uint32_t out[4]) {
+    asm volatile("ld1 {v0.4s}, [%0]\n ucvtf v0.4s, v0.4s\n st1 {v0.4s}, [%1]"
+                 :: "r"(in), "r"(out) : "v0", "memory");
+}
+__attribute__((noinline)) void ucvtf_2s(const uint32_t in[2], uint32_t out[4]) {
+    asm volatile("movi v0.2d, #0xffffffffffffffff\n ld1 {v0.d}[0], [%0]\n"
+                 " ucvtf v0.2s, v0.2s\n st1 {v0.4s}, [%1]"
+                 :: "r"(in), "r"(out) : "v0", "memory");
+}
+static const uint32_t ucvtf_cases[][2] = {
+    {0x324500a1, 0x4e491403}, {0x80000081, 0x4f000001}, {0x80000181, 0x4f000002},
+    {0x01000001, 0x4b800000}, {0x01000003, 0x4b800002}, {0xffffffff, 0x4f800000},
+    {0x7fffffc1, 0x4f000000}, {0x00ffffff, 0x4b7fffff}, {0xfffffe81, 0x4f7fffff},
+    {0x40000041, 0x4e800001},
+};
+
 /* ── SCVTF (signed int → FP) ─────────────────────────────────────── */
 __attribute__((noinline)) float scvtf_w(int32_t i) {
     float f;
@@ -192,6 +212,32 @@ int main(void) {
     CHECK(fcvtzu_x_d(3.14)    == 3u,  "fcvtzu_x_d(3.14)");
     CHECK(fcvtzu_x_d(1e10)    == 10000000000ULL, "fcvtzu_x_d(1e10)");
     CHECK(fcvtzu_x_d(1e19)    == 10000000000000000000ULL, "fcvtzu_x_d(1e19)");
+
+    /* Every case in each lane; the loop warms the block into the JIT. */
+    enum { NCASES = sizeof(ucvtf_cases) / sizeof(ucvtf_cases[0]) };
+    int vector_ok = 1;
+    for (int repeat = 0; repeat < 64; repeat++)
+        for (int c = 0; c < NCASES; c++) {
+            uint32_t in[4], out[4];
+            for (int lane = 0; lane < 4; lane++) in[lane] = ucvtf_cases[(c + lane) % NCASES][0];
+            ucvtf_4s(in, out);
+            for (int lane = 0; lane < 4; lane++)
+                if (out[lane] != ucvtf_cases[(c + lane) % NCASES][1]) {
+                    if (vector_ok) printf("ucvtf 4s %08x -> %08x\n", in[lane], out[lane]);
+                    vector_ok = 0;
+                }
+            ucvtf_2s(in, out);
+            for (int lane = 0; lane < 2; lane++)
+                if (out[lane] != ucvtf_cases[(c + lane) % NCASES][1]) {
+                    if (vector_ok) printf("ucvtf 2s %08x -> %08x\n", in[lane], out[lane]);
+                    vector_ok = 0;
+                }
+            if (out[2] || out[3]) {  // a 64-bit vector result clears the upper half
+                if (vector_ok) printf("ucvtf 2s upper %08x %08x\n", out[2], out[3]);
+                vector_ok = 0;
+            }
+        }
+    CHECK(vector_ok, "ucvtf v.4s/v.2s ties");
 
     /* ── Summary ────────────────────────────────────────────────── */
     if (fails == 0) printf("\nALL TESTS PASSED\n");
