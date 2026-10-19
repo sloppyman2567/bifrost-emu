@@ -6,6 +6,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#include <dlfcn.h>
 
 typedef void *Display;
 typedef void *Surface;
@@ -22,7 +23,7 @@ extern Display eglGetDisplay(void *);
 extern Surface eglCreateWindowSurface(Display, void *, void *, const int *);
 extern unsigned eglQuerySurface(Display, Surface, int, int *);
 
-enum { SUCCESS = 0x3000, BAD_ALLOC = 0x3003, BAD_ATTRIBUTE = 0x3004,
+enum { SUCCESS = 0x3000, BAD_ALLOC = 0x3003, BAD_ATTRIBUTE = 0x3004, BAD_CONTEXT = 0x3006,
        BAD_MATCH = 0x3009, BAD_NATIVE_PIXMAP = 0x300A, BAD_PARAMETER = 0x300C,
        NONE = 0x3038, VERSION = 0x3054, EXTENSIONS = 0x3055 };
 static _Thread_local int error;
@@ -77,7 +78,8 @@ const char *eglQueryString(Display display, int name) {
     pthread_mutex_lock(&mutex);
     struct display_state *s = state(display);
     if (s && !s->extensions) {
-        const char *extra = display ? "EGL_ANDROID_blob_cache EGL_NV_system_time" : "";
+        const char *extra = display ? "EGL_ANDROID_blob_cache EGL_NV_system_time "
+                "EGL_ANDROID_image_native_buffer EGL_ANDROID_get_native_client_buffer" : "";
         s->extensions = malloc(strlen(source) + strlen(extra) + 2);
         if (s->extensions) {
             char *out = s->extensions;
@@ -165,13 +167,74 @@ Surface eglCreatePlatformWindowSurface(Display d, void *config, void *window, co
     if (!attributes(attrs, converted)) { fail(BAD_ATTRIBUTE); return NULL; }
     return eglCreateWindowSurface(d, config, window, converted);
 }
+// EGL_ANDROID_image_native_buffer: an image of an ANativeWindowBuffer holds
+// a reference to it (common.incRef) until the image is destroyed. The host
+// maps its gralloc allocation and backs the image with a host texture.
+struct native_base {
+    int magic, version;
+    void *reserved[4];
+    void (*inc_ref)(struct native_base *);
+    void (*dec_ref)(struct native_base *);
+};
+enum { NATIVE_BUFFER = 0x3140, NATIVE_BUFFER_MAGIC = ('_' << 24) | ('b' << 16) | ('f' << 8) | 'r',
+       NATIVE_BUFFER_VERSION = 112 };  // sizeof(ANativeWindowBuffer) on arm64
+struct native_image { Image image; struct native_base *buffer; struct native_image *next; };
+static struct native_image *native_images;
+static int native_buffer(void *c, void *buffer) {
+    struct native_base *base = buffer;
+    if (c) { fail(BAD_CONTEXT); return 0; }
+    if (!base || base->magic != NATIVE_BUFFER_MAGIC || base->version < NATIVE_BUFFER_VERSION) {
+        fail(BAD_PARAMETER); return 0;
+    }
+    base->inc_ref(base);
+    return 1;
+}
+extern unsigned thunk_eglDestroyImage(Display, Image);
+extern unsigned thunk_eglDestroyImageKHR(Display, Image);
+static Image native_created(Display d, Image image, void *buffer) {
+    struct native_base *base = buffer;
+    struct native_image *entry = image ? malloc(sizeof(*entry)) : NULL;
+    if (!entry) {
+        base->dec_ref(base);
+        if (image) thunk_eglDestroyImageKHR(d, image);
+        fail(image ? BAD_ALLOC : BAD_PARAMETER);
+        return NULL;
+    }
+    pthread_mutex_lock(&mutex);
+    entry->image = image; entry->buffer = base; entry->next = native_images; native_images = entry;
+    pthread_mutex_unlock(&mutex);
+    return image;
+}
+static void native_destroyed(Image image) {
+    pthread_mutex_lock(&mutex);
+    struct native_image **link = &native_images;
+    while (*link && (*link)->image != image) link = &(*link)->next;
+    struct native_image *entry = *link;
+    if (entry) *link = entry->next;
+    pthread_mutex_unlock(&mutex);
+    if (entry) { entry->buffer->dec_ref(entry->buffer); free(entry); }
+}
 Image eglCreateImage(Display d, void *c, unsigned target, void *buffer, const intptr_t *attrs) {
-    if (target == 0x3140 || target == 0x3270 || target == 0x30B0) { fail(BAD_PARAMETER); return NULL; }
-    return thunk_eglCreateImage(d, c, target, buffer, attrs);
+    if (target == 0x3270 || target == 0x30B0) { fail(BAD_PARAMETER); return NULL; }
+    if (target != NATIVE_BUFFER) return thunk_eglCreateImage(d, c, target, buffer, attrs);
+    if (!native_buffer(c, buffer)) return NULL;
+    return native_created(d, thunk_eglCreateImage(d, c, target, buffer, attrs), buffer);
 }
 Image eglCreateImageKHR(Display d, void *c, unsigned target, void *buffer, const int *attrs) {
-    if (target == 0x3140 || target == 0x3270 || target == 0x30B0) { fail(BAD_PARAMETER); return NULL; }
-    return thunk_eglCreateImageKHR(d, c, target, buffer, attrs);
+    if (target == 0x3270 || target == 0x30B0) { fail(BAD_PARAMETER); return NULL; }
+    if (target != NATIVE_BUFFER) return thunk_eglCreateImageKHR(d, c, target, buffer, attrs);
+    if (!native_buffer(c, buffer)) return NULL;
+    return native_created(d, thunk_eglCreateImageKHR(d, c, target, buffer, attrs), buffer);
+}
+unsigned eglDestroyImage(Display d, Image image) {
+    unsigned result = thunk_eglDestroyImage(d, image);
+    if (result) native_destroyed(image);
+    return result;
+}
+unsigned eglDestroyImageKHR(Display d, Image image) {
+    unsigned result = thunk_eglDestroyImageKHR(d, image);
+    if (result) native_destroyed(image);
+    return result;
 }
 // Android-private frame hint (C++ linkage in libEGL; HWUI's EglManager calls
 // it every frame). AOSP eglBeginFrameImpl only validates the display and
@@ -200,7 +263,19 @@ Surface eglCreatePlatformPixmapSurface(Display d, void *c, void *p, const intptr
     (void)d; (void)c; (void)p; (void)a; fail(BAD_NATIVE_PIXMAP); return NULL;
 }
 void *eglCreateNativeClientBufferANDROID(const int *a) { (void)a; fail(BAD_ALLOC); return NULL; }
-void *eglGetNativeClientBufferANDROID(void *a) { (void)a; fail(BAD_PARAMETER); return NULL; }
+// As Android's libEGL: the AHardwareBuffer's ANativeWindowBuffer.
+void *eglGetNativeClientBufferANDROID(const void *buffer) {
+    static void *(*convert)(const void *);
+    if (!convert) {
+        void *library = dlopen("libnativewindow.so", RTLD_NOW);
+        // android::AHardwareBuffer_to_ANativeWindowBuffer(const AHardwareBuffer*)
+        convert = library ? (void *(*)(const void *))dlsym(library,
+                "_ZN7android38AHardwareBuffer_to_ANativeWindowBufferEPK15AHardwareBuffer") : NULL;
+    }
+    void *result = buffer && convert ? convert(buffer) : NULL;
+    if (!result) fail(BAD_PARAMETER);
+    return result;
+}
 int eglDupNativeFenceFDANDROID(Display d, void *s) { (void)d; (void)s; fail(BAD_PARAMETER); return -1; }
 unsigned eglPresentationTimeANDROID(Display d, Surface s, int64_t t) {
     (void)t;
@@ -253,6 +328,8 @@ Proc eglGetProcAddress(const char *name) {
     EGL_WRAPPER(eglCreatePixmapSurface)
     EGL_WRAPPER(eglCreateImage)
     EGL_WRAPPER(eglCreateImageKHR)
+    EGL_WRAPPER(eglDestroyImage)
+    EGL_WRAPPER(eglDestroyImageKHR)
     EGL_WRAPPER(eglCreateNativeClientBufferANDROID)
     EGL_WRAPPER(eglGetNativeClientBufferANDROID)
     EGL_WRAPPER(eglDupNativeFenceFDANDROID)

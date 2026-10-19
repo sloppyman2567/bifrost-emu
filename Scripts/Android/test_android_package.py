@@ -1207,6 +1207,17 @@ class PackageTests(unittest.TestCase):
         self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[0,0\]\[\d+,\d+\] opaque=\w+ text=Managed Fixture")
         frames = int(re.search(r"MANAGED_HARDWARE_WINDOW accelerated=true frames=(\d+)", text).group(1))
         self.assertGreaterEqual(frames, 10, text[-30000:])
+        # A TextureView samples its producer's gralloc buffers as
+        # EGL_NATIVE_BUFFER_ANDROID images: an RGBA canvas frame and an
+        # ImageWriter YUV frame, read back through TextureView.getBitmap.
+        rgba = re.search(r"MANAGED_HARDWARE_TEXTURE_RGBA (\d+),(\d+),(\d+)", text)
+        yuv = re.search(r"MANAGED_HARDWARE_TEXTURE_YUV (\d+),(\d+),(\d+)", text)
+        self.assertTrue(rgba and yuv, text[-30000:])
+        for actual, expected in zip(map(int, rgba.groups()), (200, 40, 90)):
+            self.assertLessEqual(abs(actual - expected), 2, rgba.group(0))
+        # ImageWriter's YUV frames are JFIF: full-range BT.601.
+        for actual, expected in zip(map(int, yuv.groups()), (238, 14, 14)):
+            self.assertLessEqual(abs(actual - expected), 3, yuv.group(0))
 
     def test_managed_play_services_available(self):
         # Google's own client check accepts the provisioned microG packages:

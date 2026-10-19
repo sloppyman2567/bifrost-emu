@@ -49,6 +49,15 @@ AndroidSurfaceManager& AndroidSurfaceManager::instance() {
 }
 
 void AndroidSurfaceManager::set_runner(GuestRunner r) { runner_ = std::move(r); }
+int AndroidSurfaceManager::host_fd(int guest_fd) {
+    FdResolver resolver;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        resolver = fd_resolver_;
+    }
+    return resolver ? resolver(guest_fd) : -1;
+}
+
 void AndroidSurfaceManager::set_fd_resolver(FdResolver r) {
     fd_resolver_ = std::move(r);
 }

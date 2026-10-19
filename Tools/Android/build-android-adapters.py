@@ -289,7 +289,8 @@ def build(runtime, output):
             assembly.write_text(shim(table, exports, hidden))
             wrapper = [str(ROOT / "Guest/Android/Adapters/surface.c"), str(bionic / "libc.so")] if hidden else []
             if soname == "libEGL.so":
-                wrapper = [str(ROOT / "Guest/Android/Adapters/egl.c"), str(bionic / "libc.so")]
+                wrapper = [str(ROOT / "Guest/Android/Adapters/egl.c"), str(bionic / "libc.so"),
+                           str(bionic / "libdl.so")]
             if soname == "libandroid.so":
                 wrapper += [str(ROOT / "Guest/Android/Adapters/managed_looper.c"),
                             str(bionic / "libdl.so"), str(bionic / "libdl_android.so")]

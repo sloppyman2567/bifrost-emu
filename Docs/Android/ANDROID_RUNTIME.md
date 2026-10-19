@@ -303,9 +303,8 @@ libEGL.
 
 Limits: dialogs, popup menus and dim layers remain software layers above all
 surfaces, so a dialog under a later Activity would cover it. Whether WebView
-takes its GPU (draw functor) path in the game is not yet observed, and video
-still needs AHardwareBuffer import (`eglCreateImage` with
-`EGL_NATIVE_BUFFER_ANDROID` is rejected by the adapter).
+takes its GPU (draw functor) path in the game is not yet observed.
+AHardwareBuffer import for TextureView/video is described under the EGL adapter.
 
 ### microG processes, remote providers and service resolution (2026-10-17)
 
@@ -985,9 +984,9 @@ require it to exit before `ANDROID_GRALLOC_PEER_EXIT_OK` in the survivor.
 This completes the allocation/mapping milestone only. Managed `libandroid`
 still needs dispatch between opaque Bifrost windows and real libgui windows,
 including `ANativeWindow_toSurface`; the probe deliberately uses only native
-window entry points that already reach the platform library. EGL native-buffer
-import/external textures, MediaCodec callbacks, video/audio
-decoding and in-game playback remain unfinished. Two full games running
+window entry points that already reach the platform library. MediaCodec
+callbacks, video/audio decoding and in-game playback remained unfinished at
+this point (EGL native-buffer import came later, under the EGL adapter). Two full games running
 concurrently have not been validated.
 
 The normal-JIT untraced Trickcal check on this change (session
@@ -1159,7 +1158,34 @@ callback registration without handing Arm callbacks to a host driver, and
 provides the monotonic NV system clock. Android platform/window entry points
 use the existing owned host display/window connection. Native-buffer allocation,
 native-fence FD export, pixmaps, EGLStreams and presentation timestamps remain
-unsupported and their extensions are not advertised. Symbol coverage is not
+unsupported and their extensions are not advertised.
+
+Native-buffer import is supported (`EGL_ANDROID_image_native_buffer`,
+`EGL_ANDROID_get_native_client_buffer`). HWUI samples a TextureView's
+producer buffers this way
+([AutoBackendTextureRelease](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/libs/hwui/AutoBackendTextureRelease.cpp)
+through Skia's `MakeGLBackendTexture`), as does libgui's `GLConsumer`.
+Before, the adapter rejected `EGL_NATIVE_BUFFER_ANDROID`, Skia returned an
+invalid texture and HWUI aborted. That happened to a Fyber video ad in
+Hungry Shark World (`Invalid GrBackendTexture. Width==1920, height==1080`).
+
+The guest adapter checks the `ANativeWindowBuffer` and holds its reference
+until the image is destroyed. `GraphicThunk/AndroidBufferImages.cpp` maps the
+buffer's gralloc memfd read-only on the host. Each GL context that binds the
+image gets a host texture with a host `EGL_GL_TEXTURE_2D_KHR` image on it.
+Every `glEGLImageTargetTexture2DOES` refreshes that texture from the buffer
+with `glTexSubImage2D`, saving and restoring the unpack and texture state it
+touches. HWUI's update proc and `GLConsumer` rebind once per new frame.
+Guest handles are tagged values, never host pointers.
+
+Formats are RGBA/RGBX/BGRA 8888, RGB888, RGB565 and YUV 4:2:0 (gralloc's
+planar Y, V, U). YUV converts on the CPU with the buffer's dataspace matrix
+and range, as `FrameworkSurfaces` does: BT.709, BT.2020, otherwise BT.601;
+limited range unless the dataspace says full. FP16, 1010102, R8 and protected
+buffers are refused (`EGL_BAD_PARAMETER`, reason under `BIFROST_THUNK_TRACE`).
+`glEGLImageTargetRenderbufferStorageOES` uses the same host image. The image is a copy refreshed at
+bind time, not a live alias: a consumer that samples a rebound buffer
+without rebinding it sees the previous upload. Symbol coverage is not
 EGL conformance. The host-GPU `ActivityProbe$EglProbe` passes registration,
 duplicate/invalid-argument errors, proc-address identity, platform selection,
 clock and terminate/reinitialize checks (`ANDROID_EGL_CONTRACT_OK`). Generated

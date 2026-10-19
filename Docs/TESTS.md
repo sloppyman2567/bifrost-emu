@@ -4,6 +4,24 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## TextureView native-buffer images (2026-10-19)
+
+`test_managed_hardware_canvas` now shows a TextureView. It reads back two
+producer frames through `TextureView.getBitmap`:
+
+- a `lockCanvas` RGBA frame: (200, 40, 90) exactly;
+- an `ImageWriter` YUV_420_888 frame (Y=81, U=90, V=240): (238, 14, 14).
+
+`ImageWriter` tags YUV frames JFIF (libui `PublicFormat.cpp`), so full-range
+BT.601 is the expected result. With the previous adapter HWUI aborted on the
+first frame ("Could not create EGL image, err = (0x300c)", then
+`Invalid GrBackendTexture`), as the Fyber ad did in Hungry Shark World.
+
+The strict JIT suite passes 334/334. `EglProbe` passes. `make generated-check`
+passes. The headless build compiles. `test_android_package.py` passes 35 of
+37, with the same two failures as the checkpoint below. Decoder output
+(Codec2 into a TextureView) and the game's ad were not run.
+
 ## Hardware window layer release (2026-10-19)
 
 `ActivityProbe$EglProbe` prepares an ImageReader surface and replays HWUI's

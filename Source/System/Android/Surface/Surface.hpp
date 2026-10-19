@@ -95,6 +95,8 @@ public:
     void set_memory(arm64emu::Memory* m) { mem_ = m; }
     void set_runner(GuestRunner r);
     void set_fd_resolver(FdResolver r);
+    // The host descriptor behind a guest fd, or -1 (see FdResolver).
+    int host_fd(int guest_fd);
 
     // Backend owns its host window; no SDL pointer crosses this interface.
     bool open_host_window();

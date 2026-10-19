@@ -23,6 +23,11 @@
   successful `eglMakeCurrent`), else the default tracker for SDL/GLFW GL.
   Pointer-vs-buffer-offset decisions, query answers and bind elision must
   use it, never a shared tracker; `gles_contexts` checks this.
+- Android `EGL_NATIVE_BUFFER_ANDROID` images (`AndroidBufferImages`) are
+  tagged guest handles over a read-only host mapping of the gralloc memfd.
+  Each GL context gets its own host texture and EGL image. Refresh with
+  `glTexSubImage2D` (glTexImage2D would orphan the image's storage), and
+  restore every unpack/texture binding touched so the tracker's view holds.
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);
   every soname registration takes one.
 - Preserve stack/FP argument ABI, nested pointer arrays and string returns.

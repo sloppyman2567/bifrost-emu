@@ -46,6 +46,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 #endif
     if (auto handled = dispatch_special_policies_(cpu, entry)) return *handled;
+    if (impl_->mem)
+        if (auto handled = impl_->android_buffer_images.dispatch(cpu, entry, *impl_->mem)) return *handled;
 
     // ── Android surface interception (eglGetDisplay) ─────────────────
     // On a Wayland host, EGL_DEFAULT_DISPLAY must wrap SDL's wl_display —
@@ -1599,7 +1601,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // Select the thread's per-context GL state (see GraphicThunkImpl::tracker).
     if (static_cast<uint32_t>(ret) && entry.name == "eglMakeCurrent") impl_->make_current(args[3]);
-    else if (static_cast<uint32_t>(ret) && entry.name == "eglDestroyContext") impl_->destroy_context(args[1]);
+    else if (static_cast<uint32_t>(ret) && entry.name == "eglDestroyContext") {
+        impl_->destroy_context(args[1]);
+        impl_->android_buffer_images.forget_context(args[1]);
+    }
 
     // The extension count must match the filtered glGetStringi list. args[1]
     // is the host-side result buffer; the writeback below copies it out.

@@ -13,6 +13,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### TextureView and video frames (2026-10-19)
+
+- Android apps can sample gralloc buffers as GPU textures
+  (`EGL_NATIVE_BUFFER_ANDROID` images), which TextureView and SurfaceTexture
+  video use. A Fyber video ad in Hungry Shark World had crashed the game
+  ("Invalid GrBackendTexture"). RGBA and YUV 4:2:0 frames convert with the
+  buffer's color matrix and range.
+
 ### Hardware window layers after close (2026-10-19)
 
 - A hardware-drawn (HWUI) Android window's host layer now goes away when the

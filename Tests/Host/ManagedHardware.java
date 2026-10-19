@@ -69,7 +69,57 @@ public final class ManagedHardware extends Activity {
         main.postDelayed(() -> {
             System.out.println("MANAGED_HARDWARE_WINDOW accelerated=" + label.isHardwareAccelerated()
                     + " frames=" + windowFrames);
-            finish();
+            showTexture();
         }, 500);
+    }
+
+    // A TextureView samples its producer's gralloc buffers through
+    // EGL_NATIVE_BUFFER_ANDROID images (HWUI's DeferredLayerUpdater). First a
+    // CPU canvas frame (RGBA), then an ImageWriter YUV_420_888 frame.
+    private android.view.TextureView texture;
+    private int textureStep;
+
+    private void showTexture() {
+        texture = new android.view.TextureView(this);
+        texture.setSurfaceTextureListener(new android.view.TextureView.SurfaceTextureListener() {
+            public void onSurfaceTextureAvailable(android.graphics.SurfaceTexture st, int width, int height) {
+                android.view.Surface surface = new android.view.Surface(st);
+                Canvas canvas = surface.lockCanvas(null);
+                canvas.drawColor(Color.rgb(200, 40, 90));
+                surface.unlockCanvasAndPost(canvas);
+                surface.release();
+            }
+            public void onSurfaceTextureSizeChanged(android.graphics.SurfaceTexture st, int width, int height) {}
+            public boolean onSurfaceTextureDestroyed(android.graphics.SurfaceTexture st) { return true; }
+            public void onSurfaceTextureUpdated(android.graphics.SurfaceTexture st) {
+                main.post(() -> textureUpdated(st));
+            }
+        });
+        setContentView(texture, new android.view.ViewGroup.LayoutParams(64, 64));
+    }
+
+    private void textureUpdated(android.graphics.SurfaceTexture st) {
+        android.graphics.Bitmap bitmap = texture.getBitmap(64, 64);
+        int pixel = bitmap == null ? 0 : bitmap.getPixel(32, 32);
+        String rgb = Color.red(pixel) + "," + Color.green(pixel) + "," + Color.blue(pixel);
+        if (textureStep++ == 0) {
+            System.out.println("MANAGED_HARDWARE_TEXTURE_RGBA " + rgb);
+            // ImageWriter tags YUV_420_888 as JFIF (libui PublicFormat.cpp):
+            // full-range BT.601 Y=81 U=90 V=240 is (238, 14, 14).
+            android.media.ImageWriter writer = android.media.ImageWriter.newInstance(
+                    new android.view.Surface(st), 1, android.graphics.ImageFormat.YUV_420_888);
+            android.media.Image image = writer.dequeueInputImage();
+            int[] values = {81, 90, 240};
+            for (int p = 0; p < 3; p++) {
+                java.nio.ByteBuffer plane = image.getPlanes()[p].getBuffer();
+                while (plane.hasRemaining()) plane.put((byte) values[p]);
+            }
+            writer.queueInputImage(image);
+            return;
+        }
+        if (textureStep == 2) {
+            System.out.println("MANAGED_HARDWARE_TEXTURE_YUV " + rgb);
+            finish();
+        }
     }
 }
