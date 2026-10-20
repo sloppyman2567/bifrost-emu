@@ -850,6 +850,17 @@ public final class ManagedLauncher {
             if (method.equals("startActivity") || method.equals("startActivityAsUser"))
                 return activities.start(a);
             if (method.equals("getAppTasks")) return activities.appTasks((String) a[0], services);
+            // (caller, target, allowlistToken, fillInIntent, resolvedType,
+            // resultTo, resultWho, requestCode, flagsMask, flagsValues, options)
+            if (method.equals("startActivityIntentSender")) {
+                Intent fill = (Intent) a[3];
+                if (fill != null && fill.hasFileDescriptors())
+                    throw new IllegalArgumentException("File descriptors passed in Intent");
+                if (!(a[1] instanceof android.os.IInterface))
+                    throw new IllegalArgumentException("Bad PendingIntent object");
+                return pendingIntents.startIntentSender(a[1], fill, (String) a[4], (IBinder) a[5],
+                        (String) a[6], (Integer) a[7], (Integer) a[8], (Integer) a[9], (Bundle) a[10]);
+            }
             if (method.equals("registerScreenCaptureObserver")
                     || method.equals("unregisterScreenCaptureObserver")) {
                 if (!packages.granted("android.permission.DETECT_SCREEN_CAPTURE"))

@@ -3,10 +3,13 @@ package org.bifrost.fixture;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.IntentSender;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.view.SurfaceView;
 import android.widget.Button;
 import java.util.Arrays;
@@ -47,6 +50,24 @@ public final class ManagedActivities extends Activity {
                 return;
             }
             System.out.println("MANAGED_ACTIVITIES_PENDING_RETURNED");
+            // An IntentSender of another process (Play services' sign-in UI)
+            // is reported cancelled; this app's own one starts for a result.
+            try {
+                IntentSender foreign = IntentSender.class.getConstructor(IBinder.class).newInstance(new Binder());
+                startIntentSenderForResult(foreign, 45, null, 0, 0, 0);
+                throw new AssertionError("foreign IntentSender started");
+            } catch (IntentSender.SendIntentException expected) {
+                System.out.println("MANAGED_ACTIVITIES_FOREIGN_SENDER_CANCELED");
+            } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+            try {
+                startIntentSenderForResult(android.app.PendingIntent.getActivity(this, 10,
+                        new Intent(this, Translucent.class).putExtra("back", true),
+                        android.app.PendingIntent.FLAG_IMMUTABLE).getIntentSender(), 44, null, 0, 0, 0);
+            } catch (IntentSender.SendIntentException error) { throw new AssertionError(error); }
+            return;
+        }
+        if (returned == 3) {
+            System.out.println("MANAGED_ACTIVITIES_SENDER_RETURNED");
             main.postDelayed(this::finish, 300);
             return;
         }

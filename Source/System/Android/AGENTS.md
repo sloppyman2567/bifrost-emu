@@ -49,7 +49,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   observer notifications consistent. PendingIntent identity excludes extras;
   broadcasts must use the image's ActivityThread receiver signatures and
   protected-action declarations. Keep unsupported cross-process and
-  foreground-service behavior explicit.
+  foreground-service behavior explicit: another process's IntentSender is
+  `START_CANCELED` (callers handle `SendIntentException`), never a silent
+  success or an unsupported-call crash.
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the

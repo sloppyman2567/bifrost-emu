@@ -2304,6 +2304,14 @@ Only explicit components of the installed package resolve. Implicit Intents
 and other packages (browser, Play Store) return `START_INTENT_NOT_RESOLVED`
 and an unknown class `START_CLASS_NOT_FOUND` (Android 15 values -91 and -92),
 so apps receive `ActivityNotFoundException` as on a device without a handler.
+`startActivityIntentSender` (`startIntentSenderForResult`) sends a
+PendingIntent of this process like `PendingIntentRecord.sendInner`: the
+mutable flag override, and a single activity started for the caller's
+`resultTo`/`requestCode`. A sender another process created, such as
+Play services' sign-in UI (Credential Manager in Roblox's login screen, Play
+Games v2's `GamesResolutionActivity` in Azur Lane), returns `START_CANCELED`,
+so the caller gets `IntentSender.SendIntentException` and continues without
+it. Another process's activities cannot be shown yet (see the roadmap).
 The exception is `PackageManager.ACTION_REQUEST_PERMISSIONS` addressed to the
 permission controller, built by `Activity.requestPermissions`
 ([android15-release](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/core/java/android/app/Activity.java)).

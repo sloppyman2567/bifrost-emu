@@ -1321,7 +1321,11 @@ class PackageTests(unittest.TestCase):
                    # Second round: the Back key through the window's view tree.
                    "MANAGED_ACTIVITIES_SECOND_BACK", "MANAGED_ACTIVITIES_RESULT 43 0 null",
                    "MANAGED_ACTIVITIES_ROOT_RESUMED returned=2", "MANAGED_ACTIVITIES_PENDING_CREATED",
-                   "MANAGED_ACTIVITIES_PENDING_RETURNED", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
+                   "MANAGED_ACTIVITIES_PENDING_RETURNED",
+                   # startIntentSenderForResult: a foreign sender is cancelled,
+                   # the app's own one returns its result (Back: cancelled, no data).
+                   "MANAGED_ACTIVITIES_FOREIGN_SENDER_CANCELED", "MANAGED_ACTIVITIES_RESULT 44 0 null",
+                   "MANAGED_ACTIVITIES_SENDER_RETURNED", "MANAGED_ACTIVITIES_ROOT_DESTROYED")
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions), text[-30000:])
         # Only the opaque round stops the root; its window and SurfaceView

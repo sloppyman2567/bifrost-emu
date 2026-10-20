@@ -139,7 +139,8 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
         Record created = new Record(key, a);
         created.sender = services.local("intent_sender", "android.content.IIntentSender", (method, args) -> {
             if (!method.equals("send")) throw new UnsupportedOperationException("intent_sender." + method);
-            send(created, (Integer) args[0], (Intent) args[1], (String) args[2], args[4], (String) args[5], (Bundle) args[6]);
+            send(created, (Integer) args[0], (Intent) args[1], (String) args[2], args[4], (String) args[5], (Bundle) args[6],
+                    null, null, -1, 0, 0);
             return null;
         });
         records.put(key, created); identities.put(((IInterface) created.sender).asBinder(), created);
@@ -154,7 +155,22 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
                 .getMethod("send", int.class, Bundle.class).invoke(listener, 0, null);
     }
 
-    private int send(Record record, int code, Intent fill, String resolvedType, Object finished, String permission, Bundle options) throws Exception {
+    // ActivityTaskManagerService.startActivityIntentSender: sendInner with the
+    // caller's result target. A sender this process did not create (Play
+    // services' sign-in UI) is reported as cancelled: Activity then throws
+    // IntentSender.SendIntentException, which callers handle. Another
+    // process's activities cannot be started here.
+    synchronized int startIntentSender(Object sender, Intent fill, String resolvedType, IBinder resultTo,
+            String resultWho, int requestCode, int flagsMask, int flagsValues, Bundle options) throws Exception {
+        return send(record(sender), 0, fill, resolvedType, null, null, options,
+                resultTo, resultWho, requestCode, flagsMask, flagsValues);
+    }
+
+    // PendingIntentRecord.sendInner. resultTo/resultWho/requestCode and the
+    // flag override come from startActivityIntentSender only.
+    private int send(Record record, int code, Intent fill, String resolvedType, Object finished, String permission,
+            Bundle options, IBinder resultTo, String resultWho, int requestCode, int flagsMask, int flagsValues)
+            throws Exception {
         Intent intent;
         Intent[] intents;
         String[] types;
@@ -163,9 +179,16 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
             if (record == null || record.cancelled) return -96; // START_CANCELED
             if (record.key.type == 3 && !activities.contains(record.key.activity)) { cancel(record); return -96; }
             intent = record.intents == null ? new Intent() : copy(record.intents[record.intents.length - 1]);
-            if ((record.key.flags & PendingIntent.FLAG_IMMUTABLE) == 0 && fill != null) {
-                int changed = intent.fillIn(copy(fill), record.key.flags);
-                if ((changed & Intent.FILL_IN_DATA) == 0) resolvedType = record.key.resolvedType;
+            if ((record.key.flags & PendingIntent.FLAG_IMMUTABLE) == 0) {
+                if (fill != null) {
+                    int changed = intent.fillIn(copy(fill), record.key.flags);
+                    if ((changed & Intent.FILL_IN_DATA) == 0) resolvedType = record.key.resolvedType;
+                } else resolvedType = record.key.resolvedType;
+                // Intent.IMMUTABLE_FLAGS: the URI grant flags.
+                flagsMask &= ~(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                flagsValues &= flagsMask;
+                intent.setFlags((intent.getFlags() & ~flagsMask) | flagsValues);
             } else resolvedType = record.key.resolvedType;
             if ((record.key.flags & PendingIntent.FLAG_ONE_SHOT) != 0) cancel(record);
             intents = record.intents == null ? new Intent[] {intent} : new Intent[record.intents.length];
@@ -181,9 +204,15 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
                 return broadcasts.send(intent, resolvedType, finished, code, null, null,
                         permission == null ? null : new String[] {permission}, null, null, finished != null, false, record.key.user);
             case 2:
-                for (int i = 0; i < intents.length; i++) result = activities.start(new Object[] {null, record.key.owner, record.key.feature,
-                        intents[i], i == intents.length - 1 ? resolvedType : types == null ? null : types[i],
-                        null, null, -1, 0, null, launchOptions});
+                // A single intent starts for the sender's result target, as
+                // startActivityInPackage does; startActivitiesInPackage takes none.
+                for (int i = 0; i < intents.length; i++) {
+                    boolean single = intents.length == 1;
+                    result = activities.start(new Object[] {null, record.key.owner, record.key.feature,
+                            intents[i], i == intents.length - 1 ? resolvedType : types == null ? null : types[i],
+                            single ? resultTo : null, single ? resultWho : null, single ? requestCode : -1, 0, null,
+                            launchOptions});
+                }
                 break;
             case 3: activities.result(record.key.activity, record.key.who, record.key.requestCode, code, intent); break;
             case 4:
@@ -200,7 +229,9 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
         catch (IllegalArgumentException unknown) { throw new UnsupportedOperationException("activity." + method); }
         if (contract == Contract.getIntentSenderWithFeature) return create(a);
         if (contract == Contract.getIntentSender) return create(new Object[] {a[0], a[1], null, a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]});
-        if (contract == Contract.sendIntentSender) return send(record(a[1]), (Integer) a[3], (Intent) a[4], (String) a[5], a[6], (String) a[7], (Bundle) a[8]);
+        if (contract == Contract.sendIntentSender)
+            return send(record(a[1]), (Integer) a[3], (Intent) a[4], (String) a[5], a[6], (String) a[7], (Bundle) a[8],
+                    null, null, -1, 0, 0);
         Record record = record(a[0]);
         switch (contract) {
             case cancelIntentSender: if (record != null) cancel(record); return null;
