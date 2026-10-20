@@ -48,6 +48,12 @@ labels below are historical records.
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
   Found in a Hungry Shark World profile, where the helper held 21% of the samples
   during the post-launch freeze. See the JIT guide.
+- Hardening: the host side of the Google Activity relay no longer follows
+  symlinks in the app's request directory. A malicious app could have made the
+  host copy a host file into the Play services root, truncate a host file through
+  `done`, or take a path for a package name. Reads use `O_NOFOLLOW` on regular
+  files, `done` is replaced rather than written through, and the requesting
+  package must be a package name.
 - Startup: parsed manifests of immutable archives (WebView provider, app,
   microG, platform resources) and the intent filters derived from them are
   cached in the app's root (`FrameworkParseCache`). A fixture app reaches its

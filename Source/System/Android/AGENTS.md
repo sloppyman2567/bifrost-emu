@@ -63,7 +63,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   relayed). A manifest receiver declared for another process runs there through
   `FrameworkProcessRuntime.receiver` (oneway, the process stays cached); keep it
   unordered and keep the component on the delivered Intent. Keep the request path validation and the always-written
-  `result.json` (the guest polls for it). Run `test_managed_google_activity_window`.
+  `result.json` (the guest polls for it). Host code reads and copies
+  guest-writable files only through `android_google.open_regular` (no symlinks,
+  regular files, bounded size) and writes into an app's request directory by
+  replacing, never through, what is there: an app is untrusted. Run `test_managed_google_activity_window`.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

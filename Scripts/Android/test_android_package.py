@@ -571,6 +571,42 @@ class GoogleAccountStateTests(unittest.TestCase):
                              ["--emu", "/emu", "--window-stats", "--binder-broker", "/realm", "--no-jit",
                               "--android-window-plugin", "/plugin.so"])
 
+    def test_activity_relay_never_follows_guest_symlinks(self):
+        # The request directory belongs to the (untrusted) app: a symlink there must not make the
+        # host read a file, truncate one, or take a package name for a path.
+        import json
+        import android_google as google
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            root = state / "org.example.game/managed/rootfs"
+            request = root / "data/user/0/org.example.game/cache/google-activity" / ("c" * 32)
+            request.mkdir(parents=True)
+            secret = state / "host-secret.txt"
+            secret.write_text("host data")
+            for name in google.REQUEST_FILES: (request / name).write_text("{}")
+            relay = google.ActivityRelay(state, root, [])
+            guest = "/data/user/0/org.example.game/cache/google-activity/" + "c" * 32
+            self.assertEqual(relay.request(guest), request.resolve())
+            # A request file that is a symlink is refused, and never copied into the system app's root.
+            (request / "intent.bin").unlink()
+            (request / "intent.bin").symlink_to(secret)
+            with self.assertRaises(ValueError): relay.request(guest)
+            with self.assertRaises(OSError): google.stage_request(state / "gms-root", request)
+            self.assertFalse(((state / "gms-root") / google.ACTIVITY / "intent.bin").exists())
+            # `done` pointing at a host file is replaced, not written through.
+            (request / "done").symlink_to(secret)
+            (state / "gms-root" / google.ACTIVITY).mkdir(parents=True, exist_ok=True)
+            google.finish_request(state / "gms-root", request)
+            self.assertEqual(secret.read_text(), "host data")
+            self.assertTrue(google.is_regular(request / "done"))
+            # A symlinked result file is not read, and the requesting package must be a package name.
+            (request / "nested.json").symlink_to(secret)
+            self.assertFalse(google.is_regular(request / "nested.json"))
+            with self.assertRaises(OSError): google.read_regular(request / "nested.json")
+            (request / "request.json").unlink()
+            (request / "request.json").write_text(json.dumps({"caller": "../../etc/x"}))
+            with self.assertRaises(ValueError): relay.requester(request)
+
     def test_system_app_is_registered_with_microg_identity(self):
         import json
         import android_google as google
