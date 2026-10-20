@@ -39,3 +39,7 @@ quick-exits (terminal restore via `at_quick_exit`). After every exit handler,
 process die by the guest's fatal signal, so parents see a signal death;
 `run()` keeps returning 128+n. Crash handling must use the shared reporter
 and terminate coherently; a worker failure must not leave the main CPU running.
+Every guest run loop (main, worker and SDL threads) turns a synchronous fault
+(`UnmappedMemory`, `DecodeError`) into `force_signal` inside the loop: when a
+guest handler frame is set up the thread keeps running; only an unhandled
+fault ends it.

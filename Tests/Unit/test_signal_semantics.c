@@ -8,6 +8,9 @@
 //      one passed to sigsuspend).
 //   3. Cross-thread delivery: pthread_kill -> tgkill -> per-CPU pending
 //      queue -> per-CPU signal frame stack.
+//   4. Process-directed kill() blocked by every thread stays pending for
+//      the process and reaches another thread's sigtimedwait.
+//   5. A worker thread's SIGILL handler runs and the thread continues.
 //
 // Build: make setup-tests
 // Run:   ./bifrost-emu Tests/Unit/test_signal_semantics.elf
@@ -23,6 +26,7 @@
 #include <stdatomic.h>
 #include <linux/futex.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 
 static volatile sig_atomic_t g_got = 0;
 static void h_simple(int sig) { g_got = sig; }
@@ -267,6 +271,89 @@ static int test_syscall_entry(void) {
     return boundary_hits && !bad_pid && !bad_map && !bad_unmap ? 0 : -3;
 }
 
+// ── 6. process-directed signal that every thread blocks ───────────────
+// kill(getpid()) is process-directed: blocked everywhere, it stays pending
+// for the process (sigpending shows it) until any thread sigwaits for it, as
+// ART's signal catcher does for SIGQUIT. It used to be parked on one thread,
+// where another thread's sigwait never saw it.
+static volatile int pd_spin = 1;
+static void *pd_busy(void *arg) { (void)arg; while (pd_spin) {} return NULL; }
+static void *pd_wait(void *arg) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR2);
+    struct timespec timeout = {2, 0};
+    *(int *)arg = sigtimedwait(&set, NULL, &timeout);
+    return NULL;
+}
+static void *pd_send(void *arg) { (void)arg; kill(getpid(), SIGUSR2); return NULL; }
+
+static int test_process_directed(void) {
+    sigset_t set, orig, pending;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR2);
+    if (pthread_sigmask(SIG_BLOCK, &set, &orig) != 0) return -1;
+    pthread_t busy, waiter, sender;
+    int got = 0, r = 0;
+    if (pthread_create(&busy, NULL, pd_busy, NULL) != 0) return -2;
+    // From the main thread, before anyone waits.
+    kill(getpid(), SIGUSR2);
+    if (sigpending(&pending) != 0 || !sigismember(&pending, SIGUSR2)) r = -3;
+    else if (pthread_create(&waiter, NULL, pd_wait, &got) != 0) r = -4;
+    else {
+        pthread_join(waiter, NULL);
+        if (got != SIGUSR2) r = -5;
+    }
+    // From a sibling while another thread waits.
+    if (r == 0) {
+        got = 0;
+        if (pthread_create(&waiter, NULL, pd_wait, &got) != 0) {
+            r = -6;
+        } else {
+            usleep(50000);
+            if (pthread_create(&sender, NULL, pd_send, NULL) != 0) r = -7;
+            else pthread_join(sender, NULL);
+            pthread_join(waiter, NULL);
+            if (r == 0 && got != SIGUSR2) r = -8;
+        }
+    }
+    pd_spin = 0;
+    pthread_join(busy, NULL);
+    pthread_sigmask(SIG_SETMASK, &orig, NULL);
+    return r;
+}
+
+// ── 7. synchronous SIGILL in a worker thread with a handler ───────────
+// An undecodable instruction in a non-main thread used to end that thread
+// silently once its handler frame was set up (Roblox's crash handler).
+static volatile int ill_handled, ill_resumed;
+static void h_skip_ill(int sig, siginfo_t *info, void *ctx) {
+    (void)sig; (void)info;
+    ((ucontext_t *)ctx)->uc_mcontext.pc += 4;
+    ill_handled++;
+}
+static void *ill_worker(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 3; i++) __asm__ volatile("udf #0");
+    ill_resumed = 1;
+    return NULL;
+}
+
+static int test_thread_sigill(void) {
+    struct sigaction a, old;
+    memset(&a, 0, sizeof a);
+    a.sa_sigaction = h_skip_ill;
+    a.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGILL, &a, &old) != 0) return -1;
+    pthread_t t;
+    if (pthread_create(&t, NULL, ill_worker, NULL) != 0) return -2;
+    pthread_join(t, NULL);
+    sigaction(SIGILL, &old, NULL);
+    if (ill_handled != 3) return -3;
+    if (!ill_resumed) return -4;
+    return 0;
+}
+
 int main(void) {
     alarm(15);
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even if we hang
@@ -283,8 +370,13 @@ int main(void) {
     int r6 = test_blocked_wait(2);
     printf("cross-thread blocked waits: futex=%d read=%d sigsuspend=%d\n", r4, r5, r6);
     int r7 = test_syscall_entry();
-    if (r1 || r2 || r3 || r4 || r5 || r6 || r7) {
-        printf("FAIL (r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d)\n", r1, r2, r3, r4, r5, r6, r7);
+    int r8 = test_process_directed();
+    printf("process-directed sigwait: %s (%d)\n", r8 == 0 ? "ok" : "bad", r8);
+    int r9 = test_thread_sigill();
+    printf("worker SIGILL handler: %s (%d)\n", r9 == 0 ? "ok" : "bad", r9);
+    if (r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9) {
+        printf("FAIL (r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d)\n",
+               r1, r2, r3, r4, r5, r6, r7, r8, r9);
         return 1;
     }
     printf("signal semantics: ALL PASS\n");

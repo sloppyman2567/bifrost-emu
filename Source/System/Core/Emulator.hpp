@@ -167,6 +167,21 @@ public:
     // boundary as drain_host_signals(). This is the fix for the
     // cross-thread CPU-mutation race.
     bool drain_pending_signals(CPU& cpu);
+    // Process-directed signal (a host kill, or kill() of this process), as
+    // Linux complete_signal: `current` takes it unless it blocks it, then any
+    // thread that does not. If every thread blocks it, it stays pending for
+    // the process until a thread unblocks it or sigwaits for it. Returns true
+    // when a handler frame was set up on `current`.
+    bool send_process_signal(CPU& current, int signo);
+    // Process-wide pending set (Linux signal->shared_pending), bit signo-1.
+    uint64_t shared_sigpending() const {
+        return shared_sigpending_.load(std::memory_order_acquire);
+    }
+    // Claims `signo` from the process-wide set; false if another thread did.
+    bool take_shared_signal(int signo) {
+        const uint64_t bit = 1ULL << (signo - 1);
+        return (shared_sigpending_.fetch_and(~bit, std::memory_order_acq_rel) & bit) != 0;
+    }
     // Install host signal handlers for forwarding to the guest.
     void install_host_signal_handlers();
     // Helper for blocking syscalls that returned -EINTR. Drains pending
@@ -710,6 +725,7 @@ private:
         std::atomic<size_t> tail_{0};
     };
     HostSignalQueue host_signal_queue_;
+    std::atomic<uint64_t> shared_sigpending_{0};
     static Emulator* g_active_emu_;  // for host signal handler (single active emu)
     static void host_signal_handler(int signo);
     void queue_host_signal(int signo);

@@ -27,13 +27,17 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 136: { // rt_sigpending(sigset, sigsetsize) — AArch64 136
+            // Blocked signals pending for this thread or the process
+            // (Linux do_sigpending).
+            if (a1 > 8) { ret_err(EINVAL); return 0; }
+            const uint64_t pending =
+                (cpu.sigpending.load() | emu.shared_sigpending()) & cpu.sigmask.load();
             if (a0 != 0) {
                 try {
-                    if (a3 == 4) {
-                        mem_.store<uint32_t>(a0,
-                            static_cast<uint32_t>(cpu.sigpending.load()));
+                    if (a1 == 4) {
+                        mem_.store<uint32_t>(a0, static_cast<uint32_t>(pending));
                     } else {
-                        mem_.store<uint64_t>(a0, cpu.sigpending.load());
+                        mem_.store<uint64_t>(a0, pending);
                     }
                 }
                 catch (...) { ret_err(EFAULT); return 0; }
@@ -101,10 +105,21 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (queued.signo >= 1 && queued.signo <= 64)
                         cpu.sigpending.fetch_or(1ULL << (queued.signo - 1));
                 }
+                // The thread's own pending signals first, then the
+                // process-wide set (Linux dequeue_signal order).
                 const uint64_t ready = cpu.sigpending.load() & wait_set;
+                int signo = 0;
                 if (ready) {
-                    const int signo = __builtin_ctzll(ready) + 1;
+                    signo = __builtin_ctzll(ready) + 1;
                     cpu.sigpending.fetch_and(~(1ULL << (signo - 1)));
+                } else {
+                    for (uint64_t shared = emu.shared_sigpending() & wait_set; shared && !signo;
+                         shared &= shared - 1) {
+                        const int candidate = __builtin_ctzll(shared) + 1;
+                        if (emu.take_shared_signal(candidate)) signo = candidate;
+                    }
+                }
+                if (signo) {
                     finish();
                     try { build_siginfo(mem_, a1, signo, SI_USER_EMU, 0); }
                     catch (...) { ret_err(EFAULT); return 0; }
@@ -116,7 +131,7 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (deliver_pending_signals(emu, cpu, signals_) > 0 ||
                     emu.drain_host_signals(cpu))
                     return 0;
-                if (cpu.sigpending.load() & wait_set) continue;
+                if ((cpu.sigpending.load() | emu.shared_sigpending()) & wait_set) continue;
                 if (!cpu.running) { finish(); return 0; }
                 struct timespec slice = {0, 10 * 1000 * 1000};
                 if (has_deadline) {
@@ -152,7 +167,7 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
             cpu.sigmask = guest_mask & ~((1ULL << (BIFROST_SIGKILL - 1)) |
                                           (1ULL << (BIFROST_SIGSTOP - 1)));
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
-            if (cpu.sigpending.load() != 0) {
+            if ((cpu.sigpending.load() | emu.shared_sigpending()) != 0) {
                 if (deliver_pending_signals(emu, cpu, signals_) > 0)
                     return 0;
             }
@@ -202,7 +217,7 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(cpu.sigpending.load()));
             }
             bool signal_delivered = false;
-            if (r == 0 && cpu.sigpending.load() != 0) {
+            if (r == 0 && (cpu.sigpending.load() | emu.shared_sigpending()) != 0) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(r));
                 if (deliver_pending_signals(emu, cpu, signals_) > 0)
                     signal_delivered = true;
@@ -227,7 +242,7 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.tpidrro_el0 = frame.tpidrro_el0;
                 if (dbg().fault_trace) fault_trace_sigreturn(cpu, frame);
             }
-            if (cpu.sigpending.load() != 0)
+            if ((cpu.sigpending.load() | emu.shared_sigpending()) != 0)
                 deliver_pending_signals(emu, cpu, signals_);
             return 0;
         }

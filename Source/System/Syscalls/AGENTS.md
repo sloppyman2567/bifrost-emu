@@ -22,6 +22,12 @@
   Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and
   `/proc/self/{stat,status}` must agree with it; a leader's TID equals its
   PID, including after execve.
+- Host-forwarded signals and `kill` of the own process are process-directed:
+  route them through `Emulator::send_process_signal` (Linux
+  `complete_signal`), never to whichever thread drained them. A signal every
+  thread blocks stays in the process-wide set, which `rt_sigtimedwait`,
+  `rt_sigpending`, unblocking and pending delivery also consult; ART's
+  SIGQUIT thread dump depends on it. tkill/tgkill stay thread-directed.
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
 - JIT invalidation calls name their `CodeInvalidation` reason. Only cache

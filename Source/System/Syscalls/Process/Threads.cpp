@@ -1257,24 +1257,9 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             if (pid == 1 && self != 1) { ret_err(EPERM); return 0; }
             if (pid == self || pid == 0 || pid < 0 ||
                 pid == static_cast<int>(::getpid())) {
-                // Self-process: deliver to the main thread (TID 1) or
-                // the caller if it's the main thread.
-                if (cpu.tid == emu.main_cpu().tid) {
-                    deliver_signal(emu, cpu, signals_, sig);
-                } else {
-                    // Cross-thread: queue on main thread's pending queue
-                    // (see tgkill above for rationale).
-                    auto main = emu.find_cpu_by_tid(emu.main_cpu().tid);
-                    if (main && signal_kills_process(emu, *main, sig)) {
-                        emu.signal_exit(cpu, sig);
-                    } else if (main) {
-                        if (!main->push_pending(sig, SI_USER_EMU, 0)) {
-                            main->sigpending.fetch_or(1ULL << (sig - 1));
-                        }
-                        if (!(main->sigmask.load() & (1ULL << (sig - 1))))
-                            emu.kick_cpu_wait(*main);
-                    }
-                }
+                // Self-process: process-directed, so the caller, another
+                // thread not blocking it, or the process-wide pending set.
+                emu.send_process_signal(cpu, sig);
             } else {
                 // Other process — forward to host kill() so the target
                 // (a forked child process) receives the signal via its

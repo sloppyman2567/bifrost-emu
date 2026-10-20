@@ -121,6 +121,32 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                                  mod.empty() ? nullptr : mod.c_str(), off);
                     break;
                 }
+            } catch (DecodeError& e) {
+                // Also synchronous: a NULL/zero-page call is SIGSEGV, any
+                // other undecodable instruction SIGILL. With a handler the
+                // thread keeps running, as the main loop does.
+                if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());
+                const uint64_t fault_pc = cpu.pc;
+                const int signo = fault_pc < 4096 ? BIFROST_SIGSEGV : BIFROST_SIGILL;
+                const int si_code = fault_pc < 4096 ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
+                if (!force_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
+                    // The default disposition already ended the process.
+                    std::string mod;
+                    uint64_t off = 0;
+                    try {
+                        if (auto* dl = emu->dyn_linker()) {
+                            if (const LoadedObject* obj = dl->find_object_by_addr(fault_pc)) {
+                                mod = obj->name;
+                                off = fault_pc - obj->base_addr;
+                            }
+                        }
+                    } catch (...) {}
+                    report_crash(cpu, emu->mem(),
+                                 signo == BIFROST_SIGSEGV ? "thread sigsegv null pc"
+                                                          : "thread sigill illegal inst",
+                                 fault_pc, nullptr, mod.empty() ? nullptr : mod.c_str(), off);
+                    break;
+                }
             }
             count++;
             // Same-PC hang watchdog.
@@ -169,36 +195,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                     break;
                 }
             }
-        }
-    } catch (DecodeError& e) {
-        if (dbg().crash_dump) fprintf(stderr, "[decode] %s\n", e.what());
-        // calls and illegal instructions in worker threads, matching the
-        // main-thread behavior (see Emulator.cpp's DecodeError handler).
-        // pc < 4096 = NULL deref / zero page → SIGSEGV.
-        // Otherwise = illegal instruction → SIGILL.
-        uint64_t fault_pc = cpu.pc;
-        int signo = (fault_pc < 4096) ? BIFROST_SIGSEGV : BIFROST_SIGILL;
-        int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
-        if (!force_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
-            // No handler installed — default disposition terminates the
-            // process: deliver_signal already called group_exit with
-            // 128+signo. throw site is quiet by default, so this is the
-            // crash line.
-            std::string mod;
-            uint64_t off = 0;
-            try {
-                if (auto* dl = emu->dyn_linker()) {
-                    if (const LoadedObject* obj = dl->find_object_by_addr(fault_pc)) {
-                        mod = obj->name;
-                        off = fault_pc - obj->base_addr;
-                    }
-                }
-            } catch (...) {}
-            report_crash(cpu, emu->mem(),
-                         (signo == BIFROST_SIGSEGV) ? "thread sigsegv null pc"
-                                                    : "thread sigill illegal inst",
-                         fault_pc, nullptr,
-                         mod.empty() ? nullptr : mod.c_str(), off);
         }
     } catch (const std::exception& e) {
         fprintf(stderr, "[%s] thread %d: exception: %s\n",
@@ -861,6 +857,10 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         int child_tid = static_cast<int>(getpid());
         parent_cpu.tid = child_tid;
         parent_cpu.is_fork_process = true;  // getpid() returns host PID, not 1
+        // fork(2): the child starts with no pending signals.
+        parent_cpu.sigpending.store(0);
+        parent_cpu.pending_head.store(parent_cpu.pending_tail.load());
+        shared_sigpending_.store(0);
         vfs_.set_self_pid(child_tid);
         mem_.uffd_drop_registrations();
         if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
@@ -977,8 +977,25 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
         // sentinel instead of the helper's original LR.
         cpu.jit_stop_pc = SENTINEL_LR;
         while (cpu.running && cpu.pc != SENTINEL_LR) {
-            if (emu->jit_) emu->jit_->run_block(cpu, *emu);
-            else emu->step(cpu);
+            try {
+                if (emu->jit_) emu->jit_->run_block(cpu, *emu);
+                else emu->step(cpu);
+            } catch (DecodeError&) {
+                // Synchronous SIGSEGV (zero-page call) or SIGILL; with a
+                // handler the thread keeps running.
+                const uint64_t fault_pc = cpu.pc;
+                const int signo = fault_pc < 4096 ? BIFROST_SIGSEGV : BIFROST_SIGILL;
+                const int si_code = fault_pc < 4096 ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
+                if (!force_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
+                    fprintf(stderr,
+                        "[%s] SDL thread 0x%llx: %s at pc=0x%llx (no handler — terminating)\n",
+                        CODENAME, static_cast<unsigned long long>(st->handle_addr),
+                        signo == BIFROST_SIGSEGV ? "SIGSEGV (NULL deref)"
+                                                 : "SIGILL (illegal instruction)",
+                        static_cast<unsigned long long>(fault_pc));
+                    break;
+                }
+            }
             count++;
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);
@@ -992,18 +1009,6 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
         // The thread function's return value is in x0/w0 (AArch64 ABI:
         // SDL_ThreadFunction returns int). Read it as the exit code.
         exit_code = static_cast<int32_t>(cpu.regs[0] & 0xFFFFFFFF);
-    } catch (DecodeError& e) {
-        uint64_t fault_pc = cpu.pc;
-        int signo = (fault_pc < 4096) ? BIFROST_SIGSEGV : BIFROST_SIGILL;
-        int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
-        if (!force_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
-            fprintf(stderr,
-                "[%s] SDL thread 0x%llx: %s at pc=0x%llx (no handler — terminating)\n",
-                CODENAME, static_cast<unsigned long long>(st->handle_addr),
-                (signo == BIFROST_SIGSEGV) ? "SIGSEGV (NULL deref)"
-                                            : "SIGILL (illegal instruction)",
-                static_cast<unsigned long long>(fault_pc));
-        }
     } catch (const std::exception& e) {
         fprintf(stderr, "[%s] SDL thread 0x%llx: exception: %s "
                 "pc=0x%llx sp=0x%llx lr=0x%llx\n",

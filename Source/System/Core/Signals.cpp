@@ -773,6 +773,15 @@ int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
         deliver_signal(emu, cpu, sigtab, signo);
         return 1;  // one at a time — handler modified cpu.pc
     }
+    // Then process-directed signals that every thread blocked when sent.
+    uint64_t shared = emu.shared_sigpending() & ~cpu.sigmask.load();
+    while (shared) {
+        const int signo = __builtin_ctzll(shared) + 1;
+        shared &= shared - 1;
+        if (!emu.take_shared_signal(signo)) continue;  // another thread took it
+        deliver_signal(emu, cpu, sigtab, signo);
+        return 1;
+    }
     return 0;
 }
 // ── Host-to-guest signal forwarding ───────────────────────────────────
@@ -993,7 +1002,9 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         if (sig == BIFROST_SIGINT && act && act->handler == 1) {
             cpu.sigint_ignored = true;
         }
-        if (deliver_signal(*this, cpu, signals_, sig)) {
+        // A host kill is process-directed: the draining thread may block
+        // it while another thread, or a sigwait, should receive it.
+        if (send_process_signal(cpu, sig)) {
             any_delivered = true;
             // Handler frame set up, pc changed — stop here and let the
             // handler run. Further queued signals wait for the next
@@ -1002,6 +1013,35 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         }
     }
     return any_delivered;
+}
+bool Emulator::send_process_signal(CPU& current, int signo) {
+    if (!SignalTable::is_blocked(current, signo) || is_uncatchable(signo))
+        return deliver_signal(*this, current, signals_, signo);
+    std::shared_ptr<CPU> target;
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        if (&current != &main_cpu_ && main_cpu_.running &&
+            !SignalTable::is_blocked(main_cpu_, signo))
+            target = std::shared_ptr<CPU>(&main_cpu_, [](CPU*) {});
+        for (auto& gt : threads_) {
+            if (target) break;
+            if (gt && &gt->cpu != &current && gt->cpu.running &&
+                !SignalTable::is_blocked(gt->cpu, signo))
+                target = std::shared_ptr<CPU>(gt, &gt->cpu);
+        }
+    }
+    if (!target) {
+        shared_sigpending_.fetch_or(sig_bit(signo), std::memory_order_acq_rel);
+        return false;
+    }
+    if (signal_kills_process(*this, *target, signo)) {
+        signal_exit(current, signo);
+        return false;
+    }
+    if (!target->push_pending(signo, SI_USER_EMU, 0))
+        target->sigpending.fetch_or(sig_bit(signo));
+    kick_cpu_wait(*target);
+    return false;
 }
 // ── handle_eintr ───────────────────────────────────────────────────────
 // Called by blocking syscall handlers after a host syscall returns -EINTR.
@@ -1064,6 +1104,8 @@ bool Emulator::drain_pending_signals(CPU& cpu) {
             break;
         }
     }
+    if (!any_delivered && (shared_sigpending() & ~cpu.sigmask.load()))
+        any_delivered = deliver_pending_signals(*this, cpu, signals_) > 0;
     return any_delivered;
 }
 } // namespace arm64emu
