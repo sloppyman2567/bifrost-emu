@@ -1415,6 +1415,7 @@ public final class ManagedLauncher {
     // Popup windows (FrameworkWindows) above the Activity receive input first.
     private static void dispatch(Activity activity, long[] e) throws Exception {
         final long ms = 1000000;
+        if (e[0] == 1 || e[0] == 2 || e[0] == 0x100) activities.userInput();
         if (e[0] == 0x100) {  // host text input: committed text or the composition in progress
             byte[] bytes = new byte[(int) Math.max(0, Math.min(e[13], 255))];
             for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) (e[14 + i / 8] >>> (8 * (i % 8)));
@@ -1490,10 +1491,12 @@ public final class ManagedLauncher {
         Handler handler = new Handler(Looper.getMainLooper());
         long[] event = new long[55];
         int[] size = {width, height};
+        final FrameworkStallWatch stall = FrameworkStallWatch.start();
         handler.post(new Runnable() {
             @Override
             public void run() {
                 try {
+                    stall.beat();
                     syncTextInput(size[0], size[1]);
                     for (int i = 0; i < 64; i++) {
                         int error = pollWindow(event);

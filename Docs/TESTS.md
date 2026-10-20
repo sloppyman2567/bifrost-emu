@@ -48,6 +48,19 @@ results. Passing fixtures do not establish untested application behavior.
   (the change is JIT-only). `test_sandbox_in_root` failed once when run with the
   three SIMD tests in one invocation and passed alone with the same binary,
   before and after, so it was not attributed to this change.
+- `FrameworkStallWatch` (stall reports) compiles into the launcher and one
+  220 s Hungry Shark session ran with it, the web-link code and the Settings
+  no-op without a new error; no stall happened in that run, so no report was
+  produced and the stall reports are unverified. A fixture that blocks the main
+  thread would verify them but opens a window.
+- `BrowserLinkTests` (no emulator): the host opens only well-formed http(s) links
+  (`javascript:`, `file:`, `intent:`, option-like, whitespace, control characters,
+  oversize and non-string values are refused), one per interval, with a fake
+  launcher, and a missing `xdg-open` is a clear error. The guest side (the
+  5-second input window, `market://` mapping, a real browser opening) is not
+  automated; the guest build compiles, and the live check is the user's. The
+  Settings no-op (`START_ABORTED`, checked against Android 15's
+  `Instrumentation.checkStartActivityResult`) is also untried live.
 - `GoogleAccountStateTests.test_activity_relay_never_follows_guest_symlinks` (no
   emulator): a symlinked request file is refused and not staged, a symlinked
   `done` is replaced and its target left intact, a symlinked result file is not

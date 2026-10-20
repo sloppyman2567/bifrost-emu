@@ -36,6 +36,8 @@ final class FrameworkActivities {
     private static final int START_SUCCESS = 0;
     private static final int START_INTENT_NOT_RESOLVED = -91;
     private static final int START_CLASS_NOT_FOUND = -92;
+    // Non-fatal (Instrumentation.checkStartActivityResult returns): the system declined the start.
+    private static final int START_ABORTED = 102;
     // PackageManager permission-request @SystemApi strings (Android 15).
     private static final String ACTION_REQUEST_PERMISSIONS = "android.content.pm.action.REQUEST_PERMISSIONS";
     private static final String EXTRA_REQUEST_PERMISSIONS_NAMES =
@@ -63,6 +65,13 @@ final class FrameworkActivities {
             this.resultWho = resultWho; this.requestCode = requestCode;
         }
     }
+
+    // A link opens in the host browser only just after the user pressed or
+    // touched the window, as Android allows a start from the foreground only
+    // in response to input: an ad must not open tabs on its own.
+    private static final long BROWSER_INPUT_WINDOW_MS = 5000;
+    private volatile long lastInput = -BROWSER_INPUT_WINDOW_MS - 1;
+    void userInput() { lastInput = android.os.SystemClock.elapsedRealtime(); }
 
     private final Map<IBinder, Integer> orientations;
     private final FrameworkDisplay displays;
@@ -133,12 +142,31 @@ final class FrameworkActivities {
             postGrantResult(names, resultTo, resultWho, requestCode, 0);
             return START_SUCCESS;
         }
+        // Play services' own screens (microG's account menu) start the platform
+        // Settings app, which is not provisioned. A device always has one, so the
+        // package does not catch ActivityNotFoundException: the start is
+        // declined (logged, ActivityManager.START_ABORTED) instead of ending the session.
+        if (component == null && FrameworkRemoteActivities.PACKAGE.equals(application.getPackageName())
+                && intent.getAction() != null && intent.getAction().startsWith("android.settings.")) {
+            System.out.println("APP_ACTIVITY_SETTINGS_UNAVAILABLE " + intent.getAction());
+            return START_ABORTED;
+        }
         // Play services' Activities run in a window of their own.
         ActivityInfo system = remote.resolve(intent);
         if (system != null) {
             Record caller = resultTo == null ? null : find(resultTo);
             ComponentName calling = caller != null ? caller.activity.getComponentName() : root().getComponentName();
             return remote.start(system, intent, calling, resultTo, resultWho, requestCode);
+        }
+        String link = component == null ? browserLink(intent) : null;
+        if (link != null && android.os.SystemClock.elapsedRealtime() - lastInput <= BROWSER_INPUT_WINDOW_MS) {
+            try {
+                FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "open_url").put("url", link));
+                System.out.println("APP_ACTIVITY_BROWSER " + link);
+                return START_SUCCESS;
+            } catch (Exception refused) {
+                System.out.println("APP_ACTIVITY_BROWSER_REFUSED " + refused.getMessage());
+            }
         }
         if (component == null) {
             // Intent-filter resolution and other packages (browser, store)
@@ -169,6 +197,23 @@ final class FrameworkActivities {
             }
         });
         return START_SUCCESS;
+    }
+
+    // The web page an ACTION_VIEW Intent asks for, or null: an http(s) URL for
+    // the default browser (or Chrome by name), and the Play Store's web page
+    // for a market: link or a Play URL addressed to the store. Intents that
+    // name another app's package are left unresolved so apps fall back as they
+    // do on a device without that app.
+    private static String browserLink(Intent intent) {
+        android.net.Uri data = intent.getData();
+        if (!Intent.ACTION_VIEW.equals(intent.getAction()) || data == null || data.getScheme() == null) return null;
+        String scheme = data.getScheme().toLowerCase(java.util.Locale.ROOT), pkg = intent.getPackage();
+        boolean store = "com.android.vending".equals(pkg);
+        if (pkg != null && !store && !"com.android.chrome".equals(pkg)) return null;
+        if (scheme.equals("http") || scheme.equals("https")) return data.toString();
+        if (scheme.equals("market") && data.getQueryParameter("id") != null)
+            return "https://play.google.com/store/apps/details?id=" + android.net.Uri.encode(data.getQueryParameter("id"));
+        return null;
     }
 
     // GrantPermissionsActivity: RESULT_OK with each requested name and its

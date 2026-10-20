@@ -79,6 +79,14 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   archive parse there; never cache an archive that can change under the same
   path, size and modification time. Run
   `test_managed_parse_cache_skips_manifest_parsing`.
+- `FrameworkStallWatch` reads the main thread's stack from a daemon thread
+  (no process-wide suspension) and stays bounded; keep any new diagnostic of
+  that kind cheap and rate-limited rather than spamming the log.
+- Web links an app starts open in the host browser only through
+  `FrameworkActivities.browserLink` and `android_processes.open_url`: http(s)
+  only, within 5 s of host input, one per second, never a shell. Anything else
+  stays `START_INTENT_NOT_RESOLVED`; keep apps' fallbacks working. Another app's
+  package in the Intent is never mapped to the browser.
 - Settings defaults are generated from pinned AOSP inputs with
   `Tools/Android/generate-settings-defaults.py`; regenerate rather than edit
   `FrameworkSettingsDefaults.java`. Preserve System overrides through runtime

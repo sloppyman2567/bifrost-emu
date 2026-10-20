@@ -477,6 +477,37 @@ class SurfaceIdentityTests(unittest.TestCase):
                 self.assertIn("android_surface_identity: checks passed", result.stdout)
 
 
+class BrowserLinkTests(unittest.TestCase):
+    def test_host_opens_only_well_formed_web_links_at_a_limited_rate(self):
+        import android_processes as processes
+        calls, now = [], [100.0]
+        def popen(command, **options): calls.append((command, options))
+        def opener(url, last=None):
+            return processes.open_url(url, last if last is not None else self.last, opener="/usr/bin/xdg-open",
+                                      popen=popen, clock=lambda: now[0])
+        self.last = [-processes.OPEN_INTERVAL]
+        self.assertEqual(opener("https://example.test/a?b=c#d"), dict(opened=True))
+        self.assertEqual(calls[0][0], ["/usr/bin/xdg-open", "https://example.test/a?b=c#d"])
+        self.assertTrue(calls[0][1]["start_new_session"])
+        # No scheme but http(s), no option-looking or control characters, no oversize link, no non-strings.
+        for bad in ("javascript:alert(1)", "file:///etc/passwd", "intent://x#Intent;end", "-c calc", "ftp://example.test/",
+                    "https://example.test/ with space", "https://example.test/\nHeader: 1", "https://" + "a" * 2100,
+                    "http://", "", None, 7):
+            now[0] += 5
+            with self.assertRaises(ValueError, msg=repr(bad)): opener(bad)
+        # One link per interval; the clock moving on allows the next.
+        now[0] += 5
+        opener("https://example.test/1")
+        with self.assertRaises(RuntimeError): opener("https://example.test/2")
+        now[0] += processes.OPEN_INTERVAL
+        opener("https://example.test/2")
+        self.assertEqual(len(calls), 3)
+        # No launcher installed: a clear error, not a crash.
+        now[0] += 5
+        with self.assertRaises(RuntimeError):
+            processes.open_url("https://example.test/", [-5.0], popen=popen, clock=lambda: now[0], which=lambda name: None)
+
+
 class GoogleAccountStateTests(unittest.TestCase):
     ACCOUNT = {"version": 1, "revision": 1, "accounts": [
         {"name": "user@example.test", "type": "com.google", "password": "master", "previous": None,

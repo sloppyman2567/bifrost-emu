@@ -2466,6 +2466,9 @@ waiting for the ad.
 Only explicit components of the installed package resolve, plus Play services'
 Activities, which open in a window of their own (see
 [Google accounts and sign-in](#google-accounts-and-sign-in-2026-10-20)).
+A web link, and a Play Store link, opens in the host's default browser when the
+user pressed or touched the window in the last 5 seconds (see
+[web links](#web-links-and-play-store-links-2026-10-20)).
 Other implicit Intents and other packages (browser, Play Store) return `START_INTENT_NOT_RESOLVED`
 and an unknown class `START_CLASS_NOT_FOUND` (Android 15 values -91 and -92),
 so apps receive `ActivityNotFoundException` as on a device without a handler.
@@ -2953,6 +2956,51 @@ libsensor to query static/dynamic lists and default accelerometer/gyroscope.
 enabled. This verifies that native clients discover the service, rather than
 only finding a Java service-cache entry. See [test evidence](../TESTS.md#native-sensor-service-follow-up-2026-10-07).
 
+
+## Web links and Play Store links (2026-10-20)
+
+Across the saved game sessions the Intents nothing handled were almost all
+links: privacy policies and terms (`https://`), ad clicks, `market://details`
+and `play.google.com` install links. `FrameworkActivities.start` now sends an
+`ACTION_VIEW` with an http(s) URL (no component, no package, or `com.android.chrome`)
+to the host: a `market://details?id=` link, or a Play URL addressed to
+`com.android.vending`, opens the store's web page. The request goes through the
+session supervisor (`open_url` operation) to `xdg-open`, which starts the user's
+default browser.
+
+- **Only after input.** The launcher records the last key, touch or text event
+  (`FrameworkActivities.userInput`); a link opens only within 5 s of one, the way
+  Android allows a foreground start in response to input. An ad or SDK that
+  fires a link on its own gets the old result, `START_INTENT_NOT_RESOLVED`.
+  So does a refusal by the host, which is also what an app sees on a device with no browser.
+- **The host does not trust the guest.** `android_processes.open_url` accepts
+  only a well-formed `http://` or `https://` URL of up to 2000 printable
+  characters (never an option, `file:`, `javascript:` or `intent:` link), at most
+  one per second, passes it as one argument without a shell, and needs `xdg-open`.
+- **Intents that name another app** (`com.facebook.katana`, ...) stay unresolved
+  so apps fall back as they do without that app.
+
+Checked: `BrowserLinkTests` (the host rules, with a fake launcher). Not
+automated: the guest side and a real browser opening; the existing
+`MANAGED_ACTIVITIES_UNRESOLVED_OK` check still covers the no-input case.
+
+## Main-thread stall reports (2026-10-20)
+
+A Hungry Shark World profile showed a 6 s `Choreographer: Skipped 360 frames`
+with the main thread at 100% CPU (about 500 samples/s against 50-200 normally),
+no compile work and no log lines: guest code running on the UI thread. `perf`
+cannot name guest code, and ART's SIGQUIT dump takes about 4.4 s and suspends the
+process (the one dump taken during a pinned stretch was cut off by the session
+timeout). `FrameworkStallWatch` is a daemon thread that sees whether the launcher's
+UI loop has beaten in the last 250 ms steps; after 1.5 s of silence it prints
+`APP_MAIN_STALL <ms>ms at <top 14 Java frames>` once a second, then
+`APP_MAIN_STALL_END`, at most 60 reports per session. Reading one thread's stack
+does not suspend the others, so it can stay on. Read a stall after the fact with
+`grep APP_MAIN_STALL` in the session log. It shows Java frames only: a stall in
+native code ends in the JNI method that called it.
+
+Not yet seen in a real stall; the compile and one full session with it
+present are all that is checked.
 
 ## Startup: parsed-package cache (2026-10-20)
 

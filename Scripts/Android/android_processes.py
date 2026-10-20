@@ -3,6 +3,8 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import secrets
 import signal
 import socket
@@ -13,12 +15,37 @@ import threading
 import time
 
 
+URL = re.compile(r'https?://[^\s\x00-\x1f\x7f]{1,2000}\Z')
+OPEN_INTERVAL = 1.0
+
+
+def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotonic, which=shutil.which):
+    """Open an http(s) link from a guest app in the host's default browser.
+
+    The app is untrusted: only well-formed http/https URLs (never an option, file, javascript or
+    other scheme) are opened, at most one per OPEN_INTERVAL. `last` is a one-item list holding the
+    previous time. Returns the response for the guest."""
+    if not isinstance(url, str) or not URL.match(url):
+        raise ValueError('Only http and https links open in the host browser')
+    now = clock()
+    if now - last[0] < OPEN_INTERVAL:
+        raise RuntimeError('Links open too quickly')
+    program = opener or which('xdg-open')
+    if program is None:
+        raise RuntimeError('No host browser launcher (xdg-open) is installed')
+    last[0] = now
+    popen([program, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL, start_new_session=True)
+    return dict(opened=True)
+
+
 class ProcessHost:
     def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None,
                  activities=None):
         self.root, self.emu = Path(root), str(emu)
         # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
         self.activities = activities
+        self.last_url = [-OPEN_INTERVAL]
         self.emu_args, self.environment = list(emu_args), dict(environment)
         self.dex, self.logs = dex, Path(logs)
         self.art_options = list(art_options)
@@ -172,6 +199,8 @@ class ProcessHost:
                 if self.activities is None:
                     raise ValueError('Activities of other packages are unavailable')
                 response = self.activities.start(request['directory'])
+            elif request['operation'] == 'open_url':
+                response = open_url(request['url'], self.last_url)
             elif request['operation'] == 'stop':
                 with self.lock:
                     child = self.children.get(request['key'])

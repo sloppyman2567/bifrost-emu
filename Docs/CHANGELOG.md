@@ -48,6 +48,15 @@ labels below are historical records.
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
   Found in a Hungry Shark World profile, where the helper held 21% of the samples
   during the post-launch freeze. See the JIT guide.
+- Main-thread stall reports: when the UI loop stops for 1.5 s the session log
+  gets `APP_MAIN_STALL` lines with the main thread's Java stack, once a second,
+  so a hitch can be traced to its code afterwards. Always on, bounded.
+- Web links (`https://`, `market://`, Play URLs) that an app starts now open in
+  your default browser when you pressed or touched the game window in the last 5
+  seconds; otherwise they are unresolved as before, so ads cannot open tabs on
+  their own. The host accepts only plain http(s) URLs, one per second, through
+  `xdg-open`. Also, microG's "Sync settings" request for the platform Settings
+  app no longer ends the session (the start is declined, `START_ABORTED`).
 - Hardening: the host side of the Google Activity relay no longer follows
   symlinks in the app's request directory. A malicious app could have made the
   host copy a host file into the Play services root, truncate a host file through
