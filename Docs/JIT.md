@@ -15,6 +15,42 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Inline widening SIMD (2026-10-20)
+
+A `perf` capture of Hungry Shark World (user-space sampling, 499 Hz, one run)
+put 8.6% of the first 14 s of samples in `run<NativeSimdKind 24>`: the
+`WidenThree` helper, one C++ call per instruction. In a 190 s run it was 1.7%
+overall but about 21% of the 5-10 s bucket, which lines up with the game's 3.6 s
+freeze after the first window (214 frames skipped at 10.3 s). `WidenThree`
+and `PairLong` now have inline bodies in `NativeSIMDInline.cpp`:
+
+- `WidenThree`: S/U ADDL, SUBL, ADDW, SUBW, MLAL, MLSL and MULL, both halves
+  (Q = the "2" forms) and every size. The narrow lanes are extended with
+  `pmovsx/pmovzx{bw,wd,dq}` (after `psrldq 8` for Q), then `padd/psub{w,d,q}`
+  or the multiply for the size: `pmullw`, `pmulld`, `pmuldq` (signed) or
+  `pmuludq` (unsigned). The product of two extended lanes is exact in the
+  double-width lane, so the low-lane multiplies match the helper. MLAL/MLSL
+  load Vd after the product, so every source is read before Vd is written.
+- `PairLong`: S/U ADDLP and ADALP. 8- and 16-bit lanes use shifts (`psll`+`psra`
+  for signed even lanes, a `psrl` mask for unsigned, `psra`/`psrl` for odd
+  lanes) and `padd`; 32-bit lanes shuffle even and odd dwords with `pshufd` and
+  extend with `pmov{s,z}xdq`. Q=0 forms zero the upper half of Vn (and of Vd for
+  ADALP) first, as the helper reads only the low half.
+- Both need SSE4.1 (`WidenThree`; `PairLong` only for 32-bit lanes), as
+  `native_simd_inlinable` states; other hosts keep the helper. Scratch is
+  XMM0-2, so they stay cache-compatible, and `vec_inst_operands` declares the
+  reads: Vm for `WidenThree`, Vd for MLAL/MLSL and ADALP.
+
+Checked against QEMU: the generated `native_simd_gen` fixture (every enumerated
+encoding), and `native_simd_alias` extended with 26 forms whose Vd aliases a
+source, hash `5dd49e555995750b` (QEMU, old and new emulator, and the
+interpreter all agree). A guest loop mixing SMLAL/UMLAL2/SADDL/UADDW2/SMLAL .2d/
+UADALP/SADDLP ran 2 million iterations in about 1464 ms with the helpers and
+5.2 ms inline, with the same result as QEMU (one run each; an upper bound for
+this instruction mix, not a frame time). `make verify` (90 differential fixtures,
+7 threaded) and the 150 unit tests pass. Not measured: the effect on the game
+itself, which needs a new live profile.
+
 ## Inline Select, Dup, ADDV, MLA and FRINT (2026-10-16)
 
 After the FMAX/FMIN fix below, a SpongeBob avatar-switch profile still spent

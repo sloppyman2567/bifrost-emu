@@ -35,6 +35,10 @@ bool FrostJIT::native_simd_inlinable(uint32_t w) const {
             return true;
         case NativeSimdKind::MultiplyAdd:
             return ((w >> 22) & 3) != 2 || has_sse41();  // .4s/.2s need pmulld
+        case NativeSimdKind::WidenThree:
+            return has_sse41();                          // pmovsx/pmovzx, pmulld, pmuldq
+        case NativeSimdKind::PairLong:
+            return ((w >> 22) & 3) != 2 || has_sse41();  // 32-bit lanes widen with pmovsxdq
         case NativeSimdKind::RoundFp:
             // FRINTN/M/P/Z map to ROUNDPS modes; FRINTA/I/X (U=1) need ties-away
             // or FPCR.RMode and keep the helper.
@@ -347,6 +351,84 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             load_vec(1, rd);
             sse2_op(0xFC + static_cast<int>(sz), 0, 1);                  // paddb/w/d
             store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::WidenThree: {
+            // S/U ADDL, SUBL, ADDW, SUBW, MLAL, MLSL, MULL (Q = the "2" forms).
+            // The narrow lanes of Vn and Vm come from the low half, or from the
+            // upper half when Q is set, extended to the double width (ADDW and
+            // SUBW keep Vn at full width). Products of extended lanes are exact
+            // in the wide lane, so the low-lane multiplies below match the helper.
+            const unsigned op = (w >> 12) & 15;
+            const bool wide_n = op == 0x1 || op == 0x3;
+            const int extend = (u ? 0x30 : 0x20) + (sz == 0 ? 0 : sz == 1 ? 3 : 5);  // pmov{s,z}x{bw,wd,dq}
+            const int add = sz == 0 ? 0xFD : sz == 1 ? 0xFE : 0xD4;                  // paddw/d/q
+            const int sub = sz == 0 ? 0xF9 : sz == 1 ? 0xFA : 0xFB;                  // psubw/d/q
+            load_vec(0, rn);
+            load_vec(1, rm);
+            if (q) {
+                if (!wide_n) sse2_imm(0x73, 0, 3, 8);                    // psrldq: upper narrow half
+                sse2_imm(0x73, 1, 3, 8);
+            }
+            if (!wide_n) sse2_38(extend, 0, 0);
+            sse2_38(extend, 1, 1);
+            switch (op) {
+                case 0x0: case 0x1: sse2_op(add, 0, 1); break;
+                case 0x2: case 0x3: sse2_op(sub, 0, 1); break;
+                default:
+                    if (sz == 0) sse2_op(0xD5, 0, 1);                    // pmullw
+                    else if (sz == 1) sse2_38(0x40, 0, 1);               // pmulld
+                    else if (u) sse2_op(0xF4, 0, 1);                     // pmuludq
+                    else sse2_38(0x28, 0, 1);                            // pmuldq
+                    if (op != 0xC) {                                     // MLAL / MLSL accumulate into Vd
+                        load_vec(2, rd);
+                        sse2_op(op == 0x8 ? add : sub, 2, 0);
+                        store_vec(2, rd, true);
+                        return true;
+                    }
+                    break;
+            }
+            store_vec(0, rd, true);
+            return true;
+        }
+        case NativeSimdKind::PairLong: {
+            // S/U ADDLP and ADALP: adjacent lane pairs summed into the double-width
+            // lane. Only the low half of Vn (and Vd for ADALP) takes part unless Q.
+            const bool accumulate = (w >> 14) & 1;
+            const int add = sz == 0 ? 0xFD : sz == 1 ? 0xFE : 0xD4;                  // paddw/d/q
+            auto movq_low = [&](int x) {                                             // zero the upper half
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(static_cast<uint8_t>(0xC0 | (x << 3) | x));
+            };
+            load_vec(0, rn);
+            if (!q) movq_low(0);
+            if (sz == 2) {
+                movdqa(1, 0);
+                sse2_op(0x70, 1, 1); emit_byte(0xE8);                    // pshufd: even dwords
+                sse2_op(0x70, 0, 0); emit_byte(0xED);                    // pshufd: odd dwords
+                sse2_38(u ? 0x35 : 0x25, 1, 1);                          // pmov{z,s}xdq
+                sse2_38(u ? 0x35 : 0x25, 0, 0);
+            } else {
+                const unsigned bits = 8u << sz;                          // narrow lane width
+                const int lshift = sz == 0 ? 0x71 : 0x72;                // psllw / pslld group
+                movdqa(1, 0);
+                if (u) {
+                    sse2_op(0x76, 2, 2);                                 // all ones
+                    sse2_imm(lshift, 2, 2, static_cast<uint8_t>(bits));  // psrl: low-lane mask
+                    sse2_op(0xDB, 1, 2);                                 // pand: even lanes
+                    sse2_imm(lshift, 0, 2, static_cast<uint8_t>(bits));  // psrl: odd lanes
+                } else {
+                    sse2_imm(lshift, 1, 6, static_cast<uint8_t>(bits));  // psll
+                    sse2_imm(lshift, 1, 4, static_cast<uint8_t>(bits));  // psra: sign-extended even lanes
+                    sse2_imm(lshift, 0, 4, static_cast<uint8_t>(bits));  // psra: odd lanes
+                }
+            }
+            sse2_op(add, 0, 1);
+            if (accumulate) {
+                load_vec(2, rd);
+                if (!q) movq_low(2);
+                sse2_op(add, 0, 2);
+            }
+            store_vec(0, rd, true);
             return true;
         }
         case NativeSimdKind::RoundFp: {

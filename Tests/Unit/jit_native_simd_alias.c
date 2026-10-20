@@ -1,8 +1,9 @@
 // jit_native_simd_alias.c — inline native SIMD kinds whose Vd aliases a
-// source: BSL/BIT/BIF and MLA read Vd, DUP/ADDV/FRINT overwrite their input.
+// source: BSL/BIT/BIF, MLA, MLAL/MLSL and ADALP read Vd, DUP/ADDV/FRINT and
+// the widening adds overwrite their input.
 // The generated native SIMD test pins Vd, Vn and Vm to distinct registers.
 // Every source must be read before Vd is written, as in the helper.
-// The expected FNV-1a hash of all 29 results comes from qemu-aarch64.
+// The expected FNV-1a hash of all 55 results comes from qemu-aarch64.
 #include <stdint.h>
 #include <stdio.h>
 
@@ -35,7 +36,19 @@ int main(void) {
     T("addv h0, v0.4h");
     T("frintn v0.4s, v0.4s"); T("frintm v0.2d, v0.2d"); T("frintp v0.2s, v1.2s");
     T("frintz v0.4s, v1.4s");
-    const uint64_t want = 0x5a10d206f365630dull;
+    // Widening three-register forms: low/upper halves, signed/unsigned, every size, Vd aliasing Vn and/or Vm.
+    T("smlal v0.8h, v0.8b, v1.8b"); T("umlal2 v0.4s, v1.8h, v0.8h"); T("smlsl v0.2d, v0.2s, v0.2s");
+    T("umlsl2 v0.2d, v0.4s, v1.4s"); T("smull2 v0.8h, v0.16b, v0.16b"); T("umull v0.4s, v1.4h, v0.4h");
+    T("smull v0.2d, v1.2s, v0.2s"); T("umull2 v0.2d, v0.4s, v0.4s");
+    T("saddl v0.8h, v0.8b, v1.8b"); T("uaddl2 v0.4s, v1.8h, v0.8h"); T("ssubl v0.2d, v0.2s, v1.2s");
+    T("usubl2 v0.8h, v0.16b, v0.16b");
+    T("saddw v0.4s, v0.4s, v0.4h"); T("uaddw2 v0.8h, v0.8h, v1.16b"); T("ssubw v0.2d, v1.2d, v0.2s");
+    T("usubw2 v0.4s, v0.4s, v1.8h");
+    // Pairwise widening: ADDLP overwrites its input, ADALP also reads Vd; Q=0 reads only the low half.
+    T("saddlp v0.8h, v0.16b"); T("uaddlp v0.4s, v0.8h"); T("saddlp v0.2d, v0.4s"); T("uaddlp v0.1d, v1.2s");
+    T("sadalp v0.4s, v0.8h"); T("uadalp v0.8h, v1.16b"); T("sadalp v0.2d, v0.4s"); T("uadalp v0.2s, v0.4h");
+    T("saddlp v0.4h, v0.8b"); T("sadalp v0.1d, v1.2s");
+    const uint64_t want = 0x5dd49e555995750bull;
     printf("native_simd_alias: %016llx %s\n", (unsigned long long)h, h == want ? "ALL PASS" : "FAILED");
     return h == want ? 0 : 1;
 }

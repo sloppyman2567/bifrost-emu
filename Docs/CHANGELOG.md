@@ -43,6 +43,11 @@ labels below are historical records.
   the game's root and its Play services processes restart when they changed.
   The library window shows which game asked while the window is open. A real
   sign-in through a game is not tested (needs credentials).
+- JIT: widening SIMD (S/U ADDL, SUBL, ADDW, SUBW, MLAL, MLSL, MULL and ADDLP,
+  ADALP) runs inline instead of through a helper call per instruction. A guest
+  loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
+  Found in a Hungry Shark World profile, where the helper held 21% of the samples
+  during the post-launch freeze. See the JIT guide.
 - Startup: parsed manifests of immutable archives (WebView provider, app,
   microG, platform resources) and the intent filters derived from them are
   cached in the app's root (`FrameworkParseCache`). A fixture app reaches its

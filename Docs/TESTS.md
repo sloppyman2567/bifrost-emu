@@ -40,6 +40,14 @@ results. Passing fixtures do not establish untested application behavior.
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
   covers the host side: request-path validation (including a symlink out of the
   root), staging, the answer returning with `done` last, and the session options.
+- JIT widening SIMD (2026-10-20): `native_simd_gen` and `native_simd_alias`
+  (26 new aliasing forms, hash `5dd49e555995750b` from QEMU) pass with the inline
+  `WidenThree`/`PairLong` bodies, as do `make verify` (90 differential fixtures,
+  7 threaded oracle runs) and the 150 unit tests under `run_tests.sh --unit
+  --strict` with the JIT. The interpreter run of the unit suite was not repeated
+  (the change is JIT-only). `test_sandbox_in_root` failed once when run with the
+  three SIMD tests in one invocation and passed alone with the same binary,
+  before and after, so it was not attributed to this change.
 - `test_managed_parse_cache_skips_manifest_parsing` (`ManagedSplash`): the first
   launch parses the WebView provider and writes cache entries; the second has
   no `Parse times for` line; after every entry is overwritten with garbage the
