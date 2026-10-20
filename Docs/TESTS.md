@@ -40,9 +40,12 @@ results. Passing fixtures do not establish untested application behavior.
   implemented since `aa1272b3`; `test_managed_dialog_and_popup_windows` runs
   every marker through `APP_ACTIVITY_DESTROYED` and `APP_POPUP_REMOVED 7`, then
   the process never exits and the 90 s timeout kills it (exit 124).
-- Not tested: typing into Roblox, a WebView (Chromium) editor, the interpreter
-  and Tier-2 engines for the Activity test, other host keyboard layouts or input
-  methods (IBus, Fcitx), and the Wayland/X11 differences in SDL's text events.
+- Roblox: the user tried typing in it (login and chat were suggested) and
+  reported that it works; no finer detail (which fields, accents, composition)
+  was recorded, and the log was not inspected.
+- Not tested: a WebView (Chromium) editor, the interpreter and Tier-2 engines
+  for the Activity test, other host keyboard layouts or input methods (IBus,
+  Fcitx), and the Wayland/X11 differences in SDL's text events.
 
 ## Roblox audio output (2026-10-20)
 
