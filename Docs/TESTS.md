@@ -4,6 +4,43 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Google accounts and microG sign-in (2026-10-20)
+
+- `test_managed_accounts_service` (`ManagedAccounts`) drives `AccountManager`
+  through the account service: an authenticator in the app's own package adds
+  an account, issues tokens (the second `getAuthToken` is the cached one;
+  `invalidateAuthToken` forces a new one), answers `hasFeatures` and
+  `getAccountsByTypeAndFeatures`, confirms credentials, stores extras as user
+  data and is removed; the accounts-updated listener fires; the store file
+  exists. A `com.google` account seeded into the shared file is visible to the
+  app (visibility granted) and microG's real authenticator, in its own process
+  (UID 19998), answers `hasFeatures` for it (`service_ac2dm` true,
+  `service_calendar` false), while the app is denied that authenticator's
+  secrets (`SecurityException`). A first version failed here with "uid 10000
+  cannot get user data": an authenticator serving a Binder transaction read
+  `Binder.getCallingUid()` as the session's uid; services here are
+  in-process, so the identity is `Process.myUid()`. The test also sends a media
+  key through `AudioManager`, which needs the new `media_session` service.
+  The no-service failure was seen live (WebView in the sign-in window aborted
+  the process), not re-run in the fixture without the service.
+- `GoogleAccountStateTests` (no emulator): publishing from one root and
+  importing into another carries the accounts and microG's device
+  registration but not microG's settings; unchanged roots do not re-import or
+  re-publish; `google remove` reaches the next import; an account added in a
+  game's root is published; the system app has UID 19998 and `system: true`.
+- Not covered by an automated test: a completed Google login (needs
+  credentials), the Asgard dialog beyond one headless offscreen run (it listed
+  the seeded account, showed the hint and enabled the buttons), clicking
+  "Sign in" through the dialog, typing in Google's page after the
+  `media_session` fix, and any Activity of another package started from an
+  app.
+- The whole `test_android_package.py` now has 41 tests: 39 pass. The two
+  failures are the ones recorded below as pre-existing
+  (`test_managed_activity_api_report` expects `getAppTasks` to throw;
+  `test_managed_dialog_and_popup_windows` never exits, timeout 124); they
+  were not re-checked on a pristine checkout this time. No native code
+  changed, so the strict suites and `make verify` were not rerun.
+
 ## Keyboard text input (2026-10-20)
 
 - `ActivityProbe$InputMethodProbe` (JIT and interpreter) now also binds an

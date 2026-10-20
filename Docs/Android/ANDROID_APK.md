@@ -86,6 +86,20 @@ apply on the next start. The last-session drawer shows saved outcome/timing and
 recognized error signatures from at most the final 16 MiB of its log; those
 counts are a bounded log summary, not a diagnosis or gameplay result.
 
+## Google account
+
+The library window's "Google account…" button opens the device's Google
+accounts: the signed-in list, "Sign in with Google…" (microG's own window with
+Google's embedded sign-in page; the password goes to Google, not to Asgard),
+"microG settings…" and "Remove". The same actions exist on the command line:
+`asgard.py google sign-in|settings`, `google accounts [--json]` and
+`google remove ACCOUNT`. One sign-in serves every app: accounts are kept under
+`<state>/.google` and imported into an app's root at each launch; microG's
+settings stay per app. A completed login needs real credentials and has not
+been observed here. See the
+[runtime guide](ANDROID_RUNTIME.md#google-accounts-and-sign-in-2026-10-20) for
+the account service and its limits (no sign-in prompt inside a game yet).
+
 ## Optional real Media NDK bundle
 
 The Media NDK can run as guest ARM64 code through Bionic. Provision the actual

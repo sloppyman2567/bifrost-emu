@@ -13,6 +13,30 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Google accounts and microG sign-in (2026-10-20)
+
+- The `account` service is now Android 15's `AccountManagerService` (one
+  user) instead of a no-account stub: authenticators discovered from
+  `android.accounts.AccountAuthenticator` services, bound as the system,
+  visibility by signature, permission and stored value, add, remove, confirm,
+  update, `getAuthToken` and feature queries, and accounts, tokens, user data
+  and visibility stored in one shared file that the session and microG's
+  processes update under a lock (`FrameworkAccounts`, `FrameworkAccountStore`).
+  microG's `com.google` authenticator, in its own process, answers the session.
+- `asgard.py google sign-in|settings|accounts|remove` runs microG's
+  `LoginActivity` or settings as a session of the provisioned system app (UID
+  19998) and manages the accounts; the library window gains a "Google account…"
+  dialog. One sign-in serves every app: `<state>/.google` holds the accounts
+  and microG's device registration, imported into each root before launch and
+  published after a session that changed them. Google's real sign-in page
+  renders in the window; a completed login is not tested (needs credentials).
+- New `media_session` service with no sessions. WebView forwards unhandled keys
+  to `AudioManager.dispatchMediaKeyEvent`; without the service that threw in
+  Chromium's key path and aborted the process (found in the sign-in window).
+- Not yet: Activities of another package started from a game (`GoogleSignIn`
+  buttons, `AccountManager.addAccount` UI), the credential-grant and account
+  chooser dialogs; see the runtime guide.
+
 ### Keyboard text input (2026-10-20)
 
 - Text typed on the host reaches the focused Android editor through its

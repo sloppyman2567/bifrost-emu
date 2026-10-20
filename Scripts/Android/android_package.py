@@ -523,7 +523,9 @@ def launch_session(package, app, metadata, emu, no_jit, window_plugin, frames,
     if launcher["kind"] == "managed_activity":
         if frames:
             raise ValueError("--frames is a NativeActivity redraw bound; use --timeout for managed apps")
-        code, root = verify_installed(package, app, metadata)
+        # A provisioned system app (microG) runs from its priv-app directory in the managed root.
+        code, root = (metadata["guest_code"], None) if metadata.get("system") \
+            else verify_installed(package, app, metadata)
         from android_managed import launch_managed
         return launch_managed(app, metadata, code, root, emu, no_jit,
                               window_plugin, emu_args, timeout, trace_apk, trace_after, trace_duration, session)
@@ -658,7 +660,7 @@ def installed_apps(state):
                            "version_name": metadata.get("version_name") or base.get("version_name"),
                            "icon": str(app / icon) if isinstance(icon, str) and re.fullmatch(r"icon\.(?:png|jpg|webp)", icon)
                                    and (app / icon).is_file() else None,
-                           "installed_at": metadata.get("installed_at"),
+                           "installed_at": metadata.get("installed_at"), "system": bool(metadata.get("system")),
                            "launcher": metadata["launcher"]["kind"], "session": session})
         except (OSError, ValueError, KeyError) as error:
             result.append({"package": app.name, "label": app.name, "error": str(error),
@@ -745,6 +747,14 @@ def main():
             command.add_argument("--lines", type=int, default=80)
             command.add_argument("--logd", action="store_true")
     commands.add_parser("launcher", help="open the desktop app library")
+    google = commands.add_parser("google", help="sign in to Google (microG) and manage the device's Google accounts")
+    actions = google.add_subparsers(dest="action", required=True)
+    for name, text in (("sign-in", "add a Google account in microG's sign-in window"),
+                       ("settings", "open microG's settings (accounts, device registration, attestation)")):
+        add_launch_options(actions.add_parser(name, help=text))
+    accounts = actions.add_parser("accounts", help="list the signed-in Google accounts")
+    accounts.add_argument("--json", action="store_true")
+    actions.add_parser("remove", help="sign an account out of every app").add_argument("account")
     diagnostic = commands.add_parser("probe", help="dlopen native libraries without JNI/Activity startup")
     diagnostic.add_argument("package")
     diagnostic.add_argument("--library", action="append", help="packaged basename; repeatable, default all")
@@ -801,6 +811,23 @@ def main():
         if args.command == "probe":
             return probe(args.package, args.state_root, args.emu.resolve(), args.library,
                          args.no_jit, args.timeout, args.preload)
+        if args.command == "google":
+            import android_google
+            if args.action == "accounts":
+                found = android_google.accounts(args.state_root)
+                if args.json: print(json.dumps(found))
+                else:
+                    for entry in found: print(entry["name"])
+                    if not found: print("No Google account is signed in. Use: google sign-in")
+                return 0
+            if args.action == "remove":
+                android_google.remove(args.state_root, args.account)
+                print(f"Removed {args.account}; apps drop it at their next launch")
+                return 0
+            # The microG session is an ordinary background session of the system app.
+            android_google.prepare(args.state_root, android_google.LOGIN_ACTIVITY if args.action == "sign-in"
+                                   else android_google.SETTINGS_ACTIVITY)
+            args.command, args.packages = "start", [android_google.GMS]
         if not 0 <= args.frames <= 36000:
             raise ValueError("--frames must be in 0..36000")
         if args.timeout < 0:

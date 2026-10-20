@@ -22,6 +22,10 @@ import java.util.Map;
 final class FrameworkServiceRuntime {
     // Android 15 ActivityThread.SERVICE_DONE_EXECUTING_*.
     private static final int DONE_STOP = 2, DONE_UNBIND = 4;
+    // Binds made by the framework's own services (AccountManagerService binding
+    // an authenticator) run with the system's identity: no export or permission
+    // check applies to the target service. Set only around the bind call.
+    static final ThreadLocal<Boolean> SYSTEM_BIND = ThreadLocal.withInitial(() -> false);
     private final FrameworkPackages packages;
     private final FrameworkProcessRuntime processes;
     private FrameworkProcessRuntime.Remote remote;
@@ -134,7 +138,7 @@ final class FrameworkServiceRuntime {
         if (existing != null) return existing.info;
         ServiceInfo info = packages.serviceInfo(component, PackageManager.GET_META_DATA, user);
         if (info == null) return null;
-        if (info.applicationInfo.uid != application.uid && (!info.exported
+        if (!SYSTEM_BIND.get() && info.applicationInfo.uid != application.uid && (!info.exported
                 || (info.permission != null && packages.checkPermission(info.permission,
                         application.uid, Context.DEVICE_ID_DEFAULT) != PackageManager.PERMISSION_GRANTED)))
             throw new SecurityException("Service is not accessible: " + info.name);

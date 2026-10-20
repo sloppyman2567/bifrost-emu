@@ -350,7 +350,73 @@ processes, under its own UIDs:
 Limits: microG's cold start takes about 11 s in the JIT, so the first
 `AdvertisingIdClient` request (10 s timeout) can still fail. Each child
 bootstrap carries the parsed GmsCore snapshot (about 650 KB replies). microG
-broadcasts, its `:ui` Activities and account sign-in are untested.
+broadcasts and its `:ui` Activities, started from an app, are untested. Account sign-in is covered in
+[Google accounts](#google-accounts-and-sign-in-2026-10-20).
+
+### Google accounts and sign-in (2026-10-20)
+
+`account` is no longer a stub. `FrameworkAccounts` follows Android 15's
+[AccountManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/accounts/AccountManagerService.java)
+for one user: authenticators are the services declaring
+`android.accounts.AccountAuthenticator` (XML meta-data read through the owning
+package), accounts are visible to callers by signature, `GET_ACCOUNTS`-style
+permission and stored visibility (`resolveAccountVisibility`), and add,
+remove, confirm, update, `getAuthToken` and the feature queries run a Session
+that binds the authenticator and returns its `Bundle`. A `KEY_INTENT` result
+must name an Activity of the authenticator's package (or one with its
+signature). Several services run in each guest process instead of behind
+Binder, so the caller is `Process.myUid()` even while the process serves an
+authenticator transaction (an authenticator reading its own account data).
+
+- **Store.** Accounts, tokens, user data, visibility and grants live in
+  `/data/system/users/0/bifrost-accounts.json` (`FrameworkAccountStore`),
+  shared by the session and microG's service processes: updates take a file
+  lock and replace the file atomically; a process notices another's change
+  within about 1.5 s and sends its own receivers `LOGIN_ACCOUNTS_CHANGED`.
+  Replacing a runtime root keeps the file.
+- **Authenticator binds** run with the system's identity
+  (`FrameworkServiceRuntime.SYSTEM_BIND`: no export or permission check on the
+  target service, which microG declares unexported) and the session app's uid
+  holds `ACCOUNT_MANAGER` for the authenticator's own check
+  (`FrameworkPackages.checkPermission`).
+- **Sign-in window.** `android_package.py google sign-in` (also `settings`,
+  `accounts`, `remove`; `asgard.py` joins the realm) starts the provisioned
+  `com.google.android.gms` system app as an ordinary background session:
+  `Scripts/Android/android_google.py` writes a synthetic `package.json`
+  (`system: true`, launcher `org.microg.gms.auth.login.LoginActivity`) and
+  `runApp` takes the lazily parsed system `PackageInfo` (UID 19998) instead of
+  parsing an installed APK. There is no dexopt for it. microG's own UI then
+  shows Google's embedded setup page in a WebView and stores the account
+  through `AccountManager` as microG's authenticator.
+- **One sign-in for every app.** `<state>/.google/` keeps a copy of the
+  accounts file and microG's registration of the device (`checkin.xml`,
+  `gservices.db`, account caches). `launch_managed` imports it into a root
+  before each session and publishes the root's files after the session if they
+  changed, so signing in (or out, `google remove`) in one session reaches the
+  others at their next start. microG's settings file stays per root.
+- Asgard's library window has a "Google account…" dialog: the account list,
+  "Sign in with Google…", "microG settings…" and "Remove". The system app is
+  not listed as a game.
+
+Observed: the microG dialog and Google's real "Sign in" page rendered in the
+window (screenshots), and a seeded `com.google` account was answered by
+microG's authenticator from a separate process (`hasFeatures`). Not observed:
+a completed login, because it needs real credentials, so nothing here shows
+that the account microG stores works for Play Integrity or a game's Google
+sign-in.
+
+Limits: Activities of another package that an app starts (microG's
+`AuthSignInActivity`, `AccountPickerActivity`, `AskPermissionActivity`, which
+all declare `android:process=":ui"`) are not launched: `FrameworkActivities`
+only starts the session package's Activities, so `GoogleSignIn` buttons and
+`AccountManager.addAccount` from inside a game cannot show their UI yet.
+Not modelled: other users, shared and restricted accounts, device-policy
+limits, `startAddAccountSession` and its relatives, the credential-grant and
+account-chooser Activities (a non-custom-token authenticator without a grant
+answers `ERROR_CODE_UNSUPPORTED_OPERATION`, several matches for
+`getAccountByTypeAndFeatures` the same), sign-in notifications and
+account-access requests. microG's settings and every account-related file are
+copied on the host, so two sessions signing in at once keep the last one to end.
 
 ### Shared guest processes (October 11, 2026)
 
@@ -769,7 +835,8 @@ server classes, for one app, user 0 and the default device:
 | `trust` and `window` keyguard calls | No credential and never locked; `DISABLE_KEYGUARD` gates keyguard locks, `exitKeyguardSecurely` succeeds. |
 | `clipboard` | In-process clipboard with copied `ClipData`, one-hour auto-clear and listeners; reads need the play window's focus. Not shared with the host desktop. |
 | `alarm` | Listener and PendingIntent alarms on a scheduler thread, at least 5 s ahead (`MIN_FUTURITY`), RTC converted to elapsed time. PendingIntent repeats clamp to at least 60 s; `remove(operation)` cancels them. Exact PendingIntent alarms enforce the target-SDK permission policy; exact listener alarms remain exempt. Alarms never restart a stopped process; AlarmClockInfo scheduling is unsupported. |
-| `account` | No accounts or authenticators (no Play services); secret reads and explicit additions are rejected. |
+| `account` | Android 15's `AccountManagerService` for one user over a shared JSON store; authenticators are bound and run as the system. See [Google accounts](#google-accounts-and-sign-in-2026-10-20). |
+| `media_session` | No sessions (`FrameworkMediaSessions`): `dispatchMediaKeyEvent` is accepted and reaches nobody, as `MediaSessionService` with no session or receiver; other methods are unsupported. WebView forwards unhandled keys here, and without the service Chromium aborted the process. |
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
 | `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). |
 | camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |

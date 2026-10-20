@@ -477,6 +477,69 @@ class SurfaceIdentityTests(unittest.TestCase):
                 self.assertIn("android_surface_identity: checks passed", result.stdout)
 
 
+class GoogleAccountStateTests(unittest.TestCase):
+    ACCOUNT = {"version": 1, "revision": 1, "accounts": [
+        {"name": "user@example.test", "type": "com.google", "password": "master", "previous": None,
+         "authenticated": 0, "data": {"services": "ac2dm,mail"}, "tokens": {}, "visibility": {}, "grants": []},
+        {"name": "other", "type": "org.example", "password": None, "previous": None,
+         "authenticated": 0, "data": {}, "tokens": {}, "visibility": {}, "grants": []}]}
+
+    def test_accounts_are_shared_between_roots_and_settings_are_not(self):
+        import json
+        import android_google as google
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            signed_in, game = state / "gms-root", state / "game-root"
+            for root in (signed_in, game):
+                (root / google.DATA / "shared_prefs").mkdir(parents=True)
+                (root / google.ACCOUNTS).parent.mkdir(parents=True, exist_ok=True)
+            (signed_in / google.ACCOUNTS).write_text(json.dumps(self.ACCOUNT))
+            (signed_in / google.DATA / "shared_prefs/checkin.xml").write_text("<map>device-1</map>")
+            (signed_in / google.DATA / "shared_prefs/com.google.android.gms_preferences.xml").write_text("<map>sign-in root</map>")
+            (game / google.DATA / "shared_prefs/com.google.android.gms_preferences.xml").write_text("<map>safetynet</map>")
+            # Nothing is shared until a root publishes; importing is then a no-op.
+            self.assertFalse(google.import_shared(state, game))
+            self.assertEqual(google.accounts(state), [])
+            self.assertTrue(google.publish_shared(state, signed_in))
+            self.assertEqual([entry["name"] for entry in google.accounts(state)], ["user@example.test"])
+            self.assertFalse(google.publish_shared(state, signed_in))
+            # The game root receives the accounts and the device registration, not microG's settings.
+            self.assertTrue(google.import_shared(state, game))
+            self.assertEqual(json.loads((game / google.ACCOUNTS).read_text())["accounts"][0]["name"], "user@example.test")
+            self.assertEqual((game / google.DATA / "shared_prefs/checkin.xml").read_text(), "<map>device-1</map>")
+            self.assertEqual((game / google.DATA / "shared_prefs/com.google.android.gms_preferences.xml").read_text(),
+                             "<map>safetynet</map>")
+            self.assertFalse(google.import_shared(state, game))
+            self.assertFalse(google.publish_shared(state, game))  # imported, unchanged
+            # Signing out on the host reaches the game at its next launch.
+            google.remove(state, "user@example.test")
+            self.assertEqual(google.accounts(state), [])
+            self.assertTrue(google.import_shared(state, game))
+            self.assertEqual([entry["name"] for entry in json.loads((game / google.ACCOUNTS).read_text())["accounts"]], ["other"])
+            with self.assertRaises(ValueError): google.remove(state, "user@example.test")
+            # An account the game added itself is published when its session ends.
+            document = json.loads((game / google.ACCOUNTS).read_text())
+            document["accounts"].append(self.ACCOUNT["accounts"][0]); document["revision"] += 1
+            (game / google.ACCOUNTS).write_text(json.dumps(document))
+            self.assertTrue(google.publish_shared(state, game))
+            self.assertEqual([entry["name"] for entry in google.accounts(state)], ["user@example.test"])
+
+    def test_system_app_is_registered_with_microg_identity(self):
+        import json
+        import android_google as google
+        from android_sessions import app_id
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.assertEqual(app_id(state, google.GMS), 19998)
+            self.assertEqual(app_id(state, "com.android.vending"), 19999)
+            google.prepare(state, google.SETTINGS_ACTIVITY)
+            metadata = json.loads((google.app_directory(state) / "package.json").read_text())
+            self.assertTrue(metadata["system"])
+            self.assertEqual(metadata["launcher"]["class"], google.SETTINGS_ACTIVITY)
+            listed = package.installed_apps(state)
+            self.assertEqual([(a["package"], a["system"]) for a in listed], [(google.GMS, True)])
+
+
 class PackageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -605,6 +668,22 @@ class PackageTests(unittest.TestCase):
         if managed == "ManagedPlayServices" and not split:
             # The client library checks this against its own version code.
             component += '<meta-data android:name="com.google.android.gms.version" android:value="12451000"/>'
+        compiled = []
+        if managed == "ManagedAccounts" and not split:
+            component += (f'<service android:name="{activity}$AuthenticatorService" android:exported="false">'
+                          '<intent-filter><action android:name="android.accounts.AccountAuthenticator"/></intent-filter>'
+                          '<meta-data android:name="android.accounts.AccountAuthenticator" '
+                          'android:resource="@xml/authenticator"/></service>')
+            resources = cls.work / (name + "-res/xml")
+            resources.mkdir(parents=True)
+            (resources / "authenticator.xml").write_text(
+                '<account-authenticator xmlns:android="http://schemas.android.com/apk/res/android" '
+                'android:accountType="org.bifrost.fixture.account" android:label="Fixture account"/>')
+            flat = cls.work / (name + "-flat")
+            flat.mkdir()
+            subprocess.run([str(cls.tools / "aapt2"), "compile", "-o", str(flat), str(resources / "authenticator.xml")],
+                           check=True, capture_output=True)
+            compiled = sorted(map(str, flat.glob("*.flat")))
         if managed == "ManagedDialog" and not split:
             # As Unity's player Activity declares it.
             component += (f'<activity android:name="{activity}$Engine" android:exported="false" '
@@ -645,6 +724,7 @@ class PackageTests(unittest.TestCase):
                 str(manifest),
                 "-o",
                 str(apk),
+                *compiled,
             ],
             check=True,
             capture_output=True,
@@ -1307,6 +1387,26 @@ class PackageTests(unittest.TestCase):
         self.assertRegex(text, r"MANAGED_PLAY_SERVICES_GSERVICES rows=0 uid=1\d{4}\n")
         self.assertIn("MANAGED_PLAY_SERVICES_CHIMERA com.google.android.gms/org.microg.gms.measurement."
                       "MeasurementService", text)
+
+    def test_managed_accounts_service(self):
+        # AccountManager against the account service: an authenticator in the
+        # app adds, authenticates and removes an account, and microG's
+        # "com.google" authenticator is registered beside it.
+        state = self.work / "accounts-state"
+        bundle = self.work / "accounts.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("accounts", managed="ManagedAccounts"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=240)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|MANAGED_ACCOUNTS_FAILED")
+        self.assertIn("MANAGED_ACCOUNTS_TYPES fixture=true google=true\n", text)
+        self.assertIn("MANAGED_ACCOUNTS_GOOGLE_FEATURES ac2dm=true calendar=false\n", text, text[-30000:])
+        self.assertIn("MANAGED_ACCOUNTS_SECRETS_DENIED\n", text)
+        self.assertIn("MANAGED_ACCOUNTS_MEDIA_KEY_OK\n", text, text[-30000:])
+        self.assertIn("MANAGED_ACCOUNTS_OK\n", text, text[-30000:])
 
     def test_managed_splash_hands_off_to_main_activity(self):
         # The launcher Activity finishing right after startActivity does not

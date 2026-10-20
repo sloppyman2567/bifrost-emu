@@ -145,11 +145,13 @@ make android-runtime-adapters android-managed-launcher
 python3 Scripts/Android/android_package.py install /path/to/package.apkm
 python3 Scripts/Android/android_package.py run org.example.package
 python3 Scripts/Android/asgard.py realm status        # inspect the shared realm
+python3 Scripts/Android/asgard.py google sign-in       # microG's Google sign-in window (accounts shared by every app)
 ```
 
 Native `NativeActivity` libraries can also run directly with
 `./bifrost-emu --android libgame.so`. Android support is experimental: Google
-Play services, media decoding and many system services are not provided. See
+Play services come from microG (sign-in works up to Google's own page; see the
+runtime guide), media decoding and many system services are partial or missing. See
 the [Android runtime guide](Docs/Android/ANDROID_RUNTIME.md),
 [APK tooling](Docs/Android/ANDROID_APK.md),
 [Binder](Docs/Android/ANDROID_BINDER.md) and

@@ -199,7 +199,7 @@ def main():
     parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
     parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
     parser.add_argument("command", choices=("realm", "run", "start", "list", "apps", "status",
-                                           "stop", "logs", "install", "launcher", "probe"))
+                                           "stop", "logs", "install", "launcher", "probe", "google"))
     args, remainder = parser.parse_known_args()
     state = args.state_root.resolve()
     try:
@@ -218,10 +218,13 @@ def main():
             return 0
         command = [sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
                    "--state-root", str(state), args.command, *remainder]
-        if args.command in ("run", "start"):
+        # Opening microG's window (sign-in, settings) is a session like any app's.
+        session = args.command in ("run", "start") or (args.command == "google"
+                                                       and remainder[:1] in (["sign-in"], ["settings"]))
+        if session:
             broker = ensure_broker(state, args.emu.resolve())
             command += ["--binder-broker", broker["socket"]]
-        if args.command in ("run", "start", "probe"):
+        if session or args.command == "probe":
             command += ["--emu", str(args.emu.resolve())]
         return subprocess.call(command)
     except (OSError, ValueError) as error:

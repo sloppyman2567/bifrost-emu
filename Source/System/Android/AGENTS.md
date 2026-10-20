@@ -38,6 +38,24 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   a microG service bind, a GServices query and the chimera lookup. microG's
   `AdRequestService` stub is never bound (`FrameworkServiceRuntime`), so
   Google Mobile Ads uses its local request path; see the runtime guide.
+- Accounts: `FrameworkAccounts` is Android 15's AccountManagerService for one
+  user, one instance per guest process over `FrameworkAccountStore`'s shared
+  JSON file (`/data/system/users/0/bifrost-accounts.json`; lock, atomic replace,
+  kept across root replacement). Identity is `Process.myUid()`, never
+  `Binder.getCallingUid()`: these services are in-process and an authenticator
+  serves transactions under the session's uid. Authenticator binds go through
+  `FrameworkServiceRuntime.SYSTEM_BIND`; keep it set only around that
+  `bindService` call. The session app's uid holds `ACCOUNT_MANAGER` for
+  authenticator-side checks. Keep unsupported operations throwing
+  (`UnsupportedOperationException`) or answering `ERROR_CODE_UNSUPPORTED_OPERATION`,
+  never succeeding silently. `Scripts/Android/android_google.py` runs microG's
+  sign-in UI as a session of the provisioned system app (`metadata.system`,
+  UID 19998, no dexopt, `runApp` uses the lazily parsed system `PackageInfo`) and
+  shares accounts across roots through `<state>/.google` (import before each
+  managed launch, publish after; microG settings stay per root). Run
+  `test_managed_accounts_service` and `GoogleAccountStateTests`.
+- `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
+  `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART
   (`registerProfiles`) and run from `dexopt`'s install-time odex. Keep the
   odex accepted: `PCL[]` context, the image's boot classpath and ISA props.

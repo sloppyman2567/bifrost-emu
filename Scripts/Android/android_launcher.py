@@ -150,7 +150,7 @@ def show(state):
         from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPainterPath, QPalette, QPixmap
         from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                      QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                                     QLineEdit, QMainWindow, QProgressBar, QPushButton, QScrollArea,
+                                     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
                                      QSizePolicy, QStackedWidget, QStyle, QToolButton, QVBoxLayout, QWidget)
     except ImportError as error:
         raise ValueError("The desktop launcher requires PyQt6; the CLI works without it") from error
@@ -289,6 +289,87 @@ def show(state):
                 self.settings["back_key"] = self.back.currentData()
             return self.settings
 
+    class GoogleAccounts(QDialog):
+        """Accounts signed in on this device. Sign-in is microG's own window with Google's page."""
+        def __init__(self, window):
+            super().__init__(window)
+            self.window_, self.signing_in = window, False
+            self.setWindowTitle("Google account"); self.setMinimumWidth(460)
+            layout = QVBoxLayout(self)
+            intro = muted(QLabel("Sign in once and every game on this device can use the account. Sign-in opens "
+                                 "microG's window showing Google's own page; your password goes to Google, "
+                                 "never to Asgard."))
+            intro.setWordWrap(True); layout.addWidget(intro)
+            self.accounts = QListWidget(); self.accounts.setMinimumHeight(110); layout.addWidget(self.accounts)
+            self.hint = muted(QLabel()); self.hint.setWordWrap(True); layout.addWidget(self.hint)
+            row = QHBoxLayout()
+            self.sign_in = QPushButton(themed("list-add", QStyle.StandardPixmap.SP_DialogOpenButton), "Sign in with Google…")
+            self.sign_in.clicked.connect(lambda: self.open_window("sign-in"))
+            self.settings = QPushButton("microG settings…")
+            self.settings.setToolTip("Device registration, attestation and other Google services settings")
+            self.settings.clicked.connect(lambda: self.open_window("settings"))
+            self.remove = QPushButton(themed("list-remove", QStyle.StandardPixmap.SP_TrashIcon), "Remove")
+            self.remove.clicked.connect(self.remove_selected)
+            close = QPushButton("Close"); close.clicked.connect(self.accept)
+            for widget in (self.sign_in, self.settings, self.remove): row.addWidget(widget)
+            row.addStretch(); row.addWidget(close); layout.addLayout(row)
+            self.accounts.itemSelectionChanged.connect(self.update_buttons)
+            self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1500)
+            self.refresh()
+
+        def update_buttons(self):
+            self.remove.setEnabled(bool(self.accounts.selectedItems()) and not self.signing_in)
+            self.sign_in.setEnabled(not self.signing_in); self.settings.setEnabled(not self.signing_in)
+
+        def refresh(self):
+            def listed(code, output):
+                try:
+                    if code: raise ValueError(short_error(output))
+                    found = [x["name"] for x in json.loads(output)]
+                except (ValueError, KeyError, TypeError) as error:
+                    self.hint.setText("Couldn't read the accounts: " + str(error)[:200]); return
+                selected = {x.text() for x in self.accounts.selectedItems()}
+                self.accounts.clear()
+                for name in found:
+                    self.accounts.addItem(name)
+                    if name in selected: self.accounts.item(self.accounts.count() - 1).setSelected(True)
+                self.update_hint(found)
+            self.window_.command(["google", "accounts", "--json"], listed)
+            def status(code, output):
+                try: state = json.loads(output).get("state") if not code else None
+                except ValueError: state = None
+                active = state in ACTIVE
+                if active != self.signing_in: self.signing_in = active; self.update_buttons(); self.update_hint(None)
+            self.window_.command(["status", "com.google.android.gms", "--json"], status)
+
+        def update_hint(self, found):
+            if found is not None: self.found = found
+            if self.signing_in:
+                self.hint.setText("A microG window is open. Finish there; the account appears here when it closes.")
+            elif not getattr(self, "found", []):
+                self.hint.setText("No Google account is signed in. Games that need Google Play services will ask for one.")
+            else:
+                self.hint.setText("Games pick up account changes the next time they start.")
+            self.update_buttons()
+
+        def open_window(self, action):
+            def started(code, output):
+                if code: self.hint.setText("Couldn't open the window: " + short_error(output))
+                self.refresh()
+            self.signing_in = True; self.update_buttons()
+            self.window_.command(["google", action], started)
+
+        def remove_selected(self):
+            items = self.accounts.selectedItems()
+            if not items: return
+            name = items[0].text()
+            if QMessageBox.question(self, "Remove account", f"Sign {name} out of every game on this device?"
+                                    ) != QMessageBox.StandardButton.Yes: return
+            def removed(code, output):
+                if code: self.hint.setText("Couldn't remove the account: " + short_error(output))
+                self.refresh()
+            self.window_.command(["google", "remove", name], removed)
+
     class Library(QMainWindow):
         def __init__(self):
             super().__init__()
@@ -311,7 +392,9 @@ def show(state):
             self.install_button = QPushButton(themed("list-add", QStyle.StandardPixmap.SP_DialogOpenButton), "Install APK…")
             self.install_button.setMinimumHeight(34); self.install_button.setDefault(True)
             self.install_button.clicked.connect(self.install)
-            heading.addWidget(self.search); heading.addWidget(self.install_button)
+            self.google_button = QPushButton(themed("user-identity", QStyle.StandardPixmap.SP_DialogApplyButton), "Google account…")
+            self.google_button.setMinimumHeight(34); self.google_button.clicked.connect(self.google_account)
+            heading.addWidget(self.search); heading.addWidget(self.google_button); heading.addWidget(self.install_button)
             outer.addLayout(heading)
             self.progress = QFrame(); self.progress.setObjectName("progress")
             row = QHBoxLayout(self.progress); row.setContentsMargins(12, 8, 12, 8)
@@ -434,7 +517,9 @@ def show(state):
                 if requested_state != self.state: self.refresh(); return
                 try:
                     if code: raise ValueError(short_error(output))
-                    self.apps = sorted(json.loads(output), key=lambda a: (a["label"].casefold(), a["package"]))
+                    # System apps (microG's sign-in window) are not games.
+                    self.apps = sorted((a for a in json.loads(output) if not a.get("system")),
+                                       key=lambda a: (a["label"].casefold(), a["package"]))
                 except (ValueError, KeyError) as error:
                     self.show_notice("Couldn't read the game library: " + str(error)[:300], error=True); return
                 self.render(); self.update_drawer()
@@ -506,6 +591,9 @@ def show(state):
                     self.show_notice(f"{app['label']} didn't start: {short_error(output)}", error=True, package=package)
                 self.refresh()
             self.command(args, started, env)
+
+        def google_account(self):
+            GoogleAccounts(self).exec()
 
         def stop_app(self, app):
             package = app["package"]

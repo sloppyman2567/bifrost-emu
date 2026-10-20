@@ -188,6 +188,32 @@ final class FrameworkPackages {
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
+    // The package owning a UID (installed, system or peer), or null.
+    String nameForUid(int uid) { return packageForUid(uid); }
+
+    boolean isSystemPackage(String name) {
+        PackageInfo pkg = known(name);
+        return pkg != null && (pkg.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+    }
+
+    // PackageManagerInternal.hasSignatureCapability(AUTH): the packages share a
+    // signing certificate. microG's spoofed certificate counts as the package's own.
+    boolean sameSigner(String first, String second) {
+        Signature[] left = signatures(first), right = signatures(second);
+        if (left == null || right == null) return false;
+        for (Signature one : left) for (Signature two : right) if (one.equals(two)) return true;
+        return false;
+    }
+
+    private Signature[] signatures(String name) {
+        PackageInfo pkg = known(name);  // loads a pending system package, registering its fake signature
+        if (pkg == null) return null;
+        Signature fake = fakeSignatures.get(name);
+        if (fake != null) return new Signature[] {fake};
+        if (pkg.signatures != null) return pkg.signatures;
+        return pkg.signingInfo == null ? null : pkg.signingInfo.getApkContentsSigners();
+    }
+
     List<ActivityInfo> receivers(Intent intent, String type, int user) throws Exception {
         if (user != 0) throw new SecurityException("Foreign broadcast user");
         List<ActivityInfo> results = new ArrayList<>();
@@ -774,9 +800,17 @@ final class FrameworkPackages {
                 == PackageManager.PERMISSION_GRANTED;
     }
 
+    private static final String ACCOUNT_MANAGER = "android.permission.ACCOUNT_MANAGER";
+
     int checkPermission(String permission, int uid, int deviceId) {
         if (permission == null || deviceId != Context.DEVICE_ID_DEFAULT) return PackageManager.PERMISSION_DENIED;
         PackageInfo pkg = installed;
+        // The account service calls authenticators as the system, which
+        // AbstractAccountAuthenticator requires to hold ACCOUNT_MANAGER; its
+        // calls arrive from the session app's uid (here, or as a peer in microG's processes).
+        if (ACCOUNT_MANAGER.equals(permission) && (pkg != null && uid == pkg.applicationInfo.uid
+                || peers.values().stream().anyMatch(peer -> peer.applicationInfo.uid == uid)))
+            return PackageManager.PERMISSION_GRANTED;
         if (pkg != null && uid == pkg.applicationInfo.uid)
             return grantedPermissions.contains(permission) ? PackageManager.PERMISSION_GRANTED
                     : PackageManager.PERMISSION_DENIED;

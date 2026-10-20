@@ -731,6 +731,7 @@ public final class ManagedLauncher {
         }
         audio.install(services);
         new FrameworkMediaRouter(packages).install(services);
+        new FrameworkMediaSessions(packages).install(services);
         services.register("content", "android.content.IContentService", content::call);
         services.register("window", "android.view.IWindowManager", (method, a) -> {
             switch (method) {
@@ -1181,7 +1182,10 @@ public final class ManagedLauncher {
 
     private static void runApp(Object thread, Context system, String[] args) throws Exception {
         String packageName = args[1], code = args[2], launcher = args[3];
-        PackageInfo packageInfo = system.getPackageManager().getPackageArchiveInfo(
+        // A provisioned system package (microG's Play services) runs as the
+        // session app from its priv-app directory: already parsed with its UID.
+        PackageInfo provisioned = packages.systemPackage(packageName);
+        PackageInfo packageInfo = provisioned != null ? provisioned : system.getPackageManager().getPackageArchiveInfo(
                 code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_RECEIVERS
                         | PackageManager.GET_SERVICES | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
                         | PackageManager.GET_CONFIGURATIONS | PackageManager.GET_INSTRUMENTATION
@@ -1193,36 +1197,40 @@ public final class ManagedLauncher {
         if (packageInfo == null || !packageName.equals(packageInfo.packageName))
             throw new IllegalStateException("Cannot parse " + code + "/base.apk");
         ApplicationInfo app = packageInfo.applicationInfo;
+        if (provisioned != null && app.uid != Process.myUid())
+            throw new IllegalStateException("System package " + packageName + " runs as uid " + app.uid);
         ActivityInfo activity = null;
         for (ActivityInfo candidate : packageInfo.activities)
             if (candidate.name.equals(launcher)) activity = candidate;
         if (activity == null) throw new IllegalStateException("No activity " + launcher);
-        String[] splitNames = new String[args.length - 4];
-        String[] splitPaths = new String[args.length - 4];
-        for (int i = 4; i < args.length; i++) {
-            String[] split = args[i].split("=", 2);
-            splitNames[i - 4] = split[0];
-            splitPaths[i - 4] = code + "/" + split[1];
+        if (provisioned == null) {
+            String[] splitNames = new String[args.length - 4];
+            String[] splitPaths = new String[args.length - 4];
+            for (int i = 4; i < args.length; i++) {
+                String[] split = args[i].split("=", 2);
+                splitNames[i - 4] = split[0];
+                splitPaths[i - 4] = code + "/" + split[1];
+            }
+            // What PackageManagerService records for an installed arm64 package.
+            app.sourceDir = app.publicSourceDir = code + "/base.apk";
+            app.splitNames = splitNames;
+            app.splitSourceDirs = app.splitPublicSourceDirs = splitPaths;
+            // The installed PackageInfo lists the same sorted splits; Play Asset
+            // Delivery finds install-time asset packs through it.
+            packageInfo.splitNames = splitNames;
+            packageInfo.splitRevisionCodes = new int[splitNames.length];
+            app.nativeLibraryDir = code + "/lib/arm64";
+            setField(app, "nativeLibraryRootDir", code + "/lib");
+            setField(app, "primaryCpuAbi", "arm64-v8a");
+            app.dataDir = "/data/user/0/" + packageName;
+            setField(app, "credentialProtectedDataDir", app.dataDir);
+            setField(app, "deviceProtectedDataDir", "/data/user_de/0/" + packageName);
+            app.uid = Process.myUid();
+            // The installed ApplicationInfo marks a base APK with classes.dex as
+            // code; the archive-parsed one here does not, and LoadedApk then builds
+            // a class loader without the APK's dex files.
+            app.flags |= ApplicationInfo.FLAG_HAS_CODE;
         }
-        // What PackageManagerService records for an installed arm64 package.
-        app.sourceDir = app.publicSourceDir = code + "/base.apk";
-        app.splitNames = splitNames;
-        app.splitSourceDirs = app.splitPublicSourceDirs = splitPaths;
-        // The installed PackageInfo lists the same sorted splits; Play Asset
-        // Delivery finds install-time asset packs through it.
-        packageInfo.splitNames = splitNames;
-        packageInfo.splitRevisionCodes = new int[splitNames.length];
-        app.nativeLibraryDir = code + "/lib/arm64";
-        setField(app, "nativeLibraryRootDir", code + "/lib");
-        setField(app, "primaryCpuAbi", "arm64-v8a");
-        app.dataDir = "/data/user/0/" + packageName;
-        setField(app, "credentialProtectedDataDir", app.dataDir);
-        setField(app, "deviceProtectedDataDir", "/data/user_de/0/" + packageName);
-        app.uid = Process.myUid();
-        // The installed ApplicationInfo marks a base APK with classes.dex as
-        // code; the archive-parsed one here does not, and LoadedApk then builds
-        // a class loader without the APK's dex files.
-        app.flags |= ApplicationInfo.FLAG_HAS_CODE;
         packages.install(system, packageInfo);
         installed = packageInfo;
         androidId = scopedAndroidId(settingsKey(app.uid / 100000), packageInfo.signatures);
@@ -1334,6 +1342,7 @@ public final class ManagedLauncher {
         }
         serviceRuntime.attach(thread, app);
         broadcasts.attach(thread, app.packageName);
+        accounts.attach(application, broadcasts::sendSystem);
         jobs.attach(application);
         // handleBindApplication installs this process's manifest providers
         // before Application.onCreate (SDK startup providers depend on it).
@@ -1631,6 +1640,7 @@ public final class ManagedLauncher {
             setField(thread, "mInitialApplication", application);
             serviceRuntime.attach(thread, app); serviceRuntime.remote(parent);
             broadcasts.attach(thread, app.packageName);
+            accounts.attach(application, broadcasts::sendSystem);
             jobs.attach(application);
             // handleBindApplication: this process's providers, published to
             // the session, then Application.onCreate.
@@ -1681,6 +1691,7 @@ public final class ManagedLauncher {
             setField(thread, "mInitialApplication", application);
             serviceRuntime.attach(thread, probeInfo);
             broadcasts.attach(thread, probeInfo.packageName);
+            accounts.attach(application, broadcasts::sendSystem);
             jobs.attach(application);
             context = application;
             checkApplicationRestrictions(context);

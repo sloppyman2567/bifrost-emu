@@ -145,6 +145,17 @@ final class FrameworkBroadcasts {
         return 0;
     }
 
+    // A protected broadcast the framework itself sends (LOGIN_ACCOUNTS_CHANGED),
+    // to this process's registered receivers.
+    synchronized void sendSystem(Intent intent) {
+        try {
+            for (Receiver receiver : new ArrayList<>(receivers))
+                if (allowed(receiver.permission) && receiver.filter.match(intent.getAction(), intent.getType(),
+                        intent.getScheme(), intent.getData(), intent.getCategories(), "AsgardBroadcast") >= 0)
+                    deliver(receiver, intent, 0, null, null, false);
+        } catch (Exception error) { android.util.Log.w("AsgardBroadcasts", "System broadcast failed", error); }
+    }
+
     private IBinder deliver(Object target, Intent intent, int code, String data, Bundle extras, boolean serial) throws Exception {
         if (target instanceof Receiver) {
             Receiver receiver = (Receiver) target;

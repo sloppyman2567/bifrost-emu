@@ -23,6 +23,7 @@ import threading
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
 import android_framework
+import android_google
 import android_microg
 from android_processes import ProcessHost
 
@@ -43,6 +44,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkBattery.java", "Framework/FrameworkVibrator.java",
                     "Framework/FrameworkKeyguard.java", "Framework/FrameworkClipboard.java",
                     "Framework/FrameworkAlarms.java", "Framework/FrameworkAccounts.java",
+                    "Framework/FrameworkAccountStore.java", "Framework/FrameworkMediaSessions.java",
                     "Framework/FrameworkLocation.java", "Framework/FrameworkSettingsDefaults.java",
                     "Framework/FrameworkSettings.java", "Framework/FrameworkBroadcasts.java",
                     "Framework/FrameworkPendingIntents.java", "Framework/FrameworkUsers.java",
@@ -627,6 +629,9 @@ def installed_arguments(metadata, code):
     # Installation assigns filenames after sorting ALL manifests by split name.
     # The inventory retains archive order. Assign indices before filtering ABIs,
     # or asset packs and the arm64 code split can point at unrelated APKs.
+    if metadata.get("system"):
+        # A provisioned system package (microG): parsed from its priv-app directory.
+        return ["--app", metadata["package"], code, metadata["launcher"]["class"]]
     packages = sorted(metadata["packages"], key=lambda p: p["split"] or "")
     splits = [(p["split"], f"split-{i}.apk") for i, p in enumerate(packages)
               if p["split"] and (not p["abis"] or "arm64-v8a" in p["abis"])]
@@ -820,19 +825,22 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
         install_managed_graphics(fresh, adapters / "managed")
         install_settings_key(fresh, settings_key)
-        destination = fresh / code.lstrip("/")
-        shutil.copytree(installed_root / code.lstrip("/"), destination)
+        # A system app's code is already in the provisioned image.
+        if installed_root is not None:
+            shutil.copytree(installed_root / code.lstrip("/"), fresh / code.lstrip("/"))
         # Guest writes are live in this root, including if the host crashes.
         # Copy them into a replacement root before exchanging runtimes.
         data_source = root if root.is_dir() else installed_root
         for relative in ("data/user", "data/user_de", "data/misc/profiles", "storage"):
+            if data_source is None: break
             source = data_source / relative
             target = fresh / relative
             if source.is_dir():
                 shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
-        settings_overrides = Path("data/system/users/0/bifrost-system-settings.xml")
-        if (data_source / settings_overrides).is_file():
-            shutil.copy2(data_source / settings_overrides, fresh / settings_overrides)
+        for retained in ("data/system/users/0/bifrost-system-settings.xml",
+                         "data/system/users/0/bifrost-accounts.json"):
+            if data_source is not None and (data_source / retained).is_file():
+                shutil.copy2(data_source / retained, fresh / retained)
         ensure_app_data(fresh, metadata["package"])
         (fresh / "data/data").symlink_to("user/0")
         (fresh / "data/dalvik-cache/arm64").mkdir(parents=True, exist_ok=True)
@@ -875,7 +883,11 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                       ROOT / "build/android-art/rootfs",
                                       ROOT / "build/android-adapters", dex, media_mask)
         guest_env = dict(guest_env, **network.result())
-    dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
+    # A system app (microG) has no installed base.apk to compile; ART's JIT runs it.
+    if not metadata.get("system"):
+        dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
+    # The Google accounts signed in on this device, with microG's registration for them.
+    android_google.import_shared(app.parent, root)
     trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;
@@ -918,6 +930,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                 status = process_session.run(command, stdout=log, env=environment, timeout=timeout)
             finally:
                 (root / "dev/socket/logdw").unlink(missing_ok=True)
+                android_google.publish_shared(app.parent, root)
                 collect_trace(trace_directory, app / "managed/traces")
                 if trace_directory is not None: shutil.rmtree(trace_directory)
         if status:

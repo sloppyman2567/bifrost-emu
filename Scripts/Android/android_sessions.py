@@ -8,6 +8,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -66,6 +67,10 @@ RESERVED_APP_IDS = frozenset({10001, 19998, 19999})
 
 def app_id(state, package):
     """Persist package identity independently of code updates and process IDs."""
+    tools = str(Path(__file__).resolve().parents[2] / "Tools/Android")
+    if tools not in sys.path: sys.path.insert(0, tools)
+    import android_microg
+    if package in android_microg.UIDS: return android_microg.UIDS[package]  # provisioned system apps
     state.mkdir(parents=True, exist_ok=True)
     with (state / ".app-ids.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
