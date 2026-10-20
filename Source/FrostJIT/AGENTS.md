@@ -3,7 +3,8 @@
 Read [the JIT guide](../../Docs/JIT.md) before implementation, debugging or review.
 The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
 
-- `Compiler/BlockAnalysis.*` owns fallback prediction and leaf eligibility;
+- `Compiler/BlockAnalysis.*` owns fallback prediction, leaf eligibility and the
+  dead-NZCV successor scan (`nzcv_dead_in`);
   `BlockCompiler.cpp` orchestrates Tier-1 compilation; `VerificationStores.cpp`
   records differential replay footprints. Prediction must track actual fallback
   support, but final fallback counts come from optimized IR.
@@ -30,6 +31,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   complete every load before writing any architectural register (and write the base
   last), and a store pair must write none: a fault on the second half restarts the
   whole instruction. `jit_host_fault` checks this, including `ldp x13, x12, [x13]`.
+- A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
+  never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
+  for the whole block. Vd is written only after the load, so a fault leaves it intact.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.
@@ -44,6 +48,15 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   Flags-only ops such as CCMP/CCMN do not write placeholder GPR destinations.
 - A pre-call pinned-vector writeback must include values written anywhere in a
   loop block, including writes after the call that carry into the next iteration.
+- An exit may omit its NZCV store only through `exit_flags_dead` (public Tier-1
+  compiles): the successor's first words must overwrite all four flags
+  (`ADDS`/`SUBS`/`ANDS`/`FCMP`) after nothing but flag-neutral, fault-free, non-branching
+  integer instructions. A successor that merely does not read the flags proves nothing.
+  Extend `nzcv_dead_in`'s neutral list only with instructions that cannot fault, trap,
+  branch or read NZCV. The words become a block dependency (`flag_dep_table_`, checked
+  by `invalidate_range`, `remember_code_granules`, `staged_entry_invalidated` and
+  `block_code_unchanged`); keep all four in step. `BlockEntry` is read on every dispatch
+  lookup: variable-size per-block data belongs in an append-only side table, not in it.
 - Materialize lazy NZCV before flag-clobbering allocation or operand emission.
   Respect each flag helper's scratch set and ARM carry versus x86 borrow
   convention. Keep cross-block NZCV observable through flag-neutral successors.

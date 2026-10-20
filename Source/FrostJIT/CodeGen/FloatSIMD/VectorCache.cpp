@@ -172,7 +172,7 @@ bool FrostJIT::vec_inst_effects(const IRInst& inst, VectorEffects& effects) cons
             write(inst.dest); break;
         case IROp::FP_MOVI: case IROp::FP_I2F:
             write(inst.dest); break;
-        case IROp::FP_F2I:
+        case IROp::FP_F2I: case IROp::FMOV_F2G:
             read(inst.src1); break;
         case IROp::FP_CMP:
             read(inst.src1);

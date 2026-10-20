@@ -1032,6 +1032,19 @@ private:
         // count always retires it.
         uint32_t code_words_off = 0;
         uint32_t code_words_count = 0;
+        // Successor instruction streams this translation relied on to omit a
+        // dead NZCV store at an exit (exit_flags_dead): flag_deps_count records
+        // at flag_dep_table_[flag_deps_off]. Like inlined_ranges_ they are
+        // invalidation dependencies; unlike them they do not make the block's
+        // own instruction range non-contiguous, and their words (when
+        // recorded) let cache maintenance keep the block. Only dead verdicts
+        // are recorded. Kept out of line so the entry stays small: it is read
+        // on every dispatch lookup.
+        uint32_t flag_deps_off = 0;
+        uint16_t flag_deps_count = 0;
+        // Differential verification compares NZCV after a block; an exit that
+        // legitimately left stale flags in pstate must not be compared.
+        bool skips_dead_flag_store = false;
     };
     struct Tier2Trial {
         Tier2RegionMonitor* monitor = nullptr;
@@ -1097,6 +1110,14 @@ private:
     // it under the compiler lock; block_words_ collects the current compile.
     std::vector<uint32_t> code_words_;
     std::vector<uint32_t> block_words_;
+    // Append-only like code_words_ (BlockEntry::flag_deps_off).
+    struct FlagDep { uint64_t pc; uint32_t count; uint32_t words_off; };
+    std::vector<FlagDep> flag_dep_table_;
+    // Dead-NZCV successor scans of the current compile (see exit_flags_dead).
+    struct FlagDepScratch { uint64_t pc; std::vector<uint32_t> words; };
+    std::vector<FlagDepScratch> flag_deps_scratch_;
+    bool flag_scan_active_ = false;   // public Tier-1 compiles only
+    bool flag_store_skipped_ = false;
     bool block_code_unchanged(const BlockEntry& entry, uint64_t pc) const;
     void attach_code_words(BlockEntry& entry, bool contiguous);
     // One past the highest recorded call slot; rewind_codegen purges records
@@ -2009,13 +2030,21 @@ private:
     // Materialize pending host flags to pstate if any flag-clobbering
     // instruction is about to execute. Called by ADD/SUB/AND/OR/XOR/
     // SHL/SHR/SAR/ROR/NOT/NEG/IMUL to preserve flag correctness.
-    void clobber_flags();
+    // `dead`: the flags are provably overwritten before any observer, so the
+    // register state is updated exactly as for a store but none is emitted.
+    void clobber_flags(bool dead = false);
+    // True when NZCV is dead on entry to guest `pc` (a statically known exit
+    // target): the first instructions at `pc` overwrite all four flags before
+    // anything that could read them, fault or branch. Records the words the
+    // verdict relies on as a dependency of the block being compiled. Public
+    // Tier-1 compiles only; false otherwise.
+    bool exit_flags_dead(uint64_t pc);
     // Materialize host flags (NZCV) to cpu.pstate, preserving the current
     // RFLAGS around the materialization (which clobbers RAX/RCX/RDX).
     // Used at block exits (BRCOND fall-through and taken paths) where the
     // next block may read pstate. No-op if flags_in_host_ is false.
     // Does NOT clear flags_in_host_ — the caller manages that.
-    void materialize_flags_to_pstate(bool preserve_flags = true);
+    void materialize_flags_to_pstate(bool preserve_flags = true, bool dead = false);
     // Translation entry point.
     uint64_t (*translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry = nullptr))(CPU*, Emulator*);
 private:

@@ -85,6 +85,14 @@ static void *worker(void *unused) {
         PROBE("str x11, [%0]", p + page_size);
         PROBE("ldr q0, [%0]", p + page_size - 8);
         PROBE("str q0, [%0]", p + page_size - 8);
+        // Scalar FP accesses sit in blocks that cache FP registers: d8 is written
+        // just before the fault and must survive it, also when it is the target.
+        PROBE("ldr d0, [%0]", p + page_size);
+        PROBE("ldr d8, [%0]", p + page_size);
+        PROBE("ldr s8, [%0]", p + page_size);
+        PROBE("ldr h8, [%0]", p + page_size);
+        PROBE("str d8, [%0]", p + page_size);
+        PROBE("str s0, [%0]", p + page_size);
         // Pairs: the first half is mapped and the second faults. Integer destinations
         // may not change and the pc and other state are exact; a store pair may have
         // written its first half. A float pair's first destination is left alone

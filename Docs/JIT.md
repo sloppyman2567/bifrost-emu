@@ -15,6 +15,123 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Scalar FP loads and stores keep the XMM cache (2026-10-20)
+
+`BIFROST_JIT_DUMP=1` of a double-precision loop (`ldr d1, [x0, x2, lsl #3]`,
+`fdiv`, `fmul`, `fnmsub`, `fadd`) showed no register cache at all: every FP
+operand was loaded from `cpu.v_lo`, the result stored back, and a zero stored to
+`cpu.v_hi`, about six memory operations per instruction. The cause was one op.
+`IR/Translate/Memory.cpp` lowered `ldr`/`str` of B/H/S/D (and S/D `ldp`/`stp`) to
+`LOAD_MEM`/`STORE_MEM` plus `SIMD_LDST`, which no cache admits
+(`fp_cache_compatible_op`, `vec_inst_effects`), so any block holding a scalar FP
+load or store was disqualified, and real float code is full of them.
+
+- **Lowering.** A scalar load is `LOAD_MEM` then `FMOV_G2F` (Vd.lo = value, Vd.hi =
+  0; the load zero-extends B/H/S into the register); a scalar store is `FMOV_F2G`
+  then `STORE_MEM`. Both FMOVs already had cache-aware code and the same
+  architectural effect as the old pair, and the write still follows the load, so a
+  faulting load leaves Vd unchanged. Pair loads still complete both loads before
+  writing either register.
+- **Cache side.** `vec_inst_effects` lists `FMOV_F2G` as a read of its FP source, and
+  `emit_fmov_helper` reads a pinned XMM for it in the full vector cache as well
+  (it previously did so only in the lo-only scalar cache; the full cache treated the
+  op as a synchronization boundary, so no such block reached that path).
+  `FMOV_G2F` no longer moves its source into RAX (spilling RAX's occupant) before
+  testing for a pinned destination, and in the full cache it skips the zero-upper
+  instruction `MOVQ` makes redundant.
+- **Measured (same machine, `HEAD` against this tree, minimum of five runs of the
+  game-style kernels, a game running alongside).** Double-math loop 6,114 → 2,880
+  ns/iter; float `sqrtf`/`floorf` loop 14,186 → 7,649; int16 PCM-to-float mix 12,205
+  → 7,199; an entity-update loop with calls (`kern`) 0.179 → 0.160 s. Against QEMU's
+  user-mode emulator on the same kernels that is about 6.3x, 4.8x and 3.2x faster
+  (it was about 3x, 2.6x and 1.9x). Checksums match QEMU.
+- **Not done.** Each scalar write to a cached register still stores a zero to
+  `cpu.v_hi` in the lo-only cache. Deferring it to the writeback is only correct
+  for registers statically dirty at that point (a loop-carried register may still
+  hold a vector's upper half on the first trip), and every publication site would
+  need to know; not attempted. Replacing the reg-reg `movsd`/`movss` copies with
+  `movaps` (they merge into the scratch register, a false dependency) was measured
+  and was within noise, so it was not kept. Tier-2 is off by default.
+- **Checked.** `jit_fp_ldst_cache` hashes the architectural result, upper lanes
+  included, of compiler-generated D/S loops (arithmetic, conversion, compare, struct
+  fields) and of B/H/S/D loads, stores and pairs (offset, pre- and post-index) into
+  registers preloaded with ones, plus more live FP registers than the cache holds;
+  its three hashes are QEMU's. `jit_host_fault` gained `ldr d0/d8/s8/h8` and
+  `str d8/s0` probes: `d8` is written just before the faulting access and must keep
+  its value, also when it is the load's destination. `make verify` (93 fixtures, 7
+  threaded), 152 unit tests, the MT and Tier-2 scripts and the zstd regression pass.
+  Not run: an ASan/UBSan build (`make debug` fails on a missing Vulkan video header
+  in `WindowStats.cpp`, unrelated), and no game.
+
+## Dead NZCV stores at block exits (2026-10-20)
+
+A conditional branch that leaves with live host flags stores them to `cpu.pstate` on
+each exit (`lahf; seto; and; imul; and; xor; mov; pop`, nine instructions that also
+clobber RAX/RCX/RDX). In a loop of `ldr; add; add; cmp; b.le` followed by `cmp; b.ne`
+the fall-through exit's successor starts with `cmp`, which rewrites all four flags, so
+the store was dead on every iteration. The earlier rule (see "Bitfield insertion and
+NZCV passthrough") stands: a successor that merely does not read flags proves nothing,
+because it may forward them. What can be proved is that the successor *overwrites*
+them first.
+
+- **Scan.** `jit_analysis::nzcv_dead_in` (`Compiler/BlockAnalysis.cpp`) reads the first
+  six words at an exit target and returns true when a flag-neutral, fault-free integer
+  instruction run (moves, ADD/SUB/logical without flags, bitfields, shifts, multiplies,
+  divides, bit counts, ADR/ADRP, CRC32) ends in `ADDS`/`SUBS` (so CMP/CMN), `ANDS`
+  (TST) or `FCMP`/`FCMPE`. Anything else ends it as live: a flag reader (`b.cond`,
+  `csel`, `adc`, `ccmp`, `mrs`), any branch, call or system instruction, a load or
+  store (it can fault, and a guest signal frame must show the flags), and any
+  unrecognized word. It is a fact about the guest instructions, so it holds however
+  they run (chained, dispatched or interpreted).
+- **Use.** `FrostJIT::exit_flags_dead` reads the words straight from the guest window,
+  only from pages that are mapped, executable and not userfaultfd-missing (it predicts
+  code that may never run, so it must not populate a page or fault), and
+  `clobber_flags(dead)` / `materialize_flags_to_pstate(preserve, dead)` update the
+  allocator exactly as for a store but emit none. Sites: both `BRCOND` exits (and the
+  HI/LS carry-inversion that went with the store), `CBZ`/`CBNZ`/`TBZ`/`TBNZ` (whose
+  single store feeds both exits, so both targets must overwrite), a block-limit
+  fall-through and a direct `B`. A taken self-loop back-edge uses it too, in MT as
+  well; the earlier loop-carry shortcut for single-threaded loops is unchanged.
+- **Dependency.** The words a dead verdict used are recorded per block
+  (`BlockEntry::flag_deps_off/count`, an append-only `flag_dep_table_` like
+  `code_words_`; the entry itself must stay small, see below). They are
+  invalidation dependencies like `inlined_ranges_`: overlapped by `invalidate_range`,
+  indexed by `remember_code_granules`, checked by `staged_entry_invalidated`; and
+  `block_code_unchanged` also requires their words to match and their pages to stay
+  executable, so cache maintenance and `mprotect` that leave the words alone still keep
+  the block. Only dead verdicts are recorded; a live verdict is always safe. Private
+  Tier-2 sampling copies never predict (nothing tracks their dependencies). Differential
+  verification skips its NZCV comparison for a block that did this
+  (`skips_dead_flag_store`).
+- **Policy change in MT.** The bounded MT self-loop section says expiry or revocation
+  of a back-edge commits carried state including flags, and `jit_mt_publication`
+  checked that for `add; add; subs; b.ne`. Where the loop head overwrites the flags
+  first, an expiry exit now leaves the entry flags in `cpu.pstate`: nothing guest code
+  can run observes the difference, but a signal frame taken at that exit, or a debugger,
+  would show them. The check now expects the entry flags for that loop and still
+  expects the committed carry for the loop whose head reads it (`adcs`).
+- **Cost found on the way.** The first version stored the dependencies in a vector inside
+  `BlockEntry`; the call-heavy `atomics` kernel (two helper calls per iteration, each a
+  table lookup) slowed 7% with identical generated code. `BlockEntry` is read on every
+  dispatch lookup, so variable-size per-block data goes to side tables; with them out of
+  line the kernel matched `HEAD` again.
+- **Measured (same method as above).** `array_bounds` (IL2CPP-style) 2,337 → 2,211
+  ns/iter, `switch_dispatch` 18,910 → 17,567, pointer chase flat; the effect is the
+  nine instructions on exits whose successor begins with a compare, so it is a few
+  percent of such loops, not a large one. A successor that starts with a load keeps
+  the store (the load can fault); that excludes the loop head of most real loops.
+- **Checked.** `jit_flags_exit_dead`: fall-through and taken successors that overwrite
+  or read the flags (MRS, CSET, CCMP, ADC, a load), flag-neutral instructions before the
+  overwrite, B.HI/B.LS after `adds` (the carry inversion), CBZ/TBZ with one or both
+  successors overwriting, a direct `B`, FCMP/FCMPE as the overwriter, and a warmed block
+  whose successor, on another cache line, is patched to a NOP and back (the block must
+  be retired; unchanged maintenance may keep it); the same values under QEMU, the
+  JIT, the interpreter and verify mode. Three deliberate breakages each fail it (no
+  dependency overlap, no dependency word check, flag readers treated as neutral).
+  `make verify` (93 fixtures, 7 threaded), 152 unit tests (also `--no-chain-skip`,
+  `--no-jit`, `--fwd`), Toybox and the real-world filter (65), the MT/Tier-2/cache
+  scripts and the zstd regression pass. Untested: an ASan build, and any game.
+
 ## Flag setters no longer save dead flags (2026-10-20)
 
 A 5-instruction byte-count loop (`ldrb; cmp; cinc; cmp; b.ne`) compiled to 467
@@ -1582,6 +1699,8 @@ preserves NZCV on cross-block conditional exits and no longer retroactively
 patches those stores out. Existing internal self-loop handling remains.
 `jit_flags_passthrough` covers taken and fall-through edges through neutral
 blocks with a later conditional consumer, including warmed chained execution.
+Omitting the store when the successor itself overwrites the flags first is a
+different, provable case: "Dead NZCV stores at block exits".
 The old JIT fails both regressions. `xwayland_wire` additionally checks a real
 guest libX11 connection, 100 round-trips and server-side pixel readback.
 
@@ -2167,8 +2286,9 @@ never redirect a body cell into a different translation's frame or register
 layout. Cells and retired code retain the existing lifetime policy.
 
 BRCOND commits NZCV before the MT guard because its checks overwrite host
-flags and any iteration may become an exit. The ST-only dead-flag shortcut
-remains ST-only. CBZ/CBNZ and TBZ/TBNZ preserve their pre-branch NZCV contract.
+flags and any iteration may become an exit, unless the loop head overwrites
+all four flags first (see "Dead NZCV stores at block exits"). The ST-only
+loop-carry shortcut remains ST-only. CBZ/CBNZ and TBZ/TBNZ preserve their pre-branch NZCV contract.
 `BIFROST_NO_SELFLOOP=1` restores ordinary loop edges; `BIFROST_NO_PIN=1`
 disables GPR pinning, and `BIFROST_NO_CHAIN=1` also disables MT body edges.
 Both frame layouts support this path. Tier-2 multi-block regions retain their

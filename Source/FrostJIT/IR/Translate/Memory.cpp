@@ -33,7 +33,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // because the GPR path below reads/writes cpu.regs[d.rt] while
             // vector instructions address cpu.v_lo/v_hi[d.rt]. The vector
             // branch handles the vreg storage (SIMD_LD16/ST16 for 16-byte
-            // Q forms, SIMD_LDST + LOAD_MEM/STORE_MEM for B/H/S/D).
+            // Q forms, FMOV_G2F/FMOV_F2G + LOAD_MEM/STORE_MEM for B/H/S/D).
             bool is_load = (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
                             d.cls == InstClass::LDR_REG || d.cls == InstClass::LDRSW ||
                             d.cls == InstClass::LDRSB || d.cls == InstClass::LDRSH);
@@ -86,11 +86,10 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // Q (16 bytes): SIMD_LD16/SIMD_ST16 — one bounds-check +
                 // movupd, same machinery as LD1/ST1 128-bit.
                 // B/H/S/D (<16 bytes): LOAD_MEM/STORE_MEM for the bytes,
-                // plus SIMD_LDST to (a) zero v_hi on load — the interp sets
-                // v_hi = (nbytes >= 16) ? hi : 0 — and (b) read v_lo on
-                // store. These ops are not vec-cache-compatible, so the
-                // block never enables the XMM cache: cpu.v_lo/v_hi stays
-                // the canonical vector storage (no stale-pinned-XMM risk).
+                // plus FMOV_G2F/FMOV_F2G for the register half: a load zeroes
+                // v_hi (the interp sets v_hi = (nbytes >= 16) ? hi : 0) and a
+                // store reads v_lo. Both are cache-aware, so a block holding
+                // scalar FP loads/stores keeps its XMM cache.
                 if (is_load) {
                     if (vec_q) {
                         emit_ld16(block, d.rt, addr, Ld16Params{1, static_cast<uint64_t>(mem_off)}, cur_pc);
@@ -100,27 +99,18 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         mp.width = static_cast<uint8_t>(vec_nbytes);
                         mp.offset = static_cast<uint64_t>(mem_off);
                         emit_load_mem(block, lo, addr, mp, cur_pc);
-                        // LOAD_MEM zero-extends into the vreg; src2 is a
-                        // real zero vreg (load_imm) so v_hi gets 0, matching
-                        // the interpreter (v_hi = 0 for nbytes < 16). Passing
-                        // literal 0 as src2 would read guest X0 (vreg 0) and
-                        // write ITS value into v_hi — and on the store path
-                        // it clobbers X0 itself.
-                        uint16_t zero = load_imm(block, 0);
-                        emit_ldst(block, d.rt, lo, zero, LdStParams{true}, cur_pc);
+                        // LOAD_MEM zero-extends into the vreg and FMOV_G2F
+                        // zeroes v_hi, matching the interpreter (v_hi = 0 for
+                        // nbytes < 16).
+                        block.insts.push_back(IRInst::make(IROp::FMOV_G2F, d.rt, lo, 0, 0, cur_pc));
                     }
                 } else {
                     if (vec_q) {
                         emit_st16(block, addr, d.rt, St16Params{1, false, static_cast<uint64_t>(mem_off)}, cur_pc);
                     } else {
+                        // Store: read v_lo[d.rt] into a scratch vreg.
                         uint16_t lo = g_alloc.alloc();
-                        // Store: read v_lo[d.rt] into the lo vreg. src2 is a
-                        // fresh scratch that receives the (unused) v_hi half
-                        // — literal 0 would be guest X0 (vreg 0) and the
-                        // codegen's set_vreg_reg would clobber X0 with
-                        // v_hi[d.rt]'s value.
-                        uint16_t hi_scratch = g_alloc.alloc();
-                        emit_ldst(block, d.rt, lo, hi_scratch, LdStParams{false}, cur_pc);
+                        block.insts.push_back(IRInst::make(IROp::FMOV_F2G, lo, d.rt, 0, 0, cur_pc));
                         MemParams mp;
                         mp.width = static_cast<uint8_t>(vec_nbytes);
                         mp.offset = static_cast<uint64_t>(mem_off);
@@ -189,8 +179,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── LDP/STP ──────────────────────────────────────────────────
         // Native IR translation for GPR pair load/store.
         // SIMD LDP/STP (is_vec=true) now gets native IR
-        // translation using LOAD_MEM/STORE_MEM + SIMD_LDST, matching
-        // the pattern used by SIMD_LD1/ST1. This eliminates a major
+        // translation using LOAD_MEM/STORE_MEM + FMOV_G2F/FMOV_F2G. This eliminates a major
         // CALL_INTERP fallback for FP/SIMD-heavy code (function
         // prologues/epilogues that save/restore D8-D15 pairs).
         case InstClass::LDP: case InstClass::STP: {
@@ -237,9 +226,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     }
                 } else if (is_load) {
                     // S/D LDP: load rt (S/D width), zero the upper half.
-                    // src2 must be a real zero vreg (load_imm) — literal 0
-                    // is guest X0 (vreg 0), and reading it here writes X0's
-                    // value into v_hi instead of zeroing it.
                     // Both loads complete before either register is written: a
                     // fault on the second half then leaves the architectural state
                     // as it was before the pair, so the instruction restarts whole
@@ -254,24 +240,19 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     mp2.width = static_cast<uint8_t>(esize);
                     mp2.offset = static_cast<uint64_t>(mem_off + stride);
                     emit_load_mem(block, lo2, base, mp2, cur_pc);
-                    uint16_t zero = load_imm(block, 0);
-                    emit_ldst(block, d.rt, lo1, zero, LdStParams{true}, cur_pc);
-                    uint16_t zero2 = load_imm(block, 0);
-                    emit_ldst(block, d.rt2, lo2, zero2, LdStParams{true}, cur_pc);
+                    block.insts.push_back(IRInst::make(IROp::FMOV_G2F, d.rt, lo1, 0, 0, cur_pc));
+                    block.insts.push_back(IRInst::make(IROp::FMOV_G2F, d.rt2, lo2, 0, 0, cur_pc));
                 } else {
                     // S/D STP: store rt's low bytes to [base+mem_off] and
-                    // rt2's to [base+mem_off+stride]. hi_scratch receives
-                    // the unused v_hi half (literal 0 = guest X0).
+                    // rt2's to [base+mem_off+stride].
                     uint16_t lo1 = g_alloc.alloc();
-                    uint16_t hi1 = g_alloc.alloc();
-                    emit_ldst(block, d.rt, lo1, hi1, LdStParams{false}, cur_pc);
+                    block.insts.push_back(IRInst::make(IROp::FMOV_F2G, lo1, d.rt, 0, 0, cur_pc));
                     MemParams mp;
                     mp.width = static_cast<uint8_t>(esize);
                     mp.offset = static_cast<uint64_t>(mem_off);
                     emit_store_mem(block, base, lo1, mp, cur_pc);
                     uint16_t lo2 = g_alloc.alloc();
-                    uint16_t hi2 = g_alloc.alloc();
-                    emit_ldst(block, d.rt2, lo2, hi2, LdStParams{false}, cur_pc);
+                    block.insts.push_back(IRInst::make(IROp::FMOV_F2G, lo2, d.rt2, 0, 0, cur_pc));
                     MemParams mp2;
                     mp2.width = static_cast<uint8_t>(esize);
                     mp2.offset = static_cast<uint64_t>(mem_off + stride);

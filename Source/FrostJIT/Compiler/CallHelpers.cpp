@@ -304,10 +304,6 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         // in RAX and got clobbered by the FMOV_G2F that copies x9 to
         // v_lo[0]. Fix: spill RAX's occupant BEFORE overwriting it.
         int s = ensure_vreg(src1, RAX);
-        if (s != RAX) {
-            clobber_host_reg(RAX);  // spill dirty vreg in RAX before reuse
-            emit_mov_reg(RAX, s);
-        }
         // ── FP-cache path (FMOV_G2F only — lo half): ────────────────
         // Store the GPR value into the pinned XMM (reg-reg) instead of
         // memory, mark it dirty, and zero v_hi in memory as usual. The
@@ -318,10 +314,16 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
             if (xd >= 0) {
                 emit_vmovq_gpr_to_xmm(xd, s);
                 vec_cache_mark_dirty(idx);
-                fp_zero_hi(idx);
+                // MOVQ clears bits 127:64 of a full-width cached vector; the
+                // lo-only scalar cache keeps v_hi in memory.
+                if (fp_cache_active_) fp_zero_hi(idx);
                 // src1 stays cached in s (value not modified).
                 return;
             }
+        }
+        if (s != RAX) {
+            clobber_host_reg(RAX);  // spill dirty vreg in RAX before reuse
+            emit_mov_reg(RAX, s);
         }
         emit_store(CPU_REG, fp_off, RAX);
         // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
@@ -341,7 +343,7 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
     } else {
         // FP → GPR: load fp_off into a fresh vreg for dest.
         int d = alloc_reg();
-        if (fp_cache_active_ && fp_field == 0) {
+        if (vec_cache_active_ && fp_field == 0) {
             int xs = vec_xmm(idx);
             if (xs >= 0) {
                 // Pinned source: reg-reg move (no memory).

@@ -190,7 +190,10 @@ static bool check_selfloops() {
             if (boundary == 2) cpu.jit_stop_pc = head;
             cpu.pc = fn(&cpu, e.get());
             const uint64_t n = cpu.regs[2];
-            const uint32_t nzcv = kind == 0 || kind == 4 ? 0x20000000 : 0xa0000000;
+            // Kind 4's loop head reads the carried C and must see it committed. Kind 0's head
+            // (ADD, ADD, SUBS) overwrites all four flags before anything can read them, so its
+            // back-edge exits skip the store and leave the entry flags in place.
+            const uint32_t nzcv = kind == 4 ? 0x20000000 : 0xa0000000;
             const uint64_t next_pc = kind == 2 && n == 256 ? head + 16 : head;
             double lo, hi;
             std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);

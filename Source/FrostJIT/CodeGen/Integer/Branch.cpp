@@ -218,7 +218,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // may overwrite host flags; neither edge needs PUSHFQ/POPFQ.
             // Test the allocator's existing home without moving the operand
             // into RAX or destructively clearing its high half for W-form.
-            clobber_flags();
+            // The store is dead when both successors overwrite the flags first.
+            clobber_flags(flags_in_host_ && exit_flags_dead(inst.arm_pc + 4) &&
+                          exit_flags_dead(bp.target));
             int s1 = ensure_vreg(inst.src1);
             emit_byte(rex(bp.sf, s1 >= 8, false, s1 >= 8));
             emit_byte(0x85); emit_byte(modrm(3, s1 & 7, s1 & 7));
@@ -275,7 +277,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             const BrCondBitParams bp = inst.brcond_bit_params();
             // As with CBZ, guest NZCV has been committed before BT.
             // Use the operand in place and let BT overwrite dead host CF.
-            clobber_flags();
+            clobber_flags(flags_in_host_ && exit_flags_dead(inst.arm_pc + 4) &&
+                          exit_flags_dead(bp.target));
             int s1 = ensure_vreg(inst.src1);
             emit_byte(rex(true, false, false, s1 >= 8));
             emit_byte(0x0F); emit_byte(0xBA);
@@ -365,10 +368,14 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // A successor may forward NZCV to later blocks, return to a
             // caller, or be invalidated. Preserve architectural flags on
             // every cross-block edge; a local consumer scan is not liveness.
-            if (need_cmc_for_hi_ls) emit_byte(0xF5);
+            // The exception is a successor whose own first instructions
+            // rewrite all four flags before anything can observe them
+            // (exit_flags_dead): the store is then dead.
+            const bool fall_dead = exit_flags_dead(inst.arm_pc + 4);
+            if (need_cmc_for_hi_ls && !fall_dead) emit_byte(0xF5);
             // JCC has consumed the host flags. Only architectural NZCV must
             // survive the exit; restoring RFLAGS here is dead work.
-            materialize_flags_to_pstate(false);
+            materialize_flags_to_pstate(false, fall_dead);
             emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
@@ -386,6 +393,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // every iteration (~60 bytes of pushfq/bit-extract/store).
             bool skip_taken_materialize =
                 is_selfloop && !no_selfloop_ && !flags_loop_carried_ && !mt_active();
+            // Otherwise the taken target may itself overwrite the flags first.
+            if (!skip_taken_materialize && exit_flags_dead(bp.target))
+                skip_taken_materialize = true;
             // If CMC was emitted, re-invert CF before materializing flags.
             // Skipped along with the materialize: the loop body re-sets CF
             // before any consumer reads it.

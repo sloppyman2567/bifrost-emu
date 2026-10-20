@@ -31,8 +31,8 @@ for example `FrostJIT/Compiler/FrostJIT.hpp` and `Bifrost/Emulator.hpp`.
 ## FrostJIT
 
 Read [the JIT guide](JIT.md) before changing the compiler or JIT-facing decoder.
-`Compiler/BlockAnalysis.cpp` predicts fallback boundaries and scans candidate
-inline leaves; `BlockCompiler.cpp` orchestrates Tier-1 translation, emission and
+`Compiler/BlockAnalysis.cpp` predicts fallback boundaries, scans candidate
+inline leaves and decides whether a successor overwrites NZCV first; `BlockCompiler.cpp` orchestrates Tier-1 translation, emission and
 publication. `VerificationStores.cpp` collects store footprints for differential
 replay. IR construction, scalar SSA and optimization are in `IR/Builder.*`,
 `IR/SSA/` and `IR/Passes/`; translation is in `IR/Translate/`. `IR/IR.hpp`

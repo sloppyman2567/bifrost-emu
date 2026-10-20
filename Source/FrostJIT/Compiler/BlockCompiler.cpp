@@ -110,6 +110,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
     inlined_ranges_.clear();
+    // Dead-NZCV exit predictions record guest words as dependencies; private
+    // Tier-2 sampling copies are not tracked by those, so they never predict.
+    struct FlagScanScope {
+        bool& active;
+        ~FlagScanScope() { active = false; }
+    } flag_scan_scope{flag_scan_active_};
+    flag_scan_active_ = private_entry == nullptr;
+    flag_deps_scratch_.clear();
+    flag_store_skipped_ = false;
     chain_entry_off_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();
@@ -1060,7 +1069,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // the host CPU's RFLAGS but haven't been written to pstate. The
     // next block (or the interpreter) would see stale pstate.
     // clobber_flags() handles the flush+materialize+invalidate pattern.
-    clobber_flags();
+    // When the exit target is static and overwrites NZCV before anything can
+    // observe it (a block-limit fall-through or a direct B), the store is dead.
+    bool exit_flags_are_dead = false;
+    if (flags_in_host_ && !unchainable_end_ && !indirect_exit_) {
+        if (!rax_holds_next_pc_)
+            exit_flags_are_dead = exit_flags_dead(
+                has_inlined_leaf ? cur_pc : start_pc + ir_block.count * 4);
+        else if (!ir_block.insts.empty() && ir_block.insts.back().op == IROp::BRCOND_FALLTHRU)
+            exit_flags_are_dead = exit_flags_dead(ir_block.insts.back().fallthru_params().target);
+    }
+    clobber_flags(exit_flags_are_dead);
     // Write back dirty architectural vregs before returning (so cpu.regs[]
     // is up to date); dead scratch values need no stack store at the exit.
     flush_all_vregs_exit();
@@ -1264,6 +1283,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.reads_pstate_before_set = flags_loop_carried_;
     entry.inlined_ranges_ = std::move(inlined_ranges_);
     inlined_ranges_.clear();
+    if (!flag_deps_scratch_.empty() && flag_deps_scratch_.size() <= UINT16_MAX &&
+        flag_dep_table_.size() < UINT32_MAX - flag_deps_scratch_.size()) {
+        entry.flag_deps_off = static_cast<uint32_t>(flag_dep_table_.size());
+        entry.flag_deps_count = static_cast<uint16_t>(flag_deps_scratch_.size());
+        for (const auto& dep : flag_deps_scratch_)
+            flag_dep_table_.push_back({dep.pc, static_cast<uint32_t>(dep.words.size()), UINT32_MAX});
+    }
+    entry.skips_dead_flag_store = flag_store_skipped_;
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.

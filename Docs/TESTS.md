@@ -4,6 +4,45 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## JIT scalar FP cache and dead NZCV exit stores (2026-10-20)
+
+Revision: the two commits above plus the uncommitted change under test.
+
+- `jit_fp_ldst_cache` (three hashes from QEMU: compiler-generated D/S loops with
+  conversions, compares and struct fields; B/H/S/D loads, stores and S/D pairs,
+  offset and pre/post-index, into registers preloaded with ones so a missed upper-lane
+  clear shows; thirty-two live FP registers) passes under QEMU, the new JIT, the
+  old binary (it is a behavior check, not a regression for the old code), the
+  interpreter and verify mode. `jit_host_fault` gained `ldr d0/d8/s8/h8` and
+  `str d8/s0` probes and passes under QEMU, the new and the old JIT.
+- `jit_flags_exit_dead`: 12 values squared, 3 repetitions, ten case groups (fall-through
+  and taken successors that overwrite or read the flags, neutral instructions before
+  the overwrite, B.HI/B.LS after `adds`, CBZ/TBZ, direct `B`, FCMP/FCMPE) plus a
+  warmed block whose successor, on another cache line, is patched to a NOP and back
+  with unchanged-word maintenance in between. It passes under QEMU, the JIT, the
+  interpreter and verify mode. Breakage checks, each of which fails it: no overlap
+  of the dependency range in `invalidate_range`, no word comparison in
+  `block_code_unchanged`, and `CSEL`/`CSINC`/`CCMP`/`ADC` treated as flag-neutral.
+  Faulting loads before the overwrite are not distinguishable by it (only a signal
+  handler could see the flags); `jit_host_fault` is the fixture for fault state.
+- `jit_mt_publication` expected the committed flags at an MT self-loop expiry exit for
+  `add; add; subs; b.ne`; it now expects the entry flags there (the loop head
+  overwrites them) and keeps expecting the committed carry for the `adcs` loop.
+  It failed with the first version of the change and passes on `HEAD`'s tree
+  and on this one with that expectation (checked against a clean export of `HEAD`).
+- `make verify` (93 differential fixtures, 7 threaded oracle runs); `run_tests.sh
+  --unit --strict` with the JIT (152), `--no-chain-skip` (152), `--no-jit` (144, 8
+  skipped) and `--fwd` (152); `--toybox --realworld --strict` (65); `test_jit_cache`,
+  `test_jit_mt`, `test_jit_mt_publication`, `test_jit_tier2_discovery/feedback/measure/
+  mutex`, `test_jit_profiler`, `test_fallback_profile` and the zstd regression pass.
+  `--integration` and `--dynamic` were not run (they open SDL windows); the
+  headless library build (`USE_SDL2=0`) compiled; the ASan debug build did not
+  build (`vk_video/vulkan_video_codec_h264std.h` missing, unrelated); no game ran.
+- Performance (`HEAD` against the tree, same machine, a game running alongside,
+  minimum of five runs): see the guide sections of this date for the numbers and
+  what they do and do not show. A seven-percent `atomics` slowdown that the first
+  version showed (identical generated code) was the `BlockEntry` size and is gone.
+
 ## Google accounts and microG sign-in (2026-10-20)
 
 - `test_managed_accounts_service` (`ManagedAccounts`) drives `AccountManager`

@@ -57,6 +57,19 @@ labels below are historical records.
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
   Found in a Hungry Shark World profile, where the helper held 21% of the samples
   during the post-launch freeze. See the JIT guide.
+- JIT: scalar FP loads and stores (`ldr`/`str` of B/H/S/D, S/D `ldp`/`stp`) no longer
+  disable the XMM register cache for their block, so float and double code keeps its
+  values in registers instead of about six memory operations per instruction. Same-machine
+  game-style kernels: double math 2.1x, `sqrtf`/`floorf` 1.85x, PCM-to-float mix 1.7x
+  faster than before, results identical to QEMU. `jit_fp_ldst_cache` covers the forms
+  and `jit_host_fault` the faulting accesses.
+- JIT: a conditional branch, CBZ/TBZ, direct `B` or block-limit exit skips the nine-
+  instruction NZCV store when the successor overwrites all four flags first (a `cmp`,
+  `cmn`, `tst`, `adds`, `subs`, `ands` or `fcmp` after only flag-neutral, fault-free
+  instructions). The successor's words are tracked as a block dependency, so patching
+  them retires the block. A few percent on compare-heavy loops; `jit_flags_exit_dead`
+  covers it. In MT mode a self-loop whose head overwrites the flags no longer commits
+  them at an expiry exit.
 - Web links: the same link within 30 s opens one browser tab, not one per
   repeat (a Play ad link fired five times).
 - Main-thread stall reports: when the UI loop stops for 1.5 s the session log

@@ -87,6 +87,10 @@ bool FrostJIT::staged_entry_invalidated(uint64_t pc) {
     if (touched(pc, pc + static_cast<uint64_t>(staged_entry_.instr_count) * 4)) return true;
     for (const auto& r : staged_entry_.inlined_ranges_)
         if (touched(r.first, r.first + static_cast<uint64_t>(r.second) * 4)) return true;
+    for (unsigned i = 0; i < staged_entry_.flag_deps_count; ++i) {
+        const FlagDep& dep = flag_dep_table_[staged_entry_.flag_deps_off + i];
+        if (touched(dep.pc, dep.pc + static_cast<uint64_t>(dep.count) * 4)) return true;
+    }
     return false;
 }
 bool FrostJIT::translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
@@ -552,6 +556,10 @@ void FrostJIT::remember_code_granules(uint64_t pc, const BlockEntry& entry) {
     };
     remember(pc, entry.instr_count);
     for (const auto& range : entry.inlined_ranges_) remember(range.first, range.second);
+    for (unsigned i = 0; i < entry.flag_deps_count; ++i) {
+        const FlagDep& dep = flag_dep_table_[entry.flag_deps_off + i];
+        remember(dep.pc, static_cast<int>(dep.count));
+    }
 }
 
 // perf's JIT symbol file (tools/perf/Documentation/jit-interface.txt):
@@ -594,9 +602,19 @@ void FrostJIT::attach_code_words(BlockEntry& entry, bool contiguous) {
     const size_t count = block_words_.size();
     if (!contiguous || count == 0 || count != static_cast<size_t>(entry.instr_count) ||
         code_words_.size() > UINT32_MAX - count) return;
+    size_t dep_words = 0;
+    for (const auto& dep : flag_deps_scratch_) dep_words += dep.words.size();
+    if (entry.flag_deps_count != flag_deps_scratch_.size() ||
+        code_words_.size() > UINT32_MAX - count - dep_words) return;
     entry.code_words_off = static_cast<uint32_t>(code_words_.size());
     entry.code_words_count = static_cast<uint32_t>(count);
     code_words_.insert(code_words_.end(), block_words_.begin(), block_words_.end());
+    // Dead-NZCV successor words follow the block's own words.
+    for (size_t i = 0; i < flag_deps_scratch_.size(); ++i) {
+        flag_dep_table_[entry.flag_deps_off + i].words_off = static_cast<uint32_t>(code_words_.size());
+        code_words_.insert(code_words_.end(), flag_deps_scratch_[i].words.begin(),
+                           flag_deps_scratch_[i].words.end());
+    }
 }
 
 // A translation depends only on its fetched instruction words. It stays
@@ -616,7 +634,23 @@ bool FrostJIT::block_code_unchanged(const BlockEntry& entry, uint64_t pc) const 
         const uint8_t f = flags[p].load(std::memory_order_acquire);
         if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return false;
     }
-    return std::memcmp(window_base_ + pc, code_words_.data() + entry.code_words_off, bytes) == 0;
+    if (std::memcmp(window_base_ + pc, code_words_.data() + entry.code_words_off, bytes) != 0)
+        return false;
+    // The successor streams a dead-NZCV exit relied on must still match.
+    for (unsigned i = 0; i < entry.flag_deps_count; ++i) {
+        const FlagDep& dep = flag_dep_table_[entry.flag_deps_off + i];
+        const uint64_t dep_bytes = static_cast<uint64_t>(dep.count) * 4;
+        if (!dep_bytes || dep.words_off == UINT32_MAX ||
+            dep.pc > guest_memory_->window_size() || dep_bytes > guest_memory_->window_size() - dep.pc)
+            return false;
+        for (uint64_t p = dep.pc / Memory::PAGE_SIZE; p <= (dep.pc + dep_bytes - 1) / Memory::PAGE_SIZE; ++p) {
+            const uint8_t f = flags[p].load(std::memory_order_acquire);
+            if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return false;
+        }
+        if (std::memcmp(window_base_ + dep.pc, code_words_.data() + dep.words_off, dep_bytes) != 0)
+            return false;
+    }
+    return true;
 }
 
 // Compiles that run under the shared table lock cannot be seen by the
@@ -672,6 +706,10 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
         if (ranges_overlap(b, b + static_cast<uint64_t>(entry.instr_count) * 4)) return true;
         for (const auto& r : entry.inlined_ranges_)
             if (ranges_overlap(r.first, r.first + static_cast<uint64_t>(r.second) * 4)) return true;
+        for (unsigned i = 0; i < entry.flag_deps_count; ++i) {
+            const FlagDep& dep = flag_dep_table_[entry.flag_deps_off + i];
+            if (ranges_overlap(dep.pc, dep.pc + static_cast<uint64_t>(dep.count) * 4)) return true;
+        }
         return false;
     };
     if (dbg().no_code_page_filter) {

@@ -738,7 +738,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 diverged = true;
             }
         }
-        if (cpu.pstate != ref.pstate && entry.reads_pstate_before_set) {
+        if (cpu.pstate != ref.pstate && entry.reads_pstate_before_set &&
+            !entry.skips_dead_flag_store) {
             // pstate comparison: mask out the internal from_sub marker bit
             // (bit 27) since it's a JIT implementation detail, not part of
             // the architectural NZCV state. Only compare the actual flags.

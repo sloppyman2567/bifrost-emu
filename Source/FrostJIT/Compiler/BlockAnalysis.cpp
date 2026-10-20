@@ -179,6 +179,53 @@ bool instr_will_call_interp(const DecodedInst& d) {
     // (each FP load/store cost ~18 interpreter steps in the voxel game).
     return false;
 }
+// ── Dead NZCV at a block exit ─────────────────────────────────────────
+// A block that exits with host flags still live must store them to
+// cpu.pstate unless the successor overwrites them first. The scan is an
+// instruction-semantics fact about the successor's first words, so it holds
+// for every way of executing them (chained, dispatched, interpreted). An
+// instruction before the overwrite must neither read NZCV, fault (a guest
+// signal frame would show stale flags), branch, nor leave the straight line;
+// anything unrecognized ends the scan as "live".
+bool nzcv_dead_in(const uint32_t* words, int count, int& used) {
+    used = 0;
+    for (int n = 0; n < count && n < kNzcvScanWords; ++n) {
+        DecodedInst d;
+        if (!decode(d, words[n])) return false;
+        used = n + 1;
+        switch (d.cls) {
+            // Rewrite N, Z, C and V completely.
+            case InstClass::ADDS_IMM: case InstClass::SUBS_IMM:
+            case InstClass::ADDS_REG: case InstClass::SUBS_REG:
+            case InstClass::ANDS_IMM: case InstClass::ANDS_REG:
+                return true;
+            case InstClass::FP_SCALAR:
+                // FCMP/FCMPE (register and zero forms); FCCMP reads the flags.
+                return (words[n] & 0xFF20FC07u) == 0x1E202000u;
+            // Pure integer data processing: no flag access, no fault.
+            case InstClass::ADR: case InstClass::ADRP:
+            case InstClass::MOVN: case InstClass::MOVZ: case InstClass::MOVK:
+            case InstClass::ADD_IMM: case InstClass::SUB_IMM:
+            case InstClass::AND_IMM: case InstClass::ORR_IMM: case InstClass::EOR_IMM:
+            case InstClass::SBFM: case InstClass::BFM: case InstClass::UBFM: case InstClass::EXTR:
+            case InstClass::ADD_REG: case InstClass::SUB_REG:
+            case InstClass::AND_REG: case InstClass::ORR_REG: case InstClass::EOR_REG:
+            case InstClass::MADD: case InstClass::MSUB:
+            case InstClass::SMADDL: case InstClass::SMSUBL:
+            case InstClass::UMADDL: case InstClass::UMSUBL:
+            case InstClass::SMULH: case InstClass::UMULH:
+            case InstClass::UDIV: case InstClass::SDIV:
+            case InstClass::LSL: case InstClass::LSR: case InstClass::ASR: case InstClass::ROR:
+            case InstClass::RBIT: case InstClass::REV16: case InstClass::REV32: case InstClass::REV:
+            case InstClass::CLZ: case InstClass::CLS: case InstClass::CRC32:
+                if (d.set_flags) return false;
+                break;
+            default:
+                return false;
+        }
+    }
+    return false;
+}
 // ── Leaf inlining scan ────────────────────────────────────
 // A small leaf function (no calls, no memory, no stack usage, straight-line
 // or with a single forward conditional branch) can be inlined into its
