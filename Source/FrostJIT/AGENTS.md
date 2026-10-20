@@ -26,6 +26,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `CodeGen/Native/NativeSIMDInline.cpp` must match their `run<K>` lane for
   lane, and `native_simd_inlinable` must accept exactly what the emitter
   emits (Tier-2 relies on it to skip the call treatment).
+- A pair (`LDP`/`STP`/`LDPSW`) uses the native guarded path. Its translation must
+  complete every load before writing any architectural register (and write the base
+  last), and a store pair must write none: a fault on the second half restarts the
+  whole instruction. `jit_host_fault` checks this, including `ldp x13, x12, [x13]`.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.

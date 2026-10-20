@@ -45,8 +45,27 @@ static void handler(int signo, siginfo_t *info, void *context) {
         "fmov x9, d8\n\tstr x9, [%2]\n\tstr x11, [%3]" \
         : : "r"((uintptr_t)(address)), "r"(&expected_pc), \
             "r"(&vector), "r"(&result) \
-        : "x9", "x11", "x19", "x20", "v0", "v8", "cc", "memory"); \
+        : "x9", "x11", "x12", "x19", "x20", "v0", "v8", "v9", "cc", "memory"); \
     if (faults != before + 1 || vector != 0x1357 || result != 0x999) ++bad; \
+} while (0)
+
+// Like PROBE, but x11 (or x13) holds a base address the instruction must leave
+// unchanged when it faults: a pair whose destination is its own base register,
+// and pre-index writeback. `reg` names the register checked afterwards.
+#define PROBE_BASE(instruction, address, reg) do { \
+    uint64_t vector = 0, result = 0; \
+    int before = faults; \
+    __asm__ volatile( \
+        "adr x9, 1f\n\tstr x9, [%1]\n\t" \
+        "mov x19, #0x1357\n\tmov x20, #0x2468\n\t" \
+        "fmov d8, x19\n\tmov x11, #0x999\n\tcmp x19, x20\n\t" \
+        "mov " reg ", %0\n\t" \
+        "1: " instruction "\n\t" \
+        "fmov x9, d8\n\tstr x9, [%2]\n\tstr " reg ", [%3]" \
+        : : "r"((uintptr_t)(address)), "r"(&expected_pc), \
+            "r"(&vector), "r"(&result) \
+        : "x9", "x11", "x12", "x13", "x19", "x20", "v0", "v8", "v9", "cc", "memory"); \
+    if (faults != before + 1 || vector != 0x1357 || result != (uintptr_t)(address)) ++bad; \
 } while (0)
 
 static void *worker(void *unused) {
@@ -66,6 +85,22 @@ static void *worker(void *unused) {
         PROBE("str x11, [%0]", p + page_size);
         PROBE("ldr q0, [%0]", p + page_size - 8);
         PROBE("str q0, [%0]", p + page_size - 8);
+        // Pairs: the first half is mapped and the second faults. Integer destinations
+        // may not change and the pc and other state are exact; a store pair may have
+        // written its first half. A float pair's first destination is left alone
+        // here (QEMU may update it; the architecture allows that).
+        PROBE("ldp x11, x12, [%0]", p + page_size - 8);
+        PROBE("stp x11, x12, [%0]", p + page_size - 8);
+        PROBE("ldp w11, w12, [%0]", p + page_size - 4);
+        PROBE("ldp d0, d1, [%0]", p + page_size - 8);
+        PROBE("stp d8, d9, [%0]", p + page_size - 8);
+        PROBE("ldp s0, s1, [%0]", p + page_size - 4);
+        PROBE("ldp x11, x12, [%0]", p + page_size);
+        PROBE("ldpsw x11, x12, [%0]", p + page_size - 4);
+        PROBE_BASE("ldp x13, x12, [x13]", p + page_size - 8, "x13");
+        PROBE_BASE("ldp x11, x12, [x13, #16]!", p + page_size - 24, "x13");
+        PROBE_BASE("ldp x12, x11, [x13], #16", p + page_size, "x13");
+        PROBE_BASE("stp x11, x12, [x13, #-16]!", p + page_size + 8, "x13");
         if (lse) {
             PROBE(".arch_extension lse\n\tldadd x20, x11, [%0]", p + page_size);
             PROBE(".arch_extension lse\n\tldset x20, x11, [%0]", p + page_size);

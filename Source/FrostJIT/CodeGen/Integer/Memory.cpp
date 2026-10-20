@@ -24,7 +24,7 @@
 namespace arm64emu {
 // Scalar native accesses use allocator-selected scratch registers. Only the
 // cold exit spills live state for a C call; successful accesses retain all
-// other mappings. Paired instructions still use the whole-footprint guard.
+// other mappings.
 bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     if (inst.op == IROp::LDXR_FAST && !inst.llsc_exclusive()) {
         // LDAR is an acquire load, not a reservation. Keep the original
@@ -41,9 +41,11 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     if ((mp.width != 1 && mp.width != 2 && mp.width != 4 && mp.width != 8) ||
         offset < INT32_MIN || offset > INT32_MAX) return false;
     // Forced slow-store tracing disables fault_sites_, retaining the old path.
+    // A pair (LDP/STP) takes this path too: translation completes both loads
+    // before writing either register and writes no register before a store, so
+    // a fault on either half restarts the whole instruction from unchanged state.
     DecodedInst decoded;
-    if (!decode(decoded, guest_memory_->fetch_inst(inst.arm_pc)) ||
-        decoded.cls == InstClass::LDP || decoded.cls == InstClass::STP) return false;
+    if (!decode(decoded, guest_memory_->fetch_inst(inst.arm_pc))) return false;
 
     memory_fault_stub_ = 0;
     clobber_flags();

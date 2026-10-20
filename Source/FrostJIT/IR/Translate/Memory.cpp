@@ -240,18 +240,22 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // src2 must be a real zero vreg (load_imm) — literal 0
                     // is guest X0 (vreg 0), and reading it here writes X0's
                     // value into v_hi instead of zeroing it.
+                    // Both loads complete before either register is written: a
+                    // fault on the second half then leaves the architectural state
+                    // as it was before the pair, so the instruction restarts whole
+                    // (also when Rt is the base register).
                     uint16_t lo1 = g_alloc.alloc();
                     MemParams mp;
                     mp.width = static_cast<uint8_t>(esize);
                     mp.offset = static_cast<uint64_t>(mem_off);
                     emit_load_mem(block, lo1, base, mp, cur_pc);
-                    uint16_t zero = load_imm(block, 0);
-                    emit_ldst(block, d.rt, lo1, zero, LdStParams{true}, cur_pc);
                     uint16_t lo2 = g_alloc.alloc();
                     MemParams mp2;
                     mp2.width = static_cast<uint8_t>(esize);
                     mp2.offset = static_cast<uint64_t>(mem_off + stride);
                     emit_load_mem(block, lo2, base, mp2, cur_pc);
+                    uint16_t zero = load_imm(block, 0);
+                    emit_ldst(block, d.rt, lo1, zero, LdStParams{true}, cur_pc);
                     uint16_t zero2 = load_imm(block, 0);
                     emit_ldst(block, d.rt2, lo2, zero2, LdStParams{true}, cur_pc);
                 } else {
@@ -309,6 +313,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 mp.width = static_cast<uint8_t>(width);
                 mp.offset = static_cast<uint64_t>(mem_off);
                 emit_load_mem(block, val1, addr, mp, cur_pc);
+                // Both loads complete before Rt or Rt2 is written (see the S/D
+                // pair above): a fault on the second half restarts the whole pair.
+                uint16_t val2 = g_alloc.alloc();
+                MemParams mp2;
+                mp2.width = static_cast<uint8_t>(width);
+                mp2.offset = static_cast<uint64_t>(mem_off + esize);
+                emit_load_mem(block, val2, addr, mp2, cur_pc);
                 // 32-bit pairs: opc=01 is LDPSW (sign-extend to 64), opc=00
                 // is LDP Wt (zero-extend).
                 const bool ldpsw = (opc == 1);
@@ -320,11 +331,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 } else {
                     store_arm_reg(block, d.rt, val1);
                 }
-                uint16_t val2 = g_alloc.alloc();
-                MemParams mp2;
-                mp2.width = static_cast<uint8_t>(width);
-                mp2.offset = static_cast<uint64_t>(mem_off + esize);
-                emit_load_mem(block, val2, addr, mp2, cur_pc);
                 if (width < 8) {
                     uint16_t ext2 = g_alloc.alloc();
                     if (ldpsw) emit_sext(block, ext2, val2, 32);

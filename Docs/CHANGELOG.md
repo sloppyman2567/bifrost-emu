@@ -43,6 +43,12 @@ labels below are historical records.
   the game's root and its Play services processes restart when they changed.
   The library window shows which game asked while the window is open. A real
   sign-in through a game is not tested (needs credentials).
+- JIT: load and store pairs (`ldp`/`stp`, integer, W, float and `ldpsw`) now use the
+  native guarded memory path instead of the old whole-footprint software check
+  (about 7 host instructions per access instead of about 35, a float-struct
+  update loop about 18% faster). Pairs complete both loads before writing either
+  register so a fault on the second half restarts them correctly; `jit_host_fault`
+  tests that, including a pair whose destination is its base register.
 - JIT: widening SIMD (S/U ADDL, SUBL, ADDW, SUBW, MLAL, MLSL, MULL and ADDLP,
   ADALP) runs inline instead of through a helper call per instruction. A guest
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.

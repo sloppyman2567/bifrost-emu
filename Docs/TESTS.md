@@ -40,6 +40,14 @@ results. Passing fixtures do not establish untested application behavior.
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
   covers the host side: request-path validation (including a symlink out of the
   root), staging, the answer returning with `done` last, and the session options.
+- JIT pairs (2026-10-20): `jit_host_fault` gained 12 pair probes (second half
+  faults, base-register destination, pre- and post-index writeback) and passes
+  under QEMU, the new JIT and the old one; with the load-before-write ordering
+  reverted it fails. A float pair's first destination is deliberately not
+  asserted (QEMU itself updates it before the second half faults). `make verify`
+  (90 fixtures + 7 threaded), 150 unit tests, 9 Toybox tests and the real-world
+  filter (30 of 31; the failure is `test_sandbox_in_root`, which fails in that batch
+  with the old binary too and passes alone).
 - JIT widening SIMD (2026-10-20): `native_simd_gen` and `native_simd_alias`
   (26 new aliasing forms, hash `5dd49e555995750b` from QEMU) pass with the inline
   `WidenThree`/`PairLong` bodies, as do `make verify` (90 differential fixtures,

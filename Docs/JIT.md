@@ -15,6 +15,43 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Load/store pairs use the native guarded path (2026-10-20)
+
+Reading the generated code of a game-style loop (`BIFROST_JIT_DUMP=1`, bytes
+disassembled with `objdump -b binary -mi386:x86-64`) showed that every `ldp` and
+`stp` took the old whole-footprint software guard: for each half, three
+`push`/`pop` pairs, a window compare, a page-flag table lookup for the first and
+last page, then a second limit compare. `compile_guarded_mem` (the native path:
+`lea`, one window compare, the sticky software-check byte, then the access, with
+host page protection and registered fault sites) returned false for any
+instruction whose class is `LDP` or `STP`, because the pair translation wrote Rt
+before the second load: a fault on the second half would restart the pair with
+Rt already changed, wrong for `ldp x0, x1, [x0]`. Compilers emit pairs for every
+prologue and epilogue, struct copy and float pair, so this was a large share of
+guest memory traffic.
+
+- **Translation order.** `IR/Translate/Memory.cpp` now completes both loads of a
+  GPR, LDPSW and S/D pair into scratch vregs, then writes Rt and Rt2; writeback
+  stays after both. STP already wrote no register before its stores, and a store
+  repeated after a fault stores the same data.
+- **Guard.** `compile_guarded_mem` no longer excludes pairs.
+- **Measured.** The hot 11-instruction block of a float-struct update loop went
+  from 3,649 to 3,140 bytes of x86, one access from about 35 host instructions to
+  about 7, and the loop from about 0.255 s to 0.21 s (three runs each, same
+  machine); QEMU-identical output. A real program with more pairs gains more.
+- **Checked.** `jit_host_fault` now probes pairs whose second half faults
+  (`ldp x`, `w`, `d`, `s`, `ldpsw`, `stp x` and `d`), a pair whose destination is its
+  own base (`ldp x13, x12, [x13]`) and pre/post-index writeback, on four CPUs with
+  exact pc, registers and flags, against QEMU; with the ordering change reverted
+  the test fails. `make verify` (90 fixtures, 7 threaded), the 150 unit tests,
+  the Toybox tests (9) and the real-world filter pass; `test_sandbox_in_root` fails in
+  that batch with the old binary too (it passes alone).
+- **Not changed, and visible in the same dump:** a float register is written to
+  the CPU state for every load (value, plus a zero for the upper half), reloaded
+  into an XMM register, and written back with more zero stores, about six memory
+  operations per scalar float instruction in a block like this. Tier-2 is off by
+  default. Both are the next candidates.
+
 ## Inline widening SIMD (2026-10-20)
 
 A `perf` capture of Hungry Shark World (user-space sampling, 499 Hz, one run)
