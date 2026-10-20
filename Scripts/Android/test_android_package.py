@@ -1353,6 +1353,8 @@ class PackageTests(unittest.TestCase):
         self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[0,0\]\[\d+,\d+\] opaque=\w+ text=Overlay button")
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_CREATED"), 2)
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
+        # A legacy view animation ends: the window's draw time advances with each draw.
+        self.assertIn("MANAGED_VIEWS_ANIMATION_END", text)
 
     def test_managed_text_input(self):
         # Text from the host's input method (committed text, composition) reaches

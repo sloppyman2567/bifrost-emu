@@ -9,7 +9,11 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
 
-/** An ordinary View Activity; a SurfaceView added, hidden, shown and removed later. */
+/**
+ * An ordinary View Activity; a SurfaceView added, hidden, shown and removed later.
+ * The button fades in with a legacy view animation, which only ends if the
+ * window's draw time advances (a fragment's enter animation is one).
+ */
 public final class ManagedViews extends Activity {
     private final Handler main = new Handler();
     private FrameLayout content;
@@ -21,6 +25,16 @@ public final class ManagedViews extends Activity {
         Button button = new Button(this);
         button.setText("Overlay button");
         content.addView(button, new FrameLayout.LayoutParams(320, 120));
+        android.view.animation.AlphaAnimation fade = new android.view.animation.AlphaAnimation(0f, 1f);
+        fade.setDuration(300);
+        fade.setAnimationListener(new android.view.animation.Animation.AnimationListener() {
+            public void onAnimationStart(android.view.animation.Animation animation) { }
+            public void onAnimationRepeat(android.view.animation.Animation animation) { }
+            public void onAnimationEnd(android.view.animation.Animation animation) {
+                System.out.println("MANAGED_VIEWS_ANIMATION_END");
+            }
+        });
+        button.startAnimation(fade);
         setContentView(content);
     }
 

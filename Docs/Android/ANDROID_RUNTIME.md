@@ -287,6 +287,11 @@ alpha. Two changes address this:
   `destroySurface` only clears the renderer's SurfaceControl. Host layers
   restack (op 19, Wayland `place_below`/X11 `Below`) so each window's
   SurfaceViews sit directly below it, windows in stacking order.
+- Both draw paths set `AttachInfo.mDrawingTime` (uptime milliseconds) before
+  drawing, as `ViewRootImpl.draw` does. Legacy view animations read it through
+  `drawChild`; left at zero, a fragment's enter fade stayed at its first frame
+  (alpha 0), so a Navigation screen after the first (microG's settings) drew
+  its toolbar but none of its content, and Back left the first screen blank.
 
 HWUI needed three runtime fixes, each checked against Android 15 sources:
 libhwui lists libGLESv1_CM before libGLESv2, so `glGetString` reached the

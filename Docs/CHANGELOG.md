@@ -43,6 +43,10 @@ labels below are historical records.
   the game's root and its Play services processes restart when they changed.
   The library window shows which game asked while the window is open. A real
   sign-in through a game is not tested (needs credentials).
+- Fixed: legacy view animations never advanced, because the window compositor
+  drew without setting `AttachInfo.mDrawingTime`. Screens shown by a fragment
+  transition (every microG settings page after the first) stayed at the
+  animation's first frame: blank content, and blank again after Back.
 - Fixed: a manifest broadcast to a receiver in another process of the app threw
   `UnsupportedOperationException`. microG's `LoginActivity` sends one right after
   Google accepts a login, so the first real sign-in ended with "problem

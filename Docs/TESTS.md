@@ -40,6 +40,13 @@ results. Passing fixtures do not establish untested application behavior.
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
   covers the host side: request-path validation (including a symlink out of the
   root), staging, the answer returning with `done` last, and the session options.
+- `test_managed_view_window_and_surface_lifecycle` (`ManagedViews`) now fades
+  its button in with an `AlphaAnimation` and requires its end callback. Without
+  the draw-time fix the animation never ends (reproduced first, then fixed). A
+  probe inside microG's settings window showed the same state: the animated
+  container's ancestors stayed dirty and its animation never ended, while every
+  row's view was present, visible, alpha 1 and sized. The click-through itself
+  is not automated; the user confirmed the screens render afterwards.
 - `test_managed_service_execution` also sends a broadcast to a manifest receiver
   declared for the fixture's `:remote` process and checks it ran in another PID
   with the Intent's extras (`REMOTE_RECEIVER_OK`). Reproduced first: the old

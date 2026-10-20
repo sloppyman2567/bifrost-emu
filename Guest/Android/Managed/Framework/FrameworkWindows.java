@@ -457,9 +457,20 @@ final class FrameworkWindows {
         }
     }
 
+    // ViewRootImpl.draw sets AttachInfo.mDrawingTime before every draw, and
+    // the views' legacy animations (a fragment's enter fade) are timed by it:
+    // left at zero they never advance, and the animated screen stays at its
+    // first frame, invisible. The animation clock is uptimeMillis.
+    private static void advanceDrawingTime(Object attachInfo) throws Exception {
+        if (attachInfo == null) return;
+        Field time = attachInfo.getClass().getDeclaredField("mDrawingTime");
+        time.setAccessible(true);
+        time.setLong(attachInfo, android.os.SystemClock.uptimeMillis());
+    }
+
     // ViewRootImpl's software draw into the retained bitmap: redraws `dirty`
     // (all of it when `full`, empty or resized) and copies it to `pixels`.
-    private static void drawSoftware(Popup popup, View root, Rect dirty, int w, int h, boolean full) {
+    private static void drawSoftware(Popup popup, View root, Rect dirty, int w, int h, boolean full) throws Exception {
         if (popup.bitmap == null || popup.bitmap.getWidth() != w || popup.bitmap.getHeight() != h) {
             if (popup.bitmap != null) popup.bitmap.recycle();
             popup.bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
@@ -470,6 +481,7 @@ final class FrameworkWindows {
         Canvas canvas = new Canvas(popup.bitmap);
         canvas.clipRect(dirty);
         canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+        advanceDrawingTime(hiddenField(root, "mAttachInfo"));
         root.draw(canvas);
         popup.bitmap.getPixels(popup.pixels, dirty.top * w + dirty.left, w,
                 dirty.left, dirty.top, dirty.width(), dirty.height());
@@ -577,6 +589,7 @@ final class FrameworkWindows {
         }
         surfaces.positionLayer(popup.layer, popup.frame.left, popup.frame.top);
         if (!dirty && !created) return;
+        advanceDrawingTime(attachInfo);
         RENDERER_DRAW.invoke(renderer, root, attachInfo, viewRoot);
         popup.shown.set(popup.frame);
         if (!popup.announced) {
