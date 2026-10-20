@@ -20,6 +20,52 @@
 static volatile uint64_t lock_word;
 static volatile uint64_t locked_count;
 
+// CASP family: one atomic access of a register pair (Rs at the lower
+// address); Rs/Rs+1 always receive the old memory value. Roblox's BLAKE3
+// patch check runs CASPL, which used to be undecodable.
+static void caspl_x(uint64_t* mem, uint64_t s[2], uint64_t t0, uint64_t t1) {
+    register uint64_t s0 __asm__("x4") = s[0], s1 __asm__("x5") = s[1];
+    register uint64_t n0 __asm__("x6") = t0, n1 __asm__("x7") = t1;
+    __asm__ volatile("caspl x4, x5, x6, x7, [%2]"
+                     : "+r"(s0), "+r"(s1) : "r"(mem), "r"(n0), "r"(n1) : "memory");
+    s[0] = s0; s[1] = s1;
+}
+static void casp_x(uint64_t* mem, uint64_t s[2], uint64_t t0, uint64_t t1) {
+    register uint64_t s0 __asm__("x4") = s[0], s1 __asm__("x5") = s[1];
+    register uint64_t n0 __asm__("x6") = t0, n1 __asm__("x7") = t1;
+    __asm__ volatile("casp x4, x5, x6, x7, [%2]"
+                     : "+r"(s0), "+r"(s1) : "r"(mem), "r"(n0), "r"(n1) : "memory");
+    s[0] = s0; s[1] = s1;
+}
+static void caspa_w(uint32_t* mem, uint64_t s[2], uint64_t t0, uint64_t t1) {
+    register uint64_t s0 __asm__("x4") = s[0], s1 __asm__("x5") = s[1];
+    register uint64_t n0 __asm__("x6") = t0, n1 __asm__("x7") = t1;
+    __asm__ volatile("caspa w4, w5, w6, w7, [%2]"
+                     : "+r"(s0), "+r"(s1) : "r"(mem), "r"(n0), "r"(n1) : "memory");
+    s[0] = s0; s[1] = s1;
+}
+
+#define CASP_THREADS 4
+#define CASP_ITERS 100000
+static _Alignas(16) uint64_t casp_counter[2];
+static void* casp_worker(void* arg) {
+    (void)arg;
+    for (int i = 0; i < CASP_ITERS; i++) {
+        uint64_t s[2] = {casp_counter[0], casp_counter[1]};
+        for (;;) {
+            const uint64_t want0 = s[0], want1 = s[1];
+            register uint64_t s0 __asm__("x4") = want0, s1 __asm__("x5") = want1;
+            register uint64_t n0 __asm__("x6") = want0 + 1, n1 __asm__("x7") = want1 + 1;
+            __asm__ volatile("caspal x4, x5, x6, x7, [%2]"
+                             : "+r"(s0), "+r"(s1) : "r"(casp_counter), "r"(n0), "r"(n1)
+                             : "memory");
+            if (s0 == want0 && s1 == want1) break;
+            s[0] = s0; s[1] = s1;
+        }
+    }
+    return NULL;
+}
+
 static void* lock_worker(void* arg) {
     (void)arg;
     for (int i = 0; i < LOCK_ITERS; i++) {
@@ -188,6 +234,36 @@ int main(void) {
             failures++;
         } else {
             printf("LDADD(32): val=15 old=10 OK\n");
+        }
+    }
+
+    // ── CASP family ──
+    {
+        _Alignas(16) uint64_t mem[2] = {1, 2};
+        uint64_t s[2] = {1, 2};
+        caspl_x(mem, s, 3, 4);  // match: stores, returns the old pair
+        int ok = mem[0] == 3 && mem[1] == 4 && s[0] == 1 && s[1] == 2;
+        uint64_t miss[2] = {1, 2};
+        casp_x(mem, miss, 7, 8);  // mismatch: memory kept, old pair returned
+        ok = ok && mem[0] == 3 && mem[1] == 4 && miss[0] == 3 && miss[1] == 4;
+        _Alignas(8) uint32_t wmem[2] = {0x11, 0x22};
+        uint64_t ws[2] = {0xdead000000000011ULL, 0xbeef000000000022ULL};
+        caspa_w(wmem, ws, 0x33, 0x44);  // compares the low words only
+        ok = ok && wmem[0] == 0x33 && wmem[1] == 0x44 && ws[0] == 0x11 && ws[1] == 0x22;
+        pthread_t threads[CASP_THREADS];
+        for (int i = 0; i < CASP_THREADS; i++) pthread_create(&threads[i], NULL, casp_worker, NULL);
+        for (int i = 0; i < CASP_THREADS; i++) pthread_join(threads[i], NULL);
+        const uint64_t want = (uint64_t)CASP_THREADS * CASP_ITERS;
+        ok = ok && casp_counter[0] == want && casp_counter[1] == want;
+        if (!ok) {
+            printf("CASP: mem=%llx:%llx miss=%llx:%llx w=%x:%x ws=%llx:%llx counter=%llu:%llu FAIL\n",
+                   (unsigned long long)mem[0], (unsigned long long)mem[1],
+                   (unsigned long long)miss[0], (unsigned long long)miss[1], wmem[0], wmem[1],
+                   (unsigned long long)ws[0], (unsigned long long)ws[1],
+                   (unsigned long long)casp_counter[0], (unsigned long long)casp_counter[1]);
+            failures++;
+        } else {
+            printf("CASP/CASPA/CASPL/CASPAL: OK\n");
         }
     }
 

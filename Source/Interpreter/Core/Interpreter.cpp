@@ -1404,6 +1404,37 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
+            // ── Compare and swap pair (CASP/CASPA/CASPL/CASPAL) ────────
+            // One atomic access of both elements: Rs (lower address) and
+            // Rs+1 are compared with memory; on a match Rt and Rt+1 are
+            // stored. Rs/Rs+1 always receive the old value, as in QEMU's
+            // gen_compare_and_swap_pair. Register 31 in a pair is XZR. The
+            // shard lock orders it like the exclusives, at least as strongly
+            // as the acquire/release forms require.
+            case InstClass::CASP: {
+                const uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
+                auto reg = [&](unsigned r) { return r == 31 ? 0 : cpu.regs[r]; };
+                auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
+                std::lock_guard<std::mutex> gatom(shard.mu);
+                uint64_t old_lo = 0, old_hi = 0;
+                if (d.size == 3) {
+                    uint64_t observed[2] = {0, 0};
+                    mem_.compare_exchange_16(base, reg(d.rs), reg(d.rs + 1),
+                                             reg(d.rt), reg(d.rt + 1), observed);
+                    old_lo = observed[0];
+                    old_hi = observed[1];
+                } else {
+                    const uint64_t cmp = (reg(d.rs) & 0xFFFFFFFFULL) | (reg(d.rs + 1) << 32);
+                    const uint64_t val = (reg(d.rt) & 0xFFFFFFFFULL) | (reg(d.rt + 1) << 32);
+                    uint64_t old = 0;
+                    mem_.compare_exchange(base, cmp, val, 8, &old);
+                    old_lo = old & 0xFFFFFFFFULL;
+                    old_hi = old >> 32;
+                }
+                cpu.regs[d.rs] = old_lo;  // Rs is even, never XZR
+                if (d.rs + 1 != 31) cpu.regs[d.rs + 1] = old_hi;
+                return;
+            }
             // ── Load/store exclusive pair (LDXP/LDAXP/STXP/STLXP) ──────
             // One reservation covers both elements: 8 bytes for W pairs, 16
             // for X pairs. Rt holds the lower address, Rt2 the higher. The

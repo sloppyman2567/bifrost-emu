@@ -218,7 +218,15 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // o2=0, o1=1: LDXP/LDAXP/STXP/STLXP. o1 separates pairs from
         // LDXR/STXR whatever Rt2 holds. Only 32- and 64-bit elements exist.
         if (!((inst >> 23) & 1) && ((inst >> 21) & 1)) {
-            if (!((inst >> 31) & 1)) return false;
+            if (!((inst >> 31) & 1)) {
+                // CASP/CASPA/CASPL/CASPAL (FEAT_LSE): 0 sz 001000 0 L 1 Rs
+                // o0 11111 Rn Rt. Odd Rs or Rt is unallocated, as in QEMU's
+                // trans_CASP. sz selects W (size 2) or X (size 3) pairs.
+                if (d.rt2 != 0x1F || ((d.rs | d.rt) & 1)) return false;
+                d.size = 2 + ((inst >> 30) & 1);
+                d.cls = InstClass::CASP;
+                return true;
+            }
             d.acquire = (inst >> 15) & 1;  // o0: LDAXP/STLXP
             d.cls = d.is_load ? InstClass::LDXP : InstClass::STXP;
             return true;

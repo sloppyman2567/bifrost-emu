@@ -827,7 +827,8 @@ bool Memory::compare_exchange(uint64_t addr, uint64_t expected, uint64_t desired
     return stored;
 }
 bool Memory::compare_exchange_16(uint64_t addr, uint64_t expected_lo, uint64_t expected_hi,
-                                 uint64_t desired_lo, uint64_t desired_hi) {
+                                 uint64_t desired_lo, uint64_t desired_hi,
+                                 uint64_t* observed) {
     addr = data_address(addr);
     check_access(addr, 16, GUEST_PROT_READ | GUEST_PROT_WRITE);
     // CMPXCHG16B is CPUID.01H:ECX[13]; the first x86-64 CPUs lack it.
@@ -843,13 +844,17 @@ bool Memory::compare_exchange_16(uint64_t addr, uint64_t expected_lo, uint64_t e
             : "+m"(*reinterpret_cast<unsigned __int128*>(host)), "+a"(lo), "+d"(hi), "=@ccz"(stored)
             : "b"(desired_lo), "c"(desired_hi)
             : "memory");
+        // RDX:RAX hold the memory value whether or not the store happened.
+        if (observed) { observed[0] = lo; observed[1] = hi; }
     } else {
         // No CMPXCHG16B, or a misaligned pair (its alignment fault is not
         // modelled): atomic only against other exclusive pairs.
         std::unique_lock<std::shared_mutex> g(mu_);
         auto* words = reinterpret_cast<uint64_t*>(host);
-        stored = __atomic_load_n(&words[0], __ATOMIC_ACQUIRE) == expected_lo &&
-                 __atomic_load_n(&words[1], __ATOMIC_ACQUIRE) == expected_hi;
+        const uint64_t lo = __atomic_load_n(&words[0], __ATOMIC_ACQUIRE);
+        const uint64_t hi = __atomic_load_n(&words[1], __ATOMIC_ACQUIRE);
+        if (observed) { observed[0] = lo; observed[1] = hi; }
+        stored = lo == expected_lo && hi == expected_hi;
         if (stored) {
             __atomic_store_n(&words[0], desired_lo, __ATOMIC_RELEASE);
             __atomic_store_n(&words[1], desired_hi, __ATOMIC_RELEASE);

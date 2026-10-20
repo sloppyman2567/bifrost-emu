@@ -13,6 +13,24 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### LSE compare-and-swap pairs (2026-10-19)
+
+- CASP/CASPA/CASPL/CASPAL (part of the advertised FEAT_LSE) were undecodable.
+  Roblox's BLAKE3 patch check ran CASPL on its startup thread.
+
+### Process-directed signals and worker faults (2026-10-19)
+
+- A host signal or `kill()` of the own process goes to a thread that does not
+  block it, or stays pending for the process until a thread unblocks it or
+  `sigwait`s for it (Linux `complete_signal`). It used to wait on whichever
+  thread drained it, so ART's SIGQUIT thread dump never ran. `rt_sigpending`
+  reads its size argument from the right register and reports process-wide
+  signals; a fork child starts with none pending.
+- A worker or SDL thread whose synchronous fault (SIGILL, SIGSEGV) is caught by
+  a handler keeps running. It ended silently once the handler frame was set
+  up; Roblox's startup thread vanished this way and its main thread waited
+  forever.
+
 ### Process-directed signals and worker faults (2026-10-19)
 
 - A host signal or `kill()` of the own process goes to a thread that does not

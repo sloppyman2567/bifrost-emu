@@ -907,6 +907,12 @@ uses one host `CMPXCHG16B` (`Memory::compare_exchange_16`). Hosts without
 CMPXCHG16B, and misaligned pairs whose alignment fault is not modelled, use a
 compare-and-write under the memory lock instead. `test_exclusive_pair` checks
 both element orders, W pairs, XZR operands and a contended 128-bit counter.
+CASP/CASPA/CASPL/CASPAL (FEAT_LSE, advertised by `HWCAP_ATOMICS`) share that
+encoding space with bit 31 clear and Rt2 = 11111; odd Rs or Rt is unallocated,
+as in QEMU. They also run through `CALL_INTERP`: one 8-byte compare-exchange or
+`compare_exchange_16` under the shard lock, the old value always returned in
+Rs (lower address) and Rs+1. `test_lse_inline` covers match, mismatch, W-pair
+zero extension and a contended 128-bit CASPAL counter.
 
 Helper and interpreter stores (`Memory::write`, used by STLR, slow-path
 stores and every interpreter store) must reach the host exactly once per

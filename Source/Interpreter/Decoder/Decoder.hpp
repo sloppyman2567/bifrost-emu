@@ -125,6 +125,7 @@ enum class InstClass : uint16_t {
     LDAR,           // load acquire
     LDXP,           // load exclusive pair (LDXP/LDAXP; d.acquire = o0)
     STXP,           // store exclusive pair (STXP/STLXP; d.acquire = o0)
+    CASP,           // compare and swap pair (CASP/CASPA/CASPL/CASPAL; d.size 2 or 3)
     LSE_ATOMIC,     // LSE atomic (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS — sub-dispatched on atom_op)
     // SIMD/FP (subset)
     SIMD_LD1,       // vector load single structure
