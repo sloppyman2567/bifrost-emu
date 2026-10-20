@@ -40,6 +40,10 @@ results. Passing fixtures do not establish untested application behavior.
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
   covers the host side: request-path validation (including a symlink out of the
   root), staging, the answer returning with `done` last, and the session options.
+- JIT flags (2026-10-20): `jit_flags_overwrite` (CMP/CMN/TST/ADDS, flags read by
+  CSET/CSEL/CINC, B.NE and MRS, and flags surviving an intervening load and ADD)
+  passes under QEMU, the JIT, the interpreter and verify mode; `make verify`, the
+  150 unit tests and the 9 Toybox tests pass with the change.
 - JIT pairs (2026-10-20): `jit_host_fault` gained 12 pair probes (second half
   faults, base-register destination, pre- and post-index writeback) and passes
   under QEMU, the new JIT and the old one; with the load-before-write ordering

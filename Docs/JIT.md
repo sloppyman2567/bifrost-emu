@@ -15,6 +15,33 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Flag setters no longer save dead flags (2026-10-20)
+
+A 5-instruction byte-count loop (`ldrb; cmp; cinc; cmp; b.ne`) compiled to 467
+bytes and about 55 host instructions per iteration, and ran only 1.04x faster than
+QEMU's user-mode emulator. Its first `cmp` feeds `cinc`; the second `cmp` rewrites
+all of NZCV. `ADDS`, `SUBS` (so `cmp`/`cmn`) and `TST` still called
+`clobber_flags()` first, which materializes host flags to `pstate` (`push rax; lahf;
+seto al; and; imul; and; xor; mov [rbx+0x110]; pop rax`, nine instructions that also
+clobber RAX/RCX/RDX and force spills) before the new setter overwrote them.
+
+A flag setter that rewrites all four flags makes the host flags dead, so
+`Compiler/FrostJIT.cpp` now just clears `flags_in_host_` for `ADDS`/`SUBS`/`TST`.
+Every earlier reader of the old flags is already emitted (IR order is the ARM
+order), and any op that can fault or exit between a setter and the next (a guarded
+load, a call) calls `clobber_flags()` itself, so the flags still reach `pstate`
+before anything can observe them. `ADCS`/`SBCS`/`CCMP`, which read flags, are not
+touched, nor is the partial-write case.
+
+- **Measured.** The loop went from about 55 to about 30 host instructions per
+  iteration and from 0.206 s to 0.147 s (three runs each, same machine); a
+  float-struct loop 0.25 s to 0.20 s together with the pair change above.
+- **Checked.** `jit_flags_overwrite`: CMP/CMN/TST/ADDS over 144 value pairs, the
+  first flags read by `cset`/`csel`/`cinc` and the second by `b.ne` and `mrs nzcv`,
+  and flags that must survive an intervening load and a plain `add`. It passes under
+  QEMU, the JIT, the interpreter and verify mode. `make verify` (90 fixtures,
+  7 threaded), 150 unit tests and 9 Toybox tests pass.
+
 ## Load/store pairs use the native guarded path (2026-10-20)
 
 Reading the generated code of a game-style loop (`BIFROST_JIT_DUMP=1`, bytes

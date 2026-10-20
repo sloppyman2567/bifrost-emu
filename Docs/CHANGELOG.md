@@ -43,6 +43,9 @@ labels below are historical records.
   the game's root and its Play services processes restart when they changed.
   The library window shows which game asked while the window is open. A real
   sign-in through a game is not tested (needs credentials).
+- JIT: `cmp`, `cmn`, `tst`, `adds` and `subs` no longer save the previous host flags
+  before overwriting all four (nine instructions and forced spills each time). A
+  byte-count loop is about 29% faster; `jit_flags_overwrite` covers it.
 - JIT: load and store pairs (`ldp`/`stp`, integer, W, float and `ldpsw`) now use the
   native guarded memory path instead of the old whole-footprint software check
   (about 7 host instructions per access instead of about 35, a float-struct

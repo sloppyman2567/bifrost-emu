@@ -572,7 +572,12 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
         case IROp::ADDS: case IROp::SUBS: {
             // ADD/SUB and CMP accept any GPRs. Keep cached operands in
             // place instead of spilling them through fixed RAX/RCX homes.
-            clobber_flags();
+            // The op rewrites all of NZCV, so flags still held in the host are
+            // dead: drop them rather than materializing them to pstate (nine
+            // instructions that also clobber RAX/RCX/RDX). Every earlier reader
+            // is already emitted, and an op that can fault or exit between a
+            // setter and this one materialized them itself.
+            flags_in_host_ = false;
             int s1, s2;
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             const bool is_sub = inst.op == IROp::SUBS;
@@ -618,8 +623,9 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
         }
         case IROp::TST: {
             const TstParams tp = inst.tst_params();
-            // TEST reads its operands without modifying either mapping.
-            clobber_flags();
+            // TEST reads its operands without modifying either mapping and
+            // rewrites all of NZCV: held host flags are dead (see ADDS/SUBS).
+            flags_in_host_ = false;
             int s1, s2;
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             emit_byte(rex(tp.sf, s2 >= 8, false, s1 >= 8));
