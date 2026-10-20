@@ -2977,11 +2977,16 @@ default browser.
   only a well-formed `http://` or `https://` URL of up to 2000 printable
   characters (never an option, `file:`, `javascript:` or `intent:` link), at most
   one per second, passes it as one argument without a shell, and needs `xdg-open`.
+  The same link again within 30 s is not opened twice (an ad's redirect loop fired
+  one Play link five times in a few seconds and opened five tabs).
 - **Intents that name another app** (`com.facebook.katana`, ...) stay unresolved
   so apps fall back as they do without that app.
 
-Checked: `BrowserLinkTests` (the host rules, with a fake launcher). Not
-automated: the guest side and a real browser opening; the existing
+Observed live (Hungry Shark World, 358 s session): the game's links (a
+conservation site, its Twitter page) and Play Store ad links reached the host as
+`APP_ACTIVITY_BROWSER`; a burst inside one second logged `BROWSER_REFUSED` and fell
+back to the unresolved result. Checked: `BrowserLinkTests` (the host rules, with a
+fake launcher). Not automated: the guest side and a real browser opening; the existing
 `MANAGED_ACTIVITIES_UNRESOLVED_OK` check still covers the no-input case.
 
 ## Main-thread stall reports (2026-10-20)
@@ -2999,8 +3004,24 @@ does not suspend the others, so it can stay on. Read a stall after the fact with
 `grep APP_MAIN_STALL` in the session log. It shows Java frames only: a stall in
 native code ends in the JNI method that called it.
 
-Not yet seen in a real stall; the compile and one full session with it
-present are all that is checked.
+First real session (Hungry Shark World, 358 s, with ads and links): 12 reports,
+each 1.5 to 3.7 s. By cause:
+
+- **WebView's first start, 1.7 + 2.7 s and a 3.7 s total** (`AwBrowserProcess` ->
+  `BrowserStartupControllerImpl` -> native `startBrowserProcessesSync`): the UI thread
+  waits while Chromium's browser process initializes, the first time an ad opens a
+  WebView. About 3.7 s of main-thread block in one go; a hidden WebView created
+  during the game's loading screen would move it (not tried).
+- **Cold code in the app and its SDKs**: androidx DataStore initialization (1.7 s),
+  and 1.5 s each in `Uri.decode` through ICU's charset converter and in
+  `org.json` building and parsing a very large JSON value (the ad SDK). Guest code
+  running slowly: JIT throughput and first-time translation.
+- **Our own compositor, twice**: `Bitmap.getPixels` in `FrameworkWindows.drawSoftware`
+  (1.5 s, copying a software window's pixels to the host layer) and
+  `HardwareRenderer.syncAndDrawFrame` in `drawHardware` (1.6 s, an ad's frame).
+  The first is conversion work that could move to the host.
+- Reports that end in `nativePollOnce` are the sample landing just after the stall:
+  the loop runs again within a few milliseconds (`APP_MAIN_STALL_END`).
 
 ## Startup: parsed-package cache (2026-10-20)
 

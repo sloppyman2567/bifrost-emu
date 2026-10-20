@@ -48,11 +48,11 @@ results. Passing fixtures do not establish untested application behavior.
   (the change is JIT-only). `test_sandbox_in_root` failed once when run with the
   three SIMD tests in one invocation and passed alone with the same binary,
   before and after, so it was not attributed to this change.
-- `FrameworkStallWatch` (stall reports) compiles into the launcher and one
-  220 s Hungry Shark session ran with it, the web-link code and the Settings
-  no-op without a new error; no stall happened in that run, so no report was
-  produced and the stall reports are unverified. A fixture that blocks the main
-  thread would verify them but opens a window.
+- `FrameworkStallWatch` (stall reports) and the web links: a 358 s Hungry Shark
+  World session with ads and taps on the game's links produced 12 stall reports
+  with usable stacks and `APP_ACTIVITY_BROWSER` for its links (live, by hand; not
+  an automated test). The Settings no-op was not triggered. A fixture that blocks
+  the main thread would automate the stall reports but opens a window.
 - `BrowserLinkTests` (no emulator): the host opens only well-formed http(s) links
   (`javascript:`, `file:`, `intent:`, option-like, whitespace, control characters,
   oversize and non-string values are refused), one per interval, with a fake

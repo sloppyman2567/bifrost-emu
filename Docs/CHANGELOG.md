@@ -48,6 +48,8 @@ labels below are historical records.
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
   Found in a Hungry Shark World profile, where the helper held 21% of the samples
   during the post-launch freeze. See the JIT guide.
+- Web links: the same link within 30 s opens one browser tab, not one per
+  repeat (a Play ad link fired five times).
 - Main-thread stall reports: when the UI loop stops for 1.5 s the session log
   gets `APP_MAIN_STALL` lines with the main thread's Java stack, once a second,
   so a hitch can be traced to its code afterwards. Always on, bounded.

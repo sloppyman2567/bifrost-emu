@@ -17,23 +17,27 @@ import time
 
 URL = re.compile(r'https?://[^\s\x00-\x1f\x7f]{1,2000}\Z')
 OPEN_INTERVAL = 1.0
+SAME_LINK_WINDOW = 30.0
 
 
 def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotonic, which=shutil.which):
     """Open an http(s) link from a guest app in the host's default browser.
 
     The app is untrusted: only well-formed http/https URLs (never an option, file, javascript or
-    other scheme) are opened, at most one per OPEN_INTERVAL. `last` is a one-item list holding the
-    previous time. Returns the response for the guest."""
+    other scheme) are opened, at most one per OPEN_INTERVAL, and the same link again within
+    SAME_LINK_WINDOW is not opened twice (an ad's redirect loop fires one link repeatedly).
+    `last` is [time, url] of the previous open. Returns the response for the guest."""
     if not isinstance(url, str) or not URL.match(url):
         raise ValueError('Only http and https links open in the host browser')
     now = clock()
+    if last[1] == url and now - last[0] < SAME_LINK_WINDOW:
+        return dict(opened=True, repeated=True)
     if now - last[0] < OPEN_INTERVAL:
         raise RuntimeError('Links open too quickly')
     program = opener or which('xdg-open')
     if program is None:
         raise RuntimeError('No host browser launcher (xdg-open) is installed')
-    last[0] = now
+    last[:] = [now, url]
     popen([program, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
           stderr=subprocess.DEVNULL, start_new_session=True)
     return dict(opened=True)
@@ -45,7 +49,7 @@ class ProcessHost:
         self.root, self.emu = Path(root), str(emu)
         # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
         self.activities = activities
-        self.last_url = [-OPEN_INTERVAL]
+        self.last_url = [-SAME_LINK_WINDOW, None]
         self.emu_args, self.environment = list(emu_args), dict(environment)
         self.dex, self.logs = dex, Path(logs)
         self.art_options = list(art_options)

@@ -485,10 +485,14 @@ class BrowserLinkTests(unittest.TestCase):
         def opener(url, last=None):
             return processes.open_url(url, last if last is not None else self.last, opener="/usr/bin/xdg-open",
                                       popen=popen, clock=lambda: now[0])
-        self.last = [-processes.OPEN_INTERVAL]
+        self.last = [-processes.SAME_LINK_WINDOW, None]
         self.assertEqual(opener("https://example.test/a?b=c#d"), dict(opened=True))
         self.assertEqual(calls[0][0], ["/usr/bin/xdg-open", "https://example.test/a?b=c#d"])
         self.assertTrue(calls[0][1]["start_new_session"])
+        # The same link again soon is not opened twice; a different one is held to the interval.
+        now[0] += 0.1
+        self.assertEqual(opener("https://example.test/a?b=c#d"), dict(opened=True, repeated=True))
+        self.assertEqual(len(calls), 1)
         # No scheme but http(s), no option-looking or control characters, no oversize link, no non-strings.
         for bad in ("javascript:alert(1)", "file:///etc/passwd", "intent://x#Intent;end", "-c calc", "ftp://example.test/",
                     "https://example.test/ with space", "https://example.test/\nHeader: 1", "https://" + "a" * 2100,
@@ -505,7 +509,7 @@ class BrowserLinkTests(unittest.TestCase):
         # No launcher installed: a clear error, not a crash.
         now[0] += 5
         with self.assertRaises(RuntimeError):
-            processes.open_url("https://example.test/", [-5.0], popen=popen, clock=lambda: now[0], which=lambda name: None)
+            processes.open_url("https://example.test/", [-100.0, None], popen=popen, clock=lambda: now[0], which=lambda name: None)
 
 
 class GoogleAccountStateTests(unittest.TestCase):
