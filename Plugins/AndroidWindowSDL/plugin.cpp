@@ -49,9 +49,19 @@ void remove_popup(void *instance, uint32_t id) {
   try { static_cast<AndroidWindowBackend *>(instance)->remove_popup(id); }
   catch (...) {}
 }
+int32_t set_text_input(void *instance, uint32_t active, int32_t x, int32_t y, int32_t w, int32_t h) {
+  try { return static_cast<AndroidWindowBackend *>(instance)->set_text_input(active != 0, x, y, w, h); }
+  catch (...) { return -EIO; }
+}
+int32_t poll_text(void *instance, bifrost_android_window_text_v2 *out) {
+  *out = {};
+  try { return static_cast<AndroidWindowBackend *>(instance)->poll_text(*out); }
+  catch (...) { *out = {}; return -EIO; }
+}
 const bifrost_android_window_plugin_v2 api = {
     BIFROST_ANDROID_WINDOW_ABI_V2, sizeof(api), "sdl3-egl-plugin",
-    create, destroy, open, close, resize, binding, poll, show_popup, remove_popup};
+    create, destroy, open, close, resize, binding, poll, show_popup, remove_popup,
+    set_text_input, poll_text};
 }
 extern "C" __attribute__((visibility("default")))
 const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {

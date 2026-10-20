@@ -75,6 +75,18 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   pointer ids and `POINTER_DOWN/UP` actions. The 55-word op-3 record is
   shared by `HostCalls/Android.cpp`, `activity_window.c` and
   `ManagedLauncher`; change all three together.
+- Host text input: an editor with a live `InputConnection` is bound to a host
+  `IInputMethodSession` (`FrameworkInputMethod`; no input channel, so keys keep
+  reaching views). The launcher starts the host's text input from its poll loop
+  (op 20, on the window thread only) and delivers text events (op-3 record: kind
+  in word 4, length in 13, bytes from 14) with `commitText`/`setComposingText`
+  under the connection's current session id. Backends report text as an ordered
+  `BIFROST_WINDOW_TEXT` event plus `poll_text` (append-only plugin fields); the
+  SDL backend drops a key press that SDL followed with text, so nothing types
+  twice. Keep the virtual keyboard's `Virtual.kcm` (type `FULL`) from
+  `Tools/Android/generate-key-layout.py`; regenerate `FrameworkKeyLayout.java`,
+  never edit it, or text fields stop honoring Backspace. Run
+  `ActivityProbe$InputMethodProbe` and `test_managed_text_input`.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

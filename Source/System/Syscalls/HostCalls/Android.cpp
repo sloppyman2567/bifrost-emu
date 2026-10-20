@@ -54,7 +54,19 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                     data[0] = manager.event_type(event);
                     data[5] = manager.event_source(event);
                     data[6] = manager.event_device_id(event);
-                    if (data[0] == 1) {
+                    if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_TEXT)) {
+                        // Text input: kind in word 4, the time in 11 and 12, the
+                        // UTF-8 length in 13 and the bytes packed from word 14
+                        // (at most 255 bytes, so up to word 45).
+                        char text[BIFROST_WINDOW_TEXT_MAX + 1];
+                        uint32_t kind;
+                        const uint32_t length = manager.event_text(event, kind, text);
+                        data[4] = kind;
+                        data[11] = manager.key_down_time(event);
+                        data[12] = manager.key_event_time(event);
+                        data[13] = length;
+                        std::memcpy(&data[14], text, length);
+                    } else if (data[0] == 1) {
                         data[4] = manager.key_action(event);
                         data[7] = manager.key_meta_state(event);
                         data[8] = manager.key_code(event);
@@ -211,6 +223,20 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
             else if (cpu.regs[0] == 19) { // Managed window order: surface x1 directly below surface x2.
                 ret_host(manager.surface_place_below(manager.surface_handle(cpu.regs[1]),
                                                      manager.surface_handle(cpu.regs[2])));
+            }
+            else if (cpu.regs[0] == 20) { // Managed text input: active, x, y, width, height.
+                try {
+                    int64_t record[5];
+                    emu.mem().read(cpu.regs[1], record, sizeof(record));
+                    if (record[0] < 0 || record[0] > 1 || record[3] < 0 || record[4] < 0 ||
+                        std::abs(record[1]) > INT32_MAX || std::abs(record[2]) > INT32_MAX ||
+                        record[3] > INT32_MAX || record[4] > INT32_MAX) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    ret_host(manager.set_text_input(record[0] != 0, static_cast<int32_t>(record[1]),
+                             static_cast<int32_t>(record[2]), static_cast<int32_t>(record[3]),
+                             static_cast<int32_t>(record[4])));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
             }
             else ret_host(-EINVAL);
             return 0;

@@ -140,7 +140,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                    "APP_APPLICATION_STARTED", "APP_ACTIVITY_CREATED", "FRAMEWORK_OK") \
             if app_mode else ("FRAMEWORK_OK",)
         if services and main_class == "ActivityProbe$InputMethodProbe":
-            markers += ("INPUT_METHOD_PROTOCOL_OK",)
+            markers += ("INPUT_METHOD_PROTOCOL_OK", "INPUT_METHOD_HOST_TEXT_OK")
         if main_class == "ManagedServiceBatch":
             markers += ("MANAGED_SERVICE_BATCH_OK",)
         if main_class == "ActivityProbe$NativeLooperProbe":

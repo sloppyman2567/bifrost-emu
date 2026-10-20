@@ -132,6 +132,32 @@ backend's normalized event stream. This is a window interface, not a general
 Binder/media/ART plugin ABI or framework Surface/BufferQueue implementation.
 See [APK launch and limits](ANDROID_APK.md).
 
+### Text input (2026-10-20)
+
+V2 descriptors may also append `set_text_input` and `poll_text` (both or
+neither; the host uses the pair only when both are present). `set_text_input`
+starts or stops the host's input method for the focused editor and anchors its
+composition in window pixels. While it is on, `poll` may return
+`BIFROST_WINDOW_TEXT` in order with key and pointer events, and the host then
+calls `poll_text` once for its payload: a committed text (it replaces any
+composition) or the composition in progress (empty clears it), valid UTF-8 of at
+most 255 bytes in `BIFROST_WINDOW_TEXT_MAX + 1` bytes with a terminator. A
+plugin without the pair keeps loading and reports `-ENOTSUP`. The host treats a
+`TEXT` event outside an active text input, an unknown kind, or an unterminated or
+overlong payload as `-EPROTO`. Key events keep arriving either way.
+
+The SDL3 backend calls `SDL_StartTextInput` with the composition area and turns
+`SDL_EVENT_TEXT_INPUT` and `SDL_EVENT_TEXT_EDITING` into text events (long
+commits are cut between characters). A key press that SDL immediately follows
+with text is the key that produced it: both it and its release are dropped, so a
+character is not typed twice, while keys that produce no text (Backspace, arrows,
+Ctrl shortcuts) stay key events. The decision uses the next queued event, not the
+key's code, so AltGr, dead keys and the keypad follow what SDL actually produced.
+Only the built-in backend runs managed apps: the plugin interface has no surface
+layers (`create_surface`), so a managed Activity's window cannot be created
+through a loadable module. `BIFROST_TEXT_SCRIPT` pushes scripted key and text
+events into the built-in backend's SDL queue for tests.
+
 ## Validation and reproduction
 
 Completed checks:

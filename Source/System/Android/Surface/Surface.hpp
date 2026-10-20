@@ -107,6 +107,10 @@ public:
     // cannot report its display.
     void display_size(int32_t& width, int32_t& height) const;
     int set_window_identity(const std::string& title, const uint8_t* rgba, int32_t width, int32_t height);
+    // The managed launcher's text input: while active the host reports committed
+    // text and composition as EVENT_TYPE_TEXT events, in order with key events.
+    // The rectangle anchors the composition in window pixels.
+    int set_text_input(bool active, int32_t x, int32_t y, int32_t width, int32_t height);
     void close_host_window();
     bool ready() const { return window_open_; }
     // Commit geometry only when the backend accepts the host notification.
@@ -319,7 +323,14 @@ public:
         float x_precision = 1.0f, y_precision = 1.0f;
         TouchPointer pointers[8];
         int32_t pointer_count = 0;
+        // EVENT_TYPE_TEXT: BIFROST_WINDOW_TEXT_* kind and its UTF-8 payload.
+        uint32_t text_kind = 0;
+        uint32_t text_length = 0;
+        char text[BIFROST_WINDOW_TEXT_MAX + 1] = {};
     };
+    // Private (not an AINPUT_EVENT_TYPE_*): only the managed launcher starts text
+    // input, so native activities never see it.
+    static constexpr int32_t EVENT_TYPE_TEXT = 0x100;
 
  private:
     AndroidSurfaceManager();
@@ -352,6 +363,9 @@ public:
     int32_t key_flags(uint64_t h);
     int64_t key_down_time(uint64_t h);
     int64_t key_event_time(uint64_t h);
+    // The text event's kind and UTF-8 payload (NUL-terminated, `out` holds
+    // BIFROST_WINDOW_TEXT_MAX + 1 bytes); returns its length, 0 if not a text event.
+    uint32_t event_text(uint64_t h, uint32_t& kind, char* out);
 
     // ── Host event pump (driver loop calls this every few ms) ──────────
     // Drains SDL events on the proxy window: translates mouse/touch/

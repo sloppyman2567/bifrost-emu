@@ -13,6 +13,30 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Keyboard text input (2026-10-20)
+
+- Text typed on the host reaches the focused Android editor through its
+  `InputConnection`: committed text (`commitText`) and the desktop input
+  method's composition (`setComposingText`), so layouts, dead keys, accents
+  and CJK input work without any key mapping. An editor with a live
+  `InputConnection` is bound to a host `IInputMethodSession` (no input
+  channel; key events still reach the views); other editors keep `NO_IME`.
+  The SDL3 window starts the host's text input for it (`SDL_StartTextInput`).
+  A key press that SDL followed with text is delivered as that text only, not
+  also as a key event, which would type every character twice.
+- The virtual keyboard has Android 15's `Virtual.kcm` (type `FULL`, US
+  QWERTY) instead of an empty map. With the empty map `TextKeyListener` chose
+  its `NullKeyListener`, so Backspace, Delete and the arrow keys did nothing in
+  an `EditText`, and `KeyEvent.getUnicodeChar()` was always 0.
+  `Tools/Android/generate-key-layout.py` generates the table from the pinned
+  file with libinput's parser rules.
+- The window plugin ABI gains optional `set_text_input`/`poll_text` callbacks
+  and a `BIFROST_WINDOW_TEXT` event (append-only; existing plugins keep
+  loading). `BIFROST_TEXT_SCRIPT` pushes scripted key and text events into
+  the built-in window's SDL queue for tests. No on-screen keyboard exists, and
+  the composition is anchored at the bottom of the window until apps report a
+  caret position.
+
 ### AAudio buffer capacity and NDK exports (2026-10-20)
 
 - `AAudioStreamBuilder_setBufferCapacityInFrames` sizes the host stream ring

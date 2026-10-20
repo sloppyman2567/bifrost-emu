@@ -1218,6 +1218,39 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_CREATED"), 2)
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
 
+    def test_managed_text_input(self):
+        # Text from the host's input method (committed text, composition) reaches
+        # a focused EditText through its InputConnection, in order with key events.
+        # BIFROST_TEXT_SCRIPT pushes the events into the real window's SDL queue.
+        # H arrives with the text it produced and must type once; Backspace is a key.
+        script = ("down:H,text:h;up:H;text:é;edit:ni;text:你;"
+                  "down:Backspace;up:Backspace;text:!")
+        state = self.work / "text-input-state"
+        bundle = self.work / "text-input.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("text-input", managed="ManagedTextInput"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        with patch.dict(os.environ, {"BIFROST_TEXT_SCRIPT": script}):
+            status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError|MANAGED_TEXT_INPUT_TIMEOUT")
+        # "h", "hé", the composition "ni" (underlined), its replacement by "你",
+        # Backspace removing it, then "!".
+        self.assertIn("MANAGED_TEXT_INPUT_KEYMAP_OK", text)  # the FULL US QWERTY virtual keyboard
+        markers = ("MANAGED_TEXT_INPUT_TEXT 68 composing=-1",
+                   "MANAGED_TEXT_INPUT_TEXT 68 e9 composing=-1",
+                   "MANAGED_TEXT_INPUT_TEXT 68 e9 6e 69 composing=2", "MANAGED_TEXT_INPUT_COMPOSING",
+                   "MANAGED_TEXT_INPUT_TEXT 68 e9 4f60 composing=-1",
+                   "MANAGED_TEXT_INPUT_TEXT 68 e9 composing=-1",
+                   "MANAGED_TEXT_INPUT_TEXT 68 e9 21 composing=-1", "MANAGED_TEXT_INPUT_OK")
+        position = 0
+        for marker in markers:
+            position = text.index(marker, position) + len(marker)
+        # The key that produced "h" is not also typed as a key event.
+        self.assertNotIn("MANAGED_TEXT_INPUT_TEXT 68 68", text)
+
     def test_managed_hardware_canvas(self):
         # HWUI's RenderThread, Skia GL and EGL draw through the GL thunk onto
         # a SurfaceView's host-backed surface.

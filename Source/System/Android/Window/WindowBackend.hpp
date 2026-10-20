@@ -7,6 +7,7 @@
 namespace frost {
 struct AndroidWindowBinding { uint64_t window = 0; void *display = nullptr; };
 using AndroidWindowEvent = bifrost_android_window_event_v2;
+using AndroidWindowText = bifrost_android_window_text_v2;
 // Host-only window lifecycle. The backend owns its window and input source.
 // Calls run on the display thread. No guest CPU/Memory access or SDL objects.
 class AndroidWindowBackend {
@@ -36,6 +37,12 @@ public:
     return -ENOTSUP;
   }
   virtual void remove_popup(uint32_t) {}
+  // The desktop's text input for the focused editor: while active the backend
+  // reports BIFROST_WINDOW_TEXT events in order with key events, and each one
+  // has a payload for poll_text. The rectangle anchors the composition in
+  // window pixels. Key events are unaffected.
+  virtual int set_text_input(bool, int32_t, int32_t, int32_t, int32_t) { return -ENOTSUP; }
+  virtual int poll_text(AndroidWindowText &text) { text = {}; return 0; }
   virtual void set_visible(bool) {}
   virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
   // An open window's buffer size in host pixels. open() takes the window's

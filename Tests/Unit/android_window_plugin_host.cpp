@@ -117,6 +117,71 @@ int main(int argc, char **argv) {
   polling->remove_popup(3);
   CHECK(contents(log) == "popup 3 10,-4 2x1 80ff0000\nunpopup 3\n");
   polling.reset();
+  // Host text input. TEXT events are legal only after the host started it, each
+  // has a valid payload, and they stay in order with key events.
+  {
+    mode("text-input");
+    std::ofstream(log, std::ios::trunc).close();
+    frost::AndroidSurfaceManager manager(frost::load_android_window_backend(argv[1], error));
+    CHECK(manager.open_host_window());
+    uint64_t input = 0;
+    manager.pump_host_events(nullptr);  // nothing is reported before it starts
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) != 0);
+    CHECK(manager.set_text_input(true, 10, 20, 300, 40) == 0);
+    struct Step { int32_t type; uint32_t kind; const char *text; };
+    const int32_t text_type = frost::AndroidSurfaceManager::EVENT_TYPE_TEXT;
+    const Step script[] = {{text_type, BIFROST_WINDOW_TEXT_COMMIT, "h\xc3\xa9llo"},
+                           {text_type, BIFROST_WINDOW_TEXT_COMPOSING, "ni"},
+                           {text_type, BIFROST_WINDOW_TEXT_COMMIT, "\xe4\xbd\xa0"},
+                           {1, 0, ""}, {1, 0, ""},  // Backspace down and up
+                           {text_type, BIFROST_WINDOW_TEXT_COMMIT, "!"}};
+    size_t seen = 0;
+    for (int tries = 0; tries < 300 && seen < 6; ++tries) {
+      manager.pump_host_events(nullptr);
+      while (manager.queue_get_event(manager.input_queue_handle(), &input) == 0) {
+        CHECK(seen < 6 && manager.event_type(input) == script[seen].type);
+        if (script[seen].type == text_type) {
+          uint32_t kind = 0;
+          char text[BIFROST_WINDOW_TEXT_MAX + 1];
+          const uint32_t length = manager.event_text(input, kind, text);
+          CHECK(kind == script[seen].kind && std::string(text) == script[seen].text &&
+                length == std::string(script[seen].text).size());
+        } else {
+          CHECK(manager.key_code(input) == 67 && manager.key_action(input) == int32_t(seen - 3));
+        }
+        manager.queue_finish_event(manager.input_queue_handle(), input);
+        ++seen;
+      }
+      usleep(20000);
+    }
+    CHECK(seen == 6);
+    CHECK(manager.set_text_input(false, 0, 0, 0, 0) == 0);
+    CHECK(contents(log).find("text-input 1 10,20 300x40\n") != std::string::npos);
+    CHECK(contents(log).find("text-input 0 0,0 0x0\n") != std::string::npos);
+  }
+  {
+    // A plugin may not report TEXT unasked, nor hand over a bad payload; a plugin
+    // that fails to start text input, or has no callbacks, reports so.
+    auto texting = frost::load_android_window_backend(argv[1], error);
+    CHECK(texting);
+    mode("text-unsolicited");
+    CHECK(texting->poll(event) == -EPROTO && event.type == 0);
+    frost::AndroidWindowText payload{};
+    for (const char *invalid : {"text-bad-kind", "text-bad-length"}) {
+      mode(invalid);
+      CHECK(texting->set_text_input(true, 0, 0, 1, 1) == 0);
+      for (int tries = 0; tries < 100 && texting->poll(event) == 0; ++tries) usleep(10000);
+      CHECK(event.type == BIFROST_WINDOW_TEXT);
+      CHECK(texting->poll_text(payload) == -EPROTO && payload.length == 0);
+      CHECK(texting->set_text_input(false, 0, 0, 0, 0) == 0);
+    }
+    mode("text-input-fail");
+    CHECK(texting->set_text_input(true, 0, 0, 1, 1) == -ENOTSUP);
+    mode("no-text");
+    auto plain = frost::load_android_window_backend(argv[1], error);
+    CHECK(plain && plain->set_text_input(true, 0, 0, 1, 1) == -ENOTSUP);
+    CHECK(plain->poll_text(payload) == 0);
+  }
   // An original-size v2 descriptor still loads; its trailing fields are ignored.
   mode("old-size");
   auto old = frost::load_android_window_backend(argv[1], error);

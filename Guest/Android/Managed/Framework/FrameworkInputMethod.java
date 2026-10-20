@@ -1,5 +1,8 @@
 // Android 15 input-method service for Asgard's single-user, no-installed-IME profile.
-// Host key events are independent of IME sessions; no session is fabricated here.
+// Host key events are independent of IME sessions. The desktop's text input
+// (committed text and composition) reaches the focused editor through its
+// RemoteInputConnection, as an installed IME's would: an editor with a live
+// InputConnection is bound to a host session, any other start stays NO_IME.
 import android.content.Context;
 import android.os.Binder;
 import android.os.Handler;
@@ -10,6 +13,8 @@ import android.os.Process;
 import android.os.Parcel;
 import android.os.ResultReceiver;
 import android.os.SystemClock;
+import android.text.InputType;
+import android.util.SparseArray;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import java.util.ArrayList;
@@ -20,12 +25,17 @@ import java.util.function.BiPredicate;
 
 final class FrameworkInputMethod {
     private static final String INTERNAL = "com.android.internal.inputmethod.";
+    private static final String HOST_IME = "org.bifrost.asgard/.HostTextInput";
+
     private final Map<IBinder, Client> clients = new HashMap<>();
     private final Map<IBinder, Long> requests = new HashMap<>();
     private final BiPredicate<String, Integer> ownsPackage;
     private Handler callbacks;
-    private Class<?> bindResult;
+    private Class<?> bindResult, sessionType, connectionType, headerType;
+    private FrameworkServices services;
     private Object tracker;
+    private Client focused;  // the client whose editor receives host text
+    private int binds;
 
     private final class Client implements IBinder.DeathRecipient {
         final IInterface endpoint;
@@ -33,6 +43,8 @@ final class FrameworkInputMethod {
         final int uid = Binder.getCallingUid(), pid = Binder.getCallingPid(), display;
         IBinder window;
         EditorInfo editor;
+        Object connection, session;  // IRemoteInputConnection and its IInputMethodSession
+        int sessionId;               // the connection's current InputConnectionCommandHeader id
         Client(IInterface endpoint, Object fallbackConnection, int display) {
             this.endpoint = endpoint;
             this.fallbackConnection = fallbackConnection;
@@ -42,6 +54,7 @@ final class FrameworkInputMethod {
             synchronized (FrameworkInputMethod.this) {
                 clients.remove(endpoint.asBinder());
                 endpoint.asBinder().unlinkToDeath(this, 0);
+                release(this);
             }
         }
     }
@@ -51,8 +64,12 @@ final class FrameworkInputMethod {
     }
 
     void install(FrameworkServices services) throws Exception {
+        this.services = services;
         bindResult = Class.forName(INTERNAL + "InputBindResult");
-        tracker = services.local("input_method.tracker", INTERNAL + "IImeTracker", this::track);
+        sessionType = Class.forName(INTERNAL + "IInputMethodSession");
+        connectionType = Class.forName(INTERNAL + "IRemoteInputConnection");
+        headerType = Class.forName(INTERNAL + "InputConnectionCommandHeader");
+        tracker =services.local("input_method.tracker", INTERNAL + "IImeTracker", this::track);
         services.register("input_method", "com.android.internal.view.IInputMethodManager", this::invoke);
     }
 
@@ -80,6 +97,12 @@ final class FrameworkInputMethod {
 
     private Object result(String name) throws Exception { return bindResult.getField(name).get(null); }
 
+    // Clears `client`'s editor focus (and the host's text input if it held it).
+    private void release(Client client) {
+        client.connection = null;
+        if (focused == client) focused = null;
+    }
+
     private synchronized Object start(Object[] a) throws Exception {
         user((Integer) a[10]);
         if (a[2] == null) return result("NULL");
@@ -100,7 +123,77 @@ final class FrameworkInputMethod {
                 client.editor = EditorInfo.CREATOR.createFromParcel(parcel);
             } finally { parcel.recycle(); }
         }
+        // An editor with a live InputConnection gets the host session; a focus
+        // change to anything else ends it.
+        Object connection = a[7];
+        if (editor != null && connection != null && editor.inputType != InputType.TYPE_NULL) {
+            client.connection = connection;
+            client.sessionId = 0;  // RemoteInputConnectionImpl starts at 0
+            focused = client;
+            if (client.session == null)
+                client.session = services.local("input_method.session", INTERNAL + "IInputMethodSession",
+                        (method, arguments) -> session(client, method, arguments));
+            // No input channel: key events keep dispatching straight to the window.
+            return bindResult.getConstructor(int.class, sessionType, SparseArray.class,
+                    Class.forName("android.view.InputChannel"), String.class, int.class, boolean.class)
+                    .newInstance(0 /* SUCCESS_WITH_IME_SESSION */, client.session, null, null,
+                            HOST_IME, ++binds, false);
+        }
+        release(client);
         return result(editor == null ? "NULL_EDITOR_INFO" : "NO_IME");
+    }
+
+    // The IInputMethodSession the client talks to (oneway). Only the calls that
+    // change which connection and session id the host may use matter here.
+    private Object session(Client client, String method, Object[] a) {
+        synchronized (this) {
+            switch (method) {
+                case "invalidateInput":  // the app changed its text: older commands are stale
+                    if (a[1] != null && client.connection != null) {
+                        client.connection = a[1];
+                        client.sessionId = (Integer) a[2];
+                    }
+                    break;
+                case "finishInput":
+                case "finishSession":
+                    release(client);
+                    break;
+                case "updateSelection": case "viewClicked": case "updateCursor":
+                case "updateCursorAnchorInfo": case "updateExtractedText":
+                case "displayCompletions": case "appPrivateCommand": case "removeImeSurface":
+                    break;
+                default: throw new UnsupportedOperationException("input_method.session." + method);
+            }
+        }
+        return null;
+    }
+
+    // True while an editor with a live InputConnection owns the host text input.
+    synchronized boolean textActive() { return focused != null; }
+
+    // Committed text from the desktop's input method replaces any composition.
+    boolean commit(String text) { return deliver("commitText", text); }
+
+    // The composition in progress (empty clears it).
+    boolean compose(String text) { return deliver("setComposingText", text); }
+
+    private boolean deliver(String method, String text) {
+        Object connection;
+        int sessionId;
+        synchronized (this) {
+            if (focused == null || focused.connection == null) return false;
+            connection = focused.connection;
+            sessionId = focused.sessionId;
+        }
+        try {
+            Object header = headerType.getConstructor(int.class).newInstance(sessionId);
+            connectionType.getMethod(method, headerType, CharSequence.class, int.class)
+                    .invoke(connection, header, text, 1);  // 1: cursor after the text
+            return true;
+        } catch (ReflectiveOperationException failure) {
+            android.util.Log.w("AsgardInputMethod", "Text delivery failed", failure);
+            return false;
+        }
     }
 
     private Object invoke(String method, Object[] a) throws Exception {

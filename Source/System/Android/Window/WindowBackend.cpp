@@ -6,6 +6,7 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <dlfcn.h>
 #include <map>
 #include <vector>
@@ -41,7 +42,9 @@ namespace {
   X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
-  X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS)
+  X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
+  X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
+  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -779,10 +782,53 @@ public:
     (void)id;
 #endif
   }
+  int set_text_input(bool active, int32_t x, int32_t y, int32_t w, int32_t h) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return -ENODEV;
+    if (active) {
+      // The anchor is in surface pixels; SDL wants window coordinates.
+      const double scale = std::max(0.01, ratio_->load());
+      SDL_Rect area{static_cast<int>(x / scale), static_cast<int>(y / scale),
+                    std::max(1, static_cast<int>(w / scale)), std::max(1, static_cast<int>(h / scale))};
+      sdl_.SetTextInputArea(window_, &area, 0);
+      if (!sdl_.StartTextInput(window_)) return fail("StartTextInput");
+      text_active_ = true;
+      if (!dbg().text_script.empty() && script_.empty()) load_script();
+      return 0;
+    }
+    text_active_ = false;
+    text_.clear();
+    text_reports_ = 0;
+    sdl_.StopTextInput(window_);
+    return 0;
+#else
+    (void)active; (void)x; (void)y; (void)w; (void)h;
+    return -ENOTSUP;
+#endif
+  }
+  int poll_text(AndroidWindowText &text) override {
+    text = {};
+#if defined(BIFROST_USE_SDL3)
+    if (text_.empty()) return 0;
+    text = text_.front();
+    text_.pop_front();
+    return 1;
+#else
+    return 0;
+#endif
+  }
   int poll(AndroidWindowEvent &out) override {
     out = {};
 #if defined(BIFROST_USE_SDL3)
     if (!window_) return 0;
+    if (text_reports_ > 0) {  // the rest of a long commit, before any later event
+      --text_reports_;
+      out.type = BIFROST_WINDOW_TEXT;
+      out.time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      return 1;
+    }
+    run_script();
     SDL_Event e;
     const auto id = sdl_.GetWindowID(window_);
     if (dbg().input_trace) {
@@ -836,7 +882,18 @@ public:
         out.type = BIFROST_WINDOW_RESIZE;
         out.width = e.window.data1; out.height = e.window.data2; return 1;
       }
+      if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_TEXT_EDITING) && text_active_) {
+        const bool commit = e.type == SDL_EVENT_TEXT_INPUT;
+        if ((commit ? e.text.windowID : e.edit.windowID) != id) continue;
+        const unsigned queued = queue_text(commit ? BIFROST_WINDOW_TEXT_COMMIT : BIFROST_WINDOW_TEXT_COMPOSING,
+                                           commit ? e.text.text : e.edit.text);
+        if (!queued) continue;
+        text_reports_ += queued - 1;
+        out.type = BIFROST_WINDOW_TEXT;
+        return 1;
+      }
       if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) && e.key.windowID == id) {
+        if (key_became_text(e)) continue;
         int key = android_key(e.key.scancode);
         if (!key) continue;
         out.type = BIFROST_WINDOW_KEY; out.key_code = key;
@@ -959,6 +1016,126 @@ private:
   // AndroidSurfaceManager assigns the Android pointer ids.
   static constexpr int32_t kMouseFinger = 0, kMouseSecondFinger = 1, kFirstTouchFinger = 2;
   uint32_t mouse_fingers_ = 0; // bit per mouse finger reported down
+  // Desktop text input (set_text_input). Payloads wait here for poll_text;
+  // text_reports_ counts TEXT events still owed beyond the one just returned.
+  bool text_active_ = false;
+  std::deque<AndroidWindowText> text_;
+  unsigned text_reports_ = 0;
+  // Keys whose press became text: their release is dropped with them.
+  std::vector<SDL_Scancode> text_keys_;
+  // BIFROST_TEXT_SCRIPT (tests): events pushed into SDL's own queue once text
+  // input starts, so they take the real path through poll(). A step is its
+  // items pushed together (a key and the text it produced stay adjacent).
+  struct ScriptItem { int op; SDL_Scancode scancode; std::string text; };  // 0 down, 1 up, 2 text, 3 edit
+  std::vector<std::vector<ScriptItem>> script_;
+  size_t script_next_ = 0;
+  int64_t script_due_ms_ = 0;
+  static int64_t monotonic_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  void load_script() {
+    script_.clear();
+    script_next_ = 0;
+    script_due_ms_ = monotonic_ms() + 100;
+    const std::string &source = dbg().text_script;
+    for (size_t at = 0; !source.empty() && at <= source.size();) {
+      size_t end = source.find(';', at);
+      if (end == std::string::npos) end = source.size();
+      const std::string text = source.substr(at, end - at);
+      std::vector<ScriptItem> step;
+      for (size_t item_at = 0; item_at <= text.size();) {
+        size_t item_end = text.find(',', item_at);
+        if (item_end == std::string::npos) item_end = text.size();
+        const std::string item = text.substr(item_at, item_end - item_at);
+        const size_t colon = item.find(':');
+        if (colon != std::string::npos) {
+          const std::string op = item.substr(0, colon), arg = item.substr(colon + 1);
+          if (op == "down" || op == "up") {
+            const SDL_Scancode code = sdl_.GetScancodeFromName(arg.c_str());
+            if (code != SDL_SCANCODE_UNKNOWN) step.push_back({op == "down" ? 0 : 1, code, {}});
+          } else if (op == "text") {
+            step.push_back({2, SDL_SCANCODE_UNKNOWN, arg});
+          } else if (op == "edit") {
+            step.push_back({3, SDL_SCANCODE_UNKNOWN, arg});
+          }
+        }
+        item_at = item_end + 1;
+      }
+      if (!step.empty()) script_.push_back(std::move(step));
+      at = end + 1;
+    }
+  }
+  void run_script() {
+    if (!text_active_ || script_next_ >= script_.size() || monotonic_ms() < script_due_ms_) return;
+    const SDL_WindowID id = sdl_.GetWindowID(window_);
+    for (const ScriptItem &item : script_[script_next_]) {
+      SDL_Event e{};
+      if (item.op <= 1) {
+        e.type = item.op == 0 ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        e.key.windowID = id;
+        e.key.scancode = item.scancode;
+        e.key.key = sdl_.GetKeyFromScancode(item.scancode, SDL_KMOD_NONE, false);
+        e.key.down = item.op == 0;
+      } else if (item.op == 2) {
+        e.type = SDL_EVENT_TEXT_INPUT;
+        e.text.windowID = id;
+        e.text.text = item.text.c_str();
+      } else {
+        e.type = SDL_EVENT_TEXT_EDITING;
+        e.edit.windowID = id;
+        e.edit.text = item.text.c_str();
+      }
+      e.common.timestamp = sdl_.GetTicksNS();
+      sdl_.PushEvent(&e);
+    }
+    ++script_next_;
+    script_due_ms_ = monotonic_ms() + 100;
+  }
+  // Queues `s` as payloads of at most BIFROST_WINDOW_TEXT_MAX bytes, cut between
+  // characters; a composition keeps only its first payload. Returns the count.
+  unsigned queue_text(uint32_t kind, const char *s) {
+    const size_t total = s ? std::strlen(s) : 0;
+    size_t at = 0;
+    unsigned count = 0;
+    do {
+      if (text_.size() >= 256) break;  // the guest is not draining: bound the queue
+      size_t n = std::min<size_t>(total - at, BIFROST_WINDOW_TEXT_MAX);
+      while (n > 0 && at + n < total && (static_cast<unsigned char>(s[at + n]) & 0xC0) == 0x80) --n;
+      if (n == 0 && total > at) break;  // no valid character fits a payload
+      AndroidWindowText text{};
+      text.kind = kind;
+      text.length = static_cast<uint32_t>(n);
+      if (n) std::memcpy(text.utf8, s + at, n);
+      text_.push_back(text);
+      ++count;
+      at += n;
+    } while (at < total && kind == BIFROST_WINDOW_TEXT_COMMIT);
+    return count;
+  }
+  // While the desktop's text input is active, a key press that produced text
+  // reaches the editor as that text, not also as a key event (each character
+  // would type twice). SDL queues the text right behind its key, so a press
+  // followed by text is consumed with its release. Shortcuts and non-printing
+  // keys produce no text and stay key events.
+  bool key_became_text(const SDL_Event &e) {
+    auto held = std::find(text_keys_.begin(), text_keys_.end(), e.key.scancode);
+    if (e.type == SDL_EVENT_KEY_UP) {
+      if (held == text_keys_.end()) return false;
+      text_keys_.erase(held);
+      return true;
+    }
+    if (!text_active_) return false;
+    SDL_Event next;
+    if (sdl_.PeepEvents(&next, 1, SDL_PEEKEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) != 1 ||
+        (next.type != SDL_EVENT_TEXT_INPUT && next.type != SDL_EVENT_TEXT_EDITING))
+      return false;
+    if (held == text_keys_.end()) {
+      if (text_keys_.size() >= 32) text_keys_.erase(text_keys_.begin());
+      text_keys_.push_back(e.key.scancode);
+    }
+    return true;
+  }
   Sdl3 sdl_;
   SDL_Window *window_ = nullptr;
   std::unique_ptr<WlEglFns> wl_fns_;

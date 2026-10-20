@@ -133,7 +133,8 @@ static void release_surface(void *window) {
 // ActivityProbe's JNI bridge to the managed-window ops of Bifrost's private
 // Android syscall 0x100E. Op 2 opens the host window and prepares this
 // thread's adapter looper; op 3 pumps host events and returns 55 words (up to
-// eight touch pointers).
+// eight touch pointers, or a text payload: kind in word 4, UTF-8 length in
+// word 13, bytes from word 14).
 
 static long bifrost_window(long op, long a, long b) {
     register long x0 __asm__("x0") = op;
@@ -146,6 +147,15 @@ static long bifrost_window(long op, long a, long b) {
 JNIEXPORT jint JNICALL Java_ManagedLauncher_processState(JNIEnv *env, jclass type, jint state) {
     (void)env; (void)type;
     return (jint)bifrost_window(14, state, 0);
+}
+
+// Starts or stops the host's text input (op 20); `x`, `y`, `width`, `height` anchor
+// its composition in window pixels. Text then arrives as op 3 events.
+JNIEXPORT jint JNICALL Java_ManagedLauncher_setTextInput(JNIEnv *env, jclass type, jboolean active,
+                                                         jint x, jint y, jint width, jint height) {
+    (void)env; (void)type;
+    int64_t record[5] = {active ? 1 : 0, x, y, width, height};
+    return (jint)bifrost_window(20, (long)record, 0);
 }
 
 JNIEXPORT jint JNICALL Java_ActivityProbe_openWindow(JNIEnv *env, jclass type, jint width,

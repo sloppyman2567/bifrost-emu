@@ -16,8 +16,21 @@ typedef struct bifrost_android_window_binding_v2 {
 } bifrost_android_window_binding_v2;
 enum bifrost_android_window_event_type {
     BIFROST_WINDOW_CLOSE = 1, BIFROST_WINDOW_RESIZE = 2,
-    BIFROST_WINDOW_KEY = 3, BIFROST_WINDOW_POINTER = 4
+    BIFROST_WINDOW_KEY = 3, BIFROST_WINDOW_POINTER = 4,
+    /* Only after set_text_input(active=1): one text payload is ready for
+     * poll_text, in order with the surrounding key and pointer events. */
+    BIFROST_WINDOW_TEXT = 5
 };
+enum bifrost_android_window_text_kind {
+    BIFROST_WINDOW_TEXT_COMMIT = 1,   /* text the editor keeps (replaces any composition) */
+    BIFROST_WINDOW_TEXT_COMPOSING = 2 /* the composition in progress; empty clears it */
+};
+#define BIFROST_WINDOW_TEXT_MAX 255u
+typedef struct bifrost_android_window_text_v2 {
+    uint32_t kind;   /* bifrost_android_window_text_kind */
+    uint32_t length; /* UTF-8 bytes in utf8, at most BIFROST_WINDOW_TEXT_MAX */
+    char utf8[BIFROST_WINDOW_TEXT_MAX + 1u]; /* valid UTF-8, NUL-terminated */
+} bifrost_android_window_text_v2;
 /* Input uses Android keycodes/actions/meta bits; pointer coordinates are in
  * surface pixels. One pointer per event; concurrent touches use distinct
  * pointer_id values (opaque keys; the host assigns Android ids). No SDL enums.
@@ -57,6 +70,17 @@ typedef struct bifrost_android_window_plugin_v2 {
     int32_t (*show_popup)(void *instance, uint32_t id, int32_t x, int32_t y,
                           int32_t width, int32_t height, const uint32_t *argb);
     void (*remove_popup)(void *instance, uint32_t id);
+    /* Optional: present when struct_size covers both and both are non-null.
+     * Desktop text input for the focused editor. active=1 starts the host's
+     * input method (layouts, dead keys, composition) and the window then
+     * reports BIFROST_WINDOW_TEXT; active=0 stops it. x/y/width/height are
+     * the composition anchor in window pixels (ignored when stopping).
+     * Key events keep arriving either way. */
+    int32_t (*set_text_input)(void *instance, uint32_t active, int32_t x, int32_t y,
+                              int32_t width, int32_t height);
+    /* Nonblocking; 1=payload, 0=none, negative errno=failure. Called once per
+     * BIFROST_WINDOW_TEXT event. */
+    int32_t (*poll_text)(void *instance, bifrost_android_window_text_v2 *out);
 } bifrost_android_window_plugin_v2;
 /* Smallest valid v2 descriptor: every required callback, no optional ones. */
 #define BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE \

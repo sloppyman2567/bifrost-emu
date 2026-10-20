@@ -129,6 +129,8 @@ public final class ManagedLauncher {
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
     private static native int pollWindow(long[] event);
+    // Op 20: starts or stops the host's text input; the rectangle anchors its composition.
+    private static native int setTextInput(boolean active, int x, int y, int width, int height);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
     private static native int displaySize(long[] size); // host display pixel width, height
     static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
@@ -186,14 +188,12 @@ public final class ManagedLauncher {
     private static InputDevice virtualKeyboard;
     // The virtual keyboard EventHub always creates (id -1, classes
     // KEYBOARD|ALPHAKEY|DPAD, name "Virtual"): KeyCharacterMap.load falls
-    // back to it, and Unity's render thread loads it during startup. The
-    // Builder and the empty map are hidden APIs, reached by reflection like
-    // the other hidden framework calls in this probe.
+    // back to it, and Unity's render thread loads it during startup. Its map
+    // is Virtual.kcm (FrameworkKeyboard). The Builder is a hidden API, reached
+    // by reflection like the other hidden framework calls in this probe.
     private static synchronized InputDevice virtualKeyboardDevice() throws Exception {
         if (virtualKeyboard != null) return virtualKeyboard;
-        Object map = call(Class.forName("android.view.KeyCharacterMap"),
-                "obtainEmptyMap", new Class<?>[] {int.class},
-                KeyCharacterMap.VIRTUAL_KEYBOARD);
+        Object map = FrameworkKeyboard.characterMap();
         Object builder = Class.forName("android.view.InputDevice$Builder")
                 .getConstructor().newInstance();
         call(builder, "setId", new Class<?>[] {int.class},
@@ -413,8 +413,15 @@ public final class ManagedLauncher {
         InputDevice device = inputs.getInputDevice(KeyCharacterMap.VIRTUAL_KEYBOARD);
         if (device == null || device.getKeyCharacterMap() == null)
             throw new AssertionError("virtual keyboard has no key character map");
-        if (KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD) == null)
-            throw new AssertionError("virtual key character map did not load");
+        KeyCharacterMap map = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
+        if (map == null) throw new AssertionError("virtual key character map did not load");
+        // Virtual.kcm: a FULL US QWERTY map. Any unknown device id falls back to it.
+        if (map.getKeyboardType() != KeyCharacterMap.FULL
+                || map.get(KeyEvent.KEYCODE_A, 0) != 'a'
+                || map.get(KeyEvent.KEYCODE_A, KeyEvent.META_SHIFT_ON) != 'A'
+                || map.get(KeyEvent.KEYCODE_1, KeyEvent.META_SHIFT_ON) != '!'
+                || KeyCharacterMap.load(1).getKeyboardType() != KeyCharacterMap.FULL)
+            throw new AssertionError("virtual keyboard is not the FULL US QWERTY map");
         System.out.println("ACTIVITY_INPUT_SERVICE_OK");
     }
 
@@ -1366,11 +1373,32 @@ public final class ManagedLauncher {
         System.exit(0);
     }
 
+    private static boolean textInputOn;
+
+    // Runs on the thread that polls the window. The host's text input follows
+    // the focused editor: on while one has a live InputConnection, so typed
+    // text reaches it as committed text and composition. The composition
+    // anchors at the bottom of the window until apps report a caret position.
+    private static void syncTextInput(int width, int height) {
+        boolean wanted = inputMethod.textActive();
+        if (wanted == textInputOn) return;
+        textInputOn = wanted;
+        int error = setTextInput(wanted, width / 4, Math.max(0, height - 96), width / 2, 48);
+        if (error != 0 && wanted) System.out.println("APP_TEXT_INPUT_UNAVAILABLE " + error);
+    }
+
     // Converts one op-3 event record (activity_window.c) into a framework
     // input event and dispatches it like ViewRootImpl's input stages.
     // Popup windows (FrameworkWindows) above the Activity receive input first.
     private static void dispatch(Activity activity, long[] e) throws Exception {
         final long ms = 1000000;
+        if (e[0] == 0x100) {  // host text input: committed text or the composition in progress
+            byte[] bytes = new byte[(int) Math.max(0, Math.min(e[13], 255))];
+            for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) (e[14 + i / 8] >>> (8 * (i % 8)));
+            String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            if (e[4] == 1) inputMethod.commit(text); else inputMethod.compose(text);
+            return;
+        }
         if (e[0] == 1) {  // AINPUT_EVENT_TYPE_KEY
             KeyEvent event = new KeyEvent(e[11] / ms, e[12] / ms, (int) e[4],
                     (int) e[8], (int) e[10], (int) e[7], (int) e[6], (int) e[9],
@@ -1443,6 +1471,7 @@ public final class ManagedLauncher {
             @Override
             public void run() {
                 try {
+                    syncTextInput(size[0], size[1]);
                     for (int i = 0; i < 64; i++) {
                         int error = pollWindow(event);
                         if (error != 0) throw new IllegalStateException("window poll: " + error);

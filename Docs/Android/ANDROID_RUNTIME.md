@@ -1221,6 +1221,45 @@ underneath. `EglProbe` replays HWUI's two calls on a prepared surface and
 checks that releasing the preparation removes the host backing
 (`ANDROID_SURFACE_RELEASE_OK`).
 
+### Host text input (2026-10-20)
+
+An editor with a live `InputConnection` (an `EditorInfo` that is not
+`TYPE_NULL` and a non-null `IRemoteInputConnection`) is bound to a host session:
+`startInputOrWindowGainedFocus` returns `SUCCESS_WITH_IME_SESSION` with an
+`IInputMethodSession` and no input channel, so the client's `dispatchInputEvent`
+still answers `DISPATCH_NOT_HANDLED` and key events keep reaching the views. The
+session records the connection and its command session id, which
+`RemoteInputConnectionImpl` advances each time the app invalidates its text
+(`invalidateInput`); a command carrying a stale id is dropped by the app, as for
+an installed IME. `finishInput`, a non-editor start or a dying client ends it.
+Any other start keeps the `NO_IME` path of the [input methods](#input-methods-october-11-2026)
+below.
+
+While a session is active the launcher starts the host's text input (private
+syscall 0x100E op 20; the poll loop applies it on the window thread). The host
+reports committed text and composition as text events in order with key events
+(op 3 returns the payload in the same record), and the launcher delivers them
+with `commitText` and `setComposingText` (cursor after the text). A key press
+that produced text is not also delivered as a key event, or each character would
+type twice; Backspace, Delete, Enter, arrows and shortcuts stay key events. The
+desktop's own input method (layouts, dead keys, CJK composition) supplies the
+text, so non-ASCII input needs no key mapping. See the
+[window plugin interface](ANDROID_WINDOW_PLUGINS.md#text-input-2026-10-20).
+The composition is anchored at the bottom of the window until apps report a
+caret rectangle (`updateCursorAnchorInfo` is accepted and ignored). There is
+still no on-screen keyboard, and `showSoftInput` reports the keyboard hidden.
+
+The virtual keyboard (id -1, which `KeyCharacterMap.load` falls back to for every
+other device id) now has Android 15's `Virtual.kcm`: type `FULL`, US QWERTY with
+shift, caps lock and alt behaviors. It used to be an empty map (type unknown),
+so `TextKeyListener` chose its `NullKeyListener` and physical Backspace, Delete
+and arrows did nothing in an `EditText`, and `KeyEvent.getUnicodeChar()` was
+always 0. `Tools/Android/generate-key-layout.py` parses the pinned file with the
+rules of libinput's `KeyCharacterMap` parser into `FrameworkKeyLayout.java`
+(`--check` verifies it; regenerate rather than edit), and `FrameworkKeyboard`
+writes the native parcel the framework reads. `BIFROST_TEXT_SCRIPT` pushes
+scripted key and text events into the window's SDL queue for tests.
+
 ### Input methods (October 11, 2026)
 
 `FrameworkInputMethod` publishes the process-local `input_method` service using
@@ -1241,10 +1280,10 @@ subtypes are empty, keyboard visibility stays hidden, show/hide return false
 and notify their ResultReceiver with `RESULT_UNCHANGED_HIDDEN`, and IME height
 is zero. This follows the no-selected-method path in
 [InputMethodManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java).
-It does not install an on-screen keyboard or implement IME binding/sessions,
-WindowManager focus arbitration, ViewRoot input stages, or cross-process Java
-framework services. Host key events still dispatch directly to the Activity;
-full Android text composition is unimplemented.
+It does not install an on-screen keyboard, or implement WindowManager focus
+arbitration, ViewRoot input stages, or cross-process Java framework services.
+Host key events dispatch directly to the Activity; the desktop's text reaches
+an editor through the [host session](#host-text-input-2026-10-20).
 
 Actual WebView construction also exposed `Settings.Config`'s null-name
 `LIST_config` call. The immutable Settings provider now returns a fresh empty

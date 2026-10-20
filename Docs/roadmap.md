@@ -39,8 +39,12 @@ title's instantaneous FPS is not the acceptance measurement.
 
 ### 2.0.0-alpha.3: WebView, media and possible ad support
 
-- Finish attached WebView pointer/focus/scroll delivery and desktop text/IME
-  composition. Help Center rendering is visible now; complete browser/editor
+- Finish attached WebView pointer/focus/scroll delivery. Desktop text and IME
+  composition now reach native editors through `InputConnection`
+  ([host text input](Android/ANDROID_RUNTIME.md#host-text-input-2026-10-20));
+  Chromium editors in a WebView, caret-anchored candidate windows
+  (`CursorAnchorInfo`), clipboard exchange and an on-screen keyboard are not
+  done. Help Center rendering is visible now; complete browser/editor
   interaction still needs its own tests.
 - Complete external HTTP/HTTPS intent routing and supported return/deep-link
   delivery, with app lifecycle and failed-browser handling.

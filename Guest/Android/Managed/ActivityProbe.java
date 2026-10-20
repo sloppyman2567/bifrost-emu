@@ -7,6 +7,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -289,6 +290,38 @@ public final class ActivityProbe {
             try { invoke(manager, "removeImeSurface"); throw new AssertionError("privileged method accepted"); }
             catch (SecurityException expected) {}
             System.out.println("INPUT_METHOD_PROTOCOL_OK");
+            // Host text input: an editor with a live InputConnection is bound to a host
+            // session, and committed text and composition reach it under its session id.
+            List<String> delivered = new ArrayList<>();
+            Object connection = services.local("ime-probe-connection",
+                    "com.android.internal.inputmethod.IRemoteInputConnection", (method, a) -> {
+                int id = a[0].getClass().getField("mSessionId").getInt(a[0]);
+                delivered.add(method + ":" + id + ":" + a[1] + ":" + a[2]);
+                return null;
+            });
+            check(!input.textActive(), "text input starts inactive");
+            start[1] = client; start[2] = new Binder(); start[6] = editor; start[7] = connection;
+            Object bound = invoke(manager, "startInputOrWindowGainedFocus", start);
+            Object session = bound.getClass().getField("method").get(bound);
+            check(result(bound) == 0 && session != null && bound.getClass().getField("id").get(bound) != null
+                    && bound.getClass().getField("channel").get(bound) == null, "host session bind");
+            check(input.textActive(), "text input active");
+            check(input.compose("ni") && input.commit("é"), "text delivery");
+            check(delivered.equals(Arrays.asList("setComposingText:0:ni:1", "commitText:0:é:1")),
+                    "delivered " + delivered);
+            invoke(session, "invalidateInput", editor, connection, 5);
+            check(input.commit("x") && delivered.get(2).equals("commitText:5:x:1"),
+                    "session id follows invalidateInput");
+            editor.inputType = 0;  // TYPE_NULL: a non-editor has no text input
+            check(result(invoke(manager, "startInputOrWindowGainedFocus", start)) == 6
+                    && !input.textActive() && !input.commit("y"), "non-editor start ends text input");
+            editor.inputType = 1;
+            invoke(manager, "startInputOrWindowGainedFocus", start);
+            check(input.textActive(), "text input restarts");
+            invoke(session, "finishInput");
+            check(!input.textActive() && !input.commit("z") && delivered.size() == 3,
+                    "finishInput ends text input");
+            System.out.println("INPUT_METHOD_HOST_TEXT_OK");
             System.out.println("FRAMEWORK_OK");
             System.exit(0);
         }

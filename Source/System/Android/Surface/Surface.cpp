@@ -853,6 +853,23 @@ ANDROID_EVENT_GETTER(key_down_time, ev->down_time_ns, int64_t)
 ANDROID_EVENT_GETTER(key_event_time, ev->event_time_ns, int64_t)
 #undef ANDROID_EVENT_GETTER
 
+uint32_t AndroidSurfaceManager::event_text(uint64_t h, uint32_t& kind, char* out) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const InputEvent* ev = find_event(h);
+    kind = 0;
+    out[0] = '\0';
+    if (!ev || ev->type != EVENT_TYPE_TEXT) return 0;
+    kind = ev->text_kind;
+    std::memcpy(out, ev->text, ev->text_length + 1);
+    return ev->text_length;
+}
+
+int AndroidSurfaceManager::set_text_input(bool active, int32_t x, int32_t y, int32_t width,
+                                          int32_t height) {
+    if (!window_open_) return -ENODEV;
+    return window_backend_->set_text_input(active, x, y, width, height);
+}
+
 #define ANDROID_EVENT_GETTER_IDX(name, expr, ret)                          \
     ret AndroidSurfaceManager::name(uint64_t h, size_t idx) {              \
         std::lock_guard<std::mutex> lk(mu_);                               \
@@ -966,6 +983,14 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
     } else if (e.type == BIFROST_WINDOW_POINTER) {
         ev.type = IE_TYPE_MOTION;
         ev.source = SRC_TOUCHSCREEN;
+    } else if (e.type == BIFROST_WINDOW_TEXT) {
+        AndroidWindowText text{};
+        if (window_backend_->poll_text(text) != 1) return;
+        ev.type = EVENT_TYPE_TEXT;
+        ev.source = SRC_KEYBOARD;
+        ev.text_kind = text.kind;
+        ev.text_length = text.length;
+        std::memcpy(ev.text, text.utf8, text.length);
     } else { return; }
     std::lock_guard<std::mutex> lk(mu_);
     const int64_t time_ns = e.time_ms * 1000000;

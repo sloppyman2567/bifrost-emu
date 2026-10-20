@@ -4,6 +4,46 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Keyboard text input (2026-10-20)
+
+- `ActivityProbe$InputMethodProbe` (JIT and interpreter) now also binds an
+  editor with a fake `IRemoteInputConnection`: the host session is returned
+  (`SUCCESS_WITH_IME_SESSION`, a session, no channel), composition and commit
+  arrive under session id 0, `invalidateInput` moves later commands to the new
+  id, and a non-editor start or `finishInput` ends the session
+  (`INPUT_METHOD_HOST_TEXT_OK`).
+- `test_managed_text_input` in `test_android_package.py` runs a real
+  `EditText` Activity with the built-in window and `BIFROST_TEXT_SCRIPT`, so
+  the events take the whole path (SDL queue, backend, surface manager, op 3,
+  launcher, IME session, `RemoteInputConnectionImpl`, `TextView`). `H` pressed
+  with its text types `h` once (the key is dropped, not doubled); `é` commits;
+  `ni` composes with an underline at position 2 and `你` replaces it;
+  Backspace, a key event, deletes it through `TextKeyListener`; `!` follows.
+  The same run asserts the virtual keyboard is `FULL` US QWERTY. Before the key
+  map change the Backspace did nothing (the empty map made `TextKeyListener`
+  pick `NullKeyListener`); that failing run was observed. The double-typing
+  guard was not shown failing without it. The test ran with the default JIT
+  engine only, not the interpreter or Tier-2.
+- `make test-android-window-plugin` (`android_window_plugin_host`) covers the
+  plugin contract: no text before it starts, an ordered script of text and key
+  events with payloads, `TEXT` without a start, a bad kind and an overlong
+  payload as `-EPROTO`, a failed start, and a descriptor without the callbacks
+  as `-ENOTSUP`.
+- `python3 Tools/Android/generate-key-layout.py --check` reports the committed
+  table current (it needs the network). The strict suites pass 334/334 with the
+  JIT and 325/325 with the interpreter (9 skips), `make verify` and
+  `make generated-check` pass, and the headless configuration compiles.
+- The whole of `test_android_package.py` passes 36 of 38 tests. The two
+  failures are not from this work: both fail identically on a pristine HEAD
+  checkout built and run alongside. `test_managed_activity_api_report` expects
+  `ActivityManager.getAppTasks()` to throw in trace mode, but it has been
+  implemented since `aa1272b3`; `test_managed_dialog_and_popup_windows` runs
+  every marker through `APP_ACTIVITY_DESTROYED` and `APP_POPUP_REMOVED 7`, then
+  the process never exits and the 90 s timeout kills it (exit 124).
+- Not tested: typing into Roblox, a WebView (Chromium) editor, the interpreter
+  and Tier-2 engines for the Activity test, other host keyboard layouts or input
+  methods (IBus, Fcitx), and the Wayland/X11 differences in SDL's text events.
+
 ## Roblox audio output (2026-10-20)
 
 `Tests/Unit/android_aaudio_thread.c` now resolves every name of Android 15's

@@ -28,6 +28,10 @@ public:
       api_.show_popup = nullptr;
       api_.remove_popup = nullptr;
     }
+    if (!api_.set_text_input || !api_.poll_text) {
+      api_.set_text_input = nullptr;
+      api_.poll_text = nullptr;
+    }
   }
   ~PluginWindowBackend() override {
     if (instance_) {
@@ -68,6 +72,27 @@ public:
     if (api_.remove_popup) api_.remove_popup(instance_, id);
   }
 
+  int set_text_input(bool active, int32_t x, int32_t y, int32_t w, int32_t h) override {
+    if (!api_.set_text_input) return -ENOTSUP;
+    const int result = status(api_.set_text_input(instance_, active ? 1u : 0u, x, y, w, h));
+    if (result == 0) text_input_ = active;
+    return result;
+  }
+  int poll_text(AndroidWindowText &text) override {
+    text = {};
+    if (!api_.poll_text) return 0;
+    int32_t result = api_.poll_text(instance_, &text);
+    if (result != 1) { text = {}; return status(result); }
+    // Bounded, terminated, and a kind the guest understands.
+    if ((text.kind != BIFROST_WINDOW_TEXT_COMMIT && text.kind != BIFROST_WINDOW_TEXT_COMPOSING) ||
+        text.length > BIFROST_WINDOW_TEXT_MAX || text.utf8[text.length] != '\0' ||
+        std::strlen(text.utf8) != text.length) {
+      text = {};
+      return -EPROTO;
+    }
+    return 1;
+  }
+
   int poll(AndroidWindowEvent &event) override {
     event = {};
     int32_t result = api_.poll(instance_, &event);
@@ -78,8 +103,11 @@ public:
           ((event.action != 0 && event.action != 1 && event.action != 2 && event.action != 7) ||
            event.pointer_id < 0 || !std::isfinite(event.x) || !std::isfinite(event.y) ||
            !std::isfinite(event.pressure) || event.pressure < 0);
-      if (event.type < BIFROST_WINDOW_CLOSE || event.type > BIFROST_WINDOW_POINTER ||
-          event.time_ms < 0 || bad_key || bad_pointer ||
+      // TEXT is only legal after the host started text input on a plugin that
+      // can hand over the payload.
+      const bool bad_text = event.type == BIFROST_WINDOW_TEXT && (!text_input_ || !api_.poll_text);
+      if (event.type < BIFROST_WINDOW_CLOSE || event.type > BIFROST_WINDOW_TEXT ||
+          event.time_ms < 0 || bad_key || bad_pointer || bad_text ||
           (event.type == BIFROST_WINDOW_RESIZE && (event.width <= 0 || event.height <= 0))) {
         event = {};
         return -EPROTO;
@@ -97,6 +125,7 @@ private:
   std::string name_;
   void *instance_ = nullptr;
   bool created_ = false;
+  bool text_input_ = false;
 };
 } // namespace
 
