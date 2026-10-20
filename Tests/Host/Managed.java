@@ -337,6 +337,11 @@ public final class Managed extends Activity {
             throw new AssertionError("spatializer state");
         spatializer.removeOnSpatializerStateChangedListener(listener);
         System.out.println("MANAGED_FIXTURE_SPATIALIZER_OK");
+        // FMOD (Roblox) asks for Bluetooth routes before choosing low latency:
+        // the local speaker route has none.
+        android.media.AudioManager audio = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audio.isBluetoothScoOn() || audio.isBluetoothA2dpOn()) throw new AssertionError("Bluetooth route");
+        System.out.println("MANAGED_FIXTURE_BLUETOOTH_ROUTES_OK");
         // GMA's video view creates a MediaPlayer: PlayerBase registers with
         // IAudioService and reports attribute changes and release there.
         android.media.MediaPlayer player = new android.media.MediaPlayer();

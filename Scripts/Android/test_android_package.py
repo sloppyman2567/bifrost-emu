@@ -1127,6 +1127,7 @@ class PackageTests(unittest.TestCase):
             self.assertIn("MANAGED_FIXTURE_APP_TASKS_OK", text)
             self.assertIn("MANAGED_FIXTURE_LOUDNESS_OK", text)
             self.assertIn("MANAGED_FIXTURE_SPATIALIZER_OK", text)
+            self.assertIn("MANAGED_FIXTURE_BLUETOOTH_ROUTES_OK", text)
             self.assertIn("MANAGED_FIXTURE_PLAYER_TRACKING_OK", text)
             key = (state / ".settings/user-0.key").read_bytes()
             expected_id = hmac.new(key, struct.pack(">I", len(certificate)) + certificate,

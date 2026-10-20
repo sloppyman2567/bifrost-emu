@@ -39,6 +39,7 @@ final class FrameworkAudio implements FrameworkServices.Call {
         playSoundEffectVolume,
         isMusicActive,
         isBluetoothA2dpOn,
+        isBluetoothScoOn,
         startWatchingRoutes,
         registerLoudnessCodecUpdatesDispatcher,
         unregisterLoudnessCodecUpdatesDispatcher,
@@ -323,6 +324,9 @@ final class FrameworkAudio implements FrameworkServices.Call {
             case playSoundEffectVolume: return null;
             case isMusicActive: return !(Boolean) a[0] && ManagedLauncher.hostAudioActive();
             case isBluetoothA2dpOn: return false;
+            // mBtScoOnByApp || the device broker's SCO state: no Bluetooth
+            // device, and setBluetoothScoOn is not offered.
+            case isBluetoothScoOn: return false;
             case startWatchingRoutes: {
                 IBinder token = ((IInterface) Objects.requireNonNull(a[0], "observer")).asBinder();
                 synchronized (routeObservers) {

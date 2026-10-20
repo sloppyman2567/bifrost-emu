@@ -4,6 +4,51 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Roblox from startup to its login screen (2026-10-19)
+
+Each fix below has a focused regression that fails on the previous code:
+
+- `test_signal_semantics` (both engines, and under qemu-aarch64) adds a
+  process-directed `kill()` that every thread blocks: `sigpending` reports it
+  and another thread's `sigtimedwait` receives it, sent from the main thread
+  and from a sibling. The previous emulator timed out (`-5`). A second case
+  runs three `udf #0` in a worker with a SIGILL handler that skips them; the
+  thread must continue. Previously the worker vanished and its join hung.
+- `test_lse_inline` adds CASP/CASPL (X pairs, match and mismatch), CASPA on W
+  pairs with garbage upper bits, and a four-thread CASPAL 128-bit counter.
+  The previous decoder raised SIGILL.
+- `test_sdl_gl_mapbuffer` was rewritten to valid GL only and also builds
+  natively (`cc ... -ldl`); its 26 checks pass on the host's Mesa 26.2 and in
+  both engines with the GL and GLES rows. It covers write-back to immutable
+  `glBufferStorage`, mapping-relative flushes, persistent coherent writes seen
+  while mapped, unmap ending a persistent mapping, and the host's errors for
+  invalid maps. The previous mapping code fails at the relative flush.
+- `test_managed_activity_stack` adds `startIntentSenderForResult`: a sender
+  this process did not create throws `SendIntentException`, and the app's own
+  PendingIntent returns its result (`RESULT 44 0 null`). This fixture's fixed
+  1.5 s layout wait failed once while another game was running and passed on
+  the rerun.
+- `glxmlcheck` rejects GL rows that drop stack-passed arguments; it flags the
+  old `glBlitFramebuffer` and the `glBlitFramebufferEXT` row it found.
+- The `Managed` fixture checks that `AudioManager.isBluetoothScoOn()` and
+  `isBluetoothA2dpOn()` are false (`MANAGED_FIXTURE_BLUETOOTH_ROUTES_OK`).
+
+The strict suite passes 334/334 with the JIT and 325/325 (9 skips) with the
+interpreter; `make verify` and `make generated-check` pass.
+
+Roblox itself, with the JIT and all optimizations on: its main Activity
+resumes, the GLES 3.2 fallback renders the UI (sampled back-buffer pixels
+`#111216`/`#272930` instead of black; the user confirmed the UI), and it
+reaches the login screen; the user logged in and joined live servers. About
+170 s after joining, the server disconnects the client with reason 304
+("missing or corrupted files"); the client logs no file or hash failure, and
+its Play Integrity token request fails ("Standard Integrity API is not
+available"). That attestation gate is not emulator behavior and is not worked
+around. Vulkan finds no device (no Android Vulkan HAL), so Roblox uses GLES.
+Most 3D material vertex shaders (`DefaultUnified*VS`, terrain, grass) fail to
+compile on Mesa ("could not implicitly convert operands"); in-experience
+rendering is not established.
+
 ## Splash hand-off and installer launchers (2026-10-19)
 
 `test_managed_splash_hands_off_to_main_activity` launches `ManagedSplash`. Its

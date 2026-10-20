@@ -193,8 +193,38 @@ video-ad playback or full lifecycle/recreation behavior.
   Use the [AOSP graphics architecture](https://source.android.com/docs/core/graphics/architecture)
   to define the required surface/buffer contracts; choose a supported service
   bridge or compositor integration before promising full SurfaceFlinger.
+  Android Vulkan has no HAL yet: AOSP's loader finds no `vulkan.*.so`, so
+  apps see zero physical devices (Roblox falls back to GLES). A HAL over the
+  host Vulkan thunk needs guest-side dispatchable objects (the loader writes
+  its dispatch table into them; thunk handles are host pointers) translated
+  wherever they cross, and `VK_ANDROID_native_buffer` swapchain images on
+  gralloc buffers.
+- Start activities of other processes, first Play services (microG) sign-in
+  and credential UIs: run the activity in its own process with a window,
+  deliver its result to the caller's `resultTo`, and resolve foreign
+  PendingIntents through their creator. Until then a foreign IntentSender is
+  reported cancelled (Roblox's Credential Manager, Azur Lane's Play Games).
 - Cover the selected games' audio APIs, callback threading, buffer timing
   and device changes, preserving sound during normal gameplay.
+- Complete the NDK AAudio surface for FMOD (Roblox reports "no audio driver":
+  FMOD `System::init` fails with result 51, AAudio being FMOD's default
+  output on Android 8.1+). Our `libaaudio` lacks seven public symbols of the
+  Android 15 `libaaudio.map.txt`: `AAudio_getMMapPolicy`/`setMMapPolicy`,
+  `AAudioStream_read`, `getContentType` (API 28) and
+  `getHardwareChannelCount`/`Format`/`SampleRate` (API 34). Steps:
+  1. Confirm the cause first: a fixture probe that resolves the whole AAudio
+     table with `dlsym` and opens an output stream as FMOD does, and FMOD's
+     documented meaning of result 51.
+  2. Implement them per AOSP in the AudioThunk registry and `AAudio.cpp`:
+     the builder's content type (default `MUSIC`); the host output's real
+     rate, channel count and format; MMAP policy `NEVER`, with a set policy
+     recorded; `read` on an output stream answering
+     `AAUDIO_ERROR_UNIMPLEMENTED`, as AOSP does for the wrong direction.
+     Input streams keep failing cleanly; microphone capture is out of scope.
+  3. Extend the AAudio fixture to resolve every NDK symbol and check the new
+     getters on an open stream.
+  4. Run Roblox: FMOD must initialize and play; otherwise trace the next
+     failing call from the probe.
 - Test orientation, resize, focus, pause/resume, surface loss/recreation
   and background/foreground transitions.
 - Validate decoded output beyond the small fixtures: flush/reconfigure,
@@ -203,6 +233,15 @@ video-ad playback or full lifecycle/recreation behavior.
   and native EGL into aliased surfaces remain unestablished.
 - Expand graphics ABI and extension coverage based on complete dependency
   audits and reproducible failures rather than one missing import at a time.
+- Mobile GLSL on desktop drivers: Roblox's 3D material and terrain vertex
+  shaders (`DefaultUnified*VS`, grass, smooth terrain) fail on Mesa with
+  "could not implicitly convert operands to arithmetic operator". Mobile
+  drivers accept implicit int/float conversions that GLSL ES 3.x forbids
+  without `GL_EXT_shader_implicit_conversions`. First capture the failing
+  sources and compare with the ES spec and that extension; then choose
+  between exposing the extension through the host driver and a bounded
+  source rewrite before compilation, checked against Mesa on the captured
+  shaders.
 
 Acceptance: rendered gameplay with working audio and input survives repeated
 surface recreation and lifecycle transitions without leaks or stale handles.
