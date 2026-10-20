@@ -83,7 +83,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             if (loaded_from_pstate) {
                 emit_load_flags_from_pstate();
                 flags_from_sub_ = true;
-                flags_in_host_ = true;
+                flags_in_host_ = true; flags_match_pstate_ = false;
             }
             // Condition code (SUB convention; HI/LS after ADD/TST need cmc).
             bool need_cmc = false;

@@ -327,7 +327,25 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         }
         case IROp::BRCOND: {
             const BrCondParams bp = inst.brcond_params();
+            // A condition on a single flag (EQ/NE: Z, CS/CC: C, MI/PL: N, VS/VC: V)
+            // needs no host flags when they are still in cpu.pstate: test that bit
+            // in memory and branch. Nothing is loaded, clobbered or stored back.
+            uint32_t direct_mask = 0;
+            bool direct_taken_if_set = false;
             if (!flags_in_host_) {
+                switch (bp.cond & 0xF) {
+                    case 0: direct_mask = 0x40000000u; direct_taken_if_set = true;  break;  // EQ
+                    case 1: direct_mask = 0x40000000u; direct_taken_if_set = false; break;  // NE
+                    case 2: direct_mask = 0x20000000u; direct_taken_if_set = true;  break;  // CS
+                    case 3: direct_mask = 0x20000000u; direct_taken_if_set = false; break;  // CC
+                    case 4: direct_mask = 0x80000000u; direct_taken_if_set = true;  break;  // MI
+                    case 5: direct_mask = 0x80000000u; direct_taken_if_set = false; break;  // PL
+                    case 6: direct_mask = 0x10000000u; direct_taken_if_set = true;  break;  // VS
+                    case 7: direct_mask = 0x10000000u; direct_taken_if_set = false; break;  // VC
+                    default: break;
+                }
+            }
+            if (!flags_in_host_ && !direct_mask) {
                 // emit_load_flags_from_pstate clobbers only RAX/RCX/RDX
                 // (the C^from_sub extraction is RDX-only since the R8-scratch
                 // fix; see the contract comment in X86Emitter.cpp). Use
@@ -345,19 +363,24 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 invalidate_host_regs(FLAGS3);
                 flags_from_sub_ = true;  // CF is now in SUB convention
                 flags_in_host_ = true;
+                flags_match_pstate_ = true;  // BRCOND only consumes them
             }
             // Resolve condition code, handling carry polarity (ADD/TST vs SUB).
             // With flags_from_sub_=true (SUB convention, whether originally
             // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
-            uint8_t cc = resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
+            uint8_t cc = direct_mask ? (direct_taken_if_set ? 5 /*JNE: bit set*/ : 4 /*JE: bit clear*/)
+                                     : resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
             // to pstate on each path separately (the next block may read pstate).
             // Stores don't clobber RFLAGS, so flush_all_vregs needs no
             // pushfq/popfq wrapper here.
             flush_all_vregs();
-            if (need_cmc_for_hi_ls) {
+            if (direct_mask) {
+                emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, PSTATE_OFF);  // test dword [pstate], mask
+                emit_u32(direct_mask);
+            } else if (need_cmc_for_hi_ls) {
                 emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
             }
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
@@ -371,7 +394,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // The exception is a successor whose own first instructions
             // rewrite all four flags before anything can observe them
             // (exit_flags_dead): the store is then dead.
-            const bool fall_dead = exit_flags_dead(inst.arm_pc + 4);
+            const bool clean = host_flags_match_pstate();  // loaded above, unchanged
+            const bool fall_dead = clean || exit_flags_dead(inst.arm_pc + 4);
             if (need_cmc_for_hi_ls && !fall_dead) emit_byte(0xF5);
             // JCC has consumed the host flags. Only architectural NZCV must
             // survive the exit; restoring RFLAGS here is dead work.
@@ -394,7 +418,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             bool skip_taken_materialize =
                 is_selfloop && !no_selfloop_ && !flags_loop_carried_ && !mt_active();
             // Otherwise the taken target may itself overwrite the flags first.
-            if (!skip_taken_materialize && exit_flags_dead(bp.target))
+            if (!skip_taken_materialize && (clean || exit_flags_dead(bp.target)))
                 skip_taken_materialize = true;
             // If CMC was emitted, re-invert CF before materializing flags.
             // Skipped along with the materialize: the loop body re-sets CF
@@ -496,7 +520,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 emit_load_flags_from_pstate();
                 invalidate_host_regs(FLAGS3);
                 flags_from_sub_ = true;  // CF is now in SUB convention
-                flags_in_host_ = true;
+                flags_in_host_ = true; flags_match_pstate_ = false;
             }
             bool need_cmc_for_hi_ls = false;
             uint8_t cc = resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);

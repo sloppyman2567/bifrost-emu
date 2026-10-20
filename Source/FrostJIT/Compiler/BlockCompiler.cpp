@@ -97,6 +97,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     skip_fixups_.clear();
     rax_holds_next_pc_ = false;
     flags_in_host_ = false;
+    flags_match_pstate_ = false;
     flags_from_sub_ = false;
     chain_target_pc_ = 0;
     unchainable_end_ = false;
@@ -941,6 +942,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
                     fold_ahead_kind_[i] = 2;  // shift fold — any count folds
                     break;
+                case IROp::SUBS: case IROp::ADDS: {
+                    // CMP/SUBS/ADDS with an immediate (FrostJIT.cpp ADDS/SUBS): the
+                    // 32-bit form takes any constant, the 64-bit one needs imm32 fit.
+                    // CMN (ADDS without a result) keeps the generic path.
+                    const bool no_result = nx.dest == 0 ||
+                        (nx.dest > 32 && nx.dest < 4096 &&
+                         vreg_last_use_op_[nx.dest] <= static_cast<int>(i + 1));
+                    if (nx.op == IROp::ADDS && no_result) break;
+                    fold_ahead_kind_[i] = nx.addsub_params().bits == 32 ? 2 : 1;
+                    break;
+                }
                 default:
                     break;
             }

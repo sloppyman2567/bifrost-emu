@@ -63,7 +63,15 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     bool whole_instruction = size > 16;
     if (inst.arm_pc) {
         DecodedInst d;
-        if (decode(d, guest_memory_->fetch_inst(inst.arm_pc)) &&
+        // A Q-register pair is two independent 16-byte accesses: a vector
+        // register cannot alias the base, loads write only their own register
+        // and stores only memory, so an instruction restarted after a fault on
+        // either half repeats the first half harmlessly. They take the same
+        // recoverable native path as a single LDR/STR Q.
+        const bool q_pair_native = (inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16) &&
+            decode(d, guest_memory_->fetch_inst(inst.arm_pc)) && d.is_vec &&
+            (d.cls == InstClass::LDP || d.cls == InstClass::STP) && ((d.raw >> 30) & 3) == 2;
+        if (!q_pair_native && decode(d, guest_memory_->fetch_inst(inst.arm_pc)) &&
             (d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
             whole_instruction = true;
             uint64_t first_offset = d.mode == 1 ? 0 : static_cast<uint64_t>(d.disp);
@@ -369,7 +377,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     flush_all_vregs();
     // Materialize host flags to pstate if valid.
     if (flags_in_host_) {
-        emit_materialize_flags(flags_from_sub_);
+        if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
         // emit_materialize_flags clobbers RAX/RCX/RDX. Drop their
         // cache mappings (values were already flushed above, so
@@ -441,7 +449,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
 void FrostJIT::emit_call_vdso_clock(uint64_t arm_pc) {
     flush_all_vregs();
     if (flags_in_host_) {
-        emit_materialize_flags(flags_from_sub_);
+        if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
         invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
     }
@@ -475,7 +483,7 @@ void FrostJIT::emit_call_vdso_clock(uint64_t arm_pc) {
 void FrostJIT::emit_call_native_svc(uint64_t arm_pc) {
     flush_all_vregs();
     if (flags_in_host_) {
-        emit_materialize_flags(flags_from_sub_);
+        if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
         invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
     }

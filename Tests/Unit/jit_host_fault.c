@@ -109,6 +109,11 @@ static void *worker(void *unused) {
         PROBE("ldp d0, d1, [%0]", p + page_size - 8);
         PROBE("stp d8, d9, [%0]", p + page_size - 8);
         PROBE("ldp s0, s1, [%0]", p + page_size - 4);
+        // Q pairs are two 16-byte accesses: the first is mapped, the second faults.
+        PROBE("ldp q0, q1, [%0]", p + page_size - 16);
+        PROBE("stp q0, q1, [%0]", p + page_size - 16);
+        PROBE("ldp q0, q1, [%0]", p + page_size);
+        PROBE("stp q8, q9, [%0]", p + page_size - 16);
         PROBE("ldp x11, x12, [%0]", p + page_size);
         PROBE("ldpsw x11, x12, [%0]", p + page_size - 4);
         PROBE_BASE("ldp x13, x12, [x13]", p + page_size - 8, "x13");

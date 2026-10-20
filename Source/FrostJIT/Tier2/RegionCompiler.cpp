@@ -527,7 +527,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                         emit_load_flags_from_pstate();
                         invalidate_host_regs(FLAGS3);
                         flags_from_sub_ = true;  // CF is now in SUB convention
-                        flags_in_host_ = true;
+                        flags_in_host_ = true; flags_match_pstate_ = false;
                     }
                     uint8_t cc = resolve_arm_cond_with_carry(bp.cond, need_cmc);
                     if (need_cmc) emit_byte(0xF5);  // cmc — invert CF for HI/LS

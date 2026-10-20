@@ -348,6 +348,56 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     };
     // ── Pass 0: dead-store elimination for STORE_REG ───────────────
     dse_pass();
+    // ── Pass 0b: redundant zero-extension ──────────────────────────
+    // A value that provably fits in N bits (a load of N/8 bytes, a smaller
+    // ZEXT, a small constant, an AND with such a value, an OR/XOR of two) needs
+    // no ZEXT to N or more bits: it becomes a copy, which Pass 1 propagates
+    // away. Only scratch vregs (>= 33) are tracked; they are defined once.
+    {
+        std::vector<uint8_t> fits(block.insts.size() * 4 + 64, 0);  // 0 = unknown
+        auto known = [&](uint16_t v) -> unsigned { return v >= 33 && v < fits.size() ? fits[v] : 0; };
+        for (IRInst& inst : block.insts) {
+            if (inst.dest < 33 || inst.dest >= fits.size()) continue;
+            unsigned bits = 0;
+            switch (inst.op) {
+                case IROp::IMM: {
+                    const uint64_t c = inst.imm;
+                    bits = c ? 64 - __builtin_clzll(c) : 1;
+                    break;
+                }
+                case IROp::LOAD_MEM: bits = inst.load_mem_params().width * 8u; break;
+                // The one ADDS/SUBS emitter (both tiers) uses the 32-bit x86 form
+                // for W operations, which clears bits 63:32 of the result.
+                case IROp::ADDS: case IROp::SUBS:
+                    bits = inst.addsub_params().bits == 32 ? 32 : 0;
+                    break;
+                case IROp::MOV: bits = known(inst.src1); break;
+                case IROp::ZEXT: {
+                    const unsigned w = inst.zext_bits();
+                    const unsigned k = known(inst.src1);
+                    if (k && k <= w) {
+                        inst = IRInst::make(IROp::MOV, inst.dest, inst.src1, 0, 0, inst.arm_pc);
+                        bits = k;
+                    } else {
+                        bits = k && k < w ? k : w;
+                    }
+                    break;
+                }
+                case IROp::AND: {
+                    const unsigned a = known(inst.src1), b = known(inst.src2);
+                    bits = a && b ? (a < b ? a : b) : a ? a : b;
+                    break;
+                }
+                case IROp::OR: case IROp::XOR: {
+                    const unsigned a = known(inst.src1), b = known(inst.src2);
+                    bits = a && b ? (a > b ? a : b) : 0;
+                    break;
+                }
+                default: break;
+            }
+            fits[inst.dest] = static_cast<uint8_t>(bits >= 64 ? 0 : bits);
+        }
+    }
     // Pass 1: walk forward, fold constants, propagate copies, cache
     // ARM64 register loads.
     for (size_t i = 0; i < block.insts.size(); i++) {

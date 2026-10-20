@@ -585,6 +585,48 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             // is already emitted, and an op that can fault or exit between a
             // setter and this one materialized them itself.
             flags_in_host_ = false;
+            // A constant second operand (CMP/SUBS/ADDS with an immediate) folds
+            // into the instruction: no register, no `mov r, imm`. The 32-bit
+            // form takes the low 32 bits as they are; the 64-bit form needs the
+            // value to survive imm32 sign extension. CMN keeps the generic path.
+            {
+                const bool imm_sub = inst.op == IROp::SUBS;
+                const bool imm_32 = inst.addsub_params().bits == 32;
+                const bool imm_discard = inst.dest == 0 ||
+                    (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
+                     cur_op_index_ < kills_per_op_.size() &&
+                     vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
+                auto cit = jit_consts_.find(inst.src2);
+                if (cit != jit_consts_.end() && inst.src1 != inst.src2 && inst.dest != inst.src2 &&
+                    (imm_sub || !imm_discard) && vreg_last_use_this_op(inst.src2)) {
+                    const int64_t c = static_cast<int64_t>(cit->second);
+                    if (imm_32 || static_cast<int64_t>(static_cast<int32_t>(c)) == c) {
+                        const int32_t imm = static_cast<int32_t>(c);
+                        kill_vreg(inst.src2);
+                        const int s1 = ensure_vreg(inst.src1);
+                        int d = s1;
+                        if (!(imm_sub && imm_discard)) {
+                            if (inst.dest == inst.src1) d = s1;
+                            else if (inst.src1 > 32 && vreg_last_use_this_op(inst.src1) &&
+                                     !(pinned_host_regs_ & (1u << s1))) d = s1;
+                            else d = alloc_reg_excluding(s1, -1);
+                            if (d != s1) emit_mov_reg(d, s1);
+                        }
+                        emit_byte(rex(!imm_32, false, false, d >= 8));
+                        const int kind = (imm_sub && imm_discard) ? 7 : imm_sub ? 5 : 0;  // cmp / sub / add
+                        if (imm >= -128 && imm <= 127) {
+                            emit_byte(0x83); emit_byte(modrm(3, kind, d & 7)); emit_byte(static_cast<uint8_t>(imm));
+                        } else {
+                            emit_byte(0x81); emit_byte(modrm(3, kind, d & 7)); emit_u32(static_cast<uint32_t>(imm));
+                        }
+                        flags_in_host_ = true;
+                        flags_match_pstate_ = false;
+                        flags_from_sub_ = imm_sub;
+                        if (!(imm_sub && imm_discard)) set_vreg_reg(inst.dest, d);
+                        return false;
+                    }
+                }
+            }
             int s1, s2;
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             const bool is_sub = inst.op == IROp::SUBS;
@@ -618,6 +660,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             emit_byte(is_sub ? (discard_result ? 0x39 : 0x29) : 0x01);
             emit_byte(modrm(3, s2 & 7, d & 7));
             flags_in_host_ = true;
+            flags_match_pstate_ = false;
             flags_from_sub_ = is_sub;
             if (!discard_result) set_vreg_reg(inst.dest, d);
             else if (!is_sub) {
@@ -639,6 +682,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             emit_byte(0x85);
             emit_byte(modrm(3, s2 & 7, s1 & 7));
             flags_in_host_ = true;
+            flags_match_pstate_ = false;
             flags_from_sub_ = false;
             return false;
         }
@@ -648,6 +692,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             int s1 = ensure_vreg(inst.src1, RAX);
             emit_test_reg(s1, s1);
             flags_in_host_ = true;
+            flags_match_pstate_ = false;
             flags_from_sub_ = false;
             return false;
         }
@@ -699,7 +744,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 emit_pushfq();
                 constexpr uint16_t FLAGS3a = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
                 flush_dirty_host_regs(FLAGS3a);
-                emit_materialize_flags(flags_from_sub_);
+                if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
                 emit_popfq();
                 invalidate_host_regs(FLAGS3a);
                 // Host flags are in the convention indicated by flags_from_sub_.
@@ -766,6 +811,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 else        emit_adc_reg(d, s2);
             }
             flags_in_host_ = true;
+            flags_match_pstate_ = false;
             flags_from_sub_ = is_sub;  // SBB: ARM C = NOT CF; ADC: ARM C = CF
             if (inst.dest == 0) kill_vreg(inst.src1);
             return false;
@@ -794,7 +840,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
                 // NZCV — materialize flags from host to pstate, then load.
                 if (flags_in_host_) {
-                    emit_materialize_flags(flags_from_sub_);
+                    if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
                     flags_in_host_ = false;
                     // Drop cache mappings for RAX/RCX/RDX (clobbered by materialize).
                     invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
@@ -942,7 +988,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
         case IROp::BLR_CALL: {
             flush_all_vregs();
             if (flags_in_host_) {
-                emit_materialize_flags(flags_from_sub_);
+                if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
                 flags_in_host_ = false;
                 invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             }
@@ -993,7 +1039,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             flush_all_vregs();
             // Materialize host flags to pstate if valid (callee may read pstate).
             if (flags_in_host_) {
-                emit_materialize_flags(flags_from_sub_);
+                if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
                 flags_in_host_ = false;
                 invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             }

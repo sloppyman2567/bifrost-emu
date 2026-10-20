@@ -4,6 +4,34 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## JIT branch flags, immediates and Q pairs (2026-10-20)
+
+Revision: `f0575666` plus the uncommitted change under test.
+
+- `jit_branch_flags` (new): 14 conditions x 16 NZCV values x 3 repetitions, with the flags set by
+  MSR in the previous block (EQ/NE/CS/CC/MI/PL/VS/VC test one `pstate` bit); five-branch chains
+  (N, Z, V, HI, LT/GE in separate blocks) on CMP flags and a three-branch chain on ADDS flags
+  (LS/CS/GT), 12 x 12 value pairs x 3 repetitions, each ending in MRS and checking path and NZCV;
+  LDP/STP Q copies of 32..1,024 bytes, four source offsets, destinations that cross a page. Passes
+  under QEMU, the JIT, the interpreter and the old build. With the clean-flags bit left set after
+  ADDS/SUBS it fails (checked).
+- `jit_imm_flags_zext` (new): SUBS/ADDS/CMP/CMN with 0, 1, 7, 255, 4095 and the two 12-bit shifted
+  immediates, TST/ANDS with six 64-bit and five 32-bit logical immediates, X and W forms, against 22
+  values (garbage in bits 63:32 among them), each with its result, NZCV and the branch taken; 32-bit
+  loads and W-form ALU results feeding 64-bit consumers; 64-bit results read through W operations.
+  One hash, QEMU's `68b2df78cbaec314`, equal on the JIT, the interpreter and the old build. It
+  fails when a 64-bit `subs` result is treated as 32 bits (checked); a first version of it did
+  not, because it never read a 64-bit result through a W operation.
+- `jit_host_fault` gained `ldp q`/`stp q` probes (second half unmapped, wholly unmapped, a store
+  pair) and passes under QEMU, the new JIT and the old one.
+- `make verify` (95 fixtures, 8 threaded oracle runs); `run_tests.sh --unit --strict` 155 with the
+  JIT, `--no-chain-skip`, `--fwd`, and 147 (8 skipped) under `--no-jit`; Toybox and real-world 65;
+  `test_jit_cache`, `test_jit_mt`, `test_jit_mt_publication`, `test_jit_tier2_discovery/feedback/
+  measure/mutex`, `test_jit_profiler`; the zstd regression; `make generated-check` (errors=0). The
+  build has no new warnings.
+- Not run: an ASan build, `--integration`/`--dynamic` (they open windows), any game. Timings are
+  in the guide section of this date.
+
 ## JIT native LL/SC atomics and the exclusive monitor (2026-10-20)
 
 Revision: `ed3acd04` plus the uncommitted change under test.

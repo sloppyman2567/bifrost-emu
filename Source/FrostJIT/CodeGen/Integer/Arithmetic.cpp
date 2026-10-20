@@ -630,7 +630,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
                 invalidate_host_regs(FLAGS3);
-                flags_in_host_ = true;
+                flags_in_host_ = true; flags_match_pstate_ = false;
                 flags_from_sub_ = true;  // CF is now in SUB convention
             }
             // Resolve condition code. With flags_from_sub_=true (SUB convention,
@@ -924,7 +924,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // pstate divergences like jit=0x8000000 ref=0x88000000
                 // (JIT skipped the compare; interpreter did it).
                 invalidate_host_regs(FLAGS3);
-                flags_in_host_ = true;
+                flags_in_host_ = true; flags_match_pstate_ = false;
                 flags_from_sub_ = true;  // CF is now in SUB convention
             }
             if (need_cmc) emit_byte(0xF5);

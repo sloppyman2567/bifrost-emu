@@ -38,6 +38,14 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   write without the lock (that loses ABA protection under real parallelism; only
   `jit_llsc_native`'s four-CPU LIFO shows it). The access is a registered fault site
   whose stub releases the bucket first. `CLEAR_EXCLUSIVE` implements CLREX.
+- `flags_match_pstate_` (host flags loaded by a BRCOND, unchanged since) lets exits and
+  `clobber_flags` skip the store; every flag setter must clear it, and only public
+  Tier-1 compiles use it (`host_flags_match_pstate()`). A BRCOND on one flag with its flags
+  still in `pstate` tests the bit in memory. `clobber_flags(false, true)` (RDX only) is for
+  callers that pick registers through the allocator afterwards; others assume RAX/RCX/RDX.
+- `fold_ahead_kind_` (BlockCompiler.cpp) must mirror its consumer's fold guards exactly: a
+  skipped `mov` whose consumer then does not fold leaves the vreg unmapped. Pass 0b of
+  `optimize_ir` relies on `LOAD_MEM` and the shared 32-bit `ADDS/SUBS` emitter zero-extending.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
   for the whole block. Vd is written only after the load, so a fault leaves it intact.

@@ -1118,6 +1118,13 @@ private:
     struct FlagDepScratch { uint64_t pc; std::vector<uint32_t> words; };
     std::vector<FlagDepScratch> flag_deps_scratch_;
     bool flag_scan_active_ = false;   // public Tier-1 compiles only
+    // The host flags were loaded from cpu.pstate and nothing has changed them
+    // since, so storing them back would rewrite what pstate already holds.
+    // Set by a BRCOND that loads its flags; cleared by every flag setter.
+    bool flags_match_pstate_ = false;
+    bool host_flags_match_pstate() const {
+        return flags_in_host_ && flags_match_pstate_ && flag_scan_active_;
+    }
     bool flag_store_skipped_ = false;
     bool block_code_unchanged(const BlockEntry& entry, uint64_t pc) const;
     void attach_code_words(BlockEntry& entry, bool contiguous);
@@ -2035,7 +2042,10 @@ private:
     // SHL/SHR/SAR/ROR/NOT/NEG/IMUL to preserve flag correctness.
     // `dead`: the flags are provably overwritten before any observer, so the
     // register state is updated exactly as for a store but none is emitted.
-    void clobber_flags(bool dead = false);
+    // `rdx_only`: the caller allocates registers through the allocator afterwards,
+    // so only RDX (the one register emit_materialize_flags overwrites; it saves and
+    // restores RAX and never touches RCX) is flushed and invalidated.
+    void clobber_flags(bool dead = false, bool rdx_only = false);
     // True when NZCV is dead on entry to guest `pc` (a statically known exit
     // target): the first instructions at `pc` overwrite all four flags before
     // anything that could read them, fault or branch. Records the words the

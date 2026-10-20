@@ -48,7 +48,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     if (!decode(decoded, guest_memory_->fetch_inst(inst.arm_pc))) return false;
 
     memory_fault_stub_ = 0;
-    clobber_flags();
+    clobber_flags(false, /*rdx_only=*/true);
     int address, value = -1;
     if (load) address = ensure_vreg(inst.src1);
     else ensure_two_vregs(inst.src1, inst.src2, &address, &value);

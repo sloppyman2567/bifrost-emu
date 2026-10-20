@@ -17,22 +17,27 @@ namespace arm64emu {
 // materialize them to cpu.pstate BEFORE a flag-clobbering instruction
 // overwrites them. Without this, any ALU op after ADDS/SUBS/TST would
 // lose the flags, causing wrong branch decisions downstream.
-void FrostJIT::clobber_flags(bool dead) {
+void FrostJIT::clobber_flags(bool dead, bool rdx_only) {
     if (flags_in_host_) {
-        // emit_materialize_flags clobbers RAX, RCX, RDX.
+        dead = dead || host_flags_match_pstate();
+        // emit_materialize_flags overwrites RDX only (it saves and restores RAX,
+        // never touches RCX). Callers that go on to pick registers through the
+        // allocator can leave RAX/RCX mapped; the rest take all three, as an
+        // unspecific caller may use RAX/RCX/RDX as fixed scratch next.
+        const uint16_t FLAGS_CLOBBER = rdx_only
+            ? static_cast<uint16_t>(1u << RDX)
+            : static_cast<uint16_t>((1u << RAX) | (1u << RCX) | (1u << RDX));
         // Spill dirty vregs AND non-dirty scratch vregs BEFORE the
-        // materialize — otherwise non-dirty scratch vregs cached in
-        // RAX/RCX/RDX are lost (their value is only in the host reg,
-        // and materialize overwrites it before invalidate_host_regs
-        // can drop the mapping). This was the root cause of the FWD
-        // crash on `toybox ls /` (x30 store using a stale/garbage value).
-        constexpr uint16_t FLAGS_CLOBBER =
-            (1u << RAX) | (1u << RCX) | (1u << RDX);
+        // materialize — otherwise non-dirty scratch vregs cached in the
+        // clobbered registers are lost (their value is only in the host reg,
+        // and materialize overwrites it before invalidate_host_regs can drop
+        // the mapping). This was the root cause of the FWD crash on
+        // `toybox ls /` (x30 store using a stale/garbage value).
         flush_dirty_host_regs(FLAGS_CLOBBER);
         flush_scratch_host_regs(FLAGS_CLOBBER);
         if (!dead) emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
-        // Drop cache mappings for RAX/RCX/RDX (values were spilled above).
+        // Drop cache mappings for the clobbered registers (values were spilled above).
         invalidate_host_regs(FLAGS_CLOBBER);
     }
 }
@@ -44,6 +49,7 @@ void FrostJIT::clobber_flags(bool dead) {
 // end.
 void FrostJIT::materialize_flags_to_pstate(bool preserve_flags, bool dead) {
     if (!flags_in_host_) return;
+    dead = dead || host_flags_match_pstate();
     constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
     if (!dead && preserve_flags) emit_pushfq();
     flush_dirty_host_regs(FLAGS3);

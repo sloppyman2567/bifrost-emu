@@ -15,6 +15,71 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Branch flags, immediates and Q pairs (2026-10-20)
+
+The two remaining weak spots of the game-style set were a pointer-chasing loop
+(0.64x of QEMU) and a 64-byte struct copy (0.51x). Their generated code
+(`BIFROST_JIT_DUMP=1`) showed five separate problems, each general.
+
+- **Q-register pairs.** `ldp q`/`stp q` were still the only pairs on the old software
+  guard (about 25 instructions per 16 bytes: push/pop, a window compare, a page-flag
+  table walk, and a slow-path call). `emit_memory_guard` treated every pair as a whole
+  instruction. A Q pair is two independent 16-byte accesses (no register can alias the
+  base, a load writes only its own register, a store only memory), so a restart after a
+  fault on either half repeats the first harmlessly, as for the GPR and S/D pairs. They
+  now take the recoverable native guard like `ldr q`. Struct copy 753 → 316 ns/iter
+  (QEMU 395).
+- **Flags a branch only reads.** A block that is just `b.cond` loaded NZCV from `cpu.pstate`
+  into host flags (14 instructions) and then stored the same flags back to `pstate` on
+  both exits (9 instructions each). `flags_match_pstate_` records that the host flags
+  were loaded by a BRCOND and no setter has run since; `clobber_flags`,
+  `materialize_flags_to_pstate`, the BRCOND exits and the call paths then emit no store
+  (`host_flags_match_pstate()`, public Tier-1 compiles only; every flag setter clears it).
+  `pstate` holds the same NZCV; the loader ignores the stored marker bit.
+- **Single-flag conditions need no host flags at all.** EQ/NE (Z), CS/CC (C), MI/PL (N)
+  and VS/VC (V) on flags that are still in `pstate` are one `test dword [pstate], mask`
+  and a branch: nothing is loaded, flushed or stored. The `b.eq` block of the chase loop
+  went from 251 to about 100 bytes. HI/LS/GE/LT/GT/LE keep the loader.
+- **Immediates for flag setters.** `ADDS`/`SUBS` (so `cmp`/`subs`/`adds` with a constant) and
+  their `fold_ahead_kind_` pre-scan now fold a constant second operand into
+  `cmp/sub/add r, imm` (32-bit form: any constant; 64-bit form: imm32 sign-extension fit;
+  CMN keeps the generic path), as `ADD/SUB/AND/OR/XOR` already did. No `mov r, imm`, no
+  register held for it.
+- **Zero extensions that cannot do anything.** `Optimize.cpp` Pass 0b tracks scratch vregs that
+  provably fit N bits (a load of N/8 bytes, a smaller ZEXT, a small IMM, a 32-bit
+  ADDS/SUBS result, AND with such a value, OR/XOR of two) and turns a ZEXT to N or more bits
+  into a copy that Pass 1 propagates away. The 32-bit ADDS/SUBS claim rests on the one emitter
+  both tiers share using the 32-bit x86 form; the load claim on `LOAD_MEM` zero-extending.
+- **A spill on the load chain.** `compile_guarded_mem` called `clobber_flags()`, which flushes
+  and drops RAX, RCX and RDX because `emit_materialize_flags` used to clobber all three. It now
+  overwrites RDX only (it saves and restores RAX, never touches RCX), and that path, which
+  chooses registers through the allocator, passes `rdx_only`. In the chase loop the chased
+  pointer (RAX) was stored to the stack and reloaded in front of the next load: a store-forward
+  on the dependent chain. Other callers keep the three-register contract.
+- **Measured (same machine, `HEAD` against this tree, minimum of seven runs, QEMU for
+  reference).** Pointer chase 1,905 → 1,282 ns/iter (QEMU 1,177), struct copy 753 → 316
+  (395), array bounds 2,350 → 1,862 (3,087); the others within noise of the earlier
+  checkpoints. Against QEMU the whole 13-kernel set is now faster on twelve, 0.92x on one.
+- **Checked.** `jit_branch_flags`: every condition against all sixteen NZCV values (MSR in the
+  previous block), five-branch chains each in its own block on CMP and on ADDS flags ending in
+  MRS (the flags must reach `pstate` unchanged on every edge), and LDP/STP Q copies of sizes
+  32..1,024 bytes at every 16-byte source offset into page-crossing destinations. It fails
+  with the clean-flags bit left set after `ADDS`/`SUBS` (checked). `jit_imm_flags_zext`: seven
+  arithmetic immediates of both widths for SUBS/ADDS/CMP/CMN and logical immediates for TST/ANDS,
+  against 22 values with garbage in bits 63:32, W results and 32-bit loads feeding 64-bit consumers, 64-bit results read back
+  through W operations; one hash, QEMU's, equal on the JIT, the interpreter and the old build;
+  it fails when a 64-bit `subs` is treated as a 32-bit result (checked). `jit_host_fault`
+  gained Q-pair probes (second half unmapped, a store pair, an unmapped pair) and passes under
+  QEMU, the new JIT and the old one. `make verify` (95 fixtures, 8 threaded), 155 unit tests
+  (also `--no-chain-skip`, `--no-jit`, `--fwd`), Toybox and real-world (65), the MT/Tier-2/cache
+  scripts, zstd and `generated-check` pass.
+- **Not done.** Three loads from one base each keep their own bounds and software-check guard
+  (five instructions). Sharing one check is only sound if it also rules out address wrap-around
+  between the offsets, and the sticky software-check byte must not be hoisted across a loop
+  iteration; left alone. `STORE_REG` is still write-through (about seven stores per iteration
+  of the chase loop), the flags of a `subs` are stored before the next guarded access because
+  the access may fault, and no game ran.
+
 ## Native exclusive loads and stores (2026-10-20)
 
 An LL/SC loop (`ldaxr; add; stlxr; cbnz`, what every non-LSE `atomic_fetch_add`,

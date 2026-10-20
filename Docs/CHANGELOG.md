@@ -57,6 +57,12 @@ labels below are historical records.
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
   Found in a Hungry Shark World profile, where the helper held 21% of the samples
   during the post-launch freeze. See the JIT guide.
+- JIT: the two weakest game-style loops are fixed. A pointer-chasing list walk went from 0.64x
+  to 0.92x of QEMU (1,905 → 1,282 ns/iter) and a 64-byte struct copy from 0.51x to 1.25x (753 →
+  316 ns): `ldp q`/`stp q` use the native guarded path, a branch on flags that are still in
+  `pstate` tests the bit (or reuses the loaded flags) instead of loading and re-storing NZCV,
+  `cmp`/`subs`/`adds` fold immediates, redundant zero-extensions disappear and a flags store no
+  longer spills the load address. `jit_branch_flags` and `jit_imm_flags_zext` cover them.
 - JIT: LL/SC atomics are native. `ldxr`/`ldaxr`/`stxr`/`stlxr`/`stlr` were C calls that
   locked a mutex and updated a per-address registry; the exclusive monitor is now a
   hashed version table with a bucket lock (`System/Core/ExclusiveMonitor.hpp`) shared by
