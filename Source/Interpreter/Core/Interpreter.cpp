@@ -10,6 +10,7 @@
 //   3. Add IR translate in Source/FrostJIT/IR/ir_translate*.cpp + codegen in
 //      Source/FrostJIT/jit_codegen_*.cpp + gate in Source/FrostJIT/Compiler/BlockCompiler.cpp
 #include "System/Core/Emulator.hpp"
+#include "System/Core/ExclusiveMonitor.hpp"
 #include "System/Core/CrashReport.hpp"
 #include "Interpreter/Decoder/Decoder.hpp"
 #include "System/Core/DebugFlags.hpp"
@@ -1081,11 +1082,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t mask = (width_bytes == 8) ? ~0ULL
                               : ((1ULL << (width_bytes * 8)) - 1);
                 bool returns_old = (d.rt != 31);
-                // Keep local exclusive-monitor serialization and use native CAS
-                // for the RMW itself: shard mutexes do not cross OS processes
-                // and cannot serialize against native JIT LSE instructions.
-                auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
-                std::lock_guard<std::mutex> gatom(shard.mu);
+                // The RMW is a native CAS (a host mutex would not cross OS
+                // processes or serialize against native JIT LSE instructions).
                 // CAS family (atom_op >= 0xC): compare-and-swap.
                 // ARM CAS Ws, Wt, [Xn]:
                 //   old = [Xn]; if old == Ws, [Xn] = Wt; Ws = old
@@ -1314,93 +1312,40 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 bool o0 = d.acquire;
                 bool use_monitor = (o0 == 0) || (d.excl_low6 != 0x3F);
+                uint64_t mask = (width_bytes == 8) ? ~0ULL
+                              : ((1ULL << (width_bytes * 8)) - 1);
                 if (!d.is_load) {
-                    // Store-exclusive (STXR/STLXR) or store-release (STLR).
+                    // Store-exclusive (STXR/STLXR) or store-release (STLR). The
+                    // bucket is held across the check and the write, and bumped
+                    // after a successful write (ExclusiveMonitor.hpp).
+                    uint64_t v = cpu.regs[d.rt] & mask;
+                    ExclusiveMonitor::Hold hold(g_exclusive_monitor.bucket(base));
                     if (use_monitor) {
-                        // STXR must atomically: (1) check this CPU's
-                        // reservation, (2) write memory, (3) invalidate
-                        // OTHER CPUs' reservations at this address. Steps
-                        // 1-3 must be atomic w.r.t. other CPUs' LDXR/STXR
-                        // — otherwise a race between this CPU's check and
-                        // write lets two CPUs both succeed. We hold the
-                        // SHARD lock (selected by address hash) for the
-                        // entire sequence. Sharding lets independent
-                        // atomics on different addresses proceed in
-                        // parallel — critical for high-contention workloads.
-                        auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
-                        std::lock_guard<std::mutex> gmon(shard.mu);
-                        bool ok = cpu.excl_check(base, width_bytes);
+                        // The reservation must be this CPU's, still current in
+                        // the bucket, and the loaded value still in memory.
+                        bool ok = cpu.excl_check(base, width_bytes) &&
+                                  hold.version() == cpu.excl_ver;
                         if (ok) {
-                            uint64_t v = cpu.regs[d.rt];
-                            uint64_t mask = (width_bytes == 8) ? ~0ULL
-                                          : ((1ULL << (width_bytes * 8)) - 1);
-                            v &= mask;
                             ok = mem_.compare_exchange(base, cpu.excl_value, v, width_bytes);
-                            // Invalidate OTHER CPUs' reservations at this
-                            // address (inline, since we hold the shard lock).
-                            auto it = shard.reservations.find(base);
-                            if (it != shard.reservations.end()) {
-                                for (CPU* p : it->second) {
-                                    if (p != &cpu && p->excl_tag_valid) {
-                                        p->excl_tag_valid = false;
-                                    }
-                                }
-                                it->second.erase(
-                                    std::remove(it->second.begin(), it->second.end(), &cpu),
-                                    it->second.end());
-                                if (it->second.empty()) {
-                                    shard.reservations.erase(it);
-                                }
-                            }
+                            if (ok) hold.commit();
                         }
                         if (d.rs != 31) cpu.regs[d.rs] = ok ? 0 : 1;
                         cpu.excl_clear();
                     } else {
-                        // STLR: store-release (no monitor check, always succeeds).
-                        // Must hold the shard lock during the write + invalidate
-                        // so a concurrent STXR can't sneak in between them.
-                        uint64_t v = cpu.regs[d.rt];
-                        uint64_t mask = (width_bytes == 8) ? ~0ULL
-                                      : ((1ULL << (width_bytes * 8)) - 1);
-                        v &= mask;
-                        auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
-                        std::lock_guard<std::mutex> gmon(shard.mu);
                         mem_.write(base, &v, width_bytes);
-                        // Invalidate OTHER CPUs' reservations at this address.
-                        auto it = shard.reservations.find(base);
-                        if (it != shard.reservations.end()) {
-                            for (CPU* p : it->second) {
-                                if (p != &cpu && p->excl_tag_valid) {
-                                    p->excl_tag_valid = false;
-                                }
-                            }
-                            shard.reservations.erase(it);
-                        }
+                        hold.commit();
                     }
                 } else {
-                    // Load-exclusive (LDXR/LDAXR) or load-acquire (LDAR).
-                    // LDXR must atomically: (1) read memory, (2) mark this
-                    // CPU's reservation, (3) register globally. We hold the
-                    // SHARD lock so that a concurrent STXR on the same
-                    // address can't sneak in between our read and registration.
-                    auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
-                    std::lock_guard<std::mutex> gmon(shard.mu);
+                    // Load-exclusive (LDXR/LDAXR) or load-acquire (LDAR). The
+                    // bucket version is read before the value it pairs with.
+                    const uint64_t ver = use_monitor ? g_exclusive_monitor.version(base) : 0;
                     uint64_t v = 0;
                     mem_.read(base, &v, width_bytes);
                     // Guard XZR: writes to regs[31] must be dropped (XZR
                     // always reads as 0). Other load handlers (LDR_IMM,
                     // LDR_UNS, LDR_REG) do this; LDXR was missing the guard.
                     if (d.rt != 31) cpu.regs[d.rt] = v;
-                    if (use_monitor) {
-                        cpu.excl_mark(base, width_bytes, v);
-                        // Register globally (inline, since we hold the lock).
-                        auto& vec = shard.reservations[base];
-                        bool found = false;
-                        for (auto*& p : vec) {
-                            if (p == &cpu) { found = true; break; }
-                        }
-                        if (!found) vec.push_back(&cpu);
-                    }
+                    if (use_monitor) cpu.excl_mark(base, width_bytes, v, ver);
                 }
                 return;
             }
@@ -1409,13 +1354,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             // Rs+1 are compared with memory; on a match Rt and Rt+1 are
             // stored. Rs/Rs+1 always receive the old value, as in QEMU's
             // gen_compare_and_swap_pair. Register 31 in a pair is XZR. The
-            // shard lock orders it like the exclusives, at least as strongly
-            // as the acquire/release forms require.
+            // host compare-exchange is a full barrier, which the
+            // acquire/release forms require.
             case InstClass::CASP: {
                 const uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 auto reg = [&](unsigned r) { return r == 31 ? 0 : cpu.regs[r]; };
-                auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
-                std::lock_guard<std::mutex> gatom(shard.mu);
                 uint64_t old_lo = 0, old_hi = 0;
                 if (d.size == 3) {
                     uint64_t observed[2] = {0, 0};
@@ -1439,30 +1382,28 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             // One reservation covers both elements: 8 bytes for W pairs, 16
             // for X pairs. Rt holds the lower address, Rt2 the higher. The
             // store compares the whole reserved value in one host CAS, like
-            // the single-register forms; the shard lock is stronger ordering
-            // than the acquire/release (o0) variants require.
+            // the single-register forms; the host compare-exchange is a full
+            // barrier, stronger than the acquire/release (o0) variants need.
             case InstClass::LDXP:
             case InstClass::STXP: {
                 const bool x_pair = d.size & 1;
                 const int bytes = x_pair ? 16 : 8;
                 const uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 auto reg = [&](uint8_t r) { return r == 31 ? 0 : cpu.regs[r]; };
-                auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
-                std::lock_guard<std::mutex> gmon(shard.mu);
                 if (d.is_load) {
+                    const uint64_t ver = g_exclusive_monitor.version(base);
                     uint64_t words[2] = {0, 0};
                     mem_.read(base, words, bytes);
                     const uint64_t first = x_pair ? words[0] : (words[0] & 0xFFFFFFFFULL);
                     const uint64_t second = x_pair ? words[1] : (words[0] >> 32);
                     if (d.rt != 31) cpu.regs[d.rt] = first;
                     if (d.rt2 != 31) cpu.regs[d.rt2] = second;
-                    cpu.excl_mark(base, bytes, words[0]);
+                    cpu.excl_mark(base, bytes, words[0], ver);
                     cpu.excl_value_hi = x_pair ? words[1] : 0;
-                    auto& vec = shard.reservations[base];
-                    if (std::find(vec.begin(), vec.end(), &cpu) == vec.end()) vec.push_back(&cpu);
                     return;
                 }
-                bool ok = cpu.excl_check(base, bytes);
+                ExclusiveMonitor::Hold hold(g_exclusive_monitor.bucket(base));
+                bool ok = cpu.excl_check(base, bytes) && hold.version() == cpu.excl_ver;
                 if (ok) {
                     if (x_pair) {
                         ok = mem_.compare_exchange_16(base, cpu.excl_value, cpu.excl_value_hi,
@@ -1471,14 +1412,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         const uint64_t v = (reg(d.rt) & 0xFFFFFFFFULL) | (reg(d.rt2) << 32);
                         ok = mem_.compare_exchange(base, cpu.excl_value, v, 8);
                     }
-                    auto it = shard.reservations.find(base);
-                    if (it != shard.reservations.end()) {
-                        for (CPU* p : it->second)
-                            if (p != &cpu && p->excl_tag_valid) p->excl_tag_valid = false;
-                        it->second.erase(std::remove(it->second.begin(), it->second.end(), &cpu),
-                                         it->second.end());
-                        if (it->second.empty()) shard.reservations.erase(it);
-                    }
+                    if (ok) hold.commit();
                 }
                 if (d.rs != 31) cpu.regs[d.rs] = ok ? 0 : 1;
                 cpu.excl_clear();

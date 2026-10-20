@@ -763,7 +763,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     uses_window = true;
                     break;
                 case IROp::LDXR_FAST:
-                    uses_window = !inst.llsc_exclusive(); // native LDAR
+                case IROp::STXR_FAST:
+                case IROp::STLR_FAST:
+                    uses_window = true;  // native LDAR and exclusive sequences
                     break;
                 default:
                     break;

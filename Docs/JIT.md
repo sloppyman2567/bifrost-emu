@@ -15,6 +15,79 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Native exclusive loads and stores (2026-10-20)
+
+An LL/SC loop (`ldaxr; add; stlxr; cbnz`, what every non-LSE `atomic_fetch_add`,
+refcount and spinlock compiles to, and what the outlined `__aarch64_*` helpers
+fall back to) cost about 65 ns per operation against QEMU's 15, and `stlr` 20 ns
+against 3 (`atom_llsc`, below). LSE atomics were already native and level with
+QEMU (2.4 ns). Each of `ldxr`, `stxr` and `stlr` was a C call that took a
+`std::mutex` shard, looked an address up in an `unordered_map<addr, vector<CPU*>>`
+and registered or erased the CPU in it (heap allocation included).
+
+- **Monitor.** `System/Core/ExclusiveMonitor.hpp`: a process-wide table of 2,048
+  cache-line-sized bucket words, hashed from the 8-byte granule (`kHashMul`, 32-bit
+  arithmetic on the low address bits, which the generated code repeats). A word is a
+  lock bit and a version. A reservation is the CPU's tag (address, size, loaded value)
+  plus `CPU::excl_ver`, the bucket version read before the value at LDXR time.
+  STXR locks the bucket, requires the version to still match, compare-and-swaps the
+  loaded value, then unlocks (with a version bump if it wrote); STLR locks, stores and
+  unlocks with a bump. The bump is one `add` on the locked word (bit 0 carries into
+  the version), so a reader that sees a version also sees the write behind it.
+  A collision or an unrelated write only makes a store-exclusive fail spuriously, which
+  the architecture allows. Plain stores and LSE atomics do not bump, as before; the
+  value compare covers them. The interpreter (`LDXR/STXR/STLR`, `LDXP/STXP`), the C++
+  helpers (`jit_ldxr/jit_stxr/jit_stlr`, now only the slow path) and the native
+  sequences all follow it; the old shard structures, `excl_remove_cpu` and the LSE/CASP
+  shard locks are gone (LSE RMW and CASP were already host CAS loops).
+- **A first version without a lock failed, on real parallelism only.** Bumping the
+  version before the write and checking it in a `lock xadd` ahead of the
+  `lock cmpxchg` left a window as wide as a cache miss on the contended word, in which
+  other CPUs completed whole pop/push transactions, so recycled pointers passed the
+  value compare (a corrupted LIFO; QEMU shows the same). It passed pinned to one host
+  CPU. Holding the bucket across check and write, as the old mutex did, closes it.
+- **Native code.** `CodeGen/Integer/Atomics.cpp` inlines the protocol (a handful of
+  fixed registers, flags clobbered): LDXR is the version read, a guarded load and the
+  tag stores; STXR the tag checks, `lock bts` on the bucket, version compare,
+  `lock cmpxchg` and an unlock; STLR the lock, a store and the unlock. The access is a
+  registered fault site (the exclusive ops now take the recoverable guard that
+  `LOAD_MEM`/`ATOMIC` use), and its recovery stub first releases the bucket, then
+  continues to the generic stub that steps the interpreter over the instruction under the
+  same protocol. A contended lock calls `jit_excl_lock_slow` (spin, then `sched_yield`).
+  Configurations without fault sites keep the helper calls.
+- **CLREX did nothing, in both engines.** The decoder only recognised `clrex` with
+  CRm=0 (`D503305F`); the assembler's plain `clrex` is CRm=15 (`D5033F5F`), which fell
+  into the hint range as a NOP, and the JIT translated even a recognised CLREX to a NOP. So
+  `ldxr; clrex; stxr` succeeded where QEMU's fails. The decoder now takes any CRm and
+  the JIT has a native `CLEAR_EXCLUSIVE` op (one byte store to `excl_tag_valid`).
+  This was found by comparing the new fixture with QEMU value by value; the old build
+  fails it too.
+- **Measured (same machine, `HEAD` against this tree, QEMU for reference).**
+  `fetch_add` 68.2 → 11.3 ns/op (QEMU 17.7), `cas` 64.8 → 13.1 (20.8), `xchg64`
+  62.9 → 8.8 (14.8), `ldar/stlr` 20.5 → 3.6 (2.7). The game-style `atomics` kernel
+  (outlined LL/SC helpers, two per iteration) 128,537 → 22,160 ns/iter, minimum of six
+  runs (QEMU 29,026). Four threads on separate counters 245 → 4.4 ns/op (QEMU 3–4);
+  four threads on one counter 250 → 158 (QEMU 70: it contends one cache line, this
+  two, the bucket and the data). LSE results are unchanged.
+- **Checked.** `jit_llsc_native` (new): every width and acquire/release form of
+  LDXR/STXR with no reservation, another address, CLREX, a success, a plain store of a
+  different value and a replaced reservation, release/acquire accesses and LDXP/STXP:
+  one hash over 2,492 values, identical under QEMU, the JIT and the interpreter. Four CPUs
+  with exact totals: LL/SC counters of each width, a spinlock from `ldaxr/stxr` and `stlr`,
+  cells sharing a cache line, and an ABA-prone LIFO (eight recycled nodes) that fails with
+  the version check removed (checked) and under QEMU. Faults: `stxr` to a read-only page,
+  `ldaxr` from a PROT_NONE page, `stlr` to a read-only page (each raises SIGSEGV once and
+  the loop completes), and no stale reservation after a signal. `jit_host_fault` gained
+  faulting `ldxr/ldaxr/ldaxrb/stlr/stlrh` probes. `make verify` (93 fixtures, 8 threaded
+  oracle runs), 153 unit tests (also `--no-chain-skip`, `--no-jit`, `--fwd`), Toybox and
+  the real-world filter (65), the MT/Tier-2/cache scripts, the zstd regression and
+  `make generated-check` pass; six copies of the new fixture running at once on four
+  threads each also passed.
+- **Not covered.** Reservations never crossed OS processes (a process-local table, as
+  the shard mutexes were) and still do not. A spinning waiter whose lock holder is
+  descheduled burns its time slice (it yields after 2,048 spins) where the mutex slept.
+  An ASan build was not available. No game ran.
+
 ## Scalar FP loads and stores keep the XMM cache (2026-10-20)
 
 `BIFROST_JIT_DUMP=1` of a double-precision loop (`ldr d1, [x0, x2, lsl #3]`,
@@ -917,7 +990,8 @@ entries. Bounds, sticky permission/userfaultfd checks, fault-site registration
 and precise architectural recovery use the existing memory path. Unaligned
 accesses exit to the existing interpreter implementation; forced-software
 guard/no-fault-recovery configurations retain the helper implementation.
-Exclusive loads/stores retain the shared reservation monitor.
+Exclusive loads/stores use the shared exclusive monitor (see "Native exclusive
+loads and stores", 2026-10-20).
 
 The mapping follows Linux's reference implementations of
 [arm64 acquire loads](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/asm/barrier.h)
@@ -1118,8 +1192,8 @@ and restores its original value is not detected across processes. Full
 reservation-granule semantics need separate coverage.
 
 LDXP/LDAXP/STXP/STLXP (bit 21, o1, separates them from LDXR/STXR whatever
-Rt2 holds) run in the interpreter through `CALL_INTERP` on the same shard
-monitor. One reservation covers the 8- or 16-byte pair; STXP of X registers
+Rt2 holds) run in the interpreter through `CALL_INTERP` on the same exclusive
+monitor (the version table below). One reservation covers the 8- or 16-byte pair; STXP of X registers
 uses one host `CMPXCHG16B` (`Memory::compare_exchange_16`). Hosts without
 CMPXCHG16B, and misaligned pairs whose alignment fault is not modelled, use a
 compare-and-write under the memory lock instead. `test_exclusive_pair` checks
@@ -1127,8 +1201,8 @@ both element orders, W pairs, XZR operands and a contended 128-bit counter.
 CASP/CASPA/CASPL/CASPAL (FEAT_LSE, advertised by `HWCAP_ATOMICS`) share that
 encoding space with bit 31 clear and Rt2 = 11111; odd Rs or Rt is unallocated,
 as in QEMU. They also run through `CALL_INTERP`: one 8-byte compare-exchange or
-`compare_exchange_16` under the shard lock, the old value always returned in
-Rs (lower address) and Rs+1. `test_lse_inline` covers match, mismatch, W-pair
+`compare_exchange_16` (a full barrier; they no longer take a monitor lock), the
+old value always returned in Rs (lower address) and Rs+1. `test_lse_inline` covers match, mismatch, W-pair
 zero extension and a contended 128-bit CASPAL counter.
 
 Helper and interpreter stores (`Memory::write`, used by STLR, slow-path

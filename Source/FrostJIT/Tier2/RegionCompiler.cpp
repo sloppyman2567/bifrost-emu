@@ -268,7 +268,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     uses_window = true;
                     break;
                 case IROp::LDXR_FAST:
-                    uses_window = !inst.llsc_exclusive();
+                case IROp::STXR_FAST:
+                case IROp::STLR_FAST:
+                    uses_window = true;  // native LDAR and exclusive sequences
                     break;
                 default:
                     break;

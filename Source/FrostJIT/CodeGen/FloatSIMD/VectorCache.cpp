@@ -32,7 +32,7 @@ static bool vec_cache_compatible_op(IROp op) {
         case IROp::SIMD_ORRIMM:   // dest read-modify-write — cached fast path
         case IROp::SIMD_ST16:     // 16-byte guest store — cached fast path
         case IROp::SIMD_LD16:     // 16-byte guest load — cached fast path
-        case IROp::NOP: case IROp::IMM: case IROp::MOV:
+        case IROp::NOP: case IROp::CLEAR_EXCLUSIVE: case IROp::IMM: case IROp::MOV:
         case IROp::LOAD_REG: case IROp::STORE_REG:
         case IROp::LOAD_MEM: case IROp::STORE_MEM:
         case IROp::ADD: case IROp::SUB: case IROp::MUL:
@@ -504,7 +504,7 @@ static bool fp_cache_compatible_op(IROp op) {
         // Calls with the writeback+reload guard:
         case IROp::BL_CALL: case IROp::BLR_CALL:
         // GPR-only ops (mirrors vec_cache_compatible_op's integer whitelist):
-        case IROp::NOP: case IROp::IMM: case IROp::MOV:
+        case IROp::NOP: case IROp::CLEAR_EXCLUSIVE: case IROp::IMM: case IROp::MOV:
         case IROp::LOAD_MEM: case IROp::STORE_MEM:
         case IROp::ADD: case IROp::SUB: case IROp::MUL:
         case IROp::AND: case IROp::OR: case IROp::XOR:

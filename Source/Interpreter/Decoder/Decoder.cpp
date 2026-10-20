@@ -628,7 +628,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return true;
             }
             case 0b110: {  // System register access / hints
-                if (inst == 0xD503305F) {
+                // CLREX #imm4: the assembler's plain `clrex` is CRm=15.
+                if ((inst & 0xFFFFF0FF) == 0xD503305F) {
                     d.cls = InstClass::CLREX_INST;
                     return true;
                 }

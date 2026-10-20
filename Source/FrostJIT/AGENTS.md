@@ -31,6 +31,13 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   complete every load before writing any architectural register (and write the base
   last), and a store pair must write none: a fault on the second half restarts the
   whole instruction. `jit_host_fault` checks this, including `ldp x13, x12, [x13]`.
+- The exclusive monitor is `System/Core/ExclusiveMonitor.hpp`; the interpreter, the
+  `jit_ldxr/stxr/stlr` helpers and `CodeGen/Integer/Atomics.cpp` implement one
+  protocol and must change together: version read before the value at LDXR; STXR/STLR
+  hold the bucket across check and write and bump on a write. Never bump before the
+  write without the lock (that loses ABA protection under real parallelism; only
+  `jit_llsc_native`'s four-CPU LIFO shows it). The access is a registered fault site
+  whose stub releases the bucket first. `CLEAR_EXCLUSIVE` implements CLREX.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
   for the whole block. Vd is written only after the load, so a fault leaves it intact.

@@ -11,6 +11,9 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - Keep file mapping identity, discard/remap semantics, TLS layout, userfaultfd
   state, signal recovery and Binder arena ownership as specified in the scoped guides.
   A source split must preserve file-local callback state and initialization order.
+- `Core/ExclusiveMonitor.hpp` is the one LL/SC monitor (version table); the interpreter,
+  the JIT helpers and the native sequences share its protocol, so change them together
+  (see the FrostJIT guide).
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.
 - Android guest shims/services live in `Guest/Android/` (see the Android guide

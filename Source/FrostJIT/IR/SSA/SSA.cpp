@@ -42,7 +42,7 @@ bool shape(const IRInst& i, Shape& s) {
         case IROp::MSR: s = {1, false, true}; break;
         case IROp::MRS: s = {0, true, true}; break;
         case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
-        case IROp::MEMORY_BARRIER: s = {0, false, true}; break;
+        case IROp::MEMORY_BARRIER: case IROp::CLEAR_EXCLUSIVE: s = {0, false, true}; break;
         // Helpers, calls, atomics, and direct FP/SIMD architectural accesses
         // require explicit state effects before they can enter this graph.
         default: return false;

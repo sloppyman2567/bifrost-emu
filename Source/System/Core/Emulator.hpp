@@ -383,15 +383,6 @@ public:
     void kick_cpu_wait(CPU& target);
     // Guest masks must not block the emulator's private host wakeup.
     static void unblock_host_wakeup(sigset_t& mask);
-    // Public accessor for JIT fast LL/SC helpers.
-    struct ExclMonitorShardAccess {
-        std::mutex mu;
-        std::unordered_map<uint64_t, std::vector<CPU*>> reservations;
-    };
-    static size_t excl_shard_idx_pub(uint64_t addr) {
-        return (addr >> 3) & 15;
-    }
-    void* excl_monitor_shard_pub(uint64_t addr);
     // ── Fork support (clone without CLONE_VM) ────────────────────────
     // Fork the guest: snapshot the current memory + CPU state and
     // create a child "process" that runs in a host thread with its own
@@ -568,38 +559,8 @@ private:
     // (sharded — see futex_shards_ above. The old single-mutex + single-map
     // design was)
     // ── Global exclusive monitor (LL/SC atomics) ──────────────────────
-    // AArch64's LDXR/STXR (load-linked / store-conditional) atomics rely
-    // on a GLOBAL exclusive monitor that tracks all CPUs' reservations.
-    // When any CPU stores to a reserved address, OTHER CPUs' reservations
-    // for that address are invalidated. This is what makes LL/SC correct.
-    //
-    // The monitor is SHARDED into 16 stripes by address bits ((addr>>3)&0xF)
-    // so independent atomics on different addresses proceed in parallel.
-    // Two CPUs only contend if they map to the same stripe.
-    static constexpr size_t EXCL_MONITOR_SHARDS = 16;
-    struct ExclMonitorShard {
-        std::mutex mu;
-        // Map: address → set of CPU* with a reservation at that address.
-        std::unordered_map<uint64_t, std::vector<CPU*>> reservations;
-    };
-    ExclMonitorShard excl_monitor_shards_[EXCL_MONITOR_SHARDS];
-    static size_t excl_shard_idx(uint64_t addr) {
-        return (addr >> 3) & (EXCL_MONITOR_SHARDS - 1);
-    }
-    // Remove `cpu` from every shard's reservation lists. MUST be called
-    // from thread_entry before the GuestThread can be destroyed: an LDXR
-    // leaves a raw CPU* registered until another CPU stores to that
-    // address, so freeing the CPU first leaves a dangling pointer that a
-    // later store dereferences (heap-use-after-free; found via ASan).
-    void excl_remove_cpu(CPU* cpu);
-    // jit_ldxr/jit_stxr/jit_stlr are extern "C" functions defined in
-    // X86Emitter.cpp. They access excl_monitor_shards_ directly.
-    // No friend declaration needed — the functions are in the global
-    // namespace (extern "C") and access the shards via the public
-    // excl_shard_idx + the shard array. The x86 JIT helpers
-    // (jit_ldxr/stxr/stlr, extern "C" in X86Emitter.cpp) reach the
-    // shards via the public excl_shard_idx_pub() /
-    // excl_monitor_shard_pub() accessors below.
+    // A process-wide version table (System/Core/ExclusiveMonitor.hpp), shared
+    // by the interpreter, the JIT's C++ helpers and native JIT sequences.
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;
     std::vector<std::unique_ptr<ForkChild>> fork_children_;

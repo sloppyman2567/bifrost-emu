@@ -289,13 +289,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     cpu.rseq_registered = false;
     cpu.rseq_addr = 0;
     cpu.rseq_sig = 0;
-    // Drop any LL/SC reservation this CPU still holds in the global
-    // exclusive monitor. LDXR registers a raw CPU* that is otherwise only
-    // removed by a later store to the same address; if the GuestThread is
-    // reaped first, that store dereferences a freed CPU (ASan: heap-use-
-    // after-free in Interpreter.cpp's STXR/STLR reservation invalidation).
-    // Must complete before `finished` so the reaper can't free us first.
-    emu->excl_remove_cpu(&cpu);
     emu->decrement_alive_threads();
     // Final action: mark reapable, then return. Must be the LAST statement
     // (reap_finished_threads may join and drop the last shared_ptr).
@@ -583,22 +576,6 @@ void Emulator::reap_finished_threads() {
     if (!dead.empty()) {
         std::lock_guard<std::mutex> g(comm_mu_);
         for (auto& gt : dead) task_comms_.erase(gt->tid);
-    }
-}
-void Emulator::excl_remove_cpu(CPU* cpu) {
-    for (size_t i = 0; i < EXCL_MONITOR_SHARDS; i++) {
-        ExclMonitorShard& shard = excl_monitor_shards_[i];
-        std::lock_guard<std::mutex> g(shard.mu);
-        for (auto it = shard.reservations.begin();
-             it != shard.reservations.end();) {
-            auto& vec = it->second;
-            vec.erase(std::remove(vec.begin(), vec.end(), cpu), vec.end());
-            if (vec.empty()) {
-                it = shard.reservations.erase(it);
-            } else {
-                ++it;
-            }
-        }
     }
 }
 void Emulator::wake_all_futexes() {

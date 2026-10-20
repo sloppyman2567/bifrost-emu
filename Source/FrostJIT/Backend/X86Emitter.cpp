@@ -22,6 +22,7 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Emulator.hpp"  // Emulator complete type (for slow-path helpers)
+#include "System/Core/ExclusiveMonitor.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -605,11 +606,11 @@ extern "C" {
                            si_code, e.addr);
         }
     }
-    // ── Fast LL/SC helpers (bypass interpreter decode) ──────────────
-    // These are called directly from JIT-compiled code (like jit_load_mem_slow)
-    // to avoid the full interpreter step overhead (decode cache → switch →
-    // handler). They implement the same global exclusive monitor logic as
-    // the interpreter's LDXR/STXR/STLR handlers, but skip decode entirely.
+    // ── LL/SC helpers (bypass interpreter decode) ───────────────────
+    // Called from JIT-compiled code when it does not inline the access (the
+    // slow path of the native sequences, and configurations that force the
+    // software guards). They follow the same protocol as the interpreter's
+    // LDXR/STXR/STLR handlers: see System/Core/ExclusiveMonitor.hpp.
     //
     // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=width
     // Returns (LDXR): the loaded value in RAX.
@@ -617,8 +618,8 @@ extern "C" {
     uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width) {
         bool exclusive = !(width & 0x100);
         width &= 0xFF;
-        auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
-        std::lock_guard<std::mutex> g(shard->mu);
+        // The version is read before the value it pairs with.
+        const uint64_t ver = exclusive ? g_exclusive_monitor.version(addr) : 0;
         uint64_t v = 0;
         try {
             emu->mem().read(addr, &v, width);
@@ -628,48 +629,26 @@ extern "C" {
                            si_code, e.addr);
             return 0;
         }
-        if (!exclusive) return v;
-        cpu->excl_mark(addr, width, v);
-        auto& vec = shard->reservations[addr];
-        bool found = false;
-        for (auto*& p : vec) {
-            if (p == cpu) { found = true; break; }
-        }
-        if (!found) vec.push_back(cpu);
+        if (exclusive) cpu->excl_mark(addr, width, v, ver);
         return v;
     }
     // STXR: returns 0=success, 1=failure. val is in R8 (passed as 5th arg).
     uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
-        auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
-        std::lock_guard<std::mutex> g(shard->mu);
-        bool ok = cpu->excl_check(addr, width);
+        ExclusiveMonitor::Hold hold(g_exclusive_monitor.bucket(addr));
+        bool ok = cpu->excl_check(addr, width) && hold.version() == cpu->excl_ver;
         if (ok) {
-        try {
-            // Attribute the store to the current guest pc for BIFROST_WATCH
-            // (the JIT normally bypasses Memory::write; forced-slow stores
-            // should still carry a pc).
-            Memory::note_interp_pc(cpu->pc);
-            ok = emu->mem().compare_exchange(addr, cpu->excl_value, val, width);
-        } catch (UnmappedMemory& e) {
+            try {
+                // Attribute the store to the current guest pc for BIFROST_WATCH
+                // (the JIT normally bypasses Memory::write; forced-slow stores
+                // should still carry a pc).
+                Memory::note_interp_pc(cpu->pc);
+                ok = emu->mem().compare_exchange(addr, cpu->excl_value, val, width);
+                if (ok) hold.commit();
+            } catch (UnmappedMemory& e) {
                 int si_code = e.segv_code();
                 force_signal(*emu, *cpu, emu->signals(), e.signo(),
                                si_code, e.addr);
                 return 1;
-            }
-            // Invalidate OTHER CPUs' reservations at this address.
-            auto it = shard->reservations.find(addr);
-            if (it != shard->reservations.end()) {
-                for (CPU* p : it->second) {
-                    if (p != cpu && p->excl_tag_valid) {
-                        p->excl_tag_valid = false;
-                    }
-                }
-                it->second.erase(
-                    std::remove(it->second.begin(), it->second.end(), (CPU*)cpu),
-                    it->second.end());
-                if (it->second.empty()) {
-                    shard->reservations.erase(it);
-                }
             }
         }
         cpu->excl_clear();
@@ -677,25 +656,26 @@ extern "C" {
     }
     // STLR: store-release (always succeeds, invalidates other CPUs).
     void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
-        auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
-        std::lock_guard<std::mutex> g(shard->mu);
+        ExclusiveMonitor::Hold hold(g_exclusive_monitor.bucket(addr));
         try {
             Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, &val, width);
+            hold.commit();
         } catch (UnmappedMemory& e) {
             int si_code = e.segv_code();
             force_signal(*emu, *cpu, emu->signals(), e.signo(),
                            si_code, e.addr);
-            return;
         }
-        auto it = shard->reservations.find(addr);
-        if (it != shard->reservations.end()) {
-            for (CPU* p : it->second) {
-                if (p != cpu && p->excl_tag_valid) {
-                    p->excl_tag_valid = false;
-                }
+    }
+    // Slow path of the inline bucket lock (CodeGen/Integer/Atomics.cpp): the
+    // `lock bts` found the lock held. Returns holding it.
+    void jit_excl_lock_slow(std::atomic<uint64_t>* word) {
+        for (unsigned spins = 0;; ) {
+            if (!(word->fetch_or(1, std::memory_order_acquire) & 1)) return;
+            while (word->load(std::memory_order_relaxed) & 1) {
+                __builtin_ia32_pause();
+                if (++spins >= 2048) { spins = 0; sched_yield(); }
             }
-            shard->reservations.erase(it);
         }
     }
 }

@@ -40,6 +40,7 @@ struct IRBlock;
 enum class IROp : uint8_t {
     NOP,            // no operation (used by optimizer as a tombstone)
     MEMORY_BARRIER, // order guest memory accesses; preserves registers/NZCV
+    CLEAR_EXCLUSIVE, // CLREX: drop this CPU's exclusive reservation; preserves registers/NZCV
     IMM,            // dest = imm                          (constant)
     MOV,            // dest = src1                         (copy)
     LOAD_REG,       // dest = arm64_reg[src1]              (read ARM64 reg)

@@ -250,6 +250,10 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
     switch (inst.op) {
         case IROp::NOP:
             return false;
+        case IROp::CLEAR_EXCLUSIVE:
+            // mov byte [cpu.excl_tag_valid], 0: no register, flag or XMM effect.
+            emit_byte(0xC6); emit_modrm_disp(0, CPU_REG, offsetof(CPU, excl_tag_valid)); emit_byte(0);
+            return false;
         case IROp::MEMORY_BARRIER:
             // x86 TSO still permits a younger load to bypass an older store.
             // MFENCE orders both without touching live GPRs, vectors or NZCV.
@@ -506,6 +510,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             return false;
         }
         case IROp::LDXR_FAST: {
+            if (compile_llsc_native(inst)) return false;
             // Fast LDXR via C helper — bypasses interpreter decode.
             // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=width
             clobber_flags();
@@ -527,6 +532,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             return false;
         }
         case IROp::STXR_FAST: {
+            if (compile_llsc_native(inst)) return false;
             // Fast STXR via C helper — bypasses interpreter decode.
             // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
             clobber_flags();
@@ -549,6 +555,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             return false;
         }
         case IROp::STLR_FAST: {
+            if (compile_llsc_native(inst)) return false;
             // Fast STLR via C helper — bypasses interpreter decode.
             // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
             clobber_flags();

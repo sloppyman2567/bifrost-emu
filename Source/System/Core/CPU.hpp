@@ -285,17 +285,20 @@ public:
     // and clears the tag. Any other memory access, branch, or exception
     // also clears the tag.
     //
-    // Per-thread monitor state (each thread has its own, like real HW).
+    // Per-thread monitor state (each thread has its own, like real HW). The
+    // cross-CPU part is the version table in ExclusiveMonitor.hpp.
     bool     excl_tag_valid = false;
     uint64_t excl_tag_addr  = 0;
     uint32_t excl_tag_size  = 0;
     uint64_t excl_value = 0;
     uint64_t excl_value_hi = 0;  // second word of an LDXP/LDAXP X pair
-    void excl_mark(uint64_t addr, uint32_t size, uint64_t value) {
+    uint64_t excl_ver = 0;       // ExclusiveMonitor bucket version at LDXR time (no lock bit)
+    void excl_mark(uint64_t addr, uint32_t size, uint64_t value, uint64_t ver) {
         excl_tag_valid = true;
         excl_tag_addr  = addr;
         excl_tag_size  = size;
         excl_value = value;
+        excl_ver = ver;
     }
     void excl_clear() { excl_tag_valid = false; }
     bool excl_check(uint64_t addr, uint32_t size) const {

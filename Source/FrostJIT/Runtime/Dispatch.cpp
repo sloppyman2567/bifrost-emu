@@ -10,6 +10,7 @@
 #include "System/Core/Emulator.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/ExclusiveMonitor.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -485,6 +486,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         saved.excl_tag_valid = cpu.excl_tag_valid;
         saved.excl_tag_addr  = cpu.excl_tag_addr;
         saved.excl_tag_size  = cpu.excl_tag_size;
+        saved.excl_value     = cpu.excl_value;
+        saved.excl_value_hi  = cpu.excl_value_hi;
         // The pending-queue state isn't part of architectural state, so
         // saved's pending queue is empty. That's fine for verify mode —
         // verify runs single-threaded and no signals should be pending.
@@ -669,6 +672,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         ref.excl_tag_valid = saved.excl_tag_valid;
         ref.excl_tag_addr  = saved.excl_tag_addr;
         ref.excl_tag_size  = saved.excl_tag_size;
+        ref.excl_value     = saved.excl_value;
+        ref.excl_value_hi  = saved.excl_value_hi;
+        // The JIT run already advanced the monitor bucket (its STXR bumps it),
+        // so the replay claims against the version as it stands now.
+        ref.excl_ver = ref.excl_tag_valid ? g_exclusive_monitor.version(ref.excl_tag_addr) : 0;
         int steps = 0;
         while (steps < entry.instr_count && ref.running) {
             emu.step(ref);

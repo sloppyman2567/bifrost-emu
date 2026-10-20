@@ -57,6 +57,17 @@ labels below are historical records.
   loop of them dropped from about 1464 ms to 5.2 ms with QEMU-identical results.
   Found in a Hungry Shark World profile, where the helper held 21% of the samples
   during the post-launch freeze. See the JIT guide.
+- JIT: LL/SC atomics are native. `ldxr`/`ldaxr`/`stxr`/`stlxr`/`stlr` were C calls that
+  locked a mutex and updated a per-address registry; the exclusive monitor is now a
+  hashed version table with a bucket lock (`System/Core/ExclusiveMonitor.hpp`) shared by
+  the interpreter and the JIT, and the JIT inlines it. A guest `fetch_add` through
+  `ldaxr/stlxr` went from 68 to 11 ns (QEMU 18), a CAS 65 to 13, `stlr` 20 to 3.6, the
+  game-style atomics kernel 5.8x faster (now 1.3x faster than QEMU), and four threads on
+  separate counters 245 to 4.4 ns/op. `jit_llsc_native` covers every form and width
+  against QEMU, contended counters and spinlocks, an ABA-prone LIFO and faults.
+- Fixed: `clrex` (the assembler's default `D5033F5F`) was decoded as a NOP and the JIT
+  dropped even the recognised form, so a store-exclusive after CLREX succeeded. Both
+  engines now clear the reservation.
 - JIT: scalar FP loads and stores (`ldr`/`str` of B/H/S/D, S/D `ldp`/`stp`) no longer
   disable the XMM register cache for their block, so float and double code keeps its
   values in registers instead of about six memory operations per instruction. Same-machine

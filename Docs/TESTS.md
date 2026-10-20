@@ -4,6 +4,41 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## JIT native LL/SC atomics and the exclusive monitor (2026-10-20)
+
+Revision: `ed3acd04` plus the uncommitted change under test.
+
+- `jit_llsc_native` (new). Single CPU, one hash over 2,492 values, equal under QEMU, the
+  JIT and the interpreter: twelve LDXR/STXR forms (every width, acquire/release mixes)
+  against a seed table, covering success, no reservation, another address, CLREX, a
+  repeated store-exclusive, a plain store of a different value between the pair, a
+  replaced reservation, STLR/LDAR of each width, and LDXP/STXP. Four CPUs, exact
+  totals: LL/SC counters of 64, 32, 16 and 8 bits, a spinlock from LDAXR/STXR with STLR
+  release guarding a plain counter, four cells in one cache line, and an ABA-prone LIFO
+  of eight recycled nodes (it fails under QEMU, which compares values only, so only
+  the single-CPU hash is a QEMU oracle). Faults: `stxr` to a read-only page, `ldaxr`
+  from a PROT_NONE page, `stlr` to a read-only page (one SIGSEGV each, the loop
+  completes) and a store-exclusive after a signal (the reservation is gone).
+  Breakage checks that fail it: the native version check removed (the LIFO corrupts in
+  every run), and the pre-fix `clrex` (the old build fails the hash). It passed twelve
+  times in a row, with `BIFROST_NO_CHAIN_SKIP=1`, and as six copies at once (24
+  threads on the machine's cores).
+- `jit_host_fault` gained `ldxr`, `ldaxr`, `ldaxrb`, `stlr` and `stlrh` probes and passes
+  under QEMU, the new JIT and the old one.
+- The first lock-free version of the monitor passed everything except this fixture's
+  LIFO, which it failed on every multi-core run and passed pinned to one core.
+- `make verify` (93 fixtures, 8 threaded oracle runs; `jit_llsc_native` joins
+  `jit_host_fault` in running as a threaded oracle only, since replay cannot handle its
+  threads and faults); `run_tests.sh --unit --strict` 153 with the JIT, `--no-chain-skip`,
+  `--fwd`, and 145 (8 skipped) under `--no-jit`; Toybox and real-world 65;
+  `test_jit_cache`, `test_jit_mt`, `test_jit_mt_publication`,
+  `test_jit_tier2_discovery/feedback/measure/mutex`, `test_jit_profiler`; the zstd
+  regression; `make generated-check` (errors=0). The existing `test_atomic_stress`,
+  `test_exclusive_pair`, `test_lse_inline`, `jit_lse_widths` and the pthread tests pass.
+- Not run: an ASan build (`make debug` fails on a missing Vulkan video header),
+  `--integration`/`--dynamic` (they open windows), any game. Performance numbers
+  are in the guide section of this date.
+
 ## JIT scalar FP cache and dead NZCV exit stores (2026-10-20)
 
 Revision: the two commits above plus the uncommitted change under test.

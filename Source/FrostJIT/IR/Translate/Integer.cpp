@@ -911,6 +911,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return true;
         // ── CLREX / BARRIER ─────────────────────────────────────────
         case InstClass::CLREX: case InstClass::CLREX_INST:
+            block.insts.push_back(IRInst::make(IROp::CLEAR_EXCLUSIVE));
+            return false;
         case InstClass::BARRIER:
             block.insts.push_back(IRInst::make(IROp::NOP));
             return false;

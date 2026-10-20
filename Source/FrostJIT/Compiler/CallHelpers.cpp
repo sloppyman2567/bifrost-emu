@@ -76,7 +76,8 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     }
     const bool recoverable = fault_sites_ && inst.arm_pc && !whole_instruction &&
         (inst.op == IROp::LOAD_MEM || inst.op == IROp::STORE_MEM ||
-         inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16 || inst.op == IROp::ATOMIC);
+         inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16 || inst.op == IROp::ATOMIC ||
+         inst.op == IROp::LDXR_FAST || inst.op == IROp::STXR_FAST || inst.op == IROp::STLR_FAST);
     clobber_flags();
     const uint16_t scratch = (1u << RAX) | (1u << RCX) | (1u << RDX) |
         (recoverable ? ((1u << R8) | (1u << R9) | (1u << R11)) : 0);

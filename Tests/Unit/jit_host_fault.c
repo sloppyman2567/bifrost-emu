@@ -93,6 +93,12 @@ static void *worker(void *unused) {
         PROBE("ldr h8, [%0]", p + page_size);
         PROBE("str d8, [%0]", p + page_size);
         PROBE("str s0, [%0]", p + page_size);
+        // Exclusive and release accesses: Rt and the monitor-visible state must stay put on a fault.
+        PROBE("ldxr x11, [%0]", p + page_size);
+        PROBE("ldaxr w11, [%0]", p + page_size);
+        PROBE("ldaxrb w11, [%0]", p + page_size);
+        PROBE("stlr x11, [%0]", p + page_size);
+        PROBE("stlrh w11, [%0]", p + page_size);
         // Pairs: the first half is mapped and the second faults. Integer destinations
         // may not change and the pc and other state are exact; a store pair may have
         // written its first half. A float pair's first destination is left alone

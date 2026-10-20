@@ -919,6 +919,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     switch (op) {
                     case IROp::NOP: return "NOP";
                     case IROp::MEMORY_BARRIER: return "MEMORY_BARRIER";
+                    case IROp::CLEAR_EXCLUSIVE: return "CLEAR_EXCLUSIVE";
                     case IROp::IMM: return "IMM";
                     case IROp::MOV: return "MOV";
                     case IROp::LOAD_REG: return "LOAD_REG";

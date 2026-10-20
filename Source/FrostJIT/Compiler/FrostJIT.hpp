@@ -121,6 +121,7 @@ extern "C" void jit_native_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
+extern "C" void jit_excl_lock_slow(std::atomic<uint64_t>* word);
 // Tier-2 in-code fire stub: called from generated block prologues (the
 // per-block hot-head counter, BIFROST_TIER2=1). A plain free function so the
 // prologue can take its address at codegen time; forwards to
@@ -1645,6 +1646,8 @@ private:
     bool compile_ir_inst(const IRInst& inst);
     bool compile_ir_inst_body(const IRInst& inst);
     void emit_memory_guard(const IRInst& inst);
+    // Native LDXR/STXR/STLR (CodeGen/Integer/Atomics.cpp); false = use the helper.
+    bool compile_llsc_native(const IRInst& inst);
     // FP/SIMD IR-op codegen. Called from compile_ir_inst() for the
     // FP_* and SIMD_* opcodes. Sets fp_handled_ to true if the op was
     // an FP/SIMD op (regardless of whether it ends the block), and

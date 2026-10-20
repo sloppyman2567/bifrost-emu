@@ -482,6 +482,7 @@ UNIT_TESTS=(
     "jit_flags_passthrough|Tests/Unit/jit_flags_passthrough.elf||10|checks passed"
     "jit_flags_exit_dead|Tests/Unit/jit_flags_exit_dead.elf||30|ALL PASS"
     "jit_fp_ldst_cache|Tests/Unit/jit_fp_ldst_cache.elf||30|ALL PASS"
+    "jit_llsc_native|Tests/Unit/jit_llsc_native.elf||120|ALL PASS"
     "socket_msg_layout|Tests/Unit/socket_msg_layout.elf||10|checks passed"
     "android_syscall_options|Tests/Unit/android_syscall_options.elf||10|checks passed"
     "android_service_manager|Tests/Unit/android_service_manager.elf||10|android_service_manager: ALL PASS"

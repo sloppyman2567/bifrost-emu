@@ -39,9 +39,6 @@
 #include <thread>
 #include <vector>
 namespace arm64emu {
-void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
-    return &excl_monitor_shards_[excl_shard_idx(addr)];
-}
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
