@@ -251,7 +251,7 @@ glCreateBuffers          GL     ip            -     -              -   # arg1: G
 glTexStorage2D           GL     iiii i         -     -              -   # target,levels,ifmt,w,h
 glTexStorage3D           GL     iiiiii        -     -              -   # +depth
 glTexImage3D             GL     iiii iiiii z   -     -              TEX3D  # 10 args; arg9 pixels (w*h*d*bpp)
-glBlitFramebuffer        GL     iiiiiiii      -     -              -   # Source/dst rects
+glBlitFramebuffer        GL     iiiiiiiiii    -     -              -   # src/dst rects, mask, filter (stack)
 glDrawArraysInstanced      GL     iiii          -     -              -       SYNC   # mode,first,count,primcount
 glDrawElementsInstanced    GL     iiii i        -     EL_PTR         -       SYNC   # arg3: indices (offset or ptr)
 glBindBufferBase         GL     iii           -     -              -   # target,index,buffer
@@ -2640,7 +2640,7 @@ glBlendFuncSeparateEXT     GL     iiii          -     -              -
 glBlendFuncSeparateINGR    GL     iiii          -     -              -
 glBlendFuncSeparateIndexedAMD GL     iiiii         -     -              -
 glBlendParameteriNV        GL     ii            -     -              -
-glBlitFramebufferEXT       GL     iiiiiiii      -     -              -
+glBlitFramebufferEXT       GL     iiiiiiiiii    -     -              -
 glBlitFramebufferLayerEXT  GL     iiiiiiiiiiii  -     -              -
 glBlitFramebufferLayersEXT GL     iiiiiiiiii    -     -              -
 glBlitNamedFramebuffer     GL     iiiiiiiiiiii  -     -              -

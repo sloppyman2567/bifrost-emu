@@ -271,17 +271,20 @@ struct GraphicThunkImpl {
     // exports SDL_SemPost; on the generic dispatch path the registered
     // entry.host_fn may be a guest trampoline, so use the raw dlsym result).
     void* sdl_sem_post_fn_ = nullptr;
-    // 2026-08: glMapBuffer/glMapBufferRange/glUnmapBuffer bounce support.
-    // The host glMapBuffer returns a HOST pointer the guest cannot deref,
-    // so dispatch() instead allocates a guest-window bounce buffer (via
-    // Memory::mmap_alloc, in the guest reservation so the guest JIT can
-    // read/write it inline), seeds it from the host buffer on map
-    // (GL_MAP_READ_BIT), and copies it back on unmap (GL_MAP_WRITE_BIT).
+    // glMapBuffer/glMapBufferRange/glUnmapBuffer bounce support. The guest
+    // cannot dereference a host mapping, so dispatch() maps the host buffer
+    // as asked and hands the guest a guest-window bounce (Memory::mmap_alloc)
+    // of the same range. The bounce is seeded from the host mapping
+    // (GL_MAP_READ_BIT) and copied into it on flush, unmap and, for
+    // persistent mappings, before buffer-consuming calls. Copying through
+    // the host mapping works for immutable storage, which rejects
+    // glBufferSubData, and does not depend on the current binding.
     // Raw host GL fns resolved at init (not the registered entries, whose
     // host_fn may be trampolines on some paths).
     void* gl_get_buffer_parameteriv_fn_ = nullptr;  // buffer size query
-    void* gl_get_buffer_subdata_fn_ = nullptr;      // host buffer → bounce
-    void* gl_buffer_subdata_fn_ = nullptr;          // bounce → host buffer
+    void* gl_map_buffer_range_fn_ = nullptr;
+    void* gl_unmap_buffer_fn_ = nullptr;
+    void* gl_flush_mapped_buffer_range_fn_ = nullptr;
     // Active mappings: buffer id → bounce state (guest addr, size, offset
     // into the GL buffer, access bits). Keys on the buffer NAME so
     // glUnmapBuffer (which only knows the target) can find it via the
@@ -290,8 +293,9 @@ struct GraphicThunkImpl {
         uint64_t bounce = 0;   // guest address of the bounce allocation
         uint64_t size = 0;     // bytes mapped (range length / whole buffer)
         uint64_t offset = 0;   // byte offset into the GL buffer
-        uint32_t target = 0;   // target used at map time (for writeback)
+        uint32_t target = 0;   // target used at map time
         uint32_t access = 0;   // GL_MAP_* bits from the caller
+        uint8_t* host = nullptr;  // the host's own mapping of the same range
     };
     std::unordered_map<uint32_t, BufferMapping> gl_buffer_mappings_;
     // EGL_NATIVE_BUFFER_ANDROID images over gralloc buffers.

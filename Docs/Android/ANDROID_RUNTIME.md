@@ -1975,6 +1975,13 @@ terminate and guest-issued error queries with monotonic timestamps, guest thread
 IDs, return values and call durations. An unmatched begin can locate a blocked
 host call; a zero swap result is failure. The existing `[frame]` summary counts
 calls, including failed swaps, and does not establish visible rendering.
+For a black frame, `[frame] swap N` lines (the first three swaps, then every
+120th) sample a 3x3 grid of the default back buffer before the host swap and
+list the swapping thread's GL/EGL calls since its previous swap. A non-zero
+`glGetError` result appears as `ERROR(code after call)`, naming the call before
+it; an error from an emulator-internal call shows up after the guest call that
+triggered it. Mesa's own reason is printed with `MESA_DEBUG=1`. All bindings
+and pack state the sampler touches are restored.
 `[android-window]` records SDL window events before filtering and a two-second
 event-pump heartbeat. Event, pump and EGL timestamps use the host monotonic
 clock (SDL event times are rebased onto it). These diagnostics observe restore/expose events;

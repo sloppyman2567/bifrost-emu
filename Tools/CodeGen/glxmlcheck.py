@@ -4,7 +4,9 @@ against the Khronos gl.xml registry (vendored at ThirdParty/GLRegistry/gl.xml).
 
 For each GL/GLES-family row we compare:
   1. ARITY   — hand-written ARGS length vs gl.xml parameter count
-               (trailing-'i' elision is allowed by spec convention).
+               (trailing-'i' elision is allowed by spec convention, except
+               that rows with more than eight integer/pointer params must
+               list them all: the ninth onwards are read from the stack).
   2. POINTERS— every position where gl.xml declares a pointer ('*' in the
                param text) must carry 'p'/'z' in the hand ARGS, and vice
                versa. Mismatches are exactly the class of bug that bit us
@@ -25,6 +27,8 @@ import xml.etree.ElementTree as ET
 
 SPEC_DEFAULT = 'Tools/CodeGen/thunk_dp.txt'
 XML_DEFAULT = 'ThirdParty/GLRegistry/gl.xml'
+# gl.xml scalar types passed in SIMD registers; everything else is x-class.
+FLOAT_TYPES = {'GLfloat', 'GLdouble', 'GLclampf', 'GLclampd'}
 
 # Policies whose dispatch arms read guest registers directly and own their
 # marshalling — the generic ARGS pointer mask is not applied for them.
@@ -117,6 +121,18 @@ def main():
                     f"'{hand_args}' ({len(hand_args)}) shorter than needed "
                     f"for gl.xml params ({len(cmd)}, last pointer at "
                     f"{last_ptr} ({cmd[last_ptr]['name'] if last_ptr >= 0 else '?'})")
+                continue
+            # Trailing-i elision is only harmless in x0-x7: AAPCS64 passes
+            # the ninth and later integer/pointer arguments on the stack, so
+            # a row that drops them hands stack garbage to the host.
+            int_params = sum(1 for p in cmd if p['ptr'] or p['type'] not in FLOAT_TYPES)
+            int_hand = sum(1 for c in hand_args if c != 'f')
+            if int_params > 8 and int_hand < int_params:
+                errors.append(
+                    f"{spec_path}:{lineno}: {name}: STACK ARGS — hand ARGS "
+                    f"'{hand_args}' lists {int_hand} of gl.xml's {int_params} "
+                    f"integer/pointer params; those past the eighth are read "
+                    f"from the stack and must not be elided")
                 continue
             if n_hand_effective and len(cmd) < len(hand_args.rstrip('i')):
                 errors.append(

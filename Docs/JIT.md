@@ -1404,13 +1404,12 @@ calls were implemented, the game rendered 670 frames and reached an unhandled
 `frecps v3.4s,v16.4s,v18.4s` (0x4e32fe03), which raised guest SIGILL. See the
 current service checkpoint in [ANDROID_RUNTIME.md](Android/ANDROID_RUNTIME.md).
 
-These policies reuse the existing buffer emulation, whose broader GL semantics
-are not established by this regression. In particular the existing flush code
-treats offsets as absolute buffer offsets, while the
+These policies share the buffer emulation, which maps the host buffer and
+gives the guest a bounce of the same range (see the graphics guide). Flush
+offsets are relative to the mapping, as the
 [Khronos specification](https://wikis.khronos.org/opengl/GLAPI/glFlushMappedBufferRange)
-requires offsets relative to the mapping. The persistent/coherent cases are
-existing emulator behavior tests, not ES 3 conformance tests. Those separate
-compatibility gaps are not repaired by selecting the GLES policies.
+requires. `test_sdl_gl_mapbuffer` checks valid GL usage only and passes natively
+on the host driver as well; it is not an ES 3 conformance test.
 
 ## Tier-1 zero and bit branches
 

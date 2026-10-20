@@ -19,9 +19,11 @@ host range (`SDL_PollEvent`). Trampolines end with `ret` after `svc`.
 dlopen of libGL/libSDL2 uses the thunk when the on-disk `.so` is not
 AArch64 (so host x86_64 libs are never executed as guest code).
 
-Modern GL is covered: `glMapBuffer`/`glMapBufferRange` and
-persistent-coherent mappings use a guest-window bounce (PCWFC
-writeback before buffer-consuming calls), and GL3.3+/4.x rows cover
+Modern GL is covered: `glMapBuffer`/`glMapBufferRange` map the host
+buffer and give the guest a guest-window bounce of the same range, copied
+into the host mapping on flush, on unmap and, for persistent-coherent
+mappings, before buffer-consuming calls (PCWFC); this works for immutable
+`glBufferStorage` buffers. GL3.3+/4.x rows cover
 uniform blocks, instancing, compute, transform feedback, sampler and
 query objects, DSA (`glCreateBuffers`/`glCreateVertexArrays`),
 `glBufferStorage`, and `glTexImage3D`. GLFW callback setters

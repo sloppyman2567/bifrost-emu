@@ -13,6 +13,45 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### GL buffer mappings and framebuffer blits (2026-10-19)
+
+- Mapped GL buffers reach the GPU. A guest mapping now mirrors a real host
+  mapping of the same range; writes were pushed with `glBufferSubData` into
+  whatever buffer was bound, which immutable `glBufferStorage` buffers reject.
+  Roblox drew an all-black screen this way; its UI now renders. Unmap ends
+  persistent mappings too, and `glFlushMappedBufferRange` offsets are relative
+  to the mapping, as GL specifies.
+- The desktop GL `glBlitFramebuffer` and `glBlitFramebufferEXT` rows read 8
+  of their 10 arguments, so `mask` and `filter` (on the stack) were garbage.
+  `glxmlcheck` now rejects rows that drop stack-passed arguments.
+- `BIFROST_FRAME_TRACE` samples the back buffer before each traced swap and
+  lists the frame's GL calls and `glGetError` results.
+
+### Roblox main Activity (2026-10-19)
+
+- `activity_task.registerScreenCaptureObserver`/`unregisterScreenCaptureObserver`
+  (`DETECT_SCREEN_CAPTURE`, kept on the Activity record; no screenshot is
+  ever detected). Roblox's main Activity resumes and reaches its landing and
+  login screens.
+
+### LSE compare-and-swap pairs (2026-10-19)
+
+- CASP/CASPA/CASPL/CASPAL (part of the advertised FEAT_LSE) were undecodable.
+  Roblox's BLAKE3 patch check ran CASPL on its startup thread.
+
+### Process-directed signals and worker faults (2026-10-19)
+
+- A host signal or `kill()` of the own process goes to a thread that does not
+  block it, or stays pending for the process until a thread unblocks it or
+  `sigwait`s for it (Linux `complete_signal`). It used to wait on whichever
+  thread drained it, so ART's SIGQUIT thread dump never ran. `rt_sigpending`
+  reads its size argument from the right register and reports process-wide
+  signals; a fork child starts with none pending.
+- A worker or SDL thread whose synchronous fault (SIGILL, SIGSEGV) is caught by
+  a handler keeps running. It ended silently once the handler frame was set
+  up; Roblox's startup thread vanished this way and its main thread waited
+  forever.
+
 ### Roblox main Activity (2026-10-19)
 
 - `activity_task.registerScreenCaptureObserver`/`unregisterScreenCaptureObserver`

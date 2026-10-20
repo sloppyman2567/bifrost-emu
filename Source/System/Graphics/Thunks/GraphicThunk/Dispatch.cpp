@@ -3,6 +3,86 @@
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/ExtensionFilter.hpp"
 namespace arm64emu {
+// BIFROST_FRAME_TRACE: GL/EGL calls of this thread since its last swap.
+static std::map<std::string, unsigned>& frame_calls() {
+    thread_local std::map<std::string, unsigned> calls;
+    return calls;
+}
+// The thread's last call other than glGetError, naming the call an error
+// result belongs to.
+static std::string& frame_last_call() {
+    thread_local std::string last;
+    return last;
+}
+
+// BIFROST_FRAME_TRACE: sample a 3x3 grid of the default back buffer before a
+// swap, telling an empty frame from one the compositor hides, with the
+// frame's call counts. Every binding and pack parameter it touches is
+// restored. First three swaps, then 1/120.
+static void trace_back_buffer(uint64_t surface) {
+    using GetInt = void (*)(unsigned, int*);
+    using Bind = void (*)(unsigned, unsigned);
+    using Store = void (*)(unsigned, int);
+    using Read = void (*)(int, int, int, int, unsigned, unsigned, void*);
+    using ReadBuffer = void (*)(unsigned);
+    using CurrentDisplay = void* (*)();
+    using QuerySurface = unsigned (*)(void*, void*, int, int*);
+    static const auto get = reinterpret_cast<GetInt>(dlsym(RTLD_DEFAULT, "glGetIntegerv"));
+    static const auto bind_fb = reinterpret_cast<Bind>(dlsym(RTLD_DEFAULT, "glBindFramebuffer"));
+    static const auto bind_buf = reinterpret_cast<Bind>(dlsym(RTLD_DEFAULT, "glBindBuffer"));
+    static const auto store = reinterpret_cast<Store>(dlsym(RTLD_DEFAULT, "glPixelStorei"));
+    static const auto read = reinterpret_cast<Read>(dlsym(RTLD_DEFAULT, "glReadPixels"));
+    static const auto read_buffer = reinterpret_cast<ReadBuffer>(dlsym(RTLD_DEFAULT, "glReadBuffer"));
+    static const auto display = reinterpret_cast<CurrentDisplay>(dlsym(RTLD_DEFAULT, "eglGetCurrentDisplay"));
+    static const auto query = reinterpret_cast<QuerySurface>(dlsym(RTLD_DEFAULT, "eglQuerySurface"));
+    static uint64_t swaps = 0;
+    const uint64_t n = ++swaps;
+    std::map<std::string, unsigned> calls;
+    calls.swap(frame_calls());
+    if (n > 3 && n % 120) return;
+    std::string histogram;
+    for (const auto& [name, count] : calls)
+        histogram += " " + name + "x" + std::to_string(count);
+    fprintf(stderr, "[frame] swap %llu calls:%s\n", static_cast<unsigned long long>(n),
+            histogram.c_str());
+    if (!get || !bind_fb || !bind_buf || !store || !read || !read_buffer || !display || !query) return;
+    int width = 0, height = 0;
+    void* dpy = display();
+    if (!query(dpy, reinterpret_cast<void*>(surface), 0x3057 /*EGL_WIDTH*/, &width) ||
+        !query(dpy, reinterpret_cast<void*>(surface), 0x3056 /*EGL_HEIGHT*/, &height) ||
+        width <= 0 || height <= 0) return;
+    constexpr unsigned kReadFb = 0x8CA8, kReadFbBinding = 0x8CAA, kPackBuffer = 0x88EB,
+                       kPackBufferBinding = 0x88ED, kReadBufferState = 0x0C02, kBack = 0x0405;
+    static constexpr unsigned kPack[] = {0x0D05 /*ALIGNMENT*/, 0x0D02 /*ROW_LENGTH*/,
+                                         0x0D03 /*SKIP_ROWS*/, 0x0D04 /*SKIP_PIXELS*/};
+    int read_fb = 0, pack_buffer = 0, read_state = 0, pack[4] = {};
+    get(kReadFbBinding, &read_fb);
+    get(kPackBufferBinding, &pack_buffer);
+    for (int i = 0; i < 4; ++i) get(kPack[i], &pack[i]);
+    bind_fb(kReadFb, 0);
+    get(kReadBufferState, &read_state);
+    read_buffer(kBack);
+    bind_buf(kPackBuffer, 0);
+    store(kPack[0], 4);
+    for (int i = 1; i < 4; ++i) store(kPack[i], 0);
+    char line[256];
+    int used = snprintf(line, sizeof(line), "[frame] swap %llu surface 0x%llx %dx%d rgba:",
+                        static_cast<unsigned long long>(n), static_cast<unsigned long long>(surface),
+                        width, height);
+    for (int y = 1; y <= 3; ++y)
+        for (int x = 1; x <= 3; ++x) {
+            uint32_t rgba = 0;
+            read(width * x / 4, height * y / 4, 1, 1, 0x1908 /*RGBA*/, 0x1401 /*UNSIGNED_BYTE*/, &rgba);
+            if (used > 0 && static_cast<size_t>(used) < sizeof(line))
+                used += snprintf(line + used, sizeof(line) - used, " %08x", __builtin_bswap32(rgba));
+        }
+    fprintf(stderr, "%s\n", line);
+    read_buffer(static_cast<unsigned>(read_state));
+    bind_fb(kReadFb, static_cast<unsigned>(read_fb));
+    bind_buf(kPackBuffer, static_cast<unsigned>(pack_buffer));
+    for (int i = 0; i < 4; ++i) store(kPack[i], pack[i]);
+}
+
 int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
@@ -19,6 +99,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
+    if (dbg().frame_trace) ++frame_calls()[entry.name];
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
     struct SdlCpuScope {
@@ -132,17 +213,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // ── glMapBuffer / glMapBufferRange / glUnmapBuffer / glFlushMappedBufferRange ──
-    // 2026-08: the host glMapBuffer returns a HOST pointer the guest cannot
-    // deref (address-space mismatch). Instead, bounce through a guest-window
-    // allocation: mmap_alloc() hands out guest addresses the guest JIT
-    // reads and writes inline. On
-    // map, seed the bounce from the host buffer when GL_MAP_READ_BIT is
-    // set (contents undefined otherwise / under GL_MAP_INVALIDATE_*); on
-    // unmap, copy the bounce back into the host buffer when GL_MAP_WRITE_BIT
-    // is set, then free the bounce. GL_MAP_FLUSH_EXPLICIT_BIT ranges are
-    // pushed early by the FLUSH_BUFFER arm. Transient map/write/unmap per
-    // frame works fully; persistent-coherent-without-explicit-flush stays
-    // unsupported (the writes would never land on the host).
+    // The host mapping is a HOST pointer the guest cannot dereference, so
+    // the host buffer is mapped as requested and the guest gets a bounce in
+    // the guest window (mmap_alloc), which the guest JIT reads and writes
+    // inline. The bounce is seeded from the host mapping when
+    // GL_MAP_READ_BIT is set (contents undefined otherwise / under
+    // GL_MAP_INVALIDATE_*). Guest writes reach the host mapping on
+    // glFlushMappedBufferRange, on unmap, and for persistent mappings
+    // before buffer-consuming calls; unmap then unmaps the host buffer.
     constexpr uint32_t kGLMapReadBit = 0x0001;
     constexpr uint32_t kGLMapWriteBit = 0x0002;
     constexpr uint32_t kGLMapInvalidateRangeBit = 0x0004;
@@ -152,18 +230,15 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     constexpr uint32_t kGLBufferSize = 0x8764;
     // PCWFC (Persistent-Coherent Writeback For Coherence): a mapping with
     // GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT is a
-    // "serious engine" streaming buffer — the guest maps it ONCE, writes
-    // it every frame through the returned pointer, and never unmaps it
-    // (glUnmapBuffer on a persistent mapping keeps it valid per GL). The
-    // bounce only wrote back on unmap/flush, so the host GPU never saw the
-    // writes. sync_persistent_mappings_() pushes every live persistent
-    // bounce back to the host buffer, and dispatch() calls it right before
-    // any call that consumes buffer data (draws, copies, getSubData,
-    // texbuffer) — the practical "coherence" guarantee (host sees writes at
-    // the moment the GPU would read them).
+    // streaming buffer the guest maps once and writes every frame through
+    // the returned pointer while the GPU uses it, until glUnmapBuffer.
+    // sync_persistent_mappings_() copies every live persistent bounce into
+    // its host mapping, and dispatch() calls it right before any call that
+    // consumes buffer data (draws, copies, getSubData, texbuffer): the host
+    // sees the writes at the moment the GPU would read them. The copy goes
+    // through each mapping's own host pointer, whatever is bound now.
     auto sync_persistent_mappings_ = [&]() {
-        if (impl_->gl_buffer_mappings_.empty() || !impl_->gl_buffer_subdata_fn_)
-            return;
+        if (impl_->gl_buffer_mappings_.empty()) return;
         // Snapshot (buffer id + mapping) under mu; each push re-checks
         // liveness under mu first: a concurrent UNMAP/DELETE erases and
         // hands the bounce range back for reuse, and pushing from reused
@@ -181,20 +256,16 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
         if (snaps.empty()) return;
-        using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
         for (const auto& [buffer, m] : snaps) {
-            {
-                std::lock_guard<std::mutex> g(impl_->mu);
-                auto it = impl_->gl_buffer_mappings_.find(buffer);
-                if (it == impl_->gl_buffer_mappings_.end() ||
-                    it->second.bounce != m.bounce || it->second.size != m.size)
-                    continue;  // unmapped/freed/re-mapped since snapshot
-            }
-            uint8_t* hp = impl_->mem->guest_to_host_ptr(m.bounce);
-            if (hp) {
-                reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
-                    m.target, m.offset, m.size, hp);
-            }
+            // Copy under mu: a concurrent unmap/delete unmaps the host
+            // range and returns the bounce for reuse.
+            std::lock_guard<std::mutex> g(impl_->mu);
+            auto it = impl_->gl_buffer_mappings_.find(buffer);
+            if (it == impl_->gl_buffer_mappings_.end() ||
+                it->second.bounce != m.bounce || it->second.size != m.size || !m.host)
+                continue;  // unmapped/freed/re-mapped since snapshot
+            if (const uint8_t* bounce = impl_->mem->guest_to_host_ptr(m.bounce))
+                memcpy(m.host, bounce, m.size);
         }
     };
     if (entry.spec) {
@@ -218,7 +289,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t length = is_range ? args[2] : 0;
             cpu.regs[0] = 0;
             if (!impl_->mem || !impl_->tracker() ||
-                !impl_->gl_get_buffer_parameteriv_fn_) {
+                !impl_->gl_get_buffer_parameteriv_fn_ || !impl_->gl_map_buffer_range_fn_ ||
+                !impl_->gl_unmap_buffer_fn_) {
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] %s: unavailable (mem/tracker/host fns)\n",
                             entry.name.c_str());
@@ -275,31 +347,38 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 drop_placeholder_();
                 return 0;
             }
+            // The host validates the access bits against the buffer's storage
+            // (persistent maps need immutable storage, ...). A refused map
+            // returns NULL and leaves the host's error for glGetError.
+            using MapFn = void* (*)(uint32_t, intptr_t, intptr_t, uint32_t);
+            auto* host = static_cast<uint8_t*>(reinterpret_cast<MapFn>(impl_->gl_map_buffer_range_fn_)(
+                target, static_cast<intptr_t>(offset), static_cast<intptr_t>(length), access));
+            if (!host) {
+                drop_placeholder_();
+                return 0;
+            }
+            using UnmapFn = uint8_t (*)(uint32_t);
             uint64_t bounce = impl_->mem->mmap_alloc(length);
-            if (bounce == 0) {
+            uint8_t* bounce_ptr = bounce ? impl_->mem->guest_to_host_ptr(bounce) : nullptr;
+            if (!bounce_ptr) {
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] %s: mmap_alloc(%llu) failed\n",
                             entry.name.c_str(),
                             static_cast<unsigned long long>(length));
+                if (bounce) impl_->mem->untrack_allocation(bounce, length);
+                reinterpret_cast<UnmapFn>(impl_->gl_unmap_buffer_fn_)(target);
                 drop_placeholder_();
                 return 0;
             }
-            // Seed the bounce from the host buffer if the guest may read it.
+            // Seed the bounce from the host mapping if the guest may read it.
             if ((access & kGLMapReadBit) &&
-                !(access & (kGLMapInvalidateRangeBit | kGLMapInvalidateBufferBit)) &&
-                impl_->gl_get_buffer_subdata_fn_) {
-                uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(bounce);
-                if (host_ptr) {
-                    using GetSubFn = void (*)(uint32_t, uint64_t, uint64_t, void*);
-                    reinterpret_cast<GetSubFn>(impl_->gl_get_buffer_subdata_fn_)(
-                        target, offset, length, host_ptr);
-                }
-            }
+                !(access & (kGLMapInvalidateRangeBit | kGLMapInvalidateBufferBit)))
+                memcpy(bounce_ptr, host, length);
             {
                 std::lock_guard<std::mutex> g(impl_->mu);
                 impl_->gl_buffer_mappings_[buffer] =
                     GraphicThunkImpl::BufferMapping{bounce, length, offset,
-                                                    target, access};
+                                                    target, access, host};
             }
             cpu.regs[0] = bounce;
             if (dbg().thunk_trace) {
@@ -313,85 +392,67 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
         if (mpol == thunk::Policy::UNMAP_BUFFER) {
+            // glUnmapBuffer ends every mapping, persistent ones included
+            // (GL 4.6 / ES 3.2 6.3.1). The host returns GL_FALSE with
+            // INVALID_OPERATION for a buffer that is not mapped.
             uint32_t target = static_cast<uint32_t>(args[0]);
-            if (impl_->mem && impl_->tracker() && impl_->gl_buffer_subdata_fn_) {
-                uint32_t buffer = impl_->tracker()->buffer_binding(target);
-                GraphicThunkImpl::BufferMapping m{};
-                bool found = false;
-                bool persistent = false;
-                {
-                    std::lock_guard<std::mutex> g(impl_->mu);
-                    auto it = impl_->gl_buffer_mappings_.find(buffer);
-                    if (it != impl_->gl_buffer_mappings_.end()) {
-                        m = it->second;
-                        // PCWFC: a persistent mapping stays valid after
-                        // glUnmapBuffer (GL_ARB_buffer_storage semantics) —
-                        // keep the bounce + mapping alive so per-frame
-                        // writes through the returned pointer still land.
-                        persistent = (m.access & kGLMapPersistentBit) != 0;
-                        if (!persistent) impl_->gl_buffer_mappings_.erase(it);
-                        found = true;
-                    }
+            cpu.regs[0] = 0;
+            if (!impl_->mem || !impl_->tracker() || !impl_->gl_unmap_buffer_fn_) return 0;
+            uint32_t buffer = impl_->tracker()->buffer_binding(target);
+            GraphicThunkImpl::BufferMapping m{};
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> g(impl_->mu);
+                auto it = impl_->gl_buffer_mappings_.find(buffer);
+                if (it != impl_->gl_buffer_mappings_.end() && it->second.host) {
+                    m = it->second;
+                    impl_->gl_buffer_mappings_.erase(it);
+                    found = true;
                 }
-                if (found && (m.access & kGLMapWriteBit)) {
-                    uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(m.bounce);
-                    if (host_ptr) {
-                        using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
-                        reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
-                            m.target, m.offset, m.size, host_ptr);
-                    }
-                }
-                if (found && !persistent && m.bounce) impl_->mem->untrack_allocation(m.bounce, m.size);
-                if (dbg().thunk_trace)
-                    fprintf(stderr, "[thunk] glUnmapBuffer: buffer=%u target=0x%x "
-                            "%s%s\n", buffer, target, found ? "ok" : "(not mapped)",
-                            persistent ? " (persistent, kept)" : "");
             }
-            cpu.regs[0] = 1;  // GL_TRUE
+            if (found && (m.access & kGLMapWriteBit))
+                if (const uint8_t* bounce = impl_->mem->guest_to_host_ptr(m.bounce))
+                    memcpy(m.host, bounce, m.size);
+            using UnmapFn = uint8_t (*)(uint32_t);
+            cpu.regs[0] = reinterpret_cast<UnmapFn>(impl_->gl_unmap_buffer_fn_)(target);
+            if (found) impl_->mem->untrack_allocation(m.bounce, m.size);
+            if (dbg().thunk_trace)
+                fprintf(stderr, "[thunk] glUnmapBuffer: buffer=%u target=0x%x %s -> %llu\n",
+                        buffer, target, found ? "ok" : "(not mapped)",
+                        static_cast<unsigned long long>(cpu.regs[0]));
             return 0;
         }
         if (mpol == thunk::Policy::FLUSH_BUFFER) {
-            // glFlushMappedBufferRange(target, offset, length): push the
-            // guest-written range to the host now (GL_MAP_FLUSH_EXPLICIT /
-            // persistent+coherent best-effort). The bounce holds
-            // buffer[offset..offset+size), so flush its [offset..+length).
+            // glFlushMappedBufferRange(target, offset, length): the offset
+            // is relative to the mapping. Copy that bounce range into the
+            // host mapping, then let the host flush and validate it
+            // (INVALID_OPERATION without GL_MAP_FLUSH_EXPLICIT_BIT, ...).
             uint32_t target = static_cast<uint32_t>(args[0]);
             uint64_t offset = args[1];
             uint64_t length = args[2];
-            if (impl_->mem && impl_->tracker() && impl_->gl_buffer_subdata_fn_) {
-                uint32_t buffer = impl_->tracker()->buffer_binding(target);
-                GraphicThunkImpl::BufferMapping m{};
-                bool found = false;
-                {
-                    std::lock_guard<std::mutex> g(impl_->mu);
-                    auto it = impl_->gl_buffer_mappings_.find(buffer);
-                    if (it != impl_->gl_buffer_mappings_.end()) {
-                        m = it->second;
-                        found = true;
-                    }
-                }
-                if (found && (m.access & kGLMapWriteBit)) {
-                    // The bounce holds buffer[offset..offset+size); map the
-                    // flush request into it and clamp to the mapped range.
-                    uint64_t rel = (offset >= m.offset) ? offset - m.offset : 0;
-                    uint64_t n = length;
-                    if (rel + n > m.size) n = (rel < m.size) ? m.size - rel : 0;
-                    uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(m.bounce + rel);
-                    if (host_ptr && n > 0) {
-                        using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
-                        reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
-                            m.target, offset, n, host_ptr);
-                    }
-                }
-                if (dbg().thunk_trace)
-                    fprintf(stderr, "[thunk] glFlushMappedBufferRange: buffer=%u "
-                            "target=0x%x off=%llu len=%llu %s\n",
-                            buffer, target,
-                            static_cast<unsigned long long>(offset),
-                            static_cast<unsigned long long>(length),
-                            found ? "ok" : "(not mapped)");
-            }
             cpu.regs[0] = 0;
+            if (!impl_->mem || !impl_->tracker() || !impl_->gl_flush_mapped_buffer_range_fn_)
+                return 0;
+            uint32_t buffer = impl_->tracker()->buffer_binding(target);
+            {
+                std::lock_guard<std::mutex> g(impl_->mu);
+                auto it = impl_->gl_buffer_mappings_.find(buffer);
+                if (it != impl_->gl_buffer_mappings_.end() && it->second.host &&
+                    (it->second.access & kGLMapWriteBit) && offset <= it->second.size &&
+                    length <= it->second.size - offset) {
+                    const auto& m = it->second;
+                    if (const uint8_t* bounce = impl_->mem->guest_to_host_ptr(m.bounce + offset))
+                        memcpy(m.host + offset, bounce, length);
+                }
+            }
+            using FlushFn = void (*)(uint32_t, intptr_t, intptr_t);
+            reinterpret_cast<FlushFn>(impl_->gl_flush_mapped_buffer_range_fn_)(
+                target, static_cast<intptr_t>(offset), static_cast<intptr_t>(length));
+            if (dbg().thunk_trace)
+                fprintf(stderr, "[thunk] glFlushMappedBufferRange: buffer=%u "
+                        "target=0x%x off=%llu len=%llu\n", buffer, target,
+                        static_cast<unsigned long long>(offset),
+                        static_cast<unsigned long long>(length));
             return 0;
         }
     }
@@ -1478,6 +1539,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 static_cast<unsigned long long>(cpu.regs[30]), entry.name.c_str(),
                 static_cast<unsigned long long>(args[0]), static_cast<unsigned long long>(args[1]),
                 static_cast<unsigned long long>(args[2]), static_cast<unsigned long long>(args[3]));
+    if (trace_present && entry.name == "eglSwapBuffers") trace_back_buffer(args[1]);
     uint64_t ret = 0;
     // PCWFC: before any call that consumes buffer data (draw/copy/get/
     // texbuffer), push every live persistent+coherent bounce back to the
@@ -1837,6 +1899,16 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 #endif
     }
     cpu.regs[0] = ret;
+    if (dbg().frame_trace) {
+        if (entry.name != "glGetError") {
+            frame_last_call() = entry.name;
+        } else if (ret) {
+            char key[96];
+            snprintf(key, sizeof(key), "ERROR(0x%llx after %s)",
+                     static_cast<unsigned long long>(ret), frame_last_call().c_str());
+            ++frame_calls()[key];
+        }
+    }
     if (impl_->tracker() && entry.tracks_state) {
         impl_->tracker()->track_state_change(entry.name, args, nullptr, 0);
     }

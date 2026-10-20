@@ -392,15 +392,16 @@ void GraphicThunk::register_known_symbols_() {
     impl_->glfw_set_window_size_fn_ =
         kHaveGL ? dlsym(RTLD_DEFAULT, "glfwSetWindowSize") : nullptr;
 
-    // Raw host GL fns for the glMapBuffer bounce (buffer size query and
-    // the two buffer-copy primitives). glGetBufferParameteriv is not a
-    // registered thunk symbol, so resolve it directly.
+    // Raw host GL fns for the glMapBuffer bounce: buffer size query and the
+    // host's own mapping of the buffer.
     impl_->gl_get_buffer_parameteriv_fn_ =
         kHaveGL ? dlsym(RTLD_DEFAULT, "glGetBufferParameteriv") : nullptr;
-    impl_->gl_get_buffer_subdata_fn_ =
-        kHaveGL ? dlsym(RTLD_DEFAULT, "glGetBufferSubData") : nullptr;
-    impl_->gl_buffer_subdata_fn_ =
-        kHaveGL ? dlsym(RTLD_DEFAULT, "glBufferSubData") : nullptr;
+    impl_->gl_map_buffer_range_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glMapBufferRange") : nullptr;
+    impl_->gl_unmap_buffer_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glUnmapBuffer") : nullptr;
+    impl_->gl_flush_mapped_buffer_range_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glFlushMappedBufferRange") : nullptr;
 
     // Raw host SDL_SemPost for wake_sdl_semaphores() (the registered
     // SDL_SemPost entry's host_fn is a guest-callable trampoline, so the

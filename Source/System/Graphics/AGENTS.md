@@ -36,8 +36,16 @@
   those pointers. Preserve deep-marshalling bounds and layout checks.
 - GL/GLES and Vulkan mapping APIs return guest bounces, never raw host mapping
   pointers. Preserve mapping lifetime, explicit flush/invalidate, pre-submit
-  writeback and post-wait readback. Existing coherence behavior is not proof of
+  writeback and post-wait readback. A GL bounce mirrors a real host mapping of
+  the same range: move bytes through that host pointer, never glBufferSubData
+  or the current binding (immutable storage rejects it), and let the host
+  validate access bits, flushes and unmaps. Flush offsets are mapping-relative;
+  unmap ends persistent mappings too. `test_sdl_gl_mapbuffer` also runs
+  natively as the host reference. Existing coherence behavior is not proof of
   full graphics API conformance; see [the JIT guide](../../../Docs/JIT.md).
+- `thunk_dp.txt` ARGS strings carry every parameter, including stack-passed
+  ones past the eighth (`glBlitFramebuffer` takes ten): a short string passes
+  stack garbage to the host.
 - Keep Wayland object/version tracking and callback queues coherent across the
   DisplayProxy/DisplayThunk files. Deliver guest listeners after host dispatch,
   not by re-entering the guest midway through a host callback.
