@@ -2270,7 +2270,13 @@ framework.jar) and posts the launch to the main thread:
   windows visible again, then stops and destroys the finished one and
   removes its window.
 `getCallingActivity`/`getCallingPackage` report the caller of an Activity
-started for a result. The launcher Activity is registered before its
+started for a result. `registerScreenCaptureObserver`/
+`unregisterScreenCaptureObserver` (Android 14's
+`Activity.registerScreenCaptureCallback`) enforce `DETECT_SCREEN_CAPTURE`
+and keep the observers on the Activity's record, as
+`ActivityTaskManagerService` does; an unknown token is ignored. Nothing here
+detects a screenshot, so no observer is called. Roblox registers one in its
+main Activity's `onPostResume`. The launcher Activity is registered before its
 `onCreate`, so a splash Activity may start the game Activity there (Azur
 Lane's `PrePermissionActivity`); the launch is posted and runs after the
 launcher Activity has resumed. A host window close destroys stacked Activities before

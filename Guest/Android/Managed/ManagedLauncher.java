@@ -850,6 +850,15 @@ public final class ManagedLauncher {
             if (method.equals("startActivity") || method.equals("startActivityAsUser"))
                 return activities.start(a);
             if (method.equals("getAppTasks")) return activities.appTasks((String) a[0], services);
+            if (method.equals("registerScreenCaptureObserver")
+                    || method.equals("unregisterScreenCaptureObserver")) {
+                if (!packages.granted("android.permission.DETECT_SCREEN_CAPTURE"))
+                    throw new SecurityException("Permission Denial: " + method
+                            + " requires android.permission.DETECT_SCREEN_CAPTURE");
+                activities.screenCaptureObserver((IBinder) a[0], (android.os.IInterface) a[1],
+                        method.equals("registerScreenCaptureObserver"));
+                return null;
+            }
             throw unsupported("activity_task", method);
         });
         Object provider = services.register("bifrost.settings", "android.content.IContentProvider",

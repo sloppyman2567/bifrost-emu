@@ -20,7 +20,9 @@ import android.content.res.Configuration;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.IInterface;
 import android.os.Looper;
+import android.os.RemoteCallbackList;
 import android.view.View;
 import android.view.WindowManager;
 import java.lang.reflect.Field;
@@ -52,6 +54,8 @@ final class FrameworkActivities {
         boolean occludes = true;  // ActivityRecord.mOccludesParent
         int resultCode = Activity.RESULT_CANCELED;
         Intent resultData;
+        // ActivityRecord.mCaptureCallbacks (IScreenCaptureObserver).
+        final RemoteCallbackList<IInterface> captureObservers = new RemoteCallbackList<>();
         Record(Activity activity, IBinder token, Record caller, String resultWho, int requestCode) {
             this.activity = activity; this.token = token; this.caller = caller;
             this.resultWho = resultWho; this.requestCode = requestCode;
@@ -419,7 +423,18 @@ final class FrameworkActivities {
         removeWindow(activity);
         finalCleanup(activity);
         orientations.remove(record.token);
+        record.captureObservers.kill();
         System.out.println("APP_ACTIVITY_DESTROYED " + activity.getClass().getName());
+    }
+
+    // ActivityTaskManagerService.(un)registerScreenCaptureObserver after its
+    // DETECT_SCREEN_CAPTURE check: an unknown token is ignored. Nothing here
+    // detects a screenshot, so no observer is ever called back.
+    void screenCaptureObserver(IBinder token, IInterface observer, boolean register) {
+        Record record = find(token);
+        if (record == null) return;
+        if (register) record.captureObservers.register(observer);
+        else record.captureObservers.unregister(observer);
     }
 
     // handleDestroyActivity: an added decor window is removed after onDestroy,
