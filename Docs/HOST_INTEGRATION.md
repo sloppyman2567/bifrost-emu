@@ -42,6 +42,7 @@ Thunk switches (all thunking is on by default):
 
 ```bash
 BIFROST_THUNK_TRACE=1            # Trace graphic/audio/display thunk calls
+BIFROST_AUDIO_TRACE=1            # Trace only audio thunk calls: x0-x3 and the result
 BIFROST_NO_THUNK_GRAPHICS=1      # Disable GL/EGL/SDL2 thunking
 BIFROST_NO_THUNK_AUDIO=1         # Disable ALSA/PulseAudio thunking
 BIFROST_NO_THUNK_DISPLAY=1       # Disable Vulkan/Wayland thunking

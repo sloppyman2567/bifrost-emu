@@ -153,6 +153,8 @@ struct AudioThunkImpl {
         uint64_t cb_fn = 0, cb_ud = 0, err_fn = 0, err_ud = 0;
     };
     std::map<uint64_t, AaBuilder> aa_builders_;
+    // AAudio_setMMapPolicy: process-wide, UNSPECIFIED until set (AudioGlobal.cpp).
+    int32_t aa_mmap_policy_ = 0;
     // AAudio_convert*ToText strings, written once into guest memory.
     std::map<std::string, uint64_t> aa_texts_;
     uint64_t aa_text_block_ = 0;

@@ -2459,6 +2459,17 @@ callback, frees the host stream and leaves the handle in CLOSING until close.
 Both return `INVALID_STATE` from the data callback. Package name and
 attribution tag are accepted and ignored (no app-ops service).
 
+A requested buffer capacity grows the stream's host ring to at least that many
+frames (`Audio::stream_open`'s `min_frames`), as AudioTrack sizes its buffer to
+the request; above 262144 frames `openStream` answers `UNAVAILABLE`. FMOD
+(Roblox) reopens its probe stream with twice the default capacity and fails its
+output init if that is refused. The hardware getters report the host device
+the engine opened, `getContentType` the builder's value (default `MUSIC`), and
+the MMAP policy is recorded but streams never use MMAP. Every name of Android
+15's `libaaudio.map.txt` resolves in the managed adapter
+(`android_aaudio_thread.c` checks the table with `dlsym`).
+`BIFROST_AUDIO_TRACE=1` prints each audio thunk call with its arguments.
+
 #### Managed OpenSL ES (2026-10-13)
 
 The image's real `libOpenSLES.so` (wilhelm) plays through AudioTrack, so

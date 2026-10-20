@@ -4,6 +4,34 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Roblox audio output (2026-10-20)
+
+`Tests/Unit/android_aaudio_thread.c` now resolves every name of Android 15's
+`libaaudio.map.txt` (70) with `dlsym`, checks the hardware/content-type
+getters, the MMAP policy rules and `AAudioStream_read` on an output stream,
+and opens a stream with a 32768-frame capacity request (FMOD's), which must
+report at least that capacity; a 2^20-frame request still answers
+`UNAVAILABLE`. The AAudio section of `test_android_bionic.sh` (run from a copy
+outside the repository, not the whole script) passes in JIT, interpreter and
+Tier-2. With the previous export list the fixture cannot link (`cannot locate
+symbol "AAudioStream_getHardwareSampleRate"`); the capacity check was not run
+against the old binary, the previous behavior being the `-889` that
+`BIFROST_AUDIO_TRACE` showed for Roblox's 0x8000 request.
+
+`test_audio_callbacks.sh` passes (JIT and interpreter, normal and delayed host
+waits, 5 runs each). The strict suite passes 334/334 with the JIT (230 s) and
+325/325 with the interpreter (9 skips, 106 s); `make generated-check` passes.
+`make verify`, the headless build and the other Android scripts were not run.
+
+Roblox itself, with the JIT and all optimizations on: the trace shows FMOD's
+probe stream, then its reopen with `setBufferCapacityInFrames(0x8000)`
+succeeding (capacity 32768), `requestStart`, state STARTED, and no
+`FMOD_RESULT:51`; before the change that `openStream` returned `-889` and
+`System::init` failed. The user confirmed audio plays and reports roughly
+20-40 fps in a baseplate experience with a few characters (not measured here).
+The server still disconnects the client with reason 304 about a minute after
+it joins; the client's Play Integrity request fails as before.
+
 ## Roblox from startup to its login screen (2026-10-19)
 
 Each fix below has a focused regression that fails on the previous code:

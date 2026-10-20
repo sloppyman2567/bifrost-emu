@@ -63,6 +63,7 @@ struct DebugFlags {
     bool jit_software_guard = false; // BIFROST_JIT_SOFTWARE_GUARD — compare with checked memory accesses
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
+    bool audio_trace = false;  // BIFROST_AUDIO_TRACE — audio thunk calls with arguments and results
     std::vector<uint64_t> input_watch; // BIFROST_INPUT_WATCH — comma-separated guest u32 addresses
     bool input_trace = false;  // BIFROST_INPUT_TRACE — bounded SDL mouse/input-mode log
     // BIFROST_ANDROID_LOGICAL_PIXELS — A/B control: open the Android window
@@ -204,6 +205,7 @@ struct DebugFlags {
         f.no_chain = env("BIFROST_NO_CHAIN");
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
+        f.audio_trace = all || env("BIFROST_AUDIO_TRACE");
         f.input_trace = all || env("BIFROST_INPUT_TRACE");
         f.android_logical_pixels = env("BIFROST_ANDROID_LOGICAL_PIXELS");
         if (const char* p = std::getenv("BIFROST_INPUT_WATCH")) {

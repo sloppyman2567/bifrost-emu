@@ -3,8 +3,10 @@
 #include "System/Audio/AudioThunk/AudioThunkInternal.hpp"
 namespace arm64emu {
 void AudioDispatch::tr(int64_t r) const {
-    if (trace) fprintf(stderr, "[audio-thunk] %s → %lld\n",
-                       name.c_str(), (long long)r);
+    if (trace) fprintf(stderr, "[audio-thunk] %s(%llx, %llx, %llx, %llx) → %lld\n",
+                       name.c_str(), (unsigned long long)cpu.regs[0],
+                       (unsigned long long)cpu.regs[1], (unsigned long long)cpu.regs[2],
+                       (unsigned long long)cpu.regs[3], (long long)r);
 }
 // Shared callback-arg builder: SDL2 callbacks are (userdata, stream,
 // len); AAudio data callbacks are (stream, userdata, audioData, frames).

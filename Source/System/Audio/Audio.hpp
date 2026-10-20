@@ -53,7 +53,9 @@ public:
     // ── Logical stream API (one per guest audio device) ───────────────
     // Opens (lazily) the physical device on first use; its format comes
     // from the FIRST stream. Returns a stream id > 0, or 0 on failure.
-    int stream_open(uint32_t fmt, uint32_t rate, uint8_t ch);
+    // `min_frames` (in the caller's `rate` frames) grows the stream ring so it
+    // holds at least that many; 0 keeps the default size.
+    int stream_open(uint32_t fmt, uint32_t rate, uint8_t ch, size_t min_frames = 0);
     void stream_close(int id);
     void stream_pause(int id, bool paused);
     bool stream_paused(int id);

@@ -482,6 +482,12 @@ void AudioThunk::register_known_symbols_() {
     REG(aa_libs, AAudioStream_isPrivacySensitive);
     REG(aa_libs, AAudioStream_requestFlush);
     REG(aa_libs, AAudioStream_release);
+    REG(aa_libs, AAudioStream_getContentType);
+    REG(aa_libs, AAudioStream_getHardwareChannelCount);
+    REG(aa_libs, AAudioStream_getHardwareFormat);
+    REG(aa_libs, AAudioStream_getHardwareSampleRate);
+    REG(aa_libs, AAudio_getMMapPolicy);
+    REG(aa_libs, AAudio_setMMapPolicy);
     // ── libOpenSLES.so (Android) — synthetic vtable methods + IIDs ─
     const char* sl_libs[] = {"libOpenSLES.so"};
     REG(sl_libs, slCreateEngine);

@@ -13,6 +13,26 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### AAudio buffer capacity and NDK exports (2026-10-20)
+
+- `AAudioStreamBuilder_setBufferCapacityInFrames` sizes the host stream ring
+  to the request (up to 262144 frames; `UNAVAILABLE` above) instead of
+  failing a request above the default 16384 frames. AudioTrack sizes its
+  buffer to the request, so AAudio streams normally get at least what they ask
+  for. Roblox's FMOD probes a stream, then reopens it with 32768 frames; the
+  refusal made `System::init` fail with `FMOD_ERR_OUTPUT_INIT` (51, "no audio
+  driver"). FMOD now initializes and Roblox's audio plays (user-confirmed).
+- The six `libaaudio` exports of Android 15's `libaaudio.map.txt` that were
+  missing are added: `AAudio_getMMapPolicy`/`setMMapPolicy` (UNSPECIFIED until
+  set, only the four policies accepted), `AAudioStream_getContentType` and
+  `getHardwareSampleRate`/`ChannelCount`/`Format` (the host device the engine
+  opened). `AAudioStream_read` was registered but had no handler; it now
+  validates its arguments and answers `UNIMPLEMENTED` on output streams, as
+  `AudioStream::read` does. Roblox's FMOD never looked these up; they close
+  the gap to the NDK table.
+- `BIFROST_AUDIO_TRACE=1` traces only the audio thunks, with x0-x3 and the
+  result of each call (`BIFROST_THUNK_TRACE` also traces the GL stream).
+
 ### Bluetooth SCO route (2026-10-19)
 
 - `audio.isBluetoothScoOn` answers false, like `AudioService` on a device

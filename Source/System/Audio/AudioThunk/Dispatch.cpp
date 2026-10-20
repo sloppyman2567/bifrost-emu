@@ -10,7 +10,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     const std::string name = entry.name;
     AudioThunkImpl& I = *impl_;
-    const bool trace = dbg().thunk_trace;
+    const bool trace = dbg().thunk_trace || dbg().audio_trace;
     AudioDispatch d{*this, I, cpu, entry, name, trace};
     for (auto stage : {&AudioDispatch::sdl, &AudioDispatch::alsa, &AudioDispatch::pulse,
                        &AudioDispatch::openal, &AudioDispatch::aaudio, &AudioDispatch::opensl}) {

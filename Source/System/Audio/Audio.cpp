@@ -161,7 +161,7 @@ void Audio::close_device_locked_() {
     opened_ = false;
 }
 // ── logical streams ────────────────────────────────────────────────────
-int Audio::stream_open(uint32_t fmt, uint32_t rate, uint8_t ch) {
+int Audio::stream_open(uint32_t fmt, uint32_t rate, uint8_t ch, size_t min_frames) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!rate || !ch || !pcm_fmt_size(fmt)) return 0;
     if (!opened_) {
@@ -175,7 +175,10 @@ int Audio::stream_open(uint32_t fmt, uint32_t rate, uint8_t ch) {
     Stream s;
     s.fmt = fmt; s.rate = rate; s.ch = ch;
     s.cap_frames = 1;
-    while (s.cap_frames * channels_ * sizeof(float) < kStreamRingBytes)
+    // The ring is in device frames; the request is in the caller's.
+    const size_t wanted = (min_frames * sample_rate_ + rate - 1) / rate;
+    while (s.cap_frames * channels_ * sizeof(float) < kStreamRingBytes ||
+           s.cap_frames < wanted)
         s.cap_frames <<= 1;
     s.ring.assign(s.cap_frames * channels_, 0.0f);
     const int id = ++next_stream_id_;

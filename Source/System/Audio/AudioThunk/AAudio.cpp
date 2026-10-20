@@ -6,6 +6,9 @@ namespace {
 // FCC_LIMIT from system/audio.h, and AAudioStreamParameters::validateChannelMask.
 constexpr uint32_t AA_CHANNEL_BIT_INDEX = 0x80000000u;
 constexpr int32_t AA_FCC_LIMIT = 12;
+// Largest buffer capacity request honored (about 5.5 s at 48 kHz). AudioTrack sizes
+// its buffer to the request, so AAudio streams normally get at least what they ask for.
+constexpr int32_t AA_MAX_CAPACITY_FRAMES = 1 << 18;
 bool aa_output_mask_valid(int32_t mask) {
     const uint32_t m = static_cast<uint32_t>(mask);
     if (m & AA_CHANNEL_BIT_INDEX) {
@@ -211,6 +214,7 @@ std::optional<int64_t> AudioDispatch::aaudio() {
             b.capacity < 0 || b.sharing < 0 || b.sharing > 1 || b.session < -1 ||
             b.performance < 10 || b.performance > 12) { tr(-898); return -898; }
         if (b.device != 0) { tr(-889); return -889; } // Only the default host device.
+        if (b.capacity > AA_MAX_CAPACITY_FRAMES) { tr(-889); return -889; }
         if (b.fmt < 0 || b.fmt > 2) { tr(-883); return -883; } // I16/FLOAT only.
         // Hold pump_mu for the whole arm (same shape as SDL_OpenAudioDevice).
         std::unique_lock<std::mutex> pmu(I.pump_mu);
@@ -252,7 +256,7 @@ std::optional<int64_t> AudioDispatch::aaudio() {
             s.next_cb_us = 0;
         }
         s.engine_stream = I.engine
-            ? I.engine->stream_open(s.fmt, s.rate, s.ch) : 0;
+            ? I.engine->stream_open(s.fmt, s.rate, s.ch, static_cast<size_t>(b.capacity)) : 0;
         if (!s.engine_stream) {
             if (s.bounce) I.mem->untrack_allocation(s.bounce, s.bounce_bytes);
             I.aa_streams_.erase(h); wr64(I, out, 0); tr(-889); return -889;
@@ -260,11 +264,6 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         size_t queued = 0, capacity = 0;
         I.engine->stream_buffer_info(s.engine_stream, s.rate, queued, capacity);
         s.aa_buffer_frames = static_cast<uint32_t>(capacity);
-        if (b.capacity > 0 && static_cast<size_t>(b.capacity) > capacity) {
-            I.engine->stream_close(s.engine_stream);
-            if (s.bounce) I.mem->untrack_allocation(s.bounce, s.bounce_bytes);
-            I.aa_streams_.erase(h); wr64(I, out, 0); tr(-889); return -889;
-        }
         if (s.engine_stream) I.engine->stream_pause(s.engine_stream, true);
         const bool has_callback = s.cb_fn && s.bounce && s.cb_scheduled;
         pmu.unlock();
@@ -373,6 +372,50 @@ std::optional<int64_t> AudioDispatch::aaudio() {
             : name == "AAudioStream_getSpatializationBehavior" ? s.aa_spatialization
             : name == "AAudioStream_isContentSpatialized" ? s.aa_spatialized
             : s.aa_privacy_sensitive;
+        tr(result); return result;
+    }
+    if (name == "AAudioStream_getContentType" ||
+        name == "AAudioStream_getHardwareSampleRate" ||
+        name == "AAudioStream_getHardwareChannelCount" ||
+        name == "AAudioStream_getHardwareFormat") {
+        // AudioStreamTrack::open copies the HAL's mixer configuration; here the
+        // HAL is the host device the engine opened with this stream, so report
+        // that device (AAudioConvert_androidToNearestAAudioDataFormat for the
+        // format: I16 and FLOAT map to themselves, anything else is INVALID).
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        auto it = I.aa_streams_.find(R(0));
+        if (it == I.aa_streams_.end()) { tr(-892); return -892; }
+        int64_t result = it->second.aa_content_type;
+        if (name != "AAudioStream_getContentType") {
+            const uint32_t sample_size = I.engine ? I.engine->sample_size() : 0;
+            result = name == "AAudioStream_getHardwareSampleRate"
+                    ? static_cast<int64_t>(I.engine ? I.engine->sample_rate() : it->second.rate)
+                : name == "AAudioStream_getHardwareChannelCount"
+                    ? static_cast<int64_t>(I.engine ? I.engine->channels() : it->second.ch)
+                : static_cast<int64_t>(sample_size == 2 ? 1 : sample_size == 4 ? 2 : -1);  // I16, FLOAT, INVALID
+        }
+        tr(result); return result;
+    }
+    if (name == "AAudio_getMMapPolicy" || name == "AAudio_setMMapPolicy") {
+        // AudioGlobal_setMMapPolicy: UNSPECIFIED/NEVER/AUTO/ALWAYS are recorded,
+        // anything else is ILLEGAL_ARGUMENT. Streams here never use MMAP.
+        std::lock_guard<std::recursive_mutex> g(I.mu);
+        int64_t result = I.aa_mmap_policy_;
+        if (name == "AAudio_setMMapPolicy") {
+            const int32_t policy = static_cast<int32_t>(R(0));
+            if (policy >= 0 && policy <= 3) I.aa_mmap_policy_ = policy;
+            result = policy >= 0 && policy <= 3 ? 0 : -898;
+        }
+        tr(result); return result;
+    }
+    if (name == "AAudioStream_read") {
+        // AAudioStream_read validates its arguments, then AudioStream::read,
+        // which only input streams override: an output stream answers
+        // UNIMPLEMENTED. Input streams are not opened (openStream: -890).
+        std::lock_guard<std::mutex> lock(I.pump_mu);
+        if (!I.aa_streams_.count(R(0))) { tr(-892); return -892; }
+        const int32_t frames = static_cast<int32_t>(R(2));
+        const int64_t result = !R(1) ? -886 : frames < 0 ? -898 : frames == 0 ? 0 : -890;
         tr(result); return result;
     }
     if (name == "AAudioStream_close") {

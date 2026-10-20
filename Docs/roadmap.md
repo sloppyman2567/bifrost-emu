@@ -206,25 +206,6 @@ video-ad playback or full lifecycle/recreation behavior.
   reported cancelled (Roblox's Credential Manager, Azur Lane's Play Games).
 - Cover the selected games' audio APIs, callback threading, buffer timing
   and device changes, preserving sound during normal gameplay.
-- Complete the NDK AAudio surface for FMOD (Roblox reports "no audio driver":
-  FMOD `System::init` fails with result 51, AAudio being FMOD's default
-  output on Android 8.1+). Our `libaaudio` lacks seven public symbols of the
-  Android 15 `libaaudio.map.txt`: `AAudio_getMMapPolicy`/`setMMapPolicy`,
-  `AAudioStream_read`, `getContentType` (API 28) and
-  `getHardwareChannelCount`/`Format`/`SampleRate` (API 34). Steps:
-  1. Confirm the cause first: a fixture probe that resolves the whole AAudio
-     table with `dlsym` and opens an output stream as FMOD does, and FMOD's
-     documented meaning of result 51.
-  2. Implement them per AOSP in the AudioThunk registry and `AAudio.cpp`:
-     the builder's content type (default `MUSIC`); the host output's real
-     rate, channel count and format; MMAP policy `NEVER`, with a set policy
-     recorded; `read` on an output stream answering
-     `AAUDIO_ERROR_UNIMPLEMENTED`, as AOSP does for the wrong direction.
-     Input streams keep failing cleanly; microphone capture is out of scope.
-  3. Extend the AAudio fixture to resolve every NDK symbol and check the new
-     getters on an open stream.
-  4. Run Roblox: FMOD must initialize and play; otherwise trace the next
-     failing call from the probe.
 - Test orientation, resize, focus, pause/resume, surface loss/recreation
   and background/foreground transitions.
 - Validate decoded output beyond the small fixtures: flush/reconfigure,

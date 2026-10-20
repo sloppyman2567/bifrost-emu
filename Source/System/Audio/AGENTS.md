@@ -10,7 +10,11 @@
 - `AudioThunk/AudioThunk.cpp` owns export registration; the Android adapter builder
   reads its AAudio export list. Keep that tooling in sync when moving registration.
   AAudio validation, defaults and state rules follow AOSP libaaudio
-  `android-15.0.0_r1`; strings returned to the guest live in guest memory.
+  `android-15.0.0_r1`, and its exports match that release's
+  `src/libaaudio.map.txt`; strings returned to the guest live in guest memory.
+  A buffer capacity request sizes the stream ring (`Audio::stream_open`
+  `min_frames`) rather than failing: FMOD fails its output init on a refusal.
+  `BIFROST_AUDIO_TRACE` (a `DebugFlags.hpp` switch) traces audio thunk calls.
 - Managed OpenSL ES is the guest `Guest/Android/Adapters/opensles.c`, layered on
   the managed libaaudio adapter (its callback thread runs buffer-queue callbacks),
   not the host `AudioThunk/OpenSL.cpp` vtables. Keep its result codes and
