@@ -771,6 +771,8 @@ server classes, for one app, user 0 and the default device:
 | `alarm` | Listener and PendingIntent alarms on a scheduler thread, at least 5 s ahead (`MIN_FUTURITY`), RTC converted to elapsed time. PendingIntent repeats clamp to at least 60 s; `remove(operation)` cancels them. Exact PendingIntent alarms enforce the target-SDK permission policy; exact listener alarms remain exempt. Alarms never restart a stopped process; AlarmClockInfo scheduling is unsupported. |
 | `account` | No accounts or authenticators (no Play services); secret reads and explicit additions are rejected. |
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
+| `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). |
+| camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |
 | `telephony.registry` | No modem (`getActiveModemCount()` 0): `listenWithEventList` records or removes listeners and never notifies. It keeps TelephonyRegistry's package check, `checkListenerPermission` (location, phone-state, precise, emergency and privileged event sets) and 50-listener limit (`FrameworkTelephony`). |
 
 `notification` also accepts `cancelAll`, `cancel` and `getActiveNotifications`

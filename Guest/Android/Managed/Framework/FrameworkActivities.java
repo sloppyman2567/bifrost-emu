@@ -127,6 +127,10 @@ final class FrameworkActivities {
             System.out.println("APP_ACTIVITY_UNRESOLVED " + component.flattenToShortString());
             return START_CLASS_NOT_FOUND;
         }
+        // ActivityTaskManager adds the record to the task before startActivity
+        // returns: a caller finishing right after (a splash screen) does not
+        // leave the task empty while the launch is posted.
+        synchronized (this) { pendingLaunches++; }
         main.post(() -> {
             try {
                 launch(info, intent, resultTo, resultWho, requestCode);
@@ -134,6 +138,8 @@ final class FrameworkActivities {
                 // An exception from the app's Activity creation is fatal, as
                 // in ActivityThread.
                 throw new RuntimeException("Unable to start activity " + component, error);
+            } finally {
+                synchronized (this) { pendingLaunches--; }
             }
         });
         return START_SUCCESS;
@@ -342,13 +348,26 @@ final class FrameworkActivities {
         return record == null || record.caller == null ? null : record.caller.activity.getComponentName();
     }
 
-    // Called from the launcher's UI loop: destroys finished Activities above
-    // the root, newest first.
+    // The task's root: the launcher Activity until it finishes while others
+    // remain (a splash screen that starts the main Activity), then the next.
+    synchronized Activity root() { return stack.isEmpty() ? null : stack.get(0).activity; }
+    // Activities in the task, counting launches not yet created.
+    synchronized int size() { return stack.size() + pendingLaunches; }
+    private int pendingLaunches;
+    synchronized List<Activity> all() {
+        List<Activity> result = new ArrayList<>();
+        for (Record record : stack) result.add(record.activity);
+        return result;
+    }
+
+    // Called from the launcher's UI loop: destroys finished Activities, newest
+    // first, the root included while another remains. The launcher closes
+    // the last one, which ends the app.
     void update() throws Exception {
         while (true) {
             Record done = null;
             synchronized (this) {
-                for (int i = stack.size() - 1; i >= 1; i--)
+                for (int i = stack.size() - 1; i >= 0 && stack.size() > 1; i--)
                     if (stack.get(i).activity.isFinishing()) { done = stack.get(i); break; }
             }
             if (done == null) return;
@@ -398,8 +417,7 @@ final class FrameworkActivities {
             method(Activity.class, "performStop", boolean.class, String.class).invoke(activity, false, "bifrost");
         method(Activity.class, "performDestroy").invoke(activity);
         removeWindow(activity);
-        method(activity.getBaseContext().getClass(), "scheduleFinalCleanup", String.class, String.class)
-                .invoke(activity.getBaseContext(), activity.getClass().getName(), "Activity");
+        finalCleanup(activity);
         orientations.remove(record.token);
         System.out.println("APP_ACTIVITY_DESTROYED " + activity.getClass().getName());
     }
@@ -423,6 +441,16 @@ final class FrameworkActivities {
         String name = activity.getClass().getName();
         if (decorToken != null) closeAll.invoke(global, decorToken, name, "Activity");
         closeAll.invoke(global, method(Activity.class, "getActivityToken").invoke(activity), name, "Activity");
+    }
+
+    // handleDestroyActivity cleans up a ContextImpl base context only: apps
+    // may attach a ContextWrapper of their own (attachBaseContext).
+    static void finalCleanup(Activity activity) throws Exception {
+        android.content.Context base = activity.getBaseContext();
+        Class<?> impl = Class.forName("android.app.ContextImpl");
+        if (!impl.isInstance(base)) return;
+        method(impl, "scheduleFinalCleanup", String.class, String.class)
+                .invoke(base, activity.getClass().getName(), "Activity");
     }
 
     static boolean resumedState(Activity activity) throws Exception {

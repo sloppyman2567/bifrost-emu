@@ -157,6 +157,34 @@ class SessionResultTests(unittest.TestCase):
         self.assertEqual(self.run_session("echo APP_HOST_CLOSED; exit 1"), (1, "failed"))
 
 
+class ApkInspectionTests(unittest.TestCase):
+    def test_rotated_signer_covering_the_api_is_recorded(self):
+        # APK Signature Scheme v3.1 key rotation (Roblox): only the signer whose
+        # SDK range covers the device applies.
+        current, legacy = "2b" * 32, "44" * 32
+        output = (f"Signer (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: {current}\n"
+                  f"Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: {legacy}\n")
+        with patch("android_package.preflight.run", return_value=output):
+            self.assertEqual(package.signers(Path("app.apk"), "apksigner"), [current])
+        with patch("android_package.preflight.run", return_value=f"Signer #1 certificate SHA-256 digest: {legacy}\n"):
+            self.assertEqual(package.signers(Path("app.apk"), "apksigner"), [legacy])
+
+    def test_launcher_declared_only_by_an_alias(self):
+        from android_preflight import manifest_launcher
+        def node(tag, children=(), **attributes):
+            return {"tag": tag, "attributes": attributes, "children": list(children)}
+        def launcher_filter():
+            return node("intent-filter", [node("action", name="android.intent.action.MAIN"),
+                                          node("category", name="android.intent.category.LAUNCHER")])
+        manifest = node("manifest", [node("application", [
+            node("activity-alias", [launcher_filter()], name=".Classic", enabled="false", targetActivity=".Splash"),
+            node("activity", name=".Splash"),
+            node("activity-alias", [launcher_filter()], name=".Main", enabled="true", targetActivity=".Splash")])])
+        self.assertEqual(manifest_launcher(manifest), ".Main")
+        manifest["children"][0]["children"].pop()
+        self.assertIsNone(manifest_launcher(manifest))
+
+
 class FrameworkPackageContractTests(unittest.TestCase):
     probe_class = "FrameworkPackagesProbe"
     output_name = "android-framework-package-contract"
@@ -581,6 +609,8 @@ class PackageTests(unittest.TestCase):
             # As Unity's player Activity declares it.
             component += (f'<activity android:name="{activity}$Engine" android:exported="false" '
                           'android:hardwareAccelerated="false"/>')
+        if managed == "ManagedSplash" and not split:
+            component += f'<activity android:name="{activity}$Main" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
             component += f'<activity android:name="{activity}$Second" android:exported="false"/>'
             component += (f'<activity android:name="{activity}$Translucent" android:exported="false" '
@@ -1243,6 +1273,24 @@ class PackageTests(unittest.TestCase):
         self.assertRegex(text, r"MANAGED_PLAY_SERVICES_GSERVICES rows=0 uid=1\d{4}\n")
         self.assertIn("MANAGED_PLAY_SERVICES_CHIMERA com.google.android.gms/org.microg.gms.measurement."
                       "MeasurementService", text)
+
+    def test_managed_splash_hands_off_to_main_activity(self):
+        # The launcher Activity finishing right after startActivity does not
+        # end the app: the started Activity becomes the task's root.
+        state = self.work / "splash-state"
+        bundle = self.work / "splash.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("splash", managed="ManagedSplash"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|NoSuchMethodException|Unable to start activity")
+        markers = ["MANAGED_SPLASH_FINISHING", "MANAGED_SPLASH_MAIN_RESUMED",
+                   "MANAGED_SPLASH_DESTROYED", "MANAGED_SPLASH_MAIN_DESTROYED"]
+        positions = [text.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions), text[-30000:])
 
     def test_managed_activity_stack(self):
         state = self.work / "activities-state"

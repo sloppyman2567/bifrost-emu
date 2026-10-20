@@ -85,7 +85,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `FrameworkSurfaces` following SurfaceView's visibility contract;
   `FrameworkSurfaces`, not SurfaceView's own `updateSurface`, owns their
   surface lifecycle (see the runtime guide). Keep
-  ActivityThread's lifecycle order. Hardware-accelerated Activity windows
+  ActivityThread's lifecycle order. The task ends with its last Activity: a
+  root that finishes after starting another (a splash screen) is destroyed
+  and the next becomes root; launches posted by `startActivity` count as
+  present. Hardware-accelerated Activity windows
   draw through their ViewRootImpl's own ThreadedRenderer into a host layer
   (`FrameworkWindows.drawHardware`); each window's SurfaceViews are restacked
   directly below it (host op 19). A host surface is owned only by its

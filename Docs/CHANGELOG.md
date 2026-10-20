@@ -74,6 +74,20 @@ labels below are historical records.
   `MediaPlayer`, as Google Mobile Ads' video view does in Hungry Shark
   World, no longer ends the app.
 
+### Roblox startup (2026-10-17)
+
+- The installer accepts APK Signature Scheme v3.1 key rotation (records the
+  signer covering API 35) and launchers declared only by an `activity-alias`.
+- A launcher Activity that starts another and finishes (Roblox's splash)
+  no longer ends the app; the started Activity becomes the task's root.
+  Activity teardown cleans up only a `ContextImpl` base context, as AOSP
+  does, so apps that wrap it no longer crash the launcher.
+- `appwidget` service (`getAppWidgetIds`) and `FEATURE_APP_WIDGETS`.
+- `config.disable_cameraservice=true` describes the camera-less device:
+  libcamera2ndk no longer polls for `media.camera` forever.
+- Roblox reaches its main Activity; its main thread then blocks (under
+  investigation).
+
 ### Per-context GL state (2026-10-17)
 
 - GraphicThunk keeps one GL state tracker per EGL context, selected by each

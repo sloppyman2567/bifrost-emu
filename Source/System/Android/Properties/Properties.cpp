@@ -212,6 +212,10 @@ std::map<std::string, std::string> load_android_properties(const std::string& ro
         // libcutils probes memfd_create and F_SEAL_FUTURE_WRITE itself.
         // Enable that path instead of requiring the removed ashmem driver.
         {"sys.use_memfd", "true"},
+        // No camera HAL or cameraserver: libcamera2ndk and CameraManager skip
+        // the service (CameraUtils::isCameraServiceDisabled) and list no
+        // cameras, instead of polling for media.camera forever.
+        {"config.disable_cameraservice", "true"},
     };
     for (const auto& [key, value] : kDefaults) props.emplace(key, value);
     return props;

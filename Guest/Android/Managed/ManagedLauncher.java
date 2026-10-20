@@ -119,6 +119,7 @@ public final class ManagedLauncher {
     private static final FrameworkVibrator vibrator = new FrameworkVibrator(packages);
     private static final FrameworkKeyguard keyguard = new FrameworkKeyguard(packages);
     private static final FrameworkClipboard clipboard = new FrameworkClipboard(packages, () -> windowOpen);
+    private static final FrameworkAppWidgets appWidgets = new FrameworkAppWidgets(packages);
     private static final FrameworkAlarms alarms = new FrameworkAlarms(packages);
     private static final FrameworkAccounts accounts = new FrameworkAccounts(packages);
     private static final FrameworkLocation location = new FrameworkLocation(packages);
@@ -642,6 +643,7 @@ public final class ManagedLauncher {
         inputMethod.install(services);
         users.install(services);
         deviceIdle.install(services);
+        appWidgets.install(services);
         // The runner provisions one writable emulated volume for user 0.
         // Android 15's VolumeInfo.buildStorageVolume uses the same path for
         // both app and internal access to an emulated volume.
@@ -1395,8 +1397,7 @@ public final class ManagedLauncher {
         call(Class.forName("android.app.QueuedWork"), "waitToFinish", new Class<?>[0]);
         call(activity, "performDestroy", new Class<?>[0]);
         FrameworkActivities.removeWindow(activity);
-        call(activity.getBaseContext(), "scheduleFinalCleanup", new Class<?>[] {String.class, String.class},
-                activity.getClass().getName(), "Activity");
+        FrameworkActivities.finalCleanup(activity);
         System.out.println("APP_DESTROYED");
         System.out.println("APP_WINDOW_CLOSED");
     }
@@ -1425,14 +1426,17 @@ public final class ManagedLauncher {
                     for (int i = 0; i < 64; i++) {
                         int error = pollWindow(event);
                         if (error != 0) throw new IllegalStateException("window poll: " + error);
-                        if (event[1] != 0 || activity.isFinishing()) {
+                        // The task ends with its last Activity; an earlier
+                        // root (a splash screen) finishing is not the app's end.
+                        Activity root = activities.root();
+                        if (event[1] != 0 || (root.isFinishing() && activities.size() == 1)) {
                             boolean hostClosed = event[1] != 0;
                             // Apps may kill their own process during teardown
                             // (Process.killProcess); the session reports this
                             // marker plus SIGKILL as a user close.
                             if (hostClosed) System.out.println("APP_HOST_CLOSED");
                             activities.closeAll();
-                            closeActivity(activity);
+                            closeActivity(root);
                             jobs.close();
                             if (hostClosed) serviceRuntime.shutdown(() -> System.exit(0));
                             else serviceRuntime.whenIdle(() -> System.exit(0));
@@ -1445,10 +1449,11 @@ public final class ManagedLauncher {
                             // ActivityThread applies a WMS bounds change this way.
                             Object resources = Class.forName("android.app.ResourcesManager")
                                     .getMethod("getInstance").invoke(null);
-                            call(resources, "updateResourcesForActivity",
-                                    new Class<?>[] {IBinder.class, Configuration.class, int.class},
-                                    call(activity, "getActivityToken", new Class<?>[0]),
-                                    displays.activityOverride(), 0);
+                            for (Activity each : activities.all())
+                                call(resources, "updateResourcesForActivity",
+                                        new Class<?>[] {IBinder.class, Configuration.class, int.class},
+                                        call(each, "getActivityToken", new Class<?>[0]),
+                                        displays.activityOverride(), 0);
                             // ViewConfiguration caches 4 * maxBounds area as the
                             // software drawing-cache limit, per density, forever
                             // (a phone display never grows). Rebuild it from the
@@ -1459,7 +1464,7 @@ public final class ManagedLauncher {
                             windows.displayChanged();
                         }
                         if (event[0] == 0) break;
-                        dispatch(activity, event);
+                        dispatch(root, event);
                     }
                     activities.update();
                     windows.render();

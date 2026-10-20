@@ -4,6 +4,19 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Splash hand-off and installer launchers (2026-10-19)
+
+`test_managed_splash_hands_off_to_main_activity` launches `ManagedSplash`. Its
+launcher Activity wraps its base context, starts `Main` and finishes at once.
+The app must keep running in `Main`; markers must show the splash finishing,
+`Main` resuming, then both being destroyed, with no fatal exception.
+`ApkInspectionTests` checks two installer cases. The first is
+`apksigner` output with v3.1 rotated signers: only the API 35 signer is
+recorded. The second is a launcher declared only by an enabled
+`activity-alias`. `test_android_package.py` passes 35 of 37, with the same
+two failures as the checkpoint below. Roblox itself reaches its main Activity,
+then its main thread blocks; that hang is not covered here.
+
 ## TextureView native-buffer images (2026-10-19)
 
 `test_managed_hardware_canvas` now shows a TextureView. It reads back two

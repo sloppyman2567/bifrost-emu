@@ -107,6 +107,14 @@ def signers(path, apksigner):
     values = re.findall(
         r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$", output, re.M
     )
+    # Key rotation (APK Signature Scheme v3.1) labels each signer with the SDK
+    # range it covers; only the signer covering API applies on this device.
+    values += [
+        digest for low, high, digest in re.findall(
+            r"^Signer \(minSdkVersion=(\d+), maxSdkVersion=(\d+)\) certificate SHA-256 digest: "
+            r"([0-9a-fA-F]{64})$", output, re.M)
+        if int(low) <= API <= int(high)
+    ]
     if not values:
         raise ValueError("APK verification returned no signer certificates")
     return sorted(x.lower() for x in values)

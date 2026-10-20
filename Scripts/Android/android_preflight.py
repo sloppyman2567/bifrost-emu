@@ -114,6 +114,24 @@ def qualify(package, name):
     return name if "." in name else package + "." + name
 
 
+def manifest_launcher(manifest):
+    """First enabled MAIN/LAUNCHER activity or alias, as the launcher's
+    PackageManager query finds it. AAPT2 badging omits launchers that only
+    an activity-alias declares."""
+    for application in (x for x in manifest["children"] if x["tag"] == "application"):
+        for component in application["children"]:
+            if component["tag"] not in ("activity", "activity-alias"):
+                continue
+            if component["attributes"].get("enabled") in ("false", "0x0", "0x00000000"):
+                continue
+            for intent in (x for x in component["children"] if x["tag"] == "intent-filter"):
+                actions = {x["attributes"].get("name") for x in intent["children"] if x["tag"] == "action"}
+                categories = {x["attributes"].get("name") for x in intent["children"] if x["tag"] == "category"}
+                if "android.intent.action.MAIN" in actions and "android.intent.category.LAUNCHER" in categories:
+                    return component["attributes"].get("name")
+    return None
+
+
 def launcher_details(package, launcher, manifest):
     if not launcher:
         return {"kind": "no_launcher"}
@@ -189,7 +207,7 @@ def inspect_apk(name, path, aapt2, directory):
     fields = badging_fields(run([aapt2, "dump", "badging", str(path)]))
     manifest = xmltree_nodes(run([aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", str(path)]))
     identity = fields["package"]
-    launcher = fields.get("launchable-activity", {}).get("name")
+    launcher = fields.get("launchable-activity", {}).get("name") or manifest_launcher(manifest)
     report = {"archive": name, "package": identity["name"], "split": identity.get("split", ""),
               "label": fields.get("launchable-activity", {}).get("label") or fields.get("application", {}).get("label") or identity["name"],
               "icon": None if identity.get("split") else launcher_icon(fields, path, aapt2),

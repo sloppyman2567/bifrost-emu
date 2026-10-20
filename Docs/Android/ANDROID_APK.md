@@ -144,7 +144,13 @@ and requires matching signer certificates, package/version identities and split
 dependencies. It rejects duplicate/conflicting native providers and attempts
 to replace runtime or adapter libraries. Input and aggregate expanded APK size
 are capped at 2 GiB. Updates require the same signer identity and cannot
-downgrade; certificate-rotation lineages are not implemented.
+downgrade; certificate-rotation lineages are not implemented. With APK
+Signature Scheme v3.1 key rotation, apksigner labels each signer with an SDK
+range; the installer records the signer whose range covers API 35, the one
+Android uses (Roblox signs API 33+ with a rotated key). The launcher is AAPT2's
+`launchable-activity`, or else the manifest's first enabled MAIN/LAUNCHER
+activity or `activity-alias` (AAPT2 omits launchers that only an alias
+declares); an alias resolves to its `targetActivity`.
 
 Each package has an independent rootfs under ignored `android-state/`:
 
