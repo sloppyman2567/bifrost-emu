@@ -19,7 +19,8 @@ enum bifrost_android_window_event_type {
     BIFROST_WINDOW_KEY = 3, BIFROST_WINDOW_POINTER = 4
 };
 /* Input uses Android keycodes/actions/meta bits; pointer coordinates are in
- * surface pixels. One pointer per event (v2 is single-touch). No SDL enums.
+ * surface pixels. One pointer per event; concurrent touches use distinct
+ * pointer_id values (opaque keys; the host assigns Android ids). No SDL enums.
  * time_ms is CLOCK_MONOTONIC milliseconds. Zero-initialize unused fields. */
 typedef struct bifrost_android_window_event_v2 {
     uint32_t type;

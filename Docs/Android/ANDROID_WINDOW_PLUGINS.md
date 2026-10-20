@@ -81,9 +81,17 @@ SDL-pointer callbacks are not silently reinterpreted.
 Status callbacks return zero or negative errno. Poll is nonblocking and returns
 1 for an event, 0 for an empty queue, or negative errno. Events carry Android
 keycodes/actions/meta bits, monotonic milliseconds and surface-pixel pointer
-coordinates, without SDL enums or structs. V2 supports a single pointer per
-event, not Android multitouch. The SDL3 adapter filters by its own window ID,
-converts mouse coordinates to pixels and preserves modifier state. Event work
+coordinates, without SDL enums or structs. Each event carries one pointer;
+concurrent touches use distinct `pointer_id` keys with their own down, move
+and up. The host builds Android multitouch from them as InputReader does:
+every active pointer in each event, ascending ids (lowest free id for a new
+touch), `ACTION_POINTER_DOWN/UP` with the pointer index, hover dropped while
+touched, and moves/ups for an unknown key dropped. The SDL3 adapter filters
+by its own window ID, converts mouse coordinates to pixels and preserves
+modifier state. The left mouse button is a finger that follows the cursor;
+the right button is a second finger held where it was pressed (steer and
+boost at once). Touchscreen fingers keep separate keys, and SDL's synthetic
+mouse events for touches are ignored. Event work
 is bounded per pump. Invalid statuses, types, geometry, actions and nonfinite
 pointer values become `-EPROTO`; error/empty outputs discard poisoned data.
 Mouse back/forward buttons become `KEYCODE_BACK`/`KEYCODE_FORWARD` key events,

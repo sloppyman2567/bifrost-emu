@@ -1354,12 +1354,25 @@ public final class ManagedLauncher {
                     (int) e[8], (int) e[10], (int) e[7], (int) e[6], (int) e[9],
                     (int) e[19], (int) e[5]);
             if (!windows.dispatchKey(event)) activity.dispatchKeyEvent(event);
-        } else if (e[0] == 2) {  // AINPUT_EVENT_TYPE_MOTION, first pointer only
-            MotionEvent event = MotionEvent.obtain(e[11] / ms, e[12] / ms, (int) e[4],
-                    Float.intBitsToFloat((int) e[14]), Float.intBitsToFloat((int) e[15]),
-                    Float.intBitsToFloat((int) e[16]), Float.intBitsToFloat((int) e[17]),
-                    0, 1f, 1f, (int) e[6], 0);
-            event.setSource((int) e[5]);
+        } else if (e[0] == 2) {  // AINPUT_EVENT_TYPE_MOTION
+            // Pointer 0 is at words 14..18, pointer i > 0 at 15 + 5i: x, y,
+            // pressure, size, id.
+            int count = (int) Math.max(1, Math.min(e[13], 8));
+            MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[count];
+            MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[count];
+            for (int i = 0; i < count; i++) {
+                int base = i == 0 ? 14 : 15 + 5 * i;
+                properties[i] = new MotionEvent.PointerProperties();
+                properties[i].id = (int) e[base + 4];
+                properties[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+                coords[i] = new MotionEvent.PointerCoords();
+                coords[i].x = Float.intBitsToFloat((int) e[base]);
+                coords[i].y = Float.intBitsToFloat((int) e[base + 1]);
+                coords[i].pressure = Float.intBitsToFloat((int) e[base + 2]);
+                coords[i].size = Float.intBitsToFloat((int) e[base + 3]);
+            }
+            MotionEvent event = MotionEvent.obtain(e[11] / ms, e[12] / ms, (int) e[4], count,
+                    properties, coords, 0, 0, 1f, 1f, (int) e[6], 0, (int) e[5], 0);
             if ((e[5] & InputDevice.SOURCE_CLASS_POINTER) != 0) {
                 if (!windows.dispatchPointer(event)) activity.dispatchTouchEvent(event);
             } else {
@@ -1403,7 +1416,7 @@ public final class ManagedLauncher {
         FrameworkActivities.show(activity);
         System.out.println("APP_WINDOW_ADDED");
         Handler handler = new Handler(Looper.getMainLooper());
-        long[] event = new long[20];
+        long[] event = new long[55];
         int[] size = {width, height};
         handler.post(new Runnable() {
             @Override

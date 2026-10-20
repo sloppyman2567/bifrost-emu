@@ -69,6 +69,22 @@ static int32_t poll_window(void *instance, bifrost_android_window_event_v2 *out)
         out->time_ms = 1234;
         return 1;
     }
+    if (mode("poll-two-fingers")) {
+        /* key, action, x, y: two overlapping touches, a hover while touched,
+         * a third touch reusing the freed id, then a move for no touch. */
+        static const struct { int32_t key, action; float x, y; } script[] = {
+            {7, 0, 10, 20}, {9, 0, 30, 40}, {7, 2, 12, 22}, {0, 7, 1, 1}, {7, 1, 12, 22},
+            {11, 0, 50, 60}, {9, 1, 30, 40}, {11, 1, 50, 60}, {5, 2, 0, 0},
+        };
+        static unsigned step;
+        if (step == sizeof(script) / sizeof(script[0])) { step = 0; return 0; }
+        out->type = BIFROST_WINDOW_POINTER;
+        out->pointer_id = script[step].key; out->action = script[step].action;
+        out->x = script[step].x; out->y = script[step].y;
+        out->pressure = script[step].action == 1 ? 0 : 1;
+        out->time_ms = 1000 + step++;
+        return 1;
+    }
     return 0;
 }
 static int32_t show_popup(void *instance, uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h,

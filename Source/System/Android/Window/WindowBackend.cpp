@@ -662,6 +662,7 @@ public:
     popups_.clear();
     backdrop_.reset();
     clear_binding();
+    mouse_fingers_ = 0;
     if (window_) {
       sdl_.DestroyWindow(window_);
       window_ = nullptr;
@@ -864,21 +865,48 @@ public:
       if (!sdl_.GetWindowSizeInPixels(window_, &pixel_w, &pixel_h) ||
           !sdl_.GetWindowSize(window_, &logical_w, &logical_h) ||
           pixel_w <= 0 || pixel_h <= 0 || logical_w <= 0 || logical_h <= 0) continue;
+      // Touchscreens already report SDL finger events; skip the mouse events
+      // SDL synthesizes from them so one finger is not delivered twice.
       if ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-          e.button.windowID == id && e.button.button == SDL_BUTTON_LEFT) {
+          e.button.windowID == id && e.button.which != SDL_TOUCH_MOUSEID &&
+          (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT)) {
+        // The left button is the primary finger, which follows the cursor.
+        // The right button is a second finger that stays where it went down,
+        // so two-finger controls (steer while holding boost) work by mouse.
         out.x = e.button.x; out.y = e.button.y;
+        out.pointer_id = e.button.button == SDL_BUTTON_LEFT ? kMouseFinger : kMouseSecondFinger;
         out.action = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? 0 : 1;
         out.pressure = out.action == 0 ? 1 : 0; pointer = true;
-      } else if (e.type == SDL_EVENT_MOUSE_MOTION && e.motion.windowID == id) {
+        if (out.action == 0) mouse_fingers_ |= 1u << out.pointer_id;
+        else mouse_fingers_ &= ~(1u << out.pointer_id);
+      } else if (e.type == SDL_EVENT_MOUSE_MOTION && e.motion.windowID == id &&
+                 e.motion.which != SDL_TOUCH_MOUSEID) {
         out.x = e.motion.x; out.y = e.motion.y;
-        out.pressure = (e.motion.state & SDL_BUTTON_LMASK) ? 1 : 0;
-        out.action = out.pressure ? 2 : 7; pointer = true;
+        // A release this window never saw (focus moved away) would leave
+        // that finger down; release it once motion shows the button up.
+        const bool right_held = e.motion.state & SDL_BUTTON_RMASK;
+        if ((mouse_fingers_ & (1u << kMouseSecondFinger)) && !right_held) {
+          mouse_fingers_ &= ~(1u << kMouseSecondFinger);
+          out.pointer_id = kMouseSecondFinger;
+          out.action = 1; pointer = true;
+        } else {
+          out.pointer_id = kMouseFinger;
+          out.pressure = (e.motion.state & SDL_BUTTON_LMASK) ? 1 : 0;
+          if (!out.pressure && (mouse_fingers_ & (1u << kMouseFinger))) {
+            mouse_fingers_ &= ~(1u << kMouseFinger);
+            out.action = 1;
+          } else {
+            out.action = out.pressure ? 2 : 7;
+          }
+          pointer = true;
+        }
       } else if ((e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_UP ||
                   e.type == SDL_EVENT_FINGER_MOTION) && e.tfinger.windowID == id) {
         out.type = BIFROST_WINDOW_POINTER;
         out.x = e.tfinger.x * pixel_w; out.y = e.tfinger.y * pixel_h;
         out.pressure = e.tfinger.pressure;
-        out.pointer_id = static_cast<int32_t>(e.tfinger.fingerID & 0x7fffffff);
+        out.pointer_id = kFirstTouchFinger + static_cast<int32_t>(
+            e.tfinger.fingerID % static_cast<SDL_FingerID>(INT32_MAX - kFirstTouchFinger));
         out.action = e.type == SDL_EVENT_FINGER_DOWN ? 0 : e.type == SDL_EVENT_FINGER_UP ? 1 : 2;
         return 1;
       }
@@ -927,6 +955,10 @@ private:
     if (display && surface && sdl_.GetWindowSizeInPixels(window_, &pixel_w, &pixel_h))
       backdrop_.show(display, surface, pixel_w, pixel_h);
   }
+  // Host pointer keys: the two mouse fingers, then touchscreen fingers.
+  // AndroidSurfaceManager assigns the Android pointer ids.
+  static constexpr int32_t kMouseFinger = 0, kMouseSecondFinger = 1, kFirstTouchFinger = 2;
+  uint32_t mouse_fingers_ = 0; // bit per mouse finger reported down
   Sdl3 sdl_;
   SDL_Window *window_ = nullptr;
   std::unique_ptr<WlEglFns> wl_fns_;

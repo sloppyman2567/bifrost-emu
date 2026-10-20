@@ -752,7 +752,10 @@ static constexpr int32_t ACT_DOWN       = 0;
 static constexpr int32_t ACT_UP         = 1;
 static constexpr int32_t ACT_MOVE       = 2;
 static constexpr int32_t ACT_CANCEL     = 3;
+static constexpr int32_t ACT_POINTER_DOWN = 5;
+static constexpr int32_t ACT_POINTER_UP   = 6;
 static constexpr int32_t ACT_HOVER_MOVE = 7;
+static constexpr int32_t ACT_POINTER_INDEX_SHIFT = 8;
 static constexpr int32_t SRC_KEYBOARD    = 0x00000301;
 static constexpr int32_t SRC_TOUCHSCREEN = 0x00001002;
 static constexpr int32_t SRC_MOUSE       = 0x00002002;
@@ -963,18 +966,63 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
     } else if (e.type == BIFROST_WINDOW_POINTER) {
         ev.type = IE_TYPE_MOTION;
         ev.source = SRC_TOUCHSCREEN;
-        ev.action = e.action;
-        ev.pointer_count = 1;
-        ev.pointers[0] = TouchPointer{e.x, e.y, e.pressure, 1.0f, e.pointer_id};
     } else { return; }
     std::lock_guard<std::mutex> lk(mu_);
-    if (pending_.size() >= 256) pending_.pop_front();
     const int64_t time_ns = e.time_ms * 1000000;
-    if (e.type == BIFROST_WINDOW_POINTER && e.action == ACT_DOWN)
-        pointer_down_time_ns_ = time_ns;
-    ev.down_time_ns = e.type == BIFROST_WINDOW_POINTER ? pointer_down_time_ns_ : time_ns;
+    if (e.type == BIFROST_WINDOW_POINTER) {
+        if (!translate_touch_(e, time_ns, ev)) return;
+    } else {
+        ev.down_time_ns = time_ns;
+    }
     ev.event_time_ns = time_ns;
+    if (pending_.size() >= 256) pending_.pop_front();
     pending_.push_back(ev);
+}
+
+bool AndroidSurfaceManager::translate_touch_(const AndroidWindowEvent& e, int64_t time_ns,
+                                             InputEvent& ev) {
+    const TouchPointer moved{e.x, e.y, e.pressure, 1.0f, 0};
+    if (e.action == ACT_HOVER_MOVE) {
+        // A touchscreen does not hover while a finger is on it.
+        if (!touches_.empty()) return false;
+        ev.action = e.action;
+        ev.pointer_count = 1;
+        ev.pointers[0] = moved;
+        ev.down_time_ns = time_ns;
+        return true;
+    }
+    auto it = std::find_if(touches_.begin(), touches_.end(),
+                           [&](const ActiveTouch& t) { return t.key == e.pointer_id; });
+    int32_t action = ACT_MOVE;
+    if (it == touches_.end()) {
+        // A move or up for a pointer that never went down here is dropped.
+        if (e.action != ACT_DOWN || touches_.size() == std::size(ev.pointers)) return false;
+        // InputReader gives a new pointer the lowest free id; pointers stay
+        // in ascending id order, which defines their action index.
+        int32_t id = 0;
+        while (std::any_of(touches_.begin(), touches_.end(),
+                           [&](const ActiveTouch& t) { return t.pointer.id == id; }))
+            ++id;
+        if (touches_.empty()) pointer_down_time_ns_ = time_ns;
+        it = std::find_if(touches_.begin(), touches_.end(),
+                          [&](const ActiveTouch& t) { return t.pointer.id > id; });
+        it = touches_.insert(it, ActiveTouch{e.pointer_id, moved});
+        it->pointer.id = id;
+        action = touches_.size() == 1 ? ACT_DOWN : ACT_POINTER_DOWN;
+    } else {
+        it->pointer = TouchPointer{e.x, e.y, e.pressure, 1.0f, it->pointer.id};
+        if (e.action == ACT_UP) action = touches_.size() == 1 ? ACT_UP : ACT_POINTER_UP;
+    }
+    const int32_t index = static_cast<int32_t>(it - touches_.begin());
+    if (action == ACT_POINTER_DOWN || action == ACT_POINTER_UP)
+        action |= index << ACT_POINTER_INDEX_SHIFT;
+    ev.action = action;
+    ev.pointer_count = static_cast<int32_t>(touches_.size());
+    for (size_t i = 0; i < touches_.size(); ++i) ev.pointers[i] = touches_[i].pointer;
+    ev.down_time_ns = pointer_down_time_ns_;
+    // The up event still carries the pointer that leaves.
+    if (e.action == ACT_UP) touches_.erase(it);
+    return true;
 }
 
 void AndroidSurfaceManager::pump_host_events(CPU* cpu) {

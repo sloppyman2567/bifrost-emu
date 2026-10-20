@@ -60,11 +60,36 @@ int main(int argc, char **argv) {
     CHECK(manager.host_native_window() == (uint64_t(800) << 32 | 600));
     CHECK(contents(log).find("unload") == std::string::npos);
     CHECK(manager.from_surface() != 0);
+    uint64_t input = 0;
+    // Concurrent touches form one gesture, as InputReader reports them:
+    // pointers in ascending id order, the changed pointer's index in the
+    // action, the lowest free id for a new touch and the leaving pointer in
+    // its up event. Hover while touched and a move for no touch are dropped.
+    mode("poll-two-fingers");
+    manager.pump_host_events(nullptr);
+    mode("");
+    struct Expected { int32_t action; std::vector<int32_t> ids; float x0; int64_t time_ms; };
+    const Expected gesture[] = {
+        {0, {0}, 10, 1000}, {0x105, {0, 1}, 10, 1001}, {2, {0, 1}, 12, 1002},
+        {6, {0, 1}, 12, 1004}, {5, {0, 1}, 50, 1005}, {0x106, {0, 1}, 50, 1006},
+        {1, {0}, 50, 1007},
+    };
+    for (const Expected &expected : gesture) {
+      CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) == 0);
+      CHECK(manager.motion_action(input) == expected.action);
+      CHECK(manager.motion_pointer_count(input) == int32_t(expected.ids.size()));
+      for (size_t i = 0; i < expected.ids.size(); ++i)
+        CHECK(manager.motion_pointer_id(input, i) == expected.ids[i]);
+      CHECK(manager.motion_x(input, 0) == expected.x0);
+      CHECK(manager.motion_event_time(input) == expected.time_ms * 1000000);
+      CHECK(manager.motion_down_time(input) == 1000000000);
+      manager.queue_finish_event(manager.input_queue_handle(), input);
+    }
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) != 0);
     // NDK event times are System.nanoTime nanoseconds; the plugin reports ms.
     mode("poll-pointer-down");
     manager.pump_host_events(nullptr);
     mode("");
-    uint64_t input = 0;
     CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) == 0);
     CHECK(manager.motion_event_time(input) == 1234000000);
     CHECK(manager.motion_down_time(input) == 1234000000);

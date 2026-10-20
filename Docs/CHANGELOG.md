@@ -40,6 +40,16 @@ labels below are historical records.
   because HWUI releases its window through libnativewindow, which the adapter
   cannot see.
 
+### Multi-touch input (2026-10-18)
+
+- Android apps receive multi-pointer touch gestures (`ACTION_POINTER_DOWN/UP`
+  with every active pointer), assigned as InputReader does. Managed apps get
+  up to eight pointers per `MotionEvent`, previously only the first.
+- The right mouse button is a second finger held where it was pressed, so
+  two-finger controls work by mouse (steer with the left button while
+  holding boost in Hungry Shark World). Touchscreen fingers are no longer
+  also delivered as SDL's synthetic mouse events.
+
 ### Shared EGL display lifetime (2026-10-18)
 
 - `eglInitialize`/`eglTerminate` are reference-counted per display, as in

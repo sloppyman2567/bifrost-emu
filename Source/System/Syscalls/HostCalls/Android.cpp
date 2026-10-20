@@ -10,6 +10,7 @@
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/Audio/Audio.hpp"
 #include "System/Android/Surface/Surface.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
@@ -34,9 +35,10 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (!result) manager.looper_prepare(cpu.tid, 1);
                 ret_host(result);
             } else if (cpu.regs[0] == 3) {
-                // Private managed-window ABI: twenty 64-bit words. Floats
-                // occupy the low 32 bits; no host pointers cross this boundary.
-                uint64_t data[20]{};
+                // Private managed-window ABI: 55 64-bit words, up to eight
+                // touch pointers. Floats occupy the low 32 bits; no host
+                // pointers cross this boundary.
+                uint64_t data[55]{};
                 const uint64_t address = cpu.regs[1];
                 try { emu.mem().check_access(address, sizeof(data), Memory::GUEST_PROT_WRITE); }
                 catch (const EmuError&) { ret_host(-EFAULT); return 0; }
@@ -65,14 +67,20 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                         data[4] = manager.motion_action(event);
                         data[11] = manager.motion_down_time(event);
                         data[12] = manager.motion_event_time(event);
-                        data[13] = manager.motion_pointer_count(event);
-                        const float values[] = {manager.motion_x(event, 0), manager.motion_y(event, 0),
-                            manager.motion_pressure(event, 0), manager.motion_size(event, 0)};
-                        for (unsigned i = 0; i < 4; ++i) {
-                            uint32_t bits; std::memcpy(&bits, &values[i], sizeof(bits));
-                            data[14 + i] = bits;
+                        const size_t count = std::min<size_t>(manager.motion_pointer_count(event), 8);
+                        data[13] = count;
+                        // Pointer 0 uses words 14..18 and pointer i > 0 words
+                        // 15 + 5i..19 + 5i: x, y, pressure, size, id.
+                        for (size_t p = 0; p < count; ++p) {
+                            const size_t base = p == 0 ? 14 : 15 + 5 * p;
+                            const float values[] = {manager.motion_x(event, p), manager.motion_y(event, p),
+                                manager.motion_pressure(event, p), manager.motion_size(event, p)};
+                            for (unsigned i = 0; i < 4; ++i) {
+                                uint32_t bits; std::memcpy(&bits, &values[i], sizeof(bits));
+                                data[base + i] = bits;
+                            }
+                            data[base + 4] = manager.motion_pointer_id(event, p);
                         }
-                        data[18] = manager.motion_pointer_id(event, 0);
                     }
                     manager.queue_finish_event(manager.input_queue_handle(), event);
                 }

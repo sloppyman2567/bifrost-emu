@@ -374,8 +374,18 @@ public:
     GuestRunner runner_;
     FdResolver fd_resolver_;
     void translate_window_event_(const AndroidWindowEvent& event);
+    // Applies one host pointer to the current gesture and fills ev with
+    // every active pointer, as InputReader does. Requires mu_; false drops it.
+    bool translate_touch_(const AndroidWindowEvent& e, int64_t time_ns, InputEvent& ev);
 
     bool window_open_ = false;
+    // Pointers of the current gesture in ascending Android id order; key is
+    // the window backend's pointer_id. Guarded by mu_.
+    struct ActiveTouch {
+        int32_t key = 0;
+        TouchPointer pointer;
+    };
+    std::vector<ActiveTouch> touches_;
     int64_t pointer_down_time_ns_ = 0;
     std::unique_ptr<AndroidWindowBackend> window_backend_;
     struct Surface {

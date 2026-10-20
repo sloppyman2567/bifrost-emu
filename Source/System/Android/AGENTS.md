@@ -68,6 +68,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   the NDK `AKeyEvent`/`AMotionEvent` time getters return them; the managed
   launcher converts to framework milliseconds. Window plugins report
   monotonic milliseconds; backends rebase their own clocks onto it.
+- Window backends report one pointer per event under an opaque `pointer_id`
+  key. `AndroidSurfaceManager` alone owns gesture state and assigns Android
+  pointer ids and `POINTER_DOWN/UP` actions. The 55-word op-3 record is
+  shared by `HostCalls/Android.cpp`, `activity_window.c` and
+  `ManagedLauncher`; change all three together.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

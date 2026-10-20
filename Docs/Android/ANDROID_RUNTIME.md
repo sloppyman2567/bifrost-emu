@@ -2044,7 +2044,8 @@ no host layer. Host layers stack in creation order, so when a window or dim
 layer appears below existing ones, the layers above it are recreated in
 window order. `FLAG_DIM_BEHIND` adds a translucent full-display layer below
 its window. Input follows InputDispatcher: touches go to the topmost window
-containing them or to a modal window, windows with `FLAG_WATCH_OUTSIDE_TOUCH`
+containing them or to a modal window (a multi-pointer gesture stays with the
+window its first pointer chose; touches are not split across windows), windows with `FLAG_WATCH_OUTSIDE_TOUCH`
 receive `ACTION_OUTSIDE`, and keys go to the topmost focusable window (the
 back key cancels dialogs). Exactly one window has focus; a window that never
 had it gets no `onWindowFocusChanged(false)`, as under WindowManagerService.

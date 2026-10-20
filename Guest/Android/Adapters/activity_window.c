@@ -132,7 +132,8 @@ static void release_surface(void *window) {
 
 // ActivityProbe's JNI bridge to the managed-window ops of Bifrost's private
 // Android syscall 0x100E. Op 2 opens the host window and prepares this
-// thread's adapter looper; op 3 pumps host events and returns twenty words.
+// thread's adapter looper; op 3 pumps host events and returns 55 words (up to
+// eight touch pointers).
 
 static long bifrost_window(long op, long a, long b) {
     register long x0 __asm__("x0") = op;
@@ -156,12 +157,12 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_openWindow(JNIEnv *env, jclass type, j
 
 JNIEXPORT jint JNICALL Java_ActivityProbe_pollWindow(JNIEnv *env, jclass type, jlongArray out) {
     (void)type;
-    uint64_t data[20];
-    if ((*env)->GetArrayLength(env, out) != 20)
+    uint64_t data[55];
+    if ((*env)->GetArrayLength(env, out) != 55)
         return -22; // EINVAL
     long result = bifrost_window(3, (long)data, 0);
     if (result == 0)
-        (*env)->SetLongArrayRegion(env, out, 0, 20, (const jlong *)data);
+        (*env)->SetLongArrayRegion(env, out, 0, 55, (const jlong *)data);
     return (jint)result;
 }
 
