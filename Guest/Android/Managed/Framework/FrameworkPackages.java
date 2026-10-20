@@ -42,10 +42,13 @@ final class FrameworkPackages {
 
     synchronized boolean protectedBroadcast(String action) throws Exception {
         if (protectedBroadcasts == null) {
-            java.util.Set<String> names = new java.util.HashSet<>();
-            for (Object name : (List<?>) invoke(parseArchive(new java.io.File("/system/framework/framework-res.apk")), "getProtectedBroadcasts"))
-                names.add((String) name);
-            protectedBroadcasts = names;
+            protectedBroadcasts = new java.util.HashSet<>(FrameworkParseCache.strings(
+                    new java.io.File("/system/framework/framework-res.apk"), "protected-broadcasts", () -> {
+                List<String> names = new ArrayList<>();
+                for (Object name : (List<?>) invoke(parseArchive(new java.io.File("/system/framework/framework-res.apk")),
+                        "getProtectedBroadcasts")) names.add((String) name);
+                return names;
+            }));
         }
         return protectedBroadcasts.contains(action);
     }
@@ -248,12 +251,16 @@ final class FrameworkPackages {
             java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
             java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
                     && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
-            for (Object receiver : (List<?>) invoke(parseArchive(archive), "getReceivers")) {
-                List<IntentFilter> entries = new ArrayList<>();
-                for (Object entry : (List<?>) invoke(receiver, "getIntents"))
-                    entries.add(new IntentFilter((IntentFilter) invoke(entry, "getIntentFilter")));
-                filters.put(new ComponentName(pkg.packageName, (String) invoke(receiver, "getName")), entries);
-            }
+            filters = FrameworkParseCache.filters(archive, "receivers", () -> {
+                Map<ComponentName, List<IntentFilter>> found = new java.util.HashMap<>();
+                for (Object receiver : (List<?>) invoke(parseArchive(archive), "getReceivers")) {
+                    List<IntentFilter> entries = new ArrayList<>();
+                    for (Object entry : (List<?>) invoke(receiver, "getIntents"))
+                        entries.add(new IntentFilter((IntentFilter) invoke(entry, "getIntentFilter")));
+                    found.put(new ComponentName(pkg.packageName, (String) invoke(receiver, "getName")), entries);
+                }
+                return java.util.Collections.singletonMap("receivers", found);
+            }).get("receivers");
             receiverFilters.put(pkg.packageName, filters);
         }
         for (ActivityInfo info : pkg.receivers) {
@@ -622,10 +629,18 @@ final class FrameworkPackages {
         if (base.isFile() && declared) {
             java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
                     && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
-            Object parsed = parseArchive(archive);
-            componentFilters(pkg, parsed, "getProviders", providers);
-            componentFilters(pkg, parsed, "getServices", services);
-            componentFilters(pkg, parsed, "getActivities", activities);  // activity-aliases included
+            Map<String, Map<ComponentName, List<IntentFilter>>> groups = FrameworkParseCache.filters(archive, "filters", () -> {
+                Object parsed = parseArchive(archive);
+                Map<String, Map<ComponentName, List<IntentFilter>>> found = new java.util.HashMap<>();
+                for (String[] kind : new String[][] {{"providers", "getProviders"}, {"services", "getServices"},
+                        {"activities", "getActivities"}}) {  // activity-aliases included
+                    Map<ComponentName, List<IntentFilter>> filters = new java.util.HashMap<>();
+                    componentFilters(pkg, parsed, kind[1], filters);
+                    found.put(kind[0], filters);
+                }
+                return found;
+            });
+            providers = groups.get("providers"); services = groups.get("services"); activities = groups.get("activities");
         }
         providerFilters.putIfAbsent(pkg.packageName, providers);
         serviceFilters.putIfAbsent(pkg.packageName, services);
@@ -755,7 +770,7 @@ final class FrameworkPackages {
         // of app installation/grants, as PackageManager's permission registry
         // does; app permissions and target-dependent grants are rebuilt below.
         if (platformPermissions == null) {
-            PackageInfo platform = system.getPackageManager().getPackageArchiveInfo(
+            PackageInfo platform = FrameworkParseCache.archiveInfo(system.getPackageManager(),
                     "/system/framework/framework-res.apk", PackageManager.GET_PERMISSIONS);
             if (platform == null || platform.permissions == null)
                 throw new IllegalStateException("platform permission definitions unavailable");

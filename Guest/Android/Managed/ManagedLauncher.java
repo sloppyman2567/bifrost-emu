@@ -1187,8 +1187,8 @@ public final class ManagedLauncher {
         // A provisioned system package (microG's Play services) runs as the
         // session app from its priv-app directory: already parsed with its UID.
         PackageInfo provisioned = packages.systemPackage(packageName);
-        PackageInfo packageInfo = provisioned != null ? provisioned : system.getPackageManager().getPackageArchiveInfo(
-                code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_RECEIVERS
+        PackageInfo packageInfo = provisioned != null ? provisioned : FrameworkParseCache.archiveInfo(
+                system.getPackageManager(), code + "/base.apk", PackageManager.GET_ACTIVITIES | PackageManager.GET_RECEIVERS
                         | PackageManager.GET_SERVICES | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
                         | PackageManager.GET_CONFIGURATIONS | PackageManager.GET_INSTRUMENTATION
                         | PackageManager.GET_URI_PERMISSION_PATTERNS
@@ -1860,7 +1860,7 @@ public final class ManagedLauncher {
     private static void installWebView(Context system) throws Exception {
         String apk = "/product/app/webview/webview.apk";
         if (!new File(apk).isFile()) return;
-        PackageInfo pkg = system.getPackageManager().getPackageArchiveInfo(apk,
+        PackageInfo pkg = FrameworkParseCache.archiveInfo(system.getPackageManager(), apk,
                 PackageManager.GET_META_DATA | PackageManager.GET_SIGNATURES
                         | PackageManager.GET_SIGNING_CERTIFICATES | PackageManager.GET_SERVICES
                         | PackageManager.MATCH_DISABLED_COMPONENTS);
@@ -1950,7 +1950,7 @@ public final class ManagedLauncher {
 
     private static PackageInfo parseMicroG(Context system, String name, String directory, String apk, int uid)
             throws Exception {
-        PackageInfo pkg = system.getPackageManager().getPackageArchiveInfo(apk,
+        PackageInfo pkg = FrameworkParseCache.archiveInfo(system.getPackageManager(), apk,
                 PackageManager.GET_ACTIVITIES | PackageManager.GET_RECEIVERS | PackageManager.GET_SERVICES
                         | PackageManager.GET_PROVIDERS | PackageManager.GET_META_DATA
                         | PackageManager.GET_PERMISSIONS | PackageManager.GET_SIGNATURES

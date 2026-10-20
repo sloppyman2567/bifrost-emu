@@ -1503,6 +1503,29 @@ class PackageTests(unittest.TestCase):
         for marker in ("APP_ACTIVITY_CREATED", "APP_WINDOW_ADDED"):
             self.assertIn(marker, text, text[-4000:])
 
+    def test_managed_parse_cache_skips_manifest_parsing(self):
+        # Parsed manifests of immutable archives are kept in the root: a second
+        # launch starts without parsing them, and unreadable entries are parsed again.
+        state = self.work / "parse-cache-state"
+        bundle = self.work / "parse-cache.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("parse-cache", managed="ManagedSplash"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        log = state / "org.bifrost.fixture/managed/last-run.log"
+        cache = state / "org.bifrost.fixture/managed/rootfs/data/local/tmp/package-cache"
+        parsed = lambda: re.findall(r"Parse times for '([^']+)'", log.read_text())
+        self.assertEqual(package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90), 0)
+        self.assertIn("/product/app/webview/webview.apk", parsed())
+        entries = sorted(cache.glob("*.bin"))
+        self.assertGreaterEqual(len(entries), 2, entries)
+        self.assertEqual(package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90), 0)
+        self.assertEqual(parsed(), [], log.read_text()[-3000:])
+        for entry in entries: entry.write_bytes(b"not a parcel")
+        self.assertEqual(package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90), 0)
+        self.assertIn("/product/app/webview/webview.apk", parsed())
+        self.assertTrue(all(entry.read_bytes()[:4] != b"not " for entry in cache.glob("*.bin")))
+
     def test_managed_splash_hands_off_to_main_activity(self):
         # The launcher Activity finishing right after startActivity does not
         # end the app: the started Activity becomes the task's root.

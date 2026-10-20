@@ -40,6 +40,16 @@ results. Passing fixtures do not establish untested application behavior.
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
   covers the host side: request-path validation (including a symlink out of the
   root), staging, the answer returning with `done` last, and the session options.
+- `test_managed_parse_cache_skips_manifest_parsing` (`ManagedSplash`): the first
+  launch parses the WebView provider and writes cache entries; the second has
+  no `Parse times for` line; after every entry is overwritten with garbage the
+  third launch parses again and rewrites them. The timing quoted in the runtime
+  guide is from three launches of that fixture on one machine, not a benchmark.
+  The Play services, accounts, Google window, services and receiver, activity
+  stack and splash tests passed with the cache in place. A last full run of the
+  suite on the final tree was started and stopped before it finished (it opens
+  windows on the desktop), so the suite as a whole was not rerun after the
+  cache and the draw-time fix; the earlier full run (42 of 44) predates both.
 - `test_managed_view_window_and_surface_lifecycle` (`ManagedViews`) now fades
   its button in with an `AlphaAnimation` and requires its end callback. Without
   the draw-time fix the animation never ends (reproduced first, then fixed). A

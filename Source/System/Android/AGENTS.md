@@ -70,6 +70,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   (`registerProfiles`) and run from `dexopt`'s install-time odex. Keep the
   odex accepted: `PCL[]` context, the image's boot classpath and ISA props.
   `MANAGED_FIXTURE_ODEX`/`_PROFILE_SAVER` in `test_android_package.py` check it.
+- Manifest parses of immutable archives go through `FrameworkParseCache`
+  (`/data/local/tmp/package-cache` in the root): `getPackageArchiveInfo`
+  results, filters and the platform's protected broadcasts. Add a new
+  archive parse there; never cache an archive that can change under the same
+  path, size and modification time. Run
+  `test_managed_parse_cache_skips_manifest_parsing`.
 - Settings defaults are generated from pinned AOSP inputs with
   `Tools/Android/generate-settings-defaults.py`; regenerate rather than edit
   `FrameworkSettingsDefaults.java`. Preserve System overrides through runtime

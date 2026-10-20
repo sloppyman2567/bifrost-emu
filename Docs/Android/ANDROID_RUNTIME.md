@@ -2954,6 +2954,35 @@ enabled. This verifies that native clients discover the service, rather than
 only finding a Java service-cache entry. See [test evidence](../TESTS.md#native-sensor-service-follow-up-2026-10-07).
 
 
+## Startup: parsed-package cache (2026-10-20)
+
+Session logs of real launches (SpongeBob, Azur Lane) put about 7 of the 11 to
+12 seconds before the first window into manifest parsing, in this order on the
+main path: the WebView provider (3.1 to 3.3 s), the app's `base.apk` (0.9 to 1.6
+s), GmsCore when something asks for it (1.85 s), `framework-res.apk` (0.4 s) and
+Phonesky (0.2 to 0.35 s); a second parse for the intent filters follows at the
+first implicit-Intent or broadcast query. Every one of them reads an immutable
+archive, and every service child repeats the platform one.
+
+`FrameworkParseCache` keeps the result under `/data/local/tmp/package-cache` in
+the app's root: the `PackageInfo` for `getPackageArchiveInfo` calls
+(`installWebView`, `runApp`, `parseMicroG`, the platform permissions) and what
+`FrameworkPackages` derives from a full parse (filters of activities, services,
+providers and receivers, and the platform's protected broadcasts). An entry is
+keyed by the archive's path, size and modification time (all files of a split
+directory), the request flags, the platform resources' identity and the build
+fingerprint; entries for an older version of the same archive are deleted, and
+an unreadable entry is parsed again and rewritten. Writes are atomic renames.
+
+Measured with a trivial fixture app (`ManagedSplash`), three launches in one
+root: first launch (empty cache) window added at 8.2 s with the WebView parse at
+3.2 s and `framework-res` at 0.6 s, as before the change; second and third
+launches 4.85 and 4.93 s with no manifest parse in the log. The remaining
+warm time is runtime start (about 2 s), font configuration (about 1 s) and
+garbage collection. Not changed: the stalls inside apps after the first window
+(Unity, Dynamite's class loading, Firebase), which dominate a game's first 30
+seconds in those logs. A first launch after install still pays the parses.
+
 ## Managed APK launcher (2026-10-08)
 
 `ManagedLauncher` contains the Activity bootstrap previously exercised through

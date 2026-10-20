@@ -43,6 +43,11 @@ labels below are historical records.
   the game's root and its Play services processes restart when they changed.
   The library window shows which game asked while the window is open. A real
   sign-in through a game is not tested (needs credentials).
+- Startup: parsed manifests of immutable archives (WebView provider, app,
+  microG, platform resources) and the intent filters derived from them are
+  cached in the app's root (`FrameworkParseCache`). A fixture app reaches its
+  window at about 4.9 s instead of 8.2 s from its second launch on; the first
+  launch is unchanged. See the runtime guide, "Startup".
 - Fixed: legacy view animations never advanced, because the window compositor
   drew without setting `AttachInfo.mDrawingTime`. Screens shown by a fragment
   transition (every microG settings page after the first) stayed at the
