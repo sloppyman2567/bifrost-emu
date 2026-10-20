@@ -524,6 +524,53 @@ class GoogleAccountStateTests(unittest.TestCase):
             self.assertTrue(google.publish_shared(state, game))
             self.assertEqual([entry["name"] for entry in google.accounts(state)], ["user@example.test"])
 
+    def test_activity_requests_are_validated_staged_and_answered(self):
+        import json
+        import android_google as google
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            root = state / "org.example.game/managed/rootfs"
+            identifier = "a" * 32
+            cache = root / "data/user/0/org.example.game/cache/google-activity"
+            request = cache / identifier
+            request.mkdir(parents=True)
+            (request / "intent.bin").write_bytes(b"intent")
+            (request / "caller.bin").write_bytes(b"caller")
+            (request / "request.json").write_text(json.dumps({
+                "component": google.GMS + "/org.microg.gms.auth.signin.AuthSignInActivity",
+                "caller": "org.example.game/org.example.Main", "response": False}))
+            (state / "org.example.game/package.json").write_text(json.dumps({"label": "Example Game"}))
+            relay = google.ActivityRelay(state, root, [])
+            guest = "/data/user/0/org.example.game/cache/google-activity/" + identifier
+            self.assertEqual(relay.request(guest), request.resolve())
+            self.assertEqual(relay.requester(request), {"package": "org.example.game", "label": "Example Game"})
+            escaped = state / "outside"
+            (escaped / "google-activity").mkdir(parents=True)
+            (cache / ("b" * 32)).symlink_to(escaped, target_is_directory=True)
+            for bad in ("/data/user/0/org.example.game/cache/google-activity/" + "A" * 32,
+                        "/data/user/0/org.example.game/cache/google-activity/../google-activity/" + identifier + "/..",
+                        "/data/user/0/org.example.game/files/google-activity/" + identifier,
+                        "/data/user/0/org.example.game/cache/google-activity/" + "b" * 32,
+                        "/data/system/users/0", "/" + "../" * 8 + "etc"):
+                with self.assertRaises(ValueError, msg=bad): relay.request(bad)
+            # The system app's root receives the request, answers it, and the answer returns with `done` last.
+            gms = state / "gms-root"
+            google.stage_request(gms, request)
+            self.assertEqual((gms / google.ACTIVITY / "intent.bin").read_bytes(), b"intent")
+            (gms / google.ACTIVITY / "nested.json").write_text('{"resultCode": -1}')
+            google.finish_request(gms, request)
+            self.assertEqual(json.loads((request / "nested.json").read_text()), {"resultCode": -1})
+            self.assertTrue((request / "done").is_file())
+            self.assertFalse((gms / google.ACTIVITY).exists())
+            # A session without a request never sees a stale one.
+            google.stage_request(gms, request)
+            google.stage_request(gms, None)
+            self.assertFalse((gms / google.ACTIVITY).exists())
+            self.assertEqual(google.session_options("/emu", ["--window-stats", "--android-binder-broker", "/realm",
+                                                              "--unrelated"], True, "/plugin.so"),
+                             ["--emu", "/emu", "--window-stats", "--binder-broker", "/realm", "--no-jit",
+                              "--android-window-plugin", "/plugin.so"])
+
     def test_system_app_is_registered_with_microg_identity(self):
         import json
         import android_google as google
@@ -537,7 +584,13 @@ class GoogleAccountStateTests(unittest.TestCase):
             self.assertTrue(metadata["system"])
             self.assertEqual(metadata["launcher"]["class"], google.SETTINGS_ACTIVITY)
             listed = package.installed_apps(state)
-            self.assertEqual([(a["package"], a["system"]) for a in listed], [(google.GMS, True)])
+            self.assertEqual([(a["package"], a["system"], a["requester"]) for a in listed], [(google.GMS, True, None)])
+            # A game's request names the app Asgard shows beside the open window; the next start drops it.
+            google.prepare(state, "org.microg.gms.auth.signin.AuthSignInActivity", state / "request",
+                           {"package": "org.example.game", "label": "Example Game"})
+            self.assertEqual(package.installed_apps(state)[0]["requester"]["label"], "Example Game")
+            google.prepare(state, google.LOGIN_ACTIVITY)
+            self.assertIsNone(package.installed_apps(state)[0]["requester"])
 
 
 class PackageTests(unittest.TestCase):
@@ -654,6 +707,8 @@ class PackageTests(unittest.TestCase):
                 component += f'<service android:name="{activity}${service}" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleDisabled" android:enabled="false" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleRemote" android:process=":remote" android:exported="false"/>'
+            component += (f'<receiver android:name="{activity}$RemoteReceiver" android:process=":remote" android:exported="false">'
+                          '<intent-filter><action android:name="org.bifrost.fixture.REMOTE_RECEIVER"/></intent-filter></receiver>')
             component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
         if managed is True and not split:
             # Deliberately declare the lower-priority provider first.
@@ -1061,6 +1116,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("SERVICE_EXECUTION_OK", text)
         self.assertIn("JOB_SCHEDULER_OK", text)
         self.assertIn("SERVICE_PROCESS_OK", text)
+        self.assertIn("REMOTE_RECEIVER_OK", text)
         self.assertNotRegex(text, r"thread \d+: exception:|FATAL EXCEPTION|AssertionError")
         markers = ("SERVICE_EXECUTION_OK", "SERVICE_FIXTURE Activity destroyed",
                    "SERVICE_FIXTURE alive after Activity destruction", "SERVICE_FIXTURE destroy after-activity")
@@ -1407,6 +1463,43 @@ class PackageTests(unittest.TestCase):
         self.assertIn("MANAGED_ACCOUNTS_SECRETS_DENIED\n", text)
         self.assertIn("MANAGED_ACCOUNTS_MEDIA_KEY_OK\n", text, text[-30000:])
         self.assertIn("MANAGED_ACCOUNTS_OK\n", text, text[-30000:])
+
+    def test_managed_google_activity_window(self):
+        # Activities of Play services started by an app run in a window of
+        # the system app's session and return their result: explicit and
+        # implicit start, and a caller's authenticator response that the
+        # Activity ends without answering.
+        state = self.work / "google-activity-state"
+        bundle = self.work / "google-activity.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("google-activity", managed="ManagedGoogleActivity"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=300)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        nested = "".join(path.read_text(errors="replace")[-6000:] for path in
+                         sorted((state / "com.google.android.gms/managed/sessions").glob("*/stdout.log")))
+        self.assertEqual(status, 0, text[-8000:] + nested)
+        self.assertNotRegex(text, r"FATAL EXCEPTION|APP_ACTIVITY_REMOTE_FAILED")
+        for marker in ("MANAGED_GOOGLE_RESULT 7 -1 error=10\n", "MANAGED_GOOGLE_RESULT 8 -1 error=10\n",
+                       "MANAGED_GOOGLE_RESPONSE_ERROR 4 canceled\n", "MANAGED_GOOGLE_RESULT 9 0 error=null\n",
+                       "MANAGED_GOOGLE_DONE\n"):
+            self.assertIn(marker, "\n".join(line for line in text.splitlines() if "MANAGED_GOOGLE" in line or "REMOTE" in line) + "\n", nested)
+        self.assertRegex(nested, r"APP_REMOTE_REQUEST org\.microg\.gms\.auth\.signin\.AuthSignInActivity from "
+                                 r"ComponentInfo\{org\.bifrost\.fixture/org\.bifrost\.fixture\.ManagedGoogleActivity\}")
+
+    def test_google_settings_alias_starts(self):
+        # microG's SettingsActivity is an <activity-alias>: the session loads its target's class.
+        import android_google as google
+        state = self.work / "google-settings-state"
+        google.prepare(state, google.SETTINGS_ACTIVITY)
+        status = package.launch(google.GMS, state, ARGS.emu.resolve(), timeout=45)
+        text = "".join(path.read_text(errors="replace") for path in
+                       (state / google.GMS / "managed/sessions").glob("*/stdout.log"))
+        self.assertEqual(status, 124, text[-4000:])  # still open when the timeout ended it
+        self.assertNotIn("ClassNotFoundException", text)
+        for marker in ("APP_ACTIVITY_CREATED", "APP_WINDOW_ADDED"):
+            self.assertIn(marker, text, text[-4000:])
 
     def test_managed_splash_hands_off_to_main_activity(self):
         # The launcher Activity finishing right after startActivity does not

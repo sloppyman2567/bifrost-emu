@@ -171,6 +171,22 @@ final class FrameworkPackages {
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
+    // An Activity of a provisioned system package (microG's :ui Activities
+    // run in their own process on Android), or null.
+    ActivityInfo systemActivity(ComponentName component) {
+        PackageInfo pkg = system(component.getPackageName());
+        return pkg == null ? null : activityInfo(component, 0, 0, pkg.activities);
+    }
+
+    // The best Activity for an implicit Intent when it belongs to a system
+    // package, or null. Resolving materializes every pending system package.
+    ActivityInfo resolveSystemActivity(Intent intent) throws Exception {
+        List<android.content.pm.ResolveInfo> query = queryActivities(intent, intent.getType(),
+                PackageManager.MATCH_DEFAULT_ONLY, 0);
+        if (query.isEmpty() || !systemPackages.containsKey(query.get(0).activityInfo.packageName)) return null;
+        return query.get(0).activityInfo;
+    }
+
     // A parsed system package, without parsing a pending one.
     PackageInfo loadedSystemPackage(String name) {
         PackageInfo pkg = systemPackages.get(name);

@@ -36,7 +36,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkKeyboard.java", "Framework/FrameworkKeyLayout.java",
                     "Framework/FrameworkProcessRuntime.java", "Framework/FrameworkJobs.java",
                     "Framework/FrameworkContent.java", "Framework/FrameworkNativeServices.java",
-                    "Framework/FrameworkWindows.java", "Framework/FrameworkActivities.java",
+                    "Framework/FrameworkWindows.java", "Framework/FrameworkActivities.java", "Framework/FrameworkRemoteActivities.java",
                     "Framework/FrameworkAppOps.java", "Framework/FrameworkSurfaces.java",
                     "Framework/FrameworkAudio.java", "Framework/FrameworkNotifications.java",
                     "Framework/FrameworkPower.java", "Framework/FrameworkWifi.java",
@@ -888,6 +888,9 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
     # The Google accounts signed in on this device, with microG's registration for them.
     android_google.import_shared(app.parent, root)
+    # An app's request for one of microG's Activities (this session is the system app's) or none.
+    request = metadata.get("request") if metadata.get("system") else None
+    if metadata.get("system"): android_google.stage_request(root, request)
     trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;
@@ -916,11 +919,13 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         for name in ("logdw", "dnsproxyd"):
             (root / "dev/socket" / name).unlink(missing_ok=True)
         with log_path.open("wb") as log, logd_path.open("wb") as sink, ExitStack() as services:
+            relay = None if metadata.get("system") else android_google.ActivityRelay(
+                app.parent, root, android_google.session_options(emu, emu_args, no_jit, window_plugin))
             process_host = services.enter_context(closing(ProcessHost(guest_root, emu,
                     list(emu_args) + (["--no-jit"] if no_jit else [])
                     + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
                 environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args,
-                media_mask=media_mask)))
+                media_mask=media_mask, activities=relay)))
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]
             services.enter_context(closing(LogdReceiver(guest_root, sink)))
@@ -931,6 +936,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
             finally:
                 (root / "dev/socket/logdw").unlink(missing_ok=True)
                 android_google.publish_shared(app.parent, root)
+                if request: android_google.finish_request(root, request)
                 collect_trace(trace_directory, app / "managed/traces")
                 if trace_directory is not None: shutil.rmtree(trace_directory)
         if status:

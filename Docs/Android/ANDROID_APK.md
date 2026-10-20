@@ -98,7 +98,10 @@ Google's embedded sign-in page; the password goes to Google, not to Asgard),
 settings stay per app. A completed login needs real credentials and has not
 been observed here. See the
 [runtime guide](ANDROID_RUNTIME.md#google-accounts-and-sign-in-2026-10-20) for
-the account service and its limits (no sign-in prompt inside a game yet).
+the account service and its limits. When a game itself starts a Google
+screen (a Google Sign-In button, `AccountManager.addAccount`), it opens in the
+same kind of separate window and returns to the game; the library window then
+says which game asked, and the dialog's hint names it.
 
 ## Optional real Media NDK bundle
 

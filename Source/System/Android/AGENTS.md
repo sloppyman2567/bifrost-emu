@@ -53,7 +53,17 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   UID 19998, no dexopt, `runApp` uses the lazily parsed system `PackageInfo`) and
   shares accounts across roots through `<state>/.google` (import before each
   managed launch, publish after; microG settings stay per root). Run
-  `test_managed_accounts_service` and `GoogleAccountStateTests`.
+  `test_managed_accounts_service` and `GoogleAccountStateTests`. Activities of
+  `com.google.android.gms` that an app starts never load into the app:
+  `FrameworkRemoteActivities` hands the marshalled Intent to the supervisor
+  (`ProcessHost` operation `activity`, `android_google.ActivityRelay`), which
+  runs it as that system app's session in its own window and returns the
+  result. The session's root reports the app as its caller and finishes on
+  Back; the app's `AccountAuthenticatorResponse` never crosses (a stand-in is
+  relayed). A manifest receiver declared for another process runs there through
+  `FrameworkProcessRuntime.receiver` (oneway, the process stays cached); keep it
+  unordered and keep the component on the delivered Intent. Keep the request path validation and the always-written
+  `result.json` (the guest polls for it). Run `test_managed_google_activity_window`.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

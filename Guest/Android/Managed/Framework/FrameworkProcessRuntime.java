@@ -46,6 +46,8 @@ final class FrameworkProcessRuntime {
         int pid, uid;
         Object applicationThread;
         volatile boolean dead;
+        // Served a manifest receiver: stays as a cached process until the session ends.
+        volatile boolean cached;
         Child(ComponentInfo info, String processName) { this.info = info; this.processName = processName; }
     }
 
@@ -68,7 +70,7 @@ final class FrameworkProcessRuntime {
         thread.start();
     }
 
-    private static JSONObject host(JSONObject request) throws Exception {
+    static JSONObject host(JSONObject request) throws Exception {
         String token = System.getenv("ASGARD_PROCESS_TOKEN");
         if (token == null) throw new IllegalStateException("Android process supervisor is unavailable");
         request.put("token", token);
@@ -261,12 +263,40 @@ final class FrameworkProcessRuntime {
         });
     }
 
+    // Stops the running processes of a package; its next bind or provider
+    // access starts fresh ones. Used when files they cache were replaced.
+    void restart(String packageName) {
+        List<Child> victims = new ArrayList<>();
+        synchronized (this) {
+            for (Child child : children.values())
+                if (!child.dead && child.info.packageName.equals(packageName)) victims.add(child);
+        }
+        for (Child child : victims) died(child);
+    }
+
+    // Schedules a manifest receiver in the process for `info`, starting it. The
+    // receiver is a oneway call, so the process stays cached: stopping it with
+    // its last Service would lose the broadcast.
+    void receiver(ComponentInfo info, String method, Class<?>[] types, Object... args) throws Exception {
+        for (int attempt = 0;; attempt++) {
+            Child child = start(info, null);
+            child.cached = true;
+            try {
+                schedule(child, method, types, args);
+                return;
+            } catch (IllegalStateException exited) {
+                // Stopped between the lookup and the call: start a fresh process once.
+                if (attempt > 0) throw exited;
+            }
+        }
+    }
+
     // A process whose providers have clients stays cached, as LRU-ranked
     // provider hosts do; the session's exit stops it.
     void lost(Child child) { died(child); }
 
     void stop(Child child) {
-        if (content == null || !content.hosting(child)) died(child);
+        if (!child.cached && (content == null || !content.hosting(child))) died(child);
     }
 
     static final class Remote {

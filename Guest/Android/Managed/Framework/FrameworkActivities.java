@@ -54,6 +54,8 @@ final class FrameworkActivities {
         boolean occludes = true;  // ActivityRecord.mOccludesParent
         int resultCode = Activity.RESULT_CANCELED;
         Intent resultData;
+        // The Activity that started a session's root from another process.
+        ComponentName remoteCaller;
         // ActivityRecord.mCaptureCallbacks (IScreenCaptureObserver).
         final RemoteCallbackList<IInterface> captureObservers = new RemoteCallbackList<>();
         Record(Activity activity, IBinder token, Record caller, String resultWho, int requestCode) {
@@ -65,6 +67,7 @@ final class FrameworkActivities {
     private final Map<IBinder, Integer> orientations;
     private final FrameworkDisplay displays;
     private final FrameworkPackages packages;
+    private final FrameworkRemoteActivities remote;
     private final List<Record> stack = new ArrayList<>();  // root first; main thread
     private Handler main;
     private Object thread, loaded;
@@ -72,10 +75,21 @@ final class FrameworkActivities {
     private Application application;
 
     FrameworkActivities(Map<IBinder, Integer> orientations, FrameworkDisplay displays,
-            FrameworkPackages packages) {
+            FrameworkPackages packages, FrameworkProcessRuntime processes) {
         this.orientations = orientations;
         this.displays = displays;
         this.packages = packages;
+        this.remote = new FrameworkRemoteActivities(packages, processes, this::deliverRemote);
+    }
+
+    // The result of an Activity run in another window or process, delivered
+    // to the Activity waiting for it.
+    private void deliverRemote(IBinder resultTo, String who, int requestCode, int code, Intent data)
+            throws Exception {
+        Record caller = find(resultTo);
+        if (caller == null || caller.activity.isFinishing()) return;
+        method(Activity.class, "dispatchActivityResult", String.class, int.class, int.class,
+                Intent.class, String.class).invoke(caller.activity, who, requestCode, code, data, "bifrost");
     }
 
     // Activity.attach receives the ActivityThread from performLaunchActivity;
@@ -96,6 +110,7 @@ final class FrameworkActivities {
         this.instrumentation = instrumentation;
         this.application = application;
         main = new Handler(Looper.getMainLooper());
+        remote.attach(application, main);
         stack.add(new Record(root, token, null, null, -1));
     }
 
@@ -117,6 +132,13 @@ final class FrameworkActivities {
             String[] names = requested == null ? new String[0] : requested;
             postGrantResult(names, resultTo, resultWho, requestCode, 0);
             return START_SUCCESS;
+        }
+        // Play services' Activities run in a window of their own.
+        ActivityInfo system = remote.resolve(intent);
+        if (system != null) {
+            Record caller = resultTo == null ? null : find(resultTo);
+            ComponentName calling = caller != null ? caller.activity.getComponentName() : root().getComponentName();
+            return remote.start(system, intent, calling, resultTo, resultWho, requestCode);
         }
         if (component == null) {
             // Intent-filter resolution and other packages (browser, store)
@@ -214,7 +236,8 @@ final class FrameworkActivities {
                 Configuration.class).invoke(null, thread, loaded, info, token, 0, displays.activityOverride());
         ClassLoader loader = (ClassLoader) method(loaded.getClass(), "getClassLoader").invoke(loaded);
         intent.setExtrasClassLoader(loader);
-        Activity activity = instrumentation.newActivity(loader.loadClass(info.name), context, token,
+        Activity activity = instrumentation.newActivity(
+                loader.loadClass(info.targetActivity != null ? info.targetActivity : info.name), context, token,
                 application, intent, info, info.loadLabel(application.getPackageManager()),
                 null, null, null);
         attachThread(activity, thread);
@@ -349,8 +372,23 @@ final class FrameworkActivities {
     // ActivityRecord.resultTo: the Activity awaiting this one's result.
     synchronized ComponentName callingActivity(IBinder token) {
         Record record = find(token);
-        return record == null || record.caller == null ? null : record.caller.activity.getComponentName();
+        if (record == null) return null;
+        return record.caller == null ? record.remoteCaller : record.caller.activity.getComponentName();
     }
+
+    // A session started for an Activity of another app (see
+    // FrameworkRemoteActivities): its root reports that app as its caller,
+    // and finishes on Back like a dialog instead of staying in front.
+    private boolean dialogRoot;
+    synchronized void remoteRoot(ComponentName caller) {
+        stack.get(0).remoteCaller = caller;
+        dialogRoot = true;
+    }
+    synchronized boolean finishesOnBack(IBinder token) { return dialogRoot && stack.get(0).token == token; }
+
+    // What the root Activity returned with setResult/finish.
+    synchronized int rootResultCode() { return stack.get(0).resultCode; }
+    synchronized Intent rootResultData() { return stack.get(0).resultData; }
 
     // The task's root: the launcher Activity until it finishes while others
     // remain (a splash screen that starts the main Activity), then the next.

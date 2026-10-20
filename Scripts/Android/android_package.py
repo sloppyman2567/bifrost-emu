@@ -661,6 +661,7 @@ def installed_apps(state):
                            "icon": str(app / icon) if isinstance(icon, str) and re.fullmatch(r"icon\.(?:png|jpg|webp)", icon)
                                    and (app / icon).is_file() else None,
                            "installed_at": metadata.get("installed_at"), "system": bool(metadata.get("system")),
+                           "requester": metadata.get("requester"),
                            "launcher": metadata["launcher"]["kind"], "session": session})
         except (OSError, ValueError, KeyError) as error:
             result.append({"package": app.name, "label": app.name, "error": str(error),

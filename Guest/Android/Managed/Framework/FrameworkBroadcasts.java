@@ -1,4 +1,7 @@
 // Same-app dynamic/manifest broadcasts, Android 15 IIntentReceiver protocol.
+// A manifest receiver declared for another process of the app runs there: the
+// session starts that process and schedules the receiver on it (unordered, as
+// a oneway call: its result is not awaited).
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
@@ -23,6 +26,7 @@ final class FrameworkBroadcasts {
     private final ArrayDeque<Broadcast> ordered = new ArrayDeque<>();
     private Broadcast active;
     private boolean advancing;
+    private FrameworkProcessRuntime processes;
 
     // Local interfaces bypass Binder's Parcel boundary. Preserve the same
     // isolation for nested extras, not just the Intent/Bundle containers.
@@ -63,6 +67,16 @@ final class FrameworkBroadcasts {
 
     FrameworkBroadcasts(FrameworkPackages packages, FrameworkBattery battery) { this.packages = packages; this.battery = battery; }
     synchronized void attach(Object thread, String owner) { this.thread = thread; this.owner = owner; }
+    void processes(FrameworkProcessRuntime processes) { this.processes = processes; }
+
+    // The receiver's process is this one (the session's is the package name).
+    private boolean local(ActivityInfo info) {
+        String process = info.processName;
+        if (process == null || process.equals(owner)) return true;
+        try {
+            return process.equals(Class.forName("android.app.ActivityThread").getMethod("currentProcessName").invoke(null));
+        } catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+    }
     private static void user(int user) { if (user != 0 && user != -2) throw new SecurityException("Foreign broadcast user"); }
 
     static void receive(Object receiver, Intent intent, int code, String data, Bundle extras, boolean ordered, boolean sticky) throws Exception {
@@ -127,7 +141,8 @@ final class FrameworkBroadcasts {
             if ((intent.getFlags() & Intent.FLAG_RECEIVER_REGISTERED_ONLY) == 0)
                 for (ActivityInfo info : packages.receivers(intent, type, 0)) {
                     if (!allowed(info.permission)) continue;
-                    if (info.processName != null && !info.processName.equals(owner))
+                    // Only the session starts processes; its children cannot.
+                    if (!local(info) && (processes == null || System.getenv("ASGARD_PROCESS_TOKEN") == null))
                         throw new UnsupportedOperationException("Broadcast receiver in another process: " + info.processName);
                     targets.add(info);
                 }
@@ -163,6 +178,18 @@ final class FrameworkBroadcasts {
             return receiver.endpoint.asBinder();
         }
         if (thread == null) throw new UnsupportedOperationException("Manifest receiver before application attach");
+        ActivityInfo receiver = (ActivityInfo) target;
+        // BroadcastQueue names the receiver's component in the Intent it delivers.
+        intent = new Intent(intent).setComponent(new android.content.ComponentName(receiver.packageName, receiver.name));
+        if (!local(receiver)) {
+            Class<?> compat = Class.forName("android.content.res.CompatibilityInfo");
+            processes.receiver(receiver, "scheduleReceiver", new Class<?>[] {Intent.class,
+                    ActivityInfo.class, compat, int.class, String.class, Bundle.class, boolean.class, boolean.class,
+                    int.class, int.class, int.class, String.class}, copy(intent), receiver,
+                    compat.getField("DEFAULT_COMPATIBILITY_INFO").get(null), code, data, copy(extras),
+                    false, true, 0, 2, Process.myUid(), owner);
+            return null;
+        }
         Object app = thread.getClass().getMethod("getApplicationThread").invoke(thread);
         Class<?> compat = Class.forName("android.content.res.CompatibilityInfo");
         Class.forName("android.app.IApplicationThread").getMethod("scheduleReceiver", Intent.class, ActivityInfo.class,
@@ -184,6 +211,7 @@ final class FrameworkBroadcasts {
                 try {
                     if (current.index < current.targets.size()) {
                         current.waiting = deliver(current.targets.get(current.index++), current.intent, current.code, current.data, current.extras, true);
+                        if (current.waiting == null) advance();  // another process's receiver is not awaited
                     } else {
                         if (current.finished != null) receive(current.finished, current.intent, current.code, current.data, current.extras, false, false);
                         active = null; advance();

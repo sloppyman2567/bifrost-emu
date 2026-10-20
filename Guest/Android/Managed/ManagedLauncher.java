@@ -104,8 +104,9 @@ public final class ManagedLauncher {
                 @Override public void release(long window) { releaseSurface(window); }
             }));
     private static final FrameworkActivities activities =
-            new FrameworkActivities(orientations, displays, packages);
+            new FrameworkActivities(orientations, displays, packages, serviceRuntime.processes());
     private static boolean play;
+    private static FrameworkRemoteActivities.Request remoteRequest;
     private static final FrameworkJobs jobs = new FrameworkJobs(packages, () -> windowOpen);
     private static final FrameworkAppOps appOps = new FrameworkAppOps(packages);
     private static final FrameworkPermissions permissions = new FrameworkPermissions(packages);
@@ -819,7 +820,8 @@ public final class ManagedLauncher {
                         // the back instead of finishing; with no home screen here
                         // it stays in front. Other Activities are asked to finish.
                         case "onBackPressed":
-                            if (orientations.containsKey((IBinder) a[0]) && !activities.isRoot((IBinder) a[0]))
+                            if (orientations.containsKey((IBinder) a[0])
+                                    && (!activities.isRoot((IBinder) a[0]) || activities.finishesOnBack((IBinder) a[0])))
                                 Class.forName("android.app.IRequestFinishCallback")
                                         .getMethod("requestFinish").invoke(a[1]);
                             return null;
@@ -1280,8 +1282,19 @@ public final class ManagedLauncher {
                 compatibility.getField("DEFAULT_COMPATIBILITY_INFO").get(null));
         ClassLoader loader = (ClassLoader) call(loaded, "getClassLoader", new Class<?>[0]);
         registerProfiles(loaded);
-        Class<?> launcherClass = loader.loadClass(launcher);
+        // An <activity-alias> (microG's SettingsActivity) is a name for another Activity's class.
+        Class<?> launcherClass = loader.loadClass(activity.targetActivity != null ? activity.targetActivity : launcher);
         System.out.println("APP_CLASSLOADER_OK " + launcherClass.getName());
+        // An Activity another app started (FrameworkRemoteActivities): the
+        // system app opens it with that app's Intent and knows the caller.
+        remoteRequest = play && provisioned != null ? FrameworkRemoteActivities.load(loader) : null;
+        if (remoteRequest != null) {
+            if (remoteRequest.intent.getComponent() == null
+                    || !launcher.equals(remoteRequest.intent.getComponent().getClassName()))
+                throw new IllegalStateException("Staged request is for another Activity");
+            packages.installPeer(remoteRequest.caller);
+            System.out.println("APP_REMOTE_REQUEST " + launcher + " from " + remoteRequest.callingActivity);
+        }
 
         bindApplicationMetadata(thread, system, app, loaded);
         Instrumentation instrumentation =
@@ -1356,8 +1369,8 @@ public final class ManagedLauncher {
                 "createActivityContext", new Class<?>[] {thread.getClass(), loaded.getClass(),
                         ActivityInfo.class, IBinder.class, int.class, Configuration.class},
                 thread, loaded, activity, token, 0, displays.activityOverride());
-        Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                .setClassName(packageName, launcher);
+        Intent intent = remoteRequest != null ? remoteRequest.intent
+                : new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setClassName(packageName, launcher);
         Activity instance = instrumentation.newActivity(launcherClass, activityContext, token,
                 application, intent, activity, activity.loadLabel(system.getPackageManager()),
                 null, null, null);
@@ -1372,6 +1385,7 @@ public final class ManagedLauncher {
         // game Activity). The launch is posted to the main looper, so it runs
         // after this Activity is created, started and resumed, as on Android.
         if (play) activities.attach(thread, loaded, instrumentation, application, instance, token);
+        if (remoteRequest != null) activities.remoteRoot(remoteRequest.callingActivity);
         instrumentation.callActivityOnCreate(instance, null);
         System.out.println("APP_ACTIVITY_CREATED");
         System.out.println("FRAMEWORK_OK");
@@ -1493,6 +1507,10 @@ public final class ManagedLauncher {
                             // (Process.killProcess); the session reports this
                             // marker plus SIGKILL as a user close.
                             if (hostClosed) System.out.println("APP_HOST_CLOSED");
+                            if (remoteRequest != null)
+                                FrameworkRemoteActivities.writeResult(remoteRequest,
+                                        hostClosed ? Activity.RESULT_CANCELED : activities.rootResultCode(),
+                                        hostClosed ? null : activities.rootResultData());
                             activities.closeAll();
                             closeActivity(root);
                             jobs.close();
@@ -1562,6 +1580,7 @@ public final class ManagedLauncher {
         if (diagnostic) checkServiceRegistration();
         installServices(serviceChild || inventory);
         serviceRuntime.processes().content(content);
+        broadcasts.processes(serviceRuntime.processes());
         // Only the session's supervisor capability can start provider processes.
         if (!serviceChild) content.processes(serviceRuntime.processes());
         if (!inventory) reportProcessState(serviceChild ? 10 : 19);

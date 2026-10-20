@@ -405,11 +405,63 @@ a completed login, because it needs real credentials, so nothing here shows
 that the account microG stores works for Play Integrity or a game's Google
 sign-in.
 
-Limits: Activities of another package that an app starts (microG's
-`AuthSignInActivity`, `AccountPickerActivity`, `AskPermissionActivity`, which
-all declare `android:process=":ui"`) are not launched: `FrameworkActivities`
-only starts the session package's Activities, so `GoogleSignIn` buttons and
-`AccountManager.addAccount` from inside a game cannot show their UI yet.
+**Google Activities started by an app.** microG's `:ui` Activities
+(`AuthSignInActivity`, `AccountPickerActivity`, `AskPermissionActivity`,
+`LoginActivity`, …) run in their own window of the system app, through
+`FrameworkRemoteActivities`:
+
+- `FrameworkActivities.start` routes an explicit component of
+  `com.google.android.gms`, or an implicit Intent whose action starts with
+  `com.google.android.gms.` and resolves there (the parsed manifest filters;
+  implicit resolution parses the whole package), instead of loading the class
+  into the app. Other packages' Activities are still unresolved.
+- The guest marshals the Intent and the app's `PackageInfo` into
+  `<cache>/google-activity/<id>/` and asks the session supervisor
+  (`ProcessHost`, operation `activity`) to run it. `android_google.ActivityRelay`
+  stages the request in the system app's root
+  (`data/system/users/0/bifrost-activity`), starts the `com.google.android.gms`
+  session with that Activity as its root (`runApp`; the app is installed there as
+  a peer package so label and signature lookups work, and the root reports the
+  calling Activity to `getCallingActivity`, which `AuthSignInActivity` checks), and
+  waits. When the window closes the session writes the Activity's result code
+  and data; the relay returns them in `result.json` after importing the shared
+  accounts into the app's root. The app delivers the result to `onActivityResult`
+  and restarts its Play services processes when the accounts changed, because they
+  cache the device registration and accounts.
+- The caller's `AccountAuthenticatorResponse` (add-account and token screens) is
+  a Binder of the app and cannot cross: the session's Intent carries a stand-in
+  whose `onResult`/`onError` is recorded and relayed to the real one afterwards;
+  an Activity that ends without answering cancels it (`ERROR_CODE_CANCELED`).
+  An Intent carrying other Binders or file descriptors cannot be marshalled and fails
+  with `START_CANCELED`.
+- One Google window at a time (the app lock of the system app): a request while
+  the Asgard dialog's window, or another request, is open is answered cancelled
+  with an error. A request costs a cold session start (about 15 s here before
+  the window shows). Closing the window, or the app ending, cancels it.
+  Asgard's library window shows which game asked while the window is open.
+
+**Manifest broadcasts to another process.** A manifest receiver declared for
+another process of the app (microG's `LoginActivity` sends its GCM group update
+to `com.google.android.gms:persistent`) is scheduled on that process, which the
+session starts: `FrameworkBroadcasts` passes `scheduleReceiver` to
+`FrameworkProcessRuntime.receiver`, as a oneway call whose result is not awaited
+(an ordered broadcast moves on at once). The Intent carries the receiver's
+component, as `BroadcastQueue` sets it and `ActivityThread.handleReceiver`
+reads it. A process that served a receiver stays cached until the session ends;
+before this, stopping a child with its last Service lost a receiver scheduled
+in that window. A child process still cannot send to another process.
+Before this fix the broadcast threw `UnsupportedOperationException`, which
+ended the first real Google login after Google had accepted it ("problem
+connecting to Google services"; the account was stored anyway).
+
+Observed: `test_managed_google_activity_window` starts `AuthSignInActivity`
+explicitly and by action, and `AskPermissionActivity` with an authenticator
+response, from a fixture app; each opens the system app's window and returns
+(`RESULT_OK` with `errorCode=10` for a request without a configuration;
+`RESULT_CANCELED` and a cancelled response for the permission screen). Not
+observed: a real sign-in, `LoginActivity`'s own result and response relay, or
+a Google Sign-In button in a real game.
+
 Not modelled: other users, shared and restricted accounts, device-policy
 limits, `startAddAccountSession` and its relatives, the credential-grant and
 account-chooser Activities (a non-custom-token authenticator without a grant
@@ -2406,8 +2458,10 @@ Without it `Activity.startActivity` failed with a null
 (`FullScreenAdManager`) reported `onAdFailedToShow` and the game stalled
 waiting for the ad.
 
-Only explicit components of the installed package resolve. Implicit Intents
-and other packages (browser, Play Store) return `START_INTENT_NOT_RESOLVED`
+Only explicit components of the installed package resolve, plus Play services'
+Activities, which open in a window of their own (see
+[Google accounts and sign-in](#google-accounts-and-sign-in-2026-10-20)).
+Other implicit Intents and other packages (browser, Play Store) return `START_INTENT_NOT_RESOLVED`
 and an unknown class `START_CLASS_NOT_FOUND` (Android 15 values -91 and -92),
 so apps receive `ActivityNotFoundException` as on a device without a handler.
 `startActivityIntentSender` (`startIntentSenderForResult`) sends a
@@ -2417,7 +2471,7 @@ mutable flag override, and a single activity started for the caller's
 Play services' sign-in UI (Credential Manager in Roblox's login screen, Play
 Games v2's `GamesResolutionActivity` in Azur Lane), returns `START_CANCELED`,
 so the caller gets `IntentSender.SendIntentException` and continues without
-it. Another process's activities cannot be shown yet (see the roadmap).
+it. Activities of other processes cannot be shown, except Play services'.
 The exception is `PackageManager.ACTION_REQUEST_PERMISSIONS` addressed to the
 permission controller, built by `Activity.requestPermissions`
 ([android15-release](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/core/java/android/app/Activity.java)).

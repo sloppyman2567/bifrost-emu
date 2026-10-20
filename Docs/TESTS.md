@@ -28,13 +28,37 @@ results. Passing fixtures do not establish untested application behavior.
   registration but not microG's settings; unchanged roots do not re-import or
   re-publish; `google remove` reaches the next import; an account added in a
   game's root is published; the system app has UID 19998 and `system: true`.
+- `test_managed_google_activity_window` (`ManagedGoogleActivity`): an app
+  starts microG's `AuthSignInActivity` by component and by its
+  `com.google.android.gms.auth.GOOGLE_SIGN_IN` action, then
+  `AskPermissionActivity` with an `AccountAuthenticatorResponse` extra. Each
+  runs in a window of the system app's session and returns to the app:
+  `RESULT_OK` with `errorCode=10` (the Activity's answer to a request without
+  its configuration), then `RESULT_CANCELED` with the response cancelled; the
+  session reports the fixture's `Activity` as the caller. Run alone it takes
+  about 95 s (three cold sessions).
+  `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
+  covers the host side: request-path validation (including a symlink out of the
+  root), staging, the answer returning with `done` last, and the session options.
+- `test_managed_service_execution` also sends a broadcast to a manifest receiver
+  declared for the fixture's `:remote` process and checks it ran in another PID
+  with the Intent's extras (`REMOTE_RECEIVER_OK`). Reproduced first: the old
+  code threw `UnsupportedOperationException`; with only the throw removed the
+  receiver was still lost, because the child's last Service stopped it (found by
+  tracing the child's main-thread dispatch).
+- The Asgard notice for a game's request was checked once headless offscreen
+  (a seeded request showed "<game> is asking you to sign in with Google");
+  there is no automated test for it.
 - Not covered by an automated test: a completed Google login (needs
-  credentials), the Asgard dialog beyond one headless offscreen run (it listed
-  the seeded account, showed the hint and enabled the buttons), clicking
-  "Sign in" through the dialog, typing in Google's page after the
-  `media_session` fix, and any Activity of another package started from an
-  app.
-- The whole `test_android_package.py` now has 41 tests: 39 pass. The two
+  credentials), `LoginActivity` started from `AccountManager.addAccount` and its
+  response relay (an attempt to drive it needed synthetic input on the live
+  desktop and was dropped), the Asgard dialog beyond headless offscreen runs,
+  clicking "Sign in" through the dialog, typing in Google's page after the
+  `media_session` fix, and a Google Sign-In button in a real game.
+- The whole `test_android_package.py` now has 44 tests: 42 pass (run on the
+  final tree: the same two failures; one more test died copying a root when
+  the 16 GB `/tmp` filled up, as the suite's roots reach about 12 GB, and
+  passes alone — clear `/tmp/bifrost-apk-test-*` after an interrupted run). The two
   failures are the ones recorded below as pre-existing
   (`test_managed_activity_api_report` expects `getAppTasks` to throw;
   `test_managed_dialog_and_popup_windows` never exits, timeout 124); they

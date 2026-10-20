@@ -33,9 +33,22 @@ labels below are historical records.
 - New `media_session` service with no sessions. WebView forwards unhandled keys
   to `AudioManager.dispatchMediaKeyEvent`; without the service that threw in
   Chromium's key path and aborted the process (found in the sign-in window).
-- Not yet: Activities of another package started from a game (`GoogleSignIn`
-  buttons, `AccountManager.addAccount` UI), the credential-grant and account
-  chooser dialogs; see the runtime guide.
+- Not yet: the credential-grant and account chooser dialogs; see the runtime
+  guide.
+- Google Activities started by a game (`GoogleSignIn`, `AccountPicker`,
+  `AccountManager.addAccount`, token consent) open in a separate window of the
+  Play services system app and return their result to the game
+  (`FrameworkRemoteActivities`, `android_google.ActivityRelay`); the game's
+  `AccountAuthenticatorResponse` is relayed, shared accounts are imported into
+  the game's root and its Play services processes restart when they changed.
+  The library window shows which game asked while the window is open. A real
+  sign-in through a game is not tested (needs credentials).
+- Fixed: a manifest broadcast to a receiver in another process of the app threw
+  `UnsupportedOperationException`. microG's `LoginActivity` sends one right after
+  Google accepts a login, so the first real sign-in ended with "problem
+  connecting to Google services" (the account was stored). The receiver now runs
+  in that process, started by the session, and the process stays cached; the
+  delivered Intent also names the receiver component, as `handleReceiver` needs.
 
 ### Keyboard text input (2026-10-20)
 

@@ -30,8 +30,9 @@ public final class ManagedServices extends Activity {
         require(Looper.myLooper() == Looper.getMainLooper(), "service callback off main Looper");
         System.out.println("SERVICE_FIXTURE " + message);
     }
-    private void await(BooleanSupplier condition, Runnable next) {
-        long deadline = android.os.SystemClock.uptimeMillis() + 15000;
+    private void await(BooleanSupplier condition, Runnable next) { await(condition, next, 15000); }
+    private void await(BooleanSupplier condition, Runnable next, long timeout) {
+        long deadline = android.os.SystemClock.uptimeMillis() + timeout;
         main.post(new Runnable() {
             public void run() {
                 if (condition.getAsBoolean()) { next.run(); return; }
@@ -128,6 +129,14 @@ public final class ManagedServices extends Activity {
             return START_NOT_STICKY;
         }
         public void onDestroy() { event("destroy after-activity"); }
+    }
+    // A manifest receiver in the ":remote" process: it records where it ran.
+    public static final class RemoteReceiver extends android.content.BroadcastReceiver {
+        @Override public void onReceive(android.content.Context context, Intent intent) {
+            try (java.io.FileWriter out = new java.io.FileWriter(new java.io.File(context.getFilesDir(), "remote-receiver.pid"))) {
+                out.write(android.os.Process.myPid() + " " + intent.getStringExtra("origin"));
+            } catch (java.io.IOException error) { throw new IllegalStateException(error); }
+        }
     }
     public static final class LifecycleRemote extends Service {
         @Override public IBinder onBind(Intent intent) {
@@ -262,7 +271,19 @@ public final class ManagedServices extends Activity {
             }
             finally { data.recycle(); reply.recycle(); }
             unbindService(remote);
-            begin();
+            // A manifest receiver declared for the remote process runs there.
+            java.io.File marker = new java.io.File(getFilesDir(), "remote-receiver.pid");
+            marker.delete();
+            sendBroadcast(new Intent("org.bifrost.fixture.REMOTE_RECEIVER").setPackage(getPackageName()).putExtra("origin", "main"));
+            await(marker::isFile, () -> {
+                try {
+                    String[] reported = new String(java.nio.file.Files.readAllBytes(marker.toPath())).split(" ");
+                    check(Integer.parseInt(reported[0]) != android.os.Process.myPid(), "remote receiver ran in the app process");
+                    check(reported[1].equals("main"), "remote receiver lost the Intent extras");
+                    System.out.println("REMOTE_RECEIVER_OK");
+                } catch (java.io.IOException error) { throw new AssertionError(error); }
+                begin();
+            }, 60000);  // a cold child process
         });
     }
     private void begin() {

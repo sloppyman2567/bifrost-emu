@@ -344,7 +344,10 @@ def show(state):
 
         def update_hint(self, found):
             if found is not None: self.found = found
-            if self.signing_in:
+            if self.signing_in and self.window_.google_requester:
+                self.hint.setText(f"{self.window_.google_requester} asked for Google sign-in. Finish in the open Google "
+                                  "window; the account appears here when it closes.")
+            elif self.signing_in:
                 self.hint.setText("A microG window is open. Finish there; the account appears here when it closes.")
             elif not getattr(self, "found", []):
                 self.hint.setText("No Google account is signed in. Games that need Google Play services will ask for one.")
@@ -392,6 +395,7 @@ def show(state):
             self.install_button = QPushButton(themed("list-add", QStyle.StandardPixmap.SP_DialogOpenButton), "Install APK…")
             self.install_button.setMinimumHeight(34); self.install_button.setDefault(True)
             self.install_button.clicked.connect(self.install)
+            self.google_requester = None
             self.google_button = QPushButton(themed("user-identity", QStyle.StandardPixmap.SP_DialogApplyButton), "Google account…")
             self.google_button.setMinimumHeight(34); self.google_button.clicked.connect(self.google_account)
             heading.addWidget(self.search); heading.addWidget(self.google_button); heading.addWidget(self.install_button)
@@ -518,10 +522,12 @@ def show(state):
                 try:
                     if code: raise ValueError(short_error(output))
                     # System apps (microG's sign-in window) are not games.
-                    self.apps = sorted((a for a in json.loads(output) if not a.get("system")),
+                    listed = json.loads(output)
+                    self.apps = sorted((a for a in listed if not a.get("system")),
                                        key=lambda a: (a["label"].casefold(), a["package"]))
                 except (ValueError, KeyError) as error:
                     self.show_notice("Couldn't read the game library: " + str(error)[:300], error=True); return
+                self.google_request(listed)
                 self.render(); self.update_drawer()
                 app = self.app(self.announce)
                 if app:
@@ -594,6 +600,18 @@ def show(state):
 
         def google_account(self):
             GoogleAccounts(self).exec()
+
+        def google_request(self, listed):
+            """Say which game an open Google window belongs to, while its window is up."""
+            window = next((a for a in listed if a.get("system") and a["package"] == "com.google.android.gms"
+                           and a["session"].get("state") in ACTIVE), None)
+            requester = window.get("requester") if window else None
+            self.google_requester = requester["label"] if isinstance(requester, dict) and requester.get("label") else None
+            text = self.google_requester and f"{self.google_requester} is asking you to sign in with Google. Finish in the Google window."
+            if text and self.notice_text.text() != text:
+                self.show_notice(text)
+            elif not text and self.notice_text.text().endswith("Finish in the Google window."):
+                self.notice.hide()
 
         def stop_app(self, app):
             package = app["package"]

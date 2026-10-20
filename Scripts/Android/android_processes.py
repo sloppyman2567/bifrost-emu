@@ -14,8 +14,11 @@ import time
 
 
 class ProcessHost:
-    def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None):
+    def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None,
+                 activities=None):
         self.root, self.emu = Path(root), str(emu)
+        # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
+        self.activities = activities
         self.emu_args, self.environment = list(emu_args), dict(environment)
         self.dex, self.logs = dex, Path(logs)
         self.art_options = list(art_options)
@@ -165,6 +168,10 @@ class ProcessHost:
                 raise PermissionError('Invalid process capability')
             if request['operation'] == 'spawn':
                 response = self.spawn(request)
+            elif request['operation'] == 'activity':
+                if self.activities is None:
+                    raise ValueError('Activities of other packages are unavailable')
+                response = self.activities.start(request['directory'])
             elif request['operation'] == 'stop':
                 with self.lock:
                     child = self.children.get(request['key'])
@@ -195,6 +202,8 @@ class ProcessHost:
 
     def close(self):
         self.stopped.set()
+        if self.activities is not None:
+            self.activities.close()
         if hasattr(self, 'listener'):
             self.listener.close()
             if hasattr(self, 'thread'):
