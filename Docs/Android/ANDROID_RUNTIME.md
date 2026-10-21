@@ -920,6 +920,13 @@ server classes, for one app, user 0 and the default device:
 | camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |
 | `telephony.registry` | No modem (`getActiveModemCount()` 0): `listenWithEventList` records or removes listeners and never notifies. It keeps TelephonyRegistry's package check, `checkListenerPermission` (location, phone-state, precise, emergency and privileged event sets) and 50-listener limit (`FrameworkTelephony`). |
 
+`notification` accepts `enqueueTextToast`, `enqueueToast` (both return true
+for the caller's own package; a foreign package is a `SecurityException`) and
+`cancelToast`, per Android 15's `INotificationManager.aidl`. No toast window
+exists, so toasts are never displayed and a custom toast's
+`ITransientNotification.show` is never called; `Toast.show` returns normally
+instead of ending the app. Checked in `ManagedServiceBatch` (JIT only).
+
 `notification` also accepts `cancelAll`, `cancel` and `getActiveNotifications`
 for its own package: nothing is posted, so they find nothing. Clipboard and
 alarm checks construct a focused clipboard and wait for a real listener alarm.
@@ -2450,8 +2457,7 @@ by later builds. Still failing in recent logs: `appwidget.getInstalledProvidersF
 (Roblox, 22 calls; now answered: own profile, empty list, `null` for other
 profiles, `SecurityException` for a foreign package, with provider enumeration
 not modelled), `notification.enqueueToast` (Azur Lane's `Toast.show` after a
-cancelled Facebook login; toasts need a toast window and notification
-delivery, neither of which exists, so it is unchanged), and `Cannot create
+cancelled Facebook login; now accepted, see below), and `Cannot create
 AudioTrack`, which is an audio-output limit, not a service contract.
 
 Firebase next asked `IActivityManager.getContentProvider` for Play

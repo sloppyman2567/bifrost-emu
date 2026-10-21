@@ -1013,6 +1013,11 @@ public final class ManagedServiceBatch {
         notifications.cancelAll();
         notifications.cancel("tag", 7);
         check(notifications.getActiveNotifications().length == 0, "active notifications invented");
+        // Toast.show used to die on unsupported notification.enqueueToast.
+        if (Looper.myLooper() == null) Looper.prepare();
+        android.widget.Toast toast = android.widget.Toast.makeText(context, "toast", android.widget.Toast.LENGTH_SHORT);
+        toast.show();
+        toast.cancel();
     }
 
     private static void run() throws Exception {

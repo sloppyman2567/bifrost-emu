@@ -37,7 +37,10 @@ final class FrameworkNotifications implements FrameworkServices.Call {
         deleteNotificationChannelGroup,
         cancelAllNotifications,
         cancelNotificationWithTag,
-        getAppActiveNotifications
+        getAppActiveNotifications,
+        enqueueTextToast,
+        enqueueToast,
+        cancelToast
     }
 
     @Override public String[] methods() {
@@ -256,6 +259,19 @@ final class FrameworkNotifications implements FrameworkServices.Call {
             case cancelAllNotifications: user((Integer) a[1]); return null;
             case cancelNotificationWithTag: owner((String) a[1]); user((Integer) a[4]); return null;
             case getAppActiveNotifications: user((Integer) a[1]); return slice(new ArrayList<Object>());
+            // NotificationManagerService accepts a toast from the caller's own
+            // package and queues it for SystemUI. There is no toast window
+            // here, so the toast is accepted (Toast.show returns normally and
+            // an app's sign-in failure path survives) but never displayed.
+            case enqueueTextToast:
+                Objects.requireNonNull(a[2], "text");
+                if (!pkg.packageName.equals(a[0])) throw new SecurityException("Foreign toast package");
+                return true;
+            case enqueueToast:
+                Objects.requireNonNull(a[2], "callback");
+                if (!pkg.packageName.equals(a[0])) throw new SecurityException("Foreign toast package");
+                return true;
+            case cancelToast: return null;
             default: break;
         }
         File directory = new File(pkg.applicationInfo.dataDir, ".asgard-notifications");

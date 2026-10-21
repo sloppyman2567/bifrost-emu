@@ -165,8 +165,8 @@ isolated replies.
 
 - Complete related services through real state, ownership, creation and
   cleanup; keep unsupported methods explicit and improve coverage reporting.
-- Implement toast enqueue/cancel/render/timeout behavior. Azur Lane's observed
-  Google sign-in failure path currently exits on `notification.enqueueToast`.
+- Render toasts and honor their queue/timeout behavior. Enqueue and cancel are
+  accepted (Azur Lane's sign-in failure no longer exits) but nothing is shown.
 - Connect notification posting, interaction and PendingIntent delivery, then
   foreground-service notification/deadline behavior and lifecycle policy.
 - Extend current PendingIntent/receiver/alarm/job behavior toward scoped
