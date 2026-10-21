@@ -39,6 +39,7 @@
 #include "Interpreter/Decoder/Decoder.hpp"
 #include "System/Graphics/Display/WindowStats.hpp"
 #include "System/Android/Surface/Surface.hpp"
+#include "System/Syscalls/Files/SocketPolicy.hpp"
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -303,6 +304,7 @@ int main(int argc, char** argv) {
         }
         frost::set_android_back_key(back);
     }
+    arm64emu::network_offline().store(cfg.android_offline);
     while (arg_i < argc) {
         std::string a = argv[arg_i];
         if (a == "-h" || a == "--help")     { print_banner();   return 0; }

@@ -5,6 +5,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 import hashlib
+import ipaddress
 import http.client
 import json
 import os
@@ -336,6 +337,8 @@ def host_network_environment():
             raise ValueError(name + " must be 0 or 1")
         return value
     route, validation = override("BIFROST_ANDROID_HOST_NETWORK"), override("BIFROST_ANDROID_NETWORK_VALIDATED")
+    if os.environ.get("BIFROST_ANDROID_OFFLINE") == "1":
+        route = "0"  # the emulator also refuses the sockets; Android should say so
     interface = host_default_interface()
     online = route == "1" if route is not None else interface is not None
     validated = online and (validation == "1" if validation is not None else host_network_validated())
@@ -472,7 +475,8 @@ class DnsProxy:
         ("SERVICE", 9), ("SOCKTYPE", 10), ("SYSTEM", 11), ("OVERFLOW", 14))
         if hasattr(socket, "EAI_" + name)}
 
-    def __init__(self, root):
+    def __init__(self, root, offline=False):
+        self.offline = offline
         self.path = root / "dev/socket/dnsproxyd"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -495,11 +499,23 @@ class DnsProxy:
     def failure(code):
         return b"401\0" + struct.pack("<i", code)
 
+    @staticmethod
+    def local_name(host):
+        """Names an offline device still resolves: no name, localhost and loopback address literals."""
+        if host in ("^", "localhost", "localhost.localdomain"):
+            return True
+        try:
+            return ipaddress.ip_address(host.split("%")[0]).is_loopback
+        except ValueError:
+            return False
+
     @classmethod
-    def resolve(cls, request):
+    def resolve(cls, request, offline=False):
         args = request.decode("ascii").split()
         if len(args) != 8 or args[0] != "getaddrinfo":
             return cls.failure(4)
+        if offline and not cls.local_name(args[1]):
+            return cls.failure(7)  # EAI_NODATA, Android's "No address associated with hostname"
         _, host, service, flags, family, kind, protocol, netid = args
         flags, family, kind, protocol, netid = map(int, (flags, family, kind, protocol, netid))
         if not 0 <= netid <= 0xffffffff:
@@ -550,7 +566,7 @@ class DnsProxy:
                     client.sendall(self.failure(4))
                     return
             try:
-                response = self.resolve(bytes(request).split(b"\0", 1)[0])
+                response = self.resolve(bytes(request).split(b"\0", 1)[0], self.offline)
             except (ValueError, OverflowError, OSError):
                 response = self.failure(4)
             client.sendall(response)
@@ -930,7 +946,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]
             services.enter_context(closing(LogdReceiver(guest_root, sink)))
-            services.enter_context(closing(DnsProxy(guest_root)))
+            services.enter_context(closing(DnsProxy(guest_root, environment.get("BIFROST_ANDROID_OFFLINE") == "1")))
             status = 1
             try:
                 status = process_session.run(command, stdout=log, env=environment, timeout=timeout)

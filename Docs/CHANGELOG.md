@@ -15,6 +15,13 @@ labels below are historical records.
 
 ### Asgard app removal (2026-10-20)
 
+- Fix: the per-app `network offline` setting only changed what Android's
+  `ConnectivityManager` reported, so apps that simply opened sockets stayed
+  online. It now sets `BIFROST_ANDROID_OFFLINE=1` (new `[android] offline`
+  config key), which makes the emulator refuse `connect`/`sendto`/`sendmsg`/
+  `sendmmsg` to any non-loopback IP with `ENETUNREACH`, makes the DNS proxy
+  fail non-local names, and reports no network. Egress only: inbound traffic to
+  a wildcard listener is not filtered. `Tests/Unit/net_offline.c` covers it.
 - `asgard.py compat [PACKAGE]` reports the documented compatibility of tested
   apps from `Scripts/Android/compatibility.json` (`playable`, `title`, `runs`,
   `blocked`, else `untested`), each with its evidence and known issues; the

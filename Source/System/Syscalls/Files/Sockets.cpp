@@ -12,6 +12,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/Syscalls/Files/FilesInternal.hpp"
+#include "System/Syscalls/Files/SocketPolicy.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
 #include <algorithm>
 #include <cerrno>
@@ -190,6 +191,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             struct sockaddr_storage ss;
             socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
             if (len == 0) { ret_err(EINVAL); return 0; }
+            if (socket_egress_blocked(&ss, len)) { ret_err(ENETUNREACH); return 0; }
             if (dbg().xtrace) {
                 fprintf(stderr, "[XCONN] gfd=%llu hfd=%d fam=%d ", (unsigned long long)a0, hfd, ss.ss_family);
                 if (ss.ss_family == AF_UNIX) {
@@ -348,6 +350,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
                 socklen_t addrlen = static_cast<socklen_t>(a5);
                 if (addrlen > sizeof(dest_ss)) addrlen = sizeof(dest_ss);
                 mem_.read(a4, &dest_ss, addrlen);
+                if (socket_egress_blocked(&dest_ss, addrlen)) { ret_err(ENETUNREACH); return 0; }
                 dest_ptr = reinterpret_cast<struct sockaddr*>(&dest_ss);
             }
             ssize_t r = ::sendto(hfd, buf.data(), len,
@@ -459,6 +462,12 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
             uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
             uint64_t msg_controllen = mem_.load<uint64_t>(a1 + 40);
+            if (msg_name && msg_namelen) {
+                struct sockaddr_storage target;
+                socklen_t n = std::min<socklen_t>(msg_namelen, sizeof(target));
+                mem_.read(msg_name, &target, n);
+                if (socket_egress_blocked(&target, n)) { ret_err(ENETUNREACH); return 0; }
+            }
             // Marshal iovec array: each entry is (void* base, size_t len).
             if (msg_iovlen > 1024) msg_iovlen = 1024;  // sanity cap
             std::vector<iovec> iovs(msg_iovlen);

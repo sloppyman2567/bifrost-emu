@@ -5,7 +5,8 @@ SETTINGS = "launcher-settings.json"
 # Names accepted by the emulator's [android] back_key / BIFROST_ANDROID_BACK_KEY.
 BACK_KEYS = (("escape", "Esc"), ("backspace", "Backspace"), ("delete", "Delete"),
              ("f1", "F1"), ("f2", "F2"), ("f12", "F12"), ("none", "No back key"))
-# auto follows the host's default route; offline presents Android with no network (BIFROST_ANDROID_HOST_NETWORK=0).
+# auto follows the host's default route; offline blocks all non-loopback IP traffic (BIFROST_ANDROID_OFFLINE=1) and
+# reports no network to Android.
 NETWORKS = ("auto", "offline")
 CHOICES = {"back_key": tuple(name for name, _ in BACK_KEYS), "network": NETWORKS}
 KEYS = ("window_stats", "back_key", "network")
@@ -52,7 +53,7 @@ def launch_changes(settings):
     if "back_key" in settings:
         env["BIFROST_ANDROID_BACK_KEY"] = settings["back_key"]
     if settings.get("network") == "offline":
-        env["BIFROST_ANDROID_HOST_NETWORK"] = "0"
+        env["BIFROST_ANDROID_OFFLINE"] = "1"
     return flags, env
 
 

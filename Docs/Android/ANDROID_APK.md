@@ -118,10 +118,10 @@ so it keeps following the emulator's default.
 |---|---|---|
 | `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` |
 | `back_key` | `escape`, `backspace`, `delete`, `f1`, `f2`, `f12`, `none` | host key delivered as Back (`BIFROST_ANDROID_BACK_KEY`) |
-| `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_HOST_NETWORK=0`: Android sees no network |
+| `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 
 Precedence, highest first: an explicit command-line option or an environment
-variable you exported (for example `--window-stats`, `BIFROST_ANDROID_HOST_NETWORK`),
+variable you exported (for example `--window-stats`, `BIFROST_ANDROID_OFFLINE=0`),
 then the saved setting, then the emulator default. Unknown or malformed values in
 the file are ignored. Media decoding is not a per-app setting: its routing belongs
 to the shared realm broker.

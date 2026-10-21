@@ -40,6 +40,7 @@
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Syscalls/Syscalls.hpp"
+#include "System/Syscalls/Files/SocketPolicy.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/VFS/Nodes/UserfaultNode.hpp"
 #include <algorithm>
@@ -617,6 +618,20 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
             auto node = emu.fds().get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
+            // Offline policy: like Linux, the messages before the first refused one are still sent.
+            for (int i = 0; i < vlen; i++) {
+                uint64_t entry = a1 + static_cast<uint64_t>(i) * 64;
+                uint64_t msg_name = mem_.load<uint64_t>(entry);
+                uint32_t msg_namelen = mem_.load<uint32_t>(entry + 8);
+                if (!msg_name || !msg_namelen) continue;
+                struct sockaddr_storage target;
+                socklen_t n = std::min<socklen_t>(msg_namelen, sizeof(target));
+                mem_.read(msg_name, &target, n);
+                if (!socket_egress_blocked(&target, n)) continue;
+                if (i == 0) { ret_err(ENETUNREACH); return 0; }
+                vlen = i;
+                break;
+            }
             std::vector<struct mmsghdr> mmsg(vlen);
             std::vector<std::vector<iovec>> iovs_per(vlen);
             std::vector<std::vector<std::vector<uint8_t>>> bufs_per(vlen);

@@ -3153,7 +3153,21 @@ apps also see through netlink; addresses, routes and DNS servers are empty.
 Explicit per-network routing is unsupported, and changes to the host network
 during a session are not tracked. `BIFROST_ANDROID_HOST_NETWORK=0` or `1`
 overrides the route snapshot and `BIFROST_ANDROID_NETWORK_VALIDATED=0` or `1`
-skips the probe, for deterministic offline/online diagnostics.
+skips the probe, for deterministic offline/online diagnostics. These two only
+change what `ConnectivityManager` reports; they do not stop sockets.
+
+`BIFROST_ANDROID_OFFLINE=1` (or `[android] offline = true`) is the enforced
+offline mode (the per-app `network offline` setting). In every emulator process
+of the session, `connect`, `sendto`, `sendmsg` and `sendmmsg` to any IPv4 or
+IPv6 address except loopback (127.0.0.0/8, `::1`, the unspecified address and
+v4-mapped loopback) fail with `ENETUNREACH`, a refused `sendmmsg` entry stops
+the batch after the earlier messages as Linux does, the guest DNS proxy
+answers every name except `localhost` and loopback literals with
+`EAI_NODATA`, and Android is told there is no network. Unix, netlink and other
+non-IP sockets, `bind` and `listen` are untouched, so an app that listens on a
+wildcard address can still be reached from outside; the policy filters egress
+only. Checked with `Tests/Unit/net_offline.c` (JIT and interpreter) and the
+DNS proxy tests; not checked with a full app session.
 `ConnectivityManager.getRestrictBackgroundStatus()` reports
 `RESTRICT_BACKGROUND_STATUS_DISABLED`: the host bridge enforces no Android
 Data Saver or per-UID background restriction. This policy is independent of

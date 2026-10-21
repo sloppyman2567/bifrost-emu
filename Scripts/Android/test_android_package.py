@@ -69,14 +69,14 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(load(root), settings)
             self.assertEqual(launch_request(app, trace=True), ["start", app["package"], "--trace-apk", "calls"])
             self.assertEqual(launch_changes(settings),
-                             (["--no-window-stats"], {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_HOST_NETWORK": "0"}))
+                             (["--no-window-stats"], {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_OFFLINE": "1"}))
             native = dict(app, launcher="native_activity")
             self.assertNotIn("--trace-apk", launch_request(native, trace=True))
             # Saved choices apply to every launch, below the command line and the environment.
             self.assertEqual(apply_to_launch(root, ["--timeout", "5"], {}),
                              (["--timeout", "5", "--no-window-stats"],
-                              {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_HOST_NETWORK": "0"}))
-            self.assertEqual(apply_to_launch(root, ["--window-stats-title"], {"BIFROST_ANDROID_HOST_NETWORK": "1"}),
+                              {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_OFFLINE": "1"}))
+            self.assertEqual(apply_to_launch(root, ["--window-stats-title"], {"BIFROST_ANDROID_OFFLINE": "0"}),
                              (["--window-stats-title"], {"BIFROST_ANDROID_BACK_KEY": "f2"}))
 
     def test_start_hands_saved_settings_to_the_session_process(self):
@@ -102,7 +102,7 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(command[-3:], ["--timeout", "5", "--window-stats"])
             # The caller's own environment is not overridden by the saved choice.
             self.assertEqual(environment["BIFROST_ANDROID_BACK_KEY"], "escape")
-            self.assertEqual(environment["BIFROST_ANDROID_HOST_NETWORK"], "0")
+            self.assertEqual(environment["BIFROST_ANDROID_OFFLINE"], "1")
 
     def test_run_applies_saved_settings_below_explicit_options(self):
         import json
@@ -119,10 +119,10 @@ class LauncherArgumentTests(unittest.TestCase):
                 argv = ["android_package.py", "--state-root", str(state), "run", app.name, *extra]
                 with patch.object(package, "launch", lambda *a: calls.append(a[6]) or 0), \
                         patch.object(sys, "argv", argv), patch.dict(os.environ, clear=False):
-                    os.environ.pop("BIFROST_ANDROID_HOST_NETWORK", None)
+                    os.environ.pop("BIFROST_ANDROID_OFFLINE", None)
                     self.assertEqual(package.main(), 0)
-                    return os.environ.get("BIFROST_ANDROID_HOST_NETWORK")
-            self.assertEqual(run(), "0")
+                    return os.environ.get("BIFROST_ANDROID_OFFLINE")
+            self.assertEqual(run(), "1")
             self.assertEqual(calls[-1], ["--no-window-stats"])
             run("--window-stats")
             self.assertEqual(calls[-1], ["--window-stats"])
@@ -349,6 +349,9 @@ class HostNetworkTests(unittest.TestCase):
                          (["1", "1", "eth-test"], False))
         for name in ("BIFROST_ANDROID_HOST_NETWORK", "BIFROST_ANDROID_NETWORK_VALIDATED"):
             with self.assertRaises(ValueError): environment({name: "maybe"})
+        # The enforced offline switch is reported to Android as no network, whatever the route is.
+        self.assertEqual(environment({"BIFROST_ANDROID_OFFLINE": "1"}), (["0", "0", "eth-test"], False))
+        self.assertEqual(environment({"BIFROST_ANDROID_OFFLINE": "0"}), (["1", "1", "eth-test"], True))
 
     def test_validation_probe_requires_https_204(self):
         # NetworkMonitor: 204 validates, a redirect is a portal, the rest fails.
@@ -413,6 +416,19 @@ class DnsProxyTests(unittest.TestCase):
         canon = b"fixture.invalid\0"
         self.assertEqual(data, b"222\0" + struct.pack("!6i", 1, 1034, 10, 1, 6, 28) +
                          raw + struct.pack("!i", len(canon)) + canon + struct.pack("!i", 0))
+
+    def test_offline_resolves_only_local_names(self):
+        from android_managed import DnsProxy
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
+        with patch("android_managed.socket.getaddrinfo", return_value=answer) as resolver:
+            for host in ("example.com", "dns.google", "8.8.8.8", "2001:db8::1"):
+                self.assertEqual(DnsProxy.resolve(f"getaddrinfo {host} ^ 0 0 1 0 0".encode(), offline=True),
+                                 b"401\0" + struct.pack("<i", 7), host)
+            resolver.assert_not_called()
+            for host in ("localhost", "127.0.0.1", "::1", "^"):
+                self.assertTrue(DnsProxy.resolve(f"getaddrinfo {host} ^ 0 0 1 0 0".encode(), offline=True).startswith(b"222\0"), host)
+            # Online behaviour is unchanged.
+            self.assertTrue(DnsProxy.resolve(b"getaddrinfo example.com ^ 0 0 1 0 0").startswith(b"222\0"))
 
     def test_errors_are_android_numbers_and_bad_flags_do_not_resolve(self):
         from android_managed import DnsProxy
@@ -939,6 +955,42 @@ class CompatibilityTests(unittest.TestCase):
             self.assertIn("com.roblox.client  blocked  (2026-10-19)  [not installed]", run().stdout)
             self.assertIn("child-age", run("com.tiltingpoint.spongebob").stdout)
             self.assertEqual(run("../x").returncode, 1)
+
+
+class OfflineSocketTests(unittest.TestCase):
+    """The emulator's offline policy, with a guest program (Tests/Unit/net_offline.c)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.emulator = ARGS.emu if ARGS else ROOT / "build/release-sdl1-gl1/bifrost-emu"
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.fixture = Path(cls.directory.name) / "net_offline.elf"
+        built = subprocess.run(["make", "-s", "cross", "SRC=Tests/Unit/net_offline.c", f"OUT={cls.fixture}"],
+                               cwd=ROOT, capture_output=True, text=True)
+        if built.returncode or not cls.emulator.exists():
+            raise unittest.SkipTest("needs the AArch64 cross toolchain and a built emulator")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def run_fixture(self, mode, offline, *flags):
+        environment = dict(os.environ)
+        environment.pop("BIFROST_ANDROID_OFFLINE", None)
+        if offline:
+            environment["BIFROST_ANDROID_OFFLINE"] = offline
+        return subprocess.run([str(self.emulator), *flags, str(self.fixture), mode], env=environment,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_offline_refuses_every_ip_send_beyond_loopback(self):
+        for flags in ((), ("--no-jit",)):
+            result = self.run_fixture("offline", "1", *flags)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, "net_offline: offline checks passed"), flags)
+
+    def test_loopback_and_unix_sockets_work_either_way(self):
+        for offline in ("1", None):
+            result = self.run_fixture("any", offline)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, "net_offline: loopback checks passed"))
 
 
 class PackageTests(unittest.TestCase):
