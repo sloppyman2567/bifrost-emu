@@ -1482,6 +1482,43 @@ public final class ManagedLauncher {
         System.out.println("APP_WINDOW_CLOSED");
     }
 
+    private static final java.util.Map<View, String> webViewReports = new java.util.WeakHashMap<>();
+    private static long webViewTraceMs;
+
+    // APP_WEBVIEW: a WebView's size, position, layout params and parent chain, when they change,
+    // to see what an app asked for when a page draws at an unexpected size.
+    private static void traceWebViews(Iterable<Activity> all) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - webViewTraceMs < 500) return;
+        webViewTraceMs = now;
+        for (Activity activity : all) {
+            java.util.ArrayDeque<View> pending = new java.util.ArrayDeque<>();
+            pending.add(activity.getWindow().getDecorView());
+            while (!pending.isEmpty()) {
+                View view = pending.poll();
+                if (view instanceof android.view.ViewGroup) {
+                    android.view.ViewGroup group = (android.view.ViewGroup) view;
+                    for (int i = 0; i < group.getChildCount(); i++) pending.add(group.getChildAt(i));
+                }
+                if (!view.getClass().getName().endsWith("WebView")) continue;
+                StringBuilder chain = new StringBuilder();
+                for (android.view.ViewParent parent = view.getParent(); parent instanceof View; parent = parent.getParent()) {
+                    View each = (View) parent;
+                    chain.append(' ').append(each.getClass().getSimpleName()).append('[').append(each.getWidth())
+                            .append('x').append(each.getHeight()).append(']');
+                }
+                int[] location = new int[2];
+                view.getLocationOnScreen(location);
+                android.view.ViewGroup.LayoutParams params = view.getLayoutParams();
+                String report = view.getClass().getName() + " " + view.getWidth() + "x" + view.getHeight() + "@" + location[0]
+                        + "," + location[1] + " scale=" + view.getScaleX() + "," + view.getScaleY() + " params="
+                        + (params == null ? "null" : params.width + "x" + params.height + " " + params.getClass().getSimpleName())
+                        + " visibility=" + view.getVisibility() + " parents:" + chain;
+                if (!report.equals(webViewReports.put(view, report))) System.out.println("APP_WEBVIEW " + report);
+            }
+        }
+    }
+
     private static void play(Instrumentation instrumentation, Activity activity, int width,
             int height) throws Exception {
         // ActivityThread.handleStartActivity, then handleResumeActivity.
@@ -1570,6 +1607,7 @@ public final class ManagedLauncher {
                         dispatch(root, event);
                     }
                     activities.update();
+                    traceWebViews(activities.all());
                     windows.render();
                 } catch (Exception error) {
                     error.printStackTrace();
