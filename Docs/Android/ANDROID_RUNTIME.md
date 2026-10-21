@@ -16,6 +16,16 @@ python3 Scripts/Android/asgard.py --state-root android-state realm status
 python3 Scripts/Android/asgard.py --state-root android-state realm stop
 ```
 
+`--debug CHANNELS` (before the command, like `WINEDEBUG`) turns on trace output:
+`asgard.py --debug binder,futex run org.example.app`. Channels: `audio`, `binder`,
+`dynlink`, `fault`, `frame`, `futex`, `input`, `media`, `mmap`, `poll`,
+`process`, `thunk`, `x11` and `all` (the emulator's blanket `BIFROST_TRACE`).
+Each sets the matching trace switches in `Source/System/Core/DebugFlags.hpp`;
+only logging switches are mapped. Sessions started by the command inherit
+them. A realm broker keeps the channels it was started with (`realm stop`, then
+start it with `--debug`) so `binder` is seen only that way. An unknown channel
+is rejected before anything runs.
+
 This guide retains dated implementation and failure checkpoints. Later
 checkpoints supersede earlier limits only for the contracts they cover;
 an old failure report is not automatically a current compatibility claim.

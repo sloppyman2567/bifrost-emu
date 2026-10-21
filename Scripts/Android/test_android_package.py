@@ -808,6 +808,26 @@ class RunFromFileTests(unittest.TestCase):
                 asgard.install_for_run(str(installer), root, [str(root / "broken.apk")])
 
 
+class DebugChannelTests(unittest.TestCase):
+    def test_channels_set_only_switches_the_emulator_reads(self):
+        import asgard
+        flags = (ROOT / "Source/System/Core/DebugFlags.hpp").read_text()
+        for channel, variables in asgard.DEBUG_CHANNELS.items():
+            for variable in variables:
+                self.assertIn(f'env("{variable}")', flags, channel)
+        self.assertEqual(asgard.debug_environment(""), {})
+        self.assertEqual(asgard.debug_environment("futex, mmap,"),
+                         {"BIFROST_FUTEX_TRACE": "1", "BIFROST_TRACE_MMAP": "1", "BIFROST_TRACE_MADVISE": "1"})
+        with self.assertRaisesRegex(ValueError, "Unknown debug channel 'nope'.*futex"):
+            asgard.debug_environment("futex,nope")
+
+    def test_command_line_rejects_an_unknown_channel_before_doing_anything(self):
+        result = subprocess.run([sys.executable, str(ROOT / "Scripts/Android/asgard.py"), "--debug", "nope", "list"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Unknown debug channel", result.stderr)
+
+
 class PackageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

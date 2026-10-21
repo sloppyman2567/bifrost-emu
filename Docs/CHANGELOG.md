@@ -15,6 +15,10 @@ labels below are historical records.
 
 ### Asgard app removal (2026-10-20)
 
+- `asgard.py --debug CHANNELS` enables named trace channels (`binder`, `futex`,
+  `thunk`, `mmap`, ... `all`) over the emulator's `BIFROST_*_TRACE` switches,
+  replacing remembering individual variables. A test checks every mapped switch
+  against `DebugFlags.hpp`.
 - `asgard.py run PATH.apk|.apkm|.apks|.xapk` installs the file, then runs its
   package. Installation reports which provisioning step is missing (runtime,
   adapters, aapt2, apksigner) instead of a missing-file error.

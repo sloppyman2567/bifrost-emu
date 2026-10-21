@@ -196,6 +196,33 @@ def ensure_broker(state, emu):
 
 
 PACKAGE_FILES = (".apk", ".apkm", ".apks", ".xapk")
+# Debug channels, like WINEDEBUG: each turns on trace switches that Source/System/Core/DebugFlags.hpp
+# reads when it is present. Only logging switches belong here, never ones that change execution.
+DEBUG_CHANNELS = {
+    "audio": ("BIFROST_AUDIO_TRACE",),
+    "binder": ("BIFROST_BINDER_TRACE",),
+    "dynlink": ("BIFROST_DYNLINK_TRACE",),
+    "fault": ("BIFROST_FAULT_TRACE", "BIFROST_TRACE_CRASH"),
+    "frame": ("BIFROST_FRAME_TRACE",),
+    "futex": ("BIFROST_FUTEX_TRACE",),
+    "input": ("BIFROST_INPUT_TRACE",),
+    "media": ("BIFROST_MEDIA_TRACE",),
+    "mmap": ("BIFROST_TRACE_MMAP", "BIFROST_TRACE_MADVISE"),
+    "poll": ("BIFROST_PPOLL_TRACE",),
+    "process": ("BIFROST_PROCESS_TRACE", "BIFROST_EXEC_TRACE"),
+    "thunk": ("BIFROST_THUNK_TRACE",),
+    "x11": ("BIFROST_XTRACE",),
+    "all": ("BIFROST_TRACE",),
+}
+
+
+def debug_environment(channels):
+    """Environment switches for a comma-separated channel list."""
+    names = [name.strip() for name in channels.split(",") if name.strip()]
+    unknown = [name for name in names if name not in DEBUG_CHANNELS]
+    if unknown:
+        raise ValueError(f"Unknown debug channel {unknown[0]!r}; channels: {', '.join(DEBUG_CHANNELS)}")
+    return {variable: "1" for name in names for variable in DEBUG_CHANNELS[name]}
 
 
 def install_for_run(script, state, arguments):
@@ -219,12 +246,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
     parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    parser.add_argument("--debug", metavar="CHANNELS", default="",
+                        help="trace channels, comma-separated: " + ", ".join(DEBUG_CHANNELS) +
+                             " (a running realm broker keeps the channels it started with)")
     parser.add_argument("command", choices=("realm", "run", "start", "list", "apps", "status",
                                            "stop", "logs", "install", "uninstall", "clear-data",
                                            "launcher", "probe", "google"))
     args, remainder = parser.parse_known_args()
     state = args.state_root.resolve()
     try:
+        os.environ.update(debug_environment(args.debug))
         if args.command == "realm":
             operation = remainder[0] if remainder else "status"
             if len(remainder) > 1 or operation not in ("start", "status", "stop"):
