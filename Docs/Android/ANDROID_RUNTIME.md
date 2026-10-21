@@ -933,11 +933,9 @@ framework's `transient_notification` layout (bottom centre, not focusable or
 touchable) and calls `onToastShown`/`onToastHidden`; if the layout cannot
 inflate it logs `APP_TOAST_FAILED` and the app continues. Not modelled:
 background-toast blocking, per-package limits, toast animations are only set
-if the style exists, and the 400 ms animation allowance. Observed in the
-`ManagedDialog` fixture (a `type=2005` window shown, then removed); the
-test's own assertions do not run yet, because that test never exits (see
-[the test record](../TESTS.md)). `ManagedServiceBatch` only checks that
-`Toast.show` and `cancel` return.
+if the style exists, and the 400 ms animation allowance. Checked in the
+`ManagedDialog` fixture (a `type=2005` window shown, then removed; JIT only).
+`ManagedServiceBatch` only checks that `Toast.show` and `cancel` return.
 
 Any `android.settings.*` intent without a component is declined with
 `START_ABORTED` (`APP_ACTIVITY_SETTINGS_UNAVAILABLE`), not only for Play

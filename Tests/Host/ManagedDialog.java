@@ -128,7 +128,12 @@ public final class ManagedDialog extends Activity {
                 @Override public void surfaceCreated(SurfaceHolder holder) {
                     System.out.println("MANAGED_DIALOG_ENGINE_SURFACE_CREATED " + label + " "
                             + Thread.currentThread().getName());
-                    if (context == root) root.main.postDelayed(root::finish, 500);
+                    // The task ends with its last Activity: finish the Engine on top
+                    // first, then the root.
+                    if (context == root) root.main.postDelayed(() -> {
+                        finish();
+                        root.main.postDelayed(root::finish, 500);
+                    }, 500);
                     else engine.postDelayed(dialog::dismiss, 300);
                 }
                 @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
