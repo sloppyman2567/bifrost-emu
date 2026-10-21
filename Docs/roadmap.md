@@ -9,6 +9,31 @@ runtime, improve sustained Linux game performance, and make input reliable
 across mouse, keyboard, touch and gamepads. Correctness remains the gate for
 every optimization. Existing Linux applications must keep working.
 
+## Progress at a glance (2026-10-21)
+
+Statuses are what the changelog and app pages record; none of them is a
+compatibility guarantee. "Done" means the contract is implemented and checked
+as the linked section says, not that every app using it works.
+
+| Milestone | State | Done so far | Still open |
+|---|---|---|---|
+| 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout and descriptive file names; Asgard Android runtime on the pinned Android 15 framework; SpongeBob playable | Goals below |
+| 2.0.0-alpha.2 (2026-10-21) | Cut; its goals are partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
+| 2.0.0-alpha.3 | Not started as a milestone | Partial: WebView renders; desktop text input reaches native editors | WebView pointer/focus/scroll, HTTP intent routing, ads with test creatives, video |
+| 2.0.0-beta.1 | Not started | Library cards, per-game settings, clear-data/uninstall | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
+
+Known blockers, by cause:
+
+- **Needs real Google attestation or a real device:** Roblox joins servers and
+  is then disconnected (reason 304); TrickCal's own anti-cheat ends it. Bifrost
+  does not bypass or forge either.
+- **Needs Google Play services:** SpongeBob's adult-age path stalls at 73%, and
+  Hungry Shark World's Play Games sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
+- **Architecture:** Bifrost runs AArch64 only, so an APK that ships only
+  `armeabi-v7a` or `x86` libraries (Angry Birds Space) cannot start.
+- **Platform gaps still listed below:** no Settings screens, no host mDNS,
+  no Android Vulkan HAL, no toast animations.
+
 ## Next release priorities
 
 These are proposed scopes for the next pre-releases, not announced release dates.
@@ -22,8 +47,12 @@ or successful ads, sign-in and gameplay in every app.
 ### 2.0.0-alpha.2: broader game support and less stutter
 
 - Repair concrete startup and interaction blockers in selected games, starting
-  with Azur Lane's toast failure and delayed login UI. Complete connected
-  common-service contracts rather than returning success from empty handlers.
+  with Azur Lane's delayed login UI (its toast failure is fixed). Complete
+  connected common-service contracts rather than returning success from empty
+  handlers.
+- Remove the first-ad-load wait: every Google Mobile Ads game blocks its main
+  thread (about 7 s in Battle Cats) in `DynamiteModule.getRemoteVersion`. Trace
+  what the Play services provider waits for before choosing a fix.
 - Profile matching cold-load and warm gameplay scenes. Reduce compilation stalls,
   repeated translation, paired-memory guard overhead and vector spills where
   measurements justify it. Preserve fault, alias, invalidation and FP semantics.
@@ -154,6 +183,14 @@ isolated WebView handshake remain incomplete. See
 
 ## Common services and background work
 
+Implemented checkpoint (October 21): the service-inventory probe lists 37
+Java services; 329 signatures are classified as implemented, 1,085 as
+unsupported and 1,168 are unclassified (lambda dispatch without a per-method
+contract). Four services cover every interface method: `appops`,
+`permission_checker`, `batteryproperties` and `vibrator_manager`. `NsdManager`
+was added after that run. The counts say what is declared, not how much of the
+API apps use.
+
 Implemented checkpoint (October 14): the service-inventory probe lists 31
 system-facing Java services and two internal entries. That inventory explicitly
 classifies 187 signatures as supported and 954 as unsupported; 1,187 signatures
@@ -167,6 +204,11 @@ isolated replies.
   cleanup; keep unsupported methods explicit and improve coverage reporting.
 - Toasts queue, show for 2 s or 3.5 s and cancel (Azur Lane's sign-in failure
   no longer exits). Still open: background-toast policy and toast animations.
+- `NsdManager` constructs and discovery runs but finds nothing: the host has
+  no mDNS responder, so resolving and advertising fail. Real discovery needs a
+  host backend.
+- Settings screens do not exist: `android.settings.*` intents are declined, so
+  an app's all-files-access request cannot be granted from its dialog.
 - Connect notification posting, interaction and PendingIntent delivery, then
   foreground-service notification/deadline behavior and lifecycle policy.
 - Extend current PendingIntent/receiver/alarm/job behavior toward scoped

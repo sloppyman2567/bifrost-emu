@@ -52,6 +52,10 @@ on Bifrost, not that every feature has an automated test.
 |---|---|---|
 | [SpongeBob – Krusty Cook-Off 5.12.0](Docs/Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, outfits and menus at native resolution. Child-age path; the adult path waits on Google Play services. |
 | [Azur Lane](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | Loading and title/login screens visibly captured. UI stutters and platform/input gaps remain; gameplay and completed sign-in are unverified. |
+| The Battle Cats | Android | Runs to its game window and loads its resources; title and gameplay are not confirmed. The first ad load waits about 7 s. |
+| Hungry Shark Evolution, Hungry Shark World | Android | Run sessions to their windows; gameplay is not confirmed. Hungry Shark World's Play Games sign-in does not complete. |
+| Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
+| Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |
 | [Neverball 1.6.0](Docs/Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |
 | [Minecraft Weekend](Docs/Apps/minecraft-weekend.md) | Linux, SDL2/GL voxel game | User-confirmed stable gameplay; chunk rendering can lag. |
 | [vkQuake 1.33.1](Docs/Apps/vkquake.md) | Linux, Vulkan | User-confirmed gameplay and menus; texture corruption remains. |
@@ -60,20 +64,42 @@ on Bifrost, not that every feature has an automated test.
 | BusyBox, ToyBox | Linux CLI | Covered by the regression suite. |
 | CoreMark | Linux benchmark | CRC-validated runs through `Scripts/Bench/run_benchmarks.py`. |
 
-## Android screenshots
+## Screenshots
 
-User-supplied captures from October 14, 2026 on Bifrost 2.0.0-alpha.1:
+User-supplied captures, not benchmarks. Android shots are from October 14, 2026
+(Bifrost 2.0.0-alpha.1); the Linux games are from October 2 to 4. More are in the
+[SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-10-14) and
+[Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14).
 
-![SpongeBob cooking gameplay on Bifrost](Docs/Images/SpongeBob-2026-10-14/gameplay.png)
+<table>
+<tr>
+<td><img src="Docs/Images/SpongeBob-2026-10-14/gameplay.png" alt="SpongeBob cooking gameplay" width="320"><br><sub>SpongeBob: Krusty Cook-Off (Android)</sub></td>
+<td><img src="Docs/Images/AzurLane-2026-10-14/login.png" alt="Azur Lane title and login screen" width="320"><br><sub>Azur Lane title/login (Android)</sub></td>
+<td><img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay" width="320"><br><sub>Neverball (Linux, SDL2/GL)</sub></td>
+</tr>
+<tr>
+<td><img src="Docs/Images/MinecraftWeekend-2026-10-04/daytime.png" alt="Minecraft Weekend" width="320"><br><sub>Minecraft Weekend (Linux)</sub></td>
+<td><img src="Docs/Images/Doom3-2026-10-04/hangar-npc.png" alt="Doom 3 (dhewm3)" width="320"><br><sub>Doom 3 / dhewm3 (Linux)</sub></td>
+<td><img src="Docs/Images/VkQuake-2026-10-04/gameplay.png" alt="vkQuake gameplay" width="320"><br><sub>vkQuake (Linux, Vulkan)</sub></td>
+</tr>
+</table>
 
-![Azur Lane title and login screen on Bifrost](Docs/Images/AzurLane-2026-10-14/login.png)
+## Progress
 
-All six distinct screenshots are in the [SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-10-14)
-and [Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14).
-Still images and window-title FPS are not sustained performance measurements.
-The [next-release roadmap](Docs/roadmap.md#next-release-priorities) prioritizes
-broader Android game compatibility, lower stutter, WebView/media and possible
-ad support, followed by easier setup and library use.
+**2.0.0-alpha.2** (2026-10-21) is the current pre-release. The goals for it and
+what follows are in the [roadmap](Docs/roadmap.md), which has a
+progress table and the known blockers; everything that changed is in the
+[changelog](Docs/CHANGELOG.md). Recent work:
+
+- **Android services:** toasts, `NsdManager`, the whole `IAppOpsService` and
+  Settings intents now work instead of ending apps.
+- **Windows and memory:** fixed-size apps scale to the host window, and large
+  guest mappings are no longer committed up front.
+- **Open:** measured frame times, the first-ad-load wait, WebView interaction,
+  and sustained play. A passing build or a launch is not gameplay.
+
+Check an installed app's recorded status yourself with
+`python3 Scripts/Android/asgard.py compat`.
 
 ## Quick start
 
@@ -315,7 +341,8 @@ adapter.
 ## Limitations
 
 - **User mode only** — no kernel or full-system emulation (use QEMU system mode).
-- **AArch64 guests only** — no 32-bit ARM.
+- **AArch64 guests only** — no 32-bit ARM, so an Android APK that ships only
+  `armeabi-v7a` or `x86` libraries cannot start.
 - **x86_64 Linux hosts only** — other distributions are expected to work but
   only Ubuntu 24.04 is CI-built; see the [support matrix](Docs/SUPPORT.md).
 - **Android is experimental** — Google Play services and complete system_server

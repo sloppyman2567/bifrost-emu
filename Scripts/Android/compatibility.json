@@ -57,6 +57,20 @@
       "checked": "2026-10-13",
       "evidence": "Crashes about 17 s in from the game's own anti-cheat native code, as on real Linux; it also fails when connecting on Waydroid.",
       "notes": ["Real-device only."]
+    },
+    "jp.co.ponos.battlecatsen": {
+      "name": "The Battle Cats",
+      "status": "runs",
+      "checked": "2026-10-21",
+      "evidence": "A bounded run (about 100 s) reached its 2560x1384 window and game surface and loaded its resource packs without a fatal error; title screen and gameplay were not confirmed by a person.",
+      "notes": ["The first ad load blocks the main thread for about 7 s waiting on the Play services Dynamite provider.", "The surface fills only part of a wider window (see the roadmap's window-scaling item)."]
+    },
+    "com.uptodown": {
+      "name": "Uptodown",
+      "status": "runs",
+      "checked": "2026-10-21",
+      "evidence": "Reaches its main window and draws the Trending list; it then shows its own 'storage permission is required' dialog. Before NsdManager was published it ended in onActivityCreated. Interaction was not tried.",
+      "notes": ["The dialog's Accept asks for all-files access through a Settings screen that does not exist; the request is declined."]
     }
   }
 }
