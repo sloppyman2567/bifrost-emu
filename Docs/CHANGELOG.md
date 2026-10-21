@@ -35,7 +35,15 @@ labels below are historical records.
   link_map-dependent behavior matches real glibc. The older
   `BIFROST_NO_NATIVE_DYNLINK` debug path (host interpreter, unprotected
   segments, jumps to an unmapped entry) is still in the tree but broken;
-  `--guest-ld` is the supported way. Graphics thunks are not wired in this mode.
+  `--guest-ld` is the supported way.
+- Thunked libraries (libGL, libEGL, libSDL2, libvulkan, libwayland, libX11,
+  ALSA/Pulse/OpenAL, ...) work under `--guest-ld`. They have no rootfs file, so
+  an `open` of one that fails with ENOENT returns an in-memory AArch64 shared
+  object (`ThunkStub.cpp`) whose functions branch to the existing thunk
+  trampolines; the guest `ld.so` maps it like any library, for `DT_NEEDED` and
+  `dlopen` alike. A real AArch64 file in the rootfs still wins.
+  `test_dyn_thunk_stub` (dynamic glibc, `dlopen("libGL.so.1")`, headless) passes
+  under both linkers; it needs a GL-thunk build, like `gl_state`.
 - `Scripts/Setup/make-ld-cache.py` writes `rootfs/etc/ld.so.cache` (glibc's
   `ld.so` never reads `ld.so.conf`); `setup-rootfs.sh` and
   `setup-rootfs-all.sh` call it. Output parses under the host's

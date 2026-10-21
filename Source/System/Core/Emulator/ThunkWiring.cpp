@@ -11,6 +11,8 @@
 #include "System/Audio/AudioThunk.hpp"  // AudioThunk
 #include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
+#include "System/Loader/ThunkStub.hpp"
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include "FrostJIT/Compiler/FrostJIT.hpp"
@@ -519,5 +521,42 @@ void Emulator::wire_thunk_sdl_thread_runner_() {
             }
             return 0;
         });
+}
+}  // namespace arm64emu
+
+namespace arm64emu {
+std::vector<std::pair<std::string, uint64_t>> Emulator::thunk_symbols(const std::string& lib) {
+    std::vector<std::pair<std::string, uint64_t>> out;
+    auto add_all = [&](auto* t) {
+        if (!t || !t->enabled()) return;
+        t->enumerate_symbols(lib, [&](const std::string& s, uint64_t a) {
+            out.emplace_back(s, a);
+        });
+    };
+    add_all(graphics_.thunk());
+    add_all(graphics_.audio_thunk());
+    add_all(graphics_.display_thunk());
+    return out;
+}
+std::unique_ptr<yggdrasil::Node> Emulator::open_thunk_stub(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    const std::string soname = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (!DynamicLinker::is_thunk_supported_lib_(soname)) return nullptr;
+    const auto syms = thunk_symbols(soname);
+    if (syms.empty()) return nullptr;
+    const std::vector<uint8_t> image = build_thunk_stub_elf(soname, syms);
+    int fd = ::memfd_create("bifrost-thunk-stub", MFD_CLOEXEC);
+    if (fd < 0) return nullptr;
+    size_t done = 0;
+    while (done < image.size()) {
+        const ssize_t n = ::write(fd, image.data() + done, image.size() - done);
+        if (n <= 0) { ::close(fd); return nullptr; }
+        done += static_cast<size_t>(n);
+    }
+    ::lseek(fd, 0, SEEK_SET);
+    if (dbg().dynlink_trace)
+        fprintf(stderr, "[thunk-stub] %s: %zu symbols, %zu bytes\n",
+                soname.c_str(), syms.size(), image.size());
+    return std::make_unique<yggdrasil::HostNode>(fd, O_RDONLY);
 }
 }  // namespace arm64emu

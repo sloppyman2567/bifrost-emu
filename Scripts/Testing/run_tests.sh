@@ -826,6 +826,10 @@ DYNAMIC_TESTS=(
     # A legacy-start program (__libc_start_main@GLIBC_2.17, e.g. Geekbench)
     # runs its own constructors; the linker must not run them a second time.
     "test_dyn_legacy_start|Tests/Apps/test_dyn_legacy_start.elf||15|test_dyn_legacy_start: ALL PASS"
+    # dlopen("libGL.so.1") of a thunked library: the native linker registers the
+    # thunk symbols, --guest-ld serves an in-memory stub to the guest ld.so.
+    # Needs the GL thunk build (SDL2/GL host libraries); exit 77 = skip.
+    "test_dyn_thunk_stub|Tests/Apps/test_dyn_thunk_stub.elf||15|test_dyn_thunk_stub: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

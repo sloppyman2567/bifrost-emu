@@ -2762,7 +2762,13 @@ each program's own guest `ld.so`. With a regenerated `ld.so.cache`
 (`Scripts/Setup/make-ld-cache.py`, checked with `ldconfig -p -C`), 74/74 pass in
 JIT and in interpreter mode. A trace confirmed the guest linker opens
 `/etc/ld.so.cache` and `/lib/libc.so.6` itself (2 `[dynlink]` lines versus 140
-for the native linker). Not covered: graphics/audio thunks, Android, Doom 3 and
+for the native linker). Thunked libraries are served as in-memory stubs;
+`test_dyn_thunk_stub` (`dlopen("libGL.so.1")`, state calls answered by the GL
+tracker) passes under both linkers on the GL-thunk build in JIT and interpreter
+mode (75/75 with the dynamic and real-world suites), and a one-off program with
+`libSDL2-2.0.so.0` as a `DT_NEEDED` dependency printed the host SDL version
+through the stub. It fails on a headless (`USE_THUNK_GL=0`) build, like
+`gl_state`. Not covered: windowed rendering, audio output, Android, Doom 3 and
 large-application cold-start time.
 
 ### Legacy-start constructor regression (2026-10-20)

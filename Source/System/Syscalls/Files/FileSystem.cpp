@@ -129,7 +129,22 @@ int proc_link_fd(const std::string& path, std::string* rest) {
     }
     return -2;
 }
+namespace {
+std::unique_ptr<yggdrasil::Node> open_guest_path(Emulator& emu, int tid, uint64_t guest_dirfd,
+    const std::string& requested, int guest_flags, mode_t guest_mode, int* err);
+}
 std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, int tid, uint64_t guest_dirfd,
+    const std::string& requested, int guest_flags, mode_t guest_mode, int* err) {
+    auto node = open_guest_path(emu, tid, guest_dirfd, requested, guest_flags, guest_mode, err);
+    // A guest ld.so looks for thunked libraries (libGL, libSDL2, ...) by file;
+    // like the native linker, answer a missing one with the thunks.
+    if (!node && *err == -ENOENT && emu.guest_linker() &&
+        (guest_flags & O_ACCMODE) == O_RDONLY)
+        node = emu.open_thunk_stub(requested);
+    return node;
+}
+namespace {
+std::unique_ptr<yggdrasil::Node> open_guest_path(Emulator& emu, int tid, uint64_t guest_dirfd,
     const std::string& requested, int guest_flags, mode_t guest_mode, int* err) {
     // /proc/thread-self links to /proc/self/task/<caller's TID>.
     static const std::string thread_self_comm = "/proc/thread-self/comm";
@@ -171,6 +186,7 @@ std::unique_ptr<yggdrasil::Node> open_guest_at(Emulator& emu, int tid, uint64_t 
                        start == std::string::npos ? "." : rest.substr(start),
                        host_flags, mode, err);
 }
+}  // namespace
 // Fill a synthetic struct stat for the guest ELF as seen through the
 // /proc/<pid>/exe symlink: lstat (AT_SYMLINK_NOFOLLOW) yields a symlink
 // node, stat follows it and reflects the real ELF file on disk.

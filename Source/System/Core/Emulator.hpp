@@ -113,6 +113,13 @@ public:
     // kernel exec does, instead of the in-emulator DynamicLinker.
     void set_guest_linker(bool enabled) { guest_linker_ = enabled; }
     bool guest_linker() const { return guest_linker_; }
+    // Symbols (name, trampoline address) the initialized thunks provide for
+    // library `lib`; empty if no thunk claims it.
+    std::vector<std::pair<std::string, uint64_t>> thunk_symbols(const std::string& lib);
+    // A guest linker's open of a thunked library that is not in the rootfs:
+    // an in-memory shared object whose functions branch to the thunk
+    // trampolines. Null when `path` does not name a thunked library.
+    std::unique_ptr<yggdrasil::Node> open_thunk_stub(const std::string& path);
     void enable_android_services() { vfs_.enable_android_services(); }
     std::atomic<uint32_t> guest_membarrier_registrations{0};
     std::atomic<int> guest_dumpable{1};

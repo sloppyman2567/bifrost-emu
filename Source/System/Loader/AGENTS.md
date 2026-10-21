@@ -33,7 +33,13 @@
   `entry_` is the interpreter and `AT_ENTRY`/`AT_BASE` carry the rest; no
   `DynamicLinker` is created for it. A guest glibc `ld.so` reads only
   `/etc/ld.so.cache`, which `Scripts/Setup/make-ld-cache.py` writes (and
-  `ldconfig -p -C` can verify). Graphics/audio thunks are not wired in this
-  mode. Run `run_tests.sh --guest-ld` alongside the default dynamic suite.
+  `ldconfig -p -C` can verify). Thunked libraries (libGL, libSDL2, libvulkan,
+  audio, ...) have no rootfs file: when a `--guest-ld` open of one fails with
+  ENOENT, `open_guest_at` returns `Emulator::open_thunk_stub`, a memfd holding
+  `build_thunk_stub_elf`'s ET_DYN whose functions branch (x16) to the existing
+  thunk trampolines. Keep it relocation-free with a writable PT_DYNAMIC (ld.so
+  adjusts it in place); the thunks must be initialized first, and a real
+  AArch64 file in the rootfs wins, as with the native linker. Run
+  `run_tests.sh --guest-ld` alongside the default dynamic suite.
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.
