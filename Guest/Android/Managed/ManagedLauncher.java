@@ -1541,6 +1541,22 @@ public final class ManagedLauncher {
                             Class.forName("android.view.ViewConfiguration")
                                     .getMethod("resetCacheForTesting").invoke(null);
                             windows.displayChanged();
+                            // ActivityThread.handleConfigurationChanged for the process (Application and
+                            // component callbacks), then each Activity's onConfigurationChanged, which
+                            // an Activity that declares configChanges (a game) expects instead of a
+                            // restart. Without it an app keeps its first window size and draws a
+                            // scene of that size inside the larger surface.
+                            Object activityThread = Class.forName("android.app.ActivityThread")
+                                    .getMethod("currentActivityThread").invoke(null);
+                            call(activityThread, "handleConfigurationChanged",
+                                    new Class<?>[] {Configuration.class, int.class}, displays.processConfiguration(), 0);
+                            for (Activity each : activities.all()) {
+                                Configuration current = new Configuration(each.getResources().getConfiguration());
+                                java.lang.reflect.Field field = Activity.class.getDeclaredField("mCurrentConfig");
+                                field.setAccessible(true);
+                                field.set(each, current);
+                                each.onConfigurationChanged(current);
+                            }
                         }
                         if (event[0] == 0) break;
                         dispatch(root, event);

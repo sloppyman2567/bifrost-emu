@@ -13,6 +13,25 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Window resize reaches the app's configuration callbacks (2026-10-21)
+
+- Fix (unverified on the games): when the host window changed size the launcher
+  updated the display, resources, surfaces and window layers, but never called
+  `Application`/`Activity.onConfigurationChanged`, which a game that declares
+  `configChanges` relies on instead of a restart. Battle Cats' SurfaceView and
+  `glViewport` followed a maximize to 3440x1384, but an app that only re-reads
+  its size in that callback keeps its first 2560-wide scene and leaves a black bar
+  at the right. The resize path now runs `ActivityThread.handleConfigurationChanged`
+  with the process configuration and each Activity's `onConfigurationChanged`
+  with its updated configuration. New fixture `ManagedGeometry` (green and blue
+  WebView corner divs, magenta root-view corners, every size an app can read)
+  and `test_managed_window_geometry`. Maximizing the fixture on a 3440x1440
+  display at scale 2 showed activity/application metrics, `WindowMetrics`,
+  root view and the WebView page (`innerWidth` 1720 at dpr 2) all following
+  3440x1384, and the callback arriving with the new size; the automated test
+  checks the initial window only. The Battle Cats black bar, its WebView page
+  and Roblox were not re-run with the fix (see `roadmap.md`).
+
 ### Complete Android 15 app-ops service (2026-10-21)
 
 - Fix: `appops` implemented only `checkPackage`, one `checkOperation` code and

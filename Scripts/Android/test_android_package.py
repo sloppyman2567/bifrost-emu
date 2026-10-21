@@ -1165,6 +1165,11 @@ class PackageTests(unittest.TestCase):
             component += f'<service android:name="{activity}$Sender" android:process=":sender" android:exported="false"/>'
             component += f'<service android:name="{activity}$Late" android:process=":late" android:exported="false"/>'
             component += f'<activity android:name="{activity}$Other" android:exported="false"/>'
+        if managed == "ManagedGeometry" and not split:
+            # As a game declares it, so a window size change is not an Activity restart.
+            activity_attributes = ' android:screenOrientation="landscape" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density|uiMode"'
+            component = component.replace(f'<activity android:name="{activity}"',
+                                          f'<activity android:name="{activity}"{activity_attributes}')
         if managed == "ManagedSplash" and not split:
             component += f'<activity android:name="{activity}$Main" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
@@ -1180,6 +1185,8 @@ class PackageTests(unittest.TestCase):
         if managed == "ManagedPlayServices":
             # microG's GServicesProvider checks that its caller requests this.
             job_permission = '<uses-permission android:name="com.google.android.providers.gsf.permission.READ_GSERVICES"/>'
+        if managed == "ManagedGeometry":
+            job_permission = '<uses-permission android:name="android.permission.INTERNET"/>'
         if managed == "ManagedActivities":
             # Normal (granted at install) and runtime (denied without a permission UI).
             job_permission = ('<uses-permission android:name="android.permission.INTERNET"/>'
@@ -1777,6 +1784,31 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
         # A legacy view animation ends: the window's draw time advances with each draw.
         self.assertIn("MANAGED_VIEWS_ANIMATION_END", text)
+
+    def test_managed_window_geometry(self):
+        # Every size an app can read agrees with the host window, and the attached
+        # WebView sees the full window at the window's density.
+        state = self.work / "geometry-state"
+        bundle = self.work / "geometry.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("geometry", managed="ManagedGeometry"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        # The Activity finishes itself, but the process with an attached WebView does not exit
+        # (status 124 at the timeout; observed, not yet explained), so only the log is checked.
+        package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=40)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        self.assertIn("APP_DESTROYED", text)
+        width, height, density = map(int, re.search(r"APP_WINDOW_OPEN (\d+)x(\d+) density=(\d+)", text).groups())
+        report = re.search(r"GEOMETRY periodic activity=(\d+)x(\d+) density=([\d.]+) .*? application=(\d+)x(\d+) .*? real=\d+x\d+ "
+                           r"displayMetrics=(\d+)x(\d+) window=Rect\(0, 0 - (\d+), (\d+)\).*? decor=(\d+)x(\d+) root=(\d+)x(\d+) web=(\d+)x(\d+)@0,0", text)
+        self.assertIsNotNone(report, text[-3000:])
+        sizes = list(map(int, report.group(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)))
+        self.assertEqual(sizes, [width, height] * 7)
+        page = re.search(r"GEOMETRY page inner=(\d+)x(\d+) dpr=(\d+)", text)
+        if page:  # the page reports after the WebView loads, which can outlast a short run
+            self.assertEqual((int(page.group(1)) * int(page.group(3)), int(page.group(3))), (width, density // 160))
 
     def test_managed_text_input(self):
         # Text from the host's input method (committed text, composition) reaches
