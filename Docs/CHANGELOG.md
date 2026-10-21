@@ -26,6 +26,23 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Cheaper Tier-2 branch profiling (2026-10-21)
+
+- With `BIFROST_TIER2=1`, every Tier-1 conditional exit carried a six-instruction
+  edge-profile sequence (disabled flag, saturate-at-4096 compare, `inc`). The
+  saturation test stayed in the code forever, so each executed branch paid about
+  five extra instructions and two extra branches. Now it is `mov r11, imm64;
+  inc qword [r11+off]` with 64-bit counters (no wrap, no checks; `lock`ed in MT).
+  The `enabled` flag, which only froze counts of promoted blocks, is gone; the
+  collector reads lifetime ratios instead of capped ones.
+- Measured with `perf stat` on CoreMark (40,000 iterations): Tier-2-on executed
+  1,815k host instructions per iteration before, 1,737k after (Tier-1:
+  1,576k); CoreMark with Tier-2 on went from about 8,800 to 9,750 iterations/s,
+  CRCs validated. Tier-1, the default, is unchanged. Tier-2 still executes about
+  10% more than Tier-1 on CoreMark (entry counters, profile increments) and its
+  regions measure about 1.0x there, so it is not a speedup on this workload.
+  All Tier-2 and MT scripts pass.
+
 ### Ad "Install" links open a real store page (2026-10-21)
 
 - Fix: clicking Install on an ad opened the host browser at

@@ -682,9 +682,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             terminal.op == IROp::BRCOND_BIT) {
             auto profile = std::make_unique<Tier2BranchProfile>();
             tier2_branch_profile_ = profile.get();
-            auto old = tier2_profiles_by_pc_.find(terminal.arm_pc);
-            if (old != tier2_profiles_by_pc_.end())
-                old->second->enabled.store(0, std::memory_order_release);
             tier2_profiles_by_pc_[terminal.arm_pc] = profile.get();
             tier2_branch_profiles_.push_back(std::move(profile));
         }

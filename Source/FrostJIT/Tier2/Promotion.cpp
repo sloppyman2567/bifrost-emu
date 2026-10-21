@@ -181,10 +181,6 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                     tier2_counter_disable(baseline->second.tier2_counter_off, baseline->second.tier2_counter_len);
                     baseline->second.tier2_hot_logged = true;
                 }
-                const uint64_t end = block.pc + block.ir.count * 4;
-                for (const auto& profile : tier2_profiles_by_pc_)
-                    if (profile.first >= block.pc && profile.first < end)
-                        profile.second->enabled.store(0, std::memory_order_release);
             }
             const auto wrapper_start_clock = std::chrono::steady_clock::now();
             auto trial = std::make_unique<Tier2Trial>();

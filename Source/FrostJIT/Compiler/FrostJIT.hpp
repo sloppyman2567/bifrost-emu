@@ -549,11 +549,15 @@ public:
         bool sampling_private = false;
         bool internal_loop = false; // body entry retains this block's register state
     };
+    // Outcome counts of one Tier-1 conditional exit: generated code only does
+    // `inc qword [profile+offset]` (no checks, no saturation), and the trace
+    // collector reads the ratio once per decision.
     struct Tier2BranchProfile {
-        std::atomic<uint32_t> enabled{1}, taken{0}, fallthrough{0};
+        std::atomic<uint64_t> taken{0}, fallthrough{0};
     };
-    static_assert(offsetof(Tier2BranchProfile, enabled) == 0);
-    static_assert(sizeof(std::atomic<uint32_t>) == 4);
+    static_assert(sizeof(std::atomic<uint64_t>) == 8);
+    static_assert(offsetof(Tier2BranchProfile, taken) < 128 &&
+                  offsetof(Tier2BranchProfile, fallthrough) < 128);
     std::vector<std::unique_ptr<Tier2BranchProfile>> tier2_branch_profiles_;
     std::unordered_map<uint64_t, Tier2BranchProfile*> tier2_profiles_by_pc_;
     Tier2BranchProfile* tier2_branch_profile_ = nullptr; // current Tier-1 codegen

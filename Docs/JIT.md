@@ -2528,8 +2528,9 @@ counter makes at most three attempts per translation while samples warm up. All 
 `tier2_fire_region`, retaining each constituent code range and redirecting
 incoming chains. The former dispatch/call-lookup promotion paths did not
 retain those ranges and have been removed. Self-loop iterations that bypass
-the generated entry still do not contribute hotness. Conditional exits collect
-bounded taken/fall-through counts (4,096 per outcome, atomic increments in MT).
+the generated entry still do not contribute hotness. Conditional exits count
+taken/fall-through outcomes with one `inc qword [profile+off]` (64-bit, no check,
+`lock`ed in MT) behind a `mov r11, imm64`.
 With at least 16 samples, a taken successor with 75% bias is linearized by
 inverting the typed branch and retaining the original fall-through as a cold
 exit. Head back-edges remain loop terminators. Promotion requires all branches
@@ -2537,8 +2538,8 @@ to be sampled and a product of continuation frequencies of at least 75%.
 This is a profitability heuristic, not a measured speedup; multiplying
 marginal frequencies can underestimate correlated paths. MT single-block loops are declined
 because they fuse no boundaries and cannot retain loop state across entries.
-Tier-1 profiles are disabled on promotion and mapping invalidation; their
-storage outlives published code. Monitored regions deposit a recovery credit
+A profile whose block was promoted or invalidated is dropped from the lookup
+table and its counters go unread; storage outlives published code. Monitored regions deposit a recovery credit
 in a CPU-local slot on completed hot paths. This is one flag-neutral store,
 including ST internal backedges; MT performs no shared atomic increment per
 iteration. A cold exit tail-calls feedback after flushing guest state and

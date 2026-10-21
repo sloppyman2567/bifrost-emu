@@ -20,31 +20,21 @@ namespace arm64emu {
 void FrostJIT::emit_tier2_edge_profile(bool taken) {
     if (!tier2_branch_profile_) return;
     emit_mov_imm64(R11, reinterpret_cast<uint64_t>(tier2_branch_profile_));
-    emit_byte(0x41); emit_byte(0x83); emit_byte(0x3B); emit_byte(0); // cmp [r11],0
-    const size_t disabled = emit_jcc_rel32_placeholder(4);
     const uint8_t offset = taken ? offsetof(Tier2BranchProfile, taken)
                                  : offsetof(Tier2BranchProfile, fallthrough);
-    // Each outcome stops accumulating at 4096 (MT can overshoot by the
-    // number of concurrent CPUs). No counter wraps or unbounded profiling.
-    emit_byte(0x41); emit_byte(0x81); emit_byte(0x7B); emit_byte(offset);
-    emit_u32(4096);
-    const size_t saturated = emit_jcc_rel32_placeholder(3); // JAE
+    // Two instructions and no branch: this code runs on every execution of
+    // every profiled branch for the life of the block. A 64-bit counter
+    // cannot wrap; a profile of a replaced translation just goes unread.
     if (mt_active()) emit_byte(0xF0);
-    emit_byte(0x41); emit_byte(0xFF); emit_byte(0x43); emit_byte(offset); // inc [r11+off]
-    for (size_t p : {disabled, saturated})
-        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    emit_byte(0x49); emit_byte(0xFF); emit_byte(0x43); emit_byte(offset); // inc qword [r11+off]
 }
 void FrostJIT::invalidate_tier2_profiles(uint64_t lo, uint64_t hi) {
     for (auto it = tier2_profiles_by_pc_.begin(); it != tier2_profiles_by_pc_.end();) {
-        if (it->first >= lo && it->first < hi) {
-            it->second->enabled.store(0, std::memory_order_release);
-            it = tier2_profiles_by_pc_.erase(it);
-        } else ++it;
+        if (it->first >= lo && it->first < hi) it = tier2_profiles_by_pc_.erase(it);
+        else ++it;
     }
 }
 void FrostJIT::clear_tier2_profiles() {
-    for (auto& profile : tier2_branch_profiles_)
-        profile->enabled.store(0, std::memory_order_release);
     tier2_profiles_by_pc_.clear();
 }
 
