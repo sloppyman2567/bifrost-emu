@@ -218,7 +218,19 @@ def app_linker_configuration(has_media=False):
     )
 
 
+def require_toolchain(runtime, adapters, aapt2, apksigner):
+    """Name the provisioning step for whatever installation needs and is missing."""
+    for path, what, step in (
+            (runtime / "bifrost-runtime.json", "Android runtime", "python3 Tools/Android/fetch-android-runtime.py"),
+            (adapters / "adapters.json", "Android runtime adapters", "make android-runtime-adapters"),
+            (aapt2, "aapt2", "python3 Tools/Android/fetch-aapt2.py"),
+            (apksigner, "apksigner", "python3 Tools/Android/fetch-android-package-tools.py")):
+        if not path.exists():
+            raise ValueError(f"{what} not provisioned ({path} is missing). Run: {step}")
+
+
 def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None):
+    require_toolchain(runtime, adapters, aapt2, apksigner)
     runtime_module = verify_runtime(runtime)
     adapter_metadata = verify_adapters(adapters, runtime_module)
     adapter_metadata = dict(adapter_metadata, files={

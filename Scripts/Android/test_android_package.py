@@ -770,6 +770,44 @@ class AppRemovalTests(unittest.TestCase):
         self.assertFalse(self.app().exists())
 
 
+class RunFromFileTests(unittest.TestCase):
+    def test_missing_toolchain_names_the_step_that_provisions_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "runtime", root / "adapters", root / "aapt2", root / "apksigner.jar")
+            expected = ("fetch-android-runtime.py", "make android-runtime-adapters",
+                        "fetch-aapt2.py", "fetch-android-package-tools.py")
+            for index, step in enumerate(expected):
+                with self.assertRaisesRegex(ValueError, step):
+                    package.require_toolchain(*paths)
+                path = paths[index]
+                if index < 2:
+                    path.mkdir()
+                    (path / ("bifrost-runtime.json", "adapters.json")[index]).write_text("{}")
+                else:
+                    path.write_text("")
+            package.require_toolchain(*paths)
+
+    def test_run_installs_a_package_file_and_runs_its_package(self):
+        import asgard
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = root / "installer.py"
+            installer.write_text("import sys\nprint('Installed org.bifrost.fixture version 3: 1 signed APKs')"
+                                 "\nsys.exit(int(sys.argv[-1].endswith('broken.apk')))\n")
+            apk = root / "game.apk"
+            apk.write_text("")
+            with patch("builtins.print"):
+                self.assertEqual(asgard.install_for_run(str(installer), root, ["--no-jit", str(apk), "--timeout", "5"]),
+                                 ["--no-jit", "org.bifrost.fixture", "--timeout", "5"])
+            # Package names, and files that do not exist or are not packages, pass through.
+            for arguments in (["org.bifrost.fixture"], [str(root / "missing.apk")], [str(installer)]):
+                self.assertEqual(asgard.install_for_run(str(installer), root, arguments), arguments)
+            (root / "broken.apk").write_text("")
+            with patch("builtins.print"), self.assertRaisesRegex(ValueError, "Could not install"):
+                asgard.install_for_run(str(installer), root, [str(root / "broken.apk")])
+
+
 class PackageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

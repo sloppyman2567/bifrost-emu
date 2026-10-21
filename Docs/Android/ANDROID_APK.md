@@ -45,6 +45,14 @@ python3 Scripts/Android/android_package.py run org.example.package \
     --android-window-plugin build/release-sdl1-gl1/plugins/android-window-sdl.so
 ```
 
+`asgard.py run PATH.apk` (also `.apkm`, `.apks`, `.xapk`) installs the file and
+then runs its package, as `wine app.exe` does. Reinstalling an identical,
+already installed file is accepted but still verifies its signatures, so a
+large package is re-checked on every such run; use the package id to skip that.
+Installation names the missing provisioning step (`fetch-android-runtime.py`,
+`fetch-aapt2.py`, `fetch-android-package-tools.py` or
+`make android-runtime-adapters`) instead of failing on a missing file.
+
 Installation accepts a single APK or a ZIP/APKM/APKS containing one consistent
 base/split set. It does not select among bundletool device variants. Use
 `--state-root PATH` before `install`, `run` or `probe` to choose a different state directory.

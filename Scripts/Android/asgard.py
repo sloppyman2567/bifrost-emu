@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import socket
@@ -194,6 +195,26 @@ def ensure_broker(state, emu):
         raise ValueError("Asgard broker did not become ready")
 
 
+PACKAGE_FILES = (".apk", ".apkm", ".apks", ".xapk")
+
+
+def install_for_run(script, state, arguments):
+    """`run app.apk` installs the file (a no-op for an identical, installed one) and runs its package."""
+    index = next((i for i, value in enumerate(arguments)
+                  if Path(value).suffix.lower() in PACKAGE_FILES and Path(value).is_file()), None)
+    if index is None:
+        return arguments
+    installed = subprocess.run([sys.executable, script, "--state-root", str(state), "install", arguments[index]],
+                               stdout=subprocess.PIPE, text=True)
+    print(installed.stdout, end="", flush=True)
+    if installed.returncode:
+        raise ValueError(f"Could not install {arguments[index]}")
+    match = re.search(r"^Installed (\S+) ", installed.stdout, re.M)
+    if not match:
+        raise ValueError("The installer did not report a package name")
+    return arguments[:index] + [match[1]] + arguments[index + 1:]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
@@ -217,8 +238,10 @@ def main():
                     value["state"] = "stopped"
             print(json.dumps(value))
             return 0
-        command = [sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
-                   "--state-root", str(state), args.command, *remainder]
+        script = str(ROOT / "Scripts/Android/android_package.py")
+        if args.command == "run":
+            remainder = install_for_run(script, state, remainder)
+        command = [sys.executable, script, "--state-root", str(state), args.command, *remainder]
         # Opening microG's window (sign-in, settings) is a session like any app's.
         session = args.command in ("run", "start") or (args.command == "google"
                                                        and remainder[:1] in (["sign-in"], ["settings"]))

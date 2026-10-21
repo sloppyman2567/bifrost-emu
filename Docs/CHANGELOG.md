@@ -15,6 +15,9 @@ labels below are historical records.
 
 ### Asgard app removal (2026-10-20)
 
+- `asgard.py run PATH.apk|.apkm|.apks|.xapk` installs the file, then runs its
+  package. Installation reports which provisioning step is missing (runtime,
+  adapters, aapt2, apksigner) instead of a missing-file error.
 - `asgard.py uninstall PACKAGE` removes an app's install, runtime copies and
   data; `clear-data PACKAGE` resets its saves and settings to a first-run state
   and keeps the install. Both refuse a running app (the session holds the
