@@ -53,22 +53,103 @@ def play_services_basement(work):
 class LauncherArgumentTests(unittest.TestCase):
     def test_library_settings_reject_malformed_values_and_keep_default_launch(self):
         import json
-        from android_launcher import SETTINGS, load_settings, save_settings, launch_request
+        from android_launcher import launch_request
+        from android_settings import SETTINGS, apply_to_launch, launch_changes, load, save
         app = {"package": "org.bifrost.fixture", "launcher": "managed_activity"}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for value in ([], {"back_key": []}, {"back_key": {}, "window_stats": "false"}):
+            for value in ([], {"back_key": []}, {"back_key": {}, "window_stats": "false", "network": 3},
+                          {"back_key": "q", "network": "wifi"}):
                 (root / SETTINGS).write_text(json.dumps(value))
-                self.assertEqual(load_settings(root), {})
-            self.assertEqual(launch_request(app, {}), (["start", app["package"]], {}))
-            settings = {"back_key": "f2", "window_stats": False}
-            save_settings(root, settings)
-            self.assertEqual(load_settings(root), settings)
-            self.assertEqual(launch_request(app, settings, trace=True),
-                             (["start", app["package"], "--no-window-stats", "--trace-apk", "calls"],
-                              {"BIFROST_ANDROID_BACK_KEY": "f2"}))
+                self.assertEqual(load(root), {})
+            self.assertEqual(launch_request(app), ["start", app["package"]])
+            self.assertEqual(launch_changes({}), ([], {}))
+            settings = {"back_key": "f2", "window_stats": False, "network": "offline"}
+            save(root, settings)
+            self.assertEqual(load(root), settings)
+            self.assertEqual(launch_request(app, trace=True), ["start", app["package"], "--trace-apk", "calls"])
+            self.assertEqual(launch_changes(settings),
+                             (["--no-window-stats"], {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_HOST_NETWORK": "0"}))
             native = dict(app, launcher="native_activity")
-            self.assertNotIn("--trace-apk", launch_request(native, {}, trace=True)[0])
+            self.assertNotIn("--trace-apk", launch_request(native, trace=True))
+            # Saved choices apply to every launch, below the command line and the environment.
+            self.assertEqual(apply_to_launch(root, ["--timeout", "5"], {}),
+                             (["--timeout", "5", "--no-window-stats"],
+                              {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_HOST_NETWORK": "0"}))
+            self.assertEqual(apply_to_launch(root, ["--window-stats-title"], {"BIFROST_ANDROID_HOST_NETWORK": "1"}),
+                             (["--window-stats-title"], {"BIFROST_ANDROID_BACK_KEY": "f2"}))
+
+    def test_start_hands_saved_settings_to_the_session_process(self):
+        import json
+        from android_settings import save
+        launched = []
+        class Child:
+            def __init__(self, command, **options):
+                launched.append((command, options["env"]))
+            def poll(self):
+                return 1
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            app = state / "org.bifrost.fixture"
+            app.mkdir()
+            (app / "package.json").write_text(json.dumps({"package": app.name}))
+            save(app, {"window_stats": True, "back_key": "f1", "network": "offline"})
+            with patch.object(package.subprocess, "Popen", Child), \
+                    patch.dict(os.environ, {"BIFROST_ANDROID_BACK_KEY": "escape"}), \
+                    self.assertRaises(ValueError):
+                package.start_background(app.name, state, ["--timeout", "5"])
+            command, environment = launched[0]
+            self.assertEqual(command[-3:], ["--timeout", "5", "--window-stats"])
+            # The caller's own environment is not overridden by the saved choice.
+            self.assertEqual(environment["BIFROST_ANDROID_BACK_KEY"], "escape")
+            self.assertEqual(environment["BIFROST_ANDROID_HOST_NETWORK"], "0")
+
+    def test_run_applies_saved_settings_below_explicit_options(self):
+        import json
+        import sys
+        from android_settings import save
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            app = state / "org.bifrost.fixture"
+            app.mkdir()
+            (app / "package.json").write_text(json.dumps({"package": app.name}))
+            save(app, {"window_stats": False, "network": "offline"})
+            def run(*extra):
+                argv = ["android_package.py", "--state-root", str(state), "run", app.name, *extra]
+                with patch.object(package, "launch", lambda *a: calls.append(a[6]) or 0), \
+                        patch.object(sys, "argv", argv), patch.dict(os.environ, clear=False):
+                    os.environ.pop("BIFROST_ANDROID_HOST_NETWORK", None)
+                    self.assertEqual(package.main(), 0)
+                    return os.environ.get("BIFROST_ANDROID_HOST_NETWORK")
+            self.assertEqual(run(), "0")
+            self.assertEqual(calls[-1], ["--no-window-stats"])
+            run("--window-stats")
+            self.assertEqual(calls[-1], ["--window-stats"])
+
+    def test_config_command_shows_sets_validates_and_resets(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "org.bifrost.fixture").mkdir()
+            (state / "org.bifrost.fixture/package.json").write_text("{}")
+            def run(*arguments):
+                return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                       "--state-root", str(state), "config", *arguments],
+                                      capture_output=True, text=True)
+            self.assertIn("network = default", run("org.bifrost.fixture").stdout)
+            self.assertEqual(run("org.bifrost.fixture", "network", "offline").returncode, 0)
+            self.assertEqual(run("org.bifrost.fixture", "window_stats", "off").returncode, 0)
+            self.assertEqual(run("org.bifrost.fixture", "network").stdout.strip(), "offline")
+            self.assertEqual(json.loads(run("org.bifrost.fixture", "--json").stdout),
+                             {"window_stats": False, "network": "offline"})
+            for bad in (("network", "wifi"), ("window_stats", "maybe"), ("nope", "1")):
+                self.assertEqual(run("org.bifrost.fixture", *bad).returncode, 1 if bad[0] != "nope" else 2, bad)
+            self.assertEqual(run("org.bifrost.missing", "network", "offline").returncode, 1)
+            self.assertEqual(run("org.bifrost.fixture", "--reset", "network").returncode, 0)
+            self.assertEqual(json.loads(run("org.bifrost.fixture", "--json").stdout), {"window_stats": False})
+            self.assertEqual(run("org.bifrost.fixture", "--reset").returncode, 0)
+            self.assertEqual(json.loads(run("org.bifrost.fixture", "--json").stdout), {})
 
     def test_library_icons_are_bounded_and_legacy_metadata_remains_readable(self):
         import json

@@ -146,6 +146,7 @@ python3 Scripts/Android/android_package.py install /path/to/package.apkm
 python3 Scripts/Android/android_package.py run org.example.package
 python3 Scripts/Android/asgard.py run /path/to/package.apkm   # installs, then runs (or run an installed package id)
 python3 Scripts/Android/asgard.py realm status        # inspect the shared realm
+python3 Scripts/Android/asgard.py config org.example.package network offline   # per-app settings, applied at every start
 python3 Scripts/Android/asgard.py clear-data org.example.package   # reset saves; `uninstall` removes the app
 python3 Scripts/Android/asgard.py google sign-in       # microG's Google sign-in window (accounts shared by every app)
 ```

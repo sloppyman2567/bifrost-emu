@@ -7,6 +7,7 @@ import sys
 import time
 
 from android_package import PACKAGE, ROOT
+from android_settings import BACK_KEYS, NETWORKS, load as load_settings, save as save_settings
 
 ACTIVE = ("preparing", "starting", "running", "stopping")
 LAUNCHABLE = ("managed_activity", "native_activity")
@@ -14,10 +15,6 @@ STATES = {"preparing": "Starting", "starting": "Starting", "running": "Running",
           "stopped": "Stopped", "exited": "Exited normally", "closed": "Closed normally",
           "failed": "Failed", "timed_out": "Timed out", "interrupted": "Ended unexpectedly",
           "invalid": "Install is damaged"}
-# Names accepted by the emulator's [android] back_key / BIFROST_ANDROID_BACK_KEY.
-BACK_KEYS = (("escape", "Esc"), ("backspace", "Backspace"), ("delete", "Delete"),
-             ("f1", "F1"), ("f2", "F2"), ("f12", "F12"), ("none", "No back key"))
-SETTINGS = "launcher-settings.json"
 # First match wins: a Chartboost line about missing Play services counts once.
 SIGNATURES = (
     ("crash", "Emulator caught a guest crash", re.compile(r"^\[crash\] ")),
@@ -53,35 +50,13 @@ def card_state(app, pending=None):
     return {"action": "play", "enabled": True, "badge": None, "text": "Play"}
 
 
-def load_settings(app):
-    """Per-game launcher settings; unknown or malformed values fall back to defaults."""
-    try:
-        saved = json.loads((app / SETTINGS).read_text())
-    except (OSError, ValueError):
-        return {}
-    settings = {}
-    if isinstance(saved, dict):
-        if type(saved.get("window_stats")) is bool: settings["window_stats"] = saved["window_stats"]
-        if isinstance(saved.get("back_key"), str) and saved["back_key"] in dict(BACK_KEYS):
-            settings["back_key"] = saved["back_key"]
-    return settings
-
-
-def save_settings(app, settings):
-    from android_sessions import publish
-    publish(app / SETTINGS, settings)
-
-
-def launch_request(app, settings, interpreter=False, trace=False):
-    """CLI arguments and environment for one Play click; defaults add nothing."""
+def launch_request(app, interpreter=False, trace=False):
+    """CLI arguments for one Play click; the saved per-game settings are applied by the command."""
     args = ["start", app["package"]]
-    if "window_stats" in settings:
-        args.append("--window-stats" if settings["window_stats"] else "--no-window-stats")
     if interpreter: args.append("--no-jit")
     # Call tracing follows ART methods, so NativeActivity apps launch without it.
     if trace and app.get("launcher") == "managed_activity": args += ["--trace-apk", "calls"]
-    env = {"BIFROST_ANDROID_BACK_KEY": settings["back_key"]} if "back_key" in settings else {}
-    return args, env
+    return args
 
 
 def short_error(output, fallback="The command failed"):
@@ -270,6 +245,11 @@ def show(state):
             self.back.setCurrentIndex(max(0, self.back.findData(settings.get("back_key", "escape"))))
             self.back.setToolTip("Host key delivered to the game as Android's Back button")
             form.addRow("Back key", self.back)
+            self.network = QComboBox()
+            for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
+            self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
+            self.network.setToolTip("What the game sees; Offline hides this computer's network from it")
+            form.addRow("Network", self.network)
             profile = QComboBox(); profile.addItem("Default display"); profile.setEnabled(False)
             form.addRow("Device profile", profile)
             note = muted(QLabel("Matching your phone's screen and identity is planned; games use the default display for now."))
@@ -290,7 +270,7 @@ def show(state):
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
             layout.addWidget(buttons)
-            self.initial = (self.stats.isChecked(), self.back.currentData())
+            self.initial = (self.stats.isChecked(), self.back.currentData(), self.network.currentData())
             self.settings = dict(settings)
 
         def result_settings(self):
@@ -299,6 +279,8 @@ def show(state):
                 self.settings["window_stats"] = self.stats.isChecked()
             if self.back.currentData() != self.initial[1] or "back_key" in self.settings:
                 self.settings["back_key"] = self.back.currentData()
+            if self.network.currentData() != self.initial[2] or "network" in self.settings:
+                self.settings["network"] = self.network.currentData()
             return self.settings
 
     class GoogleAccounts(QDialog):
@@ -600,15 +582,14 @@ def show(state):
         def act(self, app):
             package = app["package"]
             if card_state(app, self.pending.get(package))["action"] == "stop": return self.stop_app(app)
-            settings = load_settings(self.state / package) if PACKAGE.fullmatch(package) else {}
-            args, env = launch_request(app, settings, self.interpreter.isChecked(), self.trace.isChecked())
+            args = launch_request(app, self.interpreter.isChecked(), self.trace.isChecked())
             self.pending[package] = "play"; self.render()
             def started(code, output):
                 self.pending.pop(package, None)
                 if code:
                     self.show_notice(f"{app['label']} didn't start: {short_error(output)}", error=True, package=package)
                 self.refresh()
-            self.command(args, started, env)
+            self.command(args, started)
 
         def google_account(self):
             GoogleAccounts(self).exec()

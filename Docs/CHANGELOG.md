@@ -15,6 +15,12 @@ labels below are historical records.
 
 ### Asgard app removal (2026-10-20)
 
+- Per-app settings apply to every start, not only library launches, and have a
+  CLI: `asgard.py config PACKAGE [KEY [VALUE]] [--reset]` over `window_stats`,
+  `back_key` and the new `network` (`auto`/`offline`). The shared
+  `android_settings.py` replaces the library's own copy; the library's settings
+  dialog gains a Network choice. Explicit options and exported environment
+  variables still win over saved settings.
 - `asgard.py --debug CHANNELS` enables named trace channels (`binder`, `futex`,
   `thunk`, `mmap`, ... `all`) over the emulator's `BIFROST_*_TRACE` switches,
   replacing remembering individual variables. A test checks every mapped switch

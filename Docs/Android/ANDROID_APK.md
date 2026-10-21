@@ -101,6 +101,31 @@ from the library.
 The library window offers both as "Clear data…" and "Uninstall…" in a game's
 settings, disabled while the game runs.
 
+## Per-app settings
+
+```bash
+python3 Scripts/Android/asgard.py config org.example.package                 # list every setting
+python3 Scripts/Android/asgard.py config org.example.package network offline # set one
+python3 Scripts/Android/asgard.py config org.example.package --reset         # all back to defaults
+```
+
+Settings are saved in the app's `launcher-settings.json` and apply to every
+start of that app, from the CLI (`start`, `run`) and the library window alike.
+Changes take effect at the next start. A setting you never chose is not stored,
+so it keeps following the emulator's default.
+
+| Setting | Values | Effect |
+|---|---|---|
+| `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` |
+| `back_key` | `escape`, `backspace`, `delete`, `f1`, `f2`, `f12`, `none` | host key delivered as Back (`BIFROST_ANDROID_BACK_KEY`) |
+| `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_HOST_NETWORK=0`: Android sees no network |
+
+Precedence, highest first: an explicit command-line option or an environment
+variable you exported (for example `--window-stats`, `BIFROST_ANDROID_HOST_NETWORK`),
+then the saved setting, then the emulator default. Unknown or malformed values in
+the file are ignored. Media decoding is not a per-app setting: its routing belongs
+to the shared realm broker.
+
 ## Desktop library
 
 `python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 game
@@ -115,9 +140,8 @@ Icon selection prefers a dense daytime bitmap from the declared launcher
 resource. Adaptive/vector icons use that resource's bitmap fallback when present;
 otherwise the card uses a placeholder. This does not compose adaptive icons.
 
-Per-game `launcher-settings.json` stores explicit window-stats and Back-key
-choices. With no saved choice, launches keep the emulator defaults. Changes
-apply on the next start. The last-session drawer shows saved outcome/timing and
+Per-game settings are described under [Per-app settings](#per-app-settings).
+The last-session drawer shows saved outcome/timing and
 recognized error signatures from at most the final 16 MiB of its log; those
 counts are a bounded log summary, not a diagnosis or gameplay result.
 

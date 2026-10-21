@@ -21,6 +21,7 @@ import uuid
 import zipfile
 
 import android_preflight as preflight
+import android_settings
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
@@ -747,6 +748,36 @@ def clear_data(state, package):
                     (root / relative).mkdir(parents=True, exist_ok=True)
 
 
+def configure(args):
+    app = args.state_root / args.package
+    if not PACKAGE.fullmatch(args.package) or not (app / "package.json").is_file():
+        raise ValueError("Package is not installed: " + args.package)
+    settings = android_settings.load(app)
+    if args.reset:
+        if args.value is not None:
+            raise ValueError("--reset takes at most a setting name")
+        settings = {key: value for key, value in settings.items() if args.key and key != args.key}
+        android_settings.save(app, settings)
+    elif args.value is not None:
+        if not args.key:
+            raise ValueError("A value needs a setting name")
+        settings[args.key] = android_settings.parse(args.key, args.value)
+        android_settings.save(app, settings)
+    elif args.key and not args.json:
+        value = settings.get(args.key)
+        print("default" if value is None else str(value).lower() if isinstance(value, bool) else value)
+        return 0
+    if args.json:
+        print(json.dumps(settings))
+    elif args.reset or args.value is not None:
+        print("Saved; applies the next time the app starts")
+    else:
+        for key in android_settings.KEYS:
+            value = settings.get(key)
+            print(f"{key} = " + ("default" if value is None else str(value).lower() if isinstance(value, bool) else value))
+    return 0
+
+
 def confirm(question, assume_yes):
     if assume_yes:
         return
@@ -767,11 +798,13 @@ def start_background(package, state, options=()):
     session_id = uuid.uuid4().hex
     directory = app / "managed/sessions" / session_id
     directory.mkdir(parents=True)
+    options, saved_environment = android_settings.apply_to_launch(app, options, os.environ)
     with (directory / "launcher.log").open("wb") as log:
         child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
                                   "--state-root", str(state.resolve()), "run", package,
                                   "--session-id", session_id, *options], stdout=log,
-                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                 env=dict(os.environ, **saved_environment))
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         saved = control(app)
@@ -834,6 +867,12 @@ def main():
         if name == "logs":
             command.add_argument("--lines", type=int, default=80)
             command.add_argument("--logd", action="store_true")
+    configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
+    configuration.add_argument("package")
+    configuration.add_argument("key", nargs="?", choices=android_settings.KEYS)
+    configuration.add_argument("value", nargs="?")
+    configuration.add_argument("--reset", action="store_true", help="restore the default of KEY, or of every setting")
+    configuration.add_argument("--json", action="store_true")
     for name, text in (("uninstall", "remove an app with its code and all of its data"),
                        ("clear-data", "reset an app's saves and settings; the app stays installed")):
         command = commands.add_parser(name, help=text)
@@ -887,6 +926,8 @@ def main():
                 print(f"{args.package}: {'stop requested' if args.command == 'stop' and value['state'] in ('running', 'preparing', 'stopping') else value['state']}"
                       f" (pid={value.get('pid') or '-'}, exit={value.get('exit_code')})")
             return 0
+        if args.command == "config":
+            return configure(args)
         if args.command in ("uninstall", "clear-data"):
             removing = args.command == "uninstall"
             confirm(f"{'Uninstall' if removing else 'Clear all data of'} {args.package}?", args.yes)
@@ -956,6 +997,10 @@ def main():
                     print(str(error), file=sys.stderr)
                     failed = True
             return 1 if failed else 0
+        if PACKAGE.fullmatch(args.package):
+            emu_args, saved_environment = android_settings.apply_to_launch(
+                args.state_root / args.package, emu_args, os.environ)
+            os.environ.update(saved_environment)
         if args.binder_broker:
             emu_args += ["--android-binder-broker", str(args.binder_broker.resolve())]
         return launch(
