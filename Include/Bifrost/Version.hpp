@@ -227,6 +227,10 @@ namespace arm64emu {
 //   Subsystem source layout, role-based guest folders and descriptive
 //   file names; see CHANGELOG.md. The v2.0 Android/performance goals in
 //   Docs/roadmap.md are not complete in this pre-release.
-constexpr const char* VERSION  = "2.0.0-alpha.1";
+// 2.0.0-alpha.2 (2026-10-21): Android runtime compatibility (NsdManager,
+//   toasts, Settings intents, AppOps), JIT code-shape statistics, window
+//   scaling and memory fixes; see CHANGELOG.md. The v2.0 goals in
+//   Docs/roadmap.md are still not complete.
+constexpr const char* VERSION  = "2.0.0-alpha.2";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

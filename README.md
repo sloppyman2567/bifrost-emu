@@ -8,7 +8,7 @@
  | |_) || |_| |    | | \ \| |__| |____) |  | |
  |____/_____|_|    |_|  \_\\____/|_____/   |_|
 
-  bifrost-emu  v2.0.0-alpha.1
+  bifrost-emu  v2.0.0-alpha.2
   x86_64 ◄─────────────────► ARM64
 ```
 
@@ -20,7 +20,7 @@ Existing binaries need no cross-compiler and no QEMU.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](Docs/SUPPORT.md)
-[![Version: 2.0.0-alpha.1](https://img.shields.io/badge/version-2.0.0--alpha.1-orange.svg)](Docs/CHANGELOG.md)
+[![Version: 2.0.0-alpha.2](https://img.shields.io/badge/version-2.0.0--alpha.2-orange.svg)](Docs/CHANGELOG.md)
 
 ---
 
@@ -325,7 +325,7 @@ adapter.
 
 ## Documentation
 
-The current version is **2.0.0-alpha.1**, the first pre-release toward the
+The current version is **2.0.0-alpha.2**, the second pre-release toward the
 [v2.0 roadmap](Docs/roadmap.md); its goals are not complete yet.
 
 | Topic | Document |

@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress; the current pre-release is 2.0.0-alpha.1. Updated
-October 14, 2026. Except for checkpoints explicitly marked implemented below,
+Status: in progress; the current pre-release is 2.0.0-alpha.2. Updated
+October 21, 2026. Except for checkpoints explicitly marked implemented below,
 these are development targets, not compatibility guarantees or a release date.
 
 v2.0 aims to run selected ARM64 Android games through an integrated Android
@@ -12,7 +12,7 @@ every optimization. Existing Linux applications must keep working.
 ## Next release priorities
 
 These are proposed scopes for the next pre-releases, not announced release dates.
-The runtime remains 2.0.0-alpha.1. The October 14
+The runtime is 2.0.0-alpha.2. The October 14
 [SpongeBob screenshots](Apps/spongebob.md#screenshots-2026-10-14) show cooking,
 the lobby, Help Center and a level-14 pause menu; the
 [Azur Lane screenshots](Apps/azur-lane.md#screenshots-2026-10-14) show loading

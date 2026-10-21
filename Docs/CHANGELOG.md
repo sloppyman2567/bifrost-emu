@@ -6,12 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
-## [2.0.0-alpha.1] — first v2.0 pre-release (2026-10-12)
+## [2.0.0-alpha.2] — Android compatibility and runtime fixes (2026-10-21)
 
-**2.0.0-alpha.1** is the first alpha release toward the
-[v2.0 roadmap](roadmap.md). This section records its changes since 1.5.5
-(2026-10-04 onward). The stable v2.0 goals remain in progress; older version
-labels below are historical records.
+**2.0.0-alpha.2** collects the changes made after 2.0.0-alpha.1 (2026-10-12): Android service
+contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
+[v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
+
+### Toasts, NsdManager and Settings intents (2026-10-21)
+
+- `Toast.show` no longer ends an app: `notification.enqueueTextToast`, `enqueueToast` and
+  `cancelToast` follow `NotificationManagerService`'s queue (one toast at a time, 2 s or 3.5 s).
+  A text toast is a `TYPE_TOAST` window of the framework layout; a custom toast gets `show`/`hide`.
+  Azur Lane's sign-in failure path used to exit here. Seen in the `ManagedDialog` fixture; not
+  background-toast policy or animations.
+- `servicediscovery` is published (`FrameworkNsd`): `NsdManager` constructs, discovery starts and
+  stops and finds nothing (no host mDNS responder), resolve and advertise fail. Uptodown dereferenced
+  the missing manager in `onActivityCreated`; it now draws its home screen.
+- An `android.settings.*` intent without a component is declined (`START_ABORTED`) for every app,
+  not just Play services.
+- Test: `ManagedDialog` finishes its `Engine` Activity so the task ends;
+  `test_managed_dialog_and_popup_windows` passes again (its earlier timeout was the fixture's).
 
 ### JIT code size per guest instruction (2026-10-21, measurement only)
 
@@ -1077,6 +1091,13 @@ labels below are historical records.
   QEMU hashes. `jit_neon`, `jit_neon_fixups` and `test_simd_sat` expected
   the old wrong results (SHL `#64`, an 8-byte TBL table, a wrapped UHSUB,
   an unsigned UQSHL amount) and were corrected against QEMU.
+
+## [2.0.0-alpha.1] — first v2.0 pre-release (2026-10-12)
+
+**2.0.0-alpha.1** is the first alpha release toward the
+[v2.0 roadmap](roadmap.md). This section records its changes since 1.5.5
+(2026-10-04 onward). The stable v2.0 goals remain in progress; older version
+labels below are historical records.
 
 ### Generated native SIMD table and coverage sweep (2026-10-12)
 
