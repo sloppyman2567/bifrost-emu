@@ -208,8 +208,8 @@ video-ad playback or full lifecycle/recreation behavior.
   deliver its result to the caller's `resultTo`, and resolve foreign
   PendingIntents through their creator. Done for Play services Activity senders
   (a foreign sender is asked what it targets, then runs in the relay window);
-  other foreign senders are still reported cancelled. A real Roblox Credential
-  Manager or Azur Lane Play Games sign-in has not been observed.
+  other foreign senders are still reported cancelled. A real Azur Lane Play Games
+  sign-in has not been observed (nor any Roblox use of this path).
 - Cover the selected games' audio APIs, callback threading, buffer timing
   and device changes, preserving sound during normal gameplay.
 - Test orientation, resize, focus, pause/resume, surface loss/recreation
