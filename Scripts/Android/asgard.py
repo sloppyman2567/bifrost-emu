@@ -199,7 +199,8 @@ def main():
     parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
     parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
     parser.add_argument("command", choices=("realm", "run", "start", "list", "apps", "status",
-                                           "stop", "logs", "install", "launcher", "probe", "google"))
+                                           "stop", "logs", "install", "uninstall", "clear-data",
+                                           "launcher", "probe", "google"))
     args, remainder = parser.parse_known_args()
     state = args.state_root.resolve()
     try:

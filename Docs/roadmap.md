@@ -68,9 +68,9 @@ does not promise every ad network or Google Play Services support.
   library; show actionable missing-runtime or window-backend errors.
 - Make the launcher select the intended graphics-capable executable and keep
   headless validation from silently replacing the desktop default.
-- Build on the current cards, icons, search, per-game Back-key/stats settings
-  and last-session drawer. Add clear update/reinstall and save-preservation
-  flows, with routine controls outside Developer.
+- Build on the current cards, icons, search, per-game Back-key/stats settings,
+  clear-data/uninstall and last-session drawer. Add clear update/reinstall and
+  save export/import flows, with routine controls outside Developer.
 - Validate install → play → settings → stop/relaunch on a fresh setup. Broaden
   the game matrix, including longer gameplay and multi-app realm/lifecycle
   checks on supported Linux display stacks.

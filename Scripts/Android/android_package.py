@@ -669,6 +669,81 @@ def installed_apps(state):
     return result
 
 
+# App-owned locations in a guest root (credential and device storage, ART profiles, the
+# app-specific external directories), each holding one directory per package. OBBs are kept:
+# Android 10+ clears them, but nothing here could fetch them again.
+APP_DATA = ("data/user/0", "data/user_de/0", "data/misc/profiles/cur/0", "data/misc/profiles/ref",
+            "storage/emulated/0/Android/data", "storage/emulated/0/Android/media")
+
+
+@contextmanager
+def idle_app(state, package):
+    """Yield an installed, non-system app's directory while no session can start or run."""
+    app = state / package
+    if not PACKAGE.fullmatch(package) or not (app / "package.json").is_file():
+        raise ValueError("Package is not installed: " + package)
+    if app.is_symlink():
+        raise ValueError("Refusing redirected app state: " + package)
+    if json.loads((app / "package.json").read_text()).get("system"):
+        raise ValueError("System app cannot be removed: " + package)
+    # A session holds this lock from preparation to exit, so it is also the running check.
+    with app_lock(app, blocking=False):
+        yield app
+
+
+def remove_tree(path):
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        # Installed code directories are read-only; only the directories need relaxing.
+        from android_managed import remove_runtime
+        remove_runtime(path)
+
+
+def uninstall(state, package):
+    """Remove an app with its code, data and runtime copies, like `pm uninstall` without -k."""
+    from android_sessions import release_app_id
+    with idle_app(state, package) as app:
+        # One rename takes it out of the library atomically, whatever the deletion then meets.
+        trash = state / (".removing-" + uuid.uuid4().hex)
+        app.rename(trash)
+        try:
+            remove_tree(trash)
+        except OSError as error:
+            raise ValueError(f"{package} was uninstalled but {trash} could not be fully deleted: {error}") from error
+    release_app_id(state, package)
+
+
+def clear_data(state, package):
+    """Reset an installed app's data to a first-run state, like `pm clear`; the install stays."""
+    with idle_app(state, package) as app:
+        for root, managed in ((app / "rootfs", False), (app / "managed/rootfs", True)):
+            if not root.is_dir() or root.is_symlink():
+                continue
+            for relative in APP_DATA:
+                target = root / relative / package
+                # Data in the guest's reach can be a symlink, but its parents are runtime-owned.
+                if not target.parent.resolve().is_relative_to(root.resolve()):
+                    raise ValueError("Refusing redirected app data: " + relative)
+                remove_tree(target)
+            if managed:
+                from android_managed import ensure_app_data
+                ensure_app_data(root, package)
+            else:
+                for relative in (f"data/user/0/{package}/files", f"data/user/0/{package}/cache",
+                                 f"storage/emulated/0/Android/data/{package}/files"):
+                    (root / relative).mkdir(parents=True, exist_ok=True)
+
+
+def confirm(question, assume_yes):
+    if assume_yes:
+        return
+    if not sys.stdin.isatty():
+        raise ValueError("This cannot be undone; pass --yes to confirm")
+    if input(question + " [y/N] ").strip().lower() not in ("y", "yes"):
+        raise ValueError("Cancelled")
+
+
 def start_background(package, state, options=()):
     from android_sessions import control
     if not PACKAGE.fullmatch(package) or not (state / package / "package.json").is_file():
@@ -747,6 +822,11 @@ def main():
         if name == "logs":
             command.add_argument("--lines", type=int, default=80)
             command.add_argument("--logd", action="store_true")
+    for name, text in (("uninstall", "remove an app with its code and all of its data"),
+                       ("clear-data", "reset an app's saves and settings; the app stays installed")):
+        command = commands.add_parser(name, help=text)
+        command.add_argument("package")
+        command.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     commands.add_parser("launcher", help="open the desktop app library")
     google = commands.add_parser("google", help="sign in to Google (microG) and manage the device's Google accounts")
     actions = google.add_subparsers(dest="action", required=True)
@@ -794,6 +874,12 @@ def main():
             else:
                 print(f"{args.package}: {'stop requested' if args.command == 'stop' and value['state'] in ('running', 'preparing', 'stopping') else value['state']}"
                       f" (pid={value.get('pid') or '-'}, exit={value.get('exit_code')})")
+            return 0
+        if args.command in ("uninstall", "clear-data"):
+            removing = args.command == "uninstall"
+            confirm(f"{'Uninstall' if removing else 'Clear all data of'} {args.package}?", args.yes)
+            (uninstall if removing else clear_data)(args.state_root, args.package)
+            print(f"{'Uninstalled' if removing else 'Cleared the data of'} {args.package}")
             return 0
         if args.command == "install":
             value = install(

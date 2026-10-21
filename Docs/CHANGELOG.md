@@ -13,6 +13,23 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Asgard app removal (2026-10-20)
+
+- `asgard.py uninstall PACKAGE` removes an app's install, runtime copies and
+  data; `clear-data PACKAGE` resets its saves and settings to a first-run state
+  and keeps the install. Both refuse a running app (the session holds the
+  package lock), system apps and anything not installed, ask before deleting
+  unless given `--yes`, and are available from the library window's game
+  settings.
+- Uninstalling renames the app out of the library first, then deletes (installed
+  code is read-only), and frees the app's UID in `.app-ids.json`.
+- `clear-data` removes the package's credential/device storage, ART profiles and
+  `Android/data` and `Android/media` directories in both the install root and
+  the managed root. It keeps OBBs and shared storage. Android 10+ also clears
+  OBBs (per an AOSP installd commit message); Bifrost has no store to fetch
+  them again. Whether Android clears `Android/media` was not confirmed against
+  AOSP source.
+
 ### Google accounts and microG sign-in (2026-10-20)
 
 - The `account` service is now Android 15's `AccountManagerService` (one

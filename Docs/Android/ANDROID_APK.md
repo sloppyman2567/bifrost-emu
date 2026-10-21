@@ -66,12 +66,39 @@ Adapter changes require a fresh `--state-root`; the installer deliberately
 rejects replacing different adapters inside an existing app root. Keep the
 original app state when evaluating a new runtime.
 
+## Uninstall and reset
+
+```bash
+python3 Scripts/Android/asgard.py uninstall org.example.package    # code, runtime copies and all data
+python3 Scripts/Android/asgard.py clear-data org.example.package   # saves and settings only
+```
+
+Both ask for confirmation on a terminal; scripts must pass `--yes`. They fail
+while the app runs (stop it first), for provisioned system apps such as microG,
+and for packages that are not installed. A failed uninstall deletion reports the
+hidden `.removing-*` directory left in the state root; the app is already gone
+from the library.
+
+- `uninstall` renames the app directory out of the library, deletes it (the
+  installed code is read-only, so directories are made writable first) and frees
+  the app's UID. Google accounts in `<state>/.google` are shared and stay.
+- `clear-data` empties `data/user/0/PKG`, `data/user_de/0/PKG`, both ART
+  profile directories and `storage/emulated/0/Android/{data,media}/PKG` in the
+  install root and the managed root, then recreates the empty directories a
+  first start expects. It keeps the installed code, OBBs, other shared storage,
+  per-root device settings and accounts, and the `data-backup-*` folders.
+  Symlinks inside the data are removed, never followed, and a symlinked parent
+  directory aborts the command.
+
+The library window offers both as "Clear data…" and "Uninstall…" in a game's
+settings, disabled while the game runs.
+
 ## Desktop library
 
 `python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 game
 library using the same install and session supervisor as the CLI. Cards show
 the app label, version, install date and bitmap icon, with Play/Stop actions,
-search, per-game settings and a last-session drawer. Package IDs, library paths,
+search, per-game settings (including clear data and uninstall) and a last-session drawer. Package IDs, library paths,
 interpreter launch and Java call tracing are grouped under Developer.
 
 Install records now retain the base APK's label/version and a bounded launcher

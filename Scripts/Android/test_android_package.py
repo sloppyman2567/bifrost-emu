@@ -13,6 +13,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -662,6 +663,111 @@ class GoogleAccountStateTests(unittest.TestCase):
             self.assertEqual(package.installed_apps(state)[0]["requester"]["label"], "Example Game")
             google.prepare(state, google.LOGIN_ACTIVITY)
             self.assertIsNone(package.installed_apps(state)[0]["requester"])
+
+
+class AppRemovalTests(unittest.TestCase):
+    NAME = "org.bifrost.fixture"
+    OTHER = "org.bifrost.other"
+
+    def setUp(self):
+        import json
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.state = Path(self.directory.name) / "state"
+        for name, uid in ((self.NAME, 10000), (self.OTHER, 10002)):
+            app = self.state / name
+            for rootfs in ("rootfs", "managed/rootfs"):
+                root = app / rootfs
+                code = root / "data/app" / (name + "-abc")
+                (code / "lib/arm64").mkdir(parents=True)
+                (code / "base.apk").write_bytes(b"apk")
+                (code / "base.apk").chmod(0o444)
+                code.chmod(0o555)
+                for relative in package.APP_DATA:
+                    save = root / relative / name
+                    save.mkdir(parents=True)
+                    (save / "save.dat").write_text("progress")
+                (root / "storage/emulated/0/Android/obb" / name).mkdir(parents=True)
+                (root / "storage/emulated/0/Android/obb" / name / "main.obb").write_text("obb")
+                (root / "storage/emulated/0/DCIM").mkdir(parents=True, exist_ok=True)
+                (root / "storage/emulated/0/DCIM/photo.jpg").write_text("shared")
+            (app / "package.json").write_text(json.dumps({"package": name, "launcher": {"kind": "managed_activity"}}))
+        (self.state / ".app-ids.json").write_text(json.dumps({self.NAME: 10000, self.OTHER: 10002}))
+        self.addCleanup(lambda: [path.chmod(0o755) for path in self.state.rglob("*") if path.is_dir() and not path.is_symlink()])
+
+    def app(self, name=None):
+        return self.state / (name or self.NAME)
+
+    def test_clear_data_resets_saves_but_keeps_the_install_and_shared_files(self):
+        package.clear_data(self.state, self.NAME)
+        for rootfs in ("rootfs", "managed/rootfs"):
+            root = self.app() / rootfs
+            for relative in package.APP_DATA:
+                self.assertFalse((root / relative / self.NAME / "save.dat").exists(), relative)
+            self.assertEqual((root / "data/app" / (self.NAME + "-abc/base.apk")).read_bytes(), b"apk")
+            self.assertEqual((root / "storage/emulated/0/Android/obb" / self.NAME / "main.obb").read_text(), "obb")
+            self.assertEqual((root / "storage/emulated/0/DCIM/photo.jpg").read_text(), "shared")
+        # The next start needs the package directories, as after an install.
+        self.assertTrue((self.app() / "rootfs/data/user/0" / self.NAME / "files").is_dir())
+        self.assertTrue((self.app() / "managed/rootfs/data/user_de/0" / self.NAME).is_dir())
+        # Other apps are untouched.
+        self.assertTrue((self.app(self.OTHER) / "rootfs/data/user/0" / self.OTHER / "save.dat").is_file())
+
+    def test_uninstall_removes_read_only_code_and_releases_the_app_id(self):
+        import json
+        package.uninstall(self.state, self.NAME)
+        self.assertFalse(self.app().exists())
+        self.assertEqual([x.name for x in self.state.iterdir() if x.name.startswith(".removing-")], [])
+        self.assertEqual(json.loads((self.state / ".app-ids.json").read_text()), {self.OTHER: 10002})
+        self.assertEqual([x["package"] for x in package.installed_apps(self.state)], [self.OTHER])
+        self.assertTrue((self.app(self.OTHER) / "rootfs/data/app" / (self.OTHER + "-abc/base.apk")).is_file())
+
+    def test_running_system_and_unknown_apps_are_refused(self):
+        import json
+        with package.app_lock(self.app(), blocking=False):
+            for action in (package.uninstall, package.clear_data):
+                with self.assertRaisesRegex(ValueError, "busy"):
+                    action(self.state, self.NAME)
+        self.assertTrue((self.app() / "rootfs/data/user/0" / self.NAME / "save.dat").is_file())
+        (self.app(self.OTHER) / "package.json").write_text(json.dumps({"package": self.OTHER, "system": True}))
+        for name in (self.OTHER, "org.bifrost.missing", "../" + self.NAME, ""):
+            for action in (package.uninstall, package.clear_data):
+                with self.assertRaises(ValueError):
+                    action(self.state, name)
+        self.assertTrue(self.app(self.OTHER).is_dir())
+
+    def test_redirected_app_data_is_never_followed(self):
+        outside = Path(self.directory.name) / "outside"
+        (outside / self.NAME).mkdir(parents=True)
+        (outside / self.NAME / "keep.txt").write_text("host")
+        data = self.app() / "rootfs/data/user/0"
+        shutil.rmtree(data)
+        data.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "redirected"):
+            package.clear_data(self.state, self.NAME)
+        self.assertTrue((outside / self.NAME / "keep.txt").is_file())
+        # A redirected package directory is unlinked, not emptied through the link.
+        data.unlink()
+        (self.app() / "rootfs/data/user/0").mkdir()
+        (self.app() / "rootfs/data/user/0" / self.NAME).symlink_to(outside / self.NAME)
+        package.clear_data(self.state, self.NAME)
+        self.assertTrue((outside / self.NAME / "keep.txt").is_file())
+
+    def test_command_line_asks_before_destroying_data(self):
+        def run(*arguments):
+            return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                   "--state-root", str(self.state), *arguments],
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        save = self.app() / "rootfs/data/user/0" / self.NAME / "save.dat"
+        for command in ("clear-data", "uninstall"):
+            refused = run(command, self.NAME)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("--yes", refused.stderr)
+            self.assertTrue(save.is_file())
+        self.assertEqual(run("clear-data", "--yes", self.NAME).returncode, 0)
+        self.assertFalse(save.exists())
+        self.assertEqual(run("uninstall", "--yes", self.NAME).returncode, 0)
+        self.assertFalse(self.app().exists())
 
 
 class PackageTests(unittest.TestCase):

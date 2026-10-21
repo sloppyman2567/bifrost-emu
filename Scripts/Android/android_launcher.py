@@ -275,6 +275,18 @@ def show(state):
             note = muted(QLabel("Matching your phone's screen and identity is planned; games use the default display for now."))
             note.setWordWrap(True); form.addRow("", note)
             layout.addLayout(form)
+            removal = QHBoxLayout()
+            running = app["session"].get("state") in ACTIVE
+            for text, command, tip in (
+                    ("Clear data…", "clear-data", "Delete this game's saves and settings; the game stays installed"),
+                    ("Uninstall…", "uninstall", "Remove this game with all of its data")):
+                button = QPushButton(text)
+                button.setToolTip("Stop the game first" if running else tip); button.setEnabled(not running)
+                # Closing the dialog drops unsaved choices: they would describe data that is gone.
+                button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
+                removal.addWidget(button)
+            removal.addStretch()
+            layout.addLayout(removal)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
             layout.addWidget(buttons)
@@ -633,6 +645,26 @@ def show(state):
                         self.show_notice(f"Settings saved. They apply the next time {app['label']} starts.", timeout=6000)
                 except OSError as error:
                     self.show_notice("Couldn't save settings: " + str(error), error=True)
+
+        def remove_app(self, app, command):
+            """Ask, then clear or uninstall; True once the command was started."""
+            removing = command == "uninstall"
+            question = (f"Uninstall {app['label']}? Its saves and settings are deleted too." if removing else
+                        f"Delete all saves and settings of {app['label']}? The game stays installed.")
+            buttons, no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+            if QMessageBox.question(self, "Uninstall" if removing else "Clear data", question + "\n\nThis cannot be undone.",
+                                    buttons, no) != QMessageBox.StandardButton.Yes: return False
+            package = app["package"]
+            def removed(code, output):
+                if code:
+                    self.show_notice(f"Couldn't {'uninstall' if removing else 'clear data of'} {app['label']}: "
+                                     f"{short_error(output)}", error=True)
+                else:
+                    self.show_notice(f"{app['label']} {'was uninstalled' if removing else 'now has no saved data'}.", timeout=6000)
+                    if removing and self.drawer_package == package: self.close_drawer()
+                self.refresh()
+            self.command([command, "--yes", package], removed)
+            return True
 
         def show_notice(self, text, error=False, package=None, timeout=0):
             icon = QStyle.StandardPixmap.SP_MessageBoxWarning if error else QStyle.StandardPixmap.SP_MessageBoxInformation

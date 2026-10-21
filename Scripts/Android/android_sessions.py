@@ -65,6 +65,25 @@ def publish(path, value):
 RESERVED_APP_IDS = frozenset({10001, 19998, 19999})
 
 
+def read_app_ids(path):
+    ids = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(ids, dict) or any(type(v) is not int or not 10000 <= v <= 19999
+                                        or v in RESERVED_APP_IDS for v in ids.values()) \
+            or len(set(ids.values())) != len(ids):
+        raise ValueError("Invalid app ID registry")
+    return ids
+
+
+def release_app_id(state, package):
+    """Free a removed package's ID; a reinstall may receive another one."""
+    if not (state / ".app-ids.json").exists(): return
+    with (state / ".app-ids.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = state / ".app-ids.json"
+        ids = read_app_ids(path)
+        if ids.pop(package, None) is not None: publish(path, ids)
+
+
 def app_id(state, package):
     """Persist package identity independently of code updates and process IDs."""
     tools = str(Path(__file__).resolve().parents[2] / "Tools/Android")
@@ -75,11 +94,7 @@ def app_id(state, package):
     with (state / ".app-ids.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = state / ".app-ids.json"
-        ids = json.loads(path.read_text()) if path.exists() else {}
-        if not isinstance(ids, dict) or any(type(v) is not int or not 10000 <= v <= 19999
-                                            or v in RESERVED_APP_IDS for v in ids.values()) \
-                or len(set(ids.values())) != len(ids):
-            raise ValueError("Invalid app ID registry")
+        ids = read_app_ids(path)
         if package not in ids:
             available = next((v for v in range(10000, 20000)
                               if v not in RESERVED_APP_IDS and v not in ids.values()), None)
