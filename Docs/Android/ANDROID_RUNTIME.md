@@ -415,10 +415,21 @@ authenticator transaction (an authenticator reading its own account data).
 
 Observed: the microG dialog and Google's real "Sign in" page rendered in the
 window (screenshots), and a seeded `com.google` account was answered by
-microG's authenticator from a separate process (`hasFeatures`). Not observed:
-a completed login, because it needs real credentials, so nothing here shows
-that the account microG stores works for Play Integrity or a game's Google
-sign-in.
+microG's authenticator from a separate process (`hasFeatures`).
+
+Observed on 2026-10-21 (Hungry Shark World, a real Google account the user
+signed in): the window returned `RESULT_OK` with `changed=true`; microG's Games
+service then bound for the game, obtained a `games_lite` OAuth token from Google,
+and Google answered `GET https://www.googleapis.com/games/v1/players/me` with
+HTTP 404. microG replied `SIGN_IN_REQUIRED` and the game's Play Games plugin
+reported "Authentication failed … 4 out of 4 underlying tasks failed". The 404
+body was not logged, so the reason is not established (a Google account with no
+Play Games profile is one candidate; microG has no profile creation). This is
+Google's answer to a request the emulator delivered, not an emulator fault, and
+it shows nothing yet about Play Integrity. After the window, `changed=true`
+restarts the app's Play services processes (`FrameworkRemoteActivities`), which
+kills the provider the game's clients were bound to: the ad-ID client logged
+`DeadObjectException` once before it reconnected to the new process.
 
 **Google Activities started by an app.** microG's `:ui` Activities
 (`AuthSignInActivity`, `AccountPickerActivity`, `AskPermissionActivity`,

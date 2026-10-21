@@ -36,7 +36,7 @@
       "status": "runs",
       "checked": "2026-10",
       "evidence": "A 358 s session with ads and taps on the game's links, run by hand (Docs/TESTS.md); gameplay is not confirmed.",
-      "notes": ["Rewarded video ads had no fill from Google Mobile Ads before the ad-SDK gaps were closed; not re-checked."]
+      "notes": ["Rewarded video ads had no fill from Google Mobile Ads before the ad-SDK gaps were closed; not re-checked.", "Play Games sign-in does not complete: after the Google window, Google answers games/v1/players/me with HTTP 404 and microG reports SIGN_IN_REQUIRED (2026-10-21)."]
     },
     "com.fgol.HungrySharkEvolution": {
       "name": "Hungry Shark Evolution",
