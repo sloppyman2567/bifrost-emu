@@ -44,6 +44,13 @@ labels below are historical records.
   `dlopen` alike. A real AArch64 file in the rootfs still wins.
   `test_dyn_thunk_stub` (dynamic glibc, `dlopen("libGL.so.1")`, headless) passes
   under both linkers; it needs a GL-thunk build, like `gl_state`.
+- A stub is served only if no real AArch64 library of that name exists in a
+  directory the guest `ld.so` searches, and `--guest-ld` forwards
+  `LD_LIBRARY_PATH` to the guest (the native linker still ignores it).
+  dhewm3 under `--guest-ld` first failed on both: its private libraries were
+  not found, then a stub shadowed the rootfs's real `libopenal.so.1`. After the
+  fixes it loaded `game/demo_mars_city1` in 21.6 s in a manual windowed run
+  (no automated check; no native-linker comparison yet).
 - `Scripts/Setup/make-ld-cache.py` writes `rootfs/etc/ld.so.cache` (glibc's
   `ld.so` never reads `ld.so.conf`); `setup-rootfs.sh` and
   `setup-rootfs-all.sh` call it. Output parses under the host's

@@ -237,6 +237,12 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     // `ls` display correct local time and language conventions.
     if (guest_env_.empty()) {
         guest_env_ = build_default_guest_env();
+        // A guest ld.so honors LD_LIBRARY_PATH (read in guest paths). The
+        // native linker ignores it, so the default environment omits it.
+        if (guest_linker_) {
+            const char* v = getenv("LD_LIBRARY_PATH");
+            if (v && v[0] != '\0') guest_env_.push_back(std::string("LD_LIBRARY_PATH=") + v);
+        }
     }
     std::vector<uint64_t> argv_addrs, envp_addrs;
     uint64_t sp = place_argument_strings(stack_top, argv, guest_env_, argv_addrs, envp_addrs);

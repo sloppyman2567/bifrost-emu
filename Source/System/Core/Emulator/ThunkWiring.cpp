@@ -13,6 +13,7 @@
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
 #include "System/Loader/ThunkStub.hpp"
 #include <sys/mman.h>
+#include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
 #include "FrostJIT/Compiler/FrostJIT.hpp"
@@ -538,10 +539,41 @@ std::vector<std::pair<std::string, uint64_t>> Emulator::thunk_symbols(const std:
     add_all(graphics_.display_thunk());
     return out;
 }
+namespace {
+// True if some directory a guest ld.so searches holds a real AArch64 file
+// named `soname`. The guest linker tries LD_LIBRARY_PATH, the cache and the
+// default directories in turn, so the first miss must not be answered with a
+// stub while a real library sits further down the list.
+bool real_library_in_rootfs(const std::string& soname) {
+    std::vector<std::string> dirs;
+    if (const char* v = getenv("LD_LIBRARY_PATH")) {
+        std::stringstream ss(v);
+        for (std::string d; std::getline(ss, d, ':');)
+            if (!d.empty()) dirs.push_back(d);
+    }
+    for (const char* d : {"/lib64", "/usr/lib64", "/lib", "/usr/lib", "/usr/lib/aarch64-linux-gnu"})
+        dirs.push_back(d);
+    if (std::ifstream conf(yggdrasil::Yggdrasil::remap_path("/etc/ld.so.conf")); conf) {
+        for (std::string line; std::getline(conf, line);)
+            if (!line.empty() && line[0] == '/') dirs.push_back(line);
+    }
+    for (const auto& d : dirs) {
+        std::ifstream f(yggdrasil::Yggdrasil::remap_path(d + "/" + soname), std::ios::binary);
+        unsigned char h[20];
+        if (f && f.read(reinterpret_cast<char*>(h), sizeof(h)) &&
+            h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F' &&
+            h[18] == 183 && h[19] == 0)
+            return true;
+    }
+    return false;
+}
+}  // namespace
+
 std::unique_ptr<yggdrasil::Node> Emulator::open_thunk_stub(const std::string& path) {
     const size_t slash = path.find_last_of('/');
     const std::string soname = slash == std::string::npos ? path : path.substr(slash + 1);
     if (!DynamicLinker::is_thunk_supported_lib_(soname)) return nullptr;
+    if (real_library_in_rootfs(soname)) return nullptr;
     const auto syms = thunk_symbols(soname);
     if (syms.empty()) return nullptr;
     const std::vector<uint8_t> image = build_thunk_stub_elf(soname, syms);

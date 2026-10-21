@@ -38,8 +38,13 @@
   ENOENT, `open_guest_at` returns `Emulator::open_thunk_stub`, a memfd holding
   `build_thunk_stub_elf`'s ET_DYN whose functions branch (x16) to the existing
   thunk trampolines. Keep it relocation-free with a writable PT_DYNAMIC (ld.so
-  adjusts it in place); the thunks must be initialized first, and a real
-  AArch64 file in the rootfs wins, as with the native linker. Run
+  adjusts it in place); the thunks must be initialized first. A real AArch64
+  file of that name in any directory ld.so searches (LD_LIBRARY_PATH,
+  `ld.so.conf`, the defaults) wins, as with the native linker: ld.so tries the
+  directories in turn, so answering the first miss would shadow a real
+  library (dhewm3's `libopenal.so.1` lost `alcIsExtensionPresent` that way).
+  `--guest-ld` forwards the host `LD_LIBRARY_PATH` to the guest, in guest
+  paths; the default environment omits it for the native linker. Run
   `run_tests.sh --guest-ld` alongside the default dynamic suite.
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.
