@@ -1244,6 +1244,7 @@ public final class ManagedLauncher {
         }
         System.out.println("APP_PARSED " + app.className + " " + activity.name);
         int width = 0, height = 0;
+        boolean fixedWindow = false;
         if (play) {
             boolean landscape = Arrays.asList(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
                     ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
@@ -1266,12 +1267,16 @@ public final class ManagedLauncher {
             // grow the app's surface (the game would keep drawing its first, smaller scene in a corner).
             if (ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
                 error = fixWindow(width, height);
+                fixedWindow = error == 0;
                 System.out.println("APP_WINDOW_FIXED " + width + "x" + height + " status=" + error);
             }
             long[] display = new long[2];
             error = displaySize(display);
             if (error != 0) throw new IllegalStateException("host display size: " + error);
-            displays.setMaxBounds((int) display[0], (int) display[1]);
+            // A scaled non-resizable app's maximum bounds are its own (size compatibility mode), not
+            // the display's: Battle Cats sizes its WebView from getMaximumWindowMetrics().
+            if (fixedWindow) displays.setMaxBounds(width, height);
+            else displays.setMaxBounds((int) display[0], (int) display[1]);
             // What ActivityThread.handleConfigurationChanged applies: the
             // process and system resources use the display's density before
             // the Application and Activity contexts are created.
