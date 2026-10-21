@@ -2485,11 +2485,24 @@ so apps receive `ActivityNotFoundException` as on a device without a handler.
 `startActivityIntentSender` (`startIntentSenderForResult`) sends a
 PendingIntent of this process like `PendingIntentRecord.sendInner`: the
 mutable flag override, and a single activity started for the caller's
-`resultTo`/`requestCode`. A sender another process created, such as
-Play services' sign-in UI (Credential Manager in Roblox's login screen, Play
-Games v2's `GamesResolutionActivity` in Azur Lane), returns `START_CANCELED`,
-so the caller gets `IntentSender.SendIntentException` and continues without
-it. Activities of other processes cannot be shown, except Play services'.
+`resultTo`/`requestCode`. A sender another process created is a Binder proxy.
+The creator's sender Binder answers one transaction outside `IIntentSender`
+(`FIRST_CALL_TRANSACTION + 1000`) with the Intent, resolved type, flags and
+owner of an Activity sender aimed at Play services (`com.google.android.gms`
+component or action) that is not cancelled; it describes no other sender.
+`startActivityIntentSender` asks, then starts that Activity from the caller's
+own process through the Play services window relay
+([above](#google-accounts-and-sign-in-2026-10-20)), with the caller's
+`resultTo`/`requestCode`, the sender's mutability and the fill-in Intent applied
+as `PendingIntentRecord.sendInner` does. This is what Play services' sign-in
+UI arrives as (Credential Manager in Roblox's login screen, Play Games v2's
+`GamesResolutionActivity` in Azur Lane). Any other foreign sender, or a
+cancelled one, still returns `START_CANCELED`, so the caller gets
+`IntentSender.SendIntentException` and continues without it. Limits: a
+one-shot foreign sender is not spent in its creator, only the last Intent of a
+multi-Intent sender is described, and the Activity runs as the calling app, not
+the creator (the relay checks the app as the calling Activity). Activities of
+other processes cannot be shown, except Play services'.
 The exception is `PackageManager.ACTION_REQUEST_PERMISSIONS` addressed to the
 permission controller, built by `Activity.requestPermissions`
 ([android15-release](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/core/java/android/app/Activity.java)).

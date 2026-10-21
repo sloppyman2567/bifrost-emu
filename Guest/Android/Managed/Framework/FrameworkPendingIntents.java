@@ -2,6 +2,7 @@
 // Sender objects are local IIntentSenders attached to real Binder identities.
 import android.app.PendingIntent;
 import android.content.Intent;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.IInterface;
@@ -28,6 +29,11 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
     boolean handles(String method) {
         try { Contract.valueOf(method); return true; } catch (IllegalArgumentException unknown) { return false; }
     }
+
+    // Outside IIntentSender's own codes: a sender answers "what do you start?"
+    // so another process can start a Play services Activity for it (below).
+    private static final String SENDER_DESCRIPTOR = "android.content.IIntentSender";
+    private static final int TARGET_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION + 1000;
 
     private final FrameworkServices services;
     private final FrameworkPackages packages;
@@ -137,14 +143,74 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
         }
         if ((flags & PendingIntent.FLAG_NO_CREATE) != 0) return null;
         Record created = new Record(key, a);
-        created.sender = services.local("intent_sender", "android.content.IIntentSender", (method, args) -> {
+        created.sender = services.local("intent_sender", SENDER_DESCRIPTOR, (method, args) -> {
             if (!method.equals("send")) throw new UnsupportedOperationException("intent_sender." + method);
             send(created, (Integer) args[0], (Intent) args[1], (String) args[2], args[4], (String) args[5], (Bundle) args[6],
                     null, null, -1, 0, 0);
             return null;
+        }, new Binder() {
+            @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                    throws android.os.RemoteException {
+                if (code != TARGET_TRANSACTION) return super.onTransact(code, data, reply, flags);
+                data.enforceInterface(SENDER_DESCRIPTOR);
+                Intent target = null;
+                String owner = null, resolvedType = null;
+                int senderFlags = 0;
+                synchronized (FrameworkPendingIntents.this) {
+                    // Only an Activity sender aimed at Play services is described:
+                    // an app has no business reading another's PendingIntent.
+                    if (created.key.type == 2 && !created.cancelled && created.intents != null
+                            && playServices(created.intents[created.intents.length - 1])) {
+                        target = copy(created.intents[created.intents.length - 1]);
+                        owner = created.key.owner; resolvedType = created.key.resolvedType; senderFlags = created.key.flags;
+                    }
+                }
+                reply.writeNoException();
+                reply.writeInt(target == null ? 0 : 1);
+                if (target != null) {
+                    reply.writeString(owner); reply.writeString(resolvedType); reply.writeInt(senderFlags);
+                    target.writeToParcel(reply, 0);
+                }
+                return true;
+            }
         });
         records.put(key, created); identities.put(((IInterface) created.sender).asBinder(), created);
         return created.sender;
+    }
+
+    // An Intent for Play services' own Activities: the component, or its actions.
+    private static boolean playServices(Intent intent) {
+        if (intent.getComponent() != null) return FrameworkRemoteActivities.PACKAGE.equals(intent.getComponent().getPackageName());
+        return FrameworkRemoteActivities.PACKAGE.equals(intent.getPackage())
+                || intent.getAction() != null && intent.getAction().startsWith(FrameworkRemoteActivities.PACKAGE + ".");
+    }
+
+    // A sender another process created (Play services' sign-in UI). Its Binder
+    // is a proxy: ask the creator what it targets, and start that Activity
+    // from this process, through the Play services window relay, for the
+    // caller's result. Null when it is not an Activity sender aimed at Play
+    // services, cancelled, or not one of ours.
+    private Record foreign(Object sender) {
+        if (!(sender instanceof IInterface)) return null;
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(SENDER_DESCRIPTOR);
+            if (!((IInterface) sender).asBinder().transact(TARGET_TRANSACTION, data, reply, 0)) return null;
+            reply.readException();
+            if (reply.readInt() == 0) return null;
+            String owner = reply.readString(), resolvedType = reply.readString();
+            // One-shot cannot be spent in the creator from here; mutability is kept.
+            int flags = reply.readInt() & ~PendingIntent.FLAG_ONE_SHOT;
+            Intent target = Intent.CREATOR.createFromParcel(reply);
+            if (!playServices(target)) return null;
+            Object[] a = {2, owner, null, null, null, 0, new Intent[] {target},
+                    resolvedType == null ? null : new String[] {resolvedType}, flags, null, 0};
+            return new Record(new Key(a, flags), a);
+        } catch (Exception unreachable) {
+            return null;
+        } finally {
+            data.recycle(); reply.recycle();
+        }
     }
 
     private void cancel(Record record) throws Exception {
@@ -156,13 +222,16 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
     }
 
     // ActivityTaskManagerService.startActivityIntentSender: sendInner with the
-    // caller's result target. A sender this process did not create (Play
-    // services' sign-in UI) is reported as cancelled: Activity then throws
-    // IntentSender.SendIntentException, which callers handle. Another
-    // process's activities cannot be started here.
+    // caller's result target. A sender another process created is started from
+    // here only when it is an Activity of Play services (see foreign());
+    // otherwise it is reported as cancelled: Activity then throws
+    // IntentSender.SendIntentException, which callers handle. Other
+    // processes' activities cannot be started here.
     synchronized int startIntentSender(Object sender, Intent fill, String resolvedType, IBinder resultTo,
             String resultWho, int requestCode, int flagsMask, int flagsValues, Bundle options) throws Exception {
-        return send(record(sender), 0, fill, resolvedType, null, null, options,
+        Record record = record(sender);
+        if (record == null) record = foreign(sender);
+        return send(record, 0, fill, resolvedType, null, null, options,
                 resultTo, resultWho, requestCode, flagsMask, flagsValues);
     }
 

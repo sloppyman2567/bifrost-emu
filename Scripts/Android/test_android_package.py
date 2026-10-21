@@ -1143,6 +1143,9 @@ class PackageTests(unittest.TestCase):
             # As Unity's player Activity declares it.
             component += (f'<activity android:name="{activity}$Engine" android:exported="false" '
                           'android:hardwareAccelerated="false"/>')
+        if managed == "ManagedGoogleActivity" and not split:
+            component += f'<service android:name="{activity}$Sender" android:process=":sender" android:exported="false"/>'
+            component += f'<activity android:name="{activity}$Other" android:exported="false"/>'
         if managed == "ManagedSplash" and not split:
             component += f'<activity android:name="{activity}$Main" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
@@ -1869,8 +1872,9 @@ class PackageTests(unittest.TestCase):
     def test_managed_google_activity_window(self):
         # Activities of Play services started by an app run in a window of
         # the system app's session and return their result: explicit and
-        # implicit start, and a caller's authenticator response that the
-        # Activity ends without answering.
+        # implicit start, a PendingIntent another process of the app created
+        # for one (refused for any other Activity), and a caller's
+        # authenticator response that the Activity ends without answering.
         state = self.work / "google-activity-state"
         bundle = self.work / "google-activity.apkm"
         with zipfile.ZipFile(bundle, "w") as archive:
@@ -1883,7 +1887,9 @@ class PackageTests(unittest.TestCase):
                          sorted((state / "com.google.android.gms/managed/sessions").glob("*/stdout.log")))
         self.assertEqual(status, 0, text[-8000:] + nested)
         self.assertNotRegex(text, r"FATAL EXCEPTION|APP_ACTIVITY_REMOTE_FAILED")
-        for marker in ("MANAGED_GOOGLE_RESULT 7 -1 error=10\n", "MANAGED_GOOGLE_RESULT 8 -1 error=10\n",
+        for marker in ("MANAGED_GOOGLE_RESULT 7 -1 error=10\n", "MANAGED_GOOGLE_SENDER_PROCESS true\n",
+                       "MANAGED_GOOGLE_RESULT 10 -1 error=10\n", "MANAGED_GOOGLE_SENDER_REFUSED\n",
+                       "MANAGED_GOOGLE_RESULT 8 -1 error=10\n",
                        "MANAGED_GOOGLE_RESPONSE_ERROR 4 canceled\n", "MANAGED_GOOGLE_RESULT 9 0 error=null\n",
                        "MANAGED_GOOGLE_DONE\n"):
             self.assertIn(marker, "\n".join(line for line in text.splitlines() if "MANAGED_GOOGLE" in line or "REMOTE" in line) + "\n", nested)

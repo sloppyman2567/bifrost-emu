@@ -136,9 +136,14 @@ Revision: the two commits above plus the uncommitted change under test.
   `AskPermissionActivity` with an `AccountAuthenticatorResponse` extra. Each
   runs in a window of the system app's session and returns to the app:
   `RESULT_OK` with `errorCode=10` (the Activity's answer to a request without
-  its configuration), then `RESULT_CANCELED` with the response cancelled; the
-  session reports the fixture's `Activity` as the caller. Run alone it takes
-  about 95 s (three cold sessions).
+  its configuration), then `RESULT_CANCELED` with the response cancelled. Between
+  the first two, a `:sender` process service hands the app two PendingIntents:
+  the one for `AuthSignInActivity` started with `startIntentSenderForResult` gives
+  the same `RESULT_OK errorCode=10`, and the one for the app's own Activity is
+  refused (`SendIntentException`). It fails on the previous guest code at that
+  marker. The
+  session reports the fixture's `Activity` as the caller. Run alone it took
+  83 s with the PendingIntent stage (four Play services requests).
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`
   covers the host side: request-path validation (including a symlink out of the
   root), staging, the answer returning with `done` last, and the session options.

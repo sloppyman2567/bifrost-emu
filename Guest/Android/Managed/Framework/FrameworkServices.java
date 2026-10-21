@@ -62,9 +62,14 @@ final class FrameworkServices {
     // Child Binder interfaces (for example IImeTracker) are returned by their
     // parent service rather than published in ServiceManager.
     Object local(String name, String iface, Call call) throws Exception {
+        return local(name, iface, call, new Binder());
+    }
+
+    // The same with a caller-supplied Binder, for an object that also answers
+    // transactions outside its interface (see FrameworkPendingIntents).
+    Object local(String name, String iface, Call call, Binder binder) throws Exception {
         Class<?> type = Class.forName(iface);
         FrameworkTrace.catalog(name, type, call.methods());
-        Binder binder = new Binder();
         Object proxy = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
                 (self, method, arguments) -> {
                     if (method.getName().equals("asBinder")) return binder;

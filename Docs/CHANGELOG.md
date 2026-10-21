@@ -26,6 +26,24 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Play services PendingIntents from another process (2026-10-21)
+
+- `startIntentSenderForResult` with a PendingIntent another process created
+  used to return `START_CANCELED` (Roblox's Credential Manager, Azur Lane's
+  Play Games sign-in UI arrive that way). A sender's Binder now answers a
+  transaction outside `IIntentSender` with the Intent, type, flags and owner of
+  an Activity sender aimed at Play services, and the caller starts that Activity
+  itself through the existing Google window relay, for its own `resultTo` and
+  `requestCode`. Other foreign senders and cancelled ones are still refused;
+  nothing else of another app's PendingIntent is readable this way. One-shot
+  foreign senders are not spent in the creator, and a multi-Intent sender
+  yields only its last Intent.
+- `test_managed_google_activity_window` now has a `:sender` process service hand
+  the app a PendingIntent for `AuthSignInActivity` (result `RESULT_OK
+  errorCode=10` through the window) and one for the app's own Activity (refused).
+  It passes in 83 s and fails against the previous guest code. A real Roblox or
+  Azur Lane sign-in was not run.
+
 ### Exit no longer hangs on a blocked SDL thread (2026-10-21)
 
 - Fix: after the guest exited, `Emulator::stop_sdl_threads()` joined SDL guest
