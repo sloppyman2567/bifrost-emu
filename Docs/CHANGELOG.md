@@ -13,6 +13,23 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### JIT code size per guest instruction (2026-10-21, measurement only)
+
+- New `[JIT] code-shape` lines in `BIFROST_STATS_PERIOD` output: guest instructions covered, host bytes
+  emitted, and average bytes by block length. Battle Cats at the title screen: 698,327 blocks,
+  3.5 M guest instructions, 531 MB emitted: **152 bytes per guest instruction, 5.0 instructions per
+  block**; blocks of 1, 2, 4, 8+ instructions average 201, 283, 544 and 1,957 bytes, so the cost is
+  per instruction (loads/stores and their cold paths) rather than a fixed per-block overhead. A
+  disassembled 3-instruction block (361 bytes) was 40 prologue, 55 body, 75 exit/chain, 109 inline
+  software page-check path and 79 fault exit.
+- Tried and reverted: a shared page-check helper (`push address; call helper`) in place of the
+  inline body shrinks the code but made a tight load/store loop 1.8x slower while the sticky
+  software-check flag is set (0.66 s -> 1.20 s; flag clear: 0.36 s both), and sharing identical fault
+  tails across a block's accesses saved nothing measurable. Any size reduction must keep the checked
+  path as fast as the inline one. The software-check state itself costs 1.8x over the clear state
+  (0.36 s vs 0.66 s) and is set by write-only mappings and userfaultfd; whether Android sessions
+  stay in it was not measured.
+
 ### Large guest mappings are no longer committed when mapped (2026-10-21)
 
 - Fix: `Memory::zero_range_locked` zeroed every reused or hinted anonymous mapping in the low

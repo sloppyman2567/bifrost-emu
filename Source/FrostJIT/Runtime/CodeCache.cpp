@@ -239,6 +239,35 @@ void FrostJIT::dump_code_cache_stats() {
             (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
             mt_active() ? 1 : 0);
+    // Shape of the published code: guest instructions covered against host bytes emitted, to
+    // tell bytes-per-instruction growth from sheer block count when the cache is large.
+    {
+        uint64_t instrs = 0, bytes = 0, interp_only = 0, selfloop = 0, taken_slots = 0;
+        uint64_t size_blocks[9] = {}, size_bytes[9] = {};  // by guest instruction count, 8 = 8 or more
+        for (const auto& entry : blocks_) {
+            const BlockEntry& block = entry.second;
+            const int bucket = std::min(std::max(block.instr_count, 0), 8);
+            size_blocks[bucket]++; size_bytes[bucket] += block.emitted_bytes;
+            instrs += block.instr_count > 0 ? block.instr_count : 0;
+            bytes += block.emitted_bytes;
+            interp_only += block.interp_only;
+            selfloop += block.has_selfloop_slot;
+            taken_slots += block.has_taken_chain_slot;
+        }
+        fprintf(stderr, "[JIT] code-shape: blocks=%zu arm_instrs=%llu emitted=%llu bytes_per_instr=%.1f instrs_per_block=%.1f "
+                        "interp_only=%llu selfloop=%llu taken_slots=%llu\n",
+                blocks_.size(), (unsigned long long)instrs, (unsigned long long)bytes,
+                instrs ? double(bytes) / double(instrs) : 0.0, blocks_.empty() ? 0.0 : double(instrs) / double(blocks_.size()),
+                (unsigned long long)interp_only, (unsigned long long)selfloop, (unsigned long long)taken_slots);
+        std::string by_size;
+        for (int i = 1; i <= 8; ++i) {
+            char field[64];
+            snprintf(field, sizeof field, " %d%s:%llu@%.0f", i, i == 8 ? "+" : "", (unsigned long long)size_blocks[i],
+                     size_blocks[i] ? double(size_bytes[i]) / double(size_blocks[i]) : 0.0);
+            by_size += field;
+        }
+        fprintf(stderr, "[JIT] code-shape by instrs (blocks@avg bytes):%s\n", by_size.c_str());
+    }
     fprintf(stderr, "[JIT] Tier-2 measured payoff: pairs=%llu keeps=%llu rejects=%llu\n",
         (unsigned long long)tier2_measured_pairs.load(), (unsigned long long)tier2_measured_keeps.load(),
         (unsigned long long)tier2_measured_rejections.load());
