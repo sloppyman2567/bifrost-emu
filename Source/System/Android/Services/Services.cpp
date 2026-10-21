@@ -164,7 +164,6 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                             // Another owner's registration is shadowed, not dropped; the
                             // owner replacing its own entry leaves nothing to restore.
                             if (replaced_owner && replaced_owner.get() != this) {
-                                fprintf(stderr, "[probe] addService: shadowing %s for prior owner\n", name.c_str());
                                 auto& stack = domain_->shadowed[name];
                                 stack.push_back(existing->second);
                                 if (stack.size() > BinderDomain::MAX_SHADOWED) {

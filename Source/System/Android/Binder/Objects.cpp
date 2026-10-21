@@ -156,10 +156,8 @@ void BinderNode::release_all_references() {
         return service.object->host_service == Object::HostService::None && (owner.expired() || same_owner);
     };
     std::vector<std::string> vacated;
-    fprintf(stderr, "[probe] release_all: services=%zu shadowed=%zu\n", domain_->services.size(), domain_->shadowed.size());
     for (auto it = domain_->services.begin(); it != domain_->services.end();) {
         if (goes_away(it->second)) {
-            fprintf(stderr, "[probe] release_all: vacate %s\n", it->first.c_str());
             change_reference(it->second.object, -1, 0);
             vacated.push_back(it->first);
             it = domain_->services.erase(it);
@@ -174,9 +172,7 @@ void BinderNode::release_all_references() {
                 change_reference(stack[i].object, -1, 0);
                 stack.erase(stack.begin() + i);
             }
-        fprintf(stderr, "[probe] release_all: shadow '%s' size=%zu vacated=%d\n", it->first.c_str(), stack.size(), std::find(vacated.begin(), vacated.end(), it->first) != vacated.end());
         if (std::find(vacated.begin(), vacated.end(), it->first) != vacated.end() && !stack.empty()) {
-            fprintf(stderr, "[probe] release_all: RESTORING %s\n", it->first.c_str());
             domain_->services[it->first] = stack.back();
             stack.pop_back();
         }
