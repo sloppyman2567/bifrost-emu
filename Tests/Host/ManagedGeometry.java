@@ -59,6 +59,17 @@ public final class ManagedGeometry extends Activity {
                 return true;
             }
         });
+        // A GL view as a game has: the sizes its renderer is given.
+        android.opengl.GLSurfaceView gl = new android.opengl.GLSurfaceView(this);
+        gl.setEGLContextClientVersion(3);
+        gl.setRenderer(new android.opengl.GLSurfaceView.Renderer() {
+            public void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 g, javax.microedition.khronos.egl.EGLConfig c) { }
+            public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 g, int w, int h) {
+                System.out.println("GEOMETRY gl onSurfaceChanged " + w + "x" + h);
+            }
+            public void onDrawFrame(javax.microedition.khronos.opengles.GL10 g) { }
+        });
+        root.addView(gl, new FrameLayout.LayoutParams(-1, -1));
         root.addView(web, new FrameLayout.LayoutParams(-1, -1));
         marker(Gravity.TOP | Gravity.LEFT);
         marker(Gravity.TOP | Gravity.RIGHT);

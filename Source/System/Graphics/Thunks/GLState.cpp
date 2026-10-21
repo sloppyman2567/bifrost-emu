@@ -21,6 +21,7 @@ void GLStateTracker::reset() {
     clear_color_[0] = clear_color_[1] = clear_color_[2] = clear_color_[3] = 0;
     current_color_[0] = current_color_[1] = current_color_[2] = current_color_[3] = 0;
     viewport_ = {0, 0, 640, 480};
+    viewport_set_ = scissor_set_ = false;
     line_width_ = 1.0f;
     point_size_ = 1.0f;
     active_texture_.store(GL::TEXTURE0, std::memory_order_relaxed);
@@ -75,6 +76,7 @@ void GLStateTracker::set_clear_color(float r, float g, float b, float a) {
 void GLStateTracker::set_viewport(int x, int y, int w, int h) {
     std::lock_guard<std::mutex> g(mu_);
     viewport_ = {x, y, w, h};
+    viewport_set_ = true;
 }
 
 void GLStateTracker::set_color(float r, float g, float b, float a) {
@@ -149,6 +151,7 @@ void GLStateTracker::set_polygon_mode(uint32_t face, uint32_t mode) {
 void GLStateTracker::set_scissor(int x, int y, int w, int h) {
     std::lock_guard<std::mutex> g(mu_);
     scissor_ = {x, y, w, h};
+    scissor_set_ = true;
 }
 
 void GLStateTracker::set_stencil_func(uint32_t func, int ref, uint32_t mask) {
@@ -487,6 +490,7 @@ bool GLStateTracker::try_handle_get_integerv(uint32_t pname, int32_t* out_ptr) c
     switch (pname) {
         case GL::VIEWPORT: {
             std::lock_guard<std::mutex> g(mu_);
+            if (!viewport_set_) return false;  // the host context's own initial viewport
             out_ptr[0] = viewport_.x;
             out_ptr[1] = viewport_.y;
             out_ptr[2] = viewport_.w;
@@ -495,6 +499,7 @@ bool GLStateTracker::try_handle_get_integerv(uint32_t pname, int32_t* out_ptr) c
         }
         case GL::SCISSOR_BOX: {
             std::lock_guard<std::mutex> g(mu_);
+            if (!scissor_set_) return false;
             out_ptr[0] = scissor_.x;
             out_ptr[1] = scissor_.y;
             out_ptr[2] = scissor_.w;

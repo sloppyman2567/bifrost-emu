@@ -312,7 +312,10 @@ private:
     // Default state values.
     float clear_color_[4] = {0, 0, 0, 0};
     float current_color_[4] = {0, 0, 0, 0};
+    // A context's initial viewport and scissor box are its drawable's size (GL spec), which the
+    // tracker does not know: until the app sets one, the host GL answers the query.
     Viewport viewport_ = {0, 0, 640, 480};
+    bool viewport_set_ = false, scissor_set_ = false;
     float line_width_ = 1.0f;
     float point_size_ = 1.0f;
     // Hot elision states are lock-free atomics (relaxed): the elision

@@ -13,6 +13,18 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### GL_VIEWPORT before glViewport reports the drawable, not 640x480 (2026-10-21)
+
+- Fix (not yet run on the game): Battle Cats' `appUpdateDraw` reads `glGetIntegerv(GL_VIEWPORT)`
+  every frame and sizes its UI from it (the Help WebView is 10% in and 80% of it).
+  `GLStateTracker` answered from its mirror, whose initial value is the invented
+  `{0,0,640,480}`, so a context that had not called `glViewport` yet reported 640x480 and
+  the WebView came out 512x384 at (64,48) in a 2560x1384 window (`APP_WEBVIEW`). A new
+  context's viewport and scissor box are its drawable's size (GL spec), so the tracker now
+  answers `GL_VIEWPORT`/`GL_SCISSOR_BOX` only after the app set them and otherwise lets the
+  host GL answer. Found by disassembling `libnative-lib.so` (`appUpdateDraw` ->
+  `glGetIntegerv(0xBA2)` -> engine size globals) and the Java `newWebView` call.
+
 ### Non-resizable apps keep their size and are scaled to the window (2026-10-21)
 
 - Fix (not yet confirmed on the game by a run): Battle Cats declares
