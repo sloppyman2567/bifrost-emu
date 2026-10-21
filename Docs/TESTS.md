@@ -181,7 +181,13 @@ Revision: the two commits above plus the uncommitted change under test.
   oversize and non-string values are refused), one per interval, with a fake
   launcher, and a missing `xdg-open` is a clear error. The guest side (the
   5-second input window, `market://` mapping, a real browser opening) is not
-  automated; the guest build compiles, and the live check is the user's. The
+  automated; the guest build compiles, and the live check is the user's.
+  `test_guest_maps_play_install_links_to_the_public_store_page` runs
+  `FrameworkLinks` on the host JVM (no emulator; needs a JDK): the live
+  `play.google.com/d?id=…&inline=true&enifd=…` ad link and variants map to the
+  store's `/store/apps/details?id=` page, and other hosts and paths, a missing or
+  malformed `id`, and non-URLs stay unchanged. The rule itself is checked; that
+  the browser then opens the store page was not rerun live. The
   Settings no-op (`START_ABORTED`, checked against Android 15's
   `Instrumentation.checkStartActivityResult`) is also untried live.
 - `GoogleAccountStateTests.test_activity_relay_never_follows_guest_symlinks` (no

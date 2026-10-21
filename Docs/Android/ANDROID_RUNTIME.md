@@ -3014,6 +3014,15 @@ default browser.
   one Play link five times in a few seconds and opened five tabs).
 - **Intents that name another app** (`com.facebook.katana`, ...) stay unresolved
   so apps fall back as they do without that app.
+- **Ad install links are rewritten.** An ad's "Install" button starts
+  `https://play.google.com/d?id=<package>&inline=true&enifd=…&gclid=…` addressed to
+  `com.android.vending`. That `/d` form is a deep link only the Play Store app
+  opens; in a browser Google answers 404 (seen in Hungry Shark World, 2026-10-21).
+  `FrameworkLinks.webLink` (plain Java) sends the public page
+  `https://play.google.com/store/apps/details?id=<package>` instead, dropping the
+  ad-tracking parameters (so the store does not see the click's `referrer`); it
+  needs a valid package id in `id`, and leaves every other link, and a `/d` link
+  without one, unchanged. `market://details?id=` uses the same page builder.
 
 Observed live (Hungry Shark World, 358 s session): the game's links (a
 conservation site, its Twitter page) and Play Store ad links reached the host as

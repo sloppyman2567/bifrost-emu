@@ -26,6 +26,16 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Ad "Install" links open a real store page (2026-10-21)
+
+- Fix: clicking Install on an ad opened the host browser at
+  `https://play.google.com/d?id=<package>&inline=true&enifd=…`, the Play Store
+  app's in-app deep link, which the web answers with 404. `FrameworkLinks`
+  (new, plain Java) rewrites such a link to
+  `https://play.google.com/store/apps/details?id=<package>`; other links are
+  untouched. Covered by a host-JVM test of the mapping; not rerun with a browser.
+  The running app picks it up after a restart (the managed launcher is rebuilt).
+
 ### Services a short-lived session published no longer take the app's with them (2026-10-21)
 
 - Fix: Sessions in one Asgard realm share a Binder domain, and each publishes the

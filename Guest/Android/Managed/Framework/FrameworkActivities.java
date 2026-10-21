@@ -210,9 +210,9 @@ final class FrameworkActivities {
         String scheme = data.getScheme().toLowerCase(java.util.Locale.ROOT), pkg = intent.getPackage();
         boolean store = "com.android.vending".equals(pkg);
         if (pkg != null && !store && !"com.android.chrome".equals(pkg)) return null;
-        if (scheme.equals("http") || scheme.equals("https")) return data.toString();
+        if (scheme.equals("http") || scheme.equals("https")) return FrameworkLinks.webLink(data.toString());
         if (scheme.equals("market") && data.getQueryParameter("id") != null)
-            return "https://play.google.com/store/apps/details?id=" + android.net.Uri.encode(data.getQueryParameter("id"));
+            return FrameworkLinks.storePage(data.getQueryParameter("id"));
         return null;
     }
 

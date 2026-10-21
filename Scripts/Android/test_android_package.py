@@ -611,6 +611,23 @@ class BrowserLinkTests(unittest.TestCase):
             processes.open_url("https://example.test/", [-100.0, None], popen=popen, clock=lambda: now[0], which=lambda name: None)
 
 
+    def test_guest_maps_play_install_links_to_the_public_store_page(self):
+        # Ad "Install" clicks arrive as https://play.google.com/d?id=<package>&inline=true&enifd=...,
+        # a deep link only the Play Store app opens; the host browser gets a 404 for it.
+        javac = os.environ.get("JAVAC") or shutil.which("javac")
+        java = shutil.which("java")
+        if not javac or not java:
+            self.skipTest("needs a JDK")
+        with tempfile.TemporaryDirectory() as directory:
+            classes = Path(directory)
+            subprocess.run([javac, "--release", "8", "-Xlint:none", "-d", str(classes),
+                            str(ROOT / "Guest/Android/Managed/Framework/FrameworkLinks.java"),
+                            str(ROOT / "Tests/Host/FrameworkLinksProbe.java")], check=True, capture_output=True)
+            result = subprocess.run([java, "-cp", str(classes), "FrameworkLinksProbe"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FrameworkLinksProbe: ALL PASS", result.stdout)
+
+
 class GoogleAccountStateTests(unittest.TestCase):
     ACCOUNT = {"version": 1, "revision": 1, "accounts": [
         {"name": "user@example.test", "type": "com.google", "password": "master", "previous": None,
