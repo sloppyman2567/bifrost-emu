@@ -30,7 +30,7 @@ labels below are historical records.
 
 - `startIntentSenderForResult` with a PendingIntent another process created
   used to return `START_CANCELED` (Azur Lane's Play Games sign-in UI arrives
-  that way; an older note also named Roblox's Credential Manager, not verified). A sender's Binder now answers a
+  that way). A sender's Binder now answers a
   transaction outside `IIntentSender` with the Intent, type, flags and owner of
   an Activity sender aimed at Play services, and the caller starts that Activity
   itself through the existing Google window relay, for its own `resultTo` and

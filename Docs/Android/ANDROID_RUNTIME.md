@@ -2495,10 +2495,7 @@ own process through the Play services window relay
 ([above](#google-accounts-and-sign-in-2026-10-20)), with the caller's
 `resultTo`/`requestCode`, the sender's mutability and the fill-in Intent applied
 as `PendingIntentRecord.sendInner` does. This is how Play services' sign-in UI
-reaches an app (Play Games v2's `GamesResolutionActivity` in Azur Lane; an
-earlier note also named Credential Manager in Roblox's login screen, which was
-not checked: Roblox signs in with its own account, and its Google link is the
-Play Integrity check). Any other foreign sender, or a
+reaches an app (Play Games v2's `GamesResolutionActivity` in Azur Lane). Any other foreign sender, or a
 cancelled one, still returns `START_CANCELED`, so the caller gets
 `IntentSender.SendIntentException` and continues without it. Limits: a
 one-shot foreign sender is not spent in its creator, only the last Intent of a
