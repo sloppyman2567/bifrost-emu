@@ -436,6 +436,7 @@ GLIBC_DYN_SRCS := \
 	Tests/Apps/test_dladdr_glibc.c \
 	Tests/Apps/test_dyn_legacy_start.c \
 	Tests/Apps/test_dyn_thunk_stub.c \
+	Tests/Apps/test_dyn_sdl_exit.c \
 	Tests/Apps/test_dyn_hello.c \
 	Tests/Apps/test_dyn_write.c \
 	Tests/Apps/test_dyn_malloc.c \
@@ -504,7 +505,7 @@ setup-tests:
 			continue; \
 		fi; \
 		extra=""; \
-		case "$$src" in Tests/Apps/test_dlopen.c|Tests/Apps/test_dlopen_mt.c|Tests/Apps/test_dyn_thunk_stub.c) extra="-pthread -ldl -lm";; Tests/Apps/test_dyn_legacy_start.c) extra="-nostartfiles";; esac; \
+		case "$$src" in Tests/Apps/test_dlopen.c|Tests/Apps/test_dlopen_mt.c|Tests/Apps/test_dyn_thunk_stub.c|Tests/Apps/test_dyn_sdl_exit.c) extra="-pthread -ldl -lm";; Tests/Apps/test_dyn_legacy_start.c) extra="-nostartfiles";; esac; \
 		if $$CC -O2 -o "$$elf" "$$src" $$extra 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \

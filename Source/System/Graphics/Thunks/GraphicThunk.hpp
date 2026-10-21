@@ -192,6 +192,9 @@ public:
     // host SDL semaphore created by the guest so a blocked SDL_SemWait
     // returns and the thread's interpreter loop observes cpu.running==false.
     void wake_sdl_semaphores();
+    // Same for SDL_CondWait: broadcasts every host SDL_cond the guest created,
+    // so a worker blocked on one returns and can see cpu.running==false.
+    void wake_sdl_conditions();
     // ── Diagnostics ──────────────────────────────────────────────────
     size_t symbol_count() const;
     uint64_t trampoline_base() const;

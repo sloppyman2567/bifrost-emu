@@ -432,8 +432,13 @@ int Emulator::run() {
         stats_reporter_stop_.store(true, std::memory_order_relaxed);
         stats_reporter_thread_.join();
     }
-    if (group_exit_requested()) return group_exit_code_.load(std::memory_order_acquire);
-    return main_cpu_.exit_code;
+    const int exit_status = group_exit_requested()
+        ? group_exit_code_.load(std::memory_order_acquire) : main_cpu_.exit_code;
+    if (sdl_threads_abandoned_.load(std::memory_order_acquire)) {
+        fflush(nullptr);
+        _exit(exit_status);
+    }
+    return exit_status;
 }
 // ── Per-instruction step (decode cache + trace) ───────────────────────
 void Emulator::step(CPU& cpu) {

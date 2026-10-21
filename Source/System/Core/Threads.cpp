@@ -639,20 +639,40 @@ void Emulator::stop_sdl_threads() {
     // and the loop can observe running==false.
     if (GraphicThunk* th = graphics_.thunk()) {
         th->wake_sdl_semaphores();
+        th->wake_sdl_conditions();
     }
     // Interrupt host syscalls, then join + free exactly once per record.
     for (auto& st : pts) {
         if (st->host_thread.joinable())
             ::pthread_kill(st->host_thread.native_handle(), KICK_SIGNAL);
     }
+    // A thread can still be stuck in a host call nothing will end now (a
+    // mutex held by a dead guest thread, ...). Give them a bounded time, then
+    // detach: run() leaves through _exit, which ends them with the process.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    size_t stuck = 0;
     for (auto& st : pts) {
         std::lock_guard<std::mutex> fg(st->finish_mu);
         if (st->reaped) continue;
+        while (!st->finished.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         st->reaped = true;
+        if (!st->finished.load(std::memory_order_acquire)) {
+            // Its guest stack stays mapped: the thread may still run on it.
+            if (st->host_thread.joinable()) st->host_thread.detach();
+            stuck++;
+            continue;
+        }
         if (st->host_thread.joinable()) st->host_thread.join();
         if (st->stack_top && st->stack_size)
             mem_.untrack_allocation(st->stack_top - st->stack_size, st->stack_size);
         if (st->handle_addr) mem_.untrack_allocation(st->handle_addr, 32);
+    }
+    if (stuck) {
+        sdl_threads_abandoned_.store(true, std::memory_order_release);
+        fprintf(stderr, "[%s] %zu SDL thread(s) still blocked in a host call; "
+                "exiting without joining them\n", CODENAME, stuck);
     }
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);

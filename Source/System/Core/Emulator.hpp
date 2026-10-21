@@ -810,6 +810,9 @@ private:
     // exception"). Called at the end of run() and again defensively in
     // ~Emulator (idempotent).
     void stop_sdl_threads();
+    // Set when stop_sdl_threads() had to detach a thread stuck in a host call;
+    // run() then leaves via _exit instead of tearing the emulator down.
+    std::atomic<bool> sdl_threads_abandoned_{false};
     // wire the GraphicThunk's GLFW-callback runner to a
     // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
     // d0..=fargs, pc = callback, run step() to the sentinel LR).

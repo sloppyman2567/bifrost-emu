@@ -26,6 +26,19 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Exit no longer hangs on a blocked SDL thread (2026-10-21)
+
+- Fix: after the guest exited, `Emulator::stop_sdl_threads()` joined SDL guest
+  threads with no bound. A thread parked in a host `SDL_CondWait` (nothing woke
+  conditions, only semaphores) or any other host wait made the emulator hang
+  forever, found when dhewm3 died at a lazy-binding error under `--guest-ld`.
+  Shutdown now broadcasts every guest-created `SDL_cond` and waits at most 3 s
+  for the rest, then detaches them, prints
+  `N SDL thread(s) still blocked in a host call; exiting without joining them`
+  and leaves through `_exit` with the guest's exit status (skipping teardown
+  they could race). `test_dyn_sdl_exit` (`cond`, `mutex`) hung on the old code
+  and exits in 0.35 s / 3.4 s under both linkers; it needs the SDL thunk build.
+
 ### Experimental guest dynamic linker (`--guest-ld`) (2026-10-21)
 
 - New `--guest-ld`: a dynamic glibc or musl program runs under the rootfs's

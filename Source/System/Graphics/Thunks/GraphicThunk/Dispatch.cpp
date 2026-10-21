@@ -1797,6 +1797,15 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     } else if (entry.name == "SDL_DestroySemaphore") {
         std::lock_guard<std::mutex> g(impl_->mu);
         impl_->sdl_sems_.erase(args[0]);
+    } else if (entry.name == "SDL_CreateCond") {
+        // Same contract for SDL_CondWait (see wake_sdl_conditions).
+        if (ret) {
+            std::lock_guard<std::mutex> g(impl_->mu);
+            impl_->sdl_conds_.insert(ret);
+        }
+    } else if (entry.name == "SDL_DestroyCond") {
+        std::lock_guard<std::mutex> g(impl_->mu);
+        impl_->sdl_conds_.erase(args[0]);
     }
 
     // glDeleteBuffers(n, names) [DELETE_BUFFERS policy]: free any live

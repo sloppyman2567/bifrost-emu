@@ -271,6 +271,10 @@ struct GraphicThunkImpl {
     // exports SDL_SemPost; on the generic dispatch path the registered
     // entry.host_fn may be a guest trampoline, so use the raw dlsym result).
     void* sdl_sem_post_fn_ = nullptr;
+    // Host SDL_cond* objects the guest created via SDL_CreateCond, and the raw
+    // host SDL_CondBroadcast, for wake_sdl_conditions().
+    std::unordered_set<uint64_t> sdl_conds_;
+    void* sdl_cond_broadcast_fn_ = nullptr;
     // glMapBuffer/glMapBufferRange/glUnmapBuffer bounce support. The guest
     // cannot dereference a host mapping, so dispatch() maps the host buffer
     // as asked and hands the guest a guest-window bounce (Memory::mmap_alloc)

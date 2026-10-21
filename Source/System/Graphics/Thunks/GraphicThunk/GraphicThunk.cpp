@@ -287,6 +287,18 @@ void GraphicThunk::wake_sdl_semaphores() {
         post(reinterpret_cast<void*>(s));
     }
 }
+// ── wake_sdl_conditions — release SDL threads blocked in SDL_CondWait ──
+void GraphicThunk::wake_sdl_conditions() {
+    if (!impl_ || !impl_->sdl_cond_broadcast_fn_) return;
+    std::vector<uint64_t> conds;
+    {
+        std::lock_guard<std::mutex> g(impl_->mu);
+        conds.assign(impl_->sdl_conds_.begin(), impl_->sdl_conds_.end());
+    }
+    using CondBroadcastFn = int (*)(void*);
+    CondBroadcastFn broadcast = reinterpret_cast<CondBroadcastFn>(impl_->sdl_cond_broadcast_fn_);
+    for (uint64_t c : conds) broadcast(reinterpret_cast<void*>(c));
+}
 // ── register_known_symbols_ — populate the registry ────────────────────
 // Called once by init(). Each entry maps a (library, symbol) pair to
 // the host function pointer (when the host has the dev headers) or to
@@ -408,6 +420,8 @@ void GraphicThunk::register_known_symbols_() {
     // wake path uses this raw dlsym result instead).
     impl_->sdl_sem_post_fn_ =
         kHaveSDL ? dlsym(RTLD_DEFAULT, "SDL_SemPost") : nullptr;
+    impl_->sdl_cond_broadcast_fn_ =
+        kHaveSDL ? dlsym(RTLD_DEFAULT, "SDL_CondBroadcast") : nullptr;
 
     // Install a HOST-side error-capture trampoline so real GLFW errors
     // (from host libglfw itself) are recorded and later forwarded to the

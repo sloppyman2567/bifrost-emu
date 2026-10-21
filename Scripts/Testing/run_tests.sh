@@ -830,6 +830,11 @@ DYNAMIC_TESTS=(
     # thunk symbols, --guest-ld serves an in-memory stub to the guest ld.so.
     # Needs the GL thunk build (SDL2/GL host libraries); exit 77 = skip.
     "test_dyn_thunk_stub|Tests/Apps/test_dyn_thunk_stub.elf||15|test_dyn_thunk_stub: ALL PASS"
+    # Exit while an SDL guest thread is blocked in a host SDL wait: it must not
+    # hang the emulator (cond: woken; mutex: abandoned after 3 s). Needs the
+    # SDL thunk build; exit 77 = skip.
+    "test_dyn_sdl_exit_cond|Tests/Apps/test_dyn_sdl_exit.elf cond||20|cond ALL PASS"
+    "test_dyn_sdl_exit_mutex|Tests/Apps/test_dyn_sdl_exit.elf mutex||20|mutex ALL PASS"
 )
 
 # Interactive tests (need stdin input)
