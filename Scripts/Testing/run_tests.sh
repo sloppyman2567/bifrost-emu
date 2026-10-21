@@ -821,6 +821,9 @@ DYNAMIC_TESTS=(
     # calls the real glibc dladdr@GLIBC_2.34 symbol (dynamic glibc).
     "test_dladdr|Tests/Apps/test_dladdr.elf||15|test_dladdr: ALL PASS"
     "test_dladdr_glibc|Tests/Apps/test_dladdr_glibc.elf||15|test_dladdr_glibc: ALL PASS"
+    # A legacy-start program (__libc_start_main@GLIBC_2.17, e.g. Geekbench)
+    # runs its own constructors; the linker must not run them a second time.
+    "test_dyn_legacy_start|Tests/Apps/test_dyn_legacy_start.elf||15|test_dyn_legacy_start: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

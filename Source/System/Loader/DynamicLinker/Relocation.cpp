@@ -242,47 +242,7 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
             mem_.read(obj.versym_addr + sym_idx * 2, &vidx, 2);
             uint16_t real_idx = vidx & 0x7FFF;
             if (real_idx >= 2) {
-                // Find the version name from verneed. Walk the Verneed
-                // chain and find the Vernaux with matching vna_other
-                // (which is the version index used in .gnu.version).
-                // Elf64_Verneed (16 bytes):
-                //   +0: uint16_t vn_version
-                //   +2: uint16_t vn_cnt (number of Vernaux)
-                //   +4: uint32_t vn_file (strtab offset of dep soname)
-                //   +8: uint32_t vn_aux (offset to first Vernaux)
-                //   +12: uint32_t vn_next (offset to next Verneed)
-                // Elf64_Vernaux (16 bytes):
-                //   +0: uint32_t vna_hash
-                //   +4: uint16_t vna_flags
-                //   +6: uint16_t vna_other (version index, matches .gnu.version)
-                //   +8: uint32_t vna_name (strtab offset of version name)
-                //   +12: uint32_t vna_next
-                std::string version_name;
-                uint64_t p = obj.verneed_addr;
-                for (uint64_t i = 0; i < obj.verneed_num; i++) {
-                    uint16_t vn_cnt;
-                    uint32_t vn_aux, vn_next;
-                    mem_.read(p + 2, &vn_cnt, 2);
-                    mem_.read(p + 8, &vn_aux, 4);
-                    mem_.read(p + 12, &vn_next, 4);
-                    uint64_t ap = p + vn_aux;
-                    for (uint16_t j = 0; j < vn_cnt; j++) {
-                        uint16_t vna_other;
-                        uint32_t vna_name, vna_next;
-                        mem_.read(ap + 6, &vna_other, 2);
-                        mem_.read(ap + 8, &vna_name, 4);
-                        mem_.read(ap + 12, &vna_next, 4);
-                        if (vna_other == real_idx) {
-                            version_name = read_guest_cstr(mem_, obj.strtab_addr + vna_name);
-                            break;
-                        }
-                        if (vna_next == 0) break;
-                        ap += vna_next;
-                    }
-                    if (!version_name.empty()) break;
-                    if (vn_next == 0) break;
-                    p += vn_next;
-                }
+                const std::string version_name = verneed_name_(obj, real_idx);
                 if (!version_name.empty()) {
                     uint64_t addr = resolve_versioned_symbol(name, version_name);
                     if (addr != 0) return addr;
@@ -294,5 +254,42 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
         }
     }
     return resolve_symbol(name);
+}
+// ── verneed_name_ ──────────────────────────────────────────────────────
+// Walk the Verneed chain for the Vernaux whose vna_other matches the
+// .gnu.version index.
+// Elf64_Verneed (16 bytes): +2 vn_cnt (number of Vernaux), +8 vn_aux
+// (offset to first Vernaux), +12 vn_next (offset to next Verneed).
+// Elf64_Vernaux (16 bytes): +6 vna_other (version index, matches
+// .gnu.version), +8 vna_name (strtab offset of version name), +12 vna_next.
+std::string DynamicLinker::verneed_name_(const LoadedObject& obj,
+                                         uint16_t real_idx) {
+    if (obj.verneed_addr == 0) return {};
+    try {
+        uint64_t p = obj.verneed_addr;
+        for (uint64_t i = 0; i < obj.verneed_num; i++) {
+            uint16_t vn_cnt;
+            uint32_t vn_aux, vn_next;
+            mem_.read(p + 2, &vn_cnt, 2);
+            mem_.read(p + 8, &vn_aux, 4);
+            mem_.read(p + 12, &vn_next, 4);
+            uint64_t ap = p + vn_aux;
+            for (uint16_t j = 0; j < vn_cnt; j++) {
+                uint16_t vna_other;
+                uint32_t vna_name, vna_next;
+                mem_.read(ap + 6, &vna_other, 2);
+                mem_.read(ap + 8, &vna_name, 4);
+                mem_.read(ap + 12, &vna_next, 4);
+                if (vna_other == real_idx)
+                    return read_guest_cstr(mem_, obj.strtab_addr + vna_name);
+                if (vna_next == 0) break;
+                ap += vna_next;
+            }
+            if (vn_next == 0) break;
+            p += vn_next;
+        }
+    } catch (...) {
+    }
+    return {};
 }
 }  // namespace arm64emu

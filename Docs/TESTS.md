@@ -2755,6 +2755,17 @@ bash Scripts/Testing/test_jit_mt_publication.sh
 This is synthetic correctness and concurrency coverage, not a gameplay frame
 rate measurement or complete code-reclamation implementation.
 
+### Legacy-start constructor regression (2026-10-20)
+
+`test_dyn_legacy_start` is a dynamic glibc fixture built with `-nostartfiles`
+whose `_start` calls `__libc_start_main@GLIBC_2.17` with a non-NULL `init` that
+runs `.init_array`, as binaries from before glibc 2.34 do. Its constructor must
+run exactly once. Before the fix it ran twice (the linker ran it, then glibc's
+`init` did), which is what aborted Geekbench 6.5.0 for Linux/AArch64 in LLVM's
+option registry. It passes in JIT and interpreter modes and is part of
+`make test-dynamic`. The other dynamic fixtures use the modern start, so they
+do not cover this path.
+
 ### glibc 2.39 loader-hook regression (2026-10-04)
 
 The first provisioned Ubuntu CI run passed the build, API, unit and verification

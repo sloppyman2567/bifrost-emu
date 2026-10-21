@@ -13,6 +13,19 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Legacy-start glibc programs run constructors once (2026-10-20)
+
+- Fix: native dynlink ran the main executable's `DT_INIT`/`DT_INIT_ARRAY`
+  itself, but a program that imports `__libc_start_main@GLIBC_2.17` (built
+  before glibc 2.34, e.g. Geekbench 6 for Linux/AArch64) passes a non-NULL
+  `init` that glibc also runs, so every static constructor ran twice and
+  Geekbench aborted at startup (`LLVM ERROR: ... registered more than once`).
+  The linker now leaves the main object's initializers to such programs,
+  keeping the old behavior for glibc 2.34+ and musl starts. Checked against
+  glibc 2.42 `csu/libc-start.c` (`init != NULL` legacy path vs `call_init`).
+  `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
+  `init`; it reports two constructor runs without the fix and one with it.
+
 ### Asgard app removal (2026-10-20)
 
 - Fix: the per-app `network offline` setting only changed what Android's

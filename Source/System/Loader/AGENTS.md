@@ -20,5 +20,12 @@
 - Keep parsing, relocations, symbol/version lookup, ifunc resolution and dlopen
   lifetimes coherent across the `DynamicLinker/` split. Its private header owns
   shared ELF layouts/constants; trace configuration belongs in shared helpers.
+- ld.so never runs the main executable's initializers; `__libc_start_main` does.
+  glibc 2.34+ runs the program's non-NULL `init` (legacy `_start`, imports
+  `__libc_start_main@GLIBC_2.<34`) or else walks `link_map`, which native dynlink
+  does not populate. `run_init_arrays_` therefore runs the main object's
+  `DT_INIT`/`DT_INIT_ARRAY` only for modern-start executables
+  (`legacy_start_runs_init_`); running them for legacy ones doubles every
+  constructor. Do not size symbol scans by `symtab_count` (misses imports).
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.

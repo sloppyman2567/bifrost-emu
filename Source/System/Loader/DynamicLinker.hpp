@@ -630,6 +630,13 @@ private:
     // object (libs first, main last). Runs C++ static constructors.
     // Requires init_runner_ to be set; no-ops if not.
     void run_init_arrays_(CPU& cpu);
+    // True for a glibc executable that imports the pre-2.34
+    // __libc_start_main. That entry runs the program's own `init` (its
+    // DT_INIT and DT_INIT_ARRAY), so the linker must not run them too.
+    bool legacy_start_runs_init_(const LoadedObject& obj);
+    // Version name (from DT_VERNEED) that .gnu.version index `real_idx`
+    // of `obj` refers to; empty if not found.
+    std::string verneed_name_(const LoadedObject& obj, uint16_t real_idx);
     // ── Per-relocation helpers ─────────────────────────────────────
     // Resolve a symbol referenced by a relocation. Returns the
     // absolute address (or 0 if undefined).

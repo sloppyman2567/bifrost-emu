@@ -689,6 +689,42 @@ void DynamicLinker::set_libc_stack_end(uint64_t initial_sp) {
         }
     }
 }
+// ── legacy_start_runs_init_ ────────────────────────────────────────────
+// glibc 2.34+ __libc_start_main(main, argc, argv, init, ...) runs `init`
+// when it is non-NULL (a legacy program: its _start passes
+// __libc_csu_init, which runs DT_INIT and DT_INIT_ARRAY) and otherwise
+// walks the executable's link_map, which this linker does not populate.
+// Only the pre-2.34 import (__libc_start_main@GLIBC_2.<34) passes `init`,
+// and ld.so never runs the main executable's initializers, so running them
+// here too would run every static constructor twice.
+bool DynamicLinker::legacy_start_runs_init_(const LoadedObject& obj) {
+    if (obj.versym_addr == 0 || obj.verneed_addr == 0) return false;
+    // symtab_count comes from the hash table and misses imports (they sit
+    // below the GNU hash symoffset), so bound the scan by .dynsym's
+    // distance to .dynstr as well.
+    uint64_t count = obj.symtab_count;
+    if (obj.strtab_addr > obj.symtab_addr)
+        count = std::max<uint64_t>(
+            count, std::min<uint64_t>((obj.strtab_addr - obj.symtab_addr) /
+                                      sizeof(Elf64_Sym), 1u << 20));
+    for (uint64_t i = 1; i < count; i++) {
+        try {
+            Elf64_Sym s;
+            mem_.read(obj.symtab_addr + i * sizeof(s), &s, sizeof(s));
+            if (s.st_shndx != 0) continue;  // defined, not an import
+            if (read_guest_cstr(mem_, obj.strtab_addr + s.st_name) !=
+                "__libc_start_main") continue;
+            uint16_t vidx = 0;
+            mem_.read(obj.versym_addr + i * 2, &vidx, 2);
+            const std::string ver = verneed_name_(obj, vidx & 0x7FFF);
+            unsigned minor = 0;
+            if (sscanf(ver.c_str(), "GLIBC_2.%u", &minor) != 1) return false;
+            return minor < 34;
+        } catch (...) {
+        }
+    }
+    return false;
+}
 // ── run_init_arrays_ ───────────────────────────────────────────────────
 // Invoke DT_INIT (legacy _init()) and each entry in DT_INIT_ARRAY for
 // every loaded object, in dependency order (libs first, main last).
@@ -705,6 +741,13 @@ void DynamicLinker::run_init_arrays_(CPU& cpu) {
     // shared libs first and main last.)
     for (size_t oi = objects_.size(); oi-- > 0;) {
         const auto& obj = objects_[oi];
+        if (obj.is_main && legacy_start_runs_init_(obj)) {
+            if (dynlink_trace_enabled())
+                fprintf(stderr, "[dynlink] '%s' imports legacy __libc_start_main; "
+                        "its initializers run from the program's own init\n",
+                        obj.name.c_str());
+            continue;
+        }
         // DT_INIT (legacy _init() function) — call before .init_array.
         if (obj.init_addr != 0) {
             try {

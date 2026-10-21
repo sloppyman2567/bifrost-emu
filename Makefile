@@ -434,6 +434,7 @@ GLIBC_DYN_SRCS := \
 	Tests/Apps/test_dlopen.c \
 	Tests/Apps/test_dlopen_mt.c \
 	Tests/Apps/test_dladdr_glibc.c \
+	Tests/Apps/test_dyn_legacy_start.c \
 	Tests/Apps/test_dyn_hello.c \
 	Tests/Apps/test_dyn_write.c \
 	Tests/Apps/test_dyn_malloc.c \
@@ -502,7 +503,7 @@ setup-tests:
 			continue; \
 		fi; \
 		extra=""; \
-		case "$$src" in Tests/Apps/test_dlopen.c|Tests/Apps/test_dlopen_mt.c) extra="-pthread -ldl -lm";; esac; \
+		case "$$src" in Tests/Apps/test_dlopen.c|Tests/Apps/test_dlopen_mt.c) extra="-pthread -ldl -lm";; Tests/Apps/test_dyn_legacy_start.c) extra="-nostartfiles";; esac; \
 		if $$CC -O2 -o "$$elf" "$$src" $$extra 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \
@@ -544,7 +545,7 @@ ci: setup-tests generated-check $(TARGET)
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --integration --strict --filter '^test_sandbox$$'
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
-	./Scripts/Testing/run_tests.sh --emu $(TARGET) --dynamic --strict --filter '^(hello_dyn_glibc|test_dyn_(write|hello|malloc|printf|pthread_min|threads|pthread_stress|pthread_8thread)|test_dladdr_glibc)$$'
+	./Scripts/Testing/run_tests.sh --emu $(TARGET) --dynamic --strict --filter '^(hello_dyn_glibc|test_dyn_(write|hello|malloc|printf|pthread_min|threads|pthread_stress|pthread_8thread)|test_dladdr_glibc|test_dyn_legacy_start)$$'
 
 # Full validation provisions the rootfs and requires every selected fixture
 # except the optional external iperf3/coreutils bundle, which is reported as
