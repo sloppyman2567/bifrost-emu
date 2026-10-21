@@ -230,6 +230,28 @@ video-ad playback or full lifecycle/recreation behavior.
   source rewrite before compilation, checked against Mesa on the captured
   shaders.
 
+- Window scaling (observed October 21, 3440x1440 monitor, 2560x1384 window):
+  The Battle Cats game surface fills only the left part of a 3440x1384 window
+  with a black bar on the right, Roblox shows the same and some content lands
+  small in the top-left corner (Battle Cats' Change Account page, which is a
+  WebView drawn inside the app window). Other games fill the window. Map the
+  app's logical size, density and the host window/layer geometry explicitly
+  (viewport, scissor, surface size reported to the app versus window size),
+  then check that every game fills the window at resize and fullscreen. The
+  cause is not yet found; do not assume WebView density without a readback.
+- Low-resolution Roblox textures at desktop resolutions are unexplained. Compare
+  the rendered texture size with the app's request before blaming filtering.
+- Memory: one game (Hungry Shark World, observed October 21) used about
+  4.3 GiB PSS over three processes (main 2.7 GiB, `oxed_process0` 1.1 GiB, Play
+  Store 0.4 GiB) while the host swapped about 2 GiB. In the main process 910
+  MiB resident is the 1 GiB FrostJIT code buffer (`CODE_BUF_SIZE`), backed by
+  transparent huge pages here (`AnonHugePages` 927 MiB); 1.39 GiB is small
+  anonymous mappings. Battle Cats showed about 2.35 GiB RSS in its main process.
+  How much of the code buffer is real code, and what the anonymous memory is,
+  are unmeasured; read the exit-time `[JIT]` stats and per-mapping PSS first.
+  The window title's VRAM figure for Battle Cats (about 205-257 MiB of 8573)
+  has not been checked against the driver.
+
 Acceptance: rendered gameplay with working audio and input survives repeated
 surface recreation and lifecycle transitions without leaks or stale handles.
 
