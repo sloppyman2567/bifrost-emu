@@ -13,24 +13,32 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
-### Window resize reaches the app's configuration callbacks (2026-10-21)
+### Non-resizable apps keep their size and are scaled to the window (2026-10-21)
 
-- Fix (unverified on the games): when the host window changed size the launcher
-  updated the display, resources, surfaces and window layers, but never called
-  `Application`/`Activity.onConfigurationChanged`, which a game that declares
-  `configChanges` relies on instead of a restart. Battle Cats' SurfaceView and
-  `glViewport` followed a maximize to 3440x1384, but an app that only re-reads
-  its size in that callback keeps its first 2560-wide scene and leaves a black bar
-  at the right. The resize path now runs `ActivityThread.handleConfigurationChanged`
-  with the process configuration and each Activity's `onConfigurationChanged`
-  with its updated configuration. New fixture `ManagedGeometry` (green and blue
-  WebView corner divs, magenta root-view corners, every size an app can read)
-  and `test_managed_window_geometry`. Maximizing the fixture on a 3440x1440
-  display at scale 2 showed activity/application metrics, `WindowMetrics`,
-  root view and the WebView page (`innerWidth` 1720 at dpr 2) all following
-  3440x1384, and the callback arriving with the new size; the automated test
-  checks the initial window only. The Battle Cats black bar, its WebView page
-  and Roblox were not re-run with the fix (see `roadmap.md`).
+- Fix (not yet confirmed on the game by a run): Battle Cats declares
+  `resizeableActivity=false`. Android never resizes such an app: it keeps its
+  window size and scales it. Bifrost instead grew the SurfaceView to the maximized
+  host window (3440x1384) while the game kept drawing its first 1920x1038 scene,
+  which landed in the bottom-left corner on black (user screenshot; the earlier
+  2560-wide "left part with a black bar" is the same cause). Now the launcher
+  calls `fixWindow` (syscall op 21) for an `ActivityInfo.resizeMode`
+  unresizeable app: the SDL window keeps the app's aspect ratio
+  (`SDL_SetWindowAspectRatio`), all Wayland layers are scaled by one fit factor
+  (`AppFit`: size, position, with centering if the compositor ignores the aspect
+  hint), the app's reported size, `eglQuerySurface` and resize events stay
+  fixed, and pointer and text-input coordinates are mapped back. The primary
+  surface is scaled by SDL; X11 layers are not fitted. Removed the throwaway
+  `[TMPVP]` diagnostics from `WindowBackend.cpp`, `GLState.cpp` and
+  `GraphicThunk/Dispatch.cpp`.
+- Resizable apps: the resize path now also runs
+  `ActivityThread.handleConfigurationChanged` and each Activity's
+  `onConfigurationChanged`, which an app that declares `configChanges` expects
+  instead of a restart. New fixture `ManagedGeometry` (resizable; green and blue
+  WebView corner divs, magenta root corners, every readable size) and
+  `test_managed_window_geometry`. Maximizing it showed every size, the callback
+  and the WebView page (`innerWidth` 1720 at dpr 2) following 3440x1384; the
+  automated test checks the initial window only. Roblox and Battle Cats'
+  WebView page were not re-run (see `roadmap.md`).
 
 ### Complete Android 15 app-ops service (2026-10-21)
 

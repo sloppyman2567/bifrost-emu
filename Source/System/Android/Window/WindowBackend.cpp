@@ -44,7 +44,7 @@ namespace {
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
   X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
   X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
-  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode)
+  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -83,6 +83,13 @@ struct WlEglFns {
 };
 // Host pixels per desktop unit of the SDL window, shared with its layers.
 using PixelRatio = std::shared_ptr<std::atomic<double>>;
+// How a fixed-size app (set_fixed_size) maps onto the window: app pixels are
+// scaled by `scale` and offset by (x, y) window pixels. Identity otherwise.
+// One window per process, read by every layer.
+struct AppFit {
+  std::atomic<double> scale{1.0}, x{0.0}, y{0.0};
+};
+AppFit g_fit;
 // Maps a layer's pixel-sized buffers onto the parent window's desktop
 // coordinates, as SDL does for the primary surface. wp_viewporter scales by
 // any (fractional) ratio; without it, an integer ratio uses the core buffer
@@ -251,9 +258,13 @@ public:
     if (sibling) { wl_subsurface_place_below(subsurface_, reinterpret_cast<wl_surface*>(sibling)); wl_surface_commit(parent_); }
   }
   void geometry(int32_t x, int32_t y, int32_t w, int32_t h) {
-    const double ratio = ratio_->load();
+    // Desktop units per app pixel: the window's pixel ratio divided by the fit scale.
+    const double fit = g_fit.scale.load();
+    const double ratio = ratio_->load() / fit;
     scale_.apply(w, h, ratio);
-    const int32_t dx = SurfaceScale::to_desktop(x, ratio), dy = SurfaceScale::to_desktop(y, ratio);
+    const double window_ratio = ratio_->load();
+    const int32_t dx = int32_t(std::lround((x * fit + g_fit.x.load()) / window_ratio));
+    const int32_t dy = int32_t(std::lround((y * fit + g_fit.y.load()) / window_ratio));
     if (dx != x_ || dy != y_) {
       wl_subsurface_set_position(subsurface_, dx, dy);
       wl_surface_commit(parent_);
@@ -575,9 +586,28 @@ public:
     return false;
 #endif
   }
+  int set_fixed_size(int32_t w, int32_t h) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return -ENODEV;
+    if (w <= 0 || h <= 0) return -EINVAL;
+    fixed_w_ = w; fixed_h_ = h;
+    // The window keeps the app's aspect ratio, so the primary surface (scaled by SDL to the
+    // window) and the layers (scaled by the fit) agree and nothing is stretched unevenly.
+    const float aspect = float(w) / float(h);
+    if (!sdl_.SetWindowAspectRatio(window_, aspect, aspect)) return fail("window aspect ratio");
+    int32_t pixel_w, pixel_h;
+    update_ratio(pixel_w, pixel_h);
+    return 0;
+#else
+    (void)w; (void)h;
+    return -ENOTSUP;
+#endif
+  }
   bool pixel_size(int32_t &w, int32_t &h) override {
 #if defined(BIFROST_USE_SDL3)
-    return window_ && update_ratio(w, h);
+    if (!window_ || !update_ratio(w, h)) return false;
+    if (fixed_w_) { w = fixed_w_; h = fixed_h_; }
+    return true;
 #else
     (void)w; (void)h;
     return false;
@@ -788,8 +818,9 @@ public:
     if (active) {
       // The anchor is in surface pixels; SDL wants window coordinates.
       const double scale = std::max(0.01, ratio_->load());
-      SDL_Rect area{static_cast<int>(x / scale), static_cast<int>(y / scale),
-                    std::max(1, static_cast<int>(w / scale)), std::max(1, static_cast<int>(h / scale))};
+      const double fit = g_fit.scale.load();
+      SDL_Rect area{static_cast<int>((x * fit + g_fit.x.load()) / scale), static_cast<int>((y * fit + g_fit.y.load()) / scale),
+                    std::max(1, static_cast<int>(w * fit / scale)), std::max(1, static_cast<int>(h * fit / scale))};
       sdl_.SetTextInputArea(window_, &area, 0);
       if (!sdl_.StartTextInput(window_)) return fail("StartTextInput");
       text_active_ = true;
@@ -880,7 +911,8 @@ public:
         int32_t pixel_w, pixel_h;
         update_ratio(pixel_w, pixel_h);
         out.type = BIFROST_WINDOW_RESIZE;
-        out.width = e.window.data1; out.height = e.window.data2; return 1;
+        out.width = fixed_w_ ? fixed_w_ : e.window.data1;
+        out.height = fixed_w_ ? fixed_h_ : e.window.data2; return 1;
       }
       if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_TEXT_EDITING) && text_active_) {
         const bool commit = e.type == SDL_EVENT_TEXT_INPUT;
@@ -960,7 +992,8 @@ public:
       } else if ((e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_UP ||
                   e.type == SDL_EVENT_FINGER_MOTION) && e.tfinger.windowID == id) {
         out.type = BIFROST_WINDOW_POINTER;
-        out.x = e.tfinger.x * pixel_w; out.y = e.tfinger.y * pixel_h;
+        out.x = (e.tfinger.x * pixel_w - g_fit.x.load()) / g_fit.scale.load();
+        out.y = (e.tfinger.y * pixel_h - g_fit.y.load()) / g_fit.scale.load();
         out.pressure = e.tfinger.pressure;
         out.pointer_id = kFirstTouchFinger + static_cast<int32_t>(
             e.tfinger.fingerID % static_cast<SDL_FingerID>(INT32_MAX - kFirstTouchFinger));
@@ -969,8 +1002,8 @@ public:
       }
       if (pointer) {
         out.type = BIFROST_WINDOW_POINTER;
-        out.x *= static_cast<float>(pixel_w) / logical_w;
-        out.y *= static_cast<float>(pixel_h) / logical_h;
+        out.x = (out.x * static_cast<float>(pixel_w) / logical_w - g_fit.x.load()) / g_fit.scale.load();
+        out.y = (out.y * static_cast<float>(pixel_h) / logical_h - g_fit.y.load()) / g_fit.scale.load();
         return 1;
       }
     }
@@ -993,6 +1026,13 @@ private:
         pixel_w <= 0 || pixel_h <= 0 || logical_w <= 0 || logical_h <= 0)
       return false;
     ratio_->store(double(pixel_w) / logical_w);
+    if (fixed_w_) {
+      // Uniform scale into the window, centered when the compositor ignores the aspect hint.
+      const double fit = std::min(double(pixel_w) / fixed_w_, double(pixel_h) / fixed_h_);
+      g_fit.scale.store(fit);
+      g_fit.x.store((pixel_w - fixed_w_ * fit) / 2);
+      g_fit.y.store((pixel_h - fixed_h_ * fit) / 2);
+    }
     return true;
   }
   void clear_binding() noexcept {
@@ -1144,6 +1184,7 @@ private:
   std::map<uint32_t, std::unique_ptr<PixelLayer>> popups_;
   WaylandBackdrop backdrop_;
   PixelRatio ratio_ = std::make_shared<std::atomic<double>>(1.0);
+  int32_t fixed_w_ = 0, fixed_h_ = 0;  // set_fixed_size
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;
 #endif

@@ -238,6 +238,13 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                              static_cast<int32_t>(record[4])));
                 } catch (const EmuError&) { ret_host(-EFAULT); }
             }
+            else if (cpu.regs[0] == 21) { // Managed non-resizable app: fixed pixel width, height.
+                if (cpu.regs[1] == 0 || cpu.regs[1] > 16384 || cpu.regs[2] == 0 || cpu.regs[2] > 16384) {
+                    ret_host(-EINVAL); return 0;
+                }
+                ret_host(manager.set_fixed_window(static_cast<int32_t>(cpu.regs[1]),
+                                                  static_cast<int32_t>(cpu.regs[2])));
+            }
             else ret_host(-EINVAL);
             return 0;
         }

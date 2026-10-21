@@ -53,6 +53,11 @@ public:
   virtual bool display_pixel_size(int32_t &, int32_t &) { return false; }
   // Host pixels per desktop coordinate unit (the display's scale factor).
   virtual double pixel_density() { return 1.0; }
+  // An app that cannot be resized (resizeableActivity=false) keeps this pixel
+  // size whatever the host window becomes: the window keeps its aspect ratio and
+  // every layer, and input, is scaled to fit (Android scales such an app and
+  // letterboxes it rather than resizing it).
+  virtual int set_fixed_size(int32_t, int32_t) { return -ENOTSUP; }
   virtual void set_title(const char *) {}
   virtual bool set_icon(const uint8_t *, int32_t, int32_t) { return false; }
 };

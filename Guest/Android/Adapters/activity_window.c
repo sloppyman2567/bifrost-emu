@@ -253,6 +253,11 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_displaySize(JNIEnv *env, jclass type
         (*env)->SetLongArrayRegion(env, out, 0, 2, (const jlong *)data);
     return (jint)result;
 }
+// A non-resizable app keeps this pixel size; the host window is scaled to fit (op 21).
+JNIEXPORT jint JNICALL Java_ManagedLauncher_fixWindow(JNIEnv *env, jclass type, jint width, jint height) {
+    (void)env; (void)type;
+    return (jint)bifrost_window(21, width, height);
+}
 JNIEXPORT jint JNICALL Java_ManagedLauncher_audioConfig(JNIEnv *e, jclass c, jlongArray a) {
     return Java_ActivityProbe_audioConfig(e, c, a);
 }

@@ -864,6 +864,11 @@ uint32_t AndroidSurfaceManager::event_text(uint64_t h, uint32_t& kind, char* out
     return ev->text_length;
 }
 
+int AndroidSurfaceManager::set_fixed_window(int32_t width, int32_t height) {
+    if (!window_open_) return -ENODEV;
+    return window_backend_->set_fixed_size(width, height);
+}
+
 int AndroidSurfaceManager::set_text_input(bool active, int32_t x, int32_t y, int32_t width,
                                           int32_t height) {
     if (!window_open_) return -ENODEV;

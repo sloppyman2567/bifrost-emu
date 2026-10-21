@@ -133,6 +133,7 @@ public final class ManagedLauncher {
     // Op 20: starts or stops the host's text input; the rectangle anchors its composition.
     private static native int setTextInput(boolean active, int x, int y, int width, int height);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
+    private static native int fixWindow(int width, int height); // non-resizable app: scale the host window to fit
     private static native int displaySize(long[] size); // host display pixel width, height
     static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
     private static native int activeAudioOutputs();
@@ -1260,6 +1261,13 @@ public final class ManagedLauncher {
             width = (int) metrics[0];
             height = (int) metrics[1];
             displays.setMetrics(width, height, (int) metrics[2]);
+            // resizeableActivity=false: Android keeps such an app's window at its size and scales it
+            // (size compatibility mode) instead of resizing it, so a maximized host window must not
+            // grow the app's surface (the game would keep drawing its first, smaller scene in a corner).
+            if (ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
+                error = fixWindow(width, height);
+                System.out.println("APP_WINDOW_FIXED " + width + "x" + height + " status=" + error);
+            }
             long[] display = new long[2];
             error = displaySize(display);
             if (error != 0) throw new IllegalStateException("host display size: " + error);

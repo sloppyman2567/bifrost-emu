@@ -111,6 +111,8 @@ public:
     // text and composition as EVENT_TYPE_TEXT events, in order with key events.
     // The rectangle anchors the composition in window pixels.
     int set_text_input(bool active, int32_t x, int32_t y, int32_t width, int32_t height);
+    // A non-resizable app: the window keeps this pixel size and is scaled to fit the host window.
+    int set_fixed_window(int32_t width, int32_t height);
     void close_host_window();
     bool ready() const { return window_open_; }
     // Commit geometry only when the backend accepts the host notification.
