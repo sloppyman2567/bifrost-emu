@@ -15,6 +15,40 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Bitfield moves use immediate shifts and the allocator's register (2026-10-21)
+
+`UBFM`/`SBFM` (ubfx, sbfx, ubfiz, sbfiz, lsl, lsr, asr, uxt*, sxt*) were emitted
+through `RAX`, `RCX` and `RDX`: the source was staged in `RAX`, the general case
+rotated through `CL` and built its mask with a `movabs` into `RDX` (a `ubfx` was
+six instructions; every `lsl` also built a full mask that its shift made a
+no-op). The emitter now works in the register `result_reg` chooses, like the
+immediate shift ops, and uses only immediate forms:
+
+- extract: `shr` + `and r32, imm32` (a `movzx` for 8/16 bits, `mov r32, r32` for 32,
+  `shl` + `shr` for 33..63 bits), or `shl` + `sar` for the signed form;
+- insert: the mask is skipped when `imms + 1 == immr` (a plain `lsl`), and
+  `sbfiz` is `shl` + `sar`;
+- 32-bit forms use 32-bit instructions, so the input's upper half is ignored and the
+  output's is zero. `movzx r32, r8` always has a REX prefix (without one, registers
+  4..7 mean `AH..BH`; the allocator pool is `RAX RCX RDX R8 R9 R11-R15`).
+
+Measured on CoreMark (`perf stat`, 40,000 iterations, matched builds, three
+alternating pairs): 1,578k -> 1,506k host instructions per iteration (-4.6%), 395k
+-> 359k cycles (-9%), IPC 4.0 -> 4.2; 11.4k -> 12.65k iterations/s with every CRC
+valid. The instruction saving is small; most of the cycles come from removing
+spill/reload pairs the forced `RAX` caused (`mov [rbp-..],rax ... mov rax,[rbp-..]`).
+
+`Tests/Unit/jit_bfm_extract.c` checks all of it: every `immr`/`imms` pair, both widths
+and signedness, aliased and distinct registers, twelve inputs each, and a register-pressure
+section that keeps 0-9 temporaries live so the result lands in the later pool
+registers. Its expected values follow the Arm ARM `DecodeBitMasks` pseudocode, and the
+test passes under QEMU and the interpreter (3,102,720 checks). The pressure section
+exists because the first version, without it, still passed after the REX bits for
+`R8`-`R15` were deliberately broken; random programs caught that bug (14 of 153) and
+the extended test now does too. Random-program differential testing (compiler-generated
+bitfield code against QEMU, 420 programs at -O1/-O2/-O3) also passes. These cover
+`UBFM`/`SBFM` only; other emitters that force fixed registers were not changed.
+
 ## Branch flags, immediates and Q pairs (2026-10-20)
 
 The two remaining weak spots of the game-style set were a pointer-chasing loop

@@ -2786,6 +2786,20 @@ through the stub. It fails on a headless (`USE_THUNK_GL=0`) build, like
 `gl_state`. Not covered: windowed rendering, audio output, Android, Doom 3 and
 large-application cold-start time.
 
+### Bitfield moves (2026-10-21)
+
+`jit_bfm_extract` covers `UBFM`/`SBFM` exhaustively (3,102,720 checks, ~1 s): all
+`immr`/`imms`, W and X, aliased and distinct registers, and a register-pressure
+section (0-9 live temporaries) so the result is allocated in `R8`-`R15` as well.
+Expected values come from the Arm ARM bitfield-move pseudocode; the test passes
+under QEMU and the interpreter, so the reference is not just the JIT's own opinion.
+A deliberate REX bug for the high registers passes the section-1 loops but fails the
+pressure section; the check is therefore part of the test. `verify_jit.sh` (96
+differential fixtures, 8 threaded oracle runs) and `make test-ir-ssa` (21,839
+assertions) pass. Not in the repo: a throwaway random-program fuzzer (C programs of
+random shifts/masks/casts over 12-18 live variables, compared with QEMU) passed 420
+programs and caught the same deliberate bug.
+
 ### Legacy-start constructor regression (2026-10-20)
 
 `test_dyn_legacy_start` is a dynamic glibc fixture built with `-nostartfiles`

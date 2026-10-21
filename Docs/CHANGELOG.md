@@ -26,6 +26,17 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Faster bitfield moves (2026-10-21)
+
+- `ubfx`/`sbfx`/`ubfiz`/`sbfiz`/`lsl`/`lsr`/`asr`/`uxt*`/`sxt*` (`UBFM`/`SBFM`)
+  used `RAX`/`RCX`/`RDX` and built masks with `movabs`: six instructions per
+  `ubfx`, and a spill/reload of whatever lived in `RAX`. Now immediate shifts and
+  masks in the allocator's register. CoreMark: -4.6% host instructions, -9%
+  cycles (IPC 4.0 -> 4.2), 11.4k -> 12.65k iterations/s, CRCs valid. New
+  `jit_bfm_extract` test (3.1M checks incl. register pressure; passes under QEMU).
+  Other emitters that force fixed registers are untouched and likely have the same
+  cost.
+
 ### Cheaper Tier-2 branch profiling (2026-10-21)
 
 - With `BIFROST_TIER2=1`, every Tier-1 conditional exit carried a six-instruction

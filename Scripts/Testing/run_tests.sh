@@ -475,6 +475,7 @@ UNIT_TESTS=(
     "android_binder_features|Tests/Unit/android_binder_features.elf||10|checks passed"
     "android_binder_objects|Tests/Unit/android_binder_objects.elf||10|checks passed"
     "jit_bfm_masks|Tests/Unit/jit_bfm_masks.elf||30|checks passed"
+    "jit_bfm_extract|Tests/Unit/jit_bfm_extract.elf||60|checks passed"
     "jit_android_semantics|Tests/Unit/jit_android_semantics.elf||10|checks passed"
     "jit_literal_load|Tests/Unit/jit_literal_load.elf||10|checks passed"
     "test_shared_alias|Tests/Unit/test_shared_alias.elf||30|checks passed"

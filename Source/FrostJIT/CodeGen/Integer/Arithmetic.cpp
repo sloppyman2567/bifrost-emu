@@ -718,154 +718,101 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int width = bp.sf ? 64 : 32;
             int immr = bp.immr;
             int imms = bp.imms;
-            // Stage src in RAX, preserving live operands before clobbering
-            // its register. Keep the result as a dirty cached dest and
-            // spill only if a later clobber or
-            // block exit needs its memory home, as LOAD_MEM already does.
-            //
-            // codegen below (shifts, ands, mov_imm64). Use targeted
-            // flush+invalidate instead of the full flush_all_vregs+
-            // invalidate_all_vregs — this preserves vregs cached in
-            // R8/R9/R11/R12/R13/R15 across the bitfield op, eliminating
-            // redundant reloads in tight loops containing bitfield ops.
+            // The result stays a dirty cached dest in the register the op
+            // worked in; it is spilled only if a later clobber or block exit
+            // needs its memory home, as LOAD_MEM already does. Nothing else
+            // is flushed, so vregs cached in other registers survive the op.
             clobber_flags();  // shifts/ands clobber RFLAGS
-            constexpr uint16_t BFM_CLOBBER = (1u << RAX) | (1u << RCX) | (1u << RDX);
-            // Fast path: if src1 is a dead scratch vreg already cached in
-            // RAX (e.g. a preceding LOAD_REG left it there), skip the
-            // flush→reload sandwich entirely. Otherwise flush+invalidate
-            // and load as before (also skipping the redundant reload when
-            // src1 was still cached in RAX — the flush only writes memory).
-            load_vreg_to_reg_fast(RAX, inst.src1, inst.dest, BFM_CLOBBER);
-            // Handle common aliases efficiently:
-            // - LSL (imms < immr): shift left by (width - immr)
-            // - LSR (imms == width-1, UBFM): shift right by immr
-            // - ASR (imms == width-1, SBFM): arithmetic shift right by immr
-            // LSL: imms < immr (e.g. lsl w0, w0, #2 = UBFM w0, w0, #30, #31)
-            // UBFM semantics for imms < immr:
-            //   field = src & ((1 << (imms+1)) - 1)   [take low imms+1 bits]
-            //   result = field << (width - immr)       [shift left to position]
-            // the previous code did shl THEN and, which
-            // zeroed the result for shift >= 32. For example, lsl x0, x0, #32
-            // (immr=32, imms=31): shl rax,32 → 0x100000000, then and rax,
-            // 0xFFFFFFFF → 0. The correct order is: mask FIRST, then shift.
-            if (imms < immr) {
-                int sh = width - immr;
-                if (sh > 0 && sh < width) {
-                    // Mask to imms+1 bits FIRST.
-                    uint64_t mask = (1ULL << (imms + 1)) - 1;
-                    emit_mov_imm64(RDX, mask);
-                    emit_and_reg(RAX, RDX);
-                    // SBFM's insert form (SBFIZ) sign-extends the selected
-                    // low field before positioning it. UBFM (UBFIZ/LSL)
-                    // keeps it zero-extended. Without this, negative
-                    // 32-bit indices such as HUF's lowS == -1 become large
-                    // positive offsets instead of addressing the sentinel
-                    // node immediately before the table.
-                    if (inst.op == IROp::SBFM) {
-                        int sign_sh = width - (imms + 1);
-                        if (width == 32) {
-                            emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte(static_cast<uint8_t>(sign_sh));
-                            emit_byte(0xC1); emit_byte(modrm(3, 7, RAX & 7)); emit_byte(static_cast<uint8_t>(sign_sh));
-                        } else {
-                            emit_shift_imm8(RAX, 4, sign_sh);
-                            emit_shift_imm8(RAX, 7, sign_sh);
-                        }
-                    }
-                    // THEN shift left by sh.
-                    if (width == 32) {
-                        emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte(static_cast<uint8_t>(sh));
-                    } else {
-                        emit_shift_imm8(RAX, 4, sh);
-                    }
-                    if (width == 32) {
-                        if (RAX >= 8) emit_byte(0x45);
-                        emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
-                    }
-                    // Keep the result dirty; an eager stack store is redundant.
-                    set_vreg_reg(inst.dest, RAX);
-                    return 0;
-                }
+            // Work in the allocator's choice of register (the source's own when
+            // it dies here), so no fixed register is evicted: a bitfield op
+            // pinned to RAX forced a spill/reload pair of whatever lived there.
+            const int s1 = ensure_vreg(inst.src1);
+            int d;
+            if (inst.dest == inst.src1) {
+                d = s1;
+            } else {
+                d = result_reg(inst.src1, s1);
+                if (d != s1) emit_mov_reg(d, s1);
             }
-            // LSR (UBFM) or ASR (SBFM): imms == width-1
-            if (imms == width - 1) {
-                if (immr > 0) {
-                    if (width == 32) {
-                        if (immr <= 31) {
-                            if (inst.op == IROp::SBFM) {
-                                // SAR (arithmetic)
-                                emit_byte(0xC1); emit_byte(modrm(3, 7, RAX & 7)); emit_byte(static_cast<uint8_t>(immr));
-                            } else {
-                                // SHR (logical)
-                                emit_byte(0xC1); emit_byte(modrm(3, 5, RAX & 7)); emit_byte(static_cast<uint8_t>(immr));
-                            }
-                        }
-                    } else {
-                        if (inst.op == IROp::SBFM) {
-                            emit_shift_imm8(RAX, 7, immr);
-                        } else {
-                            emit_shift_imm8(RAX, 5, immr);
-                        }
-                    }
-                }
+            // The source is in `d` and the result stays there. 32-bit forms
+            // use 32-bit instructions, which ignore the input's upper half and
+            // zero the output's. Immediate shifts only: a rotate through CL
+            // and a materialized mask cost five instructions for a ubfx.
+            const int top = width - 1;  // sign-bit position
+            auto shift_imm = [&](int kind, int n) {
+                if (n <= 0) return;
                 if (width == 32) {
-                    if (RAX >= 8) emit_byte(0x45);
-                    emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
-                }
-                set_vreg_reg(inst.dest, RAX);
-                return 0;
-            }
-            // General case: ROR then extract then (for SBFM) sign-extend
-            if (immr != 0) {
-                emit_mov_imm32_zext(RCX, immr);
-                if (width == 64) {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(0x3F);
-                    emit_byte(rex(true,false,false,false));
-                    emit_byte(0xD3); emit_byte(modrm(3,1,RAX&7));
+                    if (d >= 8) emit_byte(0x41);
+                    emit_byte(0xC1); emit_byte(modrm(3, kind, d & 7)); emit_byte(static_cast<uint8_t>(n));
                 } else {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(0x1F);
-                    emit_byte(0xD3); emit_byte(modrm(3, 1, RAX & 7));
-                    emit_byte(rex(true,false,false,false));
-                    emit_byte(0x81); emit_byte(modrm(3,4,RAX&7)); emit_u32(0xFFFFFFFF);
+                    emit_shift_imm8(d, kind, static_cast<uint8_t>(n));
+                }
+            };
+            auto shl_imm = [&](int n) { shift_imm(4, n); };
+            auto shr_imm = [&](int n) { shift_imm(5, n); };
+            auto sar_imm = [&](int n) { shift_imm(7, n); };
+            // Keep the low `bits` bits of d and clear the rest (1 <= bits <= width).
+            auto keep_low = [&](int bits) {
+                if (bits >= 64) return;
+                const uint8_t both = d >= 8 ? 0x05 : 0x00;  // REX.R | REX.B
+                if (bits == 32) {                                   // mov r32, r32
+                    if (d >= 8) emit_byte(0x45);
+                    emit_byte(0x89); emit_byte(modrm(3, d & 7, d & 7));
+                } else if (bits == 8 || bits == 16) {               // movzx r32, r8/r16
+                    // Always a REX prefix: without one, registers 4..7 mean AH..BH.
+                    emit_byte(static_cast<uint8_t>(0x40 | both));
+                    emit_byte(0x0F); emit_byte(bits == 8 ? 0xB6 : 0xB7);
+                    emit_byte(modrm(3, d & 7, d & 7));
+                } else if (bits < 32) {                             // and r32, imm32
+                    if (d >= 8) emit_byte(0x41);
+                    emit_byte(0x81); emit_byte(modrm(3, 4, d & 7));
+                    emit_u32(static_cast<uint32_t>((1ULL << bits) - 1));
+                } else {                                            // 33..63 bits
+                    emit_shift_imm8(d, 4, static_cast<uint8_t>(64 - bits));
+                    emit_shift_imm8(d, 5, static_cast<uint8_t>(64 - bits));
+                }
+            };
+            const bool sign = inst.op == IROp::SBFM;
+            if (imms >= immr) {
+                // Extract the field [imms:immr] and zero- or sign-extend it.
+                const int flen = imms - immr + 1;
+                if (!sign) {
+                    if (immr == 0) keep_low(flen);          // uxtb/uxth/ubfx at bit 0 (flen == width: a move)
+                    else if (imms == top) shr_imm(immr);    // lsr
+                    else if (flen <= 31) { shr_imm(immr); keep_low(flen); }
+                    else { shl_imm(top - imms); shr_imm(top - imms + immr); }
+                } else if (imms == top) {
+                    if (immr == 0) { if (width == 32) keep_low(32); }  // a move
+                    else sar_imm(immr);                              // asr
+                } else {
+                    // Put the field's top bit in the sign position, then shift
+                    // it back down with sign fill (sxtb/sxth/sxtw/sbfx).
+                    shl_imm(top - imms);
+                    sar_imm(top - imms + immr);
+                }
+            } else {
+                // Insert: the low imms+1 bits move up to bit (width - immr)
+                // (lsl, ubfiz, sbfiz); bits shifted past the top are dropped.
+                const int sh = width - immr;
+                if (!sign) {
+                    // Bits above the field and below immr would land above it.
+                    // For a plain lsl (imms + 1 == immr) there are none.
+                    if (imms + 1 != immr) keep_low(imms + 1);
+                    shl_imm(sh);
+                } else {
+                    // Sign-extend the field, then place it: field top to the sign
+                    // bit, then back down by immr - 1 - imms (zero fill below).
+                    shl_imm(top - imms);
+                    sar_imm(immr - 1 - imms);
                 }
             }
-            // Extract bits [imms-immr:0] from RAX (after rotate).
-            // after ROR by immr, the field that was at
-            // [imms:immr] in the original is now at [imms-immr:0]. So the
-            // mask must be (imms-immr+1) bits wide, NOT (imms+1) bits.
-            // bits, pulling in garbage from above the field. This broke
-            // musl's get_stride (ubfx x0, x0, #6, #6) which extracts a
-            // 6-bit field — the JIT returned 0x57 instead of 0x17,
-            // corrupting the malloc size class lookup.
-            if (imms < width - 1) {
-                int field_width = imms - immr + 1;
-                uint64_t mask = (field_width >= 64) ? ~0ULL : ((1ULL << field_width) - 1);
-                emit_mov_imm64(RDX, mask);
-                emit_and_reg(RAX, RDX);
+            if (inst.dest == inst.src1) {
+                vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << d);
+                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+            } else {
+                set_vreg_reg(inst.dest, d);
             }
-            // For SBFM: sign-extend from the field's sign bit.
-            // After ROR+mask, the field occupies bits [field_width-1:0]
-            // where field_width = imms - immr + 1. The sign bit is at
-            // bit (imms - immr). Sign-extend by shifting left then right.
-            if (inst.op == IROp::SBFM && imms < width - 1) {
-                int field_width = imms - immr + 1;
-                // Shift the sign bit up to bit 63 so the 64-bit SAR below
-                // sign-extends correctly. For 32-bit ops (sxtb/sxth/sbfx W)
-                // `width - field_width` puts the sign bit at bit 31, but a
-                // 64-bit SAR reads bit 63 — a negative byte (0xf8) would
-                // come back as 248 instead of 0xfffffff8. The trailing
-                // `mov %eax,%eax` truncates the 64-bit sign-extended result
-                // to the 32-bit W container.
-                int sh = 64 - field_width;
-                if (sh > 0) {
-                    emit_shift_imm8(RAX, 4, sh);
-                    emit_shift_imm8(RAX, 7, sh);
-                }
-            }
-            // For 32-bit ops: zero-extend result to 64 bits.
-            if (width == 32) {
-                emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
-            }
-            set_vreg_reg(inst.dest, RAX);
             return 0;
         }
         // Defensive fallback: BFM is normally decomposed to SHL+SHR+
