@@ -90,6 +90,9 @@ struct AppFit {
   std::atomic<double> scale{1.0}, x{0.0}, y{0.0};
 };
 AppFit g_fit;
+class WaylandPixels;
+// Every live layer, so a changed fit repositions them without waiting for the app to redraw.
+std::vector<WaylandPixels *> g_layers;
 // Maps a layer's pixel-sized buffers onto the parent window's desktop
 // coordinates, as SDL does for the primary surface. wp_viewporter scales by
 // any (fractional) ratio; without it, an integer ratio uses the core buffer
@@ -234,11 +237,13 @@ public:
     subsurface_ = wl_subcompositor_get_subsurface(subcompositor_, surface_, parent_);
     wl_subsurface_set_desync(subsurface_);
     scale_.attach(surface_, compositor_version_);
+    g_layers.push_back(this);
     wl_region *none = wl_compositor_create_region(compositor_);
     wl_surface_set_input_region(surface_, none);
     wl_region_destroy(none);
   }
   ~WaylandPixels() override {
+    g_layers.erase(std::remove(g_layers.begin(), g_layers.end(), this), g_layers.end());
     for (auto &buffer : buffers_) release(buffer);
     scale_.reset();
     if (subsurface_) wl_subsurface_destroy(subsurface_);
@@ -257,7 +262,12 @@ public:
   void below(uintptr_t sibling) {
     if (sibling) { wl_subsurface_place_below(subsurface_, reinterpret_cast<wl_surface*>(sibling)); wl_surface_commit(parent_); }
   }
+  // The last geometry again, after the window's fit changed.
+  void refit() {
+    if (surface_ && last_w_ > 0) { geometry(last_x_, last_y_, last_w_, last_h_); wl_surface_commit(surface_); wl_display_flush(display_); }
+  }
   void geometry(int32_t x, int32_t y, int32_t w, int32_t h) {
+    last_x_ = x; last_y_ = y; last_w_ = w; last_h_ = h;
     // Desktop units per app pixel: the window's pixel ratio divided by the fit scale.
     const double fit = g_fit.scale.load();
     const double ratio = ratio_->load() / fit;
@@ -334,6 +344,7 @@ private:
   SurfaceScale scale_;
   Buffer buffers_[2];
   int32_t x_ = INT32_MIN, y_ = INT32_MIN; // desktop coordinates
+  int32_t last_x_ = 0, last_y_ = 0, last_w_ = 0, last_h_ = 0; // app pixels
 };
 // Opaque black content for a toplevel that nothing else draws into. A Wayland
 // toplevel, and every subsurface below it, stays unmapped until a buffer is
@@ -1032,6 +1043,7 @@ private:
       g_fit.scale.store(fit);
       g_fit.x.store((pixel_w - fixed_w_ * fit) / 2);
       g_fit.y.store((pixel_h - fixed_h_ * fit) / 2);
+      for (WaylandPixels *layer : g_layers) layer->refit();
     }
     return true;
   }
