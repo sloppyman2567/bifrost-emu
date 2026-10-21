@@ -126,6 +126,26 @@ then the saved setting, then the emulator default. Unknown or malformed values i
 the file are ignored. Media decoding is not a per-app setting: its routing belongs
 to the shared realm broker.
 
+## Compatibility status
+
+```bash
+python3 Scripts/Android/asgard.py compat                         # installed and recorded apps
+python3 Scripts/Android/asgard.py compat com.example.package     # status, evidence and known issues
+```
+
+`Scripts/Android/compatibility.json` records what has actually been observed
+per app, in four tiers: `playable` (a person played it and confirmed
+gameplay), `title` (reached its title, login or main menu on screen),
+`runs` (a bounded session reached its window and surface without a fatal
+error; nothing more is claimed) and `blocked` (it starts, then the app itself
+ends the session). An installed app with no entry is `untested`. Every entry
+carries its evidence, the date and, where known, the version, and many link to
+an app page under `Docs/Apps/`. The library's game settings show the same text.
+This is documentation of past observations, not a guarantee for other
+versions, devices or Google-account states; update an entry only from a new
+observation, and keep the claim no stronger than its evidence. A test checks
+the file's structure and page links.
+
 ## Desktop library
 
 `python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 game

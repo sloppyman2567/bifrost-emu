@@ -909,6 +909,38 @@ class DebugChannelTests(unittest.TestCase):
         self.assertIn("Unknown debug channel", result.stderr)
 
 
+class CompatibilityTests(unittest.TestCase):
+    def test_recorded_entries_are_well_formed_and_cite_existing_pages(self):
+        import android_compat
+        data = android_compat.load()
+        self.assertEqual(android_compat.validate(data, ROOT), [])
+        self.assertEqual(android_compat.entry(data, "org.example.unknown")["status"], "untested")
+        broken = {"statuses": {"runs": "x"}, "apps": {"bad": {"status": "great", "checked": "soon", "page": "Docs/none.md"}}}
+        self.assertEqual(len(android_compat.validate(broken, ROOT)), 5)
+
+    def test_compat_command_lists_installed_and_recorded_apps(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            for name in ("org.bifrost.fixture", "com.tiltingpoint.spongebob"):
+                (state / name).mkdir()
+                (state / name / "package.json").write_text(json.dumps(
+                    {"package": name, "version_code": "1", "launcher": {"kind": "native_activity"}}))
+            def run(*arguments):
+                return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                       "--state-root", str(state), "compat", *arguments],
+                                      capture_output=True, text=True)
+            report = json.loads(run("--json").stdout)
+            self.assertEqual(report["org.bifrost.fixture"], {"status": "untested", "evidence":
+                             "No test is recorded for this app.", "installed": True})
+            self.assertEqual((report["com.tiltingpoint.spongebob"]["status"], report["com.tiltingpoint.spongebob"]["installed"]),
+                             ("playable", True))
+            self.assertFalse(report["com.roblox.client"]["installed"])
+            self.assertIn("com.roblox.client  blocked  (2026-10-19)  [not installed]", run().stdout)
+            self.assertIn("child-age", run("com.tiltingpoint.spongebob").stdout)
+            self.assertEqual(run("../x").returncode, 1)
+
+
 class PackageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

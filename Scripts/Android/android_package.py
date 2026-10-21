@@ -748,6 +748,27 @@ def clear_data(state, package):
                     (root / relative).mkdir(parents=True, exist_ok=True)
 
 
+def compatibility_report(args):
+    import android_compat
+    data = android_compat.load()
+    if args.package:
+        if not PACKAGE.fullmatch(args.package):
+            raise ValueError("Invalid package name")
+        value = android_compat.entry(data, args.package)
+        print(json.dumps(value) if args.json else "\n".join(android_compat.describe(data, args.package)))
+        return 0
+    # Without a package: every app the library lists, then recorded apps that are not installed.
+    installed = [app["package"] for app in installed_apps(args.state_root) if not app.get("system")]
+    packages = installed + [x for x in data["apps"] if x not in installed]
+    if args.json:
+        print(json.dumps({x: dict(android_compat.entry(data, x), installed=x in installed) for x in packages}))
+        return 0
+    for package in packages:
+        print(android_compat.summary(package, android_compat.entry(data, package)) +
+              ("" if package in installed else "  [not installed]"))
+    return 0
+
+
 def configure(args):
     app = args.state_root / args.package
     if not PACKAGE.fullmatch(args.package) or not (app / "package.json").is_file():
@@ -867,6 +888,9 @@ def main():
         if name == "logs":
             command.add_argument("--lines", type=int, default=80)
             command.add_argument("--logd", action="store_true")
+    compatibility = commands.add_parser("compat", help="show the documented compatibility status of tested apps")
+    compatibility.add_argument("package", nargs="?")
+    compatibility.add_argument("--json", action="store_true")
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
     configuration.add_argument("key", nargs="?", choices=android_settings.KEYS)
@@ -928,6 +952,8 @@ def main():
             return 0
         if args.command == "config":
             return configure(args)
+        if args.command == "compat":
+            return compatibility_report(args)
         if args.command in ("uninstall", "clear-data"):
             removing = args.command == "uninstall"
             confirm(f"{'Uninstall' if removing else 'Clear all data of'} {args.package}?", args.yes)

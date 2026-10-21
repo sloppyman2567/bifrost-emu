@@ -15,6 +15,11 @@ labels below are historical records.
 
 ### Asgard app removal (2026-10-20)
 
+- `asgard.py compat [PACKAGE]` reports the documented compatibility of tested
+  apps from `Scripts/Android/compatibility.json` (`playable`, `title`, `runs`,
+  `blocked`, else `untested`), each with its evidence and known issues; the
+  library's game settings show it. Entries exist for SpongeBob, Azur Lane,
+  both Hungry Shark games, Roblox and TrickCal. A test validates the data.
 - Per-app settings apply to every start, not only library launches, and have a
   CLI: `asgard.py config PACKAGE [KEY [VALUE]] [--reset]` over `window_stats`,
   `back_key` and the new `network` (`auto`/`offline`). The shared

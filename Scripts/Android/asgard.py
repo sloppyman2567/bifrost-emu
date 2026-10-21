@@ -250,7 +250,7 @@ def main():
                         help="trace channels, comma-separated: " + ", ".join(DEBUG_CHANNELS) +
                              " (a running realm broker keeps the channels it started with)")
     parser.add_argument("command", choices=("realm", "run", "start", "list", "apps", "status",
-                                           "stop", "logs", "install", "uninstall", "clear-data", "config",
+                                           "stop", "logs", "install", "uninstall", "clear-data", "config", "compat",
                                            "launcher", "probe", "google"))
     args, remainder = parser.parse_known_args()
     state = args.state_root.resolve()

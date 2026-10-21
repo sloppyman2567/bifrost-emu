@@ -250,6 +250,7 @@ def show(state):
             self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
             self.network.setToolTip("What the game sees; Offline hides this computer's network from it")
             form.addRow("Network", self.network)
+            form.addRow("Compatibility", self.compatibility(app["package"]))
             profile = QComboBox(); profile.addItem("Default display"); profile.setEnabled(False)
             form.addRow("Device profile", profile)
             note = muted(QLabel("Matching your phone's screen and identity is planned; games use the default display for now."))
@@ -272,6 +273,20 @@ def show(state):
             layout.addWidget(buttons)
             self.initial = (self.stats.isChecked(), self.back.currentData(), self.network.currentData())
             self.settings = dict(settings)
+
+        @staticmethod
+        def compatibility(package):
+            """What is documented about this app (compatibility.json); never a promise."""
+            try:
+                import android_compat
+                data = android_compat.load()
+                value = android_compat.entry(data, package)
+                text = value["status"] + (f" ({value['checked']})" if value.get("checked") else "") + ". " + value["evidence"]
+            except (OSError, ValueError, KeyError):
+                text = "Unavailable"
+            label = muted(QLabel(text)); label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            return label
 
         def result_settings(self):
             # Store only choices the user made, so defaults keep following the emulator's.

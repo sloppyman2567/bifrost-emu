@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "statuses": {
+    "playable": "A person played it and confirmed gameplay.",
+    "title": "Reached its title, login or main menu on screen; gameplay is not confirmed.",
+    "runs": "Starts and runs a bounded session to its window and surface without a fatal error; no screen or gameplay confirmation is recorded.",
+    "blocked": "Starts, then the app itself ends the session; the cause is outside the emulator's framework services."
+  },
+  "apps": {
+    "com.tiltingpoint.spongebob": {
+      "name": "SpongeBob: Krusty Cook-Off",
+      "tested_version": "5.12.0",
+      "status": "playable",
+      "checked": "2026-10-14",
+      "evidence": "The maintainer plays and completes cooking levels, Settings and Help Center; screenshots in the app page.",
+      "notes": [
+        "Choose the child-age path in the game: the adult-age path needs Google Play services (microG) and stalled at 73%; it was not retested on this build.",
+        "Rewarded ads do not complete (Kidoz ad stays on its loading screen)."
+      ],
+      "page": "Docs/Apps/spongebob.md"
+    },
+    "com.YoStarEN.AzurLane": {
+      "name": "Azur Lane",
+      "tested_version": "9.3.7",
+      "status": "title",
+      "checked": "2026-10-14",
+      "evidence": "Screenshots of the loading and title/login screens; gameplay and completed sign-in are unverified.",
+      "notes": [
+        "The Google sign-in failure path can exit the app (unsupported toast enqueue).",
+        "Repeated UI delays at the login scene; WebView interaction is unverified."
+      ],
+      "page": "Docs/Apps/azur-lane.md"
+    },
+    "com.ubisoft.hungrysharkworld": {
+      "name": "Hungry Shark World",
+      "status": "runs",
+      "checked": "2026-10",
+      "evidence": "A 358 s session with ads and taps on the game's links, run by hand (Docs/TESTS.md); gameplay is not confirmed.",
+      "notes": ["Rewarded video ads had no fill from Google Mobile Ads before the ad-SDK gaps were closed; not re-checked."]
+    },
+    "com.fgol.HungrySharkEvolution": {
+      "name": "Hungry Shark Evolution",
+      "status": "runs",
+      "checked": "2026-10",
+      "evidence": "A 180 s session reached its window, surface and popups without framework-service exceptions (Docs/TESTS.md); gameplay is not confirmed."
+    },
+    "com.roblox.client": {
+      "name": "Roblox",
+      "status": "blocked",
+      "checked": "2026-10-19",
+      "evidence": "Logs in and joins live servers; about 170 s later the server disconnects it with reason 304. The client's Play Integrity token request fails; that this causes the kick is inferred, not proven.",
+      "notes": ["Needs real Google attestation; Bifrost does not bypass or forge it."]
+    },
+    "com.bilibili.trickcal": {
+      "name": "TrickCal",
+      "status": "blocked",
+      "checked": "2026-10-13",
+      "evidence": "Crashes about 17 s in from the game's own anti-cheat native code, as on real Linux; it also fails when connecting on Waydroid.",
+      "notes": ["Real-device only."]
+    }
+  }
+}
