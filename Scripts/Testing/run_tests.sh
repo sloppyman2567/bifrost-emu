@@ -395,6 +395,7 @@ UNIT_TESTS=(
     # userfaultfd SIGBUS mode as ART's CMC GC uses it, including
     # MREMAP_DONTUNMAP and registered ranges on both sides of 4 GiB.
     "test_userfaultfd|Tests/Unit/test_userfaultfd.elf||10|ALL PASS"
+    "test_mmap_resident|Tests/Unit/test_mmap_resident.elf||10|ALL PASS"
     # /proc/self/fd/N[/name] reopens the GUEST descriptor's file (not the
     # emulator's fd N); openat2 shares openat's flags and resolution.
     "test_proc_fd_reopen|Tests/Unit/test_proc_fd_reopen.elf||10|ALL PASS"

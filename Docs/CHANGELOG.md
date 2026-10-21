@@ -13,6 +13,23 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Large guest mappings are no longer committed when mapped (2026-10-21)
+
+- Fix: `Memory::zero_range_locked` zeroed every reused or hinted anonymous mapping in the low
+  4 GiB with `memset`, however large. ART maps its 512 MiB heap (the image's heap maximum)
+  at a hinted address, so every runtime process had about 511 MiB resident at once,
+  independent of THP. Ranges over 16 MiB are now discarded lazily (`MADV_DONTNEED`), which
+  reads as zero and commits only what the guest touches. Battle Cats, 62 s into the title
+  screen, four processes: helper runtimes 949 -> 463 MiB and 793 -> 372 MiB PSS; the sum fell
+  from 4.9 GiB to 3.7 GiB (the runs are not identical, so the totals are indicative; the
+  helper processes' 512 MiB block disappearing is not). New `test_mmap_resident` (fails on the
+  old code, passes on the new, JIT and interpreter).
+- Measured, not changed: THP-on versus THP-off made no systematic difference
+  (`prctl(PR_SET_THP_DISABLE)` run), and the 1 GiB JIT buffer is real code, not slack:
+  `[JIT] code-cache used=469 MB` for 560,501 blocks (about 840 bytes per block) with 448 MB
+  resident, plus about 317 MB of host heap for block metadata in the same process. Shrinking
+  that needs smaller per-block code or cold-block eviction, which is not done.
+
 ### GL_VIEWPORT before glViewport reports the drawable, not 640x480 (2026-10-21)
 
 - Fix (not yet run on the game): Battle Cats' `appUpdateDraw` reads `glGetIntegerv(GL_VIEWPORT)`

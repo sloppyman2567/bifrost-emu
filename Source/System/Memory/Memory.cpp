@@ -419,7 +419,13 @@ void Memory::zero_range_locked(uint64_t lo, uint64_t hi, bool noreserve) {
     // buffers every frame would otherwise take a fault per page (a measured
     // 20x slower reuse). Above it, and for virtual reservations that can
     // span GiBs, discarding is cheaper and frees the memory.
-    uint64_t eager_end = noreserve ? lo : std::min(hi, LOW_REGION_SIZE);
+    // Only for ranges a guest can plausibly rewrite each frame: a large reservation (ART's 512 MiB
+    // heap, mapped at a hinted address) was fully touched and resident in every process at once,
+    // though a guest uses a small part of it. Those are discarded lazily like high memory.
+    constexpr uint64_t kEagerZeroMax = 16ULL * 1024 * 1024;
+    uint64_t eager_end = noreserve || hi - lo > kEagerZeroMax ? lo : std::min(hi, LOW_REGION_SIZE);
+    if (lo == eager_end && !noreserve && lo < hi && lo < LOW_REGION_SIZE)
+        (void)set_direct_prot(lo, std::min(hi, LOW_REGION_SIZE), PROT_READ | PROT_WRITE);
     if (lo < eager_end) {
         (void)set_direct_prot(lo, eager_end, PROT_READ | PROT_WRITE);
         std::memset(direct_window_ + lo, 0, eager_end - lo);

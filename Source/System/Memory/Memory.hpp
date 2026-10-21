@@ -22,7 +22,9 @@
 // The guest heap and the main stack stay in the low 4 GiB (MMAP_BASE_MIN,
 // STACK_TOP). Above LOW_REGION_SIZE, freed memory is returned to the host;
 // in the low region it stays resident and is zeroed on reuse, which is
-// faster for guests that churn large buffers every frame.
+// faster for guests that churn buffers every frame. Only ranges up to 16 MiB
+// are zeroed eagerly: a larger one (ART's 512 MiB heap) is discarded lazily,
+// or it would be fully resident the moment it was mapped.
 #pragma once
 #include "Bifrost/Types.hpp"
 #include <atomic>
