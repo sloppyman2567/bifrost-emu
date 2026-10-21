@@ -165,8 +165,8 @@ isolated replies.
 
 - Complete related services through real state, ownership, creation and
   cleanup; keep unsupported methods explicit and improve coverage reporting.
-- Render toasts and honor their queue/timeout behavior. Enqueue and cancel are
-  accepted (Azur Lane's sign-in failure no longer exits) but nothing is shown.
+- Toasts queue, show for 2 s or 3.5 s and cancel (Azur Lane's sign-in failure
+  no longer exits). Still open: background-toast policy and toast animations.
 - Connect notification posting, interaction and PendingIntent delivery, then
   foreground-service notification/deadline behavior and lifecycle policy.
 - Extend current PendingIntent/receiver/alarm/job behavior toward scoped

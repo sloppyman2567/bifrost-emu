@@ -13,6 +13,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.ViewGroup;
 import android.widget.PopupWindow;
+import android.widget.Toast;
 import android.widget.TextView;
 
 /** Framework popup windows over a SurfaceView: AlertDialog, focus, PopupWindow, engine-thread windows. */
@@ -65,7 +66,14 @@ public final class ManagedDialog extends Activity {
         PopupWindow popup = new PopupWindow(text, 240, 80);
         popup.setOnDismissListener(() -> {
             System.out.println("MANAGED_DIALOG_POPUP_DISMISSED");
-            main.postDelayed(() -> startActivity(new Intent(this, Engine.class)), 300);
+            // A text toast is a TYPE_TOAST window of the framework layout; it
+            // is gone after LENGTH_SHORT (2 s) and the next step waits for it.
+            Toast.makeText(this, "Bifrost toast", Toast.LENGTH_SHORT).show();
+            System.out.println("MANAGED_DIALOG_TOAST_REQUESTED");
+            main.postDelayed(() -> {
+                System.out.println("MANAGED_DIALOG_TOAST_WAITED");
+                startActivity(new Intent(this, Engine.class));
+            }, 3000);
         });
         popup.showAtLocation(getWindow().getDecorView(), Gravity.TOP | Gravity.START, 40, 60);
         System.out.println("MANAGED_DIALOG_POPUP_SHOWN");

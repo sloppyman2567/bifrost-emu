@@ -5,6 +5,7 @@ import android.app.NotificationChannelGroup;
 import android.app.NotificationManager;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.Process;
@@ -54,6 +55,7 @@ final class FrameworkNotifications implements FrameworkServices.Call {
     private final Map<String, NotificationChannel> channels = new LinkedHashMap<>();
     private final Map<String, NotificationChannelGroup> groups = new LinkedHashMap<>();
     private static final int MAGIC = 0x41534e32, MAX_BYTES = 8 * 1024 * 1024;
+    private final FrameworkToasts toasts = new FrameworkToasts();
     private String delegate;
     private int delegateUid = -1;
     // FileChannel.lock does not wait for overlapping locks held by another
@@ -259,19 +261,20 @@ final class FrameworkNotifications implements FrameworkServices.Call {
             case cancelAllNotifications: user((Integer) a[1]); return null;
             case cancelNotificationWithTag: owner((String) a[1]); user((Integer) a[4]); return null;
             case getAppActiveNotifications: user((Integer) a[1]); return slice(new ArrayList<Object>());
-            // NotificationManagerService accepts a toast from the caller's own
-            // package and queues it for SystemUI. There is no toast window
-            // here, so the toast is accepted (Toast.show returns normally and
-            // an app's sign-in failure path survives) but never displayed.
+            // NotificationManagerService queues a toast from the caller's own
+            // package for SystemUI; FrameworkToasts shows it in this process.
             case enqueueTextToast:
                 Objects.requireNonNull(a[2], "text");
                 if (!pkg.packageName.equals(a[0])) throw new SecurityException("Foreign toast package");
-                return true;
+                return toasts.enqueue((IBinder) a[1], null, (CharSequence) a[2], a[6], (Integer) a[3]);
             case enqueueToast:
                 Objects.requireNonNull(a[2], "callback");
                 if (!pkg.packageName.equals(a[0])) throw new SecurityException("Foreign toast package");
-                return true;
-            case cancelToast: return null;
+                return toasts.enqueue((IBinder) a[1], a[2], null, null, (Integer) a[3]);
+            case cancelToast:
+                if (!pkg.packageName.equals(a[0])) throw new SecurityException("Foreign toast package");
+                toasts.cancel((IBinder) a[1]);
+                return null;
             default: break;
         }
         File directory = new File(pkg.applicationInfo.dataDir, ".asgard-notifications");

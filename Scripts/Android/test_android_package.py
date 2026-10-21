@@ -1719,6 +1719,9 @@ class PackageTests(unittest.TestCase):
         markers = ("MANAGED_DIALOG_SHOWN", "text=Bifrost dialog", "MANAGED_DIALOG_POSITIVE",
                    "MANAGED_DIALOG_DISMISSED", "MANAGED_DIALOG_POPUP_SHOWN",
                    "MANAGED_DIALOG_POPUP_DISMISSED",
+                   # A text toast gets a TYPE_TOAST window (2005) and is removed.
+                   "MANAGED_DIALOG_TOAST_REQUESTED", "APP_TOAST_SHOWN Bifrost toast",
+                   "MANAGED_DIALOG_TOAST_WAITED",
                    # A dialog created on an engine Looper thread draws there
                    # (ViewRootImpl.checkThread) and its click runs there.
                    "text=Engine dialog", "MANAGED_DIALOG_ENGINE_POSITIVE FixtureEngine",
@@ -1753,7 +1756,9 @@ class PackageTests(unittest.TestCase):
         # leaked one, which dies asynchronously at exit, were removed.
         self.assertEqual(text.count("APP_WINDOW_GPU"), 1, text[-30000:])
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
-        self.assertEqual(len(shown), 6, text[-30000:])
+        self.assertEqual(len(shown), 7, text[-30000:])
+        self.assertIn("type=2005 title=Toast", text)
+        self.assertNotIn("APP_TOAST_FAILED", text)
         self.assertEqual(shown[1][1], "[40,60][280,140]")
         removed = {line.split()[1] for line in text.splitlines() if line.startswith("APP_POPUP_REMOVED")}
         self.assertLessEqual({"1", "2", "3", "4", "5", "6"}, removed, text[-30000:])

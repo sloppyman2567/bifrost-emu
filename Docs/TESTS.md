@@ -401,7 +401,10 @@ previous adapter:
 - `test_managed_activity_api_report` still expects
   `ActivityManager.getAppTasks` to be unsupported.
 - `test_managed_dialog_and_popup_windows` reaches all its markers, then
-  never exits (timeout 124).
+  never exits (timeout 124); this reproduced on 2026-10-21 with the fixture's
+  toast step removed. The fixture now also shows a text toast (a `type=2005`
+  window, `APP_TOAST_SHOWN`, removed after 2 s); the log shows that, but the
+  test's toast assertions are unrun until the exit hang is fixed.
 
 ```bash
 python3 Scripts/Android/test_android_framework.py --services --managed-graphics \

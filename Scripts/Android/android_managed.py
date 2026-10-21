@@ -41,7 +41,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkParseCache.java", "Framework/FrameworkStallWatch.java",
                     "Framework/FrameworkAppOps.java", "Framework/FrameworkSurfaces.java",
                     "Framework/FrameworkAudio.java", "Framework/FrameworkNotifications.java",
-                    "Framework/FrameworkPower.java", "Framework/FrameworkWifi.java", "Framework/FrameworkNsd.java",
+                    "Framework/FrameworkPower.java", "Framework/FrameworkWifi.java", "Framework/FrameworkNsd.java", "Framework/FrameworkToasts.java",
                     "Framework/FrameworkPermissions.java", "Framework/FrameworkUiMode.java",
                     "Framework/FrameworkBattery.java", "Framework/FrameworkVibrator.java",
                     "Framework/FrameworkKeyguard.java", "Framework/FrameworkClipboard.java",
