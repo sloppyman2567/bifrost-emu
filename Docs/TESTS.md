@@ -141,7 +141,11 @@ Revision: the two commits above plus the uncommitted change under test.
   the one for `AuthSignInActivity` started with `startIntentSenderForResult` gives
   the same `RESULT_OK errorCode=10`, and the one for the app's own Activity is
   refused (`SendIntentException`). It fails on the previous guest code at that
-  marker. The
+  marker. The test starts a realm broker and runs the app and the Google window
+  in it, as Asgard does; 12 s after the first window closes, a `:late` process
+  must get a Choreographer frame (`MANAGED_GOOGLE_LATE_FRAME 1`), which the
+  previous emulator fails with `DeadObjectException` (without a shared realm the
+  stage passes on both, so the broker is what makes it discriminate). The
   session reports the fixture's `Activity` as the caller. Run alone it took
   83 s with the PendingIntent stage (four Play services requests).
   `GoogleAccountStateTests.test_activity_requests_are_validated_staged_and_answered`

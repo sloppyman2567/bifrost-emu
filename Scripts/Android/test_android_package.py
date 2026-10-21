@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -1145,6 +1146,7 @@ class PackageTests(unittest.TestCase):
                           'android:hardwareAccelerated="false"/>')
         if managed == "ManagedGoogleActivity" and not split:
             component += f'<service android:name="{activity}$Sender" android:process=":sender" android:exported="false"/>'
+            component += f'<service android:name="{activity}$Late" android:process=":late" android:exported="false"/>'
             component += f'<activity android:name="{activity}$Other" android:exported="false"/>'
         if managed == "ManagedSplash" and not split:
             component += f'<activity android:name="{activity}$Main" android:exported="false"/>'
@@ -1881,14 +1883,28 @@ class PackageTests(unittest.TestCase):
             archive.write(self.apk("google-activity", managed="ManagedGoogleActivity"), "base.apk")
             archive.write(self.split, "split.apk")
         self.install(bundle, state)
-        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=300)
+        # As Asgard runs it: the app and the Google window share one Binder realm.
+        realm = Path(tempfile.mkdtemp(prefix="bfrealm-"))
+        broker = subprocess.Popen([str(ARGS.emu.resolve()), "--asgard-broker", str(realm / "broker.sock")],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            for _ in range(200):
+                if (realm / "broker.sock").exists(): break
+                time.sleep(0.025)
+            status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=300,
+                                    emu_args=["--android-binder-broker", str(realm / "broker.sock")])
+        finally:
+            broker.terminate()
+            broker.wait(timeout=10)
+            shutil.rmtree(realm, ignore_errors=True)
         text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
         nested = "".join(path.read_text(errors="replace")[-6000:] for path in
                          sorted((state / "com.google.android.gms/managed/sessions").glob("*/stdout.log")))
         self.assertEqual(status, 0, text[-8000:] + nested)
         self.assertNotRegex(text, r"FATAL EXCEPTION|APP_ACTIVITY_REMOTE_FAILED")
         for marker in ("MANAGED_GOOGLE_RESULT 7 -1 error=10\n", "MANAGED_GOOGLE_SENDER_PROCESS true\n",
-                       "MANAGED_GOOGLE_RESULT 10 -1 error=10\n", "MANAGED_GOOGLE_SENDER_REFUSED\n",
+                       "MANAGED_GOOGLE_RESULT 10 -1 error=10\n", "MANAGED_GOOGLE_LATE_FRAME 1\n",
+                       "MANAGED_GOOGLE_SENDER_REFUSED\n",
                        "MANAGED_GOOGLE_RESULT 8 -1 error=10\n",
                        "MANAGED_GOOGLE_RESPONSE_ERROR 4 canceled\n", "MANAGED_GOOGLE_RESULT 9 0 error=null\n",
                        "MANAGED_GOOGLE_DONE\n"):

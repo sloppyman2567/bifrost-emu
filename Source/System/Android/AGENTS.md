@@ -163,8 +163,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `surfaceDestroyed` while the Surface is valid (window detach, `stop`). An Activity covered by an
   opaque one must still stop and hide its window
   (`EnsureActivitiesVisibleHelper`); only translucent/floating themes leave it
-  visible. Only the session process publishes device
-  services (`sensorservice`, `SurfaceFlingerAIDL`, `SurfaceFlinger`).
+  visible. Session processes publish the device
+  services (`sensorservice`, `SurfaceFlingerAIDL`, `SurfaceFlinger`), their
+  service children do not. Sessions in one realm all publish them, so the
+  registry keeps the registration an owner replaced and restores it when that
+  owner goes away (`BinderDomain::shadowed`).
 - Managed connectivity presents the host route as Wi-Fi. VALIDATED requires
   the launcher's HTTPS probe returning 204 or its explicit diagnostic override.
 - Keep Android's unmapped null page, real shared/private file mappings and

@@ -147,16 +147,40 @@ void BinderNode::drop_buffer_references(uint64_t address) {
 }
 void BinderNode::release_all_references() {
     auto closing = weak_from_this();
-    for (auto it = domain_->services.begin(); it != domain_->services.end();) {
-        const auto& owner = it->second.object->owner;
-        // Compare weak ownership without temporarily promoting another peer.
-        // Dropping that peer's last shared reference can reenter teardown and
-        // erase registry entries while this iterator is still in use.
+    // Compare weak ownership without temporarily promoting another peer.
+    // Dropping that peer's last shared reference can reenter teardown and
+    // erase registry entries while an iterator is still in use.
+    auto goes_away = [&](const BinderService& service) {
+        const auto& owner = service.object->owner;
         bool same_owner = !owner.owner_before(closing) && !closing.owner_before(owner);
-        if (it->second.object->host_service == Object::HostService::None && (owner.expired() || same_owner)) {
+        return service.object->host_service == Object::HostService::None && (owner.expired() || same_owner);
+    };
+    std::vector<std::string> vacated;
+    fprintf(stderr, "[probe] release_all: services=%zu shadowed=%zu\n", domain_->services.size(), domain_->shadowed.size());
+    for (auto it = domain_->services.begin(); it != domain_->services.end();) {
+        if (goes_away(it->second)) {
+            fprintf(stderr, "[probe] release_all: vacate %s\n", it->first.c_str());
             change_reference(it->second.object, -1, 0);
+            vacated.push_back(it->first);
             it = domain_->services.erase(it);
         } else ++it;
+    }
+    // Registrations that owner shadowed are gone with it; a name it vacated
+    // returns to the newest remaining owner.
+    for (auto it = domain_->shadowed.begin(); it != domain_->shadowed.end();) {
+        auto& stack = it->second;
+        for (size_t i = stack.size(); i-- > 0;)
+            if (goes_away(stack[i])) {
+                change_reference(stack[i].object, -1, 0);
+                stack.erase(stack.begin() + i);
+            }
+        fprintf(stderr, "[probe] release_all: shadow '%s' size=%zu vacated=%d\n", it->first.c_str(), stack.size(), std::find(vacated.begin(), vacated.end(), it->first) != vacated.end());
+        if (std::find(vacated.begin(), vacated.end(), it->first) != vacated.end() && !stack.empty()) {
+            fprintf(stderr, "[probe] release_all: RESTORING %s\n", it->first.c_str());
+            domain_->services[it->first] = stack.back();
+            stack.pop_back();
+        }
+        it = stack.empty() ? domain_->shadowed.erase(it) : std::next(it);
     }
     for (auto& entry : owned_objects_) {
         entry.second->alive = false;

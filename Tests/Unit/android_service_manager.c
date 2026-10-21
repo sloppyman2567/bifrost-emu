@@ -86,6 +86,44 @@ static int transact(int fd, uint32_t code, uint64_t *offsets, size_t count,
 static int release_reply(int fd, struct bf_binder_transaction *tx) {
     return write_command(fd, BF_BC_FREE_BUFFER, &tx->buffer, 0);
 }
+
+// Register `name` for the Binder (ptr, cookie) owned by endpoint `fd`, taking
+// the publisher's INCREFS/ACQUIRE acknowledgements that precede the reply.
+static int publish(int fd, const char *name, uint64_t ptr, uint64_t cookie) {
+    struct bf_flat_binder flat = {BF_BINDER_TYPE_BINDER, 0, ptr, cookie};
+    token();
+    string16(name);
+    uint64_t offset = length;
+    memcpy(parcel + length, &flat, sizeof(flat));
+    length += sizeof(flat);
+    u32(12);
+    u32(0);
+    u32(8);
+    struct bf_binder_transaction reply;
+    if (!transact(fd, 3, &offset, 1, &reply) || reply.flags)
+        return 0;
+    struct bf_binder_ptr_cookie incref, acquire;
+    int has_incref = find(BF_BR_INCREFS, &incref), has_acquire = find(BF_BR_ACQUIRE, &acquire);
+    if (has_incref && write_command(fd, BF_BC_INCREFS_DONE, &incref, 0))
+        return 0;
+    if (has_acquire && write_command(fd, BF_BC_ACQUIRE_DONE, &acquire, 0))
+        return 0;
+    return !release_reply(fd, &reply);
+}
+// The handle `client` is given for `name`, or 0 when nothing is registered.
+static uint32_t lookup(int fd, const char *name) {
+    struct bf_binder_transaction reply;
+    struct bf_flat_binder flat;
+    token();
+    string16(name);
+    if (!transact(fd, 2, 0, 0, &reply))
+        return ~0u;
+    memcpy(&flat, (void *)(uintptr_t)(reply.buffer + 4), sizeof(flat));
+    uint32_t handle = flat.type == BF_BINDER_TYPE_HANDLE ? flat.binder : 0;
+    if (handle && write_command(fd, BF_BC_ACQUIRE, &handle, 0))
+        return ~0u;
+    return release_reply(fd, &reply) ? ~0u : handle;
+}
 int main(void) {
     int server = open("/dev/binder", O_RDWR | O_NONBLOCK),
         client = open("/dev/binder", O_RDWR | O_NONBLOCK);
@@ -306,6 +344,27 @@ int main(void) {
     CHECK(transact(client, 4, 0, 0, &reply));
     CHECK(!reply.flags && *(int32_t *)(uintptr_t)(reply.buffer + 4) == 2);
     CHECK(!release_reply(client, &reply));
+    // A second publisher replaces a name while it lives; when it goes away the
+    // name returns to the registration it replaced (Play services' window
+    // session replaced the game's SurfaceFlinger, then removed it on exit).
+    int first = open("/dev/binder", O_RDWR | O_NONBLOCK), second = open("/dev/binder", O_RDWR | O_NONBLOCK);
+    void *c = mmap(0, 65536, PROT_READ, MAP_PRIVATE, first, 0);
+    void *d = mmap(0, 65536, PROT_READ, MAP_PRIVATE, second, 0);
+    CHECK(first >= 0 && second >= 0 && c != MAP_FAILED && d != MAP_FAILED);
+    CHECK(publish(first, "bifrost.shared", 0x33330000, 0x1));
+    uint32_t original = lookup(client, "bifrost.shared");
+    CHECK(original && original != ~0u);
+    CHECK(publish(second, "bifrost.shared", 0x44440000, 0x2));
+    uint32_t newest = lookup(client, "bifrost.shared");
+    CHECK(newest && newest != ~0u && newest != original);
+    // The same publisher registering again replaces its own entry for good.
+    CHECK(publish(second, "bifrost.shared", 0x44440008, 0x3));
+    uint32_t again = lookup(client, "bifrost.shared");
+    CHECK(again && again != ~0u && again != original);
+    CHECK(!munmap(d, 65536) && !close(second));
+    CHECK(lookup(client, "bifrost.shared") == original);
+    CHECK(!munmap(c, 65536) && !close(first));
+    CHECK(lookup(client, "bifrost.shared") == 0);
     CHECK(!munmap(a, 65536) && !munmap(b, 65536) && !close(client));
     printf("android_service_manager: ALL PASS (%d checks)\n", checks);
     return 0;

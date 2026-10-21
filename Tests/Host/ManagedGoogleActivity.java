@@ -23,6 +23,10 @@ import android.os.Process;
  * AuthSignInActivity without its configuration answers RESULT_OK with
  * DEVELOPER_ERROR at once, so no Google account or network is needed.
  *
+ * A process started after a Google window has closed must still get display
+ * events: the window's session published its own device services (the
+ * SurfaceFlinger the app's processes use) and removed them when it ended.
+ *
  * Senders created in another process of the app (Play services' sign-in UI
  * arrives in a game as one) start through the same window when they name a
  * Play services Activity, and are refused otherwise.
@@ -44,7 +48,7 @@ public final class ManagedGoogleActivity extends Activity {
         if (request == 7) {
             senders();
         } else if (request == 10) {
-            refusedSender();
+            lateProcess();
         } else if (request == 8) {
             askPermission();
         }
@@ -75,6 +79,52 @@ public final class ManagedGoogleActivity extends Activity {
     }
 
     private PendingIntent gmsSender, ownSender;
+
+    // A new process once the Google window's session is gone: its Choreographer
+    // must deliver a frame (it throws "Failed to initialize display event
+    // receiver" when no SurfaceFlinger is registered).
+    private void lateProcess() {
+        new Handler(getMainLooper()).postDelayed(() -> bindService(new Intent(this, Late.class), new ServiceConnection() {
+            @Override public void onServiceConnected(ComponentName name, IBinder service) {
+                Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+                try {
+                    service.transact(IBinder.FIRST_CALL_TRANSACTION, data, reply, 0);
+                    reply.readException();
+                    System.out.println("MANAGED_GOOGLE_LATE_FRAME " + reply.readInt());
+                } catch (Exception failure) {
+                    System.out.println("MANAGED_GOOGLE_LATE_FAILED " + failure);
+                } finally {
+                    data.recycle(); reply.recycle();
+                    unbindService(this);
+                    refusedSender();
+                }
+            }
+            @Override public void onServiceDisconnected(ComponentName name) {}
+        }, Context.BIND_AUTO_CREATE), 12000);
+    }
+
+    /** Runs in ":late": answers with 1 once its Choreographer has delivered a frame. */
+    public static final class Late extends Service {
+        @Override public IBinder onBind(Intent intent) {
+            return new Binder() {
+                @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
+                    if (code != FIRST_CALL_TRANSACTION) return false;
+                    final java.util.concurrent.CountDownLatch frame = new java.util.concurrent.CountDownLatch(1);
+                    int seen = 0;
+                    try {
+                        new Handler(getMainLooper()).post(() -> android.view.Choreographer.getInstance()
+                                .postFrameCallback(time -> frame.countDown()));
+                        seen = frame.await(20, java.util.concurrent.TimeUnit.SECONDS) ? 1 : 0;
+                    } catch (Throwable failure) {
+                        System.out.println("MANAGED_GOOGLE_LATE_ERROR " + failure);
+                    }
+                    reply.writeNoException();
+                    reply.writeInt(seen);
+                    return true;
+                }
+            };
+        }
+    }
 
     // Another process's Activity that is not Play services': the start is
     // refused, as before, and the app carries on.

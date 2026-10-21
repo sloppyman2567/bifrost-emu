@@ -160,8 +160,19 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     } else {
                         auto object = incoming.references.at(0).object;
                         change_reference(object, 1, 0); // Registry owns a strong reference.
-                        if (existing != domain_->services.end())
-                            change_reference(existing->second.object, -1, 0);
+                        if (existing != domain_->services.end()) {
+                            // Another owner's registration is shadowed, not dropped; the
+                            // owner replacing its own entry leaves nothing to restore.
+                            if (replaced_owner && replaced_owner.get() != this) {
+                                fprintf(stderr, "[probe] addService: shadowing %s for prior owner\n", name.c_str());
+                                auto& stack = domain_->shadowed[name];
+                                stack.push_back(existing->second);
+                                if (stack.size() > BinderDomain::MAX_SHADOWED) {
+                                    change_reference(stack.front().object, -1, 0);
+                                    stack.erase(stack.begin());
+                                }
+                            } else change_reference(existing->second.object, -1, 0);
+                        }
                         domain_->services[name] = {object, priority, stability};
                         for (const auto &ref : incoming.references) {
                             --handles_.at(ref.handle).temporary_strong;

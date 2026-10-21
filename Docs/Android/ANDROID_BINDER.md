@@ -205,6 +205,14 @@ using the same fd delivery path as guest Binder replies. See the
 The registry holds strong references to real guest Binder objects. Lookup
 returns callable translated handles, whose receive-buffer references follow
 the existing acquire/free/release rules. Owner teardown removes its services.
+A name another owner registers again is replaced while that owner lives, as
+before, but the registration it replaced is kept (up to 8 per name) and takes
+the name back when the replacing owner goes away. Sessions sharing a realm each
+publish the device services (`SurfaceFlingerAIDL`, `sensorservice`, the audio
+services); without this, a short-lived Play services window session removed the
+app's own on exit, and processes the app started afterwards could not create a
+`DisplayEventReceiver` (`status=-19`) or reach `SurfaceFlinger`. An owner
+re-registering its own name still replaces its entry without stacking.
 Limits are 256 registered services, 127-byte names and the existing per-endpoint
 handle, queue and receive-arena budgets. No placeholder framework services
 are registered. Notifications, lazy services, declarations, permission policy

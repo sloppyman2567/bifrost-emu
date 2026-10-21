@@ -26,6 +26,27 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Services a short-lived session published no longer take the app's with them (2026-10-21)
+
+- Fix: Sessions in one Asgard realm share a Binder domain, and each publishes the
+  device services. A name registered again replaced the earlier entry, and the
+  owner's teardown then erased it, so closing a Play services window (a second
+  session) removed the game's `SurfaceFlingerAIDL`, `sensorservice`,
+  `SurfaceFlinger` and audio services. Processes the game started afterwards
+  (Play services' `ChimeraServiceProvider`, ...) died in `androidx.startup`
+  with `Failed to initialize display event receiver status=-19`, and each
+  request for the provider waited about 20 s; in Hungry Shark World the Play
+  Games sign-in then failed ("4 out of 4 underlying tasks failed"; the link to
+  that failure is inferred, not proven). The registry now keeps the registration
+  an owner replaced and restores it when the replacing owner goes away.
+- `android_service_manager` covers the registry rule (fails without the change,
+  115 checks with it). `test_managed_google_activity_window` now runs the app and
+  the Google window in one realm broker, as Asgard does, and starts a process
+  12 s after a window closes that must receive a Choreographer frame: with the
+  previous emulator it fails (`DeadObjectException`), with this one it passes.
+  Asgard keeps its broker across apps, so `realm stop` / `realm start` is needed
+  to pick up the fix.
+
 ### Play services PendingIntents from another process (2026-10-21)
 
 - `startIntentSenderForResult` with a PendingIntent another process created

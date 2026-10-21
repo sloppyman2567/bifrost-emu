@@ -66,6 +66,13 @@ struct BinderDomain {
     bool manager_accepts_fds = true;
     uint32_t sender_euid = 0; // single guest process, not the host's credentials
     std::map<std::string, BinderService> services;
+    // Registrations another owner's addService replaced, oldest first. The
+    // registry keeps their strong references; when the owner of the current
+    // entry goes away the newest one whose owner is alive takes the name back
+    // (two sessions sharing a domain each publish SurfaceFlinger, and the
+    // shorter-lived one must not take the longer-lived one's with it).
+    static constexpr size_t MAX_SHADOWED = 8;
+    std::map<std::string, std::vector<BinderService>> shadowed;
     std::set<std::string> declared_services;
     struct ProcessState { uint32_t uid; int32_t state, adjustment; };
     std::map<int, ProcessState> processes;
