@@ -132,6 +132,9 @@ if [ "$FETCH_CURL" = "1" ]; then
     fi
 fi
 
+# Libraries fetched after setup-rootfs.sh need to be in the guest ld.so cache.
+[ -d rootfs ] && python3 -I Scripts/Setup/make-ld-cache.py rootfs
+
 # ── Summary ───────────────────────────────────────────────────────────
 log_step "Setup complete!"
 echo

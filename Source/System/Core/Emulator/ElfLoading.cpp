@@ -269,6 +269,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     }
     ElfLoader::Options load_options;
     load_options.apply_relocations = !android_runtime_;
+    load_options.defer_relocations_to_interp = guest_linker_;
     auto info = ElfLoader::load(mem_, data, load_options);
     name_segments(info, path);
     entry_ = info.entry;
@@ -334,6 +335,38 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             static_cast<unsigned long long>(interp_base_),
             static_cast<unsigned long long>(entry_),
             static_cast<unsigned long long>(Memory::PAGE_SIZE));
+    } else if (!info.interp.empty() && guest_linker_) {
+        // Kernel-style exec: the guest ld.so (from the rootfs, so it matches
+        // the libc it loads) relocates the program and its libraries, and
+        // sets up TLS and the pthread descriptor. The program entry reaches
+        // it through AT_ENTRY; AT_BASE is the interpreter's load address.
+        const std::string host_interp = yggdrasil::Yggdrasil::remap_path(info.interp);
+        std::vector<uint8_t> interpreter;
+        if (FILE* ifile = fopen(host_interp.c_str(), "rb")) {
+            fseek(ifile, 0, SEEK_END);
+            const long isz = ftell(ifile);
+            fseek(ifile, 0, SEEK_SET);
+            if (isz > 0) {
+                interpreter.resize(isz);
+                if (fread(interpreter.data(), 1, isz, ifile) != static_cast<size_t>(isz))
+                    interpreter.clear();
+            }
+            fclose(ifile);
+        }
+        if (interpreter.empty())
+            throw EmuError("cannot read interpreter " + host_interp + " for " + path);
+        ElfLoader::Options interpreter_options;
+        interpreter_options.apply_relocations = false;
+        interpreter_options.reserve_image = true;
+        auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
+        if (!loaded.interp.empty())
+            throw EmuError("guest linker " + info.interp + " must not itself require PT_INTERP");
+        name_segments(loaded, info.interp);
+        entry_ = loaded.entry;
+        interp_base_ = loaded.base_addr;
+        has_lse_ = has_lse_ || loaded.has_lse;
+        // dyn_linker_ stays null here; the block after this chain gives the
+        // process the thunk/dlopen plumbing it gives static programs.
     } else if (!info.interp.empty()) {
         // First, try the native (in-emulator) dynamic linker. This is
         // faster and more reliable because we don't depend on the

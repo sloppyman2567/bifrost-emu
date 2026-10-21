@@ -26,6 +26,26 @@ labels below are historical records.
   `Tests/Apps/test_dyn_legacy_start.c` has its own `_start` with a non-NULL
   `init`; it reports two constructor runs without the fix and one with it.
 
+### Experimental guest dynamic linker (`--guest-ld`) (2026-10-21)
+
+- New `--guest-ld`: a dynamic glibc or musl program runs under the rootfs's
+  own `ld.so`, as a kernel exec does, instead of the in-emulator
+  `DynamicLinker`. The program loads unrelocated, the interpreter loads from the
+  rootfs, and the guest linker does relocation, TLS and constructors, so
+  link_map-dependent behavior matches real glibc. The older
+  `BIFROST_NO_NATIVE_DYNLINK` debug path (host interpreter, unprotected
+  segments, jumps to an unmapped entry) is still in the tree but broken;
+  `--guest-ld` is the supported way. Graphics thunks are not wired in this mode.
+- `Scripts/Setup/make-ld-cache.py` writes `rootfs/etc/ld.so.cache` (glibc's
+  `ld.so` never reads `ld.so.conf`); `setup-rootfs.sh` and
+  `setup-rootfs-all.sh` call it. Output parses under the host's
+  `ldconfig -p -C`.
+- `run_tests.sh --guest-ld` runs the dynamic suites through it: the 18 dynamic
+  and 7 real-world glibc tests pass in JIT and interpreter modes, with the
+  default linker unchanged (238 JIT / 230 interpreter + 8 JIT-only skips).
+  Geekbench 6.5.0 AArch64 starts in this mode and, in a manual run, passed the
+  workloads where the native linker crashed; a full run was not completed.
+
 ### Asgard app removal (2026-10-20)
 
 - Fix: the per-app `network offline` setting only changed what Android's

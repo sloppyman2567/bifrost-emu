@@ -98,6 +98,11 @@ python3 Scripts/Android/android_package.py install /path/to/game.apkm
 python3 Scripts/Android/android_package.py run org.example.game
 ```
 
+`--guest-ld` (experimental) runs dynamic programs under the rootfs's own
+`ld.so`, as a kernel exec would, instead of the built-in linker; it needs the
+`ld.so.cache` that `setup-rootfs.sh` writes, and graphics thunks are not
+supported in this mode yet.
+
 Useful switches: `-d` traces every instruction, `--no-jit` forces the
 interpreter, `--no-window-stats` removes the FPS title, and `BIFROST_TIER2=1`
 enables experimental Tier-2 region compilation.

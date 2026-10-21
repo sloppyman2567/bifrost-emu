@@ -59,6 +59,8 @@ public:
     struct Options {
         // A guest dynamic linker owns all relocations, including its own.
         bool apply_relocations = true;
+        // A program with PT_INTERP is left unrelocated for its guest linker.
+        bool defer_relocations_to_interp = false;
         // Reserve an aligned ET_DYN image in the mmap arena (for PT_INTERP).
         bool reserve_image = false;
     };
@@ -107,6 +109,10 @@ public:
         vfs_.set_process_identity(enabled ? 10000 : 0, enabled ? 10000 : 0);
     }
     bool android_runtime() const { return android_runtime_; }
+    // Run dynamic glibc/musl programs under their own guest ld.so, as a
+    // kernel exec does, instead of the in-emulator DynamicLinker.
+    void set_guest_linker(bool enabled) { guest_linker_ = enabled; }
+    bool guest_linker() const { return guest_linker_; }
     void enable_android_services() { vfs_.enable_android_services(); }
     std::atomic<uint32_t> guest_membarrier_registrations{0};
     std::atomic<int> guest_dumpable{1};
@@ -442,6 +448,7 @@ private:
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool android_runtime_ = false;
+    bool guest_linker_ = false;
     bool trace_ = false;
     bool brk_verbose_ = true; // controlled by cfg.log_brk_verbose / -q flag
     std::string elf_path_;

@@ -88,6 +88,7 @@ static void print_banner() {
         "    --rootfs PATH      set rootfs for dynamic linking (BIFROST_ROOT)\n"
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
+        "    --guest-ld         run dynamic programs under their own guest ld.so (--rootfs)\n"
         "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
         "    --android-services provide the API-35 Binder service-manager subset\n"
         "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
@@ -249,6 +250,7 @@ int main(int argc, char** argv) {
     // or for debugging.
     bool use_jit = true;
     bool android_runtime = false;
+    bool guest_ld = false;
     bool android_services = false;
     uint32_t android_app_id = 10000;
     bool android_app_id_set = false;
@@ -331,6 +333,7 @@ int main(int argc, char** argv) {
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
+        if (a == "--guest-ld")              { guest_ld = true; arg_i++; continue; }
         if (a == "--android-services")      { android_services = true; arg_i++; continue; }
         if (a == "--asgard-service-parent") {
             if (arg_i + 1 >= argc) return 2;
@@ -551,6 +554,7 @@ int main(int argc, char** argv) {
     }
     Emulator emu(android_binder_broker.empty() ? Memory::WINDOW_SIZE_MAX : Memory::BINDER_REALM_WINDOW_SIZE);
     emu.set_android_runtime(android_runtime);
+    emu.set_guest_linker(guest_ld);
     if (android_runtime) emu.vfs().set_process_identity(android_app_id, android_app_id);
     if (!android_binder_broker.empty()) {
         emu.vfs().set_binder_broker(android_binder_broker);

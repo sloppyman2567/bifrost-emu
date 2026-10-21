@@ -200,9 +200,8 @@ cat > "$ROOTFS/etc/ld.so.conf" <<'EOF'
 /usr/lib64
 EOF
 
-# /etc/ld.so.cache — empty (the dynamic linker would normally generate
-# this; we don't have ldconfig, so the dynamic linker falls back to
-# the default search paths in /etc/ld.so.conf)
+# /etc/ld.so.cache — written once the libraries are in place (see the end of
+# this script); a guest ld.so reads only the cache, never ld.so.conf.
 : > "$ROOTFS/etc/ld.so.cache"
 
 # ── Android-compatible directory structure ────────────────────────────
@@ -343,6 +342,9 @@ if [ -f "$PROJECT_ROOT/Tests/Apps/toybox" ]; then
 else
     ln -sf /bin/busybox "$ROOTFS/bin/sh" 2>/dev/null || true
 fi
+
+python3 -I "$PROJECT_ROOT/Scripts/Setup/make-ld-cache.py" "$ROOTFS" || \
+    echo "warning: ld.so.cache not generated; --guest-ld needs it" >&2
 
 echo ""
 echo "Rootfs setup complete at: $ROOTFS"

@@ -2755,6 +2755,16 @@ bash Scripts/Testing/test_jit_mt_publication.sh
 This is synthetic correctness and concurrency coverage, not a gameplay frame
 rate measurement or complete code-reclamation implementation.
 
+### Guest linker pass (2026-10-21)
+
+`run_tests.sh --guest-ld --dynamic --realworld` runs the dynamic suites under
+each program's own guest `ld.so`. With a regenerated `ld.so.cache`
+(`Scripts/Setup/make-ld-cache.py`, checked with `ldconfig -p -C`), 74/74 pass in
+JIT and in interpreter mode. A trace confirmed the guest linker opens
+`/etc/ld.so.cache` and `/lib/libc.so.6` itself (2 `[dynlink]` lines versus 140
+for the native linker). Not covered: graphics/audio thunks, Android, Doom 3 and
+large-application cold-start time.
+
 ### Legacy-start constructor regression (2026-10-20)
 
 `test_dyn_legacy_start` is a dynamic glibc fixture built with `-nostartfiles`

@@ -14,6 +14,7 @@
 #   ./Scripts/Testing/run_tests.sh --unit       # only unit tests (Tests/Unit/)
 #   ./Scripts/Testing/run_tests.sh --toybox     # only toybox integration tests
 #   ./Scripts/Testing/run_tests.sh --no-jit     # run under interpreter
+#   ./Scripts/Testing/run_tests.sh --guest-ld   # dynamic programs use their guest ld.so
 #   ./Scripts/Testing/run_tests.sh --fwd        # run with BIFROST_ENABLE_FWD=1
 #   ./Scripts/Testing/run_tests.sh --no-chain-skip # run with BIFROST_NO_CHAIN_SKIP=1
 #   ./Scripts/Testing/run_tests.sh --verbose    # show full output of each test
@@ -97,6 +98,7 @@ while [ $# -gt 0 ]; do
         --dynamic)      RUN_DYNAMIC=1; RUN_ALL=0 ;;
         --bench)        RUN_BENCH=1; RUN_ALL=0 ;;
         --no-jit)       EMU_FLAGS+=(--no-jit) ;;
+        --guest-ld)     EMU_FLAGS+=(--guest-ld) ;;
         --fwd)          RUN_ENV+=(BIFROST_ENABLE_FWD=1) ;;
         --no-chain-skip) RUN_ENV+=(BIFROST_NO_CHAIN_SKIP=1) ;;
         --verbose|-v)   VERBOSE=1 ;;

@@ -391,6 +391,16 @@ correctness coverage.
   CPU caches.
 - Improve cache capacity management and hot-block retention without
   unbounded memory growth or unsafe eviction of executing code.
+- Move glibc programs to the real guest `ld-linux-aarch64.so.1` instead of the
+  native dynamic linker, as `--android-runtime` already does for Bionic's
+  `linker64`. The experimental `--guest-ld` mode passes the dynamic test
+  suites; thunks, Doom 3 and cold-start measurements remain before it can
+  become the default. The native linker imitates ld.so internals (`link_map`,
+  `_rtld_global_ro` hooks, main-executable initializer ownership) and breaks
+  when glibc changes; a legacy-start program ran every constructor twice until
+  October 20. Needs a replacement for the thunk `dlopen`/`dlsym` interception,
+  and cold-start measurements (Doom 3, large dynamic apps) against the native
+  linker; the persistent translation cache below is its expected mitigation.
 - Evaluate persistent translated-code caching with executable identity,
   guest code contents, emulator version, host ISA features, options and
   relocations in its compatibility rules. Never reuse stale code blindly.

@@ -27,5 +27,13 @@
   `DT_INIT`/`DT_INIT_ARRAY` only for modern-start executables
   (`legacy_start_runs_init_`); running them for legacy ones doubles every
   constructor. Do not size symbol scans by `symtab_count` (misses imports).
+- `--guest-ld` (`Emulator::set_guest_linker`) execs a PT_INTERP program like the
+  kernel: the program loads unrelocated (`defer_relocations_to_interp`), the
+  interpreter loads from the rootfs through `ElfLoader::load(reserve_image)`,
+  `entry_` is the interpreter and `AT_ENTRY`/`AT_BASE` carry the rest; no
+  `DynamicLinker` is created for it. A guest glibc `ld.so` reads only
+  `/etc/ld.so.cache`, which `Scripts/Setup/make-ld-cache.py` writes (and
+  `ldconfig -p -C` can verify). Graphics/audio thunks are not wired in this
+  mode. Run `run_tests.sh --guest-ld` alongside the default dynamic suite.
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.

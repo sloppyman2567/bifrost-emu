@@ -165,6 +165,8 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
             break;
         }
     }
+    const bool relocate = options.apply_relocations &&
+        !(options.defer_relocations_to_interp && !info.interp.empty());
     for (auto& h : phdrs) {
         if (h.p_type == 6) {  // PT_PHDR
             info.phdr_addr = h.p_vaddr + info.base_addr;
@@ -281,7 +283,7 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data,
         if (info.has_lse) break;
     }
     // Process RELA relocations (.rela.plt and .rela.dyn if present).
-    if (options.apply_relocations && e_shoff > 0 && e_shnum > 0 && e_shentsize >= 40) {
+    if (relocate && e_shoff > 0 && e_shnum > 0 && e_shentsize >= 40) {
         uint64_t shstr_off = e_shoff + static_cast<uint64_t>(e_shstrndx) * e_shentsize;
         if (shstr_off + e_shentsize <= data.size()) {
             for (uint16_t i = 0; i < e_shnum; i++) {
