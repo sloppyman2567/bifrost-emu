@@ -1217,6 +1217,27 @@ JAVAC=/usr/lib/jvm/java-25-openjdk/bin/javac make android-managed-launcher
 PATH=/usr/lib/jvm/java-25-openjdk/bin:$PATH python3 Scripts/Android/test_android_package.py
 ```
 
+## App ops (2026-10-21)
+
+`ManagedServiceBatch.appOps` drives the whole Android 15 `IAppOpsService`
+through the registered `appops` Binder and the real `AppOpsManager`:
+the framework interface's method list equals `FrameworkAppOps`'s contract;
+every op's default mode (`opToDefaultMode(opToSwitch(op))`, restricted-read
+ops raise `SecurityException`); the ops 24/43 regressions; note, start and
+finish accounting with nested starts, two clients and a client that dies;
+mode, active, started, noted and async-noted callbacks (arguments, ordering,
+silence after `stopWatching*`); package overrides, uid overrides,
+`MODE_FOREGROUND` and `MODE_DEFAULT` with `startIfModeDefault`; proxy
+operations; user restrictions; `getOpsForPackage`/`getPackagesForOps`/
+`getHistoricalOps` results; `SecurityException` for every privileged method
+and `IllegalArgumentException` for bad codes and history arguments. It is
+part of the batch below (JIT and `--mode interp`).
+
+```bash
+python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
+  --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch
+```
+
 ## Common device services (2026-10-13)
 
 `ManagedServiceBatch` drives the real Android 15 `UiModeManager`,

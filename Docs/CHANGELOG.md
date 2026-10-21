@@ -13,6 +13,24 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 (2026-10-04 onward). The stable v2.0 goals remain in progress; older version
 labels below are historical records.
 
+### Complete Android 15 app-ops service (2026-10-21)
+
+- Fix: `appops` implemented only `checkPackage`, one `checkOperation` code and
+  `startWatchingActive`; Battle Cats' Tapjoy threw
+  `UnsupportedOperationException: appops.checkOperation 43` on a pool thread
+  (ops 24 and 43 also hit gms, SpongeBob and Hungry Shark). `FrameworkAppOps`
+  now implements all 59 `IAppOpsService` methods of android-15.0.0_r1 with
+  AOSP's verification, modes, accounting, watchers and permission checks (see
+  `ANDROID_RUNTIME.md`, "Complete IAppOpsService"). New `appOps` section in
+  `ManagedServiceBatch` (570 checks in the batch): every op's default mode,
+  note/start/finish accounting and callbacks, `SecurityException` for
+  privileged calls, `IllegalArgumentException` for bad codes and history
+  arguments.
+- `appwidget.getInstalledProvidersForProfile` (Roblox threw on it 22 times)
+  answers the own profile's empty provider list. The service audit (recorded in
+  `ANDROID_RUNTIME.md`) lists the remaining unsupported methods per service;
+  `notification.enqueueToast` (Azur Lane) stays unsupported.
+
 ### Legacy-start glibc programs run constructors once (2026-10-20)
 
 - Fix: native dynlink ran the main executable's `DT_INIT`/`DT_INIT_ARRAY`

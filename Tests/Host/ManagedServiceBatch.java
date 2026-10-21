@@ -593,6 +593,301 @@ public final class ManagedServiceBatch {
         denied(() -> invoke(remote, "getRegisteredAttributionSourceCount", Process.myUid()));
     }
 
+    // ---- app ops: the whole Android 15 IAppOpsService against AppOpsService's contracts ----
+    private static int op(String name) throws Exception {
+        return android.app.AppOpsManager.class.getField(name).getInt(null);
+    }
+    private static Object hidden(String name, Class<?>[] types, Object... args) throws Exception {
+        return android.app.AppOpsManager.class.getMethod(name, types).invoke(null, args);
+    }
+    private static int defaultMode(int code) throws Exception {
+        return (Integer) hidden("opToDefaultMode", new Class<?>[] {int.class}, code);
+    }
+    private static int switchOf(int code) { return FrameworkAppOps.switchOp(code); }
+    private static boolean restrictsRead(int code) throws Exception {
+        return (Boolean) hidden("opRestrictsRead", new Class<?>[] {int.class}, code);
+    }
+    private static int modeOf(Object syncNoted) throws Exception { return (Integer) syncNoted.getClass().getMethod("getOpMode").invoke(syncNoted); }
+    private static final class Recorder {
+        final java.util.concurrent.LinkedBlockingQueue<Object[]> events = new java.util.concurrent.LinkedBlockingQueue<>();
+        final Object callback;
+        Recorder(String iface) throws Exception {
+            callback = new FrameworkServices().local("appops-test", iface, (method, args) -> { events.add(args); return null; });
+        }
+        Object[] next() throws Exception {
+            Object[] event = events.poll(10, TimeUnit.SECONDS);
+            if (event == null) throw new AssertionError("callback not delivered");
+            return event;
+        }
+        void quiet(String message) throws Exception {
+            check(events.poll(300, TimeUnit.MILLISECONDS) == null, message);
+        }
+    }
+    private static Object remoteCallback(java.util.concurrent.LinkedBlockingQueue<Bundle> results) throws Exception {
+        Class<?> listener = Class.forName("android.os.RemoteCallback$OnResultListener");
+        Object proxy = java.lang.reflect.Proxy.newProxyInstance(listener.getClassLoader(), new Class<?>[] {listener},
+                (self, method, args) -> { results.add((Bundle) args[0]); return null; });
+        return Class.forName("android.os.RemoteCallback").getConstructor(listener).newInstance(proxy);
+    }
+
+    private static void appOps(Context context, FrameworkPackages packages) throws Exception {
+        FrameworkAppOps service = (FrameworkAppOps) launcherField("appOps");
+        Object ops = endpoint("appops", "com.android.internal.app.IAppOpsService");
+        int uid = Process.myUid(), count = FrameworkAppOps.numOp();
+        int camera = op("OP_CAMERA"), usage = op("OP_GET_USAGE_STATS"), alert = op("OP_SYSTEM_ALERT_WINDOW"),
+                write = op("OP_WRITE_SETTINGS"), vibrate = op("OP_VIBRATE"), audio = op("OP_PLAY_AUDIO");
+
+        // Every method of the framework interface is implemented, and the contract names nothing else.
+        java.util.Set<String> declared = new java.util.TreeSet<>();
+        for (Method method : Class.forName("com.android.internal.app.IAppOpsService").getMethods())
+            if (method.getDeclaringClass() != Object.class && !method.getName().equals("asBinder")) declared.add(method.getName());
+        java.util.Set<String> covered = new java.util.TreeSet<>(Arrays.asList(FrameworkAppOps.contractMethods()));
+        check(declared.equals(covered), "IAppOpsService methods differ from the contract: " + declared + " vs " + covered);
+
+        // The failing Battle Cats / gms / Hungry Shark calls: ops 24 and 43 answer their default mode, never throw.
+        android.app.AppOpsManager manager = context.getSystemService(android.app.AppOpsManager.class);
+        check(alert == 24 && usage == 43, "op numbering differs from the reported failures");
+        check(manager.checkOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, uid, NAME) == defaultMode(usage),
+                "OP_GET_USAGE_STATS did not answer its default mode");
+        check(manager.checkOpNoThrow(android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW, uid, NAME) == defaultMode(alert),
+                "OP_SYSTEM_ALERT_WINDOW did not answer its default mode");
+        check(manager.checkOpNoThrow(android.app.AppOpsManager.OPSTR_WRITE_SETTINGS, uid, NAME) == defaultMode(write),
+                "OP_WRITE_SETTINGS did not answer its default mode");
+
+        // Every op: default mode without an override; restricted-read ops need a privileged permission.
+        int restricted = 0;
+        for (int code = 0; code < count; code++) {
+            final int op = code;
+            if (restrictsRead(code)) { restricted++; denied(() -> invoke(ops, "checkOperation", op, uid, NAME)); continue; }
+            // AOSP returns the stored default unevaluated until the op has a record; MODE_FOREGROUND
+            // (OP_TAKE_AUDIO_FOCUS) then evaluates to allowed once the app has used the op.
+            int def = defaultMode(switchOf(code)), now = (Integer) invoke(ops, "checkOperation", code, uid, NAME);
+            check(now == def || def == FrameworkAppOps.MODE_FOREGROUND && now == FrameworkAppOps.MODE_ALLOWED,
+                    "op " + code + " default mode " + now + " != " + def);
+            check((Integer) invoke(ops, "checkOperationRaw", code, uid, NAME, null) == defaultMode(switchOf(code)),
+                    "op " + code + " raw default mode");
+        }
+        check(restricted > 0, "no restricted-read op exercised");
+        invalid(() -> invoke(ops, "checkOperation", -1, uid, NAME));
+        invalid(() -> invoke(ops, "checkOperation", count, uid, NAME));
+        invalid(() -> invoke(ops, "noteOperation", count, uid, NAME, null, false, "m", false));
+        invalid(() -> invoke(ops, "shouldCollectNotes", -1));
+        invalid(() -> invoke(ops, "startWatchingActive", new int[] {count}, null));
+        invalid(() -> invoke(ops, "startWatchingNoted", new int[0], new Recorder("com.android.internal.app.IAppOpsNotedCallback").callback));
+        invalid(() -> invoke(ops, "startWatchingStarted", new int[] {-1}, new Recorder("com.android.internal.app.IAppOpsStartedCallback").callback));
+        invalid(() -> invoke(ops, "startWatchingMode", count, NAME, new Recorder("com.android.internal.app.IAppOpsCallback").callback));
+        // Package validation: an unknown package keeps the default mode for checks and errors for notes;
+        // a name that resolves to nothing is ignored; another uid's package fails verification.
+        check((Integer) invoke(ops, "checkOperation", camera, uid, "org.bifrost.absent") == defaultMode(camera), "unknown package check");
+        check(modeOf(invoke(ops, "noteOperation", camera, uid, "org.bifrost.absent", null, false, "m", false)) == FrameworkAppOps.MODE_ERRORED, "unknown package note");
+        check(modeOf(invoke(ops, "noteOperation", camera, uid, null, null, false, "m", false)) == FrameworkAppOps.MODE_IGNORED, "null package note");
+        check((Integer) invoke(ops, "checkOperationForDevice", camera, uid, NAME, 5) == FrameworkAppOps.MODE_IGNORED, "invalid device check");
+        check(modeOf(invoke(ops, "noteOperationForDevice", camera, uid, NAME, null, 5, false, "m", false)) == FrameworkAppOps.MODE_IGNORED, "invalid device note");
+        check((Integer) invoke(ops, "checkPackage", uid, NAME) == FrameworkAppOps.MODE_ALLOWED
+                && (Integer) invoke(ops, "checkPackage", uid, "org.bifrost.absent") == FrameworkAppOps.MODE_ERRORED, "checkPackage");
+        denied(() -> invoke(ops, "noteOperation", camera, uid + 1, NAME, null, false, "m", false));  // verifyIncomingUid
+        check((Integer) invoke(ops, "permissionToOpCode", "android.permission.CAMERA") == camera
+                && (Integer) invoke(ops, "permissionToOpCode", new Object[] {null}) == -1, "permissionToOpCode");
+        check((Boolean) invoke(ops, "shouldCollectNotes", camera), "shouldCollectNotes for a dangerous permission");
+
+        // note: allowed access is recorded and fires noted watchers; a rejected one fires with its mode.
+        Recorder noted = new Recorder("com.android.internal.app.IAppOpsNotedCallback");
+        invoke(ops, "startWatchingNoted", new int[] {camera}, noted.callback);
+        long before = System.currentTimeMillis();
+        check(modeOf(invoke(ops, "noteOperation", camera, uid, NAME, null, false, "m", false)) == FrameworkAppOps.MODE_ALLOWED, "note allowed");
+        Object[] event = noted.next();
+        check((Integer) event[0] == camera && (Integer) event[1] == uid && NAME.equals(event[2]) && (Integer) event[4] == 0
+                && (Integer) event[5] == 1 && (Integer) event[6] == FrameworkAppOps.MODE_ALLOWED, "noted callback arguments");
+        service.setModeUnchecked(camera, uid, NAME, FrameworkAppOps.MODE_IGNORED);
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == FrameworkAppOps.MODE_IGNORED
+                && modeOf(invoke(ops, "noteOperation", camera, uid, NAME, null, false, "m", false)) == FrameworkAppOps.MODE_IGNORED, "package override");
+        check((Integer) noted.next()[6] == FrameworkAppOps.MODE_IGNORED, "rejected note callback");
+        service.setModeUnchecked(camera, uid, NAME, FrameworkAppOps.MODE_FOREGROUND);
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == FrameworkAppOps.MODE_ALLOWED
+                && (Integer) invoke(ops, "checkOperationRaw", camera, uid, NAME, null) == FrameworkAppOps.MODE_FOREGROUND, "foreground evaluates to allowed");
+        service.setUidModeUnchecked(camera, uid, FrameworkAppOps.MODE_ERRORED);
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == FrameworkAppOps.MODE_ERRORED, "uid override wins over package mode");
+        service.setUidModeUnchecked(camera, uid, defaultMode(camera));
+        service.setModeUnchecked(camera, uid, NAME, defaultMode(camera));
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == defaultMode(camera), "overrides cleared");
+        invoke(ops, "stopWatchingNoted", noted.callback);
+        invoke(ops, "noteOperation", camera, uid, NAME, null, false, "m", false);
+        noted.events.clear();
+        noted.quiet("stopped noted watcher still called");
+
+        // Mode watchers: by op, by package, with the switch-op flag; a stopped one is silent.
+        Recorder mode = new Recorder("com.android.internal.app.IAppOpsCallback"), byPackage = new Recorder("com.android.internal.app.IAppOpsCallback");
+        invoke(ops, "startWatchingMode", camera, null, mode.callback);
+        invoke(ops, "startWatchingModeWithFlags", op("OP_NONE"), NAME, 0, byPackage.callback);
+        service.setModeUnchecked(camera, uid, NAME, FrameworkAppOps.MODE_IGNORED);
+        event = mode.next();
+        check((Integer) event[0] == camera && (Integer) event[1] == uid && NAME.equals(event[2]), "mode watcher arguments");
+        check(byPackage.next().length == 4, "package watcher notified");
+        service.setUidModeUnchecked(camera, uid, FrameworkAppOps.MODE_ERRORED);
+        check((Integer) mode.next()[0] == camera, "uid change notifies op watcher");
+        invoke(ops, "stopWatchingMode", mode.callback);
+        service.setUidModeUnchecked(camera, uid, defaultMode(camera));
+        service.setModeUnchecked(camera, uid, NAME, defaultMode(camera));
+        byPackage.events.clear(); mode.events.clear();
+        mode.quiet("stopped mode watcher still called");
+        invoke(ops, "stopWatchingMode", byPackage.callback);
+
+        // start/finish: active and started watchers fire on 0 -> 1 and back; nested starts and clients are counted.
+        Recorder active = new Recorder("com.android.internal.app.IAppOpsActiveCallback"), started = new Recorder("com.android.internal.app.IAppOpsStartedCallback");
+        invoke(ops, "startWatchingActive", new int[] {camera}, active.callback);
+        invoke(ops, "startWatchingStarted", new int[] {camera}, started.callback);
+        IBinder first = new Binder(), second = new Binder();
+        check(modeOf(invoke(ops, "startOperation", first, camera, uid, NAME, null, false, false, "m", false, 0, -1)) == FrameworkAppOps.MODE_ALLOWED, "start allowed");
+        event = active.next();
+        check((Integer) event[0] == camera && (Integer) event[1] == uid && (Boolean) event[5], "active callback on start");
+        event = started.next();
+        check((Integer) event[6] == FrameworkAppOps.MODE_ALLOWED && (Integer) event[7] == 1, "started callback arguments");
+        check((Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "op active after start");
+        invoke(ops, "startOperation", first, camera, uid, NAME, null, false, false, "m", false, 0, -1);
+        invoke(ops, "startOperation", second, camera, uid, NAME, null, false, false, "m", false, 0, -1);
+        started.next(); started.next();
+        active.quiet("active callback fired again for a nested start");
+        invoke(ops, "finishOperation", first, camera, uid, NAME, null);
+        invoke(ops, "finishOperation", first, camera, uid, NAME, null);
+        active.quiet("op became inactive while another client still ran");
+        check((Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "op inactive with a running client");
+        invoke(ops, "finishOperation", second, camera, uid, NAME, null);
+        check(!(Boolean) active.next()[5] && !(Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "inactive after last finish");
+        // A client that dies without finishing releases its start.
+        DeathToken client = new DeathToken();
+        invoke(ops, "startOperation", client, camera, uid, NAME, null, false, false, "m", false, 0, -1);
+        check((Boolean) active.next()[5], "active callback for the dying client");
+        started.next();
+        client.die();
+        check(!(Boolean) active.next()[5] && !(Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "dead client's start released");
+        // A rejected start reports the mode, fires started with START_TYPE_FAILED and starts nothing.
+        service.setModeUnchecked(camera, uid, NAME, FrameworkAppOps.MODE_IGNORED);
+        check(modeOf(invoke(ops, "startOperation", first, camera, uid, NAME, null, false, false, "m", false, 0, -1)) == FrameworkAppOps.MODE_IGNORED, "rejected start");
+        event = started.next();
+        check((Integer) event[6] == FrameworkAppOps.MODE_IGNORED && (Integer) event[7] == 0
+                && !(Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "rejected start state");
+        service.setModeUnchecked(camera, uid, NAME, defaultMode(camera));
+        // MODE_DEFAULT starts only when asked to.
+        service.setModeUnchecked(camera, uid, NAME, FrameworkAppOps.MODE_DEFAULT);
+        check(modeOf(invoke(ops, "startOperation", first, camera, uid, NAME, null, false, false, "m", false, 0, -1)) == FrameworkAppOps.MODE_DEFAULT, "default mode start without startIfModeDefault");
+        started.next();
+        check(modeOf(invoke(ops, "startOperation", first, camera, uid, NAME, null, true, false, "m", false, 0, -1)) == FrameworkAppOps.MODE_ALLOWED, "default mode start with startIfModeDefault");
+        started.next(); active.next();
+        invoke(ops, "finishOperation", first, camera, uid, NAME, null);
+        active.next();
+        service.setModeUnchecked(camera, uid, NAME, defaultMode(camera));
+        invoke(ops, "stopWatchingActive", active.callback);
+        invoke(ops, "stopWatchingStarted", started.callback);
+        invoke(ops, "startOperation", first, camera, uid, NAME, null, false, false, "m", false, 0, -1);
+        invoke(ops, "finishOperation", first, camera, uid, NAME, null);
+        active.events.clear(); started.events.clear();
+        active.quiet("stopped active watcher still called");
+        // Unstarted finish is logged and ignored, as AOSP does.
+        invoke(ops, "finishOperation", first, camera, uid, NAME, null);
+
+        // Async noted ops: forwarded to a watcher, else queued for extractAsyncOps once.
+        check(invoke(ops, "extractAsyncOps", NAME) == null, "async queue not empty");
+        invoke(ops, "noteOperation", camera, uid, NAME, null, true, "queued", true);
+        java.util.List<?> queued = (java.util.List<?>) invoke(ops, "extractAsyncOps", NAME);
+        check(queued != null && queued.size() == 1 && "queued".equals(queued.get(0).getClass().getMethod("getMessage").invoke(queued.get(0)))
+                && invoke(ops, "extractAsyncOps", NAME) == null, "async op not queued once");
+        Recorder async = new Recorder("com.android.internal.app.IAppOpsAsyncNotedCallback");
+        invoke(ops, "startWatchingAsyncNoted", NAME, async.callback);
+        invoke(ops, "noteOperation", camera, uid, NAME, null, true, "forwarded", true);
+        Object forwarded = async.next()[0];
+        check("forwarded".equals(forwarded.getClass().getMethod("getMessage").invoke(forwarded)), "async op not forwarded");
+        invoke(ops, "stopWatchingAsyncNoted", NAME, async.callback);
+        denied(() -> invoke(ops, "startWatchingAsyncNoted", "org.bifrost.absent", async.callback));
+        try { invoke(ops, "noteOperation", camera, uid, NAME, null, true, null, true); throw new AssertionError("null message collected"); }
+        catch (NullPointerException expected) { checks++; }
+
+        // Queries: the app sees its own entries with access time and activity; foreign uids need GET_APP_OPS_STATS.
+        java.util.List<?> own = (java.util.List<?>) invoke(ops, "getOpsForPackage", uid, NAME, new int[] {camera});
+        Object entry = own == null ? null : own.get(0);
+        check(entry != null && NAME.equals(entry.getClass().getMethod("getPackageName").invoke(entry))
+                && ((java.util.List<?>) entry.getClass().getMethod("getOps").invoke(entry)).size() == 1, "own package ops");
+        Object opEntry = ((java.util.List<?>) entry.getClass().getMethod("getOps").invoke(entry)).get(0);
+        check((Long) opEntry.getClass().getMethod("getLastAccessTime", int.class).invoke(opEntry, 31) >= before
+                && !(Boolean) opEntry.getClass().getMethod("isRunning").invoke(opEntry), "op entry access time or activity");
+        check(invoke(ops, "getOpsForPackage", uid, NAME, new int[] {vibrate}) == null, "ops listed that never happened");
+        check(((java.util.List<?>) invoke(ops, "getPackagesForOps", new Object[] {null})).size() == 1
+                && ((java.util.List<?>) invoke(ops, "getPackagesForOpsForDevice", new int[] {camera}, "default:0")).size() == 1, "packages for ops");
+        denied(() -> invoke(ops, "getOpsForPackage", uid + 1, NAME, null));
+        denied(() -> invoke(ops, "getUidOps", uid, null));
+
+        // History: the caller's own, as a Bundle with HistoricalOps; other uids need privileged permissions.
+        java.util.concurrent.LinkedBlockingQueue<Bundle> results = new java.util.concurrent.LinkedBlockingQueue<>();
+        invoke(ops, "getHistoricalOps", uid, null, null, null, 0, 1, before - 1000, System.currentTimeMillis() + 60000, 31, remoteCallback(results));
+        Bundle history = results.poll(10, TimeUnit.SECONDS);
+        Object historical = history == null ? null : history.getParcelable("historical_ops");
+        check(historical != null && (Integer) historical.getClass().getMethod("getUidCount").invoke(historical) == 1, "own historical ops");
+        invoke(ops, "getHistoricalOps", uid + 1, null, null, null, 0, 1, 0L, 10L, 31, remoteCallback(results));
+        check(results.poll(10, TimeUnit.SECONDS).isEmpty(), "foreign history without GET_HISTORICAL_APP_OPS_STATS");
+        invalid(() -> invoke(ops, "getHistoricalOps", uid, NAME, null, null, 0, 1, 0L, 10L, 31, remoteCallback(results)));
+        invalid(() -> invoke(ops, "getHistoricalOps", uid, null, null, null, 0, 1, 10L, 10L, 31, remoteCallback(results)));
+        denied(() -> invoke(ops, "getHistoricalOpsFromDiskRaw", uid, null, null, null, 0, 1, 0L, 10L, 31, remoteCallback(results)));
+
+        // Proxy operations: a self proxy is trusted; note and start/finish go through the same state.
+        android.content.AttributionSource chain = new android.content.AttributionSource.Builder(uid).setPackageName(NAME)
+                .setNext(new android.content.AttributionSource.Builder(uid).setPackageName(NAME).build()).build();
+        check(modeOf(invoke(ops, "noteProxyOperation", camera, chain, false, "m", false, false)) == FrameworkAppOps.MODE_ALLOWED, "proxy note");
+        check(modeOf(invoke(ops, "noteProxyOperationWithState", camera, android.content.AttributionSource.class.getMethod("asState").invoke(chain),
+                false, "m", false, true)) == FrameworkAppOps.MODE_ALLOWED, "proxy note with state");
+        check(modeOf(invoke(ops, "startProxyOperation", first, camera, chain, false, false, "m", false, false, 0, 0, -1)) == FrameworkAppOps.MODE_ALLOWED
+                && (Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "proxy start");
+        invoke(ops, "finishProxyOperation", first, camera, chain, false);
+        check(!(Boolean) invoke(ops, "isOperationActive", camera, uid, NAME), "proxy finish");
+        android.content.AttributionSource foreignChain = new android.content.AttributionSource.Builder(uid + 1).setPackageName(NAME)
+                .setNext(new android.content.AttributionSource.Builder(uid).setPackageName(NAME).build()).build();
+        denied(() -> invoke(ops, "noteProxyOperation", camera, foreignChain, false, "m", false, false));
+
+        // User restrictions: privileged to set, applied to checks and notes as IGNORED, lifted when cleared.
+        Bundle restrictions = new Bundle();
+        IBinder token = new Binder();
+        denied(() -> invoke(ops, "setUserRestrictions", restrictions, token, 0));
+        denied(() -> invoke(ops, "setUserRestriction", camera, true, token, 0, null));
+        denied(() -> invoke(ops, "removeUser", 0));
+        service.setUserRestrictionUnchecked(camera, true, token, uid / 100000, null);
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == FrameworkAppOps.MODE_IGNORED
+                && modeOf(invoke(ops, "noteOperation", camera, uid, NAME, null, false, "m", false)) == FrameworkAppOps.MODE_IGNORED, "user restriction");
+        service.setUserRestrictionUnchecked(camera, false, token, uid / 100000, null);
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == defaultMode(camera), "user restriction lifted");
+
+        // Audio: unrestricted usages answer the op's own mode; restriction setters are privileged.
+        check((Integer) invoke(ops, "checkAudioOperation", audio, 1, uid, NAME) == (Integer) invoke(ops, "checkOperation", audio, uid, NAME), "audio check");
+        denied(() -> invoke(ops, "setAudioRestriction", audio, 1, uid, FrameworkAppOps.MODE_IGNORED, new String[0]));
+        denied(() -> invoke(ops, "setCameraAudioRestriction", 1));
+
+        // Telemetry hooks answer without sampling anything.
+        check(invoke(ops, "collectRuntimeAppOpAccessMessage") == null, "runtime message collected for an app");
+        check(invoke(ops, "reportRuntimeAppOpAccessMessageAndGetConfig", NAME, invoke(ops, "noteOperation", camera, uid, NAME, null, false, "m", false), "m") != null, "sampling config");
+        invoke(ops, "collectNoteOpCallsForValidation", "trace", camera, NAME, 1L);
+
+        // Privileged methods: SecurityException for the app, with no pid bypass.
+        denied(() -> invoke(ops, "setMode", camera, uid, NAME, FrameworkAppOps.MODE_ERRORED));
+        denied(() -> invoke(ops, "setUidMode", camera, uid, FrameworkAppOps.MODE_ERRORED));
+        denied(() -> invoke(ops, "resetAllModes", 0, NAME));
+        denied(() -> invoke(ops, "resetAllModes", 10, null));
+        denied(() -> invoke(ops, "offsetHistory", 1L));
+        denied(() -> invoke(ops, "setHistoryParameters", 0, 1L, 1));
+        denied(() -> invoke(ops, "addHistoricalOps", new Object[] {null}));
+        denied(() -> invoke(ops, "resetHistoryParameters"));
+        denied(() -> invoke(ops, "resetPackageOpsNoHistory", NAME));
+        denied(() -> invoke(ops, "clearHistory"));
+        denied(() -> invoke(ops, "rebootHistory", 0L));
+        denied(() -> invoke(ops, "reloadNonHistoricalState"));
+        check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == defaultMode(camera), "privileged call changed state");
+    }
+
+    // AppWidgetManager.getInstalledProvidersForProfile, which Roblox calls: the caller's own profile lists no providers.
+    private static void appWidgets(Context context) throws Exception {
+        Object widgets = endpoint("appwidget", "com.android.internal.appwidget.IAppWidgetService");
+        Object slice = invoke(widgets, "getInstalledProvidersForProfile", 1, 0, NAME);
+        check(slice != null && ((java.util.List<?>) slice.getClass().getMethod("getList").invoke(slice)).isEmpty(), "provider list for the own profile");
+        check(invoke(widgets, "getInstalledProvidersForProfile", 1, 10, NAME) == null, "provider list for a disabled profile");
+        denied(() -> invoke(widgets, "getInstalledProvidersForProfile", 1, 0, "org.bifrost.absent"));
+    }
+
     private static void battery(Context context) throws Exception {
         android.os.BatteryManager manager = context.getSystemService(android.os.BatteryManager.class);
         check(manager != null && !manager.isCharging(), "BatteryManager unavailable or charging without a battery");
@@ -770,7 +1065,7 @@ public final class ManagedServiceBatch {
         try {
         usersAndIdle(context);
         notifications(context, packages); audio(context); power(context); wifi(context);
-        uiMode(context); permissions(context);
+        uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
         battery(context); vibratorAndKeyguard(context); clipboard(context, packages);
         alarmsAccountsLocation(context);
         settings(context, system, packages, pkg);

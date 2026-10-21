@@ -1,14 +1,16 @@
 // AppWidgetService ("appwidget"), which SystemServer starts on devices with
 // FEATURE_APP_WIDGETS, as phones have; AppWidgetManager.getInstance is null
 // without it. There is no home screen here, so no widget is ever bound to a
-// provider (Android 15 AppWidgetServiceImpl).
+// provider (Android 15 AppWidgetServiceImpl). Provider enumeration is not
+// modelled: AppWidgetProviderInfo parsing from receivers' meta-data is absent,
+// so no package is listed as a provider.
 import android.content.ComponentName;
 import android.content.pm.PackageManager;
 import android.os.Process;
 import java.util.Objects;
 
 final class FrameworkAppWidgets implements FrameworkServices.Call {
-    private enum Contract { getAppWidgetIds }
+    private enum Contract { getAppWidgetIds, getInstalledProvidersForProfile }
 
     @Override public String[] methods() {
         Contract[] values = Contract.values();
@@ -21,6 +23,12 @@ final class FrameworkAppWidgets implements FrameworkServices.Call {
 
     FrameworkAppWidgets(FrameworkPackages packages) { this.packages = packages; }
 
+    // AppWidgetServiceImpl.SecurityPolicy.enforceCallFromPackage: the package must be the caller's own.
+    private void enforceCallFromPackage(String packageName) {
+        if (packages.packageUid(packageName) != Process.myUid())
+            throw new SecurityException("Package " + packageName + " does not belong to " + Process.myUid());
+    }
+
     void install(FrameworkServices services) throws Exception {
         services.register("appwidget", "com.android.internal.appwidget.IAppWidgetService", this);
         packages.provideFeature(PackageManager.FEATURE_APP_WIDGETS);
@@ -32,12 +40,17 @@ final class FrameworkAppWidgets implements FrameworkServices.Call {
         catch (IllegalArgumentException unknown) { throw new UnsupportedOperationException("appwidget." + method); }
         switch (contract) {
             case getAppWidgetIds: {
-                // enforceCallFromPackage: the provider must be the caller's own.
                 ComponentName provider = Objects.requireNonNull((ComponentName) a[0], "provider");
-                if (packages.packageUid(provider.getPackageName()) != Process.myUid())
-                    throw new SecurityException("Package " + provider.getPackageName()
-                            + " does not belong to " + Process.myUid());
+                enforceCallFromPackage(provider.getPackageName());
                 return new int[0];
+            }
+            // (categoryFilter, profileId, packageName): only the user's own profile is an enabled group profile
+            // (null otherwise); this profile lists no providers.
+            case getInstalledProvidersForProfile: {
+                if ((Integer) a[1] != Process.myUid() / 100000) return null;
+                enforceCallFromPackage((String) a[2]);
+                return Class.forName("android.content.pm.ParceledListSlice")
+                        .getConstructor(java.util.List.class).newInstance(new java.util.ArrayList<Object>());
             }
             default: throw new UnsupportedOperationException("appwidget." + method);
         }

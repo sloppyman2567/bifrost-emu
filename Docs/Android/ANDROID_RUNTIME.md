@@ -2370,16 +2370,89 @@ scene kept drawing without its buttons. The user confirmed the HUD now stays.
 `ServiceManager.getServiceOrThrow("appops")`, so without that service
 `getSystemService(APP_OPS_SERVICE)` returned null. Firebase measurement then
 failed its upload task with a `NullPointerException`. `FrameworkAppOps`
-registers a strict `com.android.internal.app.IAppOpsService`. A SpongeBob
-run with a fully unimplemented stub showed only `checkPackage(uid, pkg)`
-(from GMS UidVerifier), so that is the one method. It follows Android 15's
+registers `com.android.internal.app.IAppOpsService`; it first answered only
+`checkPackage(uid, pkg)` (GMS UidVerifier) and was extended method by method
+until the full interface below. `checkPackage` follows Android 15's
 [AppOpsService](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android15-release/services/core/java/com/android/server/appop/AppOpsService.java)
 `checkPackage`/`verifyAndGetBypass`/`resolveUid`. Root may name any existing
 package. `root`, `shell`, `dumpstate`, `media`, `audioserver`, `cameraserver`
 and `com.android.shell` resolve to fixed uids. Any other package must exist
 and belong to the uid. Failures return `MODE_ERRORED`, which
-`AppOpsManager.checkPackage` throws as `SecurityException`. Other methods
-print `APPOPS_UNSUPPORTED <method>` and throw.
+`AppOpsManager.checkPackage` throws as `SecurityException`.
+
+### Complete IAppOpsService (2026-10-21)
+
+Battle Cats (Tapjoy `checkOpNoThrow(OP_GET_USAGE_STATS)`), gms, SpongeBob and
+Hungry Shark (`OP_SYSTEM_ALERT_WINDOW`) threw `UnsupportedOperationException:
+appops.checkOperation 43/24` because the service implemented three methods.
+`FrameworkAppOps` now implements every method of android-15.0.0_r1's
+`IAppOpsService.aidl` (59: the `FrameworkServices.Call` enum drives dispatch
+and the inventory, and `ManagedServiceBatch.appOps` compares it with the
+framework interface at run time). No method throws
+`UnsupportedOperationException`. It follows `AppOpsService`, `AttributedOp`,
+`AppOpsRestrictionsImpl` and `AudioRestrictionManager` of that tag:
+
+- Checks: `verifyIncomingOp` (`IllegalArgumentException` for a bad code;
+  restricted-read ops need `MANAGE_APPOPS`, `GET_APP_OPS_STATS` or
+  `MANAGE_APP_OPS_MODES`). Without an override the answer is
+  `opToDefaultMode(opToSwitch(op))`, as stored (a `MODE_FOREGROUND` default
+  stays 4 until the op has a record), and `MODE_FOREGROUND` evaluates to
+  allowed afterwards because the process is the foreground app. A package that
+  does not exist or fails verification gives the default; a name that
+  resolves to nothing gives `MODE_IGNORED`. Uid overrides win over package
+  modes; user restrictions answer `MODE_IGNORED`.
+- `note`/`start`/`finish` and their proxy and device variants record
+  accesses, rejections, durations and proxy info per attribution tag
+  (`getOpsForPackage`, `getPackagesForOps`, `getHistoricalOps` serve them as
+  `PackageOps`/`OpEntry`/`HistoricalOps`); invalid package or failed
+  verification is `SyncNotedAppOp(MODE_ERRORED)`. Starts are counted per
+  client binder and a dead client's start is released.
+- Watchers: mode, active (op goes inactive to active and back), started,
+  noted and async-noted callbacks are delivered by reflection from one service
+  thread (oneway, never under the lock) with the AOSP 15 signatures. Without
+  `WATCH_APPOPS` a watcher only hears its own uid; restricted-read ops are
+  hidden from watchers without `MANAGE_APPOPS`.
+- Privileged methods (`setMode`, `setUidMode`, `resetAllModes`, user and audio
+  restrictions, history management, `getUidOps`) check the permission for the
+  calling uid. The service runs in the app's process, so AOSP's
+  `callingPid == myPid` bypass is deliberately absent: an app gets
+  `SecurityException` exactly as on a device. The package-private
+  `setModeUnchecked`/`setUidModeUnchecked`/`setUserRestrictionUnchecked` are
+  the in-process permission-policy path.
+- Not modelled: persistence between launches, package visibility filtering,
+  uid-state tracking, suspended-package restrictions, role grants on reset,
+  DPM deferral and virtual devices (any device id but the default is invalid,
+  as with an empty `VirtualDeviceManager`). Runtime-message sampling answers
+  "sample nothing" (`collectRuntimeAppOpAccessMessage` is `null`, as for a
+  non-system caller). A reserved op whose switch op is `OP_NONE` is its own
+  switch (AOSP would index its table with -1).
+
+Hidden APIs (`opToDefaultMode`, `opToSwitch`, `resolvePackageName`, the
+`SyncNotedAppOp`/`PackageOps`/`OpEntry` constructors, `makeKey`) are called by
+reflection because the build links the public `android.jar` at `--release 8`.
+
+Audit of the other services (2026-10-21, `ManagedLauncher --service-inventory`
+and the `UnsupportedOperationException` lines of the Hungry Shark, Roblox,
+SpongeBob, Battle Cats, Azur Lane and gms session logs). Of the 36 registered
+Java services only `appops` (59 of 59), `permission_checker`, `batteryproperties`
+and `vibrator_manager` cover every interface method. Methods still unsupported,
+as `implemented/unsupported` counts: wifi 10/199, audio 38/227, notification
+17/139, batterystats 4/95, user 26/78, display 15/44, power 18/49,
+telephony.registry 1/53, location 13/49, appwidget 2/30, media_session 1/29,
+media_router 9/30, permissionmgr 12/20, uimode 12/15, trust 5/11, deviceidle
+13/9, clipboard 8/4, account 40/6, alarm 9/1; jobscheduler, connectivity,
+input_method, mount, input, game, package, content, window, thermalservice,
+activity, activity_task and the Bifrost-internal services are unclassified
+(lambda dispatch, no per-method contract). Most names in the older session logs
+(`audio.isMusicActive`, `notification.cancelAllNotifications`,
+`package.resolveIntent`, `audio.isBluetoothScoOn`, ...) are already handled
+by later builds. Still failing in recent logs: `appwidget.getInstalledProvidersForProfile`
+(Roblox, 22 calls; now answered: own profile, empty list, `null` for other
+profiles, `SecurityException` for a foreign package, with provider enumeration
+not modelled), `notification.enqueueToast` (Azur Lane's `Toast.show` after a
+cancelled Facebook login; toasts need a toast window and notification
+delivery, neither of which exists, so it is unchanged), and `Cannot create
+AudioTrack`, which is an audio-output limit, not a service contract.
 
 Firebase next asked `IActivityManager.getContentProvider` for Play
 services' `com.google.android.gms.phenotype` and hit the unsupported path.
