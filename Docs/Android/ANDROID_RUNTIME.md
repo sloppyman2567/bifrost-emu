@@ -918,6 +918,7 @@ server classes, for one app, user 0 and the default device:
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
 | `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). |
 | camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |
+| `servicediscovery` | `NsdManager` (`FrameworkNsd`) on a network with no mDNS responder: `connect` returns the connector, `discoverServices`/`stopDiscovery` and `stopResolution` report started/stopped, no service is ever found, and `resolveService`, `registerService` and `unregisterService` fail with `FAILURE_INTERNAL_ERROR`. Uptodown dereferenced the null manager in `onActivityCreated`. Checked in `ManagedServiceBatch` (JIT only); the NSD classes are relocated by mainline, so types come from reflection. |
 | `telephony.registry` | No modem (`getActiveModemCount()` 0): `listenWithEventList` records or removes listeners and never notifies. It keeps TelephonyRegistry's package check, `checkListenerPermission` (location, phone-state, precise, emergency and privileged event sets) and 50-listener limit (`FrameworkTelephony`). |
 
 `notification` accepts `enqueueTextToast`, `enqueueToast` (both return true
@@ -926,6 +927,13 @@ for the caller's own package; a foreign package is a `SecurityException`) and
 exists, so toasts are never displayed and a custom toast's
 `ITransientNotification.show` is never called; `Toast.show` returns normally
 instead of ending the app. Checked in `ManagedServiceBatch` (JIT only).
+
+Any `android.settings.*` intent without a component is declined with
+`START_ABORTED` (`APP_ACTIVITY_SETTINGS_UNAVAILABLE`), not only for Play
+services: a device always has a Settings app, so apps such as Uptodown's
+all-files-access request do not catch `ActivityNotFoundException`. No Settings
+screen exists, so the app is not granted anything. Not run live (it needs a
+click on the app's dialog).
 
 `notification` also accepts `cancelAll`, `cancel` and `getActiveNotifications`
 for its own package: nothing is posted, so they find nothing. Clipboard and

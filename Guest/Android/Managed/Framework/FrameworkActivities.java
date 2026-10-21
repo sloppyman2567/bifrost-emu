@@ -142,12 +142,11 @@ final class FrameworkActivities {
             postGrantResult(names, resultTo, resultWho, requestCode, 0);
             return START_SUCCESS;
         }
-        // Play services' own screens (microG's account menu) start the platform
-        // Settings app, which is not provisioned. A device always has one, so the
-        // package does not catch ActivityNotFoundException: the start is
+        // Apps start the platform Settings app (microG's account menu, an
+        // all-files-access request), which is not provisioned. A device always
+        // has one, so apps do not catch ActivityNotFoundException: the start is
         // declined (logged, ActivityManager.START_ABORTED) instead of ending the session.
-        if (component == null && FrameworkRemoteActivities.PACKAGE.equals(application.getPackageName())
-                && intent.getAction() != null && intent.getAction().startsWith("android.settings.")) {
+        if (component == null && intent.getAction() != null && intent.getAction().startsWith("android.settings.")) {
             System.out.println("APP_ACTIVITY_SETTINGS_UNAVAILABLE " + intent.getAction());
             return START_ABORTED;
         }

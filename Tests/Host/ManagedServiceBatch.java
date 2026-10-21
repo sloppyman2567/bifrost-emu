@@ -1018,6 +1018,24 @@ public final class ManagedServiceBatch {
         android.widget.Toast toast = android.widget.Toast.makeText(context, "toast", android.widget.Toast.LENGTH_SHORT);
         toast.show();
         toast.cancel();
+        // Uptodown dereferenced a null NsdManager ("servicediscovery" unpublished).
+        android.net.nsd.NsdManager nsd = context.getSystemService(android.net.nsd.NsdManager.class);
+        check(nsd != null, "NsdManager missing");
+        java.util.concurrent.CountDownLatch started = new java.util.concurrent.CountDownLatch(1),
+                stopped = new java.util.concurrent.CountDownLatch(1);
+        boolean[] found = new boolean[1];
+        android.net.nsd.NsdManager.DiscoveryListener nsdListener = new android.net.nsd.NsdManager.DiscoveryListener() {
+            @Override public void onStartDiscoveryFailed(String type, int code) {}
+            @Override public void onStopDiscoveryFailed(String type, int code) {}
+            @Override public void onDiscoveryStarted(String type) { started.countDown(); }
+            @Override public void onDiscoveryStopped(String type) { stopped.countDown(); }
+            @Override public void onServiceFound(android.net.nsd.NsdServiceInfo info) { found[0] = true; }
+            @Override public void onServiceLost(android.net.nsd.NsdServiceInfo info) {}
+        };
+        nsd.discoverServices("_http._tcp", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, nsdListener);
+        check(started.await(10, java.util.concurrent.TimeUnit.SECONDS), "NSD discovery never started");
+        nsd.stopServiceDiscovery(nsdListener);
+        check(stopped.await(10, java.util.concurrent.TimeUnit.SECONDS) && !found[0], "NSD discovery did not stop cleanly");
     }
 
     private static void run() throws Exception {

@@ -649,6 +649,7 @@ public final class ManagedLauncher {
         services.diagnostic = diagnostic;
         connectivity.install(services);
         wifi.install(services);
+        new FrameworkNsd(services).install();
         inputMethod.install(services);
         users.install(services);
         deviceIdle.install(services);
