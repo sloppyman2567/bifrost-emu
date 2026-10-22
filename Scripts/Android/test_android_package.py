@@ -635,6 +635,53 @@ class GoogleAccountStateTests(unittest.TestCase):
         {"name": "other", "type": "org.example", "password": None, "previous": None,
          "authenticated": 0, "data": {}, "tokens": {}, "visibility": {}, "grants": []}]}
 
+    def test_games_profile_choice_defaults_off_and_reaches_every_root(self):
+        import android_google as google
+        from xml.etree import ElementTree
+        def value(root):
+            text = (root / google.PREFERENCES).read_text()
+            entries = [e for e in ElementTree.fromstring(text) if e.get("name") == google.GAMES_PROFILE_KEY]
+            return entries[0].get("value") if entries else None
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            existing, fresh = state / "existing-root", state / "fresh-root"
+            (existing / google.PREFERENCES).parent.mkdir(parents=True)
+            (existing / google.PREFERENCES).write_text(
+                "<?xml version='1.0' encoding='utf-8' standalone='yes' ?><map>"
+                "<boolean name=\"safetynet_enabled\" value=\"true\" /><string name=\"x\">y</string></map>")
+            # Never chosen: not allowed, and no root is touched.
+            self.assertFalse(google.games_profile_allowed(state))
+            self.assertFalse(google.apply_games_profile(state, existing))
+            self.assertFalse(google.apply_games_profile(state, fresh))
+            self.assertFalse((fresh / google.PREFERENCES).exists())
+            self.assertIsNone(value(existing))
+            # Allowed: the key is added, the other preferences stay, a second launch changes nothing.
+            google.set_games_profile(state, True)
+            self.assertTrue(google.games_profile_allowed(state))
+            self.assertTrue(google.apply_games_profile(state, existing))
+            self.assertEqual(value(existing), "true")
+            self.assertIn('name="safetynet_enabled"', (existing / google.PREFERENCES).read_text())
+            self.assertIn(">y<", (existing / google.PREFERENCES).read_text())
+            self.assertFalse(google.apply_games_profile(state, existing))
+            # A root without preferences gets a file; turning it off flips both.
+            self.assertTrue(google.apply_games_profile(state, fresh))
+            self.assertEqual(value(fresh), "true")
+            google.set_games_profile(state, False)
+            self.assertFalse(google.games_profile_allowed(state))
+            self.assertTrue(google.apply_games_profile(state, existing))
+            self.assertTrue(google.apply_games_profile(state, fresh))
+            self.assertEqual((value(existing), value(fresh)), ("false", "false"))
+            # Hostile guest files: a DOCTYPE and a symlink are refused, not parsed or followed.
+            google.set_games_profile(state, True)
+            (existing / google.PREFERENCES).write_text('<!DOCTYPE map [<!ENTITY a "b">]><map/>')
+            self.assertFalse(google.apply_games_profile(state, existing))
+            outside = state / "host-file.xml"
+            outside.write_text("<map/>")
+            (fresh / google.PREFERENCES).unlink()
+            (fresh / google.PREFERENCES).symlink_to(outside)
+            self.assertFalse(google.apply_games_profile(state, fresh))
+            self.assertEqual(outside.read_text(), "<map/>")
+
     def test_accounts_are_shared_between_roots_and_settings_are_not(self):
         import json
         import android_google as google

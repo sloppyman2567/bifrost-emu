@@ -19,6 +19,11 @@ results. Passing fixtures do not establish untested application behavior.
   separate probe; the full `ManagedServiceBatch` passes in JIT with 580 checks (89 s).
 - Umamusume (JP), 75 s run on the real app: zero `AudioTrack` errors, against about 60 before.
   Not confirmed: audible output, sync, gameplay.
+- `GoogleAccountStateTests.test_games_profile_choice_defaults_off_and_reaches_every_root` (no
+  emulator): the choice defaults to off and leaves roots untouched, `true`/`false` is written into
+  a root's microG preferences with its other entries kept and is idempotent, a fresh root gets a
+  file, and a DOCTYPE file and a symlinked preferences file are refused. That the profile is then
+  created and sign-in succeeds was not observed (it needs the user's decision and account).
 - Not covered: static-buffer tracks, SoundPool, MediaPlayer, ExoPlayer, several tracks at
   once, long-running underrun behavior, timestamps.
 

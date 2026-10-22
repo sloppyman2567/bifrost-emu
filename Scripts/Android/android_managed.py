@@ -905,6 +905,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
     # The Google accounts signed in on this device, with microG's registration for them.
     android_google.import_shared(app.parent, root)
+    # The user's choice about letting microG create a Play Games profile (off until chosen).
+    android_google.apply_games_profile(app.parent, root)
     # An app's request for one of microG's Activities (this session is the system app's) or none.
     request = metadata.get("request") if metadata.get("system") else None
     if metadata.get("system"): android_google.stage_request(root, request)

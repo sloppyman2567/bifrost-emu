@@ -911,6 +911,10 @@ def main():
     accounts = actions.add_parser("accounts", help="list the signed-in Google accounts")
     accounts.add_argument("--json", action="store_true")
     actions.add_parser("remove", help="sign an account out of every app").add_argument("account")
+    games = actions.add_parser("games-profile", help="allow or forbid microG creating a Play Games profile "
+                               "for an account that has none (Play Games sign-in answers 404 without one)")
+    games.add_argument("choice", nargs="?", choices=("status", "on", "off"), default="status")
+    games.add_argument("--yes", action="store_true", help="do not ask for confirmation when turning it on")
     diagnostic = commands.add_parser("probe", help="dlopen native libraries without JNI/Activity startup")
     diagnostic.add_argument("package")
     diagnostic.add_argument("--library", action="append", help="packaged basename; repeatable, default all")
@@ -985,6 +989,20 @@ def main():
                 else:
                     for entry in found: print(entry["name"])
                     if not found: print("No Google account is signed in. Use: google sign-in")
+                return 0
+            if args.action == "games-profile":
+                if args.choice == "status":
+                    print("Play Games profile creation by microG: " +
+                          ("allowed" if android_google.games_profile_allowed(args.state_root) else "not allowed"))
+                    return 0
+                if args.choice == "on":
+                    print(android_google.GAMES_PROFILE_NOTICE)
+                    if not args.yes and input("Allow it? Type yes: ").strip().lower() != "yes":
+                        print("Not changed")
+                        return 1
+                android_google.set_games_profile(args.state_root, args.choice == "on")
+                print("Play Games profile creation by microG: " + ("allowed" if args.choice == "on" else "not allowed")
+                      + "; apps pick it up at their next launch")
                 return 0
             if args.action == "remove":
                 android_google.remove(args.state_root, args.account)

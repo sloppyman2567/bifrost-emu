@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
@@ -49,6 +50,17 @@ IDENTITY = (ACCOUNTS, DATA + "/shared_prefs/checkin.xml", DATA + "/databases/gse
             DATA + "/shared_prefs/google_account_cache.xml", DATA + "/shared_prefs/common.selected_account_prefs.xml",
             DATA + "/databases/pluscontacts.db")
 MARKER = "data/system/users/0/bifrost-google-import.json"
+# Whether microG may create a Play Games profile for a signed-in account that has none
+# (games/v1/players/me answers 404 and Games sign-in reports SIGN_IN_REQUIRED). microG's own
+# setting is off; this is the user's choice for every app root, made with `google games-profile`.
+GAMES_PROFILE = "games-profile.json"
+GAMES_PROFILE_KEY = "game_allow_create_player"
+PREFERENCES = DATA + "/shared_prefs/com.google.android.gms_preferences.xml"
+GAMES_PROFILE_NOTICE = """Allowing this lets microG create a Google Play Games profile for a Google account
+that has none, the first time a game signs in to Play Games with it. microG asks Google for a
+gamer tag, sets the profile hidden and not discoverable, and the account then has a Play Games
+profile at Google until you delete it in Play Games settings. Nothing is created unless an
+account without a profile signs in to a game. It applies to every account and app on this device."""
 
 
 def app_directory(state):
@@ -167,6 +179,56 @@ def _copy_text(path, value):
     pending = path.with_name(path.name + ".tmp")
     pending.write_text(json.dumps(value, sort_keys=True) + "\n")
     pending.replace(path)
+
+
+def games_profile_allowed(state):
+    """Whether the user allowed microG to create Play Games profiles (never chosen: no)."""
+    try:
+        document = json.loads(read_regular(Path(state) / SHARED / GAMES_PROFILE))
+    except (OSError, ValueError):
+        return False
+    return isinstance(document, dict) and document.get("allow_create_player") is True
+
+
+def set_games_profile(state, allowed):
+    _copy_text(Path(state) / SHARED / GAMES_PROFILE, {"version": 1, "allow_create_player": bool(allowed)})
+
+
+def apply_games_profile(state, root):
+    """Write the user's Play Games profile choice into an app root's microG preferences.
+
+    Runs before the root's session starts, so microG is not holding the file. A root is left
+    alone until the choice was made, so microG's own settings window still works there."""
+    if not is_regular(Path(state) / SHARED / GAMES_PROFILE): return False
+    value = "true" if games_profile_allowed(state) else "false"
+    path = root / PREFERENCES
+    try:
+        text = read_regular(path).decode("utf-8")
+        # SharedPreferences files have no DOCTYPE; refuse one rather than expand entities.
+        if "<!" in text.replace("<!--", ""): return False
+        document = ElementTree.fromstring(text)
+    except FileNotFoundError:
+        document = ElementTree.Element("map")
+    except (OSError, ValueError, ElementTree.ParseError):
+        return False
+    if document.tag != "map": return False
+    entry = next((e for e in document if e.tag == "boolean" and e.get("name") == GAMES_PROFILE_KEY), None)
+    if entry is None:
+        entry = ElementTree.SubElement(document, "boolean", name=GAMES_PROFILE_KEY)
+    elif entry.get("value") == value: return False
+    entry.set("value", value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        pending = Path(stream.name)
+        try:
+            stream.write(ElementTree.tostring(document, encoding="utf-8", xml_declaration=True))
+            stream.flush()
+            os.fsync(stream.fileno())
+            pending.chmod(0o600)
+            pending.replace(path)
+        finally:
+            pending.unlink(missing_ok=True)
+    return True
 
 
 def publish_shared(state, root):

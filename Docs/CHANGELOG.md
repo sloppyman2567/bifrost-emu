@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Play Games profile creation is a user choice (2026-10-21)
+
+- Play Games sign-in fails with HTTP 404 on `games/v1/players/me` when the account has no Play Games
+  profile; microG would create one but its setting is off. `asgard.py google games-profile
+  on|off|status` stores the user's choice (default off, with a notice) and every app root gets it
+  before its session starts. Nothing changes unless the user turns it on. See
+  [Play Games sign-in answers 404](Android/ANDROID_RUNTIME.md#play-games-sign-in-answers-404-2026-10-21).
+
 ### AudioTrack playback and shared-memory futexes (2026-10-21)
 
 - Native `AudioTrack` clients play: `media.audio_flinger` implements `createTrack` for linear PCM

@@ -497,6 +497,28 @@ answers `ERROR_CODE_UNSUPPORTED_OPERATION`, several matches for
 account-access requests. microG's settings and every account-related file are
 copied on the host, so two sessions signing in at once keep the last one to end.
 
+#### Play Games sign-in answers 404 (2026-10-21)
+
+Hungry Shark World and Umamusume complete Google's sign-in window, then fail the game's own
+Play Games sign-in: microG's `performGamesSignIn` (GmsCore v0.3.17.252432,
+`org.microg.gms.games.extensions.kt`) requests `https://www.googleapis.com/games/v1/players/me`,
+Google answers **404**, and `GamesConnectService` reports `SIGN_IN_REQUIRED`. In microG a 404
+means the account has no Play Games profile. It would create one (`registerForGames`: it asks
+`gameswhitelisted.googleapis.com` for a gamer tag and saves a profile that is not visible or
+discoverable) only when its setting `game_allow_create_player` is on, and that setting is off.
+This is read from the log and microG's source; the 404 body was not captured, so "no
+profile" is the reading microG's own code gives, not a proven fact about the account.
+
+Creating the profile changes the user's real Google account, so Bifrost never turns it on
+unasked. `asgard.py google games-profile on|off|status` records the choice once, behind a
+notice that says what it does (`--yes` skips the prompt), under `<state>/.google`;
+`android_google.apply_games_profile` writes it into each app root's
+`com.google.android.gms_preferences.xml` before the session starts. Until a choice is made roots
+keep their own preference. The file is guest-writable, so it is read without following
+symlinks and a DOCTYPE is refused. Setting microG's switch through its own window only
+reaches the Google root, because preferences stay per root. Not observed live: the user decides
+whether to turn it on, then a sign-in retry shows whether the profile is created and the 404 ends.
+
 ### Shared guest processes (October 11, 2026)
 
 Independent emulator OS processes can join the same Binder realm using
