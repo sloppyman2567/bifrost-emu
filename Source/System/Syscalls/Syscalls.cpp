@@ -29,10 +29,13 @@
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
+#include "System/Core/DebugFlags.hpp"
 #include "System/Core/Signals.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include <cerrno>
+#include <mutex>
+#include <set>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -126,8 +129,37 @@ void dump_syscall_histogram(double dt) {
     }
 }
 // ── Main dispatcher ────────────────────────────────────────────────────
+// BIFROST_TRACE_UNIMPLEMENTED: report each syscall number that ends in ENOSYS, and each ioctl request that
+// ends in ENOTTY, once, with its first arguments and the caller. Probes that expect the failure (clone3,
+// futex PI) show up too: read the list for what an app tried right before it went wrong.
+namespace {
+struct UnimplementedReport {
+    Emulator& emu;
+    CPU& cpu;
+    uint64_t num, a0, a1, a2, lr;
+    ~UnimplementedReport() {
+        if (!dbg().trace_unimplemented) return;
+        const int64_t result = static_cast<int64_t>(cpu.regs[0]);
+        const bool enosys = result == -ENOSYS;
+        const bool unknown_ioctl = num == 29 && result == -ENOTTY;
+        if (!enosys && !unknown_ioctl) return;
+        static std::mutex lock;
+        static std::set<uint64_t> seen;
+        const uint64_t key = unknown_ioctl ? (1ull << 62) | (a1 & 0xffffffffu) : num;
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            if (!seen.insert(key).second) return;
+        }
+        fprintf(stderr, "[unimplemented] tid=%d %s %llu a0=0x%llx a1=0x%llx a2=0x%llx from %s\n", cpu.tid,
+                unknown_ioctl ? "ioctl request" : "syscall", static_cast<unsigned long long>(unknown_ioctl ? a1 : num),
+                static_cast<unsigned long long>(a0), static_cast<unsigned long long>(a1),
+                static_cast<unsigned long long>(a2), describe_guest_address(emu, lr).c_str());
+    }
+};
+} // namespace
 void Emulator::syscall(CPU& cpu) try {
     uint64_t num = cpu.regs[8];
+    UnimplementedReport unimplemented{*this, cpu, num, cpu.regs[0], cpu.regs[1], cpu.regs[2], cpu.regs[30]};
     note_syscall(num);
     // last-call record for crash reports (cheap: 3 stores, no atomic).
     cpu.last_svc_num = num;

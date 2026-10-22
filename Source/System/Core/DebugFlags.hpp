@@ -96,6 +96,7 @@ struct DebugFlags {
     bool simd_trace = false;  // BIFROST_SIMD_TRACE — unhandled simd log
     bool simd_collect = false;  // BIFROST_SIMD_COLLECT — enumerate-and-nop mode
     bool trace_mmap = false;  // BIFROST_TRACE_MMAP — mmap/munmap/mremap lines
+    bool trace_unimplemented = false;  // BIFROST_TRACE_UNIMPLEMENTED — each syscall ending in ENOSYS, each ioctl ending in ENOTTY, once
     bool binder_trace = false; // BIFROST_BINDER_TRACE — transaction failures and registry calls
     bool trace_madvise = false;  // BIFROST_TRACE_MADVISE — madvise lines
     bool watch_trap = false;  // BIFROST_WATCH_TRAP — SIGTRAP (host) on the
@@ -251,6 +252,7 @@ struct DebugFlags {
         f.simd_trace = all || env("BIFROST_SIMD_TRACE");
         f.simd_collect = all || env("BIFROST_SIMD_COLLECT");
         f.trace_mmap = all || env("BIFROST_TRACE_MMAP");
+        f.trace_unimplemented = all || env("BIFROST_TRACE_UNIMPLEMENTED");
         f.binder_trace = all || env("BIFROST_BINDER_TRACE");
         f.media_trace = env("BIFROST_MEDIA_TRACE");
         f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");

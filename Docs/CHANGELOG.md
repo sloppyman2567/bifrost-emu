@@ -16,7 +16,9 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
 
 - With `--debug fault` (`BIFROST_FAULT_TRACE`), a guest fault now also prints the mapping, file and
   file offset (or the `[anon lo-hi rwx]` range) of the faulting PC and of the return address, and for
-  a jump to address 0 the eight instructions before the caller. `BIFROST_TRACE_MMAP` lines say who
+  a jump to address 0 the eight instructions before the caller. `BIFROST_TRACE_UNIMPLEMENTED=1` reports each
+  syscall that ends in ENOSYS and each ioctl request that ends in ENOTTY, once, with its caller (Binder's
+  `BINDER_ENABLE_ONEWAY_SPAM_DETECTION` is one that every app triggers and libbinder ignores). `BIFROST_TRACE_MMAP` lines say who
   called `mmap`. Found with the global Umamusume build, which dies with a null call right after its
   class loader is created, from an RWX anonymous region that `linker64` reserved; its cause is not known.
 
