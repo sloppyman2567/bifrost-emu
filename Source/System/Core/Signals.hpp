@@ -277,6 +277,9 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr);
 //
 // Returns true if the signal was delivered (handler invoked), false
 // if the default disposition was applied.
+// "path+0xfileoffset" of the guest mapping holding `addr` (or [anon lo-hi rwx]), for diagnostics.
+std::string describe_guest_address(Emulator& emu, uint64_t addr);
+
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code = SI_USER_EMU, uint64_t fault_addr = 0);
 // A synchronous trap the thread cannot block or ignore (Linux

@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Crash reports name the library (2026-10-21)
+
+- With `--debug fault` (`BIFROST_FAULT_TRACE`), a guest fault now also prints the mapping, file and
+  file offset (or the `[anon lo-hi rwx]` range) of the faulting PC and of the return address, and for
+  a jump to address 0 the eight instructions before the caller. `BIFROST_TRACE_MMAP` lines say who
+  called `mmap`. Found with the global Umamusume build, which dies with a null call right after its
+  class loader is created, from an RWX anonymous region that `linker64` reserved; its cause is not known.
+
 ### Play Games profile creation is a user choice (2026-10-21)
 
 - Play Games sign-in fails with HTTP 404 on `games/v1/players/me` when the account has no Play Games

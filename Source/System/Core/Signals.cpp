@@ -535,6 +535,25 @@ bool force_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     return deliver_signal(emu, cpu, sigtab, signo, si_code, fault_addr);
 }
 
+// "path+0xfileoffset" of the mapping holding `addr`, for fault traces, or "?" when it is unmapped
+// or anonymous. Loader-copied ELF images are named like kernel mappings.
+std::string describe_guest_address(Emulator& emu, uint64_t addr) {
+    for (const auto& view : emu.mem().mappings_snapshot()) {
+        if (addr < view.start || addr >= view.end) continue;
+        if (!view.file) {
+            char range[96];
+            snprintf(range, sizeof(range), "[anon 0x%llx-0x%llx %c%c%c]", static_cast<unsigned long long>(view.start),
+                     static_cast<unsigned long long>(view.end), view.prot & 1 ? 'r' : '-', view.prot & 2 ? 'w' : '-',
+                     view.prot & 4 ? 'x' : '-');
+            return range;
+        }
+        char offset[32];
+        snprintf(offset, sizeof(offset), "+0x%llx", static_cast<unsigned long long>(view.offset + (addr - view.start)));
+        return view.file->path + offset;
+    }
+    return "?";
+}
+
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {
     if (dbg().fault_trace && is_fault_signal(signo)) {
@@ -554,6 +573,21 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                 static_cast<unsigned long long>(cpu.regs[1]),
                 static_cast<unsigned long long>(cpu.regs[2]),
                 static_cast<unsigned long long>(cpu.regs[3]));
+        // A fault at pc 0 is a call through a null function pointer: the caller is what matters.
+        fprintf(stderr, "[fault] tid=%d at pc=%s lr=%s\n", cpu.tid, describe_guest_address(emu, cpu.pc).c_str(),
+                describe_guest_address(emu, cpu.regs[30]).c_str());
+        if (cpu.pc == 0) {
+            // The eight instructions before the return address: the call that jumped to null.
+            char words[160] = "";
+            for (int i = -8; i < 0; ++i) {
+                uint32_t word = 0;
+                try { word = emu.mem().load<uint32_t>(cpu.regs[30] + static_cast<int64_t>(i) * 4); } catch (...) {}
+                char one[16];
+                snprintf(one, sizeof(one), "%08x ", word);
+                strncat(words, one, sizeof(words) - strlen(words) - 1);
+            }
+            fprintf(stderr, "[fault] tid=%d code before lr: %s\n", cpu.tid, words);
+        }
     }
     const bool trace = signal_trace_enabled();
     if (trace) {

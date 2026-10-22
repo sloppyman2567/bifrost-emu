@@ -9,6 +9,7 @@
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Core/Signals.hpp"
+#include "System/Core/Signals.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include <errno.h>
@@ -254,7 +255,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
              if (dbg().trace_mmap) {
-                fprintf(stderr, "[mmap(pc=0x%llx addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
+                fprintf(stderr, "[mmap(pc=0x%llx addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx] from %s\n",
                         (unsigned long long)cpu.pc,
                         (unsigned long long)addr,
                         (unsigned long)length,
@@ -262,7 +263,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)flags,
                         (long long)(int64_t)a4,
                         (unsigned long long)a5,
-                        (unsigned long long)mapped);
+                        (unsigned long long)mapped,
+                        describe_guest_address(emu, cpu.regs[30]).c_str());
             }
             // Keep private file mappings backed by the file too: a later
             // MADV_DONTNEED must restore file bytes, not anonymous zeros.
