@@ -39,6 +39,7 @@ struct DebugFlags {
     bool ppoll_peek = false;  // BIFROST_PPOLL_PEEK  — msgs peek before/after
     bool futex_trace= false;  // BIFROST_FUTEX_TRACE — futex WAIT/WAKE lines
     bool futex_bt   = false;  // BIFROST_FUTEX_BT    — futex-wait backtraces
+    bool no_shared_futex = false;  // BIFROST_NO_SHARED_FUTEX — futexes on shared file mappings use the in-process table
     bool allbt      = false;  // BIFROST_ALLBT      — dump all thread stacks
     bool allbt2     = false;  // BIFROST_ALLBT2      — allbt frame walk
     bool btraw      = false;  // BIFROST_BTRAW       — raw (unsymbolized) frames
@@ -193,6 +194,7 @@ struct DebugFlags {
         f.ppoll_peek  = all || env("BIFROST_PPOLL_PEEK");
         f.futex_trace = all || env("BIFROST_FUTEX_TRACE");
         f.futex_bt    = all || env("BIFROST_FUTEX_BT");
+        f.no_shared_futex = env("BIFROST_NO_SHARED_FUTEX");
         f.allbt     = all || env("BIFROST_ALLBT");
         f.allbt2    = all || env("BIFROST_ALLBT2");
         f.btraw     = all || env("BIFROST_BTRAW");

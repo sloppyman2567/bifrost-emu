@@ -31,6 +31,8 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
 - Fix: a futex on a MAP_SHARED file mapping (memfd, ashmem, file) is now a host futex, so a wake
   through another mapping of the page, in the same process or another, reaches the waiter. The
   in-process table keyed words by guest address and never delivered it (`futex_shared_memfd`).
+- `BIFROST_NO_SHARED_FUTEX=1` turns the host-futex path off for A/B tests. `make all` no longer fails to refresh
+  the root `bifrost-emu` while a broker has it open (copy, then rename), which had left it stale.
 - `media.metrics` is a stub service; native `LogItem::record()` no longer waits 5 s, twice, per track.
 
 ### Toasts, NsdManager and Settings intents (2026-10-21)

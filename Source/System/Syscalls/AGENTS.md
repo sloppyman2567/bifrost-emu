@@ -36,7 +36,8 @@
   reaches the same waiters (AudioTrack's control block). Other words keep the
   in-process table keyed by guest address. A host wait interrupted by
   `KICK_SIGNAL` with no pending guest signal returns 0, a spurious wake.
-  `futex_shared_memfd` covers it.
+  `futex_shared_memfd` covers it. `BIFROST_NO_SHARED_FUTEX=1` (DebugFlags) switches the
+  host path off, to A/B a suspected futex problem on the same build.
 - JIT invalidation calls name their `CodeInvalidation` reason. Only cache
   maintenance and mprotect may keep translations with unchanged bytes;
   mapping replacement, unmap, remap and discard always retire them.

@@ -147,6 +147,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                             uint64_t entry_pc, uint64_t arg, uint64_t tls) {
         return emu.spawn_thread(parent_cpu, flags, stack_top, entry_pc, arg, tls);
     };
+    // A futex word in a shared file mapping is a host futex (see Memory::shared_futex_word).
+    auto shared_futex_word = [&](uint64_t addr) -> volatile uint32_t* {
+        return dbg().no_shared_futex ? nullptr : mem_.shared_futex_word(addr);
+    };
     auto get_futex = [&](uint64_t addr) -> Emulator::FutexSlot* {
         return emu.get_futex(addr);
     };
@@ -714,7 +718,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // or in another process, wakes it; the in-process table below
                     // keys by guest address and could not. KICK_SIGNAL (no
                     // SA_RESTART) interrupts the wait like any host syscall.
-                    if (volatile uint32_t* shared = mem_.shared_futex_word(uaddr)) {
+                    if (volatile uint32_t* shared = shared_futex_word(uaddr)) {
                         struct timespec timeout_ts;
                         const struct timespec* timeout_host = nullptr;
                         if (timeout_ptr) {
@@ -977,7 +981,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // lock-free read can see 0 just before the
                     // increment lands, skip the notify, and leave the
                     // waiter sleeping forever. Correctness over ~50ns.
-                    if (volatile uint32_t* shared = mem_.shared_futex_word(uaddr)) {
+                    if (volatile uint32_t* shared = shared_futex_word(uaddr)) {
                         const int count = static_cast<int>(val);
                         if (count <= 0) { ret_host(0); return 0; }
                         const long r = ::syscall(SYS_futex, shared,
@@ -1071,8 +1075,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         return 0;
                     }
                     if (uaddr2) {
-                        volatile uint32_t* shared1 = mem_.shared_futex_word(uaddr);
-                        volatile uint32_t* shared2 = mem_.shared_futex_word(uaddr2);
+                        volatile uint32_t* shared1 = shared_futex_word(uaddr);
+                        volatile uint32_t* shared2 = shared_futex_word(uaddr2);
                         if (shared1 && shared2) {
                             const long r = ::syscall(SYS_futex, shared1, op == 4 ? FUTEX_CMP_REQUEUE : FUTEX_REQUEUE,
                                                      nr_wake, static_cast<unsigned long>(nr_requeue),

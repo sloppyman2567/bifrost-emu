@@ -125,7 +125,8 @@ endif
 all: $(TARGET)
 ifeq ($(BUILD_PROFILE),release)
 ifeq ($(TARGET),$(BUILD_DIR)/bifrost-emu)
-	cp $(TARGET) bifrost-emu
+	# Rename over the root copy: a running broker holds it open and cp fails with ETXTBSY.
+	cp $(TARGET) bifrost-emu.new && mv -f bifrost-emu.new bifrost-emu
 endif
 endif
 
