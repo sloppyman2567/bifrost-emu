@@ -16,7 +16,8 @@ and `setenv`, but fails direct-memory environment/argv visibility checks.
 This covers startup block contents and reopening procfs; it excludes
 PR_SET_MM relocation and concurrent edits while reading an already-open fd.
 The real Global client now passes its formerly failing module-2 initialization
-but aborts at a later module; see the runtime trace below.
+but aborts at module `0x60` after its `ro.kernel.qemu` check rejects `"1"`;
+see [the runtime trace](Android/ANDROID_RUNTIME.md#global-umamusume-after-the-null-call-fix-2026-10-22).
 
 ## Signal queries and fork-child lifetime (2026-10-22)
 

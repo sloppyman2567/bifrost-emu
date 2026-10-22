@@ -744,10 +744,23 @@ on native Linux and in Bifrost JIT, interpreter, Tier-2 and the headless build.
 QEMU agrees on initial contents and `setenv`, but does not mirror direct edits
 to the guest's original environment or argv through its procfs view. A new
 windowless Global trace confirms module 2 now passes; a later module `0x60`
-initializer returns false and startup still aborts. Its cause remains under
-investigation. Fixing syscall 240 would correct SIGABRT delivery,
-but is not evidence that the game would start. HOME routing succeeds; neither
-a protection-system verdict nor game playability is established.
+initializer returns false and startup still aborts.
+
+The next narrow trace localizes module `0x60` to its emulator-property check
+at module offset `0x3d90`. It queries `ro.hardware`, compares against
+`goldfish` and `ranchu`, then queries `ro.kernel.qemu` (call at `+0x3efc`).
+The latter returns `"1"`; comparison against `"0"` at `+0x3f9c` fails, reports
+an event and returns false to the initializer. The provisioned image's
+`/vendor/build.prop` contains `ro.kernel.qemu=1` (line 80), so the property
+service is accurately reporting the image. These strings, comparison values,
+and failure branch are observed in the captured code and block trace, rather
+than inferred from the final exit code. This establishes an emulator-check
+rejection in the native loader; it does not establish the vendor branding of
+that code or prove that other startup checks would pass. No property spoofing
+or check-skipping change was made.
+
+Fixing syscall 240 would correct SIGABRT delivery, but is not evidence that
+the game would start. HOME routing succeeds; gameplay remains unconfirmed.
 
 The real app also exposed a stale
 Binder receive-arena protection guard after exec; clearing device mappings
