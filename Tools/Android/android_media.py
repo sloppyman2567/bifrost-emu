@@ -66,9 +66,13 @@ def update_bionic_inventory(root, metadata, manifest):
     """Upgrade a verified root; accept interrupted link-only upgrades on retry."""
     install_bionic_links(root)
     files = {**metadata["files"], **BIONIC_LINKS}
+    return update_inventory(metadata, manifest, files)
+
+
+def update_inventory(metadata, manifest, files):
     if files != metadata["files"]:
         metadata["files"] = files
-        with tempfile.NamedTemporaryFile(mode="w", dir=root.parent, delete=False) as stream:
+        with tempfile.NamedTemporaryFile(mode="w", dir=manifest.parent.parent, delete=False) as stream:
             temporary = Path(stream.name)
             try:
                 stream.write(json.dumps(metadata, indent=2) + "\n")

@@ -70,3 +70,5 @@ Run focused regressions for the changed contract and relevant host/API/Android
 checks. Review before committing, update docs after the implementation and
 report remaining limitations. Detailed bug history and performance checkpoints
 belong in `Docs/`, rather than this instruction file.
+
+- Managed HOME uses Asgard via the authenticated session supervisor; preserve background/resume lifecycle and the pinned shell/am provisioning contract.

@@ -294,18 +294,11 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     const uint64_t HWCAP_CRC32   = 1ULL << 7;
     const uint64_t HWCAP_ATOMICS = 1ULL << 8;
     uint64_t hwcap = HWCAP_FP | HWCAP_ASIMD | HWCAP_CRC32 | HWCAP_ATOMICS;
-    // AT_EXECFN: pointer to the program name string on the stack.
-    // argc==0 is permitted by the C API (argv empty) — indexing [0] would
-    // be UB, so synthesize an empty string when there is no argv0.
-    uint64_t execfn_addr;
-    if (!argv_addrs.empty()) {
-        execfn_addr = argv_addrs[0];
-    } else {
-        sp -= 1;
-        const char empty[1] = {'\0'};
-        mem_.write(sp, empty, 1);
-        execfn_addr = sp;
-    }
+    // Linux AT_EXECFN names the executable path, independently of argv[0].
+    const std::string execfn = elf_path_;
+    sp -= execfn.size() + 1;
+    mem_.write(sp, execfn.c_str(), execfn.size() + 1);
+    const uint64_t execfn_addr = sp;
     // AT_PLATFORM: aarch64 string (some libc ifunc resolvers consult it).
     sp -= 8;
     const char platform_str[] = "aarch64";

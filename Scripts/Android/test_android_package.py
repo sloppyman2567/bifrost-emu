@@ -52,6 +52,16 @@ def play_services_basement(work):
 
 
 class BionicCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        shell = b'fixture shell'
+        import android_framework
+        def install(root, archive=None, system=None):
+            target = root / 'system/bin/sh'; target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(shell); target.chmod(0o755)
+        for setting in (patch('android_framework.SHELL_SHA256', hashlib.sha256(shell).hexdigest()),
+                        patch('android_framework.install_shell', side_effect=install)):
+            setting.start()
+            self.addCleanup(setting.stop)
     def make_root(self, root):
         import json
         import android_art
@@ -74,7 +84,8 @@ class BionicCompatibilityTests(unittest.TestCase):
             before = self.make_root(root)
             with patch("android_codecs.fingerprint", return_value="fixture"):
                 after = android_framework.install(root, root / "unused")
-                self.assertEqual(after["files"], {**before["files"], **BIONIC_LINKS})
+                self.assertEqual(after["files"], {**before["files"], **BIONIC_LINKS,
+                                                'system/bin/sh': android_framework.shell_inventory()})
                 manifest = (root / "bifrost-framework.json").read_bytes()
                 self.assertEqual(android_framework.install(root, root / "unused"), after)
                 self.assertEqual((root / "bifrost-framework.json").read_bytes(), manifest)
@@ -124,6 +135,35 @@ class BionicCompatibilityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     install_bionic_links(root)
                 self.assertFalse((root / "system/lib64/libc.so").is_symlink())
+
+
+class HomeCommandTests(unittest.TestCase):
+    def test_am_home_options_and_unresolved_commands(self):
+        from android_processes import home_command
+        base = ['start', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.HOME']
+        self.assertTrue(home_command(base + ['--user', '0', '-f', '0x10200000']))
+        self.assertTrue(home_command(base + ['-c', 'android.intent.category.DEFAULT']))
+        for suffix in (['--user', '10'], ['-n', 'other/.Activity'], ['-f', '-1'], ['--user'],
+                       ['-c', 'android.intent.category.BROWSABLE']):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError): home_command(base + suffix)
+        with self.assertRaises(ValueError): home_command(['start', '-a', 'android.intent.action.VIEW'])
+
+    def test_home_activation_is_idempotent_and_resume_queues_foreground(self):
+        from android_processes import ProcessHost
+        import threading
+        host = ProcessHost.__new__(ProcessHost)
+        host.state, host.home_active, host.task_visible, host.lock = Path('/tmp/library'), False, None, threading.Lock()
+        with patch('android_launcher.activate_launcher') as activated:
+            self.assertEqual(host.home(), {'exit_code': 0})
+            host.home(); activated.assert_called_once_with(host.state)
+            self.assertIs(host.task_visible, False)
+            host.task(True); self.assertIs(host.task_visible, True)
+            host.home(); self.assertEqual(activated.call_count, 2)
+
+    def test_running_background_app_returns_instead_of_relaunching(self):
+        from android_launcher import card_state
+        app = {'session': {'state': 'running', 'background': True}}
+        self.assertEqual(card_state(app)['action'], 'resume')
 
 
 class LauncherArgumentTests(unittest.TestCase):
@@ -1263,6 +1303,8 @@ class PackageTests(unittest.TestCase):
         if managed == "ManagedPlayServices" and not split:
             # The client library checks this against its own version code.
             component += '<meta-data android:name="com.google.android.gms.version" android:value="12451000"/>'
+        if managed == "Managed$Home" and not split:
+            component = component.replace('android:exported="true"', 'android:exported="true" android:hardwareAccelerated="false"')
         compiled = []
         if managed == "ManagedAccounts" and not split:
             component += (f'<service android:name="{activity}$AuthenticatorService" android:exported="false">'
@@ -1343,7 +1385,7 @@ class PackageTests(unittest.TestCase):
             libraries = [play_services_basement(cls.work)] if managed == "ManagedPlayServices" else []
             subprocess.run([os.environ.get("JAVAC", "javac"), "--release", "8", "-cp",
                             os.pathsep.join(map(str, [cls.tools / "android.jar", *libraries])), "-d", str(classes),
-                            str(ROOT / "Tests/Host" / (activity.rsplit(".", 1)[-1] + ".java"))],
+                            str(ROOT / "Tests/Host" / (activity.rsplit(".", 1)[-1].split("$")[0] + ".java"))],
                            check=True, capture_output=True)
             subprocess.run(["java", "-cp", str(cls.tools / "d8.jar"),
                             "com.android.tools.r8.D8", "--min-api", "26", "--lib",
@@ -1827,6 +1869,62 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(positions, sorted(positions))
             self.assertNotIn("bifrost.registration_probe", text)
         self.assertTrue((app / "managed/rootfs/data/user/0/org.bifrost.fixture/shared_prefs/fixture.xml").is_file())
+
+    def test_managed_home_and_resume(self):
+        import threading
+        from android_sessions import control
+        from android_launcher import activate_existing
+        state = self.work / "home-state"
+        bundle = self.work / "home.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("home", managed="Managed$Home"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        errors = []
+        done = threading.Event()
+        def resume_twice():
+            try:
+                app = state / "org.bifrost.fixture"
+                for _ in range(2):
+                    deadline = time.monotonic() + 90
+                    while not done.is_set() and time.monotonic() < deadline:
+                        saved = control(app)
+                        if saved.get("state") == "running" and saved.get("background"):
+                            self.assertFalse(control(app, "resume").get("error"))
+                            break
+                        done.wait(0.1)
+                    else: raise AssertionError("App did not background for HOME")
+                    while control(app).get("background") and not done.wait(0.1): pass
+            except Exception as error: errors.append(error)
+        with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
+            with (self.work / "home-launcher.log").open("w") as launcher_log:
+                launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
+                    "--state-root", str(state), "launcher"], stdout=launcher_log, stderr=subprocess.STDOUT)
+                worker = None
+                try:
+                    deadline = time.monotonic() + 20
+                    while not activate_existing(state):
+                        if launcher.poll() is not None or time.monotonic() >= deadline:
+                            self.fail("Offscreen Asgard launcher did not start")
+                        time.sleep(0.1)
+                    worker = threading.Thread(target=resume_twice, daemon=True)
+                    worker.start()
+                    status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(),
+                                            window_plugin=ARGS.plugin.resolve(), timeout=120)
+                finally:
+                    done.set()
+                    if worker: worker.join(3)
+                    launcher.terminate()
+                    launcher.wait(timeout=10)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertFalse(errors, str(errors) + text[-12000:])
+        self.assertEqual(status, 0, text[-12000:])
+        for marker in ("HOME_INTENT_OK 2", "HOME_ALL_PASS", "HOME_DESTROYED"):
+            self.assertIn(marker, text)
+        self.assertEqual(text.count("HOME_CREATED"), 1, text[-12000:])
+        self.assertEqual(text.count("HOME_RESTARTED"), 2, text[-12000:])
+        self.assertEqual(text.count("APP_TASK_BACKGROUND"), 2, text[-12000:])
+        self.assertEqual(text.count("APP_TASK_FOREGROUND"), 2, text[-12000:])
 
     def test_managed_dialog_and_popup_windows(self):
         state = self.work / "dialog-state"

@@ -185,7 +185,7 @@ def verify_adapters(adapters, runtime):
     }
     managed = {"libbifrost-activity.so", "managed/libandroid.so", "managed/libEGL.so",
                "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so", "managed/libaaudio.so",
-               "managed/libOpenSLES.so", "managed/mapper.bifrost.so"}
+               "managed/libOpenSLES.so", "managed/mapper.bifrost.so", "managed/am"}
     files = set(metadata.get("files", {}))
     if (
         metadata.get("runtime_archive_sha256") != runtime.SHA256
@@ -881,7 +881,7 @@ def main():
     add_launch_options(starter)
     listing = commands.add_parser("list", aliases=["apps"], help="show installed apps and live sessions")
     listing.add_argument("--json", action="store_true")
-    for name in ("status", "stop", "logs"):
+    for name in ("status", "stop", "logs", "resume"):
         command = commands.add_parser(name)
         command.add_argument("package")
         if name == "status": command.add_argument("--json", action="store_true")
@@ -937,11 +937,13 @@ def main():
                           f"  version={app.get('version', '?')}")
                 if not apps: print("No apps installed. Use install <APK/APKM> or open launcher.")
             return 0
-        if args.command in ("status", "stop", "logs"):
+        if args.command in ("status", "stop", "logs", "resume"):
             from android_sessions import control
             if not PACKAGE.fullmatch(args.package) or not (args.state_root / args.package / "package.json").is_file():
                 raise ValueError("Package is not installed: " + args.package)
-            value = control(args.state_root / args.package, "stop" if args.command == "stop" else "status")
+            value = control(args.state_root / args.package, args.command if args.command in ("stop", "resume") else "status")
+            if args.command == "resume" and (value.get("error") or value.get("state") != "running"):
+                raise ValueError(value.get("error", "App is not running"))
             if args.command == "logs":
                 if not 1 <= args.lines <= 10000: raise ValueError("--lines must be in 1..10000")
                 path = value.get("logd" if args.logd else "log")

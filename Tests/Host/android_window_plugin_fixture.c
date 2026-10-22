@@ -169,12 +169,18 @@ static void remove_popup(void *instance, uint32_t id) {
     record(line);
 }
 #ifndef BIFROST_TEST_NO_ENTRY
+static int32_t set_task_visible(void *instance, uint32_t visible) {
+    (void)instance;
+    if (visible > 1) return -EINVAL;
+    record(visible ? "task-show" : "task-hide");
+    return 0;
+}
 const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {
     static bifrost_android_window_plugin_v2 api;
     if (host_abi != BIFROST_ANDROID_WINDOW_ABI_V2 || mode("null-api")) return NULL;
     api = (bifrost_android_window_plugin_v2){2, sizeof(api), "c-fixture",
         create, destroy, open_window, close_window, resize, binding, poll_window,
-        show_popup, remove_popup, set_text_input, poll_text};
+        show_popup, remove_popup, set_text_input, poll_text, set_task_visible};
     // A descriptor from before the optional popup callbacks were appended.
     if (mode("old-size")) api.struct_size = BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE;
     // Popups but no text input (before those callbacks were appended).

@@ -37,7 +37,7 @@ namespace {
   X(InitSubSystem) X(QuitSubSystem) X(SetHint) X(GetError) \
   X(CreateWindowWithProperties) X(CreateProperties) X(DestroyProperties) \
   X(SetStringProperty) X(SetNumberProperty) X(SetBooleanProperty) \
-  X(DestroyWindow) X(GetWindowProperties) \
+  X(DestroyWindow) X(GetWindowProperties) X(HideWindow) X(ShowWindow) X(RaiseWindow) X(RestoreWindow) \
   X(GetPointerProperty) X(GetNumberProperty) X(SetWindowSize) \
   X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
@@ -580,6 +580,19 @@ private:
 #endif
 class SdlAndroidWindowBackend final : public AndroidWindowBackend {
 public:
+  int set_task_visible(bool visible) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return -ENODEV;
+    if (!visible) return sdl_.HideWindow(window_) ? 0 : -EIO;
+    if (!sdl_.ShowWindow(window_)) return -EIO;
+    sdl_.RestoreWindow(window_);
+    sdl_.RaiseWindow(window_);
+    return 0;
+#else
+    (void)visible;
+    return -ENOTSUP;
+#endif
+  }
   bool window_info(arm64emu::window_stats::WindowInfo &info) override {
 #if defined(BIFROST_USE_SDL3)
     if (!window_) return false;

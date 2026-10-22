@@ -457,3 +457,14 @@ For the preceding Bionic/header refinement, the full Linux runs initially
 rejected two stale fixtures;
 after rebuilding, both cases passed in each mode. Aggregate coverage remains
 273 passing JIT runs and 266 passing interpreter runs with seven JIT-only skips.
+
+### HOME and returning to a running app
+
+A managed app's MAIN/HOME Intent, or supported `am start` HOME command, opens
+Asgard for its state directory and backgrounds the Activity task. Select
+**Return to app** to resume that instance; the CLI equivalent is
+`asgard resume PACKAGE`. The pinned Android shell and native `am` client are
+provisioned with managed roots. This requires PyQt6 for Asgard and a window
+backend supporting task visibility; it does not keep alive an app that exits
+after HOME. See the runtime guide for supported command options and the
+remaining Java `Runtime.exec`/vfork limitation.

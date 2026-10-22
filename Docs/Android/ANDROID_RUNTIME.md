@@ -678,6 +678,65 @@ because this runtime has no `/system/bin/sh`. This establishes an app-requested
 HOME/termination path, not the reason the app selected it. Protection rejection
 is not confirmed, and successful startup/gameplay is not established.
 
+### Android HOME and Asgard (2026-10-22)
+
+Managed app sessions now route an implicit `ACTION_MAIN` + `CATEGORY_HOME`
+Intent to Asgard. The authenticated session supervisor activates the launcher
+for the same state directory (one launcher per state), then queues task
+backgrounding on the app's main thread. Activities pause and stop without
+being destroyed; the host window hides. Asgard's **Return to app** action, or
+`asgard resume PACKAGE`, restores the window and restarts/resumes the existing
+Activity stack. Services remain alive. This does not prevent an app from
+terminating itself after requesting HOME. Root Back handling remains separate.
+
+Managed roots contain the verified SDK image's `/system/bin/sh` and a native
+`/system/bin/am` client. The client uses the same peer-UID/token authenticated
+supervisor channel as managed services. It supports `start`/`start-activity`
+with MAIN/HOME (optional DEFAULT), `--user 0`/`current`, and numeric `-f` flags;
+unresolved intents, other users and unsupported options fail explicitly.
+Cached framework inventories acquire the pinned shell after verification;
+changing its bytes or mode fails verification. No host shell executes guest
+commands. The desktop launcher requires PyQt6.
+
+Tracing that shell found two prerequisite ABI bugs. Raw `TCGETS` copied libc's
+60-byte `termios` over Bionic's 36-byte stack object, triggering the SDK shell's
+stack protector. Terminal ioctls now marshal the 36-byte
+[Linux kernel layout](https://github.com/torvalds/linux/blob/v6.12/include/uapi/asm-generic/termbits.h).
+Android `execve` also jumped directly into the new executable without running
+its interpreter. It now discards old device-mapping guards, loads Bionic's
+confined PT_INTERP, preserves ELF map
+identity, resets TLS, rebuilds vDSO/auxv and enters linker64. AT_EXECFN names the
+executable path independently of argv[0], following
+[Linux's ELF loader](https://github.com/torvalds/linux/blob/v6.12/fs/binfmt_elf.c).
+This does not implement the still-unsupported shared-VM/vfork process contract:
+Java `Runtime.exec` currently encounters ENOSYS on that path. Native fork/exec
+and direct HOME Intents are the validated paths.
+
+The real Global client was rerun with default JIT settings, a windowless plugin
+and an offscreen Asgard launcher. The supervisor acknowledged HOME with status
+0, and the shell/am child called `exit_group(0)`. The main game process then
+explicitly called `exit_group(127)` during Application startup, before an
+Activity could poll the queued background request. Thus HOME routing succeeds,
+but the game still terminates itself; this does not identify why it chose HOME
+or confirm a protection-system verdict. The real app also exposed a stale
+Binder receive-arena protection guard after exec; clearing device mappings
+before image replacement fixes the shell's atexit-array EACCES without changing
+the parent's broker arena (fork-child RPC is rejected by owner PID).
+
+Validation: SDL and headless builds, 16 focused Python tests, the offscreen
+managed HOME/resume regression, plugin ABI checks, and the Bionic bootstrap
+matrix (fixed/random addresses, JIT/interpreter/Tier-2, services off/on), plus
+AAudio/OpenSL callback regressions in all three engine modes passed. The shell
+regression uses the real pinned SDK shell. Terminal layout and ELF auxv/entry
+contracts above were checked against Linux source; game exit behavior and
+lifecycle ordering are observations from these runs.
+
+Window plugin v2 appends optional `set_task_visible`; old descriptors still
+load, but task visibility returns ENOTSUP. The built-in backend and packaged
+SDL plugin implement hiding/showing the existing window. Headless tests use
+a windowless plugin and Qt's offscreen platform; they establish routing and
+lifecycle, not compositor focus behavior or gameplay.
+
 `test_signal_semantics` checks both uncatchable signal queries and rejection of
 setters. `test_fork_threads` adds three workers blocked on a private futex,
 checks that the child's wake finds zero inherited waiters, and verifies child

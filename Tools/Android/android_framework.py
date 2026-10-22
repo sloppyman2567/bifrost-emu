@@ -15,7 +15,8 @@ import tempfile
 import zipfile
 
 from android_media import (ROOT, IMAGE_SHA256, image_archive, extract_system, dump,
-                           without_bionic_links, update_bionic_inventory)
+                           without_bionic_links, install_bionic_links, BIONIC_LINKS,
+                           update_inventory, digest)
 import android_art
 import android_codecs
 
@@ -24,6 +25,34 @@ import android_codecs
 # "bootclasspath" key; the mainline extension lists its dex locations.
 JAR_PATH = re.compile(rb"/(?:apex/com\.android\.[a-z0-9.]+/javalib|system/framework)/[A-Za-z0-9._-]+\.jar")
 SCHEMA = 8
+SHELL_SHA256 = "6726065cf17ebde172980adb2d988a48918597ca2907b613025d63d9d0ed196f"
+
+
+def shell_inventory():
+    return {"sha256": SHELL_SHA256, "executable": True}
+
+
+def without_shell(files):
+    files = without_bionic_links(files)
+    if "system/bin/sh" in files and files.pop("system/bin/sh") != shell_inventory():
+        raise ValueError("Modified Android shell")
+    return files
+
+
+def install_shell(root, archive=None, system=None):
+    target = root / "system/bin/sh"
+    if target.exists() or target.is_symlink():
+        if target.is_symlink() or not target.is_file() or digest(target) != SHELL_SHA256:
+            raise ValueError("Modified Android shell")
+        return
+    with tempfile.TemporaryDirectory(prefix=".android-shell-") as directory:
+        work = Path(directory)
+        if system is None: system, _ = extract_system(image_archive(archive), work)
+        shell = work / "sh"
+        dump(system, "/system/bin/sh", shell)
+        if digest(shell) != SHELL_SHA256: raise ValueError("Android shell differs from pinned image")
+        shell.chmod(0o755)
+        shutil.copy2(shell, target)
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -171,11 +200,14 @@ def install(destination, art_root, archive=None):
         actual.pop("bifrost-framework.json", None)
         if (metadata.get("image_sha256") != IMAGE_SHA256 or
                 not isinstance(metadata.get("files"), dict) or
-                without_bionic_links(actual) != without_bionic_links(metadata["files"])):
+                without_shell(actual) != without_shell(metadata["files"])):
             raise ValueError("Refusing modified framework runtime")
         if metadata.get("codecs", {}).get("adapter_fingerprint") != android_codecs.fingerprint():
             raise ValueError("Codec adapters changed; provision a fresh framework directory")
-        return update_bionic_inventory(destination, metadata, manifest)
+        install_bionic_links(destination)
+        install_shell(destination, archive)
+        return update_inventory(metadata, manifest, {**metadata["files"], **BIONIC_LINKS,
+                                                     "system/bin/sh": shell_inventory()})
     android_art.install(art_root)  # verifies the pinned ART layer
     archive = image_archive(archive)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -185,6 +217,7 @@ def install(destination, art_root, archive=None):
         shutil.copytree(art_root.resolve(), root, symlinks=True)
         (root / "bifrost-art.json").unlink()
         system, _ = extract_system(archive, work)
+        install_shell(root, system=system)
         for name, target in boot_image_entries(system):
             path = root / f"system/framework/arm64/{name}"
             if target is None:

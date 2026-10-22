@@ -235,6 +235,11 @@ def build(runtime, output):
                                  str(bionic / "libc.so"), "-o", str(managed / "mapper.bifrost.so")],
                        check=True)
         names.append("managed/mapper.bifrost.so")
+        subprocess.run(common + ["-fPIE", "-pie", "-Wl,--dynamic-linker=/system/bin/linker64",
+                                 str(ROOT / "Tests/Unit/android_bionic_start.S"),
+                                 str(ROOT / "Guest/Android/Launchers/am.c"), str(bionic / "libc.so"),
+                                 "-Wl,--allow-shlib-undefined", "-o", str(staging / "managed/am")], check=True)
+        names.append("managed/am")
         thunked_android = [n for n in groups["libandroid.so"]
                            if not n.startswith(("AConfiguration_", "ALooper_", "AChoreographer_"))]
         # Managed Java MessageQueue polls the image's libutils Looper. Native

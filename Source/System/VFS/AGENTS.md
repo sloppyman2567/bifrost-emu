@@ -38,3 +38,5 @@
 - Keep virtual nodes separate from host path translation. Preserve errno,
   symlink, directory iteration and host device behavior across that boundary.
 - Run filesystem sandbox regressions and the affected proc/sys/device probes.
+
+- Raw TCGETS/TCSETS use the 36-byte kernel termios layout, never host libc struct termios (which can be larger). Preserve guest buffer bounds on both real and synthetic TTY paths.

@@ -418,6 +418,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 fclose(f);
                 f = nullptr;
             }
+            if (!is_aarch64 && emu.android_runtime_) {
+                ret_err(file_existed ? ENOEXEC : ENOENT);
+                return 0;
+            }
             if (!is_aarch64) {
                 // ── Multi-call binary redirect ────────────────────────
                 // The requested binary is not AArch64 (or doesn't exist).
@@ -517,6 +521,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // valid guest state. Fresh cursors: the old heap is gone, so
             // new mmaps start from a fresh-process layout.
             emu.kill_other_threads(cpu);
+            // Device guards describe the old address space. Broker Binder
+            // nodes reject RPC from a fork child (owner PID), so clearing its
+            // local alias cannot unmap the parent's receive arena.
+            emu.fds().invalidate_device_mappings(0, mem_.window_size());
             mem_.reset_allocator_cursors();
             // simulate execve's memory image replacement. On real Linux,
             // execve() removes ALL old mappings (heap, mmap, etc.) and
@@ -552,7 +560,35 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // Reload the ELF into the existing Memory. The ElfLoader will
             // map new PT_LOAD segments. Old mappings remain but are
             // overwritten by the new binary's segments.
-            auto info = ElfLoader::load(mem_, elf_data);
+            ElfLoader::Options options;
+            options.apply_relocations = !emu.android_runtime_;
+            auto info = ElfLoader::load(mem_, elf_data, options);
+            uint64_t exec_entry = info.entry;
+            if (emu.android_runtime_) {
+                if ((info.interp != "/system/bin/linker64" &&
+                     info.interp != "/apex/com.android.runtime/bin/linker64") || !info.phdr_addr)
+                    throw EmuError("Android exec requires a Bionic linker64 and mapped program headers");
+                auto interpreter = emu.read_android_elf(info.interp);
+                ElfLoader::Options interpreter_options;
+                interpreter_options.apply_relocations = false;
+                interpreter_options.reserve_image = true;
+                auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
+                if (!loaded.interp.empty())
+                    throw EmuError("Android linker64 must not itself require PT_INTERP");
+                emu.name_elf_segments(info, path);
+                emu.name_elf_segments(loaded, info.interp);
+                emu.elf_path_ = path;
+                emu.vfs_.set_elf_path(path);
+                emu.prog_entry_ = info.entry;
+                emu.entry_ = exec_entry = loaded.entry;
+                emu.interp_base_ = loaded.base_addr;
+                emu.end_addr_ = info.end_addr;
+                emu.phdr_addr_ = info.phdr_addr;
+                emu.phnum_ = info.phnum;
+                emu.phent_ = info.phent;
+                emu.has_lse_ = info.has_lse || loaded.has_lse;
+                emu.dyn_linker_.reset();
+            }
             // execve resets process state: brk to the new image end,
             // caught signal handlers to default, pending signals and
             // altstack cleared. (sigmask preserved per POSIX.)
@@ -582,44 +618,51 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // TZ and all locale vars in execve'd processes. This meant
             // `toybox sh -c 'uptime'` showed UTC time even when the
             // parent shell had TZ set correctly.
-            const auto& envs = emu.guest_env().empty()
-                ? Emulator::build_default_guest_env()
-                : emu.guest_env();
-            std::vector<uint64_t> argv_addrs, envp_addrs;
-            uint64_t sp = emu.place_argument_strings(STACK_TOP, new_argv, envs,
-                                                     argv_addrs, envp_addrs);
-            // AT_RANDOM.
-            sp -= 16;
-            uint8_t rnd[16] = {0};
-            mem_.write(sp, rnd, 16);
-            uint64_t random_addr = sp;
-            // Build auxv.
-            std::vector<uint64_t> auxv = {
-                6, 4096,           // AT_PAGESZ
-                3, info.phdr_addr, // AT_PHDR
-                4, info.phent,     // AT_PHENT
-                5, info.phnum,     // AT_PHNUM
-                9, info.entry,     // AT_ENTRY
-                25, random_addr,   // AT_RANDOM
-                16, 0x3ff,         // AT_HWCAP (FP+ASIMD+ATOMICS)
-                7, 0,              // AT_BASE
-                0, 0,              // AT_NULL
-            };
-            // Compute total table size and align SP to 16.
-            uint64_t argc = new_argv.size();
-            uint64_t table_size = 8 + 8 * (argc + 1) + 8 * (envp_addrs.size() + 1) + 8 * auxv.size();
-            sp -= table_size;
-            sp &= ~0xFULL;
-            uint64_t p = sp;
-            auto push = [&](uint64_t v) { mem_.store<uint64_t>(p, v); p += 8; };
-            push(argc);
-            for (auto a : argv_addrs) push(a);
-            push(0);
-            for (auto e : envp_addrs) push(e);
-            push(0);
-            for (auto v : auxv) push(v);
+            uint64_t sp;
+            if (emu.android_runtime_) {
+                emu.vdso_base_ = emu.vdso_size_ = 0;
+                emu.load_vdso();
+                sp = emu.build_initial_stack(STACK_TOP, new_argv, info);
+            } else {
+                const auto& envs = emu.guest_env().empty()
+                    ? Emulator::build_default_guest_env()
+                    : emu.guest_env();
+                std::vector<uint64_t> argv_addrs, envp_addrs;
+                sp = emu.place_argument_strings(STACK_TOP, new_argv, envs,
+                                                         argv_addrs, envp_addrs);
+                // AT_RANDOM.
+                sp -= 16;
+                uint8_t rnd[16] = {0};
+                mem_.write(sp, rnd, 16);
+                uint64_t random_addr = sp;
+                // Build auxv.
+                std::vector<uint64_t> auxv = {
+                    6, 4096,           // AT_PAGESZ
+                    3, info.phdr_addr, // AT_PHDR
+                    4, info.phent,     // AT_PHENT
+                    5, info.phnum,     // AT_PHNUM
+                    9, info.entry,     // AT_ENTRY
+                    25, random_addr,   // AT_RANDOM
+                    16, 0x3ff,         // AT_HWCAP (FP+ASIMD+ATOMICS)
+                    7, 0,              // AT_BASE
+                    0, 0,              // AT_NULL
+                };
+                // Compute total table size and align SP to 16.
+                uint64_t argc = new_argv.size();
+                uint64_t table_size = 8 + 8 * (argc + 1) + 8 * (envp_addrs.size() + 1) + 8 * auxv.size();
+                sp -= table_size;
+                sp &= ~0xFULL;
+                uint64_t p = sp;
+                auto push = [&](uint64_t v) { mem_.store<uint64_t>(p, v); p += 8; };
+                push(argc);
+                for (auto a : argv_addrs) push(a);
+                push(0);
+                for (auto e : envp_addrs) push(e);
+                push(0);
+                for (auto v : auxv) push(v);
+            }
             // Set CPU state for the new program.
-            cpu.pc = info.entry;
+            cpu.pc = exec_entry;
             cpu.sp = sp;
             cpu.pstate = 0;
             cpu.running = true;
@@ -645,13 +688,16 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(cpu.sp),
                         cpu.tid);
             }
-            // Set up a fresh TLS scratch area (like load_elf_file does).
-            const uint64_t TLS_SCRATCH_SIZE = 65536;
-            uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
-            cpu.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
-            cpu.tpidrro_el0 = cpu.tpidr_el0;
-            // Map the zero page (NULL deref returns 0).
-            mem_.map_range(0, 4096);
+            if (emu.android_runtime_) {
+                // Bionic's interpreter establishes the new process TLS itself.
+                cpu.tpidr_el0 = cpu.tpidrro_el0 = 0;
+            } else {
+                const uint64_t TLS_SCRATCH_SIZE = 65536;
+                uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
+                cpu.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
+                cpu.tpidrro_el0 = cpu.tpidr_el0;
+                mem_.map_range(0, 4096);
+            }
             // Return 0 to indicate execve succeeded (the syscall doesn't
             // actually return on success — we just set PC to the entry
             // point and continue).

@@ -3506,3 +3506,17 @@ memory growth in a longer/different run. Evidence:
 [thread/cache trace](../build/android-spongebob-sensor-memory-final/jit.log),
 [memory samples](../build/android-spongebob-sensor-memory-final/memory.jsonl),
 [result](../build/android-spongebob-sensor-memory-final/jit.json).
+
+### Android HOME regression
+
+`PackageTests.test_managed_home_and_resume` uses `Managed.Home` to request HOME
+twice, with an offscreen Asgard launcher and a windowless plugin. It verifies
+one Activity creation, two pause/stop/restart/resume cycles and final destroy.
+Pass `--plugin build/release-sdl1-gl1/android_window_plugin_fixture.so` to
+`Scripts/Android/test_android_package.py` to keep this test off the desktop.
+`HomeCommandTests` checks command parsing, repeated HOME and launcher card
+state. `android_bionic_bootstrap` checks TCGETS buffer boundaries and a real
+fork/exec through Bionic (constructors, TLS, interpreter/vDSO auxv, executable
+path, stack bounds and parent Binder-arena survival). `test-android-window-plugin` checks visibility calls
+and old-descriptor ENOTSUP. These checks do not establish desktop focus,
+Java Runtime.exec/vfork support or game playability.

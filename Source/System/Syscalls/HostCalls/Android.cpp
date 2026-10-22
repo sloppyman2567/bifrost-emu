@@ -245,6 +245,10 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(manager.set_fixed_window(static_cast<int32_t>(cpu.regs[1]),
                                                   static_cast<int32_t>(cpu.regs[2])));
             }
+            else if (cpu.regs[0] == 22) { // HOME/task return: retain the host window and surfaces.
+                if (cpu.regs[1] > 1) ret_host(-EINVAL);
+                else ret_host(manager.set_task_visible(cpu.regs[1] != 0));
+            }
             else ret_host(-EINVAL);
             return 0;
         }

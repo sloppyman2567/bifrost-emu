@@ -41,6 +41,9 @@ int main(int argc, char **argv) {
   {
     frost::AndroidSurfaceManager manager(std::move(backend));
     CHECK(manager.open_host_window());
+    CHECK(manager.set_task_visible(false) == 0);
+    CHECK(manager.set_task_visible(true) == 0);
+    CHECK(contents(log).find("task-hide\ntask-show\n") != std::string::npos);
     CHECK(manager.host_native_window() == (uint64_t(800) << 32 | 600));
     CHECK(manager.native_display() != nullptr);
     mode("resize-fail");
@@ -96,7 +99,7 @@ int main(int argc, char **argv) {
     CHECK(!manager.install_window_backend(frost::make_sdl_android_window_backend()));
     // Destructor must close the owned window while the DSO is resident.
   }
-  CHECK(contents(log) == "create\nopen\nclose\ndestroy\nunload\n");
+  CHECK(contents(log) == "create\nopen\ntask-hide\ntask-show\nclose\ndestroy\nunload\n");
   // Poll has its own positive-success contract; poison is discarded.
   auto polling = frost::load_android_window_backend(argv[1], error);
   CHECK(polling);
@@ -186,6 +189,7 @@ int main(int argc, char **argv) {
   mode("old-size");
   auto old = frost::load_android_window_backend(argv[1], error);
   CHECK(old && error.empty());
+  CHECK(old->set_task_visible(false) == -ENOTSUP);
   std::ofstream(log, std::ios::trunc).close();
   CHECK(old->show_popup(1, 0, 0, 1, 1, pixels) == -ENOTSUP);
   old->remove_popup(1);

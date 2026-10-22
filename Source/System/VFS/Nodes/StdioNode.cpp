@@ -51,9 +51,9 @@ int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
     if (fake_tty && request == 0x5401) {  // TCGETS
         // First try the real ioctl. If it succeeds, the host fd IS a
         // TTY — return the real termios.
-        struct termios t;
+        KernelTermios t{};
         if (::ioctl(fd_, TCGETS, &t) == 0) {
-            try { mem.write(argp, &t, sizeof(t)); } catch (...) {}
+            try { mem.write(argp, &t, sizeof(t)); } catch (...) { return -EFAULT; }
             return 0;
         }
         // Host fd is NOT a TTY. Return a fake termios struct so
@@ -80,7 +80,7 @@ int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
         t.c_cc[VWERASE] = 0x17;  // ^W
         t.c_cc[VLNEXT] = 0x16;   // ^V
         t.c_cc[VEOL2] = 0;
-        try { mem.write(argp, &t, sizeof(t)); } catch (...) {}
+        try { mem.write(argp, &t, sizeof(t)); } catch (...) { return -EFAULT; }
         return 0;
     }
     int r = dispatch_terminal_ioctl(fd_, request, argp, mem);

@@ -82,6 +82,47 @@ final class FrameworkActivities {
     private Object thread, loaded;
     private Instrumentation instrumentation;
     private Application application;
+    private volatile boolean background;
+    private long nextTaskPoll;
+    boolean isBackground() { return background; }
+
+    static boolean homeIntent(Intent intent) {
+        if (!Intent.ACTION_MAIN.equals(intent.getAction()) || !intent.hasCategory(Intent.CATEGORY_HOME)
+                || intent.getComponent() != null || intent.getPackage() != null) return false;
+        for (String category : intent.getCategories())
+            if (!Intent.CATEGORY_HOME.equals(category) && !Intent.CATEGORY_DEFAULT.equals(category)) return false;
+        return true;
+    }
+
+    private void taskVisible(boolean visible) throws Exception {
+        if (background == !visible) return;
+        int error = ManagedLauncher.setTaskVisible(visible);
+        if (error != 0) throw new IllegalStateException("host task visibility: " + error);
+        background = !visible;
+        if (background) {
+            List<Record> records;
+            synchronized (this) { records = new ArrayList<>(stack); }
+            for (int i = records.size() - 1; i >= 0; --i) stop(records.get(i).activity);
+        } else {
+            List<Record> revealed = ensureVisibility();
+            Record record = top();
+            if (record != null && !record.activity.isFinishing() && !resumedState(record.activity))
+                resume(record.activity);
+            for (Record each : revealed) setVisible(each.activity, true);
+        }
+        FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "task_state")
+                .put("background", background));
+        System.out.println(background ? "APP_TASK_BACKGROUND" : "APP_TASK_FOREGROUND");
+    }
+
+    void pollTask() throws Exception {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now < nextTaskPoll || System.getenv("ASGARD_PROCESS_TOKEN") == null) return;
+        nextTaskPoll = now + 100;
+        org.json.JSONObject command = FrameworkProcessRuntime.host(
+                new org.json.JSONObject().put("operation", "poll_task"));
+        if (command.has("visible")) taskVisible(command.getBoolean("visible"));
+    }
 
     FrameworkActivities(Map<IBinder, Integer> orientations, FrameworkDisplay displays,
             FrameworkPackages packages, FrameworkProcessRuntime processes) {
@@ -135,6 +176,10 @@ final class FrameworkActivities {
             if (main == null) throw new UnsupportedOperationException("activity_task.startActivity");
         }
         ComponentName component = intent.getComponent();
+        if (homeIntent(intent)) {
+            FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "home"));
+            return START_SUCCESS;
+        }
         if (component == null && ACTION_REQUEST_PERMISSIONS.equals(intent.getAction())
                 && FrameworkPackages.PERMISSION_CONTROLLER.equals(intent.getPackage())) {
             String[] requested = intent.getStringArrayExtra(EXTRA_REQUEST_PERMISSIONS_NAMES);
@@ -272,7 +317,7 @@ final class FrameworkActivities {
         Record caller = resultTo != null && requestCode >= 0 ? find(resultTo) : null;
         Record below = top();
         // The caller pauses before the new Activity is created.
-        if (below != null) pause(below.activity);
+        if (below != null && resumedState(below.activity)) pause(below.activity);
         Binder token = new Binder();
         orientations.put(token, info.screenOrientation);
         Context context = (Context) method(Class.forName("android.app.ContextImpl"), "createActivityContext",
@@ -297,9 +342,11 @@ final class FrameworkActivities {
             instrumentation.callActivityOnPostCreate(activity, null);
         }
         if (!activity.isFinishing()) {
-            resume(activity);
-            show(activity);
-            System.out.println("APP_ACTIVITY_RESUMED " + info.name);
+            if (!background) {
+                resume(activity);
+                show(activity);
+                System.out.println("APP_ACTIVITY_RESUMED " + info.name);
+            }
             // Once the new Activity is visible, the ones it covers stop.
             for (Record revealed : ensureVisibility()) setVisible(revealed.activity, true);
         }
@@ -338,7 +385,7 @@ final class FrameworkActivities {
         List<Record> records;
         synchronized (this) { records = new ArrayList<>(stack); }
         List<Record> revealed = new ArrayList<>();
-        boolean covered = false;
+        boolean covered = background;
         for (int i = records.size() - 1; i >= 0; i--) {
             Record record = records.get(i);
             if (record.activity.isFinishing()) continue;
@@ -476,6 +523,7 @@ final class FrameworkActivities {
     // ActivityThread.performPauseActivity, then the caller's result and
     // resume, then performStopActivity and handleDestroyActivity.
     private void destroy(Record record, boolean resumeBelow) throws Exception {
+        resumeBelow &= !background;
         Activity activity = record.activity;
         Record below;
         boolean wasTop;
@@ -619,8 +667,8 @@ final class FrameworkActivities {
         setHidden(info, "userId", android.os.Process.myUid() / 100000);
         setHidden(info, "displayId", 0);
         setHidden(info, "lastActiveTime", android.os.SystemClock.elapsedRealtime());
-        setHidden(info, "isFocused", true);
-        setHidden(info, "isVisible", true);
+        setHidden(info, "isFocused", !background);
+        setHidden(info, "isVisible", !background);
         setHidden(info, "topActivityInfo", application.getPackageManager().getActivityInfo(top.getComponentName(), 0));
         ((android.content.res.Configuration) hiddenField(info, "configuration"))
                 .setTo(top.getResources().getConfiguration());

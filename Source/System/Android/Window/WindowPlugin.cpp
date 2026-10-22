@@ -40,6 +40,12 @@ public:
     }
     // module_ is closed after the plugin's last callback returns.
   }
+  int set_task_visible(bool visible) override {
+    if (api_.struct_size < offsetof(bifrost_android_window_plugin_v2, set_task_visible)
+                              + sizeof(api_.set_task_visible) || !api_.set_task_visible)
+      return -ENOTSUP;
+    return status(api_.set_task_visible(instance_, visible ? 1u : 0u));
+  }
   int create() {
     int result = status(api_.create(&instance_));
     created_ = result == 0 && instance_ != nullptr;

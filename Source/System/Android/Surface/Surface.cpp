@@ -104,6 +104,10 @@ void AndroidSurfaceManager::display_size(int32_t& width, int32_t& height) const 
     height = known ? std::max(display_h, height_) : height_;
 }
 
+int AndroidSurfaceManager::set_task_visible(bool visible) {
+    return window_backend_->set_task_visible(visible);
+}
+
 int AndroidSurfaceManager::set_window_identity(const std::string& title, const uint8_t* rgba,
                                                int32_t width, int32_t height) {
     if (!window_open_) return -ENODEV;

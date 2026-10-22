@@ -167,6 +167,7 @@ public:
     // Install at startup, before a host window or guest surface exists.
     bool install_window_backend(std::unique_ptr<AndroidWindowBackend> backend);
     const char* window_backend_name() const { return window_backend_->name(); }
+    int set_task_visible(bool visible);
 
     // ── NativeActivity lifecycle (v2) ──────────────────────────────────
     // ANativeActivityCallbacks slots (MODERN NDK layout — the first five

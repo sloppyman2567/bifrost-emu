@@ -1,9 +1,16 @@
 """Desktop game library using the same CLI and process supervisor as terminal launches."""
 import html
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import socket
+import stat
+import struct
+import subprocess
 import sys
+import tempfile
 import time
 
 from android_package import PACKAGE, ROOT
@@ -11,6 +18,42 @@ from android_settings import BACK_KEYS, NETWORKS, load as load_settings, save as
 
 ACTIVE = ("preparing", "starting", "running", "stopping")
 LAUNCHABLE = ("managed_activity", "native_activity")
+
+
+def launcher_socket(state):
+    identity = hashlib.sha256(os.fsencode(Path(state).resolve())).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / f"asgard-launcher-{os.getuid()}-{identity}.sock"
+
+
+def activate_existing(state):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(str(launcher_socket(state)))
+            _, uid, _ = struct.unpack('3i', client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if uid != os.getuid(): raise PermissionError('Foreign Asgard launcher')
+            client.sendall(b'activate\n')
+            return client.makefile('rb').readline(16) == b'ok\n'
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False
+
+
+def activate_launcher(state):
+    if activate_existing(state): return
+    process = subprocess.Popen([sys.executable, str(ROOT / 'Scripts/Android/asgard.py'),
+                                '--state-root', str(Path(state).resolve()), 'launcher'],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            if activate_existing(state): return
+        except socket.timeout:
+            pass
+        if process.poll() is not None:
+            raise RuntimeError('Asgard launcher could not open')
+        time.sleep(.05)
+    raise RuntimeError('Asgard launcher did not become ready')
 STATES = {"preparing": "Starting", "starting": "Starting", "running": "Running", "stopping": "Stopping",
           "stopped": "Stopped", "exited": "Exited normally", "closed": "Closed normally",
           "failed": "Failed", "timed_out": "Timed out", "interrupted": "Ended unexpectedly",
@@ -38,6 +81,8 @@ def card_state(app, pending=None):
     if state in ("preparing", "starting"):
         return {"action": "stop", "enabled": True, "badge": "Starting", "text": "Stop"}
     if state == "running":
+        if app["session"].get("background"):
+            return {"action": "resume", "enabled": True, "badge": "Running", "text": "Return to app"}
         return {"action": "stop", "enabled": True, "badge": "Running", "text": "Stop"}
     if state == "stopping":
         return {"action": "stop", "enabled": False, "badge": "Running", "text": "Stopping…"}
@@ -120,6 +165,8 @@ def read_findings(path, limit=16 * 1024 * 1024):
 
 
 def show(state):
+    import fcntl
+    state = Path(state).resolve()
     try:
         from PyQt6.QtCore import QProcess, QProcessEnvironment, QRectF, QTimer, Qt, QUrl
         from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPainterPath, QPalette, QPixmap
@@ -130,7 +177,22 @@ def show(state):
     except ImportError as error:
         raise ValueError("The desktop launcher requires PyQt6; the CLI works without it") from error
 
+    from PyQt6.QtNetwork import QLocalServer
     application = QApplication.instance() or QApplication([sys.argv[0]])
+    directory = state / '.asgard'
+    directory.mkdir(parents=True, exist_ok=True)
+    server = QLocalServer(application)
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+    with (directory / 'launcher.lock').open('a+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if activate_existing(state): return 0
+        path = launcher_socket(state)
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError('Refusing to replace foreign launcher socket')
+            path.unlink()
+        if not server.listen(str(path)): raise RuntimeError(server.errorString())
     application.setApplicationName("Asgard")
     card_width, icon_size, spacing = 240, 72, 16
     style = """
@@ -597,6 +659,12 @@ def show(state):
         def act(self, app):
             package = app["package"]
             if card_state(app, self.pending.get(package))["action"] == "stop": return self.stop_app(app)
+            if card_state(app, self.pending.get(package))["action"] == "resume":
+                def resumed(code, output):
+                    if code: self.show_notice(short_error(output), error=True, package=package)
+                    self.refresh()
+                self.command(["resume", package], resumed)
+                return
             args = launch_request(app, self.interpreter.isChecked(), self.trace.isChecked())
             self.pending[package] = "play"; self.render()
             def started(code, output):
@@ -761,4 +829,21 @@ def show(state):
             self.command(["install", path], installed)
 
     window = Library(); window.setStyleSheet(style); window.show()
+    def activate():
+        while server.hasPendingConnections():
+            client = server.nextPendingConnection()
+            def receive(client=client):
+                if not client.canReadLine(): return
+                if bytes(client.readLine(64)) != b'activate\n':
+                    client.abort(); return
+                if window.state != state:
+                    window.state = state; window.path.setText(str(state)); window.refresh()
+                window.showNormal(); window.raise_(); window.activateWindow()
+                client.write(b'ok\n'); client.flush(); client.disconnectFromServer()
+            client.readyRead.connect(receive)
+            client.disconnected.connect(client.deleteLater)
+            timer = QTimer(client); timer.setSingleShot(True)
+            timer.timeout.connect(client.abort); timer.start(1000)
+            receive()
+    server.newConnection.connect(activate)
     return application.exec()

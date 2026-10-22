@@ -20,6 +20,33 @@ OPEN_INTERVAL = 1.0
 SAME_LINK_WINDOW = 30.0
 
 
+def home_command(arguments):
+    """Parse the supported am start intent; leave unresolved intents as errors."""
+    if not isinstance(arguments, list) or not arguments or len(arguments) > 64 \
+            or any(not isinstance(a, str) or len(a) > 2048 for a in arguments):
+        raise ValueError('Invalid activity command')
+    if arguments[0] not in ('start', 'start-activity'):
+        raise ValueError('Supported activity command: am start')
+    action, categories, user = None, set(), 'current'
+    index = 1
+    while index < len(arguments):
+        option = arguments[index]
+        if index + 1 >= len(arguments): raise ValueError('Missing activity option value')
+        value = arguments[index + 1]; index += 2
+        if option == '-a': action = value
+        elif option == '-c': categories.add(value)
+        elif option == '--user': user = value
+        elif option == '-f':
+            flags = int(value, 0)
+            if not 0 <= flags <= 0xffffffff: raise ValueError('Invalid intent flags')
+        else: raise ValueError('Unsupported activity option: ' + option)
+    if user not in ('0', 'current'): raise ValueError('Only Android user 0 is available')
+    if action != 'android.intent.action.MAIN' or 'android.intent.category.HOME' not in categories \
+            or categories - {'android.intent.category.HOME', 'android.intent.category.DEFAULT'}:
+        raise ValueError('Activity intent is not resolved')
+    return True
+
+
 def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotonic, which=shutil.which):
     """Open an http(s) link from a guest app in the host's default browser.
 
@@ -45,10 +72,13 @@ def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotoni
 
 class ProcessHost:
     def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None,
-                 activities=None):
+                 activities=None, task_session=None, state=None):
         self.root, self.emu = Path(root), str(emu)
         # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
         self.activities = activities
+        self.task_session, self.state = task_session, state
+        self.task_visible = None
+        self.home_active = False
         self.last_url = [-SAME_LINK_WINDOW, None]
         self.emu_args, self.environment = list(emu_args), dict(environment)
         self.dex, self.logs = dex, Path(logs)
@@ -97,6 +127,20 @@ class ProcessHost:
         self.listener.settimeout(.2)
         self.thread = threading.Thread(target=self.loop, name='AsgardProcessHost', daemon=True)
         self.thread.start()
+
+    def task(self, visible):
+        with self.lock:
+            self.task_visible = visible
+            if visible: self.home_active = False
+
+    def home(self):
+        if self.state is None: raise ValueError('HOME is unavailable outside an app session')
+        if not self.home_active:
+            from android_launcher import activate_launcher
+            activate_launcher(self.state)
+            self.home_active = True
+        self.task(False)
+        return dict(exit_code=0)
 
     @staticmethod
     def receive(client, size):
@@ -205,6 +249,20 @@ class ProcessHost:
                 response = self.activities.start(request['directory'])
             elif request['operation'] == 'open_url':
                 response = open_url(request['url'], self.last_url)
+            elif request['operation'] == 'home':
+                response = self.home()
+            elif request['operation'] == 'am':
+                home_command(request.get('argv'))
+                response = self.home()
+            elif request['operation'] == 'poll_task':
+                with self.lock:
+                    response = {} if self.task_visible is None else dict(visible=self.task_visible)
+                    self.task_visible = None
+            elif request['operation'] == 'task_state':
+                background = request.get('background')
+                if type(background) is not bool: raise ValueError('Invalid task state')
+                if self.task_session is not None: self.task_session.update(background=background)
+                response = {}
             elif request['operation'] == 'stop':
                 with self.lock:
                     child = self.children.get(request['key'])

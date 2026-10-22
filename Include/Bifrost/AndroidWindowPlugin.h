@@ -81,6 +81,9 @@ typedef struct bifrost_android_window_plugin_v2 {
     /* Nonblocking; 1=payload, 0=none, negative errno=failure. Called once per
      * BIFROST_WINDOW_TEXT event. */
     int32_t (*poll_text)(void *instance, bifrost_android_window_text_v2 *out);
+    /* Optional task visibility. 0=success, negative errno=failure. Hiding
+     * preserves the window and its surfaces; showing may request focus. */
+    int32_t (*set_task_visible)(void *instance, uint32_t visible);
 } bifrost_android_window_plugin_v2;
 /* Smallest valid v2 descriptor: every required callback, no optional ones. */
 #define BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE \

@@ -176,3 +176,5 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Run framework contracts and Bionic probes in both engines after boundary
   changes. Installed-app creation, surface startup and rendering checkpoints
   cover different behavior; report the checkpoint actually reached.
+
+- Managed HOME activates Asgard through ProcessHost, then changes task visibility on the guest main thread. Preserve Activity instances and pause/stop/restart/resume order; old window plugins must return ENOTSUP for missing visibility callbacks.

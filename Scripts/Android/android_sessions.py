@@ -127,6 +127,7 @@ def control(app, operation="status"):
 class Session:
     def __init__(self, app, package, uid, session_id=None):
         self.app = app
+        self.task_control = None
         self.id = session_id or uuid.uuid4().hex
         if len(self.id) != 32 or any(c not in "0123456789abcdef" for c in self.id):
             raise ValueError("Invalid session ID")
@@ -167,6 +168,11 @@ class Session:
                     request = json.loads(client.makefile("rb").readline(4097))
                     if not hmac.compare_digest(str(request.get("token", "")), self.data["token"]): continue
                     if request.get("operation") == "stop": self.stop.set()
+                    elif request.get("operation") == "resume":
+                        if self.task_control is None:
+                            client.sendall(json.dumps(dict(self.snapshot(), error="Task resume is unavailable")).encode() + b"\n")
+                            continue
+                        self.task_control(True)
                     elif request.get("operation") != "status": continue
                     client.sendall(json.dumps(self.snapshot()).encode() + b"\n")
                 except (OSError, ValueError): continue

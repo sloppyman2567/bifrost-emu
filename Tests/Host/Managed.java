@@ -15,6 +15,39 @@ import android.view.SurfaceView;
 
 /** Real ART/framework fixture: persistent data, Surface callbacks and finish. */
 public final class Managed extends Activity {
+    /** HOME preserves the Activity instance across HOME requests. */
+    public static final class Home extends Activity {
+        private int resumes, stops;
+        @Override public void onCreate(Bundle state) {
+            super.onCreate(state);
+            android.widget.TextView view = new android.widget.TextView(this);
+            view.setText("HOME lifecycle fixture");
+            setContentView(view);
+            System.out.println("HOME_CREATED");
+        }
+        @Override public void onResume() {
+            super.onResume();
+            final int round = ++resumes;
+            System.out.println("HOME_RESUMED " + round);
+            new Handler().postDelayed(() -> {
+                if (round <= 2) {
+                    startActivity(new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                            .addCategory(android.content.Intent.CATEGORY_HOME)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+                    System.out.println("HOME_INTENT_OK " + round);
+                }
+                else {
+                    if (round != 3 || stops != 2) throw new AssertionError("HOME lifecycle lost state");
+                    System.out.println("HOME_ALL_PASS");
+                    finish();
+                }
+            }, 750);
+        }
+        @Override public void onPause() { System.out.println("HOME_PAUSED"); super.onPause(); }
+        @Override public void onStop() { ++stops; System.out.println("HOME_STOPPED"); super.onStop(); }
+        @Override public void onRestart() { System.out.println("HOME_RESTARTED"); super.onRestart(); }
+        @Override public void onDestroy() { System.out.println("HOME_DESTROYED"); super.onDestroy(); }
+    }
     private static int providerOrder, providerCreates;
     private static boolean applicationStarted;
     public static final class App extends Application {

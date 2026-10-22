@@ -792,7 +792,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     """
     environment = android_framework.install(framework, art)["environment"]
     adapter_manifest = json.loads((adapters / "adapters.json").read_text())
-    adapter_names = ["libbifrost-activity.so"] + [
+    adapter_names = ["libbifrost-activity.so", "managed/am"] + [
         "managed/" + name for name in ("libandroid.so", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so",
                                       "libGLESv3.so", "libaaudio.so", "libOpenSLES.so",
                                       "mapper.bifrost.so")]
@@ -840,6 +840,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         shutil.copy2(dex, local / "launcher.dex")
         (local / "launcher.dex").chmod(0o444)  # ART rejects writable DEX for ordinary app UIDs.
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
+        shutil.copy2(adapters / "managed/am", fresh / "system/bin/am")
         install_managed_graphics(fresh, adapters / "managed")
         install_settings_key(fresh, settings_key)
         # A system app's code is already in the provisioned image.
@@ -900,6 +901,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                       ROOT / "build/android-art/rootfs",
                                       ROOT / "build/android-adapters", dex, media_mask)
         guest_env = dict(guest_env, **network.result())
+        guest_env["PATH"] = "/system/bin:/apex/com.android.runtime/bin"
     # A system app (microG) has no installed base.apk to compile; ART's JIT runs it.
     if not metadata.get("system"):
         dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
@@ -944,7 +946,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     list(emu_args) + (["--no-jit"] if no_jit else [])
                     + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
                 environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args,
-                media_mask=media_mask, activities=relay)))
+                media_mask=media_mask, activities=relay, task_session=process_session, state=app.parent)))
+            process_session.task_control = process_host.task
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]
             services.enter_context(closing(LogdReceiver(guest_root, sink)))

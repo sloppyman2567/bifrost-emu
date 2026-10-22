@@ -55,3 +55,5 @@
   earlier handler would silently shadow it. Bifrost-private calls (>= 0x1000)
   belong in `HostCalls/`. Families outside the `Emulator` friend list use its
   public accessors.
+
+- Android execve enters the confined Bionic interpreter with fresh vDSO/auxv and reset TLS; never reuse the previous vDSO address or relocate the executable before linker64.

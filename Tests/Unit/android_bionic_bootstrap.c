@@ -3,6 +3,10 @@
 #include "../../Include/Bifrost/BinderABI.h"
 typedef unsigned long pthread_t;
 extern char* getenv(const char*);
+extern int fork(void);
+extern int execve(const char*, char* const*, char* const*);
+extern int waitpid(int, int*, int);
+extern void _exit(int);
 extern int strcmp(const char*, const char*);
 extern int __system_property_get(const char*, char*);
 extern int open(const char*, int, ...);
@@ -158,7 +162,13 @@ static void* worker(void* unused) {
     return (void*)(unsigned long)(tls_value == 99 && *__errno() == 22 ? 42 : 2);
 }
 int main(int argc, char** argv, char** envp) {
-    (void)argv; (void)envp;
+    if (argc == 2 && !strcmp(argv[1], "--exec-child")) {
+        if (constructed != 41 || tls_value != 17 || !getauxval(7) || !getauxval(33) ||
+            !getauxval(9) || strcmp((const char*)getauxval(31), "/data/local/tmp/bootstrap") ||
+            check_main_stack()) return 16;
+        printf("Bionic: exec linker, auxv, constructors and TLS passed\n");
+        return 0;
+    }
     if (argc != 1 || constructed != 41 || tls_value != 17) return 1;
     int identity = check_identity();
     if (identity) { printf("Android app identity check failed: %d\n", identity); return 11; }
@@ -173,6 +183,32 @@ int main(int argc, char** argv, char** envp) {
     printf("Bionic: service-manager readiness %s passed\n", ready);
     if (getauxval(6) != 4096 || getpagesize() != 4096 || !getauxval(7)) return 2;
     printf("Bionic: constructors and auxv passed (page=%d)\n", getpagesize());
+    // Raw Linux TCGETS has a 36-byte payload, regardless of libc's termios.
+    unsigned char terminal[80];
+    for (int fd = 0; fd < 3; ++fd) {
+        for (unsigned i = 0; i < sizeof(terminal); ++i) terminal[i] = 0xa5;
+        ioctl(fd, 0x5401UL, terminal);
+        for (unsigned i = 36; i < sizeof(terminal); ++i)
+            if (terminal[i] != 0xa5) { printf("TCGETS overwrote byte %u\n", i); return 15; }
+    }
+    printf("Bionic: TCGETS kernel payload bounds passed\n");
+    // Keep a Binder receive arena across fork: exec must discard its old
+    // mprotect guard without changing the parent's mapping or descriptor.
+    int inherited_binder = open("/dev/binder", 2);
+    if (inherited_binder < 0) return 18;
+    void* inherited_arena = mmap(0, 65536, 1, 2, inherited_binder, 0);
+    if (inherited_arena == (void*)-1) return 18;
+    int child = fork(), status = 0;
+    if (child < 0) return 16;
+    if (!child) {
+        char* arguments[] = {"bootstrap", "--exec-child", 0};
+        execve("/data/local/tmp/bootstrap", arguments, envp);
+        _exit(17);
+    }
+    if (waitpid(child, &status, 0) != child || status) return 17;
+    int binder_version = 0;
+    if (ioctl(inherited_binder, BF_BINDER_VERSION, &binder_version) || binder_version != 8 ||
+        munmap(inherited_arena, 65536) || close(inherited_binder)) return 18;
     int stack = check_main_stack();
     if (stack) { printf("main stack check failed: %d\n", stack); return 9; }
     printf("Bionic: /proc/self/maps and main-thread stack bounds passed\n");

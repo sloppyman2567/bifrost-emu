@@ -40,50 +40,51 @@
 #include <vector>
 namespace arm64emu {
 // ── ELF loading ───────────────────────────────────────────────────────
+// Read Android runtime images through the same confined VFS as guest opens.
+std::vector<uint8_t> Emulator::read_android_elf(const std::string& guest_path) {
+    int err = 0;
+    auto node = vfs_.open(guest_path, O_RDONLY, 0, &err);
+    if (!node) throw EmuError("cannot open Android runtime ELF " + guest_path +
+                              ": " + strerror(err < 0 ? -err : ENOENT));
+    struct stat st{};
+    if (node->fstat(&st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size > 512LL * 1024 * 1024)
+        throw EmuError("invalid or oversized Android runtime ELF " + guest_path);
+    std::vector<uint8_t> bytes(static_cast<size_t>(st.st_size));
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        ssize_t n = node->read(offset, bytes.data() + offset, bytes.size() - offset);
+        if (n == -EINTR) continue;
+        if (n <= 0) throw EmuError("short read of Android runtime ELF " + guest_path);
+        offset += static_cast<size_t>(n);
+    }
+    return bytes;
+}
+// The loader copies ELF bytes; name its PT_LOAD pages in /proc/self/maps
+// after the file, as the kernel names its own mappings (resolved path).
+void Emulator::name_elf_segments(const ElfLoader::Loaded& image, const std::string& guest_path) {
+    Memory::FileIdentity file;
+    file.path = guest_path;
+    int err = 0;
+    if (auto node = vfs_.open(guest_path, O_RDONLY, 0, &err)) {
+        struct stat st{};
+        if (node->fstat(&st) == 0) {
+            file.dev = st.st_dev;
+            file.inode = st.st_ino;
+        }
+        std::string resolved;
+        if (node->host_fd() >= 0 &&
+            yggdrasil::Yggdrasil::fd_link_target(node->host_fd(), resolved) == 0)
+            file.path = resolved;
+    }
+    for (const auto& segment : image.segments)
+        mem_.name_image(segment.addr, segment.file_end - segment.addr, segment.offset, file);
+}
+
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
                             path.empty() || path.front() != '/'))
         throw EmuError("Android runtime bootstrap requires --rootfs and an absolute guest ELF path");
-    // Read Android runtime images through the same confined VFS as guest opens.
-    auto read_android_elf = [this](const std::string& guest_path) {
-        int err = 0;
-        auto node = vfs_.open(guest_path, O_RDONLY, 0, &err);
-        if (!node) throw EmuError("cannot open Android runtime ELF " + guest_path +
-                                  ": " + strerror(err < 0 ? -err : ENOENT));
-        struct stat st{};
-        if (node->fstat(&st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-            st.st_size > 512LL * 1024 * 1024)
-            throw EmuError("invalid or oversized Android runtime ELF " + guest_path);
-        std::vector<uint8_t> bytes(static_cast<size_t>(st.st_size));
-        size_t offset = 0;
-        while (offset < bytes.size()) {
-            ssize_t n = node->read(offset, bytes.data() + offset, bytes.size() - offset);
-            if (n == -EINTR) continue;
-            if (n <= 0) throw EmuError("short read of Android runtime ELF " + guest_path);
-            offset += static_cast<size_t>(n);
-        }
-        return bytes;
-    };
-    // The loader copies ELF bytes; name its PT_LOAD pages in /proc/self/maps
-    // after the file, as the kernel names its own mappings (resolved path).
-    auto name_segments = [this](const ElfLoader::Loaded& image, const std::string& guest_path) {
-        Memory::FileIdentity file;
-        file.path = guest_path;
-        int err = 0;
-        if (auto node = vfs_.open(guest_path, O_RDONLY, 0, &err)) {
-            struct stat st{};
-            if (node->fstat(&st) == 0) {
-                file.dev = st.st_dev;
-                file.inode = st.st_ino;
-            }
-            std::string resolved;
-            if (node->host_fd() >= 0 &&
-                yggdrasil::Yggdrasil::fd_link_target(node->host_fd(), resolved) == 0)
-                file.path = resolved;
-        }
-        for (const auto& segment : image.segments)
-            mem_.name_image(segment.addr, segment.file_end - segment.addr, segment.offset, file);
-    };
     // IFUNC resolvers can read Linux auxiliary data at low addresses while
     // the dynamic linker is running. Keep the emulator's zero page mapped
     // before loading or relocating any guest objects. The Android profile
@@ -271,7 +272,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     load_options.apply_relocations = !android_runtime_;
     load_options.defer_relocations_to_interp = guest_linker_;
     auto info = ElfLoader::load(mem_, data, load_options);
-    name_segments(info, path);
+    name_elf_segments(info, path);
     entry_ = info.entry;
     prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
@@ -306,7 +307,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
         if (!loaded.interp.empty())
             throw EmuError("Android linker64 must not itself require PT_INTERP");
-        name_segments(loaded, info.interp);
+        name_elf_segments(loaded, info.interp);
         dyn_linker_.reset();
         entry_ = loaded.entry;
         interp_base_ = loaded.base_addr;
@@ -361,7 +362,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
         if (!loaded.interp.empty())
             throw EmuError("guest linker " + info.interp + " must not itself require PT_INTERP");
-        name_segments(loaded, info.interp);
+        name_elf_segments(loaded, info.interp);
         entry_ = loaded.entry;
         interp_base_ = loaded.base_addr;
         has_lse_ = has_lse_ || loaded.has_lse;

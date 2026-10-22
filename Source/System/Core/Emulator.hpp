@@ -754,6 +754,8 @@ private:
                                     const std::vector<std::string>& env,
                                     std::vector<uint64_t>& argv_addrs,
                                     std::vector<uint64_t>& envp_addrs);
+    std::vector<uint8_t> read_android_elf(const std::string& path);
+    void name_elf_segments(const ElfLoader::Loaded& image, const std::string& path);
     uint64_t build_initial_stack(uint64_t stack_top,
                                  std::vector<std::string>& argv,
                                  ElfLoader::Loaded& info);

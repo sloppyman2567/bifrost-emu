@@ -44,6 +44,7 @@ public:
   virtual int set_text_input(bool, int32_t, int32_t, int32_t, int32_t) { return -ENOTSUP; }
   virtual int poll_text(AndroidWindowText &text) { text = {}; return 0; }
   virtual void set_visible(bool) {}
+  virtual int set_task_visible(bool) { return -ENOTSUP; }
   virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
   // An open window's buffer size in host pixels. open() takes the window's
   // size in desktop coordinates; on a scaled display the two differ.

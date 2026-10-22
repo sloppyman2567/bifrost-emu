@@ -132,6 +132,7 @@ public final class ManagedLauncher {
     private static native int pollWindow(long[] event);
     // Op 20: starts or stops the host's text input; the rectangle anchors its composition.
     private static native int setTextInput(boolean active, int x, int y, int width, int height);
+    static native int setTaskVisible(boolean visible);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
     private static native int fixWindow(int width, int height); // non-resizable app: scale the host window to fit
     private static native int displaySize(long[] size); // host display pixel width, height
@@ -1612,9 +1613,10 @@ public final class ManagedLauncher {
                             }
                         }
                         if (event[0] == 0) break;
-                        dispatch(root, event);
+                        if (!activities.isBackground()) dispatch(root, event);
                     }
                     activities.update();
+                    activities.pollTask();
                     traceWebViews(activities.all());
                     windows.render();
                 } catch (Exception error) {

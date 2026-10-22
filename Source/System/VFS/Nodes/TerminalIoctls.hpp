@@ -29,6 +29,13 @@
 #include <termios.h>
 #include <unistd.h>
 namespace arm64emu::yggdrasil {
+// Linux asm-generic TCGETS/TCSETS wire layout (also x86-64's kernel ABI).
+// libc's struct termios can be larger and must never cross this boundary.
+struct KernelTermios {
+    uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
+    uint8_t c_line, c_cc[19];
+};
+static_assert(sizeof(KernelTermios) == 36);
 // ── AArch64 Linux ioctl request numbers (from <asm-generic/ioctls.h>) ──
 // These match the values the guest AArch64 binary uses when it issues
 // an ioctl syscall. We hardcode them (instead of relying on the host's
@@ -76,7 +83,7 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
             return 0;
         }
         case ioctl_num::REQ_TCGETS: {
-            struct termios t;
+            KernelTermios t{};
             int r = ::ioctl(host_fd, TCGETS, &t);
             if (r < 0) return -errno;
             mem.write(argp, &t, sizeof(t));
@@ -85,7 +92,7 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
         case ioctl_num::REQ_TCSETS:
         case ioctl_num::REQ_TCSETSW:
         case ioctl_num::REQ_TCSETSF: {
-            struct termios t;
+            KernelTermios t{};
             mem.read(argp, &t, sizeof(t));
             // Map our generic constants back to the host's <termios.h>
             // values. On AArch64+glibc these are identical, but on

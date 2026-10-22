@@ -165,6 +165,11 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_openWindow(JNIEnv *env, jclass type, j
     return (jint)bifrost_window(2, width, height);
 }
 
+JNIEXPORT jint JNICALL Java_ManagedLauncher_setTaskVisible(JNIEnv *env, jclass type, jboolean visible) {
+    (void)env; (void)type;
+    return (jint)bifrost_window(22, visible != JNI_FALSE, 0);
+}
+
 JNIEXPORT jint JNICALL Java_ActivityProbe_pollWindow(JNIEnv *env, jclass type, jlongArray out) {
     (void)type;
     uint64_t data[55];
