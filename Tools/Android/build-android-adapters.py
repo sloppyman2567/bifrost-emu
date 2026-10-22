@@ -214,9 +214,10 @@ def build(runtime, output):
             check=True,
         )
         # ManagedLauncher and ActivityProbe share the window/identity JNI bridge.
-        subprocess.run(common + ["-std=c2x", "-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
+        subprocess.run(common + ["-std=c2x", "-mno-outline-atomics", "-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
                                  str(ROOT / "Guest/Android/Adapters/activity_window.c"),
                                  str(ROOT / "Guest/Android/Adapters/gralloc_probe.c"),
+                                 str(ROOT / "Guest/Android/Adapters/audio_track.c"),
                                  str(staging / "libandroid.so"), str(bionic / "libc.so"),
                                  str(bionic / "libdl.so"), str(bionic / "libdl_android.so"),
                                  "-o", str(staging / "libbifrost-activity.so")], check=True)

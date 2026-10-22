@@ -15,6 +15,13 @@
   A buffer capacity request sizes the stream ring (`Audio::stream_open`
   `min_frames`) rather than failing: FMOD fails its output init on a refusal.
   `BIFROST_AUDIO_TRACE` (a `DebugFlags.hpp` switch) traces audio thunk calls.
+- Native `AudioTrack` clients (Java AudioTrack, SoundPool, MediaPlayer) play through
+  `Guest/Android/Adapters/audio_track.c`, the server side of AudioFlinger's
+  control-block protocol (`createTrack` in `FrameworkAudioTracks`): one AAudio
+  data-callback stream per track on the managed libaaudio adapter. Keep the
+  cblk layout, obtain/release/flush/stop rules and futex wakes matched to
+  AOSP `AudioTrackShared` `android-15.0.0_r1`; its `_Static_assert`s pin the
+  offsets and `ManagedServiceBatch.audioTracks` checks a real client.
 - Managed OpenSL ES is the guest `Guest/Android/Adapters/opensles.c`, layered on
   the managed libaaudio adapter (its callback thread runs buffer-queue callbacks),
   not the host `AudioThunk/OpenSL.cpp` vtables. Keep its result codes and

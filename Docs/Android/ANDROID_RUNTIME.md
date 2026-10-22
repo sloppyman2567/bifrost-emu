@@ -143,10 +143,11 @@ nothing spatialized, and its state callbacks never run.
 
 The `Managed` fixture checks the controller with a configured AAC decoder
 and the Spatializer; `ManagedPlayServices` checks that the ad request bind
-fails. ExoPlayer still cannot play: it needs Java `AudioTrack`
-(`generateAudioSessionId` returns -1 and AudioFlinger has no track
-creation), so GMA plays the rewarded video in its WebView, whose audio uses
-AAudio.
+fails. When this was written ExoPlayer could not play: it needs Java
+`AudioTrack`, and AudioFlinger had no track creation (it has since, see
+[AudioTrack playback](#audiotrack-playback-2026-10-21); `generateAudioSessionId`
+and ExoPlayer itself were not rechecked), so GMA played the rewarded video in
+its WebView, whose audio uses AAudio.
 
 The ad window then froze black a few seconds in: the emulator was dumping
 core after a host SIGSEGV, a NULL read in glibc's `memcpy` on HWUI's
@@ -623,8 +624,9 @@ before app initialization, only from the session owner. Android 15 policy
 transactions 8/80/82 and flinger 3/5/6 add stream-output, empty strategy/group
 lists, sample-rate, frame-count and estimated output-quantum latency queries.
 `AudioTrack.getMinBufferSize` now traverses those real native clients. This
-does not implement AudioFlinger track creation or AudioTrack PCM playback;
-AAudio and OpenSL ES play through the host audio adapter instead.
+did not implement AudioFlinger track creation or AudioTrack PCM playback at that
+point (it does now, see [AudioTrack playback](#audiotrack-playback-2026-10-21));
+AAudio and OpenSL ES play through the host audio adapter.
 
 Notification channels/groups support creation, copied queries, app-allowed
 updates, deletion and resurrection with preserved settings, following
@@ -2735,8 +2737,9 @@ flinger 3/5/6/23/45/46; codes
 checked against `IAudioPolicyService.aidl`/`IAudioFlingerService.aidl` at
 `android-15.0.0_r1`): no HAL ports or patches, and the primary output's rate
 and frames per buffer come from Bifrost's host Audio engine
-(`APP_AUDIO_ROUTING_READY`). Playback itself never uses AudioFlinger: the
-managed `libaaudio.so` adapter sends AAudio to the AudioThunk. Like real
+(`APP_AUDIO_ROUTING_READY`). AAudio playback never uses AudioFlinger: the
+managed `libaaudio.so` adapter sends AAudio to the AudioThunk. (Native
+`AudioTrack` clients do, below.) Like real
 libaaudio, the adapter runs each data callback stream on a Bionic pthread of
 its own (`Guest/Android/Adapters/aaudio.c`), created at open and joined at close; the
 host callback pump cannot make Bionic TLS. That thread asks the thunk when the
@@ -2766,6 +2769,53 @@ the MMAP policy is recorded but streams never use MMAP. Every name of Android
 15's `libaaudio.map.txt` resolves in the managed adapter
 (`android_aaudio_thread.c` checks the table with `dlsym`).
 `BIFROST_AUDIO_TRACE=1` prints each audio thunk call with its arguments.
+
+#### AudioTrack playback (2026-10-21)
+
+Java `AudioTrack` (FMOD, ExoPlayer-style players), SoundPool-style users and
+MediaPlayer reach native `AudioTrack`, whose `createTrack` failed with
+`AudioFlinger could not create track, status: -74`: Umamusume's FMOD logged
+about 60 of these and had no sound. `media.audio_flinger` now implements
+`IAudioFlingerService.createTrack` and `newAudioUniqueId`/`acquire`/`releaseAudioSessionId`
+for linear PCM streaming tracks. Wire formats and rules were read from
+android-15.0.0_r1 (`IAudioFlingerService.aidl`, `IAudioTrack.aidl`,
+`CreateTrackRequest/Response.aidl`, `SharedFileRegion.aidl`, `AudioTrackShared.h/.cpp`,
+`AudioFlinger` `Tracks.cpp`/`Threads.cpp`) and checked against a real client:
+
+- **Request/response.** Every nested parcelable or union field is written behind a
+  non-null marker, a parcelable then has a size word; the channel mask is a union
+  (`1 3 3`: marker, `layoutMask`, `LAYOUT_STEREO`). Refusals are
+  `EX_SERVICE_SPECIFIC` with a `status_t`. Frame count is the larger of the request and
+  three output quanta (AOSP's `calculateMinFrameCount` plus slack for the emulator);
+  the notification period is half of it. Fast, offload, direct, static-buffer and
+  non-PCM tracks are refused.
+- **Shared region.** One memfd holds the 232-byte `audio_track_cblk_t` and a ring of
+  `roundup(frameCount)` frames (the client indexes modulo the next power of two).
+  `IAudioTrack.getCblk` returns it as a `SharedFileRegion` with `writeable` set; without
+  it the client maps the region read-only and faults on its first write.
+- **Server** (`Guest/Android/Adapters/audio_track.c`). A port of `ServerProxy` and
+  `AudioTrackServerProxy`: obtain/release, flush and stop positions, start threshold
+  (the whole buffer by default, since Android 12), underrun tally and the futex wake
+  of the client. One AAudio float data-callback stream per track on the managed
+  libaaudio adapter pulls frames, converts U8/16/24/32-bit, Q8.24 and float, applies
+  the track's left/right gain and fills missing frames with silence. Stop drains up to
+  the client's stop position; pause keeps the buffer; flush discards it.
+- **Futex.** The client blocks in `FUTEX_WAIT` on the control block and the server
+  wakes it through another mapping of the same pages. The emulator's futex table keyed
+  words by guest address and never saw that wake; shared file mappings now use host
+  futexes (see the syscall guide).
+- **Metrics.** Native `mediametrics::LogItem::record()` waited 5 s for `media.metrics`
+  twice per track; a stub service accepts and drops submissions.
+
+Checked: `ManagedServiceBatch.audioTracks` plays a stereo tone (left a quarter of full
+scale, right a half) through a real `AudioTrack` and asserts that the server consumed every
+frame, that the per-channel peaks match, and that stop/start/pause/flush work, in JIT
+and interpreter mode. Umamusume then logged no `AudioTrack` errors. Whether it is
+audible and in sync was not measured. Not implemented: static (shared-buffer) tracks, so
+SoundPool-style short sounds; kernel timestamps (`getTimestamp` reports would-block and
+`getPlaybackHeadPosition` follows the frames consumed); sample-rate and playback-rate
+changes after creation; volume shapers and effects; a track is freed when its Binder is
+garbage collected, not at the client's release.
 
 #### Managed OpenSL ES (2026-10-13)
 

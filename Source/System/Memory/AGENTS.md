@@ -29,6 +29,9 @@ State shared between them goes in `MemoryInternal.hpp`.
   protection, file identity and offset discontinuities. Loader-copied ELF
   pages are named with `name_image`; `detach_file_locked` drops those names
   wherever storage is replaced or unmapped (mprotect keeps them).
+- `shared_futex_word` answers whether a 32-bit word lies in a writable MAP_SHARED
+  file mapping and gives its host address; the futex syscall depends on it.
+  Anonymous MAP_SHARED mappings are not covered.
 - MADV_REMOVE punches writable shared file mappings; reject unsupported,
   private, read-only and unmapped ranges with the appropriate errno. Do not
   report successful discard while retaining stale data. Check wrapping lengths.

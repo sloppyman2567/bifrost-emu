@@ -321,6 +321,12 @@ public:
         return direct_page_flags_;
     }
     bool in_direct_window(uint64_t addr) const { return addr < window_size_; }
+    // The host address of the aligned 32-bit word at `addr` when it lies in a
+    // writable MAP_SHARED file mapping (a memfd, ashmem region or file), else
+    // nullptr. A futex there must be a host futex: the kernel keys it by the
+    // shared page, so another mapping of that page, in this process or another,
+    // reaches the same waiters.
+    volatile uint32_t* shared_futex_word(uint64_t addr) const;
     // Translate a guest range to a host pointer, or nullptr when any byte
     // of it is not accessible with `access` (thunk pointer arguments).
     uint8_t* guest_to_host_ptr(uint64_t guest_addr,

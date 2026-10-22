@@ -4,6 +4,24 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## AudioTrack playback and shared futexes (2026-10-21)
+
+- `futex_shared_memfd` (new, registered in `run_tests.sh`): a non-private `FUTEX_WAIT` on one
+  mapping of a memfd is woken by `FUTEX_WAKE` through a second mapping, in a thread and across
+  `fork`. QEMU passes; the emulator timed out after 5 s (`woken=0`) before the change and passes
+  now in the JIT and the interpreter. `run_tests.sh --unit --strict --quick --emu
+  build/release-sdl1-gl1/bifrost-emu`: 158 of 158 pass (JIT, 71 s). A first run through the stale
+  root `./bifrost-emu` failed only this test. The interpreter and other categories were not run.
+- `ManagedServiceBatch.audioTracks` (new): a real `android.media.AudioTrack` plays a stereo
+  tone through `createTrack`; the server consumes every frame, the per-channel peaks match the
+  written amplitudes (about 250000 and 500000 millionths), and stop, restart with a lowered
+  start threshold, pause and flush work. Passes in JIT (4 s) and the interpreter (18 s) as a
+  separate probe; the full `ManagedServiceBatch` passes in JIT with 580 checks (89 s).
+- Umamusume (JP), 75 s run on the real app: zero `AudioTrack` errors, against about 60 before.
+  Not confirmed: audible output, sync, gameplay.
+- Not covered: static-buffer tracks, SoundPool, MediaPlayer, ExoPlayer, several tracks at
+  once, long-running underrun behavior, timestamps.
+
 ## JIT branch flags, immediates and Q pairs (2026-10-20)
 
 Revision: `f0575666` plus the uncommitted change under test.

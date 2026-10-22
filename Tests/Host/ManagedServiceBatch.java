@@ -1038,6 +1038,57 @@ public final class ManagedServiceBatch {
         check(stopped.await(10, java.util.concurrent.TimeUnit.SECONDS) && !found[0], "NSD discovery did not stop cleanly");
     }
 
+    // A real android.media.AudioTrack plays through AudioFlinger.createTrack: the client writes
+    // PCM into the shared ring and waits on its futex, and the native server consumes it.
+    private static void audioTracks() throws Exception {
+        final int rate = 48000, frames = rate / 4;
+        android.media.AudioFormat format = new android.media.AudioFormat.Builder()
+                .setSampleRate(rate).setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_STEREO).build();
+        android.media.AudioTrack track = new android.media.AudioTrack.Builder()
+                .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_GAME)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                .setAudioFormat(format).setTransferMode(android.media.AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(android.media.AudioTrack.getMinBufferSize(rate,
+                        android.media.AudioFormat.CHANNEL_OUT_STEREO, android.media.AudioFormat.ENCODING_PCM_16BIT) * 2)
+                .build();
+        check(track.getState() == android.media.AudioTrack.STATE_INITIALIZED, "AudioTrack was not created");
+        // Left at a quarter of full scale, right at a half: channel order, sample size and the
+        // ring's start all show in the server's per-channel peaks.
+        short[] pcm = new short[frames * 2];
+        for (int i = 0; i < frames; i++) {
+            double wave = Math.sin(2 * Math.PI * 440 * i / rate);
+            pcm[2 * i] = (short) (wave * 8192);
+            pcm[2 * i + 1] = (short) (wave * 16384);
+        }
+        track.play();
+        check(track.write(pcm, 0, pcm.length) == pcm.length, "blocking write did not complete");
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        while (track.getPlaybackHeadPosition() < frames && System.nanoTime() < deadline) Thread.sleep(10);
+        check(track.getPlaybackHeadPosition() == frames, "server consumed " + track.getPlaybackHeadPosition()
+                + " of " + frames + " frames");
+        long[] seen = FrameworkAudioTracks.snapshot(track.getAudioSessionId());
+        check(seen != null, "no server counters for the track");
+        check(seen[3] > 240_000 && seen[3] <= 250_100 && seen[4] > 490_000 && seen[4] <= 500_100,
+                "channel peaks " + seen[3] + "/" + seen[4] + " (expected about 250000/500000)");
+        track.stop();
+        // Stop, then play again from the same track: the server resumes past the stop position.
+        // The start threshold defaults to the whole buffer; lower it so 2,000 frames start playing.
+        track.setStartThresholdInFrames(1000);
+        track.play();
+        check(track.write(pcm, 0, 4000) == 4000, "write after restart");
+        deadline = System.nanoTime() + 5_000_000_000L;
+        while (track.getPlaybackHeadPosition() < 2000 && System.nanoTime() < deadline) Thread.sleep(10);
+        // AudioTrack::start after a stop counts from zero again.
+        check(track.getPlaybackHeadPosition() == 2000, "restart consumed " + track.getPlaybackHeadPosition()
+                + " of 2000 frames");
+        track.pause();
+        track.flush();
+        track.release();
+        System.out.println("MANAGED_AUDIO_TRACK_OK");
+    }
+
     private static void run() throws Exception {
         Looper.prepareMainLooper();
         Class<?> threadType = Class.forName("android.app.ActivityThread");
@@ -1087,6 +1138,7 @@ public final class ManagedServiceBatch {
         new Thread(() -> {
         try {
         usersAndIdle(context);
+        audioTracks();
         notifications(context, packages); audio(context); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
         battery(context); vibratorAndKeyguard(context); clipboard(context, packages);

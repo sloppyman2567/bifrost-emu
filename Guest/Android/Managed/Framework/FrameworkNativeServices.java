@@ -87,15 +87,39 @@ final class FrameworkNativeServices {
         }
     }
 
-    // Android 15 IAudioFlingerService: only the queries used by this profile.
-    // Playback uses the managed AAudio adapter and Bifrost's host Audio engine.
+    // Android 15 IAudioFlingerService: the queries used by this profile and createTrack for
+    // linear PCM streaming tracks. Playback goes through the managed AAudio adapter and
+    // Bifrost's host Audio engine (FrameworkAudioTracks).
     static final class AudioFlinger extends Binder {
         static final String DESCRIPTOR = "android.media.IAudioFlingerService";
         private static final int SAMPLE_RATE = 3, FRAME_COUNT = 5, LATENCY = 6;
+        // Transaction codes are the method order in IAudioFlingerService.aidl.
+        private static final int NEW_AUDIO_UNIQUE_ID = 35, ACQUIRE_AUDIO_SESSION_ID = 36, RELEASE_AUDIO_SESSION_ID = 37;
+        private final FrameworkAudioTracks tracks = new FrameworkAudioTracks();
         private IBinder client;
         @Override protected synchronized boolean onTransact(int code, Parcel data,
                 Parcel reply, int flags) throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code == FrameworkAudioTracks.CREATE_TRACK) {
+                data.enforceInterface(DESCRIPTOR);
+                long[] config = new long[3];
+                if (ManagedLauncher.audioConfig(config) != 0)
+                    throw new IllegalStateException("host audio configuration unavailable");
+                tracks.createTrack(data, reply, config);
+                return true;
+            }
+            if (code == NEW_AUDIO_UNIQUE_ID) {
+                data.enforceInterface(DESCRIPTOR);
+                data.readInt(); // AudioUniqueIdUse: one counter serves every use
+                reply.writeNoException();
+                reply.writeInt(tracks.newUniqueId());
+                return true;
+            }
+            if (code == ACQUIRE_AUDIO_SESSION_ID || code == RELEASE_AUDIO_SESSION_ID) {
+                data.enforceInterface(DESCRIPTOR); // (session, pid, uid): sessions hold no per-session state here
+                reply.writeNoException();
+                return true;
+            }
             if (code != SAMPLE_RATE && code != FRAME_COUNT && code != LATENCY
                     && code != 23 && code != 45 && code != 46)
                 return super.onTransact(code, data, reply, flags);
@@ -117,6 +141,19 @@ final class FrameworkNativeServices {
             // claim to have hardware presentation timestamps.
             if (code == LATENCY) reply.writeInt(output == 1 && config[0] > 0
                     ? (int) ((config[1] * 1000 + config[0] - 1) / config[0]) : 0);
+            return true;
+        }
+    }
+
+    // Native mediametrics::LogItem::record() (AudioTrack logs a creation event) submits to
+    // "media.metrics" and waits 5 s for it to appear. There is no metrics sink: submissions
+    // are accepted and dropped, as a device with the service disabled would.
+    static final class MediaMetrics extends Binder {
+        static final String DESCRIPTOR = "android.media.IMediaMetricsService";
+        @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if ((flags & FLAG_ONEWAY) == 0) reply.writeNoException();
             return true;
         }
     }

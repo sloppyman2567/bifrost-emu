@@ -480,6 +480,7 @@ UNIT_TESTS=(
     "jit_android_semantics|Tests/Unit/jit_android_semantics.elf||10|checks passed"
     "jit_literal_load|Tests/Unit/jit_literal_load.elf||10|checks passed"
     "test_shared_alias|Tests/Unit/test_shared_alias.elf||30|checks passed"
+    "futex_shared_memfd|Tests/Unit/futex_shared_memfd.elf||30|FUTEX_SHARED_MEMFD_OK"
     "jit_call_exit|Tests/Unit/jit_call_exit.elf||10|checks passed"
     "jit_blr_lr|Tests/Unit/jit_blr_lr.elf||10|checks passed"
     "jit_interp_exit|Tests/Unit/jit_interp_exit.elf||10|2001/2001 checks passed"

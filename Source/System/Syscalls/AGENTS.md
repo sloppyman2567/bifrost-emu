@@ -30,6 +30,13 @@
   SIGQUIT thread dump depends on it. tkill/tgkill stay thread-directed.
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
+- A futex word in a writable MAP_SHARED file mapping (`Memory::shared_futex_word`:
+  memfd, ashmem, files) waits, wakes and requeues through the host futex on its
+  host address, so another mapping of the page, in this or another process,
+  reaches the same waiters (AudioTrack's control block). Other words keep the
+  in-process table keyed by guest address. A host wait interrupted by
+  `KICK_SIGNAL` with no pending guest signal returns 0, a spurious wake.
+  `futex_shared_memfd` covers it.
 - JIT invalidation calls name their `CodeInvalidation` reason. Only cache
   maintenance and mprotect may keep translations with unchanged bytes;
   mapping replacement, unmap, remap and discard always retire them.

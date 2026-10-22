@@ -12,6 +12,19 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### AudioTrack playback and shared-memory futexes (2026-10-21)
+
+- Native `AudioTrack` clients play: `media.audio_flinger` implements `createTrack` for linear PCM
+  streaming tracks, with the shared control block and ring in a memfd and a native server
+  (`audio_track.c`) that feeds the host engine through one AAudio callback stream per track.
+  Umamusume's FMOD logged about 60 `AudioTrack` failures and now none. See
+  [AudioTrack playback](Android/ANDROID_RUNTIME.md#audiotrack-playback-2026-10-21).
+  Not yet: static (shared-buffer) tracks, kernel timestamps, rate changes after creation.
+- Fix: a futex on a MAP_SHARED file mapping (memfd, ashmem, file) is now a host futex, so a wake
+  through another mapping of the page, in the same process or another, reaches the waiter. The
+  in-process table keyed words by guest address and never delivered it (`futex_shared_memfd`).
+- `media.metrics` is a stub service; native `LogItem::record()` no longer waits 5 s, twice, per track.
+
 ### Toasts, NsdManager and Settings intents (2026-10-21)
 
 - `Toast.show` no longer ends an app: `notification.enqueueTextToast`, `enqueueToast` and

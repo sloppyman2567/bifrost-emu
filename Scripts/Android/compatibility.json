@@ -71,6 +71,13 @@
       "checked": "2026-10-21",
       "evidence": "Reaches its main window and draws the Trending list; it then shows its own 'storage permission is required' dialog. Before NsdManager was published it ended in onActivityCreated. Interaction was not tried.",
       "notes": ["The dialog's Accept asks for all-files access through a Settings screen that does not exist; the request is declined."]
+    },
+    "jp.co.cygames.umamusume": {
+      "name": "Umamusume Pretty Derby (JP)",
+      "status": "runs",
+      "checked": "2026-10-21",
+      "evidence": "Reaches its 1440x1384 Unity window and surface; FMOD's AudioTrack output now initializes (no AudioTrack errors in a 75 s run). Whether the sound is audible, and gameplay, were not confirmed by a person.",
+      "notes": ["Play Games sign-in does not complete: GamesResolutionActivity starts microG's GamesSignInActivity and the result is 'response=none'."]
     }
   }
 }

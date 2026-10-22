@@ -15,6 +15,9 @@
 #include "System/Loader/DynamicLinker.hpp"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <signal.h>
 #include <cstdio>
 #include <mutex>
@@ -705,6 +708,43 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_err(EAGAIN);
                         return 0;
                     }
+                    // A word in a MAP_SHARED file mapping (a memfd or ashmem region:
+                    // AudioTrack's control block, for one) is keyed by the host
+                    // kernel by its shared page. Another mapping of the page, here
+                    // or in another process, wakes it; the in-process table below
+                    // keys by guest address and could not. KICK_SIGNAL (no
+                    // SA_RESTART) interrupts the wait like any host syscall.
+                    if (volatile uint32_t* shared = mem_.shared_futex_word(uaddr)) {
+                        struct timespec timeout_ts;
+                        const struct timespec* timeout_host = nullptr;
+                        if (timeout_ptr) {
+                            timeout_ts.tv_sec = static_cast<time_t>(mem_.load<uint64_t>(timeout_ptr));
+                            timeout_ts.tv_nsec = static_cast<long>(mem_.load<uint64_t>(timeout_ptr + 8));
+                            timeout_host = &timeout_ts;
+                        }
+                        const int host_op = absolute
+                            ? (FUTEX_WAIT_BITSET | (clock_realtime ? FUTEX_CLOCK_REALTIME : 0))
+                            : FUTEX_WAIT;
+                        if (cpu.has_unblocked_pending_signals()) {
+                            ret_err(EINTR);
+                            emu.handle_eintr(cpu);
+                            return 0;
+                        }
+                        const long r = ::syscall(SYS_futex, shared, host_op, val, timeout_host,
+                                                 nullptr, val3 ? val3 : ~0u);
+                        const int error = r < 0 ? errno : 0;
+                        if (error == EINTR) {
+                            if (cpu.has_unblocked_pending_signals()) {
+                                ret_err(EINTR);
+                                emu.handle_eintr(cpu);
+                            } else {
+                                ret_host(0);  // a kick: a spurious wake the caller rechecks
+                            }
+                            return 0;
+                        }
+                        if (error) ret_err(error); else ret_host(0);
+                        return 0;
+                    }
                     // Backward-compat: if no other threads are alive to
                     // wake us, return 0 immediately (pretend we waited
                     // and were woken). This preserves the previous
@@ -937,6 +977,15 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // lock-free read can see 0 just before the
                     // increment lands, skip the notify, and leave the
                     // waiter sleeping forever. Correctness over ~50ns.
+                    if (volatile uint32_t* shared = mem_.shared_futex_word(uaddr)) {
+                        const int count = static_cast<int>(val);
+                        if (count <= 0) { ret_host(0); return 0; }
+                        const long r = ::syscall(SYS_futex, shared,
+                                                 op == 10 ? FUTEX_WAKE_BITSET : FUTEX_WAKE, count,
+                                                 nullptr, nullptr, val3 ? val3 : ~0u);
+                        if (r < 0) ret_err(errno); else ret_host(static_cast<uint64_t>(r));
+                        return 0;
+                    }
                     Emulator::FutexSlot* slot = get_futex(uaddr);
                     int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
@@ -1020,6 +1069,17 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (uaddr2 == 0 && nr_requeue > 0) {
                         ret_err(EINVAL);
                         return 0;
+                    }
+                    if (uaddr2) {
+                        volatile uint32_t* shared1 = mem_.shared_futex_word(uaddr);
+                        volatile uint32_t* shared2 = mem_.shared_futex_word(uaddr2);
+                        if (shared1 && shared2) {
+                            const long r = ::syscall(SYS_futex, shared1, op == 4 ? FUTEX_CMP_REQUEUE : FUTEX_REQUEUE,
+                                                     nr_wake, static_cast<unsigned long>(nr_requeue),
+                                                     shared2, val3);
+                            if (r < 0) ret_err(errno); else ret_host(static_cast<uint64_t>(r));
+                            return 0;
+                        }
                     }
                     Emulator::FutexSlot* slot1 = get_futex(uaddr);
                     Emulator::FutexSlot* slot2 = (uaddr2 != 0) ? get_futex(uaddr2) : nullptr;

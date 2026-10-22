@@ -488,6 +488,16 @@ const Memory::FilePage* Memory::file_page_locked(uint64_t addr) const {
     auto it = file_pages_.find(addr / PAGE_SIZE);
     return it == file_pages_.end() ? nullptr : &it->second;
 }
+volatile uint32_t* Memory::shared_futex_word(uint64_t addr) const {
+    if (addr % sizeof(uint32_t) || addr >= window_size_ || window_size_ - addr < sizeof(uint32_t))
+        return nullptr;
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    const FilePage* page = file_page_locked(addr);
+    if (!page || !page->backing || !page->backing->shared) return nullptr;
+    uint8_t prot = 0;
+    if (!mapping_prot_at_locked(addr, prot) || !(prot & GUEST_PROT_READ)) return nullptr;
+    return reinterpret_cast<volatile uint32_t*>(direct_window_ + addr);
+}
 void Memory::detach_file_locked(uint64_t lo, uint64_t hi) {
     forget_images_locked(lo, hi);
     // Restore anonymous storage before zero/reuse, rather than overwriting

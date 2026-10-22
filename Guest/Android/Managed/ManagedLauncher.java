@@ -215,6 +215,7 @@ public final class ManagedLauncher {
     // SurfaceFlinger display-event channel): Framework/FrameworkNativeServices.java.
     private static final Binder audioPolicy = new FrameworkNativeServices.AudioPolicy();
     private static final Binder audioFlinger = new FrameworkNativeServices.AudioFlinger();
+    private static final Binder mediaMetrics = new FrameworkNativeServices.MediaMetrics();
     private static final Binder sensorService = new FrameworkNativeServices.SensorService();
     private static boolean sensorServiceRegistered;
     private static final Binder surfaceComposer = new FrameworkNativeServices.SurfaceComposer(displays);
@@ -731,6 +732,7 @@ public final class ManagedLauncher {
                     "addService", String.class, IBinder.class);
             add.invoke(null, "media.audio_policy", audioPolicy);
             add.invoke(null, "media.audio_flinger", audioFlinger);
+            add.invoke(null, "media.metrics", mediaMetrics);
         }
         audio.install(services);
         new FrameworkMediaRouter(packages).install(services);
