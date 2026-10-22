@@ -9,7 +9,9 @@ import subprocess
 import tempfile
 import zipfile
 
-from android_media import ROOT, URL, IMAGE_SHA256, image_archive, extract_system, dump, needed, digest, LIBRARY
+from android_media import (ROOT, URL, IMAGE_SHA256, image_archive, extract_system, dump, needed,
+                           digest, LIBRARY, without_bionic_links, install_bionic_links,
+                           update_bionic_inventory)
 
 APEXES = {
     "art": "capex", "runtime": "apex", "i18n": "apex",
@@ -94,6 +96,8 @@ def linker_configuration(paths):
 
 
 def verify_inventory(files):
+    if isinstance(files, dict):
+        files = without_bionic_links(files)
     if not isinstance(files, dict) or len(files) != 529:
         raise ValueError("Invalid ART file inventory")
     encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
@@ -156,9 +160,10 @@ def install(destination, archive=None):
         actual = inventory(destination)
         actual.pop("bifrost-art.json", None)
         # Writable data and fixture files are deliberately outside this root.
-        if metadata.get("image_sha256") != IMAGE_SHA256 or actual != metadata.get("files"):
+        if (metadata.get("image_sha256") != IMAGE_SHA256 or
+                without_bionic_links(actual) != without_bionic_links(metadata["files"])):
             raise ValueError("Refusing modified ART runtime")
-        return metadata
+        return update_bionic_inventory(destination, metadata, manifest)
     for tool in ("debugfs", "lpunpack", "readelf"):
         if not shutil.which(tool):
             raise ValueError(f"Required ART extraction tool: {tool}")
@@ -185,6 +190,7 @@ def install(destination, archive=None):
                  "/apex/com.android.os.statsd/lib64", "/apex/com.android.adbd/lib64", "/system/lib64"]
         (root / "linkerconfig").mkdir()
         (root / "linkerconfig/ld.config.txt").write_text(linker_configuration(paths))
+        install_bionic_links(root)
         files = inventory(root)
         verify_inventory(files)
         metadata = {"schema_version": 2, "purpose": "ART bootstrap only; framework startup not implemented",

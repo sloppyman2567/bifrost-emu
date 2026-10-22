@@ -4,6 +4,25 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Signal queries and fork-child lifetime (2026-10-22)
+
+`test_signal_semantics` now queries SIGKILL/SIGSTOP through raw `rt_sigaction`
+with and without an output buffer, while checking that setters still fail
+EINVAL. `test_fork_threads` adds three workers blocked on one private futex:
+the child must see zero inherited waiters, exit with the expected status, and
+leave the parent able to wake and join its workers. The signal query failed
+and blocked-worker child exit hung before the fixes; QEMU passed. Both updated
+fixtures pass in JIT, interpreter and Tier-2, and on the headless JIT build.
+
+The existing process/signal/futex/exit selection passes 10/10 in each engine:
+`run_tests.sh --unit --strict --quick --filter
+'signal|sigtimedwait|sigreturn|fork|futex|exit_blocked|thread_fault|proc_exe'`,
+also with `--no-jit`. SDL and headless `all lib` builds pass. Global Umamusume
+now reaps its child and exits 127 itself after requesting HOME; startup and
+gameplay remain unconfirmed. See [the traced path](Android/ANDROID_RUNTIME.md#global-umamusume-after-the-null-call-fix-2026-10-22).
+These tests exclude arbitrary host-library fork locks and successful shell/AM
+execution; the runtime does not yet provision `/system/bin/sh`.
+
 ## AudioTrack playback and shared futexes (2026-10-21)
 
 - `futex_shared_memfd` (new, registered in `run_tests.sh`): a non-private `FUTEX_WAIT` on one

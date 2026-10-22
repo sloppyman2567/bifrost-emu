@@ -51,6 +51,81 @@ def play_services_basement(work):
     return jar
 
 
+class BionicCompatibilityTests(unittest.TestCase):
+    def make_root(self, root):
+        import json
+        import android_art
+        import android_framework
+        from android_media import IMAGE_SHA256
+        libraries = root / "apex/com.android.runtime/lib64/bionic"
+        libraries.mkdir(parents=True)
+        for name in ("libc.so", "libm.so", "libdl.so"):
+            (libraries / name).write_bytes(name.encode())
+        metadata = {"schema_version": android_framework.SCHEMA, "image_sha256": IMAGE_SHA256,
+                    "codecs": {"adapter_fingerprint": "fixture"}, "files": android_art.inventory(root)}
+        (root / "bifrost-framework.json").write_text(json.dumps(metadata))
+        return metadata
+
+    def test_existing_framework_upgrade_is_verified_and_idempotent(self):
+        import android_framework
+        from android_media import BIONIC_LINKS
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = self.make_root(root)
+            with patch("android_codecs.fingerprint", return_value="fixture"):
+                after = android_framework.install(root, root / "unused")
+                self.assertEqual(after["files"], {**before["files"], **BIONIC_LINKS})
+                manifest = (root / "bifrost-framework.json").read_bytes()
+                self.assertEqual(android_framework.install(root, root / "unused"), after)
+                self.assertEqual((root / "bifrost-framework.json").read_bytes(), manifest)
+            for name in BIONIC_LINKS:
+                self.assertTrue((root / name).samefile(
+                    root / "apex/com.android.runtime/lib64/bionic" / Path(name).name))
+
+    def test_interrupted_link_upgrade_recovers(self):
+        import android_framework
+        from android_media import BIONIC_LINKS
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_root(root)
+            (root / "system/lib64").mkdir(parents=True)
+            name = "system/lib64/libc.so"
+            (root / name).symlink_to(BIONIC_LINKS[name]["link"])
+            with patch("android_codecs.fingerprint", return_value="fixture"):
+                after = android_framework.install(root, root / "unused")
+            self.assertTrue(BIONIC_LINKS.items() <= after["files"].items())
+
+    def test_modified_framework_is_not_blessed_by_upgrade(self):
+        import android_framework
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_root(root)
+            (root / "apex/com.android.runtime/lib64/bionic/libc.so").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "modified framework"):
+                android_framework.install(root, root / "unused")
+            self.assertFalse((root / "system").exists())
+
+    def test_conflicting_paths_and_redirected_directories_are_rejected(self):
+        from android_media import install_bionic_links
+        for conflict in ("file", "link", "directory"):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.make_root(root)
+                (root / "system").mkdir()
+                if conflict == "directory":
+                    (root / "system/lib64").symlink_to(root / "apex/com.android.runtime/lib64/bionic")
+                else:
+                    (root / "system/lib64").mkdir()
+                    path = root / "system/lib64/libm.so"
+                    if conflict == "file":
+                        path.write_bytes(b"conflict")
+                    else:
+                        path.symlink_to("/tmp/wrong-bionic-target")
+                with self.assertRaises(ValueError):
+                    install_bionic_links(root)
+                self.assertFalse((root / "system/lib64/libc.so").is_symlink())
+
+
 class LauncherArgumentTests(unittest.TestCase):
     def test_library_settings_reject_malformed_values_and_keep_default_launch(self):
         import json

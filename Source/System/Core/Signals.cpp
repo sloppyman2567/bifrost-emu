@@ -145,7 +145,9 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
     if (signo < 1 || signo > MAX_SIGNAL) {
         return -EINVAL;
     }
-    if (is_uncatchable(signo)) {
+    // Linux do_sigaction permits querying these dispositions; only a
+    // non-null new action is forbidden (Bionic's spawn queries every signal).
+    if (act_addr != 0 && is_uncatchable(signo)) {
         return -EINVAL;
     }
     // Read the NEW action first. `act` and `oldact` are allowed to alias

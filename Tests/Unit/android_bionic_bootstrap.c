@@ -184,6 +184,17 @@ int main(int argc, char** argv, char** envp) {
         if (pthread_create(&thread, 0, worker, 0) || pthread_join(thread, &result) ||
             result != (void*)42 || tls_value != 31 || *__errno() != 11) return 3;
     printf("Bionic: pthread identity and isolated TLS passed\n");
+    const char* legacy[] = {"/system/lib64/libc.so", "/system/lib64/libm.so",
+                            "/system/lib64/libdl.so"};
+    const char* symbols[] = {"__errno", "sqrt", "dlopen"};
+    for (int i = 0; i < 3; ++i) {
+        void* handle = dlopen(legacy[i], 2);
+        if (!handle) { printf("legacy dlopen %s: %s\n", legacy[i], dlerror()); return 13; }
+        void* symbol = dlsym(handle, symbols[i]);
+        if (!symbol || (i == 0 && ((int* (*)(void))symbol)() != __errno()) || dlclose(handle))
+            return 14;
+    }
+    printf("Bionic: legacy system paths and canonical errno TLS passed\n");
     void* library = dlopen("libm.so", 2); // RTLD_NOW
     if (!library) { printf("dlopen: %s\n", dlerror()); return 4; }
     double (*square_root)(double) = (double (*)(double))dlsym(library, "sqrt");

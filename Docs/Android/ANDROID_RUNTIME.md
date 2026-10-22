@@ -621,6 +621,72 @@ media services/decoding remain bounded; the managed launcher now supplies a
 window, input and presentation for the SurfaceView path described below.
 See the APK guide for provisioning and namespace boundaries.
 
+### Bionic compatibility paths (2026-10-21)
+
+Bootstrap, ART and framework provisioners create relative links from
+`/system/lib64/{libc,libm,libdl}.so` to their canonical counterparts in
+`/apex/com.android.runtime/lib64/bionic/`. This follows the
+[Android compatibility contract](https://developer.android.com/about/versions/10/behavior-changes-all#bionic-libraries).
+The libraries remain single canonical files. Existing ART/framework roots are
+verified before upgrading their inventories; conflicting files, unexpected links
+and redirected directories are rejected. A retry can complete an interrupted
+link-only upgrade. The framework manifest digest then causes managed app roots
+to refresh on their next start while retaining app data.
+
+In the global Umamusume trace, its private loader omitted libc from its search
+list without these paths. The `__errno` lookup returned zero and populated a null
+call slot. A failed probe of `/system/lib/libhoudini.so` then attempted to store
+ENOENT through `__errno()` and jumped to PC zero. Restoring only the three links
+made libc discoverable, resolved `__errno`, populated the slot and removed that
+crash. An uninstrumented run survived the 40-second observation window; later
+startup and gameplay remain unverified. This trace establishes a runtime layout
+defect; it does not establish deliberate protection rejection.
+
+The focused `test_android_package.BionicCompatibilityTests` covers inventory
+upgrade, idempotence, interrupted upgrade recovery and refusal of modified roots
+or conflicting paths. The real `android_bionic_bootstrap.c` regression opens all
+three legacy paths and checks that libc's resolved `__errno` uses the existing
+thread's errno storage; it passed in JIT, interpreter and Tier-2 modes. These
+checks do not cover game rendering, sign-in or server access.
+
+### Global Umamusume after the null-call fix (2026-10-22)
+
+The next stall was traced to Bionic's spawn path. It queried signal dispositions
+in the child; `rt_sigaction(SIGKILL, NULL, &old, 8)` incorrectly returned EINVAL.
+[Linux do_sigaction](https://github.com/torvalds/linux/blob/v6.12/kernel/signal.c)
+rejects SIGKILL/SIGSTOP only when a new action is supplied.
+[Bionic's spawn implementation](https://android.googlesource.com/platform/bionic/+/741541d307f2b48c5c87fb7f38e6618d3175dbd0/libc/bionic/spawn.cpp)
+exits 127 if querying a disposition fails. Read-only queries now succeed while
+setting either disposition remains forbidden.
+
+That child then hung in host `pthread_cond_destroy` during emulator teardown:
+its copied private futex table retained parent waiters that no longer existed
+in the child. Fork now snapshots these tables under their shard locks and
+abandons copied host waiter objects in the child, preserving guest memory but
+starting fresh private queues. The parent retains its original queues.
+Further tracing caught SDL teardown using the inherited Wayland connection,
+which could hang or invalidate the parent's objects. A host-fork child's
+`exit_group` now terminates directly through host `_exit`, bypassing host
+destructors. Actual host-fork ownership is tracked separately from the CPU's
+host-PID identity flag used by fresh Binder-realm processes.
+
+With these fixes, the child actually terminates and the parent reaps status
+`0x7f00`, then explicitly calls `exit_group(127)` itself. The command passed to
+the child is `/system/bin/sh -c -- 'am start --user 0 -f 0x10200000 -a
+android.intent.action.MAIN -c android.intent.category.HOME'`; exec fails ENOENT
+because this runtime has no `/system/bin/sh`. This establishes an app-requested
+HOME/termination path, not the reason the app selected it. Protection rejection
+is not confirmed, and successful startup/gameplay is not established.
+
+`test_signal_semantics` checks both uncatchable signal queries and rejection of
+setters. `test_fork_threads` adds three workers blocked on a private futex,
+checks that the child's wake finds zero inherited waiters, and verifies child
+exit status and continued parent operation. Both pass under QEMU, JIT,
+interpreter and Tier-2; the focused existing process/signal/futex/exit selection
+passes 10/10 in JIT and 10/10 in the interpreter. SDL and headless builds pass;
+the two fixtures also pass on the headless build. These are bounded regressions,
+not a full-suite or game-playability result.
+
 ## Android 15 framework probe
 
 ### App audio, notification, Wi-Fi and power services (2026-10-13)
@@ -2943,7 +3009,8 @@ ICU, Conscrypt, timezone data and native dependencies from the official
 Its build identity is `AE3A.240806.019/12368160`, with image SHA-256
 `1e6ae4fca6449c07278a333311f0ef29c5101d1e3e18ba48fbe9bd2dc5006926`.
 The provisioner verifies the archive and all 529 extracted file hashes,
-symlink targets and executable flags. Besides the DT_NEEDED closure it extracts
+symlink targets and executable flags, plus three derived Bionic compatibility
+links (532 inventory entries). Besides the DT_NEEDED closure it extracts
 the image's `public.libraries.txt` preloads (libnativeloader opens them at VM
 startup) and their dependencies. It keeps the upstream notices and records the
 dependency graph and preload list in `bifrost-art.json` (schema 2; older

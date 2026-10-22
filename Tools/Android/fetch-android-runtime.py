@@ -11,6 +11,8 @@ import tempfile
 import urllib.request
 import zipfile
 
+from android_media import install_bionic_links
+
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "8aeb37cca394ce39c1311744c60960cbd466aa77"
 SHA256 = "83bf0dce249728dae48149b80d28b48115c54adad95a352120d58a6ac669d1fc"
@@ -37,6 +39,7 @@ def install(destination, archive=None):
                 metadata.get("files") == FILE_HASHES and
                 all((runtime / name).is_file() and hashlib.sha256((runtime / name).read_bytes()).hexdigest() == digest
                     for name, digest in metadata["files"].items())):
+                install_bionic_links(destination)
                 print(f"Verified existing Bionic bootstrap in {destination}")
                 return
         raise ValueError(f"Refusing to replace an existing or modified runtime: {destination}")
@@ -88,6 +91,7 @@ def install(destination, archive=None):
                 raise ValueError(f"Extracted runtime SHA-256 mismatch: {name}")
         (staging / "system/bin").mkdir(parents=True)
         (staging / "system/bin/linker64").symlink_to("../../apex/com.android.runtime/bin/linker64")
+        install_bionic_links(staging)
         (staging / "data/local/tmp").mkdir(parents=True)
         (staging / "linkerconfig").mkdir()
         (staging / "linkerconfig/ld.config.txt").write_text(

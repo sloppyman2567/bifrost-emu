@@ -16,6 +16,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <limits.h>
 
 // Exercise the exact SDK vfork flags. A working implementation lets the
 // child exit its own process group and leaves the parent alive to wait.
@@ -111,20 +115,38 @@ static int test_zero_stack_clone(void) {
     return 0;
 }
 
-static volatile int g_stop = 0;
+static _Atomic int g_stop = 0;
 static void* spin_fn(void* arg) { (void)arg; while (!g_stop) { } return NULL; }
+static _Atomic int waiting = 0;
+static void* wait_fn(void* arg) {
+    (void)arg;
+    ++waiting;
+    while (!g_stop) syscall(SYS_futex, &g_stop, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0);
+    return NULL;
+}
 
 #define NW 3
-static int test_fork_with_threads(void) {
+static int test_fork_with_threads(int blocked) {
+    g_stop = 0;
+    waiting = 0;
     pthread_t t[NW];
     for (int i = 0; i < NW; i++)
-        if (pthread_create(&t[i], NULL, spin_fn, NULL) != 0) return -1;
+        if (pthread_create(&t[i], NULL, blocked ? wait_fn : spin_fn, NULL) != 0) return -1;
+    if (blocked) {
+        while (waiting != NW) usleep(1000);
+    }
     usleep(50000);  // let the workers really be running
 
     for (int round = 0; round < 3; round++) {
         pid_t p = fork();
         if (p < 0) { g_stop = 1; return -2; }
-        if (p == 0) _exit(40 + round);
+        if (p == 0) {
+            // The child's private futex queue is empty even though the
+            // parent has waiters on the same copied guest address.
+            if (blocked && syscall(SYS_futex, &g_stop, FUTEX_WAKE_PRIVATE, INT_MAX,
+                                   NULL, NULL, 0) != 0) _exit(90);
+            _exit(40 + round);
+        }
         int st = 0;
         pid_t w = waitpid(p, &st, 0);
         if (w != p) { g_stop = 1; return -3; }
@@ -134,20 +156,25 @@ static int test_fork_with_threads(void) {
         }
     }
     g_stop = 1;
+    syscall(SYS_futex, &g_stop, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0);
     for (int i = 0; i < NW; i++) pthread_join(t[i], NULL);
     return 0;
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
     printf("=== fork with threads test ===\n");
     int r = test_vfork_exit();
     if (r != 0) { printf("FAIL vfork r=%d\n", r); return 1; }
     r = test_zero_stack_clone();
     printf("clone(stack=0): %s\n", r == 0 ? "ok" : "bad");
     if (r != 0) { printf("FAIL r=%d\n", r); return 1; }
-    r = test_fork_with_threads();
+    r = test_fork_with_threads(0);
     printf("fork(3 rounds, %d live threads): %s\n", NW, r == 0 ? "ok" : "bad");
     if (r != 0) { printf("FAIL r=%d\n", r); return 1; }
+    r = test_fork_with_threads(1);
+    printf("fork(3 rounds, %d blocked threads): %s\n", NW, r == 0 ? "ok" : "bad");
+    if (r != 0) { printf("FAIL blocked fork r=%d\n", r); return 1; }
     printf("fork threads: ALL PASS\n");
     return 0;
 }

@@ -14,7 +14,8 @@ import subprocess
 import tempfile
 import zipfile
 
-from android_media import ROOT, IMAGE_SHA256, image_archive, extract_system, dump
+from android_media import (ROOT, IMAGE_SHA256, image_archive, extract_system, dump,
+                           without_bionic_links, update_bionic_inventory)
 import android_art
 import android_codecs
 
@@ -168,11 +169,13 @@ def install(destination, art_root, archive=None):
             raise ValueError("Unknown framework manifest; provision a fresh directory")
         actual = android_art.inventory(destination)
         actual.pop("bifrost-framework.json", None)
-        if metadata.get("image_sha256") != IMAGE_SHA256 or actual != metadata.get("files"):
+        if (metadata.get("image_sha256") != IMAGE_SHA256 or
+                not isinstance(metadata.get("files"), dict) or
+                without_bionic_links(actual) != without_bionic_links(metadata["files"])):
             raise ValueError("Refusing modified framework runtime")
         if metadata.get("codecs", {}).get("adapter_fingerprint") != android_codecs.fingerprint():
             raise ValueError("Codec adapters changed; provision a fresh framework directory")
-        return metadata
+        return update_bionic_inventory(destination, metadata, manifest)
     android_art.install(art_root)  # verifies the pinned ART layer
     archive = image_archive(archive)
     destination.parent.mkdir(parents=True, exist_ok=True)

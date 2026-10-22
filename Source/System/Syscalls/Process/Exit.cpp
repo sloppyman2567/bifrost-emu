@@ -9,6 +9,7 @@
 #include "System/Core/CPU.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include <mutex>
+#include <unistd.h>
 namespace arm64emu {
 int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0];
@@ -48,6 +49,12 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 94: { // exit_group
+            // A host-fork child owns a copied runtime with vanished host
+            // threads and borrowed graphics/audio connections. C++ teardown
+            // can wait on copied condition variables or send destruction
+            // requests over the parent's display connection. Let the kernel
+            // reclaim the child directly, as guest _exit requires.
+            if (emu.host_fork_child()) ::_exit(static_cast<int>(a0));
             // Linux exit_group terminates EVERY thread in the process, not
             // just the caller — including the main thread when a worker
             // calls it. From main, stop + reap the siblings here; from a

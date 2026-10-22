@@ -46,3 +46,10 @@ Every guest run loop (main, worker and SDL threads) turns a synchronous fault
 (`UnmappedMemory`, `DecodeError`) into `force_signal` inside the loop: when a
 guest handler frame is set up the thread keeps running; only an unhandled
 fault ends it.
+
+`rt_sigaction` may query SIGKILL/SIGSTOP; only installing a new disposition
+is forbidden. After host fork, private futex queues start empty and copied host
+waiter objects must not be destroyed. A real host-fork child's `exit_group`
+uses kernel termination without host resource teardown; track that ownership
+separately from `CPU::is_fork_process`, which Binder-realm apps also use for PID
+identity. The parent's display/audio connections must survive child exit.

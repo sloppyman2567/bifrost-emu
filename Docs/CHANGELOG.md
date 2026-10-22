@@ -19,8 +19,28 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   a jump to address 0 the eight instructions before the caller. `BIFROST_TRACE_UNIMPLEMENTED=1` reports each
   syscall that ends in ENOSYS and each ioctl request that ends in ENOTTY, once, with its caller (Binder's
   `BINDER_ENABLE_ONEWAY_SPAM_DETECTION` is one that every app triggers and libbinder ignores). `BIFROST_TRACE_MMAP` lines say who
-  called `mmap`. Found with the global Umamusume build, which dies with a null call right after its
-  class loader is created, from an RWX anonymous region that `linker64` reserved; its cause is not known.
+  called `mmap`. Found with the global Umamusume build, whose loader called a null `__errno`
+  pointer because the runtime lacked Android's standard Bionic compatibility links.
+
+### Bionic compatibility paths (2026-10-21)
+
+- Bootstrap, ART and framework provisioning now retain `/system/lib64/libc.so`, `libm.so`
+  and `libdl.so` as links to the canonical APEX libraries. Verified cached ART/framework
+  roots gain the links and updated inventories; managed roots refresh on their next start.
+  Tracing global Umamusume confirmed that restoring these paths resolves `__errno` and
+  removes its initial null-call crash. Later startup and gameplay remain unverified.
+  See [runtime evidence](Android/ANDROID_RUNTIME.md#bionic-compatibility-paths-2026-10-21).
+
+### Signal queries and fork-child shutdown (2026-10-22)
+
+- Permit read-only SIGKILL/SIGSTOP disposition queries, matching Linux and
+  Bionic's spawn requirements. Fork children start with empty private futex
+  queues and terminate `exit_group` without tearing down copied host display
+  resources. Focused signal/fork fixtures pass against QEMU and all engines;
+  existing process/signal/futex/exit checks pass 10/10 in each engine.
+  Global Umamusume now gets past the child-exit hang, requests HOME and exits
+  127; the reason for that app-requested termination remains unconfirmed.
+  See [the trace](Android/ANDROID_RUNTIME.md#global-umamusume-after-the-null-call-fix-2026-10-22).
 
 ### Play Games profile creation is a user choice (2026-10-21)
 

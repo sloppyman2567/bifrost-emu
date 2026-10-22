@@ -429,6 +429,7 @@ public:
     };
     int fork_guest(CPU& parent_cpu, uint64_t child_stack, uint64_t flags,
                    uint64_t ptid_ptr, uint64_t ctid_ptr, uint64_t tls);
+    bool host_fork_child() const { return host_fork_child_; }
     // Look up a forked child by PID. Returns nullptr if not found.
     // The caller should hold fork_children_mu_ while accessing the
     // returned pointer.
@@ -577,6 +578,9 @@ private:
     // by the interpreter, the JIT's C++ helpers and native JIT sequences.
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;
+    // Runtime ownership, distinct from CPU::is_fork_process (also used
+    // for host PID identity by a freshly started Binder-realm app).
+    bool host_fork_child_ = false;
     std::vector<std::unique_ptr<ForkChild>> fork_children_;
     // ── Guest CPU time tracking ──────────────────────────────
     // We track guest instructions executed to provide accurate rusage/

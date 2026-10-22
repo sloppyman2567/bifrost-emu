@@ -36,6 +36,9 @@ such as "misc", "common" or "core". The current version lives in
   without explicit approval.
 - Keep throwaway probes/logs outside the repository. Diagnostic switches belong
   in `Source/System/Core/DebugFlags.hpp`, not repeated getenv calls in hot paths.
+- Android runtime provisioning must retain `/system/lib64/{libc,libm,libdl}.so`
+  compatibility links to canonical APEX Bionic libraries. Upgrade verified cached
+  inventories before rebuilding managed roots; never duplicate Bionic DSOs.
 - Gralloc's allocator belongs to the Binder realm, independently of app
   lifetimes. Keep its sealed memfd transport in `Include/Bifrost/AndroidGralloc.h`
   in step with the guest mapper; validate concurrent clients and peer exit.

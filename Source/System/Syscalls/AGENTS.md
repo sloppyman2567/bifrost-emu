@@ -17,6 +17,9 @@
   sigreturn frame) use `force_signal`, which reverts a blocked or ignored
   signal to SIG_DFL; only asynchronous kill/tgkill/queued signals use
   `deliver_signal` directly.
+  A real host-fork child's `exit_group` instead uses host `_exit`: copied host
+  waiter/display resources must not be torn down. Use Emulator's fork ownership
+  flag, not the CPU's host-PID identity flag (also set for Binder-realm apps).
 - Process identity comes from `Yggdrasil::process_ids()`: the PID-1 model of
   a plain run, or the host process's identity for fork children and
   Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and

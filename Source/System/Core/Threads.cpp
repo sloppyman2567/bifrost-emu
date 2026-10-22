@@ -22,6 +22,7 @@
 #include "System/Audio/AudioThunk.hpp"
 #include "Bifrost/Version.hpp"
 #include <algorithm>
+#include <array>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -817,10 +818,27 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     // A leaf lock: holding it across fork keeps the child from inheriting
     // it locked by a thread that does not exist there.
     std::unique_lock<std::mutex> comm_lock(comm_mu_);
+    // Freeze the private futex maps while copying them. The child inherits
+    // guest words, but none of the parent's host waiters (Linux fork(2)).
+    std::array<std::unique_lock<std::mutex>, FUTEX_SHARDS> futex_locks;
+    for (size_t i = 0; i < FUTEX_SHARDS; ++i)
+        futex_locks[i] = std::unique_lock<std::mutex>(futex_shards_[i].mu);
     pid_t child_pid = ::fork();
     if (child_pid < 0) {
         return -1;
     }
+    if (child_pid == 0) {
+        host_fork_child_ = true;
+        for (auto& shard : futex_shards_) {
+            // Do not destroy copied condition variables: their waiter
+            // counts refer to vanished parent threads and destruction can
+            // wait forever. Abandon them in this CoW child, as with the
+            // inherited std::thread handles below; exec/exit reclaims them.
+            for (auto& slot : shard.slots) (void)slot.second.release();
+            shard.slots.clear();
+        }
+    }
+    for (auto& lock : futex_locks) lock.unlock();
     if (child_pid > 0) comm_lock.unlock();
     if (child_pid == 0) {
         // The forking thread is the child's only task (copy_process).

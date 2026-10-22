@@ -31,6 +31,20 @@
 static volatile sig_atomic_t g_got = 0;
 static void h_simple(int sig) { g_got = sig; }
 
+static int test_uncatchable_query(void) {
+    const int signals[] = {SIGKILL, SIGSTOP};
+    struct kernel_action { unsigned long handler, flags, restorer, mask; } old, action = {0};
+    for (unsigned i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i) {
+        memset(&old, 0xa5, sizeof(old));
+        if (syscall(SYS_rt_sigaction, signals[i], NULL, &old, 8) || old.handler) return -1;
+        if (syscall(SYS_rt_sigaction, signals[i], NULL, NULL, 8)) return -2;
+        errno = 0;
+        if (syscall(SYS_rt_sigaction, signals[i], &action, NULL, 8) != -1 || errno != EINVAL)
+            return -3;
+    }
+    return 0;
+}
+
 // ── 1. sigaction aliasing ─────────────────────────────────────────────
 static int test_sigaction_alias(void) {
     struct sigaction a, b, q;
@@ -358,6 +372,8 @@ int main(void) {
     alarm(15);
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even if we hang
     printf("=== signal semantics test ===\n");
+    int r0 = test_uncatchable_query();
+    printf("SIGKILL/SIGSTOP disposition query: %s (%d)\n", r0 == 0 ? "ok" : "bad", r0);
     int r1 = test_sigaction_alias();
     printf("sigaction alias: %s\n", r1 == 0 ? "ok" : "bad");
     int r2 = test_sigsuspend();
@@ -374,9 +390,9 @@ int main(void) {
     printf("process-directed sigwait: %s (%d)\n", r8 == 0 ? "ok" : "bad", r8);
     int r9 = test_thread_sigill();
     printf("worker SIGILL handler: %s (%d)\n", r9 == 0 ? "ok" : "bad", r9);
-    if (r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9) {
-        printf("FAIL (r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d)\n",
-               r1, r2, r3, r4, r5, r6, r7, r8, r9);
+    if (r0 || r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9) {
+        printf("FAIL (r0=%d r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d)\n",
+               r0, r1, r2, r3, r4, r5, r6, r7, r8, r9);
         return 1;
     }
     printf("signal semantics: ALL PASS\n");

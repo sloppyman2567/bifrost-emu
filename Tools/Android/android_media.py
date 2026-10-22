@@ -22,6 +22,61 @@ IMAGE_SHA256 = "1e6ae4fca6449c07278a333311f0ef29c5101d1e3e18ba48fbe9bd2dc5006926
 FILES_SHA256 = "e892e694d4bf7c6654cd2459fadfce8d64488c43413a7b18efab49dc17d907fa"
 BIONIC = {"libc.so", "libm.so", "libdl.so", "libdl_android.so"}
 LIBRARY = re.compile(r"[A-Za-z0-9_.+@-]+\.so\Z")
+BIONIC_LINKS = {f"system/lib64/{name}":
+                {"link": f"../../apex/com.android.runtime/lib64/bionic/{name}"}
+                for name in ("libc.so", "libm.so", "libdl.so")}
+
+
+def without_bionic_links(files):
+    """Validate derived compatibility links while preserving the image pin."""
+    result = dict(files)
+    for name, expected in BIONIC_LINKS.items():
+        if name in result and result.pop(name) != expected:
+            raise ValueError(f"Modified Bionic compatibility link: {name}")
+    return result
+
+
+def install_bionic_links(root):
+    """Expose Android's legacy paths without duplicating Bionic libraries."""
+    # Preflight every path before writing, including symlinked ancestors.
+    for name, value in BIONIC_LINKS.items():
+        path = root / name
+        for parent in path.relative_to(root).parents:
+            if (root / parent).is_symlink():
+                raise ValueError(f"Redirected Bionic directory: {parent}")
+        target = root / "apex/com.android.runtime/lib64/bionic" / path.name
+        for parent in target.relative_to(root).parents:
+            if (root / parent).is_symlink():
+                raise ValueError(f"Redirected Bionic directory: {parent}")
+        if target.is_symlink() or not target.is_file():
+            raise ValueError(f"Missing canonical Bionic library: {target}")
+        if path.is_symlink():
+            if str(path.readlink()) != value["link"]:
+                raise ValueError(f"Modified Bionic compatibility link: {name}")
+        elif path.exists():
+            raise ValueError(f"Refusing to replace Bionic compatibility path: {name}")
+    for name, value in BIONIC_LINKS.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.is_symlink():
+            path.symlink_to(value["link"])
+
+
+def update_bionic_inventory(root, metadata, manifest):
+    """Upgrade a verified root; accept interrupted link-only upgrades on retry."""
+    install_bionic_links(root)
+    files = {**metadata["files"], **BIONIC_LINKS}
+    if files != metadata["files"]:
+        metadata["files"] = files
+        with tempfile.NamedTemporaryFile(mode="w", dir=root.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(json.dumps(metadata, indent=2) + "\n")
+                stream.close()
+                temporary.replace(manifest)
+            finally:
+                temporary.unlink(missing_ok=True)
+    return metadata
 
 
 def digest(path):
