@@ -766,12 +766,45 @@ tracing confirms the property now supplies `"0"`, the comparison succeeds, and
 the entire module `0x60` initializer returns 1 (observed at offsets `+0x9c00`
 and `+0x9c9c`). Execution subsequently reaches another decoded loader, whose
 initial setup returns 0 at its `+0x3174`, before the abort fallback. That later
-failure has not yet been localized. The first broad block trace with the
+failure was subsequently localized as described below. The first broad block trace with the
 override timed out from logging overhead; the narrowed run reached the abort.
 The override lives only in that generated app root and can be lost when the
 root is rebuilt; its original file was backed up outside the repository.
 This experiment demonstrates progress past the emulator-property check,
 not successful Application/Activity startup or gameplay.
+
+A watchpoint on the first recorded error traced that later failure back to
+module `0x60`, even though its initializer returned 1: it defers an error and
+copies it to the loader's shared record afterward. The failing check compares
+`/proc/filesystems`' directory-entry inode with `newfstatat` at module
+`+0x78ec` / `+0x7900`. The expected value `0xbe15bdbd357f6e4f` exactly matches
+Bifrost's directory-entry path hash; path stat instead returned the host proc
+inode `0xf00000f1`. Independent open-file stats exposed yet another identity,
+the backing memfd's inode. A focused probe agrees between native Linux and
+QEMU on this file and reproduces the mismatch in Bifrost.
+
+Synthetic procfs nodes now present the directory-entry identity through path
+stat, descriptor stat, relative directory-fd queries, AT_EMPTY_PATH and statx.
+Real executable identity through `/proc/self/exe` stays on its existing path.
+The expanded procfs regression passes on native Linux and in all three
+Bifrost engine modes and the headless build. The relevant contract is
+[stat/fstat/fstatat referring to the same file](https://man7.org/linux/man-pages/man2/stat.2.html).
+This is a general filesystem fix, with no game-specific checks or return values.
+
+The real windowless Global run now passes the formerly failing loader setup,
+then reaches a forked self-debugging stage. Lightweight syscall logging (no
+GDB attachment) observes a child repeatedly issuing syscall 117 with request
+16 (`PTRACE_ATTACH`) targeting the main app PID, then `exit_group(45)`. A main
+process watchdog thread subsequently issues `exit_group(0)`. Bifrost's
+`Scheduling.cpp` currently returns EPERM for every ptrace request; Linux
+[attach semantics](https://man7.org/linux/man-pages/man2/ptrace.2.html) include
+tracer ownership, stops and wait notifications, not just a success return.
+Other fork descendants also repeatedly fail to open a related guest PID's
+`/proc/<pid>/status` with ENOENT. These are the next observed compatibility
+gaps; the trace does not prove that implementing them would complete startup.
+The earlier abort/127 has been passed, but exit 0 is not Application startup
+or playability. A GDB run timed out after fork, so its incomplete exit capture
+was superseded by the lightweight trace.
 
 Fixing syscall 240 would correct SIGABRT delivery, but is not evidence that
 the game would start. HOME routing succeeds; gameplay remains unconfirmed.

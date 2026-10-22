@@ -24,15 +24,6 @@ namespace arm64emu::yggdrasil {
 // see stable values). d_off is the byte offset of the NEXT record
 // (or 0 for the last, signaling end-of-directory). d_reclen is the
 // total record length including padding.
-static uint64_t hash_ino(const std::string& name) {
-    // FNV-1a 64-bit. Good enough for a fake inode number.
-    uint64_t h = 1469598103934665603ULL;
-    for (char c : name) {
-        h ^= static_cast<uint8_t>(c);
-        h *= 1099511628211ULL;
-    }
-    return h | 0x8000000000000000ULL;  // set high bit to avoid 0 (reserved)
-}
 ssize_t DirNode::getdents(uint64_t /*off*/, void* buf, size_t n) {
     // The `off` parameter is ignored — we use the internal pos_ (set by
     // lseek) so that the guest's lseek(fd, d_off, SEEK_SET) + getdents
@@ -65,7 +56,7 @@ ssize_t DirNode::getdents(uint64_t /*off*/, void* buf, size_t n) {
         }
         // Lay out the record.
         // d_ino (8 bytes) — FNV-1a hash of the full path.
-        uint64_t ino = hash_ino(name_ + "/" + e.name);
+        uint64_t ino = Node::synthetic_inode(name_ + "/" + e.name);
         memcpy(out + total, &ino, 8);
         // d_off (8 bytes) — entry index of the NEXT record (idx+1).
         // The guest passes this back via lseek(fd, d_off, SEEK_SET).

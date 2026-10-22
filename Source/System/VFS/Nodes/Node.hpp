@@ -49,6 +49,23 @@ public:
     virtual ssize_t lseek(int64_t off, int whence) = 0;
     // Fill in a struct stat. Returns 0 on success, -errno on failure.
     virtual int fstat(struct stat* st) = 0;
+    // Procfs content can use a fresh backing memfd on each open. Its guest
+    // identity must still match the directory entry and path stat.
+    static uint64_t synthetic_inode(const std::string& path) {
+        uint64_t h = 1469598103934665603ULL;
+        for (unsigned char c : path) { h ^= c; h *= 1099511628211ULL; }
+        return h | 0x8000000000000000ULL;
+    }
+    void set_proc_identity(const std::string& path) { proc_inode_ = synthetic_inode(path); }
+    bool has_proc_identity() const { return proc_inode_ != 0; }
+    int guest_stat(struct stat* st) {
+        int r = fstat(st);
+        if (r == 0 && proc_inode_) {
+            st->st_dev = 0;
+            st->st_ino = proc_inode_;
+        }
+        return r;
+    }
     // Dispatch an ioctl. Returns 0 on success, -errno on failure, or
     // INT_MIN if this Node does not handle the request (so the caller
     // can fall back to host passthrough or return -ENOTTY). Default
@@ -103,5 +120,7 @@ public:
     virtual ssize_t getdents(uint64_t /*off*/, void* /*buf*/, size_t /*n*/) {
         return -ENOTDIR;
     }
+private:
+    uint64_t proc_inode_ = 0;
 };
 } // namespace arm64emu::yggdrasil

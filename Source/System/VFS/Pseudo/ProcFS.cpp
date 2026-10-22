@@ -143,7 +143,36 @@ static std::vector<DirNode::Entry> proc_self_entries() {
     };
 }
 // ── Yggdrasil::open_procfs ────────────────────────────────────────────
-std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
+std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& requested,
+                                             int flags, mode_t mode,
+                                             int* err_out) {
+    std::string path = canonical_proc_path(requested);
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    auto node = resolve_procfs(path, flags, mode, err_out);
+    if (node && !requested.empty() && requested.back() == '/' && !node->is_dir()) {
+        *err_out = ENOTDIR;
+        return nullptr;
+    }
+    // /proc/self/exe follows the real executable's identity, or presents
+    // its existing symlink node for O_PATH|O_NOFOLLOW.
+    if (node && !is_proc_exe_path(path)) node->set_proc_identity(path);
+    return node;
+}
+
+bool Yggdrasil::procfs_stat(const std::string& requested, int flags,
+                          struct stat* st, int& result) {
+    const std::string path = canonical_proc_path(requested);
+    if (is_proc_exe_path(path)) return false;
+    // /proc/mounts is a symlink; retain the existing lstat handling.
+    if (path == "/proc/mounts" && (flags & AT_SYMLINK_NOFOLLOW)) return false;
+    int error = 0;
+    auto node = open_procfs(path, O_PATH | ((flags & AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0), 0, &error);
+    if (!node && error == 0) return false;
+    result = node ? node->guest_stat(st) : -error;
+    return true;
+}
+
+std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                                              int flags, mode_t /*mode*/,
                                              int* err_out) {
     // Directory listings.

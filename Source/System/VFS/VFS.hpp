@@ -92,6 +92,7 @@ public:
     // count and contradict sched_getaffinity). Returns false when
     // `path` is not part of the synthetic tree.
     static bool sysfs_stat(const std::string& path, struct stat* st);
+    bool procfs_stat(const std::string& path, int flags, struct stat* st, int& result);
     // Resolve a guest path to a Node. Returns nullptr on failure (with
     // errno set via the `*err_out` parameter).
     //
@@ -298,6 +299,8 @@ private:
     // DevFS.cpp / HostPaths.cpp). Each returns nullptr if it doesn't handle
     // the path.
     std::unique_ptr<Node> open_procfs(const std::string& path,
+                                      int flags, mode_t mode, int* err_out);
+    std::unique_ptr<Node> resolve_procfs(const std::string& path,
                                       int flags, mode_t mode, int* err_out);
     std::unique_ptr<Node> open_sysfs(const std::string& path,
                                      int flags, mode_t mode, int* err_out);

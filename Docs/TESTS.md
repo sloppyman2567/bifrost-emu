@@ -4,6 +4,27 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Procfs inode identity (2026-10-22)
+
+`test_proc_rewind` now compares directory entries, path stat, independent open
+file descriptors, relative directory-fd stat, AT_EMPTY_PATH, and statx for
+`/proc/filesystems`, `/proc/cpuinfo`, `/proc/self/maps`, and the process's own
+numeric-PID environ path. It also checks trailing-slash ENOTDIR and unknown
+stat-flag EINVAL. Native Linux, Bifrost JIT/interpreter/Tier-2 and the headless
+build pass. The four selected procfs runner cases pass 4/4 in both engines, and the
+filesystem confinement gate passes 2/2 in both engines. SDL and headless `all lib` builds pass. QEMU agrees on the target
+`/proc/filesystems` identity, but its special cpuinfo/maps open handling
+produces different descriptor identity from path stat in the broader fixture.
+
+The real Global client advances past the recorded inode error, then reaches
+forked self-debugging: ptrace is still an unconditional EPERM stub, and related
+PID status queries remain unsupported. A watchdog exits the main process with
+status 0 before Application startup completes. This does not establish gameplay.
+Excluded from the identity fix: SysFS/DevFS inode identity, general procfs
+symlink/parent-component resolution, and metadata changes during an already-open
+snapshot. The existing procfs directory listing's legacy d_type constants are
+also not corrected by this change.
+
 ## Guest procfs environment (2026-10-22)
 
 `test_proc_cmdline` now compares the complete NUL-separated initial environment

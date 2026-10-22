@@ -44,6 +44,25 @@ static int stat_guest_path(int hfd, const std::string& raw_path, int flags,
     const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;
     return ::fstatat(dir, path.c_str(), st, flags) < 0 ? -errno : 0;
 }
+// Procfs metadata uses the same virtual nodes as open, including dirfd and
+// AT_EMPTY_PATH queries. Never consult host /proc for a synthetic node's inode.
+static bool stat_proc_path(Yggdrasil& vfs, yggdrasil::FdTable& fds, uint64_t dirfd,
+                           const std::string& path, int flags, struct stat* st,
+                           int& result) {
+    if (path.empty() && (flags & AT_EMPTY_PATH)) {
+        auto node = fds.get(static_cast<int>(dirfd));
+        if (!node || !node->has_proc_identity()) return false;
+        result = node->guest_stat(st);
+        return true;
+    }
+    std::string full = path;
+    if (!full.empty() && full.front() != '/' && static_cast<int>(dirfd) != AT_FDCWD) {
+        auto dir = std::dynamic_pointer_cast<yggdrasil::DirNode>(fds.get(static_cast<int>(dirfd)));
+        if (!dir || !dir->has_proc_identity()) return false;
+        full = dir->name() + "/" + path;
+    }
+    return vfs.procfs_stat(full, flags, st, result);
+}
 int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -59,7 +78,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             struct stat st{};
-            int r = node->fstat(&st);
+            int r = node->guest_stat(&st);
             // Build AArch64 struct stat (128 bytes) — same layout as fstatat.
             uint8_t buf[128] = {0};
             if (r >= 0) {
@@ -148,7 +167,11 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +0x9C: stx_dio_offset_align (u32), ... (rest is padding)
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat st;
-            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st) ||
+            int proc_result = 0;
+            if (stat_proc_path(vfs_, fds_, a0, raw_path, static_cast<int>(a2), &st, proc_result)) {
+                if (a2 & ~uint64_t(0x100 | 0x800 | 0x1000 | 0x6000) || (a2 & 0x6000) == 0x6000) { ret_err(EINVAL); return 0; }
+                if (proc_result < 0) { ret_host(proc_result); return 0; }
+            } else if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st) ||
                 yggdrasil::Yggdrasil::sysfs_stat(raw_path, &st)) {
                 if (a2 & ~uint64_t(0x100 | 0x800 | 0x1000 | 0x6000)) { ret_err(EINVAL); return 0; }
                 if ((a2 & 0x6000) == 0x6000) { ret_err(EINVAL); return 0; }
@@ -225,7 +248,11 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             // see correct file sizes, types, and permissions.
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat st;
-            if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st) ||
+            int proc_result = 0;
+            if (stat_proc_path(vfs_, fds_, a0, raw_path, static_cast<int>(a3), &st, proc_result)) {
+                if (a3 & ~uint64_t(0x100 | 0x800 | 0x1000)) { ret_err(EINVAL); return 0; }
+                if (proc_result < 0) { ret_host(proc_result); return 0; }
+            } else if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &st) ||
                 yggdrasil::Yggdrasil::sysfs_stat(raw_path, &st)) {
                 if (a3 & ~uint64_t(0x100 | 0x800 | 0x1000)) { ret_err(EINVAL); return 0; }
             } else if (is_proc_exe_path(raw_path)) {
