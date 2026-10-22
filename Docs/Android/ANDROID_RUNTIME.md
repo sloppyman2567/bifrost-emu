@@ -756,8 +756,22 @@ service is accurately reporting the image. These strings, comparison values,
 and failure branch are observed in the captured code and block trace, rather
 than inferred from the final exit code. This establishes an emulator-check
 rejection in the native loader; it does not establish the vendor branding of
-that code or prove that other startup checks would pass. No property spoofing
-or check-skipping change was made.
+that code or prove that other startup checks would pass.
+
+A subsequent user-requested, app-local experiment adds `ro.kernel.qemu=0` to
+Global's managed root `debug_ramdisk/adb_debug.prop`, which the property loader
+already reads after the vendor file. The shared image and production property
+loader are unchanged. A default-JIT windowless run still exits 127. Narrow
+tracing confirms the property now supplies `"0"`, the comparison succeeds, and
+the entire module `0x60` initializer returns 1 (observed at offsets `+0x9c00`
+and `+0x9c9c`). Execution subsequently reaches another decoded loader, whose
+initial setup returns 0 at its `+0x3174`, before the abort fallback. That later
+failure has not yet been localized. The first broad block trace with the
+override timed out from logging overhead; the narrowed run reached the abort.
+The override lives only in that generated app root and can be lost when the
+root is rebuilt; its original file was backed up outside the repository.
+This experiment demonstrates progress past the emulator-property check,
+not successful Application/Activity startup or gameplay.
 
 Fixing syscall 240 would correct SIGABRT delivery, but is not evidence that
 the game would start. HOME routing succeeds; gameplay remains unconfirmed.
