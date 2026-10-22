@@ -455,7 +455,9 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
     }
     if (path == "/proc/self/auxv") return serve_static(std::string(), flags);
     if (path == "/proc/self/environ") {
-        return serve_static(std::string("PATH=/bin:/usr/bin\0", 19), flags);
+        return serve_lazy([this]() {
+            return environ_provider_ ? environ_provider_() : std::string();
+        }, flags);
     }
     if (path == "/proc/version") {
         return serve_static(std::string("Linux version 6.5.0 (bifrost-emu) (gcc) #1 SMP\n"), flags);

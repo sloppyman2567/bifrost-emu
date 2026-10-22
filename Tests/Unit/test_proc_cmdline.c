@@ -12,6 +12,7 @@
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -48,6 +49,31 @@ int main(int argc, char** argv) {
         contiguous &= argv[i] == argv[i - 1] + strlen(argv[i - 1]) + 1;
     check(contiguous, "argv strings are contiguous and ascending");
     check(!environ[0] || environ[0] == end, "environment follows argv");
+
+    char env[65536], initial[65536], envpath[64];
+    long envlen = 0;
+    for (char** e = environ; *e; ++e) {
+        size_t len = strlen(*e) + 1;
+        if (len > sizeof(initial) - envlen) return 1;
+        memcpy(initial + envlen, *e, len);
+        envlen += len;
+    }
+    check(read_file("/proc/self/environ", env, sizeof(env)) == envlen &&
+          !memcmp(env, initial, envlen), "proc environ contains the complete initial environment");
+    snprintf(envpath, sizeof(envpath), "/proc/%d/environ", getpid());
+    check(read_file(envpath, env, sizeof(env)) == envlen &&
+          !memcmp(env, initial, envlen), "proc pid environ aliases self environ");
+    setenv("BIFROST_PROC_ENV_LATE", "added-after-startup", 1);
+    check(read_file(envpath, env, sizeof(env)) == envlen &&
+          !memcmp(env, initial, envlen), "setenv does not replace the initial proc environment");
+    if (envlen) {
+        char saved = end[0];
+        end[0] = saved == 'X' ? 'Y' : 'X';
+        initial[0] = end[0];
+        check(read_file(envpath, env, sizeof(env)) == envlen &&
+              !memcmp(env, initial, envlen), "proc environ reads edits to the original string block");
+        end[0] = saved;
+    }
 
     char cmdline[8192], own[8192], path[64];
     long n = read_file("/proc/self/cmdline", cmdline, sizeof(cmdline));

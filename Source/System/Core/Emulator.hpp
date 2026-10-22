@@ -466,6 +466,8 @@ private:
     uint64_t guest_envp_addr_ = 0;
     // Guest argv string block, [arg_start_, arg_end_), for /proc/self/cmdline.
     uint64_t arg_start_ = 0, arg_end_ = 0;
+    // Initial environment string block, independent of later libc setenv().
+    uint64_t env_start_ = 0, env_end_ = 0;
     // Guest-side current working directory. Decoupled from the host cwd
     // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
     // chdir/fchdir; returned by getcwd. Defaults to "/".

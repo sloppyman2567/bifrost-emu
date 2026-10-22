@@ -223,7 +223,9 @@ uint64_t Emulator::place_argument_strings(uint64_t stack_top,
     arg_start_ = cursor;
     for (const auto& a : argv) argv_addrs.push_back(place(a));
     arg_end_ = cursor;
+    env_start_ = cursor;
     for (const auto& e : env) envp_addrs.push_back(place(e));
+    env_end_ = cursor;
     return start;
 }
 // ── Initial stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ─────

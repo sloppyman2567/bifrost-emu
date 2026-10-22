@@ -715,10 +715,41 @@ and direct HOME Intents are the validated paths.
 The real Global client was rerun with default JIT settings, a windowless plugin
 and an offscreen Asgard launcher. The supervisor acknowledged HOME with status
 0, and the shell/am child called `exit_group(0)`. The main game process then
-explicitly called `exit_group(127)` during Application startup, before an
-Activity could poll the queued background request. Thus HOME routing succeeds,
-but the game still terminates itself; this does not identify why it chose HOME
-or confirm a protection-system verdict. The real app also exposed a stale
+reached `exit_group(127)` during Application startup, before an Activity could
+poll the queued background request. Further tracing identifies that exit as
+Bionic `abort()`'s fallback, not a game-selected exit status. `abort()` raises
+SIGABRT twice through `rt_tgsigqueueinfo` (240); Bifrost's explicit ENOSYS stub
+makes both attempts fail, after which Bionic calls `_exit(127)`. This matches
+[Bionic's abort implementation](https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/bionic/abort.cpp)
+and the pinned image's disassembly. A minimal program using the actual Bionic
+DSO, with SIGABRT set to SIG_DFL to exclude debuggerd, terminates with SIGABRT
+under QEMU but exits 127 under both Bifrost engines. The real Global client
+also reaches the same HOME/abort path in the reference interpreter.
+
+The captured constructor is `lib__4e06__.so + 0x1d54`. Its decoded code calls
+a cleanup dispatcher, requests HOME, restores a saved register/stack context
+with `abort` as the return target, and then reaches the fallback above. The
+24-byte records passed to cleanup describe mapped modules: identifiers such as
+`0xe2` are not established failure codes. The first captured initialization
+failure was module 2: its final data-directory subcheck looked up `ANDROID_DATA`
+in `/proc/self/environ`. Procfs returned only a hardcoded 19-byte
+`PATH=/bin:/usr/bin` block, hiding the configured Android environment. The
+preceding `/proc/self/exe` ELF-header check passed.
+
+Procfs now reads the guest's original environment string block, with NUL
+separators and numeric-PID aliases, independently of libc's later `setenv`
+array. This follows [Linux's initial-environment contract](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html),
+including direct edits to that original memory. The focused fixture passes
+on native Linux and in Bifrost JIT, interpreter, Tier-2 and the headless build.
+QEMU agrees on initial contents and `setenv`, but does not mirror direct edits
+to the guest's original environment or argv through its procfs view. A new
+windowless Global trace confirms module 2 now passes; a later module `0x60`
+initializer returns false and startup still aborts. Its cause remains under
+investigation. Fixing syscall 240 would correct SIGABRT delivery,
+but is not evidence that the game would start. HOME routing succeeds; neither
+a protection-system verdict nor game playability is established.
+
+The real app also exposed a stale
 Binder receive-arena protection guard after exec; clearing device mappings
 before image replacement fixes the shell's atexit-array EACCES without changing
 the parent's broker arena (fork-child RPC is rejected by owner PID).

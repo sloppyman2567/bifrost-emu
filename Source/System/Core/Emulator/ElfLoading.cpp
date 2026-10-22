@@ -124,6 +124,19 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         return block;
     });
+    // Linux proc_pid_environ reads the original env_start/env_end memory,
+    // not the host environment or libc's possibly replaced environ array.
+    vfs_.set_environ_provider([this]() -> std::string {
+        std::string block;
+        if (env_start_ >= env_end_) return block;
+        try {
+            block.resize(env_end_ - env_start_);
+            mem_.read(env_start_, block.data(), block.size());
+        } catch (const EmuError&) {
+            block.clear();
+        }
+        return block;
+    });
     vfs_.set_graphics(&graphics_);
     vfs_.set_audio(&audio_);
     // /proc/self/maps lists every guest mapping as the kernel does: real

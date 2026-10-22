@@ -4,6 +4,20 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Guest procfs environment (2026-10-22)
+
+`test_proc_cmdline` now compares the complete NUL-separated initial environment
+with `/proc/self/environ` and `/proc/<getpid()>/environ`, checks that `setenv`
+does not replace that block, and verifies direct edits to the original memory.
+It passes on native Linux, Bifrost JIT/interpreter/Tier-2 and the headless build.
+The selected `proc_exe` and `test_proc_cmdline` runner gate passes 2/2 in both
+engines; SDL and headless `all lib` builds pass. QEMU passes initial contents
+and `setenv`, but fails direct-memory environment/argv visibility checks.
+This covers startup block contents and reopening procfs; it excludes
+PR_SET_MM relocation and concurrent edits while reading an already-open fd.
+The real Global client now passes its formerly failing module-2 initialization
+but aborts at a later module; see the runtime trace below.
+
 ## Signal queries and fork-child lifetime (2026-10-22)
 
 `test_signal_semantics` now queries SIGKILL/SIGSTOP through raw `rt_sigaction`

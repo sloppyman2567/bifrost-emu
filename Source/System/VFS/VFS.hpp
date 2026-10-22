@@ -198,6 +198,9 @@ public:
     void set_cmdline_provider(std::function<std::string()> cb) {
         cmdline_provider_ = std::move(cb);
     }
+    void set_environ_provider(std::function<std::string()> cb) {
+        environ_provider_ = std::move(cb);
+    }
     // The guest's own pid as getpid() reports it: 1, or the host pid in a
     // fork child. /proc/<that pid> names the same process as /proc/self.
     void set_self_pid(int pid) { self_pid_ = pid; }
@@ -280,6 +283,7 @@ private:
     std::string elf_backing_path_;
     uint64_t initial_stack_ = 0;
     std::function<std::string()> cmdline_provider_;
+    std::function<std::string()> environ_provider_;
     int self_pid_ = 1;
     ::arm64emu::FrostGraphics* gfx_ = nullptr;
     ::arm64emu::Audio* audio_ = nullptr;
