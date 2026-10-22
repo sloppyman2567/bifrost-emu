@@ -102,6 +102,13 @@ int64_t syscall_signals(Emulator& emu, CPU& cpu, uint64_t num) {
                 // in one place without reordering the producer's queue.
                 CPU::PendingSig queued;
                 while (cpu.pop_pending(queued, wait_set)) {
+                    if (queued.signo >= 1 && queued.signo <= 64 &&
+                        (wait_set & (1ULL << (queued.signo - 1)))) {
+                        finish();
+                        try { build_siginfo(mem_, a1, queued.signo, queued.si_code, queued.fault_addr, &queued); }
+                        catch (...) { ret_err(EFAULT); return 0; }
+                        ret_host(queued.signo); return 0;
+                    }
                     if (queued.signo >= 1 && queued.signo <= 64)
                         cpu.sigpending.fetch_or(1ULL << (queued.signo - 1));
                 }

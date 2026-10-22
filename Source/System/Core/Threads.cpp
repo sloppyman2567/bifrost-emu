@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <system_error>
 #include <mutex>
 #include <pthread.h>
 #include <signal.h>
@@ -74,6 +75,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // The child's CPU state was set up by spawn_thread() before the
     // host thread was created. We just run it to completion.
     CPU& cpu = gt->cpu;
+    emu->debugger().register_task(cpu);
     // ── JIT dispatch ──
     // Default (shared-JIT): spawned threads share the main's FrostJIT
     // (emu->jit_), saving 64 MiB per thread. blocks_mutex_ is held only
@@ -206,6 +208,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // FUTEX_OWNER_DIED, then wake waiters. This lets pthread_mutex with
     // PTHREAD_MUTEX_ROBUST work correctly when a thread dies holding
     // the lock. Best-effort: if a pointer read fails, we stop walking.
+    emu->debugger().exited(cpu, cpu.exit_code);
     if (cpu.robust_list_head != 0) {
         Memory& mem = emu->mem();
         uint64_t head = cpu.robust_list_head;
@@ -425,7 +428,6 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // mode too: workers invalidate it while main runs. No-op after the
     // first spawn.
     if (jit_) jit_->enter_multithreaded();
-    alive_threads_.fetch_add(1);
     if (libc_single_threaded_addr_) {
         mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
     }
@@ -437,7 +439,14 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // reap_finished_threads()/kill_other_threads() observe (and join) a
     // half-assigned std::thread — host-heap corruption. Installing the
     // handle first means any published GuestThread is fully initialised.
-    gtp->host_thread = std::thread(thread_entry, this, gtp);
+    if (!debugger_->register_task(gtp->cpu)) return -1;
+    alive_threads_.fetch_add(1);
+    try { gtp->host_thread = std::thread(thread_entry, this, gtp); }
+    catch (const std::system_error&) {
+        debugger_->exited(gtp->cpu, 1);
+        alive_threads_.fetch_sub(1);
+        return -1;
+    }
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         threads_.push_back(std::move(gt));
@@ -496,6 +505,7 @@ void Emulator::group_exit(CPU& caller, int code, int signo) {
     bool expected = false;
     if (!group_exit_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;  // another thread already ended the process
+    debugger_->exited(caller, code, signo, true);
     g_guest_exit_signal.store(signo, std::memory_order_release);
     group_exit_code_.store(code, std::memory_order_release);
     if (&caller != &main_cpu_) {
@@ -527,6 +537,7 @@ void Emulator::signal_exit(CPU& caller, int signo) {
     if (dbg().process_trace || dbg().fault_trace)
         fprintf(stderr, "[guest-exit] tid=%d SIGKILL\n", caller.tid);
     g_guest_exit_signal.store(BIFROST_SIGKILL, std::memory_order_release);
+    debugger_->exited(caller, 128 + BIFROST_SIGKILL, BIFROST_SIGKILL, true);
     std::fflush(nullptr);
     std::quick_exit(128 + BIFROST_SIGKILL);
 }
@@ -815,6 +826,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     // unflushed buffer data and prints it again on exit.
     fflush(stdout);
     fflush(stderr);
+    debugger_->before_fork();
     // A leaf lock: holding it across fork keeps the child from inheriting
     // it locked by a thread that does not exist there.
     std::unique_lock<std::mutex> comm_lock(comm_mu_);
@@ -824,6 +836,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     for (size_t i = 0; i < FUTEX_SHARDS; ++i)
         futex_locks[i] = std::unique_lock<std::mutex>(futex_shards_[i].mu);
     pid_t child_pid = ::fork();
+    debugger_->fork_return(child_pid == 0);
     if (child_pid < 0) {
         return -1;
     }
@@ -944,6 +957,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // child, and let them spawn fresh ones.
         if (graphics_.audio_thunk())
             graphics_.audio_thunk()->detach_pump_for_fork_child();
+        debugger_->after_fork(parent_cpu);
         // Return 0 to indicate "child". The syscall handler will put
         // this in x0, and the normal run loop continues.
         return 0;

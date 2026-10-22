@@ -239,7 +239,7 @@ uint64_t map_sigreturn_trampoline(Memory& mem);
 // struct siginfo_t (128 bytes): si_signo, si_errno, si_code, then a
 // union containing si_addr/si_pid/si_uid/etc.
 void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
-                   int si_code, uint64_t fault_addr);
+                   int si_code, uint64_t fault_addr, const CPU::PendingSig* queued = nullptr);
 // Build a guest-side ucontext_t at address `uc_addr`. The layout is
 // simplified but covers the fields real handlers (glibc/musl/bionic)
 // actually read:

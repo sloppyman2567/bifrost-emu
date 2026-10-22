@@ -15,6 +15,7 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0];
     switch (num) {
         case 93: { // exit — exit current thread (not whole process)
+            emu.debugger().exited(cpu, static_cast<int>(a0));
             // On AArch64 Linux, exit(2) (syscall 93) exits only the
             // calling thread. The kernel's do_exit() handles:
             //   1. clear_child_tid zeroing + futex wake (CLONE_CHILD_CLEARTID)
@@ -54,7 +55,10 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
             // can wait on copied condition variables or send destruction
             // requests over the parent's display connection. Let the kernel
             // reclaim the child directly, as guest _exit requires.
-            if (emu.host_fork_child()) ::_exit(static_cast<int>(a0));
+            if (emu.host_fork_child()) {
+                emu.debugger().exited(cpu, static_cast<int>(a0), 0, true);
+                ::_exit(static_cast<int>(a0));
+            }
             // Linux exit_group terminates EVERY thread in the process, not
             // just the caller — including the main thread when a worker
             // calls it. From main, stop + reap the siblings here; from a

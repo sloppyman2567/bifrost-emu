@@ -406,6 +406,8 @@ UNIT_TESTS=(
     # Linux argv/env string layout, live /proc/self/cmdline (setArgV0 and
     # setproctitle rewrites, also after execve), /proc/<getpid()> == self.
     "test_proc_cmdline|Tests/Unit/test_proc_cmdline.elf||10|ALL PASS"
+    # Guest ptrace ownership, blocked-parent attach, regsets and stepping.
+    "test_ptrace|Tests/Unit/test_ptrace.elf||30|ALL PASS"
     # exit_group / fatal default signals from any thread end the process;
     # main pthread_exit does not; fork-child threads share getpid().
     "test_group_exit|Tests/Unit/test_group_exit.elf||60|ALL PASS"

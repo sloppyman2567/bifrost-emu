@@ -138,6 +138,9 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         return block;
     });
     vfs_.set_graphics(&graphics_);
+    vfs_.set_debug_status_provider([this](int tid, std::string& text) {
+        return debugger_->status(tid, text);
+    });
     vfs_.set_audio(&audio_);
     // /proc/self/maps lists every guest mapping as the kernel does: real
     // permissions, and file offset, device, inode and resolved path for

@@ -809,6 +809,50 @@ was superseded by the lightweight trace.
 Fixing syscall 240 would correct SIGABRT delivery, but is not evidence that
 the game would start. HOME routing succeeds; gameplay remains unconfirmed.
 
+### Guest ptrace continuation (2026-10-22)
+
+The unconditional ptrace rejection is now replaced by guest task tracing.
+One process-shared control domain follows an emulator's fork family; it never
+attaches a host debugger or exposes host register state. ATTACH/TRACEME establish
+ownership, the target stops at a committed CPU boundary, and wait4/waitid report
+the stop. CONT/DETACH can suppress or inject a signal; SINGLESTEP executes one
+guest instruction through the interpreter, then stops again. Default execution
+continues to use the selected JIT. SEIZE/INTERRUPT, PEEK/POKE, GETSIGINFO,
+GETREGSET/SETREGSET for AArch64 GPR, FPSIMD and TLS, and EXITKILL are implemented.
+Stopped CPUs execute memory/register commands themselves. Forced memory access
+uses `/proc/self/mem` only after validating the guest mapping and window bounds;
+code writes invalidate translations. Related registered tasks expose their
+guest identity and TracerPid through `/proc/<tid>/status`.
+
+The contract follows Linux [ptrace](https://man7.org/linux/man-pages/man2/ptrace.2.html)
+and the [AArch64 UAPI register layouts](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/uapi/asm/ptrace.h).
+The focused fixture compares process, stop/wait, signal, memory and exec behavior
+with native Linux; its AArch64 register/step checks run in Bifrost, not on a
+native ARM machine. This is a bounded compatibility implementation, not a full
+Linux debugger: syscall tracing, fork/clone/exec event options, hardware debug
+regsets, unrelated emulator processes, and general job-control group stops are
+unsupported. Only TRACESYSGOOD and EXITKILL option bits are accepted. The domain
+has 1,024 task records; exited unowned records without tracer references can be
+reused. Existing overlapping synthetic worker TIDs after fork are rejected as
+ambiguous. Guest credentials/dumpability are checked; host Yama/LSM policies are
+not emulated. `BIFROST_PTRACE_TRACE=1` logs requests and results.
+
+A default-JIT windowless Global run (session
+`40ef5e4550dc44e28cf6dd1c1671a618`) now observes successful child ATTACH and CONT,
+loads `lib__4e06__.so`, and reaches `APP_APPLICATION_CREATED`,
+`APP_ACTIVITY_CREATED` and `APP_RESUMED`. The child also successfully requests
+GETSIGINFO and continues SIGBUS/SIGSEGV delivery stops. Thus the former ptrace
+stub was a concrete startup blocker. This does not identify a particular
+commercial protection vendor or establish a server-side integrity verdict.
+The app-local property experiment described above remains in effect.
+
+The same run subsequently reports `IllegalStateException: surface preparation:
+-22` in FrameworkSurfaces with the windowless fixture plugin, then Java VM exit
+status 1. The managed run reaches its 60-second timeout (124), so clean process
+shutdown is also unconfirmed. Visible rendering, title/login screens and
+gameplay have not been tested by this run. The surface failure is separate from
+the earlier loader/self-debugging failure.
+
 The real app also exposed a stale
 Binder receive-arena protection guard after exec; clearing device mappings
 before image replacement fixes the shell's atexit-array EACCES without changing

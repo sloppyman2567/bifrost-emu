@@ -175,6 +175,18 @@ bool Yggdrasil::procfs_stat(const std::string& requested, int flags,
 std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                                              int flags, mode_t /*mode*/,
                                              int* err_out) {
+    // Only tasks registered in this emulator's fork family are visible.
+    // Unrelated numeric PIDs still fall through to the existing denial.
+    if (path.compare(0, 6, "/proc/") == 0 && path.size() > 13 &&
+        path.compare(path.size() - 7, 7, "/status") == 0 && debug_status_provider_) {
+        const std::string number = path.substr(6, path.size() - 13);
+        if (!number.empty() && number.size() < 11 && number.find_first_not_of("0123456789") == std::string::npos) {
+            uint64_t tid = std::stoull(number);
+            std::string text;
+            if (tid <= INT32_MAX && debug_status_provider_(static_cast<int>(tid), text))
+                return serve_static(text, flags);
+        }
+    }
     // Directory listings.
     if (path == "/proc" || path == "/proc/") {
         return serve_dir("/proc", proc_entries(), flags);
@@ -371,7 +383,12 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
             s += "Ngid:\t0\n";
             s += "Pid:\t" + std::to_string(ids.pid) + "\n";
             s += "PPid:\t" + std::to_string(ids.ppid) + "\n";
-            s += "TracerPid:\t0\n";
+            std::string debug_status;
+            if (debug_status_provider_ && debug_status_provider_(ids.pid, debug_status)) {
+                size_t at = debug_status.find("TracerPid:");
+                size_t end = debug_status.find('\n', at);
+                s += at == std::string::npos ? "TracerPid:\t0\n" : debug_status.substr(at, end - at + 1);
+            } else s += "TracerPid:\t0\n";
             for (const auto& identity : {std::make_pair("Uid", process_uid_), std::make_pair("Gid", process_gid_)}) {
                 s += std::string(identity.first) + ":";
                 for (int i = 0; i < 4; ++i) s += '\t' + std::to_string(identity.second);

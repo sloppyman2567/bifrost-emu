@@ -288,6 +288,12 @@ public:
     FdTable&        fds()      { return fds_; }
     const std::string& elf_path() const { return elf_path_; }
     CPU&            main_cpu() { return main_cpu_; }
+    GuestDebugger& debugger() { return *debugger_; }
+    bool debugger_poll(CPU& cpu) {
+        if (__builtin_expect(cpu.debug_control && cpu.debug_control->work.load(std::memory_order_acquire), 0))
+            return debugger_->poll(cpu);
+        return false;
+    }
     // Async-signal-safe access to the active emulator (the guard-fault
     // reporter in Signals.cpp runs in a host signal context and cannot use
     // instance globals directly). Single active emulator per host process.
@@ -438,6 +444,7 @@ public:
     // or -ECHILD if the PID doesn't exist.
     int reap_fork_child(int pid, int options, bool& found);
 private:
+    friend class GuestDebugger;
     // ── Owned state ───────────────────────────────────────────────────
     Memory mem_;
     CPU    main_cpu_;          // main thread's CPU state
@@ -834,6 +841,7 @@ private:
     void wire_thunk_audio_runner_();
     void ensure_thunk_linker_();
     uint64_t android_on_create_ = 0;
+    std::unique_ptr<GuestDebugger> debugger_;
     static std::string to_hex(uint64_t v) {
         char b[32]; snprintf(b, sizeof(b), "%llx", static_cast<unsigned long long>(v));
         return b;

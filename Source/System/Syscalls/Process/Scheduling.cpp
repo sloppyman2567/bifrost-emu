@@ -12,6 +12,7 @@
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
+#include "System/Core/DebugFlags.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/VFS/VFS.hpp"
 #include <errno.h>
@@ -24,8 +25,13 @@ int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     auto& mem_ = emu.mem();
     switch (num) {
-        case 117: { // ptrace — return -EPERM
-            ret_err(EPERM);
+        case 117: { // ptrace — guest task state, never host registers
+            int64_t result = emu.debugger().ptrace(cpu, a0, static_cast<int>(a1), a2, cpu.regs[3]);
+            if (dbg().ptrace_trace)
+                fprintf(stderr, "[ptrace] tid=%d request=%#llx target=%d addr=%#llx data=%#llx result=%lld\n",
+                        cpu.tid, (unsigned long long)a0, static_cast<int>(a1),
+                        (unsigned long long)a2, (unsigned long long)cpu.regs[3], (long long)result);
+            ret_host(result);
             return 0;
         }
         case 124: { // sched_yield — AArch64 124

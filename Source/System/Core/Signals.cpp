@@ -348,7 +348,7 @@ uint64_t map_sigreturn_trampoline(Memory& mem) {
 // + 4 pad + union (16..) — _kill.{pid,uid}, _sigfault.addr,
 // _sigchld.{pid,uid,status,utime,stime}.
 void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
-                   int si_code, uint64_t fault_addr) {
+                   int si_code, uint64_t fault_addr, const CPU::PendingSig* queued) {
     if (info_addr == 0) return;
     uint8_t buf[128] = {0};
     const int32_t signo32 = signo;
@@ -371,6 +371,11 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
         signo == BIFROST_SIGILL  || signo == BIFROST_SIGFPE ||
         signo == BIFROST_SIGTRAP) {
         memcpy(buf + 16, &fault_addr, 8);
+    }
+    if (queued && queued->sender_pid) {
+        memcpy(buf + 16, &queued->sender_pid, 4);
+        memcpy(buf + 20, &queued->sender_uid, 4);
+        if (signo == BIFROST_SIGCHLD) memcpy(buf + 24, &queued->child_status, 4);
     }
     try { mem.write(info_addr, buf, sizeof(buf)); } catch (...) {}
 }
@@ -625,6 +630,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         }
         return false;
     }
+    if (emu.debugger().signal(cpu, signo, si_code, fault_addr) && signo == 0) return true;
     std::optional<SigAction> act = sigtab.lookup(signo);
     if (trace) {
         fprintf(stderr, "[signal] signo=%d: act=%s", signo,
@@ -716,7 +722,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                                     ? cpu.sigsuspend_saved_mask
                                     : cpu.sigmask.load();
     // Build the guest-visible siginfo_t and ucontext_t.
-    build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr);
+    build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr, cpu.active_siginfo);
     try {
         build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
     } catch (const UnmappedMemory&) {
@@ -1099,6 +1105,7 @@ bool Emulator::send_process_signal(CPU& current, int signo) {
 // make the guest never see -EINTR, breaking shells that rely on -EINTR
 // from read()/nanosleep() to detect "user wants to interrupt".
 bool Emulator::handle_eintr(CPU& cpu) {
+    debugger_poll(cpu);
     return drain_host_signals(cpu) || drain_pending_signals(cpu);
 }
 // ── drain_pending_signals ─────────────────────────────────────────────
@@ -1127,11 +1134,17 @@ bool Emulator::drain_pending_signals(CPU& cpu) {
         if (sig.signo >= 1 && sig.signo <= 64 &&
             SignalTable::is_blocked(cpu, sig.signo)) {
             // Re-push and stop.
-            cpu.push_pending(sig.signo, sig.si_code, sig.fault_addr);
+            cpu.push_pending(sig.signo, sig.si_code, sig.fault_addr, sig.sender_pid, sig.sender_uid, sig.child_status);
             break;
         }
-        if (deliver_signal(*this, cpu, signals_, sig.signo,
-                           sig.si_code, sig.fault_addr)) {
+        struct QueuedInfoScope {
+            CPU& cpu;
+            const CPU::PendingSig* previous;
+            ~QueuedInfoScope() { cpu.active_siginfo = previous; }
+        } info_scope{cpu, cpu.active_siginfo};
+        cpu.active_siginfo = &sig;
+        bool delivered = deliver_signal(*this, cpu, signals_, sig.signo, sig.si_code, sig.fault_addr);
+        if (delivered) {
             any_delivered = true;
             // deliver_signal sets up the handler frame and changes
             // cpu.pc. Don't drain more — let the handler run first.

@@ -424,6 +424,9 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     uint64_t dbg2_count = 0;
     while (cpu->running && !cpu->jit_dispatch_requested && cpu->pc != return_pc &&
            (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {
+        bool debug_step = emu->debugger_poll(*cpu);
+        if (!cpu->running || cpu->jit_dispatch_requested) break;
+        if (debug_step) { emu->step(*cpu); continue; }
         if (__builtin_expect(hang_watchdog && ++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
             if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);
             fprintf(stderr, "[JIT] jit_call_helper watchdog: %llu blocks dispatched by a thread — disabling JIT (likely codegen bug)\n",

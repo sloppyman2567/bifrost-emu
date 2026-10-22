@@ -43,6 +43,9 @@ void FrostJIT::bind_ibl(CPU& cpu) {
 }
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (!cpu.jit_call_depth) cpu.jit_dispatch_requested = false;
+    bool debug_step = emu.debugger_poll(cpu);
+    if (!cpu.running || (cpu.jit_call_depth && cpu.jit_dispatch_requested)) return cpu.pc;
+    if (debug_step) { emu.step(cpu); return cpu.pc; }
     FaultScope fault_scope(this);
     cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
     cpu.jit_chain_budget = 256;

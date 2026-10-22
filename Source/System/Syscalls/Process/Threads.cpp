@@ -668,6 +668,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             cpu.running = true;
             cpu.exit_code = 0;
             memset(cpu.regs, 0, sizeof(cpu.regs));
+            emu.debugger().exec(cpu);
             memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
             memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
             cpu.tid = emu.vfs().process_ids().pid;  // exec keeps the PID; the leader TID equals it

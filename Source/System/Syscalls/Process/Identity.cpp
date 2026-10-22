@@ -191,7 +191,8 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             switch (option) {
                 case PR_SET_DUMPABLE:
                     if (a1 > 1) { ret_err(EINVAL); return 0; }
-                    emu.guest_dumpable.store(static_cast<int>(a1)); ret_host(0); return 0;
+                    emu.guest_dumpable.store(static_cast<int>(a1));
+                    emu.debugger().set_dumpable(static_cast<int>(a1)); ret_host(0); return 0;
                 case PR_SET_TIMERSLACK:
                     cpu.timer_slack_ns = a1 ? a1 : cpu.timer_slack_default_ns; ret_host(0); return 0;
                 case PR_SET_NO_NEW_PRIVS:

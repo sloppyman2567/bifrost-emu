@@ -19,6 +19,57 @@
 #include <sys/wait.h>
 #include <unistd.h>
 namespace arm64emu {
+static pid_t guest_wait4(Emulator& emu, CPU& cpu, pid_t pid, int* status,
+                         int options, struct rusage* usage) {
+    if (!emu.debugger().wait_polling()) return ::wait4(pid, status, options, usage);
+    for (;;) {
+        pid_t result = ::wait4(pid, status, options | WNOHANG, usage);
+        if (result > 0) {
+            if (WIFEXITED(*status) || WIFSIGNALED(*status)) emu.debugger().reaped(result);
+            return result;
+        }
+        if (result < 0 && errno != ECHILD) return result;
+        int tid = 0;
+        if (emu.debugger().take_wait(pid, true, true, true, tid, *status)) {
+            if (usage) memset(usage, 0, sizeof(*usage));
+            return tid;
+        }
+        if (result < 0 && !emu.debugger().has_tracees(pid)) return result;
+        if (options & WNOHANG) return 0;
+        if (emu.group_exit_requested() || cpu.has_unblocked_pending_signals()) {
+            errno = EINTR; return -1;
+        }
+        emu.debugger().wait_change();
+    }
+}
+static int guest_waitid(Emulator& emu, CPU& cpu, idtype_t type, id_t id,
+                        siginfo_t* info, int options) {
+    if (type != P_ALL && type != P_PID && type != P_PGID) return ::waitid(type, id, info, options);
+    int selector = type == P_ALL ? -1 : type == P_PID ? static_cast<int>(id) : -static_cast<int>(id);
+    if (!emu.debugger().wait_polling()) return ::waitid(type, id, info, options);
+    for (;;) {
+        int result = ::waitid(type, id, info, options | WNOHANG);
+        if (result == 0 && info->si_pid) {
+            if (!(options & WNOWAIT) && (info->si_code == CLD_EXITED || info->si_code == CLD_KILLED || info->si_code == CLD_DUMPED))
+                emu.debugger().reaped(info->si_pid);
+            return 0;
+        }
+        if (result < 0 && errno != ECHILD) return result;
+        int tid = 0, status = 0;
+        if (emu.debugger().take_wait(selector, options & WSTOPPED, options & WEXITED,
+                                    !(options & WNOWAIT), tid, status)) {
+            memset(info, 0, sizeof(*info));
+            info->si_signo = SIGCHLD; info->si_pid = tid; info->si_uid = emu.vfs().process_uid();
+            info->si_code = WIFSTOPPED(status) ? CLD_TRAPPED : WIFEXITED(status) ? CLD_EXITED : CLD_KILLED;
+            info->si_status = WIFSTOPPED(status) ? status >> 8 : WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status);
+            return 0;
+        }
+        if (result < 0 && !emu.debugger().has_tracees(selector)) return result;
+        if (options & WNOHANG) { memset(info, 0, sizeof(*info)); return 0; }
+        if (emu.group_exit_requested() || cpu.has_unblocked_pending_signals()) { errno = EINTR; return -1; }
+        emu.debugger().wait_change();
+    }
+}
 int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3];
@@ -55,7 +106,7 @@ int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             int status = 0;
             pid_t r;
             while (true) {
-                r = ::waitpid((pid_t)a0, &status, static_cast<int>(a2));
+                r = guest_wait4(emu, cpu, (pid_t)a0, &status, static_cast<int>(a2), nullptr);
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
@@ -87,7 +138,7 @@ int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             memset(&ru, 0, sizeof(ru));
             pid_t r;
             while (true) {
-                r = ::wait4(pid, &status, options, a3 ? &ru : nullptr);
+                r = guest_wait4(emu, cpu, pid, &status, options, a3 ? &ru : nullptr);
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
@@ -130,7 +181,7 @@ int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             memset(&si, 0, sizeof(si));
             int r;
             while (true) {
-                r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
+                r = guest_waitid(emu, cpu, static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run

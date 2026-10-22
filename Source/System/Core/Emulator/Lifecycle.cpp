@@ -32,8 +32,10 @@
 namespace arm64emu {
 // ── Static active-emu pointer (defined in Source/System/Core/Signals.cpp) ────────
 // Emulator* Emulator::g_active_emu_ = nullptr;  // defined in Signals.cpp
-Emulator::Emulator(uint64_t guest_window_max) : mem_(true, guest_window_max) {}
+Emulator::Emulator(uint64_t guest_window_max) : mem_(true, guest_window_max),
+    debugger_(std::make_unique<GuestDebugger>(*this)) {}
 Emulator::~Emulator() {
+    debugger_->shutdown();
     // Clear the active-emu pointer so host signal handlers don't
     // dereference freed memory. Without this, a signal arriving after
     // the destructor runs would crash with UAF.
@@ -77,6 +79,7 @@ static void resolve_crash_module(DynamicLinker* dl, uint64_t pc,
 }
 // ── Run loop ──────────────────────────────────────────────────────────
 int Emulator::run() {
+    if (!debugger_->register_task(main_cpu_)) return 1;
     uint64_t count = 0;
     auto t0 = std::chrono::steady_clock::now();
     run_start_time_ = t0;
@@ -442,6 +445,9 @@ int Emulator::run() {
 }
 // ── Per-instruction step (decode cache + trace) ───────────────────────
 void Emulator::step(CPU& cpu) {
+    if (cpu.debug_skip_poll) cpu.debug_skip_poll = false;
+    else { debugger_poll(cpu); cpu.debug_skip_poll = false; }
+    if (!cpu.running) return;
     // BIFROST_PROF sampling-flag toggle (see EmulatorBridge.cpp): the
     // SIGPROF handler buckets time spent in the interpreter vs JIT.
     extern thread_local bool prof_in_interp;

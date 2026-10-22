@@ -4,6 +4,34 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Guest ptrace (2026-10-22)
+
+`test_ptrace` covers TRACEME, attach to a parent blocked in read, real wait stops,
+SIGCHLD identity/status, PEEK/POKE (including private read-only pages and CoW),
+invalid memory/option errors, GPR/FPSIMD/TLS regsets, exact one-instruction
+stepping, signal suppression/reinjection, traced exec, SEIZE/INTERRUPT,
+waitid WNOWAIT, detach, tracer death and EXITKILL. Native Linux passes the
+portable process/memory/signal checks; Bifrost JIT, interpreter, Tier-2 and
+headless JIT also pass the AArch64 register and stepping checks. This does not
+test every instruction under single stepping, native ARM register validation,
+cross-process executable-code patching, or every signal/job-control ordering.
+Unsupported ptrace contracts are listed in the
+[runtime continuation](Android/ANDROID_RUNTIME.md#guest-ptrace-continuation-2026-10-22).
+
+The selected process/signal/futex/procfs runner gate passes 14/14 in both engines;
+the filesystem confinement selection passes 2/2 in both engines. SDL and
+headless `all lib` builds and `make generated-check` pass. The real Global
+windowless run reaches Application creation, Activity creation and resume,
+then reports a surface-preparation error; it times out during shutdown. It
+does not demonstrate visible rendering or gameplay.
+
+`make verify` runs 96 differential fixtures and eight threaded oracles. One
+fixture, `jit_bfm_extract`, times out at 30 seconds, also at a separate
+90-second replay limit; the other runs report no failures. Its ordinary JIT
+and QEMU runs both complete all 3,102,720 checks. The replay timeout remains
+unresolved, so the full verification gate has not passed. IR SSA passes
+21,839 checks. No claim is made that this timeout predates the change.
+
 ## Procfs inode identity (2026-10-22)
 
 `test_proc_rewind` now compares directory entries, path stat, independent open

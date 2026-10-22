@@ -14,6 +14,7 @@
 #pragma once
 #include "Bifrost/Types.hpp"
 #include "System/Memory/Memory.hpp"
+#include "System/Core/GuestDebugger.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -201,6 +202,9 @@ public:
         int      signo;
         int      si_code;
         uint64_t fault_addr;
+        int      sender_pid = 0;
+        uint32_t sender_uid = 0;
+        int      child_status = 0;
     };
     static constexpr size_t PENDING_QUEUE_CAP = 64;
     std::mutex              pending_mu;
@@ -210,13 +214,14 @@ public:
     // Producer (other thread delivering signal) — returns true if queued,
     // false if the queue is full (caller should fall back to setting the
     // bit in sigpending so the signal isn't completely lost).
-    bool push_pending(int signo, int si_code, uint64_t fault_addr) {
+    bool push_pending(int signo, int si_code, uint64_t fault_addr,
+                      int sender_pid = 0, uint32_t sender_uid = 0, int child_status = 0) {
         std::lock_guard<std::mutex> lock(pending_mu);
         const size_t t = pending_tail.load(std::memory_order_relaxed);
         const size_t h = pending_head.load(std::memory_order_acquire);
         const size_t used = t - h;  // wraparound-safe
         if (used >= PENDING_QUEUE_CAP) return false;
-        pending_queue[t % PENDING_QUEUE_CAP] = PendingSig{signo, si_code, fault_addr};
+        pending_queue[t % PENDING_QUEUE_CAP] = PendingSig{signo, si_code, fault_addr, sender_pid, sender_uid, child_status};
         pending_tail.store(t + 1, std::memory_order_release);
         return true;
     }
@@ -406,5 +411,10 @@ public:
         excl_tag_addr = 0;
         excl_tag_size = 0;
     }
+    // Non-architectural debugger state; never inherited by clone copies.
+    int debug_slot = -1;
+    GuestDebugControl* debug_control = nullptr;
+    bool debug_skip_poll = false;
+    const PendingSig* active_siginfo = nullptr;
 };
 } // namespace arm64emu
