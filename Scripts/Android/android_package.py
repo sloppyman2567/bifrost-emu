@@ -532,6 +532,7 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
 
 def launch_session(package, app, metadata, emu, no_jit, window_plugin, frames,
                    emu_args, timeout, trace_apk, trace_after, trace_duration, session):
+    session.update(phase="Verifying installed files")
     launcher = metadata["launcher"]
     if launcher["kind"] == "managed_activity":
         if frames:

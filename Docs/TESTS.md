@@ -936,6 +936,17 @@ render of Uma's actual saved profile confirms that its emulator flag is Off and
 an unchanged save preserves its saved values. No desktop window or game was
 opened; interactive desktop use remains unverified by these checks.
 
+Startup visibility regression: Uma session `9a8317263cfb4941978b8b73d1625355`
+remained in preparation for about 108 seconds, with `Compiling ... (speed-profile)`
+in its preparation log and no guest output. The drawer previously cached the
+unchanged log size and displayed a frozen elapsed time. The focused
+`SessionResultTests` now verifies that the refresh key advances without output,
+phase changes refresh immediately, preparation logs are selected until guest
+output appears, old session records still find their preparation log, and
+finished-session clocks remain stable. Session and launcher argument tests pass
+(11 tests); no game restart or live desktop interaction was performed for this
+visibility change.
+
 Final broad checks: the SDL/GL build and library, separate headless build,
 `make generated-check`, and `make verify` pass (87 differential fixtures and
 seven threaded oracle runs). The strict JIT suite passes 326/326; the strict

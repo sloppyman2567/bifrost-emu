@@ -104,6 +104,21 @@ def app_id(state, package):
         return ids[package]
 
 
+def session_log(session):
+    """Prefer guest output once present; show preparation output before that."""
+    guest = session.get("log")
+    preparation = session.get("preparation_log") or (str(Path(guest).with_name("launcher.log")) if guest else None)
+    existing = []
+    for path in (guest, preparation):
+        if not path: continue
+        try:
+            if Path(path).is_file():
+                existing.append(path)
+                if Path(path).stat().st_size: return path
+        except OSError: continue
+    return existing[0] if existing else None
+
+
 def control(app, operation="status"):
     path = app / "managed/session.json"
     if not path.is_file(): return {"state": "stopped"}
@@ -139,9 +154,10 @@ class Session:
         self.lock = threading.RLock()
         self.started = time.monotonic()
         self.data = {"session_id": self.id, "package": package, "uid": uid,
-                     "state": "preparing", "supervisor_pid": os.getpid(), "pid": None,
+                     "state": "preparing", "phase": "Preparing app", "supervisor_pid": os.getpid(), "pid": None,
                      "started_at": time.time(), "exit_code": None,
                      "log": str(self.directory.resolve() / "stdout.log"),
+                     "preparation_log": str(self.directory.resolve() / "launcher.log"),
                      "logd": str(self.directory.resolve() / "logd.log"),
                      "token": uuid.uuid4().hex}
 
@@ -214,7 +230,7 @@ class Session:
             else:
                 child = subprocess.Popen(command, stdout=stdout, stderr=subprocess.STDOUT,
                                          env=env, start_new_session=True)
-                self.update(state="running", pid=child.pid)
+                self.update(state="running", phase="App process running", pid=child.pid)
                 deadline = time.monotonic() + timeout if timeout else None
                 while True:
                     result = process_result(child.pid)

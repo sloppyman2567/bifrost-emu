@@ -15,6 +15,7 @@ import time
 
 from android_package import PACKAGE, ROOT
 from android_settings import BACK_KEYS, NETWORKS, load as load_settings, save as save_settings
+from android_sessions import session_log
 
 ACTIVE = ("preparing", "starting", "running", "stopping")
 LAUNCHABLE = ("managed_activity", "native_activity")
@@ -137,6 +138,13 @@ def describe_session(session, now=None):
     when = clock(started, now) if started else None
     duration = span((ended or now) - started) if started and (ended or state in ACTIVE) else None
     return {"outcome": outcome, "when": when, "duration": duration, "error": session.get("error")}
+
+
+def drawer_stamp(session, log_info, developer=False, now=None):
+    # Elapsed time must advance even when preparation hasn't produced new output.
+    clock = int((time.time() if now is None else now) // 5) if session.get("state") in ACTIVE else None
+    return (session.get("session_id"), session.get("state"), session.get("phase"), session_log(session),
+            log_info and log_info.st_size, clock, developer)
 
 
 def log_findings(lines):
@@ -600,9 +608,10 @@ def show(state):
             body = QScrollArea(); body.setWidgetResizable(True); body.setFrameShape(QFrame.Shape.NoFrame); body.setWidget(self.drawer_body)
             layout.addWidget(self.drawer_title); layout.addWidget(body, 1)
             self.open_log = QPushButton(themed("document-open", QStyle.StandardPixmap.SP_FileIcon), "Open full log")
-            self.open_log.clicked.connect(lambda: self.open_path(self.drawer_app()["session"].get("log")))
+            self.open_log.clicked.connect(lambda: self.open_path(session_log(self.drawer_app()["session"])))
             self.open_folder = QPushButton(themed("folder-open", QStyle.StandardPixmap.SP_DirOpenIcon), "Open session folder")
-            self.open_folder.clicked.connect(lambda: self.open_path(str(Path(self.drawer_app()["session"]["log"]).parent)))
+            self.open_folder.clicked.connect(lambda: self.open_path(str(Path(log).parent)
+                if (log := session_log(self.drawer_app()["session"])) else None))
             layout.addWidget(self.open_log); layout.addWidget(self.open_folder)
             self.drawer.hide()
             return self.drawer
@@ -832,13 +841,13 @@ def show(state):
             if not self.drawer.isVisible(): return
             app = self.app(self.drawer_package)
             if app is None: self.close_drawer(); return
-            session = app["session"]; log = session.get("log")
+            session = app["session"]; log = session_log(session)
             try: info = Path(log).stat() if log else None
             except OSError: info = None
-            stamp = (session.get("session_id"), session.get("state"), info and info.st_size, self.developer_mode())
+            stamp = drawer_stamp(session, info, self.developer_mode())
             # A growing log of a live game is rescanned at most every five seconds.
             if not force and (stamp == self.drawer_stamp or (session.get("state") in ACTIVE and self.drawer_stamp
-                    and stamp[:2] == self.drawer_stamp[:2] and time.monotonic() - self.drawer_scanned < 5)):
+                    and stamp[:4] == self.drawer_stamp[:4] and time.monotonic() - self.drawer_scanned < 5)):
                 return
             self.drawer_stamp, self.drawer_scanned = stamp, time.monotonic()
             self.drawer_title.setText(app["label"])
@@ -848,6 +857,11 @@ def show(state):
                 parts.append("<br>Started " + html.escape(described["when"]) +
                              (" · " + html.escape(described["duration"]) if described["duration"] else ""))
             parts.append("</p>")
+            if session.get("phase"):
+                prefix = "Current step" if session.get("state") in ACTIVE else "Last step"
+                parts.append(f"<p>{prefix}: {html.escape(session['phase'])}</p>")
+            elif session.get("state") == "preparing":
+                parts.append("<p>Preparing Android runtime or optimizing app code. The app window has not opened yet.</p>")
             if described["error"] or app.get("error"):
                 parts.append(f"<p>{html.escape(str(described['error'] or app['error']))}</p>")
             if info:

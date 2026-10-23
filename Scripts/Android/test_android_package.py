@@ -439,6 +439,34 @@ class LauncherProfileTests(unittest.TestCase):
 
 
 class SessionResultTests(unittest.TestCase):
+    def test_preparation_log_and_elapsed_time_remain_visible_without_guest_output(self):
+        from android_sessions import Session, session_log
+        from android_launcher import drawer_stamp, describe_session
+        with tempfile.TemporaryDirectory(prefix="bifrost-preparation-") as temporary:
+            with Session(Path(temporary), "org.bifrost.fixture", 10000) as session:
+                data = session.snapshot()
+                preparation = Path(data["preparation_log"])
+                preparation.write_text("Compiling fixture (speed-profile)\n")
+                self.assertEqual(session_log(data), str(preparation))
+                first = drawer_stamp(data, preparation.stat(), now=data["started_at"])
+                later = drawer_stamp(data, preparation.stat(), now=data["started_at"] + 10)
+                self.assertNotEqual(first, later)
+                self.assertEqual(describe_session(data, now=data["started_at"] + 10)["duration"], "10 s")
+                session.update(phase="Optimizing Android app code")
+                updated = session.snapshot()
+                self.assertNotEqual(first[:4], drawer_stamp(updated, preparation.stat(), now=data["started_at"])[:4])
+                stdout, _ = session.logs()
+                self.assertEqual(session_log(updated), str(preparation))
+                stdout.write_text("APP_ACTIVITY_CREATED\n")
+                self.assertEqual(session_log(updated), str(stdout))
+                # Older session records have no preparation_log field.
+                updated.pop("preparation_log")
+                stdout.write_text("")
+                self.assertEqual(session_log(updated), str(preparation))
+                updated["state"] = "failed"
+                self.assertEqual(drawer_stamp(updated, stdout.stat(), now=10),
+                                 drawer_stamp(updated, stdout.stat(), now=20))
+
     def run_session(self, script):
         from android_sessions import Session
         with tempfile.TemporaryDirectory(prefix="bifrost-session-test-") as temporary:

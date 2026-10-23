@@ -894,12 +894,14 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                    process_session=None):
     if process_session is None: raise ValueError("Managed launch requires an app process session")
     dex = launcher_dex(ROOT / "build/android-managed-launcher")
+    process_session.update(phase="Checking media services")
     from asgard import decoder_mask
     broker = emu_args[emu_args.index('--android-binder-broker') + 1] if '--android-binder-broker' in emu_args else None
     media_mask = decoder_mask(emu, broker)
     # The validation probe can wait for its timeout; overlap it with root setup.
     with ThreadPoolExecutor(1) as pool:
         network = pool.submit(host_network_environment)
+        process_session.update(phase="Preparing Android runtime")
         root, guest_env = prepare_root(app, metadata, code, installed_root,
                                       ROOT / "build/android-framework/rootfs",
                                       ROOT / "build/android-art/rootfs",
@@ -908,7 +910,9 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         guest_env["PATH"] = "/system/bin:/apex/com.android.runtime/bin"
     # A system app (microG) has no installed base.apk to compile; ART's JIT runs it.
     if not metadata.get("system"):
+        process_session.update(phase="Optimizing Android app code")
         dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
+    process_session.update(phase="Starting Android app process")
     # The Google accounts signed in on this device, with microG's registration for them.
     android_google.import_shared(app.parent, root)
     # The user's choice about letting microG create a Play Games profile (off until chosen).

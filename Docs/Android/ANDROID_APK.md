@@ -145,6 +145,14 @@ bundled runtime is identified rather than offering an unsupported Android
 version selector. Runtime version switching, permission policy editing and
 backup/restore are not part of this profile editor.
 
+While an app starts, its session records the current preparation step: installed
+file verification, media setup, Android runtime preparation, app-code optimization
+or process launch. The session sidebar shows that step and updates elapsed time
+even when no new log output arrives. Before guest output exists, Open full log
+opens the preparation log; it switches to the guest log once that has output.
+ART optimization can take time after a runtime rebuild; Starting does not itself
+mean the game process has already launched.
+
 | Setting | Values | Effect |
 |---|---|---|
 | `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` |
