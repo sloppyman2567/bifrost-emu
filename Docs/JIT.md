@@ -33,6 +33,24 @@ equal to Rn and equal to Rm, against a lane model written from the Arm ARM pseud
 (432,000 checks; edge values plus random lanes, Q=0 results must clear the upper half).
 The model passes under QEMU, the interpreter and the JIT, and under `BIFROST_JIT_VERIFY=1`.
 
+## Single-thread self-loop reconcile is out of line (2026-10-23)
+
+`BIFROST_JIT_VERIFY=1` showed `v28` taking `v27`'s value after a loop with 14 live vector registers. The
+vector allocator keeps 13 XMM registers (`xmm3`-`xmm15`); the 14th value shares a demand slot, and the loop
+back-edge reconciles that layout (store the dirty demand value, reload the entry value). The single-thread
+back-edge emitted that reconcile *before* its patchable `jmp` slot. Differential replay unpatches the slot, so the
+reconcile ran and the following exit still wrote back for the layout at the branch: `xmm15` held `v27` but was
+stored to `v28`'s slot. A clean build of `e7ed1b3c` shows the same divergence with only instructions that
+were already native (`mla`, `eor`, `movi`), so this predates the new kinds; a patched slot (every production run)
+never reaches that exit. It surfaced when a new vector-pressure loop first ran under the differential gate.
+
+`emit_selfloop_reconcile_stub` now emits the reconcile after the exit, patches the slot to the stub, and the stub
+jumps to the body (the MT edge already ordered its checks ahead of the reconcile). When no reconcile code is
+needed the slot still jumps straight to the body and nothing changes. A 12-accumulator `mla` loop (16 live vectors,
+a non-empty reconcile) grows by the 5-byte `jmp` and runs the same: 0.416 s against 0.417 s over five alternating
+runs against `e7ed1b3c`. `Tests/Unit/jit_vec_pressure_loop.c` is the focused regression (one divergence
+before, none after, under `make verify`).
+
 ## Bitfield moves use immediate shifts and the allocator's register (2026-10-21)
 
 `UBFM`/`SBFM` (ubfx, sbfx, ubfiz, sbfiz, lsl, lsr, asr, uxt*, sxt*) were emitted

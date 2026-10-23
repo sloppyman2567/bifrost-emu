@@ -83,6 +83,11 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   Changes of PC/stop state must return to the dispatcher through the proper exit.
 - Native BL/BLR calls honor exit-group, callback stop sentinels and bounded host
   call depth; unwind without restoring stale caller state.
+- A single-thread self-loop back-edge is a patchable `jmp` slot, patched to the body
+  or, when the demand-slot layout needs reconciling, to `emit_selfloop_reconcile_stub`'s
+  out-of-line stub. Reconcile code must never precede the slot: differential replay
+  leaves it unpatched and falls into the exit emitted for the layout at the branch. The
+  MT edge orders its checks before the reconcile for the same reason.
 - Use actual reservation bounds via the shared window-limit helpers
   (`emit_window_limit_cmp` reads the header-page table through `WIN_REG`;
   `emit_window_limit` where `WIN_REG` is not the window base). Missing-page

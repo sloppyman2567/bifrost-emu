@@ -104,6 +104,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     indirect_exit_ = false;
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
+    selfloop_target_off_ = 0;
+    selfloop_reconcile_after_ = false;
     tier2_counter_off_ = 0;
     tier2_counter_len_ = 0;
     tier2_branch_profile_ = nullptr;
@@ -1311,8 +1313,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // MT body edges were emitted with a revocable data cell. Never
         // patch their instructions or redirect them to a different prologue.
         if (!mt_active()) {
-            // Patch the selfloop slot: `jmp rel32` → block body start.
-            size_t body_off = block_body_start_off_;
+            // Patch the selfloop slot: `jmp rel32` → block body start, or the
+            // reconcile stub that precedes it when the loop layout needs one.
+            size_t body_off = selfloop_target_off_;
             int32_t self_rel = static_cast<int32_t>(body_off - (selfloop_patch_off_ + 5));
             code_buf_[selfloop_patch_off_] = 0xE9;  // jmp rel32
             code_buf_[selfloop_patch_off_ + 1] = self_rel & 0xFF;

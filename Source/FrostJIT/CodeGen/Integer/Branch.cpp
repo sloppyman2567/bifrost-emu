@@ -40,8 +40,13 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // iteration's value. Mapping and dirty state stay for the exits below.
     store_dirty_unpinned_arch_regs();
     if (!mt_active()) {
-        vec_writeback_dynamic();
+        // The loop-layout reconcile belongs only to the patched edge: an
+        // unpatched slot (differential replay) falls into the caller's exit,
+        // which assumes the layout at the branch. emit_selfloop_reconcile_stub()
+        // places the reconcile after that exit and the slot is patched to it.
         selfloop_patch_off_ = code_buf_used_;
+        selfloop_target_off_ = block_body_start_off_;
+        selfloop_reconcile_after_ = true;
         emit_byte(0xE9); emit_u32(0);
         return true;
     }
@@ -75,6 +80,20 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
         patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
     // The caller emits the taken cold exit, committing GPRs and vectors.
     return true;
+}
+// Out-of-line reconcile for a single-thread self-loop back-edge: reconcile the
+// demand-slot layout, then enter the body. Emitted after the exit that follows
+// the slot (state-neutral, like the MT edge), and only when the layout differs;
+// otherwise the slot keeps jumping straight to the body.
+void FrostJIT::emit_selfloop_reconcile_stub() {
+    if (!selfloop_reconcile_after_) return;
+    selfloop_reconcile_after_ = false;
+    const size_t stub = code_buf_used_;
+    vec_writeback_dynamic();
+    if (code_buf_used_ == stub) return;
+    emit_byte(0xE9);
+    emit_u32(static_cast<uint32_t>(static_cast<int32_t>(block_body_start_off_ - (code_buf_used_ + 4))));
+    selfloop_target_off_ = stub;
 }
 void FrostJIT::emit_call_depth_guard() {
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_call_depth));
@@ -270,6 +289,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
                 emit_ret();
+                emit_selfloop_reconcile_stub();
             }
             return 1;
         }
@@ -322,6 +342,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
                 emit_ret();
+                emit_selfloop_reconcile_stub();
             }
             return 1;
         }
@@ -487,6 +508,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
                 emit_ret();
+                emit_selfloop_reconcile_stub();
             }
             return 1;
         }

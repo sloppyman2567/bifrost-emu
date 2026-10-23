@@ -594,6 +594,7 @@ public:
     // Chain-skip BR/BLR/RET exit: jump through the IBL table on a hit.
     void emit_indirect_branch_probe();
     bool emit_selfloop_backedge(uint64_t target_pc);
+    void emit_selfloop_reconcile_stub();
     void refresh_mt_edges(uint64_t target_pc);
     void retire_mt_source(uint64_t source_pc);
 
@@ -1888,6 +1889,8 @@ private:
     // that skips the epilogue/dispatcher/prologue.
     bool    has_selfloop_slot_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
+    size_t  selfloop_target_off_ = 0;    // where the patched slot jumps: the body, or the reconcile stub
+    bool    selfloop_reconcile_after_ = false;  // an ST back-edge still owes its reconcile stub
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
     // Tier-2 in-code hot-head counter (BIFROST_TIER2=1): offset of the
     // prologue counter+fire sequence (0 = none emitted). Carried into

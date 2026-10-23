@@ -12,6 +12,15 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Self-loop layout reconcile (2026-10-23)
+
+- `BIFROST_JIT_VERIFY=1` mis-stored a vector register in a loop with more live vectors than XMM slots (`v28`
+  received `v27`'s value) because the single-thread back-edge reconciled the demand-slot layout before its
+  patchable `jmp`, so the unpatched slot used by replay ran the reconcile and then an exit written for the old
+  layout. The reconcile is now emitted out of line and the slot patched to it. Production runs, where the slot
+  is always patched, never reached the bad exit; the previous commit shows the same divergence. A 12-accumulator
+  loop is unchanged in speed. New regression: `jit_vec_pressure_loop`.
+
 ### Native unsigned halfword min/max (2026-10-23)
 
 - `UMAX`/`UMIN` `.4h`/`.8h` were interpreted one instruction at a time (about 130 ns each, and the
