@@ -135,6 +135,9 @@ public final class ManagedLauncher {
     static native int setTaskVisible(boolean visible);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
     private static native int fixWindow(int width, int height); // non-resizable app: scale the host window to fit
+    private static native int orientWindow(int axis);
+    private static boolean fixedWindowSize;
+    private static int appliedOrientation = Integer.MIN_VALUE;
     private static native int displaySize(long[] size); // host display pixel width, height
     static native int audioConfig(long[] config); // also FrameworkNativeServices.AudioFlinger
     private static native int activeAudioOutputs();
@@ -1272,6 +1275,7 @@ public final class ManagedLauncher {
             if (ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
                 error = fixWindow(width, height);
                 fixedWindow = error == 0;
+                fixedWindowSize = fixedWindow;
                 System.out.println("APP_WINDOW_FIXED " + width + "x" + height + " status=" + error);
             }
             long[] display = new long[2];
@@ -1528,6 +1532,37 @@ public final class ManagedLauncher {
         }
     }
 
+    // Rotation is relative to the managed display's natural portrait orientation.
+    static int orientationRotation(int request, int current) {
+        switch (request) {
+            case ActivityInfo.SCREEN_ORIENTATION_PORTRAIT: return 0;
+            case ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE: return 1;
+            case ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT: return 2;
+            case ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE: return 3;
+            case ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT:
+            case ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT: return current & 2;
+            case ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE:
+            case ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE: return (current & 2) | 1;
+            case ActivityInfo.SCREEN_ORIENTATION_NOSENSOR:
+            case ActivityInfo.SCREEN_ORIENTATION_LOCKED: return current;
+            default: return -1;
+        }
+    }
+
+    private static void applyRequestedOrientation() throws Exception {
+        int request = activities.requestedOrientation();
+        if (request == appliedOrientation) return;
+        int rotation = orientationRotation(request, displays.rotation());
+        int error = orientWindow(rotation < 0 ? 0 : (rotation % 2 == 0 ? 1 : 2));
+        appliedOrientation = request;
+        if (error != 0) {
+            System.out.println("APP_ORIENTATION_UNSUPPORTED request=" + request + " status=" + error);
+            return;
+        }
+        if (rotation >= 0) displays.setRotation(rotation);
+        System.out.println("APP_ORIENTATION request=" + request + " rotation=" + displays.rotation());
+    }
+
     private static void play(Instrumentation instrumentation, Activity activity, int width,
             int height) throws Exception {
         // ActivityThread.handleStartActivity, then handleResumeActivity.
@@ -1545,12 +1580,14 @@ public final class ManagedLauncher {
         Handler handler = new Handler(Looper.getMainLooper());
         long[] event = new long[55];
         int[] size = {width, height};
+        int[] rotation = {displays.rotation()};
         final FrameworkStallWatch stall = FrameworkStallWatch.start();
         handler.post(new Runnable() {
             @Override
             public void run() {
                 try {
                     stall.beat();
+                    applyRequestedOrientation();
                     syncTextInput(size[0], size[1]);
                     for (int i = 0; i < 64; i++) {
                         int error = pollWindow(event);
@@ -1581,9 +1618,11 @@ public final class ManagedLauncher {
                             else serviceRuntime.whenIdle(() -> System.exit(0));
                             return;
                         }
-                        if (event[2] != size[0] || event[3] != size[1]) {
+                        if (event[2] != size[0] || event[3] != size[1] || rotation[0] != displays.rotation()) {
                             size[0] = (int) event[2];
                             size[1] = (int) event[3];
+                            rotation[0] = displays.rotation();
+                            if (fixedWindowSize) displays.setMaxBounds(size[0], size[1]);
                             displays.setSize(size[0], size[1]);
                             // ActivityThread applies a WMS bounds change this way.
                             Object resources = Class.forName("android.app.ResourcesManager")

@@ -873,6 +873,19 @@ int AndroidSurfaceManager::set_fixed_window(int32_t width, int32_t height) {
     return window_backend_->set_fixed_size(width, height);
 }
 
+int AndroidSurfaceManager::set_window_orientation(int32_t axis) {
+    if (axis < 0 || axis > 2) return -EINVAL;
+    if (!window_open_) return -ENODEV;
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    int error = window_backend_->set_orientation(axis);
+    if (error) return error;
+    if (axis && ((axis == 2) != (width_ > height_))) {
+        std::swap(width_, height_);
+        std::swap(natural_width_, natural_height_);
+    }
+    return 0;
+}
+
 int AndroidSurfaceManager::set_text_input(bool active, int32_t x, int32_t y, int32_t width,
                                           int32_t height) {
     if (!window_open_) return -ENODEV;

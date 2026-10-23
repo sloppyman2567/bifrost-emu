@@ -59,6 +59,8 @@ public:
   // every layer, and input, is scaled to fit (Android scales such an app and
   // letterboxes it rather than resizing it).
   virtual int set_fixed_size(int32_t, int32_t) { return -ENOTSUP; }
+  // Managed display orientation: 0 releases the request, 1 portrait, 2 landscape.
+  virtual int set_orientation(int32_t) { return -ENOTSUP; }
   virtual void set_title(const char *) {}
   virtual bool set_icon(const uint8_t *, int32_t, int32_t) { return false; }
 };

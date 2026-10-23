@@ -20,6 +20,25 @@ bool SDL_GetDisplayBounds(SDL_DisplayID display, SDL_Rect *bounds) {
     *bounds = (SDL_Rect){0, 0, 1920, 1080}; return true;
 }
 static struct fake_window *windows[16];
+/* Required loader exports added by task visibility and host text input. */
+bool SDL_HideWindow(SDL_Window *window) { return window != NULL; }
+bool SDL_ShowWindow(SDL_Window *window) { return window != NULL; }
+bool SDL_RaiseWindow(SDL_Window *window) { return window != NULL; }
+bool SDL_RestoreWindow(SDL_Window *window) { return window != NULL; }
+Uint64 SDL_GetTicksNS(void) { return 123000000; }
+bool SDL_StartTextInput(SDL_Window *window) { return window != NULL; }
+bool SDL_StopTextInput(SDL_Window *window) { return window != NULL; }
+bool SDL_SetTextInputArea(SDL_Window *window, const SDL_Rect *rect, int cursor) {
+    (void)cursor; return window != NULL && rect != NULL;
+}
+int SDL_PeepEvents(SDL_Event *events, int count, SDL_EventAction action, Uint32 min, Uint32 max) {
+    (void)events; (void)count; (void)action; (void)min; (void)max; return 0;
+}
+bool SDL_PushEvent(SDL_Event *event) { return event != NULL; }
+SDL_Scancode SDL_GetScancodeFromName(const char *name) { (void)name; return SDL_SCANCODE_UNKNOWN; }
+SDL_Keycode SDL_GetKeyFromScancode(SDL_Scancode code, SDL_Keymod mods, bool event) {
+    (void)code; (void)mods; (void)event; return SDLK_UNKNOWN;
+}
 static void record(const char *event) {
     const char *path = getenv("BIFROST_TEST_WL_LOG");
     FILE *file = path ? fopen(path, "a") : NULL;
@@ -81,6 +100,10 @@ bool SDL_SetWindowSize(SDL_Window *window, int width, int height) {
     if (getenv("BIFROST_TEST_SDL_RESIZE_FAIL")) return false;
     struct fake_window *w = (struct fake_window *)window;
     w->width = width; w->height = height; record("host-resize"); return true;
+}
+bool SDL_SetWindowAspectRatio(SDL_Window *window, float minimum, float maximum) {
+    (void)window; (void)minimum; (void)maximum;
+    return getenv("BIFROST_TEST_SDL_ASPECT_FAIL") == NULL;
 }
 bool SDL_GetWindowSize(SDL_Window *window, int *width, int *height) {
     struct fake_window *w = (struct fake_window *)window;

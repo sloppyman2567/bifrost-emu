@@ -249,6 +249,10 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (cpu.regs[1] > 1) ret_host(-EINVAL);
                 else ret_host(manager.set_task_visible(cpu.regs[1] != 0));
             }
+            else if (cpu.regs[0] == 23) { // Managed orientation: release, portrait, landscape.
+                if (cpu.regs[1] > 2) ret_host(-EINVAL);
+                else ret_host(manager.set_window_orientation(static_cast<int32_t>(cpu.regs[1])));
+            }
             else ret_host(-EINVAL);
             return 0;
         }

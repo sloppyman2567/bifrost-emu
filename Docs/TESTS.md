@@ -898,6 +898,17 @@ as well as trusted/untrusted client state, package/user rejection and unregister
 It retains resize, display-listener and window-context coverage. Remote Binder
 death delivery and wireless display hardware are not covered.
 
+Requested-orientation regression checks add portrait/landscape, reverse rotation,
+locked and sensor-axis policy, and release to the display contract; the focused
+contract passes in both JIT and interpreter modes. `test-android-sdl-backend`
+checks fixed and resizable panel rotation, invalid requests, aspect-setting
+failure and release, alongside its 256 teardown cycles. Its mock exports include
+the SDL functions required by task visibility and text input; input timestamps
+are checked against host monotonic time. SDL/GL and separate headless builds
+pass. Uma Global advanced past its cover art in the approved live verification,
+as confirmed by the user; full gameplay and successful Google sign-in were not
+tested by these checks.
+
 Final broad checks: the SDL/GL build and library, separate headless build,
 `make generated-check`, and `make verify` pass (87 differential fixtures and
 seven threaded oracle runs). The strict JIT suite passes 326/326; the strict

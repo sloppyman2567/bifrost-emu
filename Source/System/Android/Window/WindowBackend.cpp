@@ -627,6 +627,32 @@ public:
     return -ENOTSUP;
 #endif
   }
+  int set_orientation(int32_t axis) override {
+#if defined(BIFROST_USE_SDL3)
+    if (!window_) return -ENODEV;
+    if (axis < 0 || axis > 2) return -EINVAL;
+    int32_t w = fixed_w_ ? fixed_w_ : width_;
+    int32_t h = fixed_h_ ? fixed_h_ : height_;
+    const float previous = fixed_w_ || orientation_axis_ ? float(w) / float(h) : 0.0f;
+    if (axis && ((axis == 2) != (w > h))) std::swap(w, h);
+    // Preserve the virtual panel's aspect when the compositor fits a rotated
+    // window onto a shorter desktop. Releasing a resizable app restores free resizing.
+    const float aspect = axis || fixed_w_ ? float(w) / float(h) : 0.0f;
+    if (!sdl_.SetWindowAspectRatio(window_, aspect, aspect)) return fail("window orientation");
+    if (!axis) { orientation_axis_ = 0; return 0; }
+    int error = resize(w, h, true);
+    if (error) {
+      sdl_.SetWindowAspectRatio(window_, previous, previous);
+      return error;
+    }
+    if (fixed_w_) { fixed_w_ = w; fixed_h_ = h; }
+    orientation_axis_ = axis;
+    return 0;
+#else
+    (void)axis;
+    return -ENOTSUP;
+#endif
+  }
   bool pixel_size(int32_t &w, int32_t &h) override {
 #if defined(BIFROST_USE_SDL3)
     if (!window_ || !update_ratio(w, h)) return false;
@@ -1210,6 +1236,7 @@ private:
   WaylandBackdrop backdrop_;
   PixelRatio ratio_ = std::make_shared<std::atomic<double>>(1.0);
   int32_t fixed_w_ = 0, fixed_h_ = 0;  // set_fixed_size
+  int32_t orientation_axis_ = 0;
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;
 #endif

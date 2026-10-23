@@ -2479,6 +2479,26 @@ requests. Its get/set behavior follows Android 15's
 [ActivityClientController](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/wm/ActivityClientController.java).
 The built-in probe checks a requested-orientation round trip.
 
+Managed play mode also applies the top Activity's requested orientation to the
+SDL window through private window operation 23 (0 releases the constraint,
+1 selects portrait, 2 landscape). `BEHIND` inherits the next Activity's request.
+The launcher publishes display rotation, bounds, resources and configuration
+changes through the existing resize path, including reverse rotations without
+a size change. Fixed-size apps retain their virtual panel dimensions with axes
+swapped; the desktop compositor can scale the portrait window to fit.
+Sensor/user axis requests retain the current reverse direction; physical sensor
+rotation and Activity recreation are not implemented by this path.
+
+Uma Global's cover-art stall was traced to its live
+`Screen.WaitDeviceOrientation` coroutine: it repeatedly observed landscape
+while waiting for portrait, blocking `GameSystem.InitializeGame`. Before this
+change, requested orientation was stored but never applied to the display.
+The approved live verification (session `63f0656adf534ee39ba21f7168d85a5a`)
+returned from microG cancellation, applied portrait request 1, resumed Unity
+rendering, and the user confirmed that the game advanced beyond the cover art.
+This establishes progress past this startup gate, not full gameplay or Google
+sign-in support.
+
 Native libbinder then waited indefinitely for `servicemanager.ready`. Bifrost
 now publishes it as true only when its Binder registry is selected by
 `--android-services`, and false otherwise, matching libbinder's
@@ -2950,8 +2970,8 @@ An Activity below a translucent or floating one is paused but not stopped
 and keeps its window and surfaces. The stop happens at once rather than after
 the new Activity is idle, and `onSaveInstanceState` is not called on it
 (there is no process death to restore from). Stacked Activities draw only in
-software, keep the display size regardless of their requested orientation,
-and launch flags, task affinities and `onNewIntent` are not modelled.
+software. Their topmost orientation request now controls the display in play
+mode; launch flags, task affinities and `onNewIntent` are not modelled.
 A mouse's back/forward buttons send `KEYCODE_BACK`/`KEYCODE_FORWARD`, as
 Android's InputReader synthesizes them. The configured back key
 (`[android] back_key`, `BIFROST_ANDROID_BACK_KEY`; default `escape`, `none`

@@ -1,6 +1,7 @@
 #include "System/Android/Window/WindowBackend.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -47,7 +48,12 @@ int main() {
   unsetenv("BIFROST_TEST_SDL_RESIZE_FAIL");
   frost::AndroidWindowEvent event{};
   setenv("BIFROST_TEST_SDL_EVENT", "key", 1);
-  CHECK(first->poll(event) == 1 && event.key_code == 29 && event.meta_state == 0x1001 && event.time_ms == 123);
+  const auto before_key = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  CHECK(first->poll(event) == 1 && event.key_code == 29 && event.meta_state == 0x1001);
+  const auto after_key = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  CHECK(event.time_ms >= before_key && event.time_ms <= after_key);
   setenv("BIFROST_TEST_SDL_EVENT", "pointer", 1);
   CHECK(first->poll(event) == 1 && event.x == 20 && event.y == 40 && event.action == 0);
   setenv("BIFROST_TEST_SDL_EVENT", "other-window", 1);
@@ -72,6 +78,29 @@ int main() {
   first.reset();
   CHECK(contents(log).find("create\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);
   // Stress repeated window, wrapper, subsystem and module teardown.
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("orientation", 800, 600) == 0);
+  CHECK(first->set_orientation(3) < 0);
+  CHECK(first->set_fixed_size(1600, 1200) == 0);
+  CHECK(first->set_orientation(1) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1200 && pixel_h == 1600);
+  CHECK(first->set_orientation(2) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
+  setenv("BIFROST_TEST_SDL_ASPECT_FAIL", "1", 1);
+  CHECK(first->set_orientation(1) < 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
+  unsetenv("BIFROST_TEST_SDL_ASPECT_FAIL");
+  CHECK(first->set_orientation(0) == 0);
+  first.reset();
+  // Resizable apps rotate native pixels too and can release the constraint.
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("resizable orientation", 800, 600) == 0);
+  CHECK(first->set_orientation(1) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1200 && pixel_h == 1600);
+  CHECK(first->set_orientation(0) == 0);
+  CHECK(first->resize(1600, 1200, true) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
+  first.reset();
   for (int i = 0; i < 256; ++i) {
     first = frost::make_sdl_android_window_backend();
     CHECK(first->open("stress", 800, 600) == 0 && first->binding().window);

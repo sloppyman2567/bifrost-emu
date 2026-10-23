@@ -484,6 +484,15 @@ final class FrameworkActivities {
     // The task's root: the launcher Activity until it finishes while others
     // remain (a splash screen that starts the main Activity), then the next.
     synchronized Activity root() { return stack.isEmpty() ? null : stack.get(0).activity; }
+    synchronized int requestedOrientation() {
+        for (int i = stack.size() - 1; i >= 0; --i) {
+            Record record = stack.get(i);
+            if (record.activity.isFinishing()) continue;
+            int request = orientations.getOrDefault(record.token, ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            if (request != ActivityInfo.SCREEN_ORIENTATION_BEHIND) return request;
+        }
+        return ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+    }
     // Activities in the task, counting launches not yet created.
     synchronized int size() { return stack.size() + pendingLaunches; }
     private int pendingLaunches;

@@ -168,6 +168,15 @@ public final class FrameworkDisplayProbe {
         Point size = new Point();
         displays[0].getRealSize(size);
         check(size.x == 480 && size.y == 800, "initial size incorrect");
+        check(displays[0].getRotation() == 0, "natural portrait rotation incorrect");
+        check(ManagedLauncher.orientationRotation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, 1) == 0,
+                "portrait request did not resolve rotation");
+        check(ManagedLauncher.orientationRotation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE, 0) == 3,
+                "reverse landscape request did not resolve rotation");
+        check(ManagedLauncher.orientationRotation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED, 2) == 2,
+                "locked request discarded rotation");
+        check(ManagedLauncher.orientationRotation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR, 1) == -1,
+                "full sensor request constrains host rotation");
         Context windowContext = context.createWindowContext(displays[0],
                 android.view.WindowManager.LayoutParams.TYPE_APPLICATION, null);
         check(windowContext.getResources().getConfiguration().screenWidthDp == 480,
@@ -236,6 +245,7 @@ public final class FrameworkDisplayProbe {
                 await(() -> changed.get() == 1, () -> {
                     displays[0].getRealSize(size);
                     check(size.x == 800 && size.y == 600, "callback observed stale display dimensions");
+                    check(displays[0].getRotation() == 1, "landscape resize left stale display rotation");
                     check(windowContext.getResources().getConfiguration().screenWidthDp == 800
                             && windowContext.getResources().getConfiguration().screenHeightDp == 600,
                             "window context configuration stale after resize");
@@ -250,6 +260,12 @@ public final class FrameworkDisplayProbe {
                         check(changed.get() == 1, "callback delivered after unregister");
                         check(windowContext.getResources().getConfiguration().screenWidthDp == 800,
                                 "released window context still receives configuration updates");
+                        try {
+                            service.setRotation(3);
+                            check(displays[0].getRotation() == 3, "reverse rotation not published");
+                            service.setSize(600, 900);
+                            check(displays[0].getRotation() == 2, "portrait resize lost reverse rotation");
+                        } catch (Exception error) { throw new RuntimeException(error); }
                         worker.quitSafely();
                         System.out.println("FRAMEWORK_DISPLAY_CONTRACT_OK checks=" + checks);
                         System.out.println("FRAMEWORK_OK");

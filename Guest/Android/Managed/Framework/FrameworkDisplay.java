@@ -30,6 +30,7 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     private static final int CHANGED_EVENT = 2; // DisplayManagerGlobal.EVENT_DISPLAY_CHANGED
     private Object info;
     private int width, height;
+    private int rotation;
     private int maxWidth, maxHeight; // host display holding the window; 0 until play mode sizes it
     private int densityDpi = 160; // DisplayMetrics.DENSITY_DEFAULT until play mode sizes the display
     private IInterface callback;
@@ -81,6 +82,18 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     // Pixel width, height and density dpi, as one snapshot.
     synchronized int[] metrics() {
         return new int[] {width, height, densityDpi};
+    }
+
+    synchronized int rotation() { return rotation; }
+
+    void setRotation(int value) throws Exception {
+        if (value < 0 || value > 3) throw new IllegalArgumentException("Invalid display rotation");
+        synchronized (this) {
+            if (rotation == value) return;
+            info = displayInfo(width, height, densityDpi, value);
+            rotation = value;
+        }
+        notifyChanged();
     }
 
     private Object windowContextInfo() throws Exception {
@@ -151,6 +164,8 @@ final class FrameworkDisplay implements FrameworkServices.Call {
         window.getClass().getMethod("setBounds", Rect.class).invoke(window, bounds);
         window.getClass().getMethod("setMaxBounds", Rect.class).invoke(window, max);
         window.getClass().getMethod("setAppBounds", Rect.class).invoke(window, bounds);
+        window.getClass().getMethod("setRotation", int.class).invoke(window, rotation);
+        window.getClass().getMethod("setDisplayRotation", int.class).invoke(window, rotation);
     }
 
     private void dispatchWindowContexts() throws Exception {
@@ -174,7 +189,7 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     void install(FrameworkServices services, FrameworkPackages packages) throws Exception {
         this.packages = packages;
         main = new Handler(Looper.getMainLooper());
-        info = displayInfo(width = 480, height = 800, densityDpi);
+        info = displayInfo(width = 480, height = 800, densityDpi, rotation);
         services.register("display", "android.hardware.display.IDisplayManager", this);
     }
 
@@ -277,12 +292,18 @@ final class FrameworkDisplay implements FrameworkServices.Call {
             throw new IllegalArgumentException("Invalid display metrics");
         synchronized (this) {
             if (width == newWidth && height == newHeight && densityDpi == newDensityDpi) return;
-            Object next = displayInfo(newWidth, newHeight, newDensityDpi);
+            int nextRotation = (rotation & 2) | (newWidth > newHeight ? 1 : 0);
+            Object next = displayInfo(newWidth, newHeight, newDensityDpi, nextRotation);
             info = next;
             width = newWidth;
             height = newHeight;
             densityDpi = newDensityDpi;
+            rotation = nextRotation;
         }
+        notifyChanged();
+    }
+
+    private void notifyChanged() {
         // Publish the new info before notifying, and never call clients under our lock.
         main.post(() -> {
             try {
@@ -311,11 +332,12 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     // One 60 Hz display with id 0: 480x800 at 160 dpi unless play mode sizes
     // it to the host window's native pixels and scale before the app first
     // queries it.
-    private static Object displayInfo(int width, int height, int densityDpi) throws Exception {
+    private static Object displayInfo(int width, int height, int densityDpi, int rotation) throws Exception {
         Class<?> type = Class.forName("android.view.DisplayInfo");
         Object info = type.getConstructor().newInstance();
         type.getField("name").set(info, "Bifrost");
         type.getField("uniqueId").set(info, "bifrost:0");
+        type.getField("rotation").setInt(info, rotation);
         for (String field : new String[] {"appWidth", "logicalWidth", "largestNominalAppWidth"})
             type.getField(field).setInt(info, width);
         for (String field : new String[] {"appHeight", "logicalHeight", "largestNominalAppHeight"})

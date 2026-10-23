@@ -263,6 +263,10 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_fixWindow(JNIEnv *env, jclass type, 
     (void)env; (void)type;
     return (jint)bifrost_window(21, width, height);
 }
+JNIEXPORT jint JNICALL Java_ManagedLauncher_orientWindow(JNIEnv *env, jclass type, jint axis) {
+    (void)env; (void)type;
+    return (jint)bifrost_window(23, axis, 0);
+}
 JNIEXPORT jint JNICALL Java_ManagedLauncher_audioConfig(JNIEnv *e, jclass c, jlongArray a) {
     return Java_ActivityProbe_audioConfig(e, c, a);
 }
