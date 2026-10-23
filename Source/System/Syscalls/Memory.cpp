@@ -320,6 +320,19 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             emu.fds().invalidate_device_mappings(a0, a1);
             mem_.untrack_allocation(a0, a1);
+            // A thread that frees the pages holding its own exit-time words
+            // (a detached Bionic thread unmaps its stack and TLS, then
+            // exits) must not write them afterwards: another thread can map
+            // the same range before that thread's exit runs. Linux's
+            // clear_child_tid store would then fail only while the range is
+            // still unmapped.
+            if (a1) {
+                const uint64_t hi = (a0 + a1 + Memory::PAGE_MASK) & ~uint64_t(Memory::PAGE_MASK);
+                if (cpu.tpidr_el0 >= 0xa0 && cpu.tpidr_el0 - 0xa0 >= a0 && cpu.tpidr_el0 - 0xa0 < hi)
+                    cpu.exit_tid_slot_freed = true;
+                if (cpu.clear_child_tid >= a0 && cpu.clear_child_tid < hi)
+                    cpu.clear_child_tid = 0;
+            }
             // Unmapped bytes are gone — drop JIT translations of the range
             // so a later reuse of these addresses can't run stale code.
             emu.invalidate_jit_range(a0, a1, CodeInvalidation::Unmap);

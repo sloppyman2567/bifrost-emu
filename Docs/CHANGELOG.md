@@ -12,6 +12,15 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Thread exit after the guest unmaps its own stack (2026-10-23)
+
+A detached Bionic thread unmaps its stack and TLS block and then calls `exit`. The exit path still
+wrote the musl-layout tid word (`TPIDR_EL0 - 0xa0`) and the registered `clear_child_tid` afterwards.
+By then another thread could have mapped the freed range, so the late store either zeroed that
+thread's TCB or took a host `SEGV_ACCERR` in `Memory::write` (Hungry Shark World crashed this way
+in several runs). `munmap` now records that the calling thread freed those words and exit skips
+them. `test_thread_exit_unmapped_tls` reproduces it (QEMU passes; the previous binary host-faults).
+
 ### Multithreaded JIT overhead (2026-10-23)
 
 - Once a process runs a second vCPU, native code no longer decrements a shared budget at every back-edge, indirect

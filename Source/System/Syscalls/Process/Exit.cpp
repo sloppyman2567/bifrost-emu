@@ -31,7 +31,7 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
             // Leave the glibc DTV attached here: NPTL may cache this TCB and
             // reads its DTV before calling _dl_allocate_tls_init on reuse.
             // That allocator releases emulator-owned dynamic TLS then.
-            if (cpu.tpidr_el0 != 0) {
+            if (cpu.tpidr_el0 != 0 && !cpu.exit_tid_slot_freed) {
                 uint64_t tid_addr = cpu.tpidr_el0 - 0xa0;
                 try {
                     emu.mem().store<uint32_t>(tid_addr, 0);

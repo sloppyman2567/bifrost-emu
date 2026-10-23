@@ -418,6 +418,7 @@ UNIT_TESTS=(
     # Cross-thread JIT invalidation of a running thread's blocks (also run
     # with per-thread JITs in the "Per-thread JIT" category below).
     "test_jit_thread_invalidate|Tests/Unit/test_jit_thread_invalidate.elf||60|ALL PASS"
+    "test_thread_exit_unmapped_tls|Tests/Unit/test_thread_exit_unmapped_tls.elf||60|ALL PASS"
     "test_memory_permissions|Tests/Unit/test_memory_permissions.elf||30|ALL PASS"
     "jit_host_fault|Tests/Unit/jit_host_fault.elf||15|ALL PASS|JIT"
     "interp_host_fault|Tests/Unit/jit_host_fault.elf single||15|ALL PASS|INTERP"

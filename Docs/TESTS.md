@@ -2726,6 +2726,13 @@ Focused additions:
   on alternating pages; every call returns a published value. Runs with the
   shared JIT and again with `BIFROST_NO_SHARED_JIT=1`. QEMU passes; the
   pre-change binary dumps core in per-thread mode.
+- `test_thread_exit_unmapped_tls`: 1,500 raw-clone threads on mmap'd stacks each
+  unmap their own stack and TLS block and then `exit`, as Bionic's detached
+  `exit_with_stack_teardown` does, while the next thread reuses the freed hole
+  and two threads recycle same-size ranges. A canary at `TPIDR_EL0 - 0xa0` in
+  every new thread must survive the previous thread's exit. The pre-change
+  binary host-faults (`SEGV_ACCERR` in `Memory::write` from `syscall_exit`) or
+  clobbers the canary; QEMU passes.
 - `test_group_exit`: forked children with live threads: main SIGKILLing
   itself, a worker's `kill(getpid(), SIGTERM)`, and a worker's
   `exit_group(7)` (main sleeping or spinning) each end the process within
