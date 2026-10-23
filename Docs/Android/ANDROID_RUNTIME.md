@@ -853,6 +853,30 @@ shutdown is also unconfirmed. Visible rendering, title/login screens and
 gameplay have not been tested by this run. The surface failure is separate from
 the earlier loader/self-debugging failure.
 
+Subsequent normal-window traces supersede the windowless rendering limitation:
+session `02048892f06d436ab4460aa463fb2b1c` successfully swaps Unity frames at
+about 30 FPS. Thirty-five sampled 3x3 back-buffer grids are identical. This
+supports the reported static image, but does not prove every pixel is unchanged.
+The Java/ART dump's Unity `pthread_cond_wait` at `libunity.so+0x6e7bf8` is not
+evidence of a stalled clock: two direct snapshots in session
+`fcc8027100af45f48f1e97c6dd4e342d` observe its counter advancing from 290 to 475
+over 3.3 seconds; the first wait requests counter 292. The initial suspicion of
+a stuck timing counter was therefore rejected. The application can continue
+presenting the same scene while game initialization remains incomplete.
+
+The latest microG child log reports `GamesConnectService: signIn success`, then
+a GamesService connection and `Not yet implemented: registerEventClient`.
+Earlier, before the user completed the account window, automatic account
+selection reported no account. Thus returning from that window alone did not
+prove authentication, while the later run does report initial Games sign-in
+success. This still does not establish delivery of every subsequent game
+callback, server-side authorization, or successful game login. The event-client
+stub is an observed gap, not a proven cause of the static scene. Lightweight
+framework tracing has no unfinished local framework calls at its final
+heartbeat; these traces do not cover every direct Games Binder callback.
+The separate ART method-tracing run timed out before rendering and is not used
+to diagnose the scene. No rendering or authentication fix is claimed here.
+
 The real app also exposed a stale
 Binder receive-arena protection guard after exec; clearing device mappings
 before image replacement fixes the shell's atexit-array EACCES without changing
