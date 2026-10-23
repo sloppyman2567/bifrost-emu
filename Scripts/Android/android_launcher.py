@@ -105,6 +105,73 @@ def launch_request(app, interpreter=False, trace=False):
     return args
 
 
+INSTALLABLE = (".apk", ".apkm", ".apks", ".xapk")
+SORTS = (("name", "Name"), ("played", "Recently played"))
+FAILED = ("failed", "timed_out", "interrupted")
+MIN_CARD, MAX_CARD, GAP = 208, 280, 18
+
+
+def installable(paths):
+    """The existing package files among chosen or dropped paths."""
+    return [str(path) for path in paths if Path(path).suffix.lower() in INSTALLABLE and Path(path).is_file()]
+
+
+def sort_apps(apps, mode):
+    name = lambda app: (app["label"].casefold(), app["package"])
+    if mode == "played":
+        return sorted(apps, key=lambda app: (-(app["session"].get("started_at") or 0), *name(app)))
+    return sorted(apps, key=name)
+
+
+def grid_metrics(width):
+    """Columns and card width that fill `width`: cards stretch between MIN_CARD and MAX_CARD."""
+    columns = max(1, (width + GAP) // (MIN_CARD + GAP))
+    return columns, min(MAX_CARD, (width - (columns - 1) * GAP) // columns)
+
+
+def poll_wait(minimized, active, busy):
+    """Seconds between library refreshes; None while the window is minimized."""
+    if minimized: return None
+    return 1.5 if active or busy else 10.0
+
+
+def activity_line(app, now=None):
+    """Second line of a card: the latest session in a few words, and whether it needs attention."""
+    now = time.time() if now is None else now
+    session = app["session"]; state = session.get("state", "stopped"); started = session.get("started_at")
+    if state == "running" and started: return "Running for " + span(now - started), ""
+    if state in ACTIVE: return STATES.get(state, state), ""
+    if state in FAILED: return "Last run failed", "problem"
+    if started: return "Played " + clock(started, now), ""
+    return "Not played yet", ""
+
+
+TILE_COLORS = ("#d4574e", "#d9822b", "#b8962e", "#3f9e57", "#2f9d95", "#3a85c8", "#6b63d1", "#a95bc4", "#cc5a8d", "#6d7b8a")
+
+
+def tile_color(label):
+    """A stable color per game, for the tile of a game without an icon."""
+    return TILE_COLORS[int(hashlib.sha256(label.encode()).hexdigest()[:4], 16) % len(TILE_COLORS)]
+
+
+def opaque_bounds(image):
+    """(x, y, width, height) of an icon's visible pixels, or None without an alpha channel or pixels."""
+    from PyQt6.QtGui import QImage
+    if not image.hasAlphaChannel(): return None
+    alpha = image.convertToFormat(QImage.Format.Format_Alpha8)
+    width, height, stride = alpha.width(), alpha.height(), alpha.bytesPerLine()
+    data = bytes(alpha.constBits().asarray(stride * height))
+    table = bytes(0 if value <= 16 else 255 for value in range(256))
+    top = bottom = None; left, right = width, 0
+    for y in range(height):
+        row = data[y * stride:y * stride + width].translate(table)
+        trimmed = row.lstrip(b"\0")
+        if not trimmed: continue
+        top = y if top is None else top; bottom = y
+        left = min(left, width - len(trimmed)); right = max(right, len(row.rstrip(b"\0")))
+    return None if top is None else (left, top, right - left, bottom - top + 1)
+
+
 def short_error(output, fallback="The command failed"):
     lines = [x.strip() for x in output.splitlines() if x.strip()]
     if not lines: return fallback
@@ -316,48 +383,131 @@ def settings_dialog(window, app, settings):
     return Settings()
 
 
-def show(state):
-    import fcntl
-    state = Path(state).resolve()
+def build(state, application, settings=None):
+    """The library window without its single-instance socket or event loop (show() adds both)."""
     try:
-        from PyQt6.QtCore import QProcess, QProcessEnvironment, QRectF, QTimer, Qt, QUrl
-        from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPainterPath, QPalette, QPixmap
-        from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,
-                                     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                                     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-                                     QSizePolicy, QStackedWidget, QStyle, QToolButton, QVBoxLayout, QWidget)
+        from PyQt6.QtCore import QEvent, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
+        from PyQt6.QtGui import (QActionGroup, QColor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath,
+                                 QPalette, QPixmap)
+        from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+                                     QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
+                                     QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
     except ImportError as error:
         raise ValueError("The desktop launcher requires PyQt6; the CLI works without it") from error
-
-    from PyQt6.QtNetwork import QLocalServer
-    application = QApplication.instance() or QApplication([sys.argv[0]])
-    directory = state / '.asgard'
-    directory.mkdir(parents=True, exist_ok=True)
-    server = QLocalServer(application)
-    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
-    with (directory / 'launcher.lock').open('a+b') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if activate_existing(state): return 0
-        path = launcher_socket(state)
-        if path.exists() or path.is_symlink():
-            info = path.lstat()
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-                raise ValueError('Refusing to replace foreign launcher socket')
-            path.unlink()
-        if not server.listen(str(path)): raise RuntimeError(server.errorString())
     application.setApplicationName("Asgard")
-    card_width, icon_size, spacing = 240, 72, 16
-    style = """
-        QFrame#card { background: palette(base); border: 1px solid palette(mid); border-radius: 10px; }
-        QFrame#card[selected="true"] { border: 2px solid palette(highlight); }
-        QLabel#badge { background: palette(highlight); color: palette(highlighted-text);
-                       border-radius: 9px; padding: 2px 9px; font-weight: 600; }
-        QFrame#notice, QFrame#progress, QFrame#drawer, QFrame#developer {
-            background: palette(alternate-base); border: 1px solid palette(mid); border-radius: 8px; }
-    """
+    icon_size, spacing = 88, GAP
 
-    def themed(name, fallback):
-        return QIcon.fromTheme(name, application.style().standardIcon(fallback))
+    def theme():
+        """Colors for the current palette; the stylesheet and every glyph derive from them."""
+        palette = application.palette()
+        window, role = palette.color(QPalette.ColorRole.Window), QPalette.ColorRole
+        dark = window.lightness() < 128
+        accent = palette.color(role.Highlight)
+        return {"dark": dark, "text": palette.color(role.WindowText), "muted": palette.color(role.PlaceholderText),
+                "accent": accent, "accent_text": accent.lighter(130) if dark else accent.darker(140),
+                "on_accent": palette.color(role.HighlightedText),
+                "danger": QColor("#ff6b78" if dark else "#c0392b"), "good": QColor("#3ddc84" if dark else "#1e8e4e")}
+
+    def tint(color, alpha):
+        return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha})"
+
+    def make_style(colors):
+        accent, danger, good = colors["accent"], colors["danger"], colors["good"]
+        return f"""
+        QFrame#card {{ background: palette(base); border: 2px solid transparent; border-radius: 14px; }}
+        QFrame#card:hover {{ border-color: palette(mid); }}
+        QFrame#card:focus, QFrame#card[selected="true"] {{ border-color: palette(highlight); }}
+        QLabel#badge {{ background: palette(mid); color: white; border-radius: 9px; padding: 2px 10px; font-weight: 600; }}
+        QLabel#badge[state="running"] {{ background: #1f9d55; }}
+        QLabel#badge[state="starting"] {{ background: #d9730d; }}
+        QLabel#line[tone="problem"] {{ color: {danger.name()}; }}
+        QPushButton#play {{ background: {tint(accent, .18)}; color: {colors["accent_text"].name()};
+            border: none; border-radius: 9px; min-height: 34px; padding: 0 14px; font-weight: 600; }}
+        QPushButton#play:hover {{ background: palette(highlight); color: palette(highlighted-text); }}
+        QPushButton#play[role="resume"] {{ background: {tint(good, .18)}; color: {good.name()}; }}
+        QPushButton#play[role="resume"]:hover {{ background: {good.darker(125).name()}; color: white; }}
+        QPushButton#play[role="stop"] {{ background: {tint(danger, .16)}; color: {danger.name()}; }}
+        QPushButton#play[role="stop"]:hover {{ background: {danger.darker(130).name()}; color: white; }}
+        QPushButton#play:disabled {{ background: palette(button); color: {colors["muted"].name()}; }}
+        QPushButton#primary {{ background: palette(highlight); color: palette(highlighted-text); border: none;
+            border-radius: 9px; min-height: 34px; padding: 0 16px; font-weight: 600; }}
+        QPushButton#primary:hover {{ background: {accent.lighter(112).name()}; }}
+        QPushButton#primary:disabled {{ background: palette(button); color: {colors["muted"].name()}; }}
+        QPushButton#ghost, QPushButton#sort {{ background: transparent; border: 1px solid palette(mid); border-radius: 9px;
+            min-height: 32px; padding: 0 12px; }}
+        QPushButton#ghost:hover, QPushButton#sort:hover {{ background: palette(button); }}
+        QPushButton#sort {{ padding-right: 30px; }}
+        QPushButton#sort::menu-indicator {{ subcontrol-position: right center; right: 11px; }}
+        QToolButton#tool {{ border: none; border-radius: 8px; padding: 6px; }}
+        QToolButton#tool:hover {{ background: palette(button); }}
+        QLineEdit#search {{ background: palette(base); border: 1px solid palette(mid); border-radius: 9px; padding: 6px 10px; }}
+        QLineEdit#search:focus {{ border-color: palette(highlight); }}
+        QFrame#notice, QFrame#progress, QFrame#drawer, QFrame#developer {{
+            background: palette(alternate-base); border: 1px solid palette(mid); border-radius: 10px; }}
+        QFrame#drawer QScrollArea, QFrame#drawer QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
+        QFrame#notice QLabel, QFrame#progress QLabel, QFrame#drawer QLabel {{ background: transparent; }}
+        QLabel#drop {{ background: palette(window); border: 2px dashed palette(highlight); border-radius: 16px;
+            font-weight: 600; }}
+        """
+
+    ICON = 18
+    glyph_cache = {}
+
+    def draw_glyph(painter, name):
+        """One glyph on an 18 x 18 canvas, stroked and filled with the painter's pen."""
+        pen = painter.pen(); color = pen.color()
+        line = lambda *xy: painter.drawLine(QPointF(xy[0], xy[1]), QPointF(xy[2], xy[3]))
+        ring = lambda x, y, r: painter.drawEllipse(QPointF(x, y), r, r)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if name == "play":
+            path = QPainterPath(); path.moveTo(6, 4); path.lineTo(14.2, 9); path.lineTo(6, 14); path.closeSubpath()
+            painter.setBrush(color); painter.drawPath(path)
+        elif name == "stop":
+            painter.setBrush(color); painter.drawRoundedRect(QRectF(4.6, 4.6, 8.8, 8.8), 2, 2)
+        elif name == "tune":
+            line(3, 6, 6, 6); line(10.6, 6, 15, 6); ring(8.3, 6, 2.3); line(3, 12, 8, 12); line(12.6, 12, 15, 12); ring(10.3, 12, 2.3)
+        elif name == "history":
+            ring(9, 9, 6.4); line(9, 9, 9, 5.4); line(9, 9, 11.6, 10.6)
+        elif name == "search":
+            ring(8, 8, 4.7); line(11.5, 11.5, 15, 15)
+        elif name == "plus":
+            line(9, 3.6, 9, 14.4); line(3.6, 9, 14.4, 9)
+        elif name == "person":
+            ring(9, 6.2, 2.9); path = QPainterPath(); path.moveTo(3.6, 15.2); path.cubicTo(3.6, 10.6, 14.4, 10.6, 14.4, 15.2)
+            painter.drawPath(path)
+        elif name == "close":
+            line(4.6, 4.6, 13.4, 13.4); line(13.4, 4.6, 4.6, 13.4)
+        elif name == "info":
+            ring(9, 9, 6.8); line(9, 8.2, 9, 12.6); painter.setBrush(color); ring(9, 5.7, .55)
+        elif name == "alert":
+            ring(9, 9, 6.8); line(9, 5.2, 9, 9.8); painter.setBrush(color); ring(9, 12.5, .55)
+
+    def glyph(name, kind="text"):
+        """A monochrome vector icon; `kind` picks its colors, and its hover (Active) variant."""
+        colors = theme()
+        key = (name, kind, colors["text"].rgb(), colors["accent"].rgb(), colors["dark"])
+        if key in glyph_cache: return glyph_cache[key]
+        normal, active = {"text": (colors["text"], colors["text"]),
+                          "muted": (colors["muted"], colors["text"]),
+                          "accent": (colors["accent_text"], colors["on_accent"]),
+                          "danger": (colors["danger"], QColor("white")),
+                          "good": (colors["good"], QColor("white")),
+                          "onaccent": (colors["on_accent"], colors["on_accent"])}[kind]
+        ratio = max(2.0, application.devicePixelRatio())
+        icon = QIcon()
+        for mode, color in ((QIcon.Mode.Normal, normal), (QIcon.Mode.Active, active),
+                            (QIcon.Mode.Disabled, QColor(colors["muted"]))):
+            pixmap = QPixmap(round(ICON * ratio), round(ICON * ratio)); pixmap.setDevicePixelRatio(ratio)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = painter.pen(); pen.setColor(QColor(color)); pen.setWidthF(1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin); painter.setPen(pen)
+            draw_glyph(painter, name); painter.end()
+            icon.addPixmap(pixmap, mode)
+        glyph_cache[key] = icon
+        return icon
+
+    application.setWindowIcon(glyph("play", "accent"))
 
     def muted(label):
         label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
@@ -367,72 +517,111 @@ def show(state):
         font = label.font(); font.setPointSizeF(font.pointSizeF() * factor); font.setBold(bold); label.setFont(font)
         return label
 
+    def restyle(widget):
+        widget.style().unpolish(widget); widget.style().polish(widget)
+
     def artwork(app, size, ratio, palette):
-        """Rounded launcher icon at device pixels, or a lettered placeholder."""
+        """Rounded launcher tile at device pixels: the icon filling it (a padded icon is cropped to its
+        pixels), or a tinted tile with the game's initial; a hairline keeps pale icons defined."""
         pixmap = QPixmap(round(size * ratio), round(size * ratio))
         pixmap.setDevicePixelRatio(ratio); pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing); painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         path = QPainterPath(); path.addRoundedRect(QRectF(0, 0, size, size), size * .22, size * .22)
-        image = QPixmap(app["icon"]) if app.get("icon") else QPixmap()
+        image = QImage(app["icon"]) if app.get("icon") else QImage()
         if not image.isNull():
-            painter.setClipPath(path); painter.drawPixmap(QRectF(0, 0, size, size), image, QRectF(image.rect()))
+            box = opaque_bounds(image)
+            if box and box[2] * box[3] < .97 * image.width() * image.height():
+                image = image.copy(*box)
+            side = min(image.width(), image.height())
+            painter.setClipPath(path); painter.fillPath(path, palette.color(QPalette.ColorRole.Base))
+            painter.drawImage(QRectF(0, 0, size, size), image,
+                              QRectF((image.width() - side) / 2, (image.height() - side) / 2, side, side))
+            painter.setClipping(False)
         else:
-            painter.fillPath(path, palette.color(QPalette.ColorRole.Highlight))
+            painter.fillPath(path, QColor(tile_color(app["label"])))
             font = painter.font(); font.setPixelSize(round(size * .46)); font.setBold(True); painter.setFont(font)
-            painter.setPen(palette.color(QPalette.ColorRole.HighlightedText))
+            painter.setPen(QColor("white"))
             painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter,
                              next((c.upper() for c in app["label"] if c.isalnum()), "?"))
+        ring = QColor(palette.color(QPalette.ColorRole.WindowText)); ring.setAlpha(34)
+        painter.setPen(ring); painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(.5, .5, size - 1, size - 1), size * .22, size * .22)
         painter.end()
         return pixmap
 
     class Card(QFrame):
         def __init__(self, window, app):
             super().__init__()
-            self.window, self.app, self.art = window, app, None
-            self.setObjectName("card"); self.setFixedWidth(card_width)
+            self.window, self.app, self.art, self.card_width = window, app, None, MIN_CARD
+            self.setObjectName("card"); self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            layout = QVBoxLayout(self); layout.setContentsMargins(14, 14, 14, 12); layout.setSpacing(6)
-            top = QHBoxLayout(); self.icon = QLabel(); self.icon.setFixedSize(icon_size, icon_size)
+            layout = QVBoxLayout(self); layout.setContentsMargins(16, 16, 16, 14); layout.setSpacing(3)
+            top = QGridLayout(); top.setContentsMargins(0, 0, 0, 0)
+            self.icon = QLabel(); self.icon.setFixedSize(icon_size, icon_size)
             self.badge = QLabel(); self.badge.setObjectName("badge")
-            top.addWidget(self.icon); top.addStretch(); top.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
-            layout.addLayout(top); layout.addSpacing(4)
-            self.title = scaled(QLabel(), 1.1, True); self.title.setWordWrap(True)
-            self.title.setFixedHeight(self.title.fontMetrics().lineSpacing() * 2 + 2)
-            self.title.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-            self.meta = muted(QLabel())
-            self.developer = muted(QLabel()); self.developer.setWordWrap(True)
+            top.addWidget(self.icon, 0, 0, Qt.AlignmentFlag.AlignHCenter)
+            top.addWidget(self.badge, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+            layout.addLayout(top); layout.addSpacing(8)
+            centered = Qt.AlignmentFlag.AlignHCenter
+            self.title = scaled(QLabel(), 1.1, True); self.title.setAlignment(centered)
+            self.meta = muted(QLabel()); self.meta.setAlignment(centered)
+            self.line = muted(QLabel()); self.line.setObjectName("line"); self.line.setAlignment(centered)
+            self.developer = muted(QLabel()); self.developer.setWordWrap(True); self.developer.setAlignment(centered)
             self.developer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            for widget in (self.title, self.meta, self.developer): layout.addWidget(widget)
-            actions = QHBoxLayout(); actions.setSpacing(6)
-            self.action = QPushButton(); self.action.setMinimumHeight(34)
+            for widget in (self.title, self.meta, self.line, self.developer): layout.addWidget(widget)
+            layout.addSpacing(10)
+            actions = QHBoxLayout(); actions.setSpacing(2)
+            self.action = QPushButton(); self.action.setObjectName("play")
             self.action.clicked.connect(lambda: window.act(self.app))
-            self.gear = QToolButton(); self.gear.setIcon(themed("configure", QStyle.StandardPixmap.SP_FileDialogDetailedView))
-            self.gear.setToolTip("Game settings"); self.gear.setAutoRaise(True)
-            self.gear.clicked.connect(lambda: window.configure(self.app))
-            self.history = QToolButton(); self.history.setIcon(themed("view-history", QStyle.StandardPixmap.SP_FileDialogInfoView))
-            self.history.setToolTip("Last session"); self.history.setAutoRaise(True)
+            self.gear = QToolButton(); self.gear.setObjectName("tool")
+            self.gear.setIcon(glyph("tune", "muted")); self.gear.setIconSize(QSize(ICON, ICON))
+            self.gear.setToolTip("Game settings"); self.gear.clicked.connect(lambda: window.configure(self.app))
+            self.history = QToolButton(); self.history.setObjectName("tool")
+            self.history.setIcon(glyph("history", "muted")); self.history.setIconSize(QSize(ICON, ICON))
+            self.history.setToolTip("Last session")
             self.history.clicked.connect(lambda: window.open_drawer(self.app["package"]))
-            actions.addWidget(self.action, 1); actions.addWidget(self.gear); actions.addWidget(self.history)
+            actions.addWidget(self.action, 1); actions.addSpacing(4); actions.addWidget(self.gear); actions.addWidget(self.history)
             layout.addLayout(actions)
             self.update_app(app)
+
+        def set_width(self, width):
+            self.card_width = width; self.setFixedWidth(width); self.relabel()
+
+        def relabel(self):
+            label = self.app["label"]
+            words = self.title.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, self.card_width - 40)
+            self.title.setText(words); self.title.setToolTip(label if words != label else "")
+            if getattr(self, "meta_text", None):
+                shown = self.meta.fontMetrics().elidedText(self.meta_text, Qt.TextElideMode.ElideRight, self.card_width - 40)
+                self.meta.setText(shown); self.meta.setToolTip(self.meta_text if shown != self.meta_text else "")
 
         def update_app(self, app, pending=None):
             self.app = app
             rule = card_state(app, pending)
             ratio = self.devicePixelRatioF()
+            self.meta_text = None
             art = (app.get("icon"), app["label"], ratio, self.palette().cacheKey())
             if art != self.art:
                 self.art = art; self.icon.setPixmap(artwork(app, icon_size, ratio, self.palette()))
-            metrics = self.title.fontMetrics()
-            words = metrics.elidedText(app["label"], Qt.TextElideMode.ElideRight, (card_width - 32) * 2 - metrics.averageCharWidth() * 4)
-            self.title.setText(words); self.title.setToolTip(app["label"] if words != app["label"] else "")
-            installed = time.strftime("%b %d, %Y", time.localtime(app["installed_at"])) if app.get("installed_at") else None
-            self.meta.setText(" · ".join(str(x) for x in (app.get("version_name") or app.get("version"), installed and "Installed " + installed) if x))
+            self.relabel()
+            version = app.get("version_name") or app.get("version")
+            moment = time.localtime(app["installed_at"]) if app.get("installed_at") else None
+            installed = moment and "Installed " + time.strftime("%b %d" + ("" if moment.tm_year == time.localtime().tm_year
+                                                                           else ", %Y"), moment)
+            self.meta_text = " · ".join(str(x) for x in (version, installed) if x) or " "
+            text, tone = activity_line(app)
+            self.line.setText(text); self.line.setProperty("tone", tone)
+            self.line.setForegroundRole(QPalette.ColorRole.WindowText if tone else QPalette.ColorRole.PlaceholderText)
+            restyle(self.line)
             self.badge.setText(rule["badge"] or ""); self.badge.setVisible(bool(rule["badge"]))
+            self.badge.setProperty("state", (rule["badge"] or "").lower()); restyle(self.badge)
             self.action.setText(rule["text"]); self.action.setEnabled(rule["enabled"])
-            self.action.setIcon(themed("media-playback-stop" if rule["action"] == "stop" else "media-playback-start",
-                                       QStyle.StandardPixmap.SP_MediaStop if rule["action"] == "stop" else QStyle.StandardPixmap.SP_MediaPlay))
+            self.action.setProperty("role", rule["action"]); restyle(self.action)
+            self.action.setIcon(glyph("stop" if rule["action"] == "stop" else "play",
+                                      {"stop": "danger", "resume": "good"}.get(rule["action"], "accent")))
+            self.action.setIconSize(QSize(ICON, ICON))
+            self.gear.setIcon(glyph("tune", "muted")); self.history.setIcon(glyph("history", "muted"))
             self.action.setToolTip(rule.get("reason", ""))
             session = app["session"]
             self.history.setEnabled(bool(session.get("session_id") or app.get("error")))
@@ -440,10 +629,27 @@ def show(state):
             self.developer.setVisible(self.window.developer_mode())
 
         def set_selected(self, value):
-            self.setProperty("selected", value); self.style().unpolish(self); self.style().polish(self)
+            self.setProperty("selected", value); restyle(self)
 
         def mousePressEvent(self, event):
             self.window.select(self.app["package"]); super().mousePressEvent(event)
+
+        def mouseDoubleClickEvent(self, event):
+            self.window.activate_card(self.app)
+
+        def focusInEvent(self, event):
+            self.window.select(self.app["package"]); super().focusInEvent(event)
+
+        def keyPressEvent(self, event):
+            key, package = event.key(), self.app["package"]
+            moves = {Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_Right: (1, 0), Qt.Key.Key_Up: (0, -1), Qt.Key.Key_Down: (0, 1)}
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space): self.window.activate_card(self.app)
+            elif key in moves: self.window.move_focus(package, *moves[key])
+            elif key == Qt.Key.Key_Menu: self.window.card_menu(self.app, self.mapToGlobal(self.rect().center()))
+            else: super().keyPressEvent(event)
+
+        def contextMenuEvent(self, event):
+            self.window.select(self.app["package"]); self.window.card_menu(self.app, event.globalPos())
 
     class GoogleAccounts(QDialog):
         """Accounts signed in on this device. Sign-in is microG's own window with Google's page."""
@@ -459,12 +665,12 @@ def show(state):
             self.accounts = QListWidget(); self.accounts.setMinimumHeight(110); layout.addWidget(self.accounts)
             self.hint = muted(QLabel()); self.hint.setWordWrap(True); layout.addWidget(self.hint)
             row = QHBoxLayout()
-            self.sign_in = QPushButton(themed("list-add", QStyle.StandardPixmap.SP_DialogOpenButton), "Sign in with Google…")
+            self.sign_in = QPushButton("Sign in with Google…")
             self.sign_in.clicked.connect(lambda: self.open_window("sign-in"))
             self.settings = QPushButton("microG settings…")
             self.settings.setToolTip("Device registration, attestation and other Google services settings")
             self.settings.clicked.connect(lambda: self.open_window("settings"))
-            self.remove = QPushButton(themed("list-remove", QStyle.StandardPixmap.SP_TrashIcon), "Remove")
+            self.remove = QPushButton("Remove")
             self.remove.clicked.connect(self.remove_selected)
             close = QPushButton("Close"); close.clicked.connect(self.accept)
             for widget in (self.sign_in, self.settings, self.remove): row.addWidget(widget)
@@ -537,7 +743,10 @@ def show(state):
             self.refreshing, self.apps, self.columns = False, [], 0
             self.selected, self.drawer_package, self.drawer_stamp, self.drawer_scanned = None, None, None, 0
             self.order, self.announce = [], None
-            self.setWindowTitle("Asgard"); self.setMinimumSize(720, 480)
+            self.settings = settings or QSettings("Asgard", "Library")
+            self.metrics, self.polled, self.install_queue, self.install_batch = None, 0.0, [], None
+            self.setWindowTitle("Asgard"); self.setMinimumSize(720, 480); self.setAcceptDrops(True)
+            self.setWindowIcon(application.windowIcon()); self.theming = False
             body = QWidget(); outer = QVBoxLayout(body)
             outer.setContentsMargins(24, 20, 24, 16); outer.setSpacing(12)
             heading = QHBoxLayout(); heading.setSpacing(10)
@@ -545,16 +754,29 @@ def show(state):
             titles.addWidget(scaled(QLabel("Game library"), 1.8, True))
             self.summary = muted(QLabel()); titles.addWidget(self.summary)
             heading.addLayout(titles); heading.addStretch()
-            self.search = QLineEdit(); self.search.setPlaceholderText("Search games")
-            self.search.setClearButtonEnabled(True); self.search.setMinimumWidth(220)
+            self.search = QLineEdit(); self.search.setObjectName("search"); self.search.setPlaceholderText("Search games")
+            self.search.setClearButtonEnabled(True)
+            self.search_action = self.search.addAction(glyph("search", "muted"), QLineEdit.ActionPosition.LeadingPosition)
             self.search.textChanged.connect(lambda: self.render(True))
-            self.install_button = QPushButton(themed("list-add", QStyle.StandardPixmap.SP_DialogOpenButton), "Install APK…")
-            self.install_button.setMinimumHeight(34); self.install_button.setDefault(True)
+            self.sort_menu, self.sort_group = QMenu(self), QActionGroup(self)
+            for key, text in SORTS:
+                action = self.sort_menu.addAction(text); action.setCheckable(True); action.setData(key)
+                self.sort_group.addAction(action)
+                action.triggered.connect(lambda _, key=key: self.set_sort(key))
+            self.sort_button = QPushButton(); self.sort_button.setObjectName("sort")
+            self.sort_button.setMenu(self.sort_menu); self.sort_button.setToolTip("Sort games")
+            self.sort_mode = "name"
+            self.set_sort(str(self.settings.value("sort", "name")), save=False)
+            self.install_button = QPushButton(glyph("plus", "onaccent"), "Install APK…")
+            self.install_button.setObjectName("primary"); self.install_button.setIconSize(QSize(ICON, ICON))
             self.install_button.clicked.connect(self.install)
             self.google_requester = None
-            self.google_button = QPushButton(themed("user-identity", QStyle.StandardPixmap.SP_DialogApplyButton), "Google account…")
-            self.google_button.setMinimumHeight(34); self.google_button.clicked.connect(self.google_account)
-            heading.addWidget(self.search); heading.addWidget(self.google_button); heading.addWidget(self.install_button)
+            self.google_button = QPushButton(glyph("person", "text"), "Google account")
+            self.google_button.setObjectName("ghost"); self.google_button.setToolTip("Google account…")
+            self.google_button.setIconSize(QSize(ICON, ICON)); self.google_button.clicked.connect(self.google_account)
+            self.search.setMinimumWidth(140); self.search.setMaximumWidth(380)
+            heading.addWidget(self.search); heading.addWidget(self.sort_button)
+            heading.addWidget(self.google_button); heading.addWidget(self.install_button)
             outer.addLayout(heading)
             self.progress = QFrame(); self.progress.setObjectName("progress")
             row = QHBoxLayout(self.progress); row.setContentsMargins(12, 8, 12, 8)
@@ -565,10 +787,11 @@ def show(state):
             row = QHBoxLayout(self.notice); row.setContentsMargins(12, 8, 8, 8)
             self.notice_icon = QLabel(); self.notice_text = QLabel(); self.notice_text.setWordWrap(True)
             self.notice_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self.notice_details = QPushButton("Last session"); self.notice_details.clicked.connect(
+            self.notice_details = QPushButton("Last session"); self.notice_details.setObjectName("ghost")
+            self.notice_details.clicked.connect(
                 lambda: self.open_drawer(self.notice_details.property("package")))
             close = QToolButton(); close.setAutoRaise(True)
-            close.setIcon(themed("window-close", QStyle.StandardPixmap.SP_TitleBarCloseButton)); close.clicked.connect(self.notice.hide)
+            close.setObjectName("tool"); close.setIcon(glyph("close", "muted")); close.clicked.connect(self.notice.hide)
             row.addWidget(self.notice_icon); row.addWidget(self.notice_text, 1); row.addWidget(self.notice_details); row.addWidget(close)
             self.notice.hide(); outer.addWidget(self.notice)
             self.notice_timer = QTimer(self); self.notice_timer.setSingleShot(True); self.notice_timer.timeout.connect(self.notice.hide)
@@ -579,37 +802,46 @@ def show(state):
             self.grid.setContentsMargins(0, 0, 0, 0); self.grid.setSpacing(spacing)
             self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             self.scroll.setWidget(grid_body); self.pages.addWidget(self.scroll)
+            self.scroll.viewport().installEventFilter(self)
             empty = QWidget(); column = QVBoxLayout(empty); column.addStretch()
-            self.empty_title = scaled(QLabel(), 1.4, True); self.empty_hint = muted(QLabel()); self.empty_hint.setWordWrap(True)
-            self.empty_install = QPushButton(themed("list-add", QStyle.StandardPixmap.SP_DialogOpenButton), "Install APK…")
+            self.empty_title = scaled(QLabel(), 1.5, True); self.empty_hint = muted(QLabel()); self.empty_hint.setWordWrap(True)
+            self.empty_hint.setFixedWidth(420)
+            self.empty_install = QPushButton(glyph("plus", "onaccent"), "Install APK…")
+            self.empty_install.setObjectName("primary"); self.empty_install.setIconSize(QSize(ICON, ICON))
             self.empty_install.clicked.connect(self.install)
             for widget in (self.empty_title, self.empty_hint, self.empty_install):
                 if isinstance(widget, QLabel): widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 column.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
-            column.addStretch(); self.pages.addWidget(empty)
+            column.setSpacing(10); column.addStretch(); self.pages.addWidget(empty)
             middle.addWidget(self.pages, 1); middle.addWidget(self.build_drawer())
             outer.addLayout(middle, 1)
             outer.addWidget(self.build_developer())
-            self.setCentralWidget(body); self.resize(1080, 720)
-            self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1500)
+            self.setCentralWidget(body)
+            self.drop_hint = QLabel("<div style='font-size: 22pt; font-weight: 600'>Drop to install</div>"
+                                    "<div style='margin-top: 6px'>APK, APKM, APKS or XAPK</div>", body)
+            self.drop_hint.setObjectName("drop"); self.drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.drop_hint.hide()
+            geometry = self.settings.value("geometry")
+            if not (geometry and self.restoreGeometry(geometry)): self.resize(1080, 720)
+            self.timer = QTimer(self); self.timer.timeout.connect(self.tick); self.timer.start(1500)
             self.render(True); self.refresh()
 
         def build_drawer(self):
             self.drawer = QFrame(); self.drawer.setObjectName("drawer"); self.drawer.setFixedWidth(340)
             layout = QVBoxLayout(self.drawer); layout.setContentsMargins(16, 12, 10, 14); layout.setSpacing(8)
-            top = QHBoxLayout(); top.addWidget(scaled(QLabel("Last session"), 1.15, True)); top.addStretch()
+            top = QHBoxLayout(); top.addWidget(muted(QLabel("LAST SESSION"))); top.addStretch()
             close = QToolButton(); close.setAutoRaise(True)
-            close.setIcon(themed("window-close", QStyle.StandardPixmap.SP_TitleBarCloseButton)); close.clicked.connect(self.close_drawer)
+            close.setObjectName("tool"); close.setIcon(glyph("close", "muted")); close.clicked.connect(self.close_drawer)
             top.addWidget(close); layout.addLayout(top)
-            self.drawer_title = QLabel(); self.drawer_title.setWordWrap(True)
+            self.drawer_title = scaled(QLabel(), 1.1, True); self.drawer_title.setWordWrap(True)
             self.drawer_body = QLabel(); self.drawer_body.setWordWrap(True); self.drawer_body.setTextFormat(Qt.TextFormat.RichText)
             self.drawer_body.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             self.drawer_body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             body = QScrollArea(); body.setWidgetResizable(True); body.setFrameShape(QFrame.Shape.NoFrame); body.setWidget(self.drawer_body)
             layout.addWidget(self.drawer_title); layout.addWidget(body, 1)
-            self.open_log = QPushButton(themed("document-open", QStyle.StandardPixmap.SP_FileIcon), "Open full log")
+            self.open_log = QPushButton("Open full log"); self.open_log.setObjectName("ghost")
             self.open_log.clicked.connect(lambda: self.open_path(session_log(self.drawer_app()["session"])))
-            self.open_folder = QPushButton(themed("folder-open", QStyle.StandardPixmap.SP_DirOpenIcon), "Open session folder")
+            self.open_folder = QPushButton("Open session folder"); self.open_folder.setObjectName("ghost")
             self.open_folder.clicked.connect(lambda: self.open_path(str(Path(log).parent)
                 if (log := session_log(self.drawer_app()["session"])) else None))
             layout.addWidget(self.open_log); layout.addWidget(self.open_folder)
@@ -671,7 +903,7 @@ def show(state):
 
         def refresh(self):
             if self.refreshing: return
-            self.refreshing = True
+            self.refreshing, self.polled = True, time.monotonic()
             requested_state = self.state
             def loaded(code, output):
                 self.refreshing = False
@@ -694,7 +926,8 @@ def show(state):
 
         def render(self, relayout=False):
             query = self.search.text().casefold()
-            visible = [a for a in self.apps if query in (a["label"] + " " + a["package"]).casefold()]
+            visible = [a for a in sort_apps(self.apps, self.sort_mode)
+                       if query in (a["label"] + " " + a["package"]).casefold()]
             for package in set(self.cards) - {a["package"] for a in self.apps}:
                 self.cards.pop(package).deleteLater()
             for app in self.apps:
@@ -710,29 +943,121 @@ def show(state):
             self.summary.setText(f"{len(self.apps)} game{'s' * (len(self.apps) != 1)}" + (f" · {running} running" if running else ""))
             if not self.apps:
                 self.empty_title.setText("No games yet")
-                self.empty_hint.setText("Install an APK, APKM, APKS or XAPK file to add it to your library.")
+                self.empty_hint.setText("Install an APK, APKM, APKS or XAPK file, or drop one anywhere in this window.")
+                self.empty_hint.setFixedHeight(self.empty_hint.heightForWidth(420))
                 self.empty_install.show(); self.pages.setCurrentIndex(1)
             elif not visible:
                 self.empty_title.setText("No matches")
                 self.empty_hint.setText(f"No installed game matches “{self.search.text()}”.")
+                self.empty_hint.setFixedHeight(self.empty_hint.heightForWidth(420))
                 self.empty_install.hide(); self.pages.setCurrentIndex(1)
             else:
                 self.pages.setCurrentIndex(0)
 
-        def reflow(self, order):
-            self.order = order
-            width = self.scroll.viewport().width()
-            self.columns = max(1, (width + spacing) // (card_width + spacing))
+        def reflow(self, order=None):
+            if order is not None: self.order = order
+            columns, width = grid_metrics(self.scroll.viewport().width())
+            self.columns, self.metrics = columns, (columns, width)
             for card in self.cards.values():
                 self.grid.removeWidget(card); card.hide()
-            for index, package in enumerate(order):
-                card = self.cards[package]
-                self.grid.addWidget(card, index // self.columns, index % self.columns); card.show()
+            previous = None
+            for index, package in enumerate(self.order):
+                card = self.cards[package]; card.set_width(width)
+                self.grid.addWidget(card, index // columns, index % columns); card.show()
+                if previous: QWidget.setTabOrder(previous, card)
+                previous = card
+
+        def eventFilter(self, watched, event):
+            # The viewport gets its size after the window's own resize event, so only
+            # its own Resize carries the width the grid must fill.
+            if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+                if grid_metrics(self.scroll.viewport().width()) != self.metrics: self.reflow()
+            return super().eventFilter(watched, event)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
-            width = self.scroll.viewport().width()
-            if max(1, (width + spacing) // (card_width + spacing)) != self.columns: self.reflow(self.order)
+            self.google_button.setText("Google account" if self.width() >= 900 else "")
+
+        def changeEvent(self, event):
+            super().changeEvent(event)
+            if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange) \
+                    and self.isActiveWindow() and not self.isMinimized():
+                self.refresh()
+            elif event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange) and not self.theming:
+                self.theming = True; self.apply_theme(); self.theming = False
+
+        def closeEvent(self, event):
+            self.settings.setValue("geometry", self.saveGeometry())
+            super().closeEvent(event)
+
+        def tick(self):
+            """Poll the library, less often when nothing is happening and not at all when minimized."""
+            busy = bool(self.pending) or any(a["session"].get("state") in ACTIVE for a in self.apps)
+            wait = poll_wait(self.isMinimized() or not self.isVisible(), self.isActiveWindow(), busy)
+            if wait is not None and time.monotonic() - self.polled >= wait: self.refresh()
+
+        def set_sort(self, mode, save=True):
+            labels = dict(SORTS)
+            self.sort_mode = mode if mode in labels else "name"
+            self.sort_button.setText("Sort: " + labels[self.sort_mode])
+            for action in self.sort_group.actions(): action.setChecked(action.data() == self.sort_mode)
+            if save: self.settings.setValue("sort", self.sort_mode); self.render(True)
+
+        def apply_theme(self):
+            """Stylesheet and glyphs follow the palette, including a theme change while running."""
+            self.setStyleSheet(make_style(theme()))
+            self.search_action.setIcon(glyph("search", "muted")); self.google_button.setIcon(glyph("person", "text"))
+            self.install_button.setIcon(glyph("plus", "onaccent")); self.empty_install.setIcon(glyph("plus", "onaccent"))
+            for card in self.cards.values(): card.art = None; card.update_app(card.app, self.pending.get(card.app["package"]))
+            self.render(True)
+
+        def activate_card(self, app):
+            if card_state(app, self.pending.get(app["package"]))["enabled"]: self.act(app)
+
+        def move_focus(self, package, dx, dy):
+            if package not in self.order: return
+            index = self.order.index(package) + dx + dy * self.columns
+            if 0 <= index < len(self.order):
+                card = self.cards[self.order[index]]; card.setFocus(); self.scroll.ensureWidgetVisible(card)
+
+        def build_menu(self, app):
+            menu = QMenu(self); rule = card_state(app, self.pending.get(app["package"]))
+            primary = menu.addAction(rule["text"]); primary.setEnabled(rule["enabled"])
+            primary.triggered.connect(lambda: self.act(app))
+            menu.addSeparator()
+            menu.addAction("Game settings…").triggered.connect(lambda: self.configure(app))
+            session = menu.addAction("Last session"); session.triggered.connect(lambda: self.open_drawer(app["package"]))
+            session.setEnabled(bool(app["session"].get("session_id") or app.get("error")))
+            menu.addSeparator()
+            running = app["session"].get("state") in ACTIVE
+            for text, command in (("Clear data…", "clear-data"), ("Uninstall…", "uninstall")):
+                action = menu.addAction(text); action.setEnabled(not running)
+                action.setToolTip("Stop the game first" if running else "")
+                action.triggered.connect(lambda _, command=command: self.remove_app(app, command))
+            return menu
+
+        def card_menu(self, app, position):
+            self.build_menu(app).popup(position)
+
+        def dropped(self, event):
+            return [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+
+        def show_drop_hint(self):
+            body = self.centralWidget(); origin = self.pages.mapTo(body, QPoint(0, 0))
+            self.drop_hint.setGeometry(origin.x(), origin.y(), body.width() - origin.x() - 24, self.pages.height())
+            self.drop_hint.raise_(); self.drop_hint.show()
+
+        def dragEnterEvent(self, event):
+            if installable(self.dropped(event)):
+                event.acceptProposedAction(); self.show_drop_hint()
+
+        def dragLeaveEvent(self, event):
+            self.drop_hint.hide()
+
+        def dropEvent(self, event):
+            self.drop_hint.hide()
+            paths = installable(self.dropped(event))
+            if paths: event.acceptProposedAction(); self.install_files(paths)
 
         def app(self, package):
             return next((a for a in self.apps if a["package"] == package), None)
@@ -817,8 +1142,8 @@ def show(state):
             return True
 
         def show_notice(self, text, error=False, package=None, timeout=0):
-            icon = QStyle.StandardPixmap.SP_MessageBoxWarning if error else QStyle.StandardPixmap.SP_MessageBoxInformation
-            self.notice_icon.setPixmap(application.style().standardIcon(icon).pixmap(20, 20))
+            self.notice_icon.setPixmap(glyph("alert", "danger").pixmap(ICON, ICON) if error
+                                       else glyph("info", "accent").pixmap(ICON, ICON))
             self.notice_text.setText(text)
             self.notice_details.setProperty("package", package); self.notice_details.setVisible(bool(package))
             self.notice.show()
@@ -899,27 +1224,85 @@ def show(state):
                 self.close_drawer(); self.render(True); self.refresh()
 
         def install(self):
-            path, _ = QFileDialog.getOpenFileName(self, "Install Android game", str(Path.home()),
+            paths, _ = QFileDialog.getOpenFileNames(self, "Install Android games", str(Path.home()),
                 "Android packages (*.apk *.apkm *.apks *.xapk);;All files (*)")
-            if not path: return
-            name = Path(path).name; started = time.monotonic()
-            self.install_button.setEnabled(False); self.empty_install.setEnabled(False); self.notice.hide()
+            self.install_files(paths)
+
+        def install_files(self, paths):
+            """Queue packages; they install one at a time, and anything already queued keeps its place."""
+            paths = installable(paths)
+            if not paths: return
+            fresh = self.install_batch is None
+            if fresh:
+                self.install_batch = {"total": 0, "done": 0, "installed": 0, "failed": [], "announce": None}
+                self.notice.hide()
+            self.install_queue.extend(paths); self.install_batch["total"] += len(paths)
+            if fresh: self.install_next()
+
+        def install_next(self):
+            batch = self.install_batch
+            if not self.install_queue: return self.install_finished()
+            path = self.install_queue.pop(0); name = Path(path).name; started = time.monotonic()
             def tick():
-                self.progress_text.setText(f"Installing {name}… verifying signatures and unpacking "
+                position = f" ({batch['done'] + 1} of {batch['total']})" if batch["total"] > 1 else ""
+                self.progress_text.setText(f"Installing {name}{position}… verifying signatures and unpacking "
                                            f"({span(time.monotonic() - started)})")
             ticker = QTimer(self); ticker.timeout.connect(tick); ticker.start(1000); tick(); self.progress.show()
             def installed(code, output):
-                ticker.stop(); ticker.deleteLater(); self.progress.hide()
-                self.install_button.setEnabled(True); self.empty_install.setEnabled(True)
-                if code:
-                    self.show_notice(f"Couldn't install {name}: {short_error(output)}", error=True); return
-                match = re.search(r"^Installed (\S+) ", output, re.M)
-                # Announced by the first listing that contains the package.
-                self.announce = match[1] if match else None
-                self.refresh()
+                ticker.stop(); ticker.deleteLater()
+                batch["done"] += 1
+                if code: batch["failed"].append((name, short_error(output)))
+                else:
+                    batch["installed"] += 1
+                    match = re.search(r"^Installed (\S+) ", output, re.M)
+                    if match: batch["announce"] = match[1]
+                self.install_next()
             self.command(["install", path], installed)
 
-    window = Library(); window.setStyleSheet(style); window.show()
+        def install_finished(self):
+            batch, self.install_batch = self.install_batch, None
+            self.progress.hide()
+            if batch["failed"]:
+                name, error = batch["failed"][0]
+                more = f" ({len(batch['failed']) - 1} more failed)" if len(batch["failed"]) > 1 else ""
+                done = f"{batch['installed']} of {batch['total']} installed. " if batch["total"] > 1 else ""
+                self.show_notice(f"{done}Couldn't install {name}: {error}{more}", error=True)
+            elif batch["total"] > 1:
+                self.show_notice(f"{batch['installed']} games installed.", timeout=8000)
+            # A lone install is announced by the first listing that contains the package.
+            if batch["installed"] == 1: self.announce = batch["announce"]
+            self.refresh()
+
+    window = Library(); window.apply_theme()
+    return window
+
+
+def show(state):
+    import fcntl
+    state = Path(state).resolve()
+    try:
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtNetwork import QLocalServer
+        from PyQt6.QtWidgets import QApplication
+    except ImportError as error:
+        raise ValueError("The desktop launcher requires PyQt6; the CLI works without it") from error
+    application = QApplication.instance() or QApplication([sys.argv[0]])
+    directory = state / '.asgard'
+    directory.mkdir(parents=True, exist_ok=True)
+    server = QLocalServer(application)
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+    with (directory / 'launcher.lock').open('a+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if activate_existing(state): return 0
+        path = launcher_socket(state)
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError('Refusing to replace foreign launcher socket')
+            path.unlink()
+        if not server.listen(str(path)): raise RuntimeError(server.errorString())
+    window = build(state, application)
+    window.show()
     def activate():
         while server.hasPendingConnections():
             client = server.nextPendingConnection()

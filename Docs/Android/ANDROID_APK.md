@@ -208,10 +208,27 @@ the file's structure and page links.
 ## Desktop library
 
 `python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 game
-library using the same install and session supervisor as the CLI. Cards show
-the app label, version, install date and bitmap icon, with Play/Stop actions,
-search, per-game settings (including clear data and uninstall) and a last-session drawer. Package IDs, library paths,
-interpreter launch and Java call tracing are grouped under Developer.
+library using the same install and session supervisor as the CLI.
+
+Each card shows a rounded icon tile, the label, version and install date, and one line about
+the latest session ("Played Today 13:08", "Running for 25 min", or a red "Last run failed"),
+with Play/Stop, per-game settings and last-session buttons. Colors come from the desktop
+palette and the icons are drawn by the launcher, so the look does not depend on an icon
+theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; a game
+without an icon gets a tile in one of ten fixed colors with its initial. Cards stretch
+between 208 and 280 px to fill the row, and the column count follows the viewport width.
+A running or starting game carries a status chip and its Play button becomes a red Stop.
+
+Double-click, Enter or Space plays (or stops) the focused card, arrow keys move between
+cards, and the context menu or Menu key offers Play/Stop, game settings, last session,
+clear data and uninstall (the last two are disabled while the game runs). Search matches the
+label or package ID, and Sort offers Name or Recently played. Dropping `.apk`, `.apkm`,
+`.apks` or `.xapk` files anywhere on the window installs them one at a time (the Install
+button accepts several files too), and a failure in one does not stop the rest. The window
+size and sort order are remembered (Qt settings, `Asgard/Library`). The library refreshes every 1.5 s
+while the window is focused or a game is running, every 10 s otherwise, and not at all while
+it is minimized; it refreshes at once when the window is activated. Package IDs, library
+paths, interpreter launch and Java call tracing are grouped under Developer.
 
 Install records now retain the base APK's label/version and a bounded launcher
 bitmap; older records recover labels and versions from their saved base report.

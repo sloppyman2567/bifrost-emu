@@ -438,6 +438,269 @@ class LauncherProfileTests(unittest.TestCase):
         self.assertEqual(dialog.result_settings(), {"property.ro.kernel.qemu": "custom", "property.debug.fixture": "1"})
 
 
+class LauncherLibraryTests(unittest.TestCase):
+    """The real library window on Qt's offscreen platform: layout, sorting, input, queueing and theming."""
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6 import QtTest  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("PyQt6 is not installed")
+        with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
+            cls.qt = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from PyQt6.QtCore import QSettings
+        import android_launcher
+        self.launcher = android_launcher
+        self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-library-")
+        self.root = Path(self.temporary.name)
+        (self.root / "state").mkdir()
+        self.settings = QSettings(str(self.root / "library.ini"), QSettings.Format.IniFormat)
+        self.windows = []
+        self.window = self.open_window()
+
+    def tearDown(self):
+        for window in self.windows:
+            window.timer.stop(); window.close()
+            for job in list(window.jobs): job.kill(); job.waitForFinished(2000)   # no child outlives its window
+            window.deleteLater()
+        self.qt.processEvents()
+        self.temporary.cleanup()
+
+    def settle(self, done=lambda: True, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.qt.processEvents()
+            if done(): return
+            time.sleep(0.01)
+        self.fail("Qt events did not settle")
+
+    def open_window(self, size=(1100, 700)):
+        window = self.launcher.build(self.root / "state", self.qt, self.settings)
+        window.timer.stop(); self.windows.append(window)
+        self.settle(lambda: not window.refreshing)       # the initial listing of the empty library
+        if size: window.resize(*size)
+        window.show(); self.settle()
+        return window
+
+    def app(self, index, label=None, **session):
+        return {"package": f"org.fixture.g{index}", "label": label or f"Game {index:02d}", "version_name": f"1.{index}",
+                "installed_at": 1792000000 + index, "launcher": "managed_activity", "icon": None,
+                "session": {"state": "stopped", **session}}
+
+    def fill(self, count, window=None, **extra):
+        window = window or self.window
+        window.apps = [dict(self.app(i), **extra) for i in range(count)]
+        window.render(True); self.settle()
+
+    def test_grid_metrics_fill_the_width_between_the_card_limits(self):
+        from android_launcher import GAP, MAX_CARD, MIN_CARD, grid_metrics
+        for width in range(MIN_CARD, 3000, 7):
+            columns, card = grid_metrics(width)
+            self.assertTrue(MIN_CARD <= card <= MAX_CARD, (width, columns, card))
+            self.assertLessEqual(columns * card + (columns - 1) * GAP, width)
+            # No further column would fit, so the row is as full as the limits allow.
+            self.assertGreater((columns + 1) * MIN_CARD + columns * GAP, width)
+
+    def test_cards_fill_the_viewport_on_first_show_and_follow_resizes(self):
+        # The grid once used the viewport width from before the window's layout, so a window
+        # opened wide showed two columns and left more than half of it empty.
+        from android_launcher import grid_metrics
+        self.fill(12)
+        for width in (1100, 1650, 800, 1300):
+            self.window.resize(width, 700); self.settle()
+            viewport = self.window.scroll.viewport().width()
+            columns, card = grid_metrics(viewport)
+            self.assertEqual(self.window.metrics, (columns, card), width)
+            shown = [self.window.cards[p] for p in self.window.order]
+            self.assertEqual({c.width() for c in shown}, {card})
+            self.assertLess(max(c.geometry().right() for c in shown), viewport)
+            self.assertEqual(len({c.geometry().x() for c in shown}), columns)
+        self.assertGreaterEqual(self.window.columns, 3)
+
+    def test_sort_mode_orders_the_library_and_survives_a_restart(self):
+        self.window.apps = [self.app(1, "Charlie", started_at=300), self.app(2, "alpha", started_at=100),
+                            self.app(3, "Bravo"), self.app(4, "Delta", started_at=900)]
+        self.window.render(True)
+        self.assertEqual([self.window.cards[p].app["label"] for p in self.window.order],
+                         ["alpha", "Bravo", "Charlie", "Delta"])
+        self.window.set_sort("played")
+        self.assertEqual([self.window.cards[p].app["label"] for p in self.window.order],
+                         ["Delta", "Charlie", "alpha", "Bravo"])        # never played last, then by name
+        self.assertEqual(self.window.sort_button.text(), "Sort: Recently played")
+        self.window.resize(760, 520); self.window.close(); self.settings.sync()      # inside the 800 x 600 offscreen screen
+        reopened = self.open_window(size=None)
+        self.assertEqual(reopened.sort_mode, "played")
+        self.assertEqual((reopened.width(), reopened.height()), (760, 520))
+        self.settings.setValue("sort", "nonsense")
+        self.assertEqual(self.open_window().sort_mode, "name")
+
+    def test_card_text_says_what_happened_last(self):
+        from android_launcher import activity_line
+        now = 1792800000
+        self.assertEqual(activity_line(self.app(1), now), ("Not played yet", ""))
+        self.assertEqual(activity_line(self.app(1, state="failed", started_at=now - 60), now), ("Last run failed", "problem"))
+        self.assertEqual(activity_line(self.app(1, state="running", started_at=now - 1500), now), ("Running for 25 min", ""))
+        self.assertEqual(activity_line(self.app(1, state="preparing"), now), ("Starting", ""))
+        self.assertTrue(activity_line(self.app(1, state="exited", started_at=now - 90000), now)[0].startswith("Played "))
+        self.fill(2)
+        failed = dict(self.app(7, "Broken"), session={"state": "failed", "started_at": 1792700000})
+        self.window.apps = [failed]; self.window.render()
+        card = self.window.cards[failed["package"]]
+        self.assertEqual((card.line.text(), card.line.property("tone")), ("Last run failed", "problem"))
+        self.assertTrue(card.meta.text().startswith("1.7 · Installed"), card.meta.text())
+
+    def test_keyboard_and_double_click_play_but_not_a_disabled_game(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        self.fill(8)
+        self.window.activateWindow(); self.settle()
+        played = []
+        self.window.act = lambda app: played.append(app["package"])
+        order = self.window.order
+        first = self.window.cards[order[0]]
+        first.setFocus(); self.settle()
+        QTest.keyClick(first, Qt.Key.Key_Return); QTest.keyClick(first, Qt.Key.Key_Space)
+        QTest.mouseDClick(self.window.cards[order[2]], Qt.MouseButton.LeftButton)
+        self.assertEqual(played, [order[0], order[0], order[2]])
+        QTest.keyClick(first, Qt.Key.Key_Right); self.settle()
+        self.assertEqual(self.window.selected, order[1])
+        QTest.keyClick(self.window.cards[order[1]], Qt.Key.Key_Down); self.settle()
+        self.assertEqual(self.window.selected, order[1 + self.window.columns])
+        damaged = self.window.cards[order[3]]
+        damaged.app = dict(damaged.app, error="damaged")
+        QTest.keyClick(damaged, Qt.Key.Key_Return)
+        self.assertEqual(len(played), 3)
+
+    def test_context_menu_follows_the_card_state(self):
+        def items(app):
+            return {a.text(): a.isEnabled() for a in self.window.build_menu(app).actions() if a.text()}
+        self.assertEqual(items(self.app(1)), {"Play": True, "Game settings…": True, "Last session": False,
+                                              "Clear data…": True, "Uninstall…": True})
+        running = items(self.app(1, state="running", session_id="s"))
+        self.assertEqual((running["Stop"], running["Last session"], running["Clear data…"], running["Uninstall…"]),
+                         (True, True, False, False))
+        self.assertFalse(items(dict(self.app(1), error="damaged"))["Play"])
+
+    def test_polling_slows_when_idle_and_stops_while_minimized(self):
+        from android_launcher import poll_wait
+        self.assertEqual((poll_wait(True, True, True), poll_wait(False, True, False), poll_wait(False, False, True),
+                          poll_wait(False, False, False)), (None, 1.5, 1.5, 10.0))
+        refreshed = []
+        self.window.refresh = lambda: refreshed.append(1)
+        def tick(minimized, active, age, running=False):
+            self.window.isMinimized, self.window.isActiveWindow = (lambda: minimized), (lambda: active)
+            self.window.apps = [self.app(1, state="running" if running else "stopped")]
+            self.window.polled = time.monotonic() - age
+            self.window.tick()
+        tick(True, False, 99); self.assertEqual(refreshed, [])          # minimized: never
+        tick(False, False, 5); self.assertEqual(refreshed, [])          # idle and background: wait 10 s
+        tick(False, False, 11); self.assertEqual(len(refreshed), 1)
+        tick(False, True, 2); self.assertEqual(len(refreshed), 2)       # focused: every 1.5 s
+        tick(False, False, 2, running=True); self.assertEqual(len(refreshed), 3)   # a running game is watched
+
+    def test_installs_queue_one_at_a_time_and_report_failures(self):
+        files = []
+        for name in ("one.apk", "two.xapk", "three.apks", "notes.txt"):
+            path = self.root / name; path.write_bytes(b"x"); files.append(str(path))
+        from android_launcher import installable
+        self.assertEqual(installable(files + [str(self.root / "missing.apk"), str(self.root)]), files[:3])
+        started = []
+        self.window.command = lambda args, done=None, env=None: started.append((args, done))
+        self.window.install_files(files)
+        self.assertEqual([a[0][1] for a in started], [files[0]])          # one at a time
+        self.window.install_files([files[0]])                             # added while busy: queued, not started
+        self.assertEqual(len(started), 1)
+        self.assertIn("(1 of 3)", self.window.progress_text.text())     # the label counts what was queued when it began
+        started[-1][1](0, "Installed org.one 1.0\n")                      # one.apk done; two.xapk starts
+        self.assertEqual([a[0][1] for a in started], files[:2])
+        started[-1][1](1, "Android package: signature mismatch\n")        # two.xapk fails; three.apks starts
+        started[-1][1](0, "Installed org.three 3.0\n")                    # three.apks done; the queued one.apk starts
+        self.assertEqual([a[0][1] for a in started], [files[0], files[1], files[2], files[0]])
+        started[-1][1](0, "Installed org.one 1.0\n")
+        self.assertFalse(self.window.progress.isVisible())
+        self.assertIn("3 of 4 installed. Couldn't install two.xapk: signature mismatch", self.window.notice_text.text())
+        # A single install is announced by name once it is listed.
+        started.clear()
+        self.window.install_files([files[0]]); started[-1][1](0, "Installed org.single 2.0\n")
+        self.assertEqual(self.window.announce, "org.single")
+
+    def test_dropped_files_are_filtered_to_packages(self):
+        from PyQt6.QtCore import QMimeData, QUrl
+        good = self.root / "game.apk"; good.write_bytes(b"x")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(good)), QUrl.fromLocalFile(str(self.root / "a.txt")), QUrl("https://example.org/x.apk")])
+        event = SimpleNamespace(mimeData=lambda: mime)
+        self.assertEqual(self.launcher.installable(self.window.dropped(event)), [str(good)])
+        self.window.show_drop_hint()
+        pages = self.window.pages.geometry()
+        self.assertEqual(self.window.drop_hint.geometry().height(), pages.height())
+        self.assertEqual(self.window.drop_hint.geometry().y(), pages.y())
+
+    def test_padded_icons_are_cropped_to_fill_the_tile(self):
+        from PyQt6.QtGui import QColor, QImage
+        padded, flat = self.root / "padded.png", self.root / "flat.png"
+        image = QImage(192, 192, QImage.Format.Format_ARGB32); image.fill(QColor(0, 0, 0, 0))
+        for y in range(20, 172):
+            for x in range(20, 172): image.setPixelColor(x, y, QColor(220, 30, 30))
+        image.save(str(padded))
+        self.assertEqual(self.launcher.opaque_bounds(image), (20, 20, 152, 152))
+        solid = QImage(64, 64, QImage.Format.Format_RGB32); solid.fill(QColor(30, 30, 220)); solid.save(str(flat))
+        self.assertIsNone(self.launcher.opaque_bounds(solid))
+        clear = QImage(16, 16, QImage.Format.Format_ARGB32); clear.fill(QColor(0, 0, 0, 0))
+        self.assertIsNone(self.launcher.opaque_bounds(clear))
+        self.window.apps = [dict(self.app(1), icon=str(padded)), dict(self.app(2), icon=str(flat)), self.app(3)]
+        self.window.render(True); self.settle()
+        for index, (package, color) in enumerate((("org.fixture.g1", (220, 30, 30)), ("org.fixture.g2", (30, 30, 220)))):
+            tile = self.window.cards[package].icon.pixmap().toImage()
+            ratio = tile.devicePixelRatio()
+            edge = tile.pixelColor(round(10 * ratio), round(44 * ratio))      # just inside the rounded edge
+            self.assertEqual((edge.red(), edge.green(), edge.blue()), color, package)
+        placeholder = self.window.cards["org.fixture.g3"].icon.pixmap().toImage()
+        self.assertEqual(placeholder.pixelColor(round(44 * ratio), round(8 * ratio)).name(), self.launcher.tile_color("Game 03"))
+
+    def test_empty_state_text_is_not_clipped(self):
+        self.window.apps = []; self.window.render(True); self.settle()
+        hint = self.window.empty_hint
+        self.assertGreaterEqual(hint.height(), hint.heightForWidth(hint.width()))
+        self.assertGreater(hint.heightForWidth(hint.width()), hint.fontMetrics().height())      # it wraps
+        self.fill(3); self.window.search.setText("zzz"); self.settle()
+        self.assertIn("zzz", self.window.empty_hint.text())
+
+    def test_stylesheet_and_glyphs_follow_the_palette(self):
+        from PyQt6.QtGui import QColor, QPalette
+        old = self.qt.palette()
+        try:
+            for window_color, accent in (("#1b1e20", "#2f8fd6"), ("#eff0f1", "#c0392b")):
+                palette = QPalette(old)
+                palette.setColor(QPalette.ColorRole.Window, QColor(window_color))
+                palette.setColor(QPalette.ColorRole.Highlight, QColor(accent))
+                self.qt.setPalette(palette); self.window.apply_theme(); self.settle()
+                self.assertIn("rgba(%d, %d, %d" % QColor(accent).getRgb()[:3], self.window.styleSheet())
+                self.assertFalse(self.window.install_button.icon().isNull())
+                self.assertFalse(self.window.cards and next(iter(self.window.cards.values())).gear.icon().isNull())
+        finally:
+            self.qt.setPalette(old)
+
+    def test_desktop_launcher_process_starts_offscreen_with_the_shared_socket(self):
+        from android_launcher import activate_existing
+        state = self.root / "process-state"; state.mkdir()
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen", HOME=str(self.root))
+        with (self.root / "launcher.log").open("w") as log:
+            launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
+                                         "--state-root", str(state), "launcher"], stdout=log, stderr=subprocess.STDOUT, env=env)
+            try:
+                deadline = time.monotonic() + 20
+                while not activate_existing(state):
+                    if launcher.poll() is not None or time.monotonic() >= deadline:
+                        self.fail("Offscreen Asgard launcher did not start: " + (self.root / "launcher.log").read_text()[-2000:])
+                    time.sleep(0.1)
+            finally:
+                launcher.terminate(); launcher.wait(timeout=10)
+
+
 class SessionResultTests(unittest.TestCase):
     def test_preparation_log_and_elapsed_time_remain_visible_without_guest_output(self):
         from android_sessions import Session, session_log

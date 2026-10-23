@@ -12,6 +12,27 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Desktop library redesign (2026-10-23)
+
+- The Asgard game library has a new visual design: icon-forward cards with calm tonal Play/Stop
+  buttons, a status chip, a version and install-date line and a "last played / running for / last run
+  failed" line; consistent rounded icon tiles (padded launcher bitmaps are cropped to fill; games
+  without an icon get a fixed-palette tile with their initial); monochrome glyphs drawn by the
+  launcher in the palette's colors instead of whatever icon theme or fallback the system supplies;
+  cards that stretch to fill the window; a header with a search field, a sort menu, account and
+  install buttons that no longer clips its title or placeholder at narrow widths; styled empty,
+  no-match, notice, last-session and drag-and-drop states.
+- Fixed: the grid computed its columns from the viewport width before the window's layout, so a
+  freshly opened or resized window could show two columns and leave over half of itself empty. The
+  empty-state hint is no longer clipped to one line.
+- Added: double-click/Enter/Space to play, arrow-key navigation, a context menu, drag-and-drop and
+  multi-file installation, a Recently-played sort, remembered window size and sort order, and polling
+  that slows down when the window is idle and stops while minimized (it used to start a Python process
+  every 1.5 s regardless).
+- `android_launcher.build()` now builds the window without the single-instance socket or event loop,
+  which `show()` adds; the new offscreen `LauncherLibraryTests` use it. Refactoring `show()` briefly dropped
+  an import its activation handler needs; the new process test catches that.
+
 ### Pixel and media integer NEON forms (2026-10-23)
 
 - Halving add/subtract (`SHADD/UHADD`, `SRHADD/URHADD`, `SHSUB/UHSUB`), rounding shifts (`SRSHR/URSHR`),

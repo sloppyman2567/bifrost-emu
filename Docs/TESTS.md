@@ -4,6 +4,32 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Desktop library redesign (2026-10-23)
+
+`LauncherLibraryTests` (13 tests) builds the real library window on Qt's offscreen platform (an
+800 x 600 screen) with a temporary state folder and settings file, and passes together with the existing
+`LauncherProfileTests` and `LauncherArgumentTests` (24 tests, three runs, exit status 0):
+grid metrics for every width from 208 to 3000 px, cards filling the viewport on first show and after
+resizes (the layout bug above), sort order and its persistence with the window size across a restart,
+the per-card activity line, Enter/Space/double-click/arrow keys including a disabled game, the context
+menu's enabled states, the polling policy (minimized, idle, focused, running), the install queue (one
+at a time, a queued extra, a mid-batch failure, the announcement of a single install), dropped-file
+filtering, icon cropping and tile colors read back from the rendered pixmaps, the empty-state text height,
+palette-driven styling, and a real `asgard.py launcher` process that must answer an activation request.
+Four injected regressions (no reflow on viewport resize, polling while minimized, acting on a disabled game,
+starting a second install while one runs) each failed the matching test, and dropping an import in `show()` failed
+the process test.
+
+I viewed offscreen renders (Fusion style, dark and light palettes, 720-1700 px wide, 1.5x scale, with real installed
+icons and running/starting/failed cards, the drawer, notice, empty, no-match and drop states) to judge the
+design. They are not renders of a KDE desktop: the launcher has not been opened on a real desktop, drag-and-drop from
+a file manager and the context menu popup were not exercised there, and Breeze's own widget chrome (scroll bars,
+menu arrows) will differ from Fusion's.
+
+```sh
+cd Scripts/Android && QT_QPA_PLATFORM=offscreen python3 test_android_package.py LauncherLibraryTests
+```
+
 ## Pixel and media vector forms, self-loop reconcile (2026-10-23)
 
 Tested on a Ryzen 7 5800X3D (SSE4.2, AVX2, FMA3) at `e7ed1b3c` plus the working tree; no game was run.
