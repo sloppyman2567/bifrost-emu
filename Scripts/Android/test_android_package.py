@@ -553,6 +553,37 @@ class FrameworkDisplayContractTests(FrameworkPackageContractTests):
     marker = "FRAMEWORK_DISPLAY_CONTRACT_OK"
 
 
+class FrameworkServiceRoutingTests(FrameworkPackageContractTests):
+    probe_class = "FrameworkServiceRoutingProbe"
+    output_name = "android-service-child-routing"
+    marker = "SERVICE_CHILD_ROUTING_OK"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.app = Path(cls.temporary.name) / "org.bifrost.routing-fixture"
+        cls.app.mkdir()
+        manifest = cls.app.parent / "AndroidManifest.xml"
+        manifest.write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                            'package="org.bifrost.routing"><application android:hasCode="true"/></manifest>')
+        apk = cls.app / "base.apk"
+        subprocess.run([str(ROOT / "Tools/android-tools/aapt2"), "link", "-I", str(ROOT / "Tools/android-tools/android.jar"),
+                        "--manifest", str(manifest), "-o", str(apk), "--min-sdk-version", "26", "--target-sdk-version", "35"],
+                       check=True, capture_output=True)
+        with zipfile.ZipFile(apk, "a") as archive:
+            archive.write(cls.probe / "classes.dex", "classes.dex")
+        apk.chmod(0o444)
+
+    def check_mode(self, mode):
+        from test_android_framework import run
+        output = ROOT / "build" / self.output_name / mode
+        passed = run(ARGS.emu.resolve(), self.runtime, self.art, self.probe / "classes.dex",
+                     mode, output, 150, services=True, main_class=self.probe_class, app_id=10000, app=self.app,
+                     libraries=(ROOT / "build/android-adapters/libbifrost-activity.so",))
+        self.assertTrue(passed, f"{mode} service routing failed; see {output}")
+        self.assertIn(self.marker, (output / (mode + ".log")).read_text())
+
+
 class HostNetworkTests(unittest.TestCase):
     def test_default_routes_and_offline_profiles(self):
         from android_managed import host_default_interface

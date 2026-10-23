@@ -41,6 +41,18 @@ final class FrameworkServiceRuntime {
     private long bindSequence;
     private int processState;
 
+    // Root and authenticated child calls share service records, but never caller identity.
+    private static final class Caller {
+        final Object thread;
+        final int uid;
+        final String packageName;
+        final FrameworkProcessRuntime.Child child;
+        Caller(Object thread, int uid, String packageName, FrameworkProcessRuntime.Child child) {
+            this.thread = thread; this.uid = uid; this.packageName = packageName; this.child = child;
+        }
+    }
+    private Caller caller;
+
     private static final class Record {
         final Binder token = new Binder();
         final ServiceInfo info;
@@ -67,8 +79,9 @@ final class FrameworkServiceRuntime {
         final Binding binding;
         final IInterface client;
         final long flags;
-        Connection(Binding binding, Object client, long flags) {
-            this.binding = binding; this.client = (IInterface) client; this.flags = flags;
+        final FrameworkProcessRuntime.Child owner;
+        Connection(Binding binding, Object client, long flags, Caller caller) {
+            this.binding = binding; this.client = (IInterface) client; this.flags = flags; this.owner = caller.child;
         }
     }
 
@@ -85,6 +98,7 @@ final class FrameworkServiceRuntime {
         java.lang.reflect.Method method = thread.getClass().getDeclaredMethod("getApplicationThread");
         method.setAccessible(true);
         applicationThread = method.invoke(thread);
+        caller = new Caller(applicationThread, application.uid, application.packageName, null);
         main = new Handler(Looper.getMainLooper());
         processState = ActivityManager.class.getField("PROCESS_STATE_IMPORTANT_FOREGROUND").getInt(null);
     }
@@ -114,14 +128,18 @@ final class FrameworkServiceRuntime {
         else processes.schedule(record.child, method, types, args);
     }
 
-    private ServiceInfo resolve(Object caller, Intent intent, String type, String callingPackage, int user)
-            throws Exception {
+    private void checkCaller(Caller identity, Object thread, String callingPackage, int user) {
         if (application == null || shuttingDown)
             throw new IllegalStateException("Service runtime is not accepting requests");
-        if (application.uid >= 99000) throw new SecurityException("Isolated processes cannot start or bind services");
-        if (caller != applicationThread || !application.packageName.equals(callingPackage)
-                || user != application.uid / 100000)
+        if (identity == null || identity.uid >= 99000) throw new SecurityException("Isolated processes cannot start or bind services");
+        if (thread != identity.thread || !identity.packageName.equals(callingPackage)
+                || user != identity.uid / 100000)
             throw new SecurityException("Foreign service caller or user");
+    }
+
+    private ServiceInfo resolve(Caller identity, Object thread, Intent intent, String type, String callingPackage, int user)
+            throws Exception {
+        checkCaller(identity, thread, callingPackage, user);
         if (intent == null) throw new IllegalArgumentException("null service Intent");
         // ActiveServices.retrieveServiceLocked resolves an implicit Intent
         // (Context requires its package) through PackageManager's filters.
@@ -135,12 +153,11 @@ final class FrameworkServiceRuntime {
         // ActiveServices checks its existing records before consulting PackageManager.
         // A component disabled with DONT_KILL_APP must remain stoppable while alive.
         Record existing = names.get(component);
-        if (existing != null) return existing.info;
-        ServiceInfo info = packages.serviceInfo(component, PackageManager.GET_META_DATA, user);
+        ServiceInfo info = existing != null ? existing.info : packages.serviceInfo(component, PackageManager.GET_META_DATA, user);
         if (info == null) return null;
-        if (!SYSTEM_BIND.get() && info.applicationInfo.uid != application.uid && (!info.exported
+        if (!(identity.child == null && SYSTEM_BIND.get()) && info.applicationInfo.uid != identity.uid && (!info.exported
                 || (info.permission != null && packages.checkPermission(info.permission,
-                        application.uid, Context.DEVICE_ID_DEFAULT) != PackageManager.PERMISSION_GRANTED)))
+                        identity.uid, Context.DEVICE_ID_DEFAULT) != PackageManager.PERMISSION_GRANTED)))
             throw new SecurityException("Service is not accessible: " + info.name);
         return info;
     }
@@ -180,8 +197,16 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized ComponentName start(Object[] a) throws Exception {
+        if (remote != null) {
+            checkCaller(caller, a[0], (String) a[4], (Integer) a[6]);
+            return remote.startService(a);
+        }
+        return start(a, caller);
+    }
+
+    private ComponentName start(Object[] a, Caller identity) throws Exception {
         Intent intent = copy((Intent) a[1]);
-        ServiceInfo info = resolve(a[0], intent, (String) a[2], (String) a[4], (Integer) a[6]);
+        ServiceInfo info = resolve(identity, a[0], intent, (String) a[2], (String) a[4], (Integer) a[6]);
         if (info == null) return null;
         if ((Boolean) a[3])
             throw new UnsupportedOperationException("Foreground-service notification/deadline support is not implemented");
@@ -199,8 +224,15 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized int stop(Object[] a) throws Exception {
-        ServiceInfo info = resolve(a[0], (Intent) a[1], (String) a[2],
-                application == null ? null : application.packageName, (Integer) a[3]);
+        if (remote != null) {
+            checkCaller(caller, a[0], application.packageName, (Integer) a[3]);
+            return remote.stopService(a);
+        }
+        return stop(a, caller);
+    }
+
+    private int stop(Object[] a, Caller identity) throws Exception {
+        ServiceInfo info = resolve(identity, a[0], (Intent) a[1], (String) a[2], identity.packageName, (Integer) a[3]);
         if (info == null) return 0;
         Record record = names.get(new ComponentName(info.packageName, info.name));
         if (record == null) return 0;
@@ -210,7 +242,13 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized boolean stopSelf(ComponentName name, IBinder token, int startId) throws Exception {
+        if (remote != null) return remote.stopSelf(name, token, startId);
+        return stopSelf(name, token, startId, null);
+    }
+
+    private boolean stopSelf(ComponentName name, IBinder token, int startId, FrameworkProcessRuntime.Child owner) throws Exception {
         Record record = tokens.get(token);
+        if (record != null && record.child != owner) throw new SecurityException("Foreign service token");
         if (record == null || record.stopping || !record.name.equals(name)
                 || (startId >= 0 && startId != record.lastStartId)) return false;
         record.started = false;
@@ -226,8 +264,16 @@ final class FrameworkServiceRuntime {
             new ComponentName("com.google.android.gms", "org.microg.gms.ads.AdRequestService");
 
     synchronized int bind(Object[] a, boolean instance) throws Exception {
+        if (remote != null) {
+            checkCaller(caller, a[0], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
+            return remote.bindService(a, instance);
+        }
+        return bind(a, instance, caller);
+    }
+
+    private int bind(Object[] a, boolean instance, Caller identity) throws Exception {
         Intent intent = copy((Intent) a[2]);
-        ServiceInfo info = resolve(a[0], intent, (String) a[3], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
+        ServiceInfo info = resolve(identity, a[0], intent, (String) a[3], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
         if (info == null) return 0;
         if (MICROG_AD_REQUESTS.equals(new ComponentName(info.packageName, info.name))) return 0;
         // ActiveServices returns 0 when bringUpServiceLocked cannot start
@@ -242,8 +288,8 @@ final class FrameworkServiceRuntime {
                 throw new SecurityException("Service is not an external isolated service");
             info = new ServiceInfo(info);
             info.applicationInfo = new ApplicationInfo(info.applicationInfo);
-            info.packageName = info.applicationInfo.packageName = application.packageName;
-            info.applicationInfo.uid = application.uid;
+            info.packageName = info.applicationInfo.packageName = identity.packageName;
+            info.applicationInfo.uid = identity.uid;
         }
         String instanceName = instance ? (String) a[6] : null;
         Record record;
@@ -261,7 +307,11 @@ final class FrameworkServiceRuntime {
         Intent.FilterComparison key = new Intent.FilterComparison(intent);
         Binding binding = record.bindings.get(key);
         if (binding == null) { binding = new Binding(record, intent); record.bindings.put(key, binding); }
-        Connection connection = new Connection(binding, a[4], flags);
+        List<Connection> existing = connections.get(((IInterface) a[4]).asBinder());
+        if (existing != null)
+            for (Connection connection : existing)
+                if (connection.owner != identity.child) throw new SecurityException("Foreign service connection");
+        Connection connection = new Connection(binding, a[4], flags, identity);
         binding.clients.add(connection);
         connections.computeIfAbsent(connection.client.asBinder(), unused -> new ArrayList<>()).add(connection);
         if ((flags & Context.BIND_AUTO_CREATE) != 0) create(record);
@@ -295,9 +345,16 @@ final class FrameworkServiceRuntime {
         }
     }
 
-    synchronized IBinder peek(Intent intent, String callingPackage) {
-        if (application == null || !application.packageName.equals(callingPackage))
-            throw new SecurityException("Foreign service caller");
+    synchronized IBinder peek(Intent intent, String callingPackage) throws Exception {
+        if (remote != null) {
+            checkCaller(caller, applicationThread, callingPackage, application.uid / 100000);
+            return remote.peekService(intent, callingPackage);
+        }
+        return peek(intent, callingPackage, caller);
+    }
+
+    private IBinder peek(Intent intent, String callingPackage, Caller identity) throws Exception {
+        if (resolve(identity, identity.thread, intent, null, callingPackage, identity.uid / 100000) == null) return null;
         if (intent.getComponent() == null)
             throw new UnsupportedOperationException("Service intent-filter resolution is not implemented");
         Record record = names.get(intent.getComponent());
@@ -321,14 +378,28 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized boolean unbind(Object client) throws Exception {
-        List<Connection> removed = connections.remove(((IInterface) client).asBinder());
+        if (remote != null) return remote.unbindService(client);
+        return unbind(client, null);
+    }
+
+    private boolean unbind(Object client, FrameworkProcessRuntime.Child owner) throws Exception {
+        return unbind(client, owner, false);
+    }
+
+    private boolean unbind(Object client, FrameworkProcessRuntime.Child owner, boolean callerDied) throws Exception {
+        IBinder binder = ((IInterface) client).asBinder();
+        List<Connection> removed = connections.get(binder);
         if (removed == null) return false;
+        for (Connection connection : removed)
+            if (connection.owner != owner) throw new SecurityException("Foreign service connection");
+        connections.remove(binder);
         for (Connection connection : removed) {
             Binding binding = connection.binding;
             binding.clients.remove(connection);
-            if (binding.clients.isEmpty()) requestUnbind(binding);
+            if (binding.clients.isEmpty() && !(callerDied && binding.record.child == owner)) requestUnbind(binding);
         }
-        for (Connection connection : removed) stopIfUnused(connection.binding.record);
+        for (Connection connection : removed)
+            if (!(callerDied && connection.binding.record.child == owner)) stopIfUnused(connection.binding.record);
         return true;
     }
 
@@ -398,6 +469,8 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized void processDied(FrameworkProcessRuntime.Child child) throws Exception {
+        for (List<Connection> list : new ArrayList<>(connections.values()))
+            if (!list.isEmpty() && list.get(0).owner == child) unbind(list.get(0).client, child, true);
         for (Record record : new ArrayList<>(tokens.values())) {
             if (record.child != child) continue;
             record.created = false; record.child = null;
@@ -409,7 +482,53 @@ final class FrameworkServiceRuntime {
             if (record.stopping) {
                 tokens.remove(record.token);
                 notifyIdle();
+            } else stopIfUnused(record);
+        }
+    }
+
+    // Called only after the parent controller authenticates the child's PID, UID and key.
+    synchronized void fromChild(FrameworkProcessRuntime.Child child, int operation, Parcel data, Parcel reply) throws Exception {
+        if (child.applicationThread == null) throw new SecurityException("Unavailable service caller");
+        Caller identity = new Caller(child.applicationThread, child.uid, child.info.packageName, child);
+        Intent intent;
+        switch (operation) {
+            case FrameworkProcessRuntime.SERVICE_START: {
+                intent = data.readTypedObject(Intent.CREATOR); String type = data.readString();
+                boolean foreground = data.readBoolean(); String name = data.readString(); int user = data.readInt();
+                ComponentName result = start(new Object[] {identity.thread, intent, type, foreground, name, null, user}, identity);
+                reply.writeNoException(); reply.writeTypedObject(result, 0); return;
             }
+            case FrameworkProcessRuntime.SERVICE_STOP: {
+                intent = data.readTypedObject(Intent.CREATOR); String type = data.readString(); int user = data.readInt();
+                int result = stop(new Object[] {identity.thread, intent, type, user}, identity);
+                reply.writeNoException(); reply.writeInt(result); return;
+            }
+            case FrameworkProcessRuntime.SERVICE_BIND: {
+                boolean instance = data.readBoolean(); intent = data.readTypedObject(Intent.CREATOR);
+                String type = data.readString();
+                Object client = Class.forName("android.app.IServiceConnection$Stub").getMethod("asInterface", IBinder.class)
+                        .invoke(null, data.readStrongBinder());
+                long flags = data.readLong(); String instanceName = data.readString(), name = data.readString(); int user = data.readInt();
+                Object[] args = instance ? new Object[] {identity.thread, null, intent, type, client, flags, instanceName, name, user}
+                        : new Object[] {identity.thread, null, intent, type, client, flags, name, user};
+                int result = bind(args, instance, identity);
+                reply.writeNoException(); reply.writeInt(result); return;
+            }
+            case FrameworkProcessRuntime.SERVICE_UNBIND: {
+                Object client = Class.forName("android.app.IServiceConnection$Stub").getMethod("asInterface", IBinder.class)
+                        .invoke(null, data.readStrongBinder());
+                boolean result = unbind(client, child); reply.writeNoException(); reply.writeBoolean(result); return;
+            }
+            case FrameworkProcessRuntime.SERVICE_PEEK: {
+                intent = data.readTypedObject(Intent.CREATOR); String name = data.readString();
+                IBinder result = peek(intent, name, identity); reply.writeNoException(); reply.writeStrongBinder(result); return;
+            }
+            case FrameworkProcessRuntime.SERVICE_STOP_SELF: {
+                ComponentName name = data.readTypedObject(ComponentName.CREATOR); IBinder token = data.readStrongBinder();
+                boolean result = stopSelf(name, token, data.readInt(), child);
+                reply.writeNoException(); reply.writeBoolean(result); return;
+            }
+            default: throw new IllegalArgumentException("Unknown service operation");
         }
     }
 

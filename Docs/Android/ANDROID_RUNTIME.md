@@ -2181,13 +2181,26 @@ The supervisor bounds child count, reaps exits and kills its owned children on
 shutdown. These VMs share a guest root and the host user's permissions; isolated
 Android identity is not a host filesystem or SELinux sandbox.
 
+Service children route outgoing start, stop, bind, unbind, peek and stop-self
+requests over the existing authenticated Binder controller to the session parent.
+Only the parent retains the host process-supervisor capability. The controller
+checks the child's key, Binder PID and UID; service resolution then checks that
+child's package, user, export status and permissions, including cached service
+records. Connection ownership and service-token ownership are checked separately.
+Isolated callers cannot start or bind other services, but can stop their own
+service. A dead child releases its outgoing bindings. This permits nested service
+clients such as Phonesky calling microG's DroidGuard without giving the child
+direct access to the host supervisor. The focused headless regression is described
+in [the test guide](../TESTS.md#child-service-routing-2026-10-23).
+
 The real APK service gate checks a different PID, the same ordinary app UID,
 and a synchronous Binder round trip, in addition to local lifecycle behavior.
 The isolated WebView handshake is still incomplete. This profile rejects
 foreground-service requests (notification/deadline support is absent) and
 installed-package intent-filter resolution. Unknown explicit components and
 packages return absent results. It does not implement sticky
-restart/redelivery after process death, cross-app Services, Android background
+restart/redelivery after process death, arbitrary cross-app Services beyond the
+provisioned package set, Android background
 execution policy, or system_server process management.
 
 ### Managed JobScheduler (October 11, 2026)

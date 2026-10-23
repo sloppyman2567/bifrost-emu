@@ -4,6 +4,30 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Child service routing (2026-10-23)
+
+`FrameworkServiceRoutingTests` runs `FrameworkServiceRoutingProbe` headlessly
+under real ART and Binder in three supervised processes. A service child starts,
+binds, peeks, unbinds and stops a service in its parent, and starts/binds a helper
+in a third process. The helper calls `stopSelfResult` while remaining bound.
+The gate checks distinct PIDs, absence of the host-supervisor capability in the
+child, rejection of a forged caller package, export checks on an existing service
+record, isolated-caller rejection and outgoing-binding cleanup after child death,
+including a child that binds its own service.
+
+```sh
+python Scripts/Android/test_android_package.py FrameworkServiceRoutingTests
+```
+
+Both JIT and interpreter reach `SERVICE_CHILD_ROUTING_OK` and `FRAMEWORK_OK`
+with no presented frames. The production managed launcher also builds. Caller
+permission and stop-token behavior were reviewed against Android 15's
+[ActiveServices](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/ActiveServices.java).
+This gate does not validate a real isolated-process lifecycle, sticky restarts,
+the complete Android background-execution policy, or Google integrity verdicts.
+The original Phonesky-to-DroidGuard failure was observed in Japanese Uma's log;
+the target game's request has not yet been rerun with this change.
+
 ## Guest ptrace (2026-10-22)
 
 `test_ptrace` covers TRACEME, attach to a parent blocked in read, real wait stops,

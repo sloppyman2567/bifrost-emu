@@ -27,6 +27,8 @@ final class FrameworkProcessRuntime {
     private static final String DESCRIPTOR = "org.asgard.ServiceProcesses";
     private static final int BOOTSTRAP = 1, READY = 2, PUBLISH = 3, DONE = 4, UNBIND = 5, PROVIDERS = 6,
             ACQUIRE = 7, REF = 8, PROVIDER_DIED = 9;
+    static final int SERVICE_START = 10, SERVICE_STOP = 11, SERVICE_BIND = 12,
+            SERVICE_UNBIND = 13, SERVICE_PEEK = 14, SERVICE_STOP_SELF = 15;
     // Provisioned system packages a child receives as parsed snapshots when
     // the parent has already parsed them (ManagedLauncher.installMicroG).
     static final String[] SHARED_SYSTEM_PACKAGES = {"com.google.android.gms", "com.android.vending"};
@@ -194,6 +196,9 @@ final class FrameworkProcessRuntime {
                             return true;
                         }
                         case PROVIDER_DIED: content.unstableProviderDied(data.readStrongBinder()); break;
+                        case SERVICE_START: case SERVICE_STOP: case SERVICE_BIND:
+                        case SERVICE_UNBIND: case SERVICE_PEEK: case SERVICE_STOP_SELF:
+                            services.fromChild(child, code, data, reply); return true;
                         default: return false;
                     }
                     reply.writeNoException();
@@ -341,6 +346,42 @@ final class FrameworkProcessRuntime {
         void publish(IBinder token, Intent intent, IBinder binder) throws Exception {
             Parcel data = request(); data.writeStrongBinder(token); data.writeTypedObject(intent, 0);
             data.writeStrongBinder(binder); call(PUBLISH, data).recycle();
+        }
+        android.content.ComponentName startService(Object[] args) throws Exception {
+            Parcel data = request(); data.writeTypedObject((Intent) args[1], 0); data.writeString((String) args[2]);
+            data.writeBoolean((Boolean) args[3]); data.writeString((String) args[4]); data.writeInt((Integer) args[6]);
+            Parcel reply = call(SERVICE_START, data);
+            try { return reply.readTypedObject(android.content.ComponentName.CREATOR); }
+            finally { reply.recycle(); }
+        }
+        int stopService(Object[] args) throws Exception {
+            Parcel data = request(); data.writeTypedObject((Intent) args[1], 0);
+            data.writeString((String) args[2]); data.writeInt((Integer) args[3]);
+            Parcel reply = call(SERVICE_STOP, data);
+            try { return reply.readInt(); } finally { reply.recycle(); }
+        }
+        int bindService(Object[] args, boolean instance) throws Exception {
+            Parcel data = request(); data.writeBoolean(instance); data.writeTypedObject((Intent) args[2], 0);
+            data.writeString((String) args[3]); data.writeStrongBinder(((IInterface) args[4]).asBinder());
+            data.writeLong(((Number) args[5]).longValue()); data.writeString(instance ? (String) args[6] : null);
+            data.writeString((String) args[instance ? 7 : 6]); data.writeInt((Integer) args[instance ? 8 : 7]);
+            Parcel reply = call(SERVICE_BIND, data);
+            try { return reply.readInt(); } finally { reply.recycle(); }
+        }
+        boolean unbindService(Object client) throws Exception {
+            Parcel data = request(); data.writeStrongBinder(((IInterface) client).asBinder());
+            Parcel reply = call(SERVICE_UNBIND, data);
+            try { return reply.readBoolean(); } finally { reply.recycle(); }
+        }
+        IBinder peekService(Intent intent, String name) throws Exception {
+            Parcel data = request(); data.writeTypedObject(intent, 0); data.writeString(name);
+            Parcel reply = call(SERVICE_PEEK, data);
+            try { return reply.readStrongBinder(); } finally { reply.recycle(); }
+        }
+        boolean stopSelf(android.content.ComponentName name, IBinder token, int startId) throws Exception {
+            Parcel data = request(); data.writeTypedObject(name, 0); data.writeStrongBinder(token); data.writeInt(startId);
+            Parcel reply = call(SERVICE_STOP_SELF, data);
+            try { return reply.readBoolean(); } finally { reply.recycle(); }
         }
         void done(IBinder token, int type, Intent intent) throws Exception {
             Parcel data = request(); data.writeStrongBinder(token); data.writeInt(type);
