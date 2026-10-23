@@ -49,6 +49,21 @@ python3 Scripts/Android/android_package.py run org.example.package \
 then runs its package, as `wine app.exe` does. Reinstalling an identical,
 already installed file is accepted but still verifies its signatures, so a
 large package is re-checked on every such run; use the package id to skip that.
+Upgrades and identical-version reinstalls retain app data and saved settings.
+An older version requires an explicit downgrade option:
+
+```bash
+python3 Scripts/Android/asgard.py install /path/to/older.apkm --allow-downgrade
+python3 Scripts/Android/asgard.py run /path/to/older.apk -d
+```
+
+`-d` is an alias for `--allow-downgrade`, using the spelling from
+[ADB's install options](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/docs/user/adb.1.md).
+Asgard permits this for signed release packages too; the installed signer must
+still match and all split/signature/integrity checks still run. Saves, accounts
+and launcher settings are retained. Asgard does not convert databases or saves
+to an older app's schema; use `clear-data` only if you intend to discard them.
+
 Installation names the missing provisioning step (`fetch-android-runtime.py`,
 `fetch-aapt2.py`, `fetch-android-package-tools.py` or
 `make android-runtime-adapters`) instead of failing on a missing file.
@@ -119,6 +134,26 @@ so it keeps following the emulator's default.
 | `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` |
 | `back_key` | `escape`, `backspace`, `delete`, `f1`, `f2`, `f12`, `none` | host key delivered as Back (`BIFROST_ANDROID_BACK_KEY`) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
+
+Managed apps also accept `property.NAME` settings. These override Android
+properties in this app's generated runtime, without changing the shared image:
+
+```bash
+python3 Scripts/Android/asgard.py config com.cygames.umamusume property.ro.kernel.qemu 0
+python3 Scripts/Android/asgard.py config com.cygames.umamusume property.ro.kernel.qemu
+python3 Scripts/Android/asgard.py config com.cygames.umamusume property.ro.kernel.qemu --reset
+```
+
+Values must be trimmed text without control characters, at most 91 UTF-8 bytes;
+an empty string is allowed. `config` lists saved overrides and `config --json`
+includes them. The launcher library preserves them when saving its other settings.
+They survive app upgrades, downgrades and managed runtime reprovisioning.
+Changing or resetting an override rebuilds the generated runtime at the next
+start, preserving app data; reset restores the verified image's property values.
+The generated property file is checked with the runtime inventory, so edit the
+saved configuration rather than `managed/rootfs/debug_ramdisk/adb_debug.prop`.
+This supports the managed Android runtime; native-only Activity launch does not
+consume these overrides.
 
 Precedence, highest first: an explicit command-line option or an environment
 variable you exported (for example `--window-stats`, `BIFROST_ANDROID_OFFLINE=0`),

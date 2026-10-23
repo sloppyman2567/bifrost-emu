@@ -230,7 +230,7 @@ def require_toolchain(runtime, adapters, aapt2, apksigner):
             raise ValueError(f"{what} not provisioned ({path} is missing). Run: {step}")
 
 
-def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None):
+def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None, *, allow_downgrade=False):
     require_toolchain(runtime, adapters, aapt2, apksigner)
     runtime_module = verify_runtime(runtime)
     adapter_metadata = verify_adapters(adapters, runtime_module)
@@ -342,8 +342,8 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None)
                 if previous:
                     if previous["signers"] != certificates:
                         raise ValueError("Installed package signer differs")
-                    if int(base["version_code"]) < int(previous["version_code"]):
-                        raise ValueError("Package downgrade is unsupported")
+                    if int(base["version_code"]) < int(previous["version_code"]) and not allow_downgrade:
+                        raise ValueError("Package downgrade requires --allow-downgrade")
                 root = app / "rootfs"
                 if not root.exists():
                     fresh = staging / "rootfs"
@@ -774,6 +774,8 @@ def configure(args):
     if not PACKAGE.fullmatch(args.package) or not (app / "package.json").is_file():
         raise ValueError("Package is not installed: " + args.package)
     settings = android_settings.load(app)
+    if args.key and not android_settings.known(args.key):
+        raise ValueError("Unknown setting: " + args.key)
     if args.reset:
         if args.value is not None:
             raise ValueError("--reset takes at most a setting name")
@@ -793,7 +795,7 @@ def configure(args):
     elif args.reset or args.value is not None:
         print("Saved; applies the next time the app starts")
     else:
-        for key in android_settings.KEYS:
+        for key in (*android_settings.KEYS, *sorted(k for k in settings if android_settings.property_name(k))):
             value = settings.get(key)
             print(f"{key} = " + ("default" if value is None else str(value).lower() if isinstance(value, bool) else value))
     return 0
@@ -858,6 +860,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     installer = commands.add_parser("install")
     installer.add_argument("input", type=Path)
+    installer.add_argument("-d", "--allow-downgrade", action="store_true",
+                           help="allow an older signed version, preserving app data and settings")
     installer.add_argument(
         "--runtime-root", type=Path, default=ROOT / "Tools/android-runtime/rootfs"
     )
@@ -893,7 +897,8 @@ def main():
     compatibility.add_argument("--json", action="store_true")
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
-    configuration.add_argument("key", nargs="?", choices=android_settings.KEYS)
+    configuration.add_argument("key", nargs="?", type=android_settings.setting_key,
+                               help="window_stats, back_key, network or property.NAME")
     configuration.add_argument("value", nargs="?")
     configuration.add_argument("--reset", action="store_true", help="restore the default of KEY, or of every setting")
     configuration.add_argument("--json", action="store_true")
@@ -975,6 +980,7 @@ def main():
                 args.aapt2,
                 args.apksigner,
                 args.media_root,
+                allow_downgrade=args.allow_downgrade,
             )
             print(
                 f"Installed {value['package']} version {value['version_code']}: {value['apk_count']} signed APKs, {value['arm64_library_count']} ARM64 libraries"

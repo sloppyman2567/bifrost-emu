@@ -680,7 +680,7 @@ def image_properties(root, names):
     """Read build properties with init's partition precedence (later file wins)."""
     values = {}
     for relative in ("system/build.prop", "system_ext/etc/build.prop", "vendor/default.prop",
-                     "vendor/build.prop", "product/etc/build.prop"):
+                     "vendor/build.prop", "product/etc/build.prop", "debug_ramdisk/adb_debug.prop"):
         path = root / relative
         if not path.is_file(): continue
         for line in path.read_text(errors="replace").splitlines():
@@ -800,11 +800,14 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)
     settings_key = settings_user_key(app.parent)
+    import android_settings
+    property_overrides = android_settings.properties(android_settings.load(app))
     identity = {"schema": 3, "code": code, "files": metadata["files"], "media_mask": media_mask,
                 "framework": file_hash(framework / "bifrost-framework.json"),
                 "microg": {package: value[3] for package, value in android_microg.PACKAGES.items()},
                 "adapters": {n: adapter_manifest["files"][n] for n in adapter_names},
-                "launcher": file_hash(dex), "settings_key": hashlib.sha256(settings_key).hexdigest()}
+                "launcher": file_hash(dex), "settings_key": hashlib.sha256(settings_key).hexdigest(),
+                "properties": property_overrides}
     managed = app / "managed"
     root = managed / "rootfs"
     if managed.is_symlink() or root.is_symlink():
@@ -835,6 +838,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         android_microg.install(fresh)
         from asgard import configure_media
         configure_media(fresh, media_mask)
+        android_settings.install_properties(fresh, property_overrides)
         local = fresh / "data/local/tmp"
         local.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dex, local / "launcher.dex")
@@ -867,7 +871,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         immutable = {name: value for name, value in android_art.inventory(fresh).items()
                      if name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/",
                                          "data/app/", "data/local/tmp/"))
-                     or name == "data/system/users/0/bifrost-ssaid-key"}
+                     or name in ("data/system/users/0/bifrost-ssaid-key", "debug_ramdisk/adb_debug.prop")}
         backup = managed / "previous-rootfs"
         if backup.exists():
             raise ValueError("Interrupted managed runtime replacement; preserve previous-rootfs before retrying")

@@ -227,11 +227,16 @@ def debug_environment(channels):
 
 def install_for_run(script, state, arguments):
     """`run app.apk` installs the file (a no-op for an identical, installed one) and runs its package."""
+    downgrade = [arg for arg in arguments if arg in ("-d", "--allow-downgrade")]
+    arguments = [arg for arg in arguments if arg not in ("-d", "--allow-downgrade")]
     index = next((i for i, value in enumerate(arguments)
                   if Path(value).suffix.lower() in PACKAGE_FILES and Path(value).is_file()), None)
     if index is None:
+        if downgrade:
+            raise ValueError("--allow-downgrade requires an APK/APKM file to install")
         return arguments
-    installed = subprocess.run([sys.executable, script, "--state-root", str(state), "install", arguments[index]],
+    installed = subprocess.run([sys.executable, script, "--state-root", str(state), "install",
+                                *(["--allow-downgrade"] if downgrade else []), arguments[index]],
                                stdout=subprocess.PIPE, text=True)
     print(installed.stdout, end="", flush=True)
     if installed.returncode:

@@ -167,6 +167,34 @@ class HomeCommandTests(unittest.TestCase):
 
 
 class LauncherArgumentTests(unittest.TestCase):
+    def test_property_settings_cli_round_trip_and_validation(self):
+        import json
+        from android_settings import SETTINGS, load, properties
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            app = state / "org.bifrost.fixture"
+            app.mkdir()
+            (app / "package.json").write_text("{}")
+            def configure(key, value=None, reset=False):
+                return package.configure(SimpleNamespace(state_root=state, package=app.name,
+                    key=key, value=value, reset=reset, json=True))
+            with patch("builtins.print"):
+                configure("property.ro.kernel.qemu", "0")
+                configure("property.debug.fixture", "")
+                configure("network", "offline")
+                self.assertEqual(properties(load(app)), {"ro.kernel.qemu": "0", "debug.fixture": ""})
+                for key, value in (("property.bad\nname", "1"), ("property.a", "x\ny=1"),
+                                   ("property.a", "é" * 46), ("property.a", "trailing "),
+                                   ("property.a", "x\u0085y=1"), ("property.a", "x\u2028y=1")):
+                    with self.assertRaises(ValueError): configure(key, value)
+                configure("property.ro.kernel.qemu", reset=True)
+                self.assertEqual(properties(load(app)), {"debug.fixture": ""})
+                self.assertEqual(load(app)["network"], "offline")
+                configure(None, reset=True)
+                self.assertEqual(load(app), {})
+            (app / SETTINGS).write_text(json.dumps({"property.a": "ok", "property.b": "x\ny=1"}))
+            self.assertEqual(properties(load(app)), {"a": "ok"})
+
     def test_library_settings_reject_malformed_values_and_keep_default_launch(self):
         import json
         from android_launcher import launch_request
@@ -485,6 +513,57 @@ class HostNetworkTests(unittest.TestCase):
 
 
 class SettingsIdentityTests(unittest.TestCase):
+    def test_saved_properties_survive_reprovisioning_and_reset_to_image_defaults(self):
+        import json
+        import android_managed as managed
+        from android_settings import save
+        with tempfile.TemporaryDirectory(prefix="bifrost-properties-") as temporary:
+            work = Path(temporary)
+            app, framework, adapters, dex = (work / n for n in ("app", "framework", "adapters", "launcher.dex"))
+            app.mkdir()
+            (framework / "system/bin").mkdir(parents=True)
+            (framework / "vendor/etc").mkdir(parents=True)
+            (framework / "bifrost-framework.json").write_text("{}")
+            (framework / "system/build.prop").write_text("ro.kernel.qemu=1\n")
+            (framework / "vendor/etc/media_codecs.xml").write_text('<MediaCodecs/>')
+            names = ("libbifrost-activity.so", "managed/am", "managed/libandroid.so", "managed/libEGL.so",
+                     "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so",
+                     "managed/libaaudio.so", "managed/libOpenSLES.so", "managed/mapper.bifrost.so")
+            files = {}
+            for name in names:
+                path = adapters / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name)
+                files[name] = managed.file_hash(path)
+            (adapters / "adapters.json").write_text(json.dumps({"files": files}))
+            dex.write_text("launcher version one")
+            metadata = {"package": "org.bifrost.fixture", "files": {}}
+            def prepare():
+                return managed.prepare_root(app, metadata, "/data/app/fixture", None,
+                                            framework, work / "art", adapters, dex)[0]
+            with patch.object(managed.android_framework, "install", return_value={"environment": {}}), \
+                    patch.object(managed.android_microg, "install"), \
+                    patch.object(managed, "install_managed_graphics"):
+                save(app, {"property.ro.kernel.qemu": "0"})
+                root = prepare()
+                values = lambda: managed.image_properties(root, {"ro.kernel.qemu", "media.c2.hal.selection"})
+                self.assertEqual(values(), {"ro.kernel.qemu": "0", "media.c2.hal.selection": "aidl"})
+                data = root / "data/user/0/org.bifrost.fixture/save"
+                data.write_text("saved game")
+                self.assertEqual(prepare(), root)  # verified cached runtime
+                dex.write_text("launcher version two")  # force runtime replacement
+                prepare()
+                self.assertEqual(values()["ro.kernel.qemu"], "0")
+                self.assertEqual(data.read_text(), "saved game")
+                save(app, {})
+                prepare()
+                self.assertEqual(values()["ro.kernel.qemu"], "1")
+                self.assertEqual(data.read_text(), "saved game")
+                prop = root / "debug_ramdisk/adb_debug.prop"
+                prop.write_text(prop.read_text() + "ro.kernel.qemu=0\n")
+                with self.assertRaisesRegex(ValueError, "Modified managed runtime file"):
+                    prepare()
+
     def test_concurrent_first_launches_share_a_persistent_user_key(self):
         from android_managed import settings_user_key, install_settings_key
         with tempfile.TemporaryDirectory(prefix="bifrost-settings-") as temporary:
@@ -1134,6 +1213,13 @@ class RunFromFileTests(unittest.TestCase):
             with patch("builtins.print"):
                 self.assertEqual(asgard.install_for_run(str(installer), root, ["--no-jit", str(apk), "--timeout", "5"]),
                                  ["--no-jit", "org.bifrost.fixture", "--timeout", "5"])
+                real_run = subprocess.run
+                with patch.object(asgard.subprocess, "run", wraps=real_run) as installed:
+                    self.assertEqual(asgard.install_for_run(str(installer), root, [str(apk), "-d", "--timeout", "5"]),
+                                     ["org.bifrost.fixture", "--timeout", "5"])
+                    self.assertIn("--allow-downgrade", installed.call_args.args[0])
+            with self.assertRaisesRegex(ValueError, "requires an APK"):
+                asgard.install_for_run(str(installer), root, ["org.bifrost.fixture", "--allow-downgrade"])
             # Package names, and files that do not exist or are not packages, pass through.
             for arguments in (["org.bifrost.fixture"], [str(root / "missing.apk")], [str(installer)]):
                 self.assertEqual(asgard.install_for_run(str(installer), root, arguments), arguments)
@@ -1481,7 +1567,7 @@ class PackageTests(unittest.TestCase):
             capture_output=True,
         )
 
-    def install(self, input, state):
+    def install(self, input, state, *, allow_downgrade=False):
         return package.install(
             input,
             state,
@@ -1490,6 +1576,7 @@ class PackageTests(unittest.TestCase):
             self.tools / "aapt2",
             self.tools / "apksigner.jar",
             self.media,
+            allow_downgrade=allow_downgrade,
         )
 
     def test_signed_split_native_launch_and_persistence(self):
@@ -1682,6 +1769,8 @@ class PackageTests(unittest.TestCase):
             archive.write(other, "split.apk")
         with self.assertRaisesRegex(ValueError, "Installed package signer"):
             self.install(bundle, state)
+        with self.assertRaisesRegex(ValueError, "Installed package signer"):
+            self.install(bundle, state, allow_downgrade=True)
         upgrade_base = self.apk("upgrade-base", version=2)
         upgrade_split = self.apk(
             "upgrade-split", split="config.arm64_v8a", native=True, version=2
@@ -1695,6 +1784,21 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "downgrade"):
             self.install(self.bundle, state)
         self.assertEqual(manifest.read_bytes(), before)
+        app = manifest.parent
+        from android_settings import save, load
+        save(app, {"property.ro.kernel.qemu": "0"})
+        native_save = app / "rootfs/data/user/0/org.bifrost.fixture/files/downgrade-save"
+        managed_save = app / "managed/rootfs/data/user/0/org.bifrost.fixture/files/downgrade-save"
+        for target in (native_save, managed_save):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("retained")
+        downgraded = self.install(self.bundle, state, allow_downgrade=True)
+        self.assertEqual(downgraded["version_code"], "1")
+        self.assertEqual(load(app), {"property.ro.kernel.qemu": "0"})
+        for target in (native_save, managed_save): self.assertEqual(target.read_text(), "retained")
+        # Same-version reinstall and a subsequent upgrade use the same signed path.
+        self.install(self.bundle, state)
+        self.install(bundle, state)
         code = state / "org.bifrost.fixture/rootfs" / metadata["guest_code"].lstrip("/")
         asset = code / "assets/split.txt"
         asset.chmod(0o644)

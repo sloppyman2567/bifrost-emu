@@ -909,6 +909,23 @@ pass. Uma Global advanced past its cover art in the approved live verification,
 as confirmed by the user; full gameplay and successful Google sign-in were not
 tested by these checks.
 
+Persistent app property coverage in `LauncherArgumentTests` checks CLI save,
+query/reset paths and rejects malformed names, injected lines and oversized
+UTF-8 values. `SettingsIdentityTests` exercises the managed root preparation
+and inventory path with a small framework fixture: overrides survive launcher
+replacement, reset restores the image default, app data survives, and manual
+property-file edits fail inventory validation. This test mocks framework/microG
+installation and graphics adapter patching; it does not launch a guest app.
+The existing real signed APK identity test also verifies explicit downgrade,
+default rejection, signer mismatch rejection with the flag, same-version
+reinstall and subsequent upgrade, retaining native/managed app data and settings.
+`RunFromFileTests` checks downgrade option forwarding to installation without
+passing the option to the game runtime.
+All 14 focused tests pass. Uma's actual installed managed root was then
+reprovisioned headlessly with its saved `property.ro.kernel.qemu=0` setting;
+the generated property read back as `0` and a second preparation accepted
+the cached runtime inventory. The game was not relaunched for this check.
+
 Final broad checks: the SDL/GL build and library, separate headless build,
 `make generated-check`, and `make verify` pass (87 differential fixtures and
 seven threaded oracle runs). The strict JIT suite passes 326/326; the strict
