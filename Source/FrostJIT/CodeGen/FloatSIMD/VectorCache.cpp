@@ -74,9 +74,11 @@ bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& 
             if (kind != NativeSimdKind::ImmediateFp) read((w >> 5) & 31);
             if (kind == NativeSimdKind::Extract || kind == NativeSimdKind::CompareFp ||
                 kind == NativeSimdKind::Select || kind == NativeSimdKind::MultiplyAdd ||
-                kind == NativeSimdKind::WidenThree)
+                kind == NativeSimdKind::WidenThree || kind == NativeSimdKind::HalvingAdd ||
+                kind == NativeSimdKind::TestBits || kind == NativeSimdKind::AbsDiffAcc)
                 read((w >> 16) & 31);
-            if (kind == NativeSimdKind::Select || kind == NativeSimdKind::MultiplyAdd)
+            if (kind == NativeSimdKind::Select || kind == NativeSimdKind::MultiplyAdd ||
+                kind == NativeSimdKind::AbsDiffAcc)
                 read(w & 31);
             // MLAL/MLSL and ADALP accumulate into Vd.
             if ((kind == NativeSimdKind::WidenThree && (((w >> 12) & 15) == 0x8 || ((w >> 12) & 15) == 0xA)) ||

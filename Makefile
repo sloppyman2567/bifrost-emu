@@ -387,7 +387,7 @@ test: $(TARGET)
 
 # Differential replay plus separate threaded oracle runs (no shared-memory replay).
 SHELL := /bin/bash
-verify: $(TARGET) test-ir-ssa
+verify: $(TARGET) test-ir-ssa test-native-simd-helpers
 	@bash Scripts/Testing/verify_jit.sh "$(TARGET)"
 
 
@@ -583,6 +583,12 @@ test-ir-ssa:
 	@mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) Tests/Host/ir_ssa.cpp Source/FrostJIT/IR/SSA/SSA.cpp Source/FrostJIT/IR/Passes/Optimize.cpp -o $(OBJDIR)/ir_ssa_test $(LDFLAGS)
 	./$(OBJDIR)/ir_ssa_test
+
+.PHONY: test-native-simd-helpers
+test-native-simd-helpers:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Host/native_simd_helpers.cpp Source/FrostJIT/CodeGen/Native/NativeSIMD.cpp -o $(OBJDIR)/native_simd_helpers $(LDFLAGS)
+	./$(OBJDIR)/native_simd_helpers Tools/CodeGen/native_simd_expected.txt
 
 .PHONY: test-audio-frame-counters
 test-audio-frame-counters:

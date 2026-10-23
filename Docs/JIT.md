@@ -33,6 +33,65 @@ equal to Rn and equal to Rm, against a lane model written from the Arm ARM pseud
 (432,000 checks; edge values plus random lanes, Q=0 results must clear the upper half).
 The model passes under QEMU, the interpreter and the JIT, and under `BIFROST_JIT_VERIFY=1`.
 
+## Pixel and media integer forms are native (2026-10-23)
+
+A profile of the English Umamusume client and `Scripts/Testing/simd_coverage.py` (22,739
+FP/SIMD words that stepped the interpreter) listed integer NEON forms that image, video and
+UI code uses constantly. One interpreted step costs about 130 ns and, because a block holding
+one cannot use the vector cache, drags every neighbouring instruction down with it. These
+forms are now native kinds in `Tools/CodeGen/native_simd.txt` (spec row, `run<K>` reference
+body, inline emitter):
+
+| Form | Kind | Inline sequence (XMM0-2 scratch only) |
+|---|---|---|
+| `SHADD/UHADD`, `SRHADD/URHADD`, `SHSUB/UHSUB` | `HalvingAdd` | bytes/halfwords through `pavgb/pavgw`; words with shifts |
+| `SRSHR/URSHR` (vector; scalar D takes the helper) | `RoundShift` | see below |
+| `RSHRN/RSHRN2` | `NarrowShift` (rounding bit 11) | `(x >> s) + ((x >> (s-1)) & 1)` in the source lanes, then the `SHRN` narrowing |
+| `CMTST`; `CMGT/CMGE/CMLE/CMLT #0` | `TestBits`; `CompareZeroInt` | `pand` + `pcmpeq`; `pcmpgt` against zero, GE/LE inverted |
+| `MUL .8b/.16b`, `MLS` | `MultiplyAdd` | the existing byte-multiply sequence, then optional accumulate or subtract |
+| `SABA/UABA` | `AbsDiffAcc` | `max - min` (unsigned bytes and signed halfwords are SSE2, the rest SSE4.1) |
+| `REV32`, `REV16` | `Reverse` (was `Reverse64`) | word shuffles and a byte swap |
+
+Exact identities the emitters rely on (each checked by the tests below):
+
+- `(a + b + 1) >> 1` is `pavg`. `UHADD = ~pavg(~a, ~b)`, `UHSUB = pavg(a, ~b) ^ S`, and signed forms bias
+  by the lane sign bit `S` (`SRHADD = pavg(a^S, b^S) ^ S`, `SHADD = pavg(a^M, b^M) ^ M` with `M = ~S`,
+  `SHSUB = pavg(a^S, b^M) ^ S`). 32-bit lanes use `(a>>1) + (b>>1) + carry` with the right shift kind.
+- `RShr(x, s) = ((x >> (s-1)) + 1) >> 1`, which `pavgw` evaluates without the overflow that adding the
+  rounding constant first has in a full-width lane; unsigned bytes widen to words first, signed ones
+  sign-extend, round and `packsswb` back (the result is at most 128 in magnitude). Other lanes use the
+  `(x >> s) + ((x >> (s-1)) & 1)` form. A signed 64-bit `SRSHR` needs `psraq` (AVX-512) and takes the helper.
+- The `RSHRN` rounding constant cannot be added in the source lane (`0xffff + 0x80` overflows); the bit form is
+  exact.
+
+`native_simd_inlinable` declines what a host cannot do: signed 64-bit and scalar rounding shifts, `CMGT..#0`
+on 64-bit lanes without SSE4.2, and `SABA/UABA` forms needing SSE4.1; those run the helper.
+
+**What was checked.** `Tools/CodeGen/native_simd_expected.txt` gained 689 QEMU hashes (1,480 to 2,169
+encodings); `jit_native_simd_gen` passes all of them in the JIT and interpreter. Because the JIT inlines these
+kinds, the new host test `make test-native-simd-helpers` (also run by `make verify`) calls every `run<K>` body over
+the fixture's inputs and compares with the same hashes: 2,169 pass, and it fails when a hash is altered.
+`Tests/Unit/jit_simd_pixel.c` (376,104 checks) and `jit_simd_round.c` (158,628) compare against lane models
+that compute in 128-bit integers: byte lanes see all 65,536 operand pairs (or all 256 values at every shift),
+wider lanes edge values and random data, with Rd distinct from, equal to Rn and equal to Rm, plus hot loops that
+chain 14-16 live vectors and carry accumulators. They pass under QEMU, the interpreter, the JIT and
+`BIFROST_JIT_VERIFY=1`. Nine deliberate single-point defects in the emitters (wrong `pavg` width, swapped
+`max`/`min`, dropped rounding bit, wrong constant, un-inverted `CMTST`, `MLS` adding, ...) and a dropped
+`Vd` read declaration for `SABA/UABA` in `vec_inst_operands` were each caught. A dropped `Rm` read declaration
+for `CMTST`, `HalvingAdd` or `SABA/UABA` was not, in loops where the operand is live into the loop or rewritten
+at its end; I did not establish why, so those declarations rest on review.
+
+**Measured.** The four-op pixel loop of the previous section (`umax`, `umin`, `urshr`, `srshr`, `.8h`, 2.6
+million iterations each) now takes 0.070-0.075 s, from 1.28-1.34 s at `e7ed1b3c`, the commit before this work (QEMU 0.05-0.10 s on the
+same machine, noisy); `BIFROST_FALLBACK_PROFILE` lists nothing for it. That is one synthetic loop, not a game frame
+time.
+
+**Still interpreted** (from the same sweep): the saturating family (`SQADD/UQADD/SQSUB/UQSUB` on word and
+doubleword lanes, `SQSHL/UQSHL`, `SQSHRN` and the other saturating narrowing shifts, `SQXTN/UQXTN` on wider
+lanes, `SQDMULH/SQRDMULH`, `SQABS/SQNEG`), the register rounding shifts (`SRSHL/URSHL/...`), `CLS/CLZ`, `PMUL`,
+`URECPE/URSQRTE`, scalar-D variants of several shifts, `SRSRA/URSRA` scalar and the 64-bit lane
+`SSHR/SSRA/SRSRA`. They keep the interpreter's correct but slow path.
+
 ## Single-thread self-loop reconcile is out of line (2026-10-23)
 
 `BIFROST_JIT_VERIFY=1` showed `v28` taking `v27`'s value after a loop with 14 live vector registers. The

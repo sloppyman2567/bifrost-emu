@@ -50,7 +50,14 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
     } else if constexpr(K==NativeSimdKind::NarrowShift) {
         unsigned imm=(w>>16)&127, h=(w>>19)&15;
         unsigned esize=1u<<(31-__builtin_clz(h)), shift=esize*16-imm;
-        for(unsigned i=0;i<8/esize;i++) put(out,i,esize,get(n,i,esize*2)>>shift);
+        // RSHRN adds 1 << (shift - 1) to the unsigned source lane first; the sum can
+        // exceed the source lane, so it is formed in 128 bits.
+        const bool round=(w>>11)&1;
+        for(unsigned i=0;i<8/esize;i++) {
+            unsigned __int128 x=get(n,i,esize*2);
+            if(round) x+=static_cast<unsigned __int128>(1)<<(shift-1);
+            put(out,i,esize,static_cast<uint64_t>(x>>shift));
+        }
         if(q) { std::memcpy(out.bytes+8,out.bytes,8); std::memcpy(out.bytes,d.bytes,8); }
     } else if constexpr(K==NativeSimdKind::WidenShift || K==NativeSimdKind::WidenHigh) {
         unsigned esize, shift;
@@ -86,7 +93,13 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
             put(out,i,esize,match?~uint64_t(0):0);
         }
     } else if constexpr(K==NativeSimdKind::CompareZeroInt) {
-        for(unsigned i=0;i<bytes/size;i++) put(out,i,size,get(n,i,size)==0?~uint64_t(0):0);
+        // Opcode bits 16:12 select the test: 8 GT (GE when U), 9 EQ (LE when U), 10 LT.
+        const unsigned opc=(w>>12)&31;
+        for(unsigned i=0;i<bytes/size;i++) {
+            const int64_t a=signed_lane(get(n,i,size),size*8);
+            const bool match = opc==8 ? (u ? a>=0 : a>0) : opc==9 ? (u ? a<=0 : a==0) : a<0;
+            put(out,i,size,match?~uint64_t(0):0);
+        }
     } else if constexpr(K==NativeSimdKind::ImmediateFp) {
         unsigned imm=(((w>>16)&7)<<5)|((w>>5)&31);
         uint64_t value;
@@ -125,11 +138,18 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
     } else if constexpr(K==NativeSimdKind::ScalarAdd) { put(out,0,8,get(n,0,8)+get(m,0,8)); }
     else if constexpr(K==NativeSimdKind::ReduceAdd) {
         uint64_t sum=0; for(unsigned i=0;i<bytes/size;i++) sum+=get(n,i,size); put(out,0,size,sum);
-    } else if constexpr(K==NativeSimdKind::Reverse64) {
-        unsigned count=8/size;
+    } else if constexpr(K==NativeSimdKind::Reverse) {
+        // REV64 (U=0), REV32 (U=1) and REV16 (opcode bit 12) reverse the elements of each
+        // container of 8, 4 or 2 bytes.
+        const unsigned container=(w&0x1000)?2:u?4:8, count=container/size;
         for(unsigned i=0;i<bytes/size;i++) put(out,i,size,get(n,(i/count)*count+count-1-i%count,size));
     } else if constexpr(K==NativeSimdKind::MultiplyAdd) {
-        for(unsigned i=0;i<bytes/size;i++) put(out,i,size,get(d,i,size)+get(n,i,size)*get(m,i,size));
+        // MUL has opcode bit 11 set and ignores Vd; MLS (U=1) subtracts the product from Vd.
+        const bool accumulate=!((w>>11)&1);
+        for(unsigned i=0;i<bytes/size;i++) {
+            const uint64_t product=get(n,i,size)*get(m,i,size);
+            put(out,i,size,!accumulate?product:u?get(d,i,size)-product:get(d,i,size)+product);
+        }
     } else if constexpr(K==NativeSimdKind::IndexedFma) {
         unsigned lane=((w>>21)&1)|(((w>>11)&1)<<1); float value=fp<float>(m,lane);
         for(unsigned i=0;i<bytes/4;i++) put_fp(out,i,arm_fp_muladd(fp<float>(d,i),fp<float>(n,i),value,(cpu->fpcr>>25)&1));
@@ -206,6 +226,38 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
         } else {
             if (q) std::memcpy(out.bytes, d.bytes, 8);
             for (unsigned i = 0; i < 4; i++) put(out, (q ? 4 : 0) + i, 2, f2h(fp<float>(n, i), dn));
+        }
+    } else if constexpr(K==NativeSimdKind::HalvingAdd) {
+        // SHADD/UHADD, SRHADD/URHADD and SHSUB/UHSUB: the sum or difference of the extended
+        // lanes in full precision, (plus one for the rounding form), shifted right by one
+        // (floor) and truncated to the lane.
+        const unsigned opc=(w>>11)&31, bits=size*8;
+        for(unsigned i=0;i<bytes/size;i++) {
+            const int64_t a=u?static_cast<int64_t>(get(n,i,size)):signed_lane(get(n,i,size),bits);
+            const int64_t b=u?static_cast<int64_t>(get(m,i,size)):signed_lane(get(m,i,size),bits);
+            const int64_t r=opc==0?a+b:opc==2?a+b+1:a-b;
+            put(out,i,size,static_cast<uint64_t>(r>>1));
+        }
+    } else if constexpr(K==NativeSimdKind::RoundShift) {
+        // SRSHR/URSHR (vector and scalar D): (x + (1 << (shift - 1))) >> shift in full precision.
+        const unsigned h=(w>>19)&15, esize=1u<<(31-__builtin_clz(h)), bits=esize*8;
+        const unsigned shift=2*bits-((w>>16)&127);
+        const unsigned lanes=((w>>28)&1)?1:bytes/esize;
+        for(unsigned i=0;i<lanes;i++) {
+            const uint64_t raw=get(n,i,esize);
+            __int128 x=u?static_cast<__int128>(raw):static_cast<__int128>(signed_lane(raw,bits));
+            x+=static_cast<__int128>(1)<<(shift-1);
+            put(out,i,esize,static_cast<uint64_t>(x>>shift));
+        }
+    } else if constexpr(K==NativeSimdKind::TestBits) {
+        for(unsigned i=0;i<bytes/size;i++) put(out,i,size,(get(n,i,size)&get(m,i,size))?~uint64_t(0):0);
+    } else if constexpr(K==NativeSimdKind::AbsDiffAcc) {
+        // SABA/UABA: Vd += |Vn - Vm| per lane, the difference taken in full precision.
+        const unsigned bits=size*8;
+        for(unsigned i=0;i<bytes/size;i++) {
+            const int64_t a=u?static_cast<int64_t>(get(n,i,size)):signed_lane(get(n,i,size),bits);
+            const int64_t b=u?static_cast<int64_t>(get(m,i,size)):signed_lane(get(m,i,size),bits);
+            put(out,i,size,get(d,i,size)+static_cast<uint64_t>(a>b?a-b:b-a));
         }
     } else {
         // A kind added to native_simd.txt needs a body above.

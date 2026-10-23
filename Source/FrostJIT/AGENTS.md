@@ -26,7 +26,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   generated test and expectations together. Inline bodies in
   `CodeGen/Native/NativeSIMDInline.cpp` must match their `run<K>` lane for
   lane, and `native_simd_inlinable` must accept exactly what the emitter
-  emits (Tier-2 relies on it to skip the call treatment).
+  emits (Tier-2 relies on it to skip the call treatment). The JIT inlines most
+  kinds, so the generated guest fixture rarely reaches a `run<K>` body: the helper
+  host test (`make test-native-simd-helpers`, part of `make verify`) runs every
+  body against the same QEMU hashes. `vec_inst_operands` lists each kind's
+  vector reads and writes by hand; add a new kind there (a kind that accumulates
+  into Vd reads it).
 - A pair (`LDP`/`STP`/`LDPSW`) uses the native guarded path. Its translation must
   complete every load before writing any architectural register (and write the base
   last), and a store pair must write none: a fault on the second half restarts the

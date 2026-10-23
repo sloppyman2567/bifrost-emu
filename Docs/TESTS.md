@@ -4,6 +4,41 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Pixel and media vector forms, self-loop reconcile (2026-10-23)
+
+Tested on a Ryzen 7 5800X3D (SSE4.2, AVX2, FMA3) at `e7ed1b3c` plus the working tree; no game was run.
+`jit_simd_minmax` (432,000 checks), `jit_simd_pixel` (376,104), `jit_simd_round` (158,628) and
+`jit_vec_pressure_loop` (32 lanes) compare against lane models. The first three pass under QEMU, the
+interpreter, the JIT, `BIFROST_JIT_VERIFY=1`, `BIFROST_TIER2=1`, `BIFROST_IR_VALIDATE=1` and (pixel, round)
+`BIFROST_NO_AVX2=1`; the pressure fixture passes under QEMU and the JIT, and under verify only with the fix
+(one vector divergence at `e7ed1b3c`, none after). `jit_native_simd_gen` passes 2,169 encodings (689 new, hashes
+recorded under QEMU by `make nativegen-expect`) in the JIT and the interpreter, and `make test-native-simd-helpers`
+(`Tests/Host/native_simd_helpers.cpp`) passes the same 2,169 against every `run<K>` body; it fails when one hash
+is altered. `make test-ir-ssa` still passes 21,839 checks; `run_tests.sh --unit --toybox --realworld` passes
+228 of 228 with the full SDL/GL build, the headless build (`USE_SDL2=0 USE_THUNK_GL=0`) passes the new fixtures,
+and `make generated-check` passes.
+
+`make verify`'s only failure is `jit_bfm_extract` in verify mode: it takes 95 s against the gate's 30 s limit on
+this machine, and a clean build of `e7ed1b3c` takes the same 95 s. The other 107 sections pass, including the four
+new fixtures.
+
+Mutation checks: nine single-point defects in the inline emitters (wrong `pavg` width, swapped `max`/`min`,
+dropped rounding bit and constant, un-inverted `CMTST`, `MLS` adding, swapped `pcmpgt` operands, 32-bit signed
+halving with logical shifts) each fail the matching fixture and the generated test; a dropped `Vd` read
+declaration for `SABA/UABA` in `vec_inst_operands` fails the loop kernel's accumulators. Dropped `Rm` read
+declarations were not caught by any loop shape I tried.
+
+Not covered: hosts without SSE4.1, SSE4.2 or AVX2 (only the helper bodies, the eligibility predicates and
+`BIFROST_NO_AVX2` were exercised); whether Tier-2 promoted these loops (the opt-in path ran and passed); the
+saturating family, which still steps the interpreter and does not set `FPSR.QC` in this change; and any
+application workload.
+
+```sh
+make cross SRC=Tests/Unit/jit_simd_pixel.c OUT=Tests/Unit/jit_simd_pixel.elf
+qemu-aarch64 Tests/Unit/jit_simd_pixel.elf
+make test-native-simd-helpers
+```
+
 ## Per-process compatibility defaults (2026-10-23)
 
 `FrameworkCompatibilityTests` runs separate real ART VMs targeting API 29, 33,

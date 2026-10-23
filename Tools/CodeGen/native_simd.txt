@@ -22,6 +22,7 @@ DUP_ELEM   Dup            0xBFE0FC00 0x0E000400 d,n    imm5 && imm5 != 16 && ((i
 INS_GPR    Insert         0xFFE0FC00 0x4E001C00 d,n    imm5 && imm5 != 16
 EXT        Extract        0xBFE08400 0x2E000000 d,n,m  ((w >> 11) & 15) < (q ? 16u : 8u)
 SHRN       NarrowShift    0xBF80FC00 0x0F008400 d,n    h && h < 8
+RSHRN      NarrowShift    0xBF80FC00 0x0F008C00 d,n    h && h < 8
 SSHLL      WidenShift     0x9F80FC00 0x0F00A400 d,n    h && h < 8
 SHLL       WidenHigh      0xBF3FFC00 0x2E213800 d,n    sz < 3
 FCVTN_D    NarrowFp       0xBFFFFC00 0x0E616800 d,n    -
@@ -33,7 +34,11 @@ FCMEQ_Z    CompareZeroFp  0xBFBFFC00 0x0EA0D800 d,n    fp_lanes
 FCMLT_Z    CompareZeroFp  0xBFBFFC00 0x0EA0E800 d,n    fp_lanes
 FCMGE_Z    CompareZeroFp  0xBFBFFC00 0x2EA0C800 d,n    fp_lanes
 FCMLE_Z    CompareZeroFp  0xBFBFFC00 0x2EA0D800 d,n    fp_lanes
+CMGT_Z     CompareZeroInt 0xBF3FFC00 0x0E208800 d,n    sz < 3 || q
+CMGE_Z     CompareZeroInt 0xBF3FFC00 0x2E208800 d,n    sz < 3 || q
 CMEQ_Z     CompareZeroInt 0xBF3FFC00 0x0E209800 d,n    sz < 3 || q
+CMLE_Z     CompareZeroInt 0xBF3FFC00 0x2E209800 d,n    sz < 3 || q
+CMLT_Z     CompareZeroInt 0xBF3FFC00 0x0E20A800 d,n    sz < 3 || q
 FMOV_IMM   ImmediateFp    0x9FF8FC00 0x0F00F400 d      !u || q
 SSHL       VariableShift  0x9F20FC00 0x0E204400 d,n,m  sz < 3 || q
 FRINTN     RoundFp        0xBFBFFC00 0x0E218800 d,n    fp_lanes
@@ -47,8 +52,12 @@ SCVTF_2D   Convert64      0xBFFFFC00 0x0E61D800 d,n    q
 FCVTZS_2D  Convert64      0xBFFFFC00 0x0EE1B800 d,n    q
 ADD_D      ScalarAdd      0xFFE0FC00 0x5EE08400 d,n,m  -
 ADDV       ReduceAdd      0xBF3FFC00 0x0E31B800 d,n    across_size
-REV64      Reverse64      0xBF3FFC00 0x0E200800 d,n    sz < 3
+REV64      Reverse        0xBF3FFC00 0x0E200800 d,n    sz < 3
+REV32      Reverse        0xBF3FFC00 0x2E200800 d,n    sz < 2
+REV16      Reverse        0xBF3FFC00 0x0E201800 d,n    sz == 0
 MLA        MultiplyAdd    0xBF20FC00 0x0E209400 d,n,m  sz < 3
+MLS        MultiplyAdd    0xBF20FC00 0x2E209400 d,n,m  sz < 3
+MUL_B      MultiplyAdd    0xBF20FC00 0x0E209C00 d,n,m  sz == 0
 FMLA_ELEM  IndexedFma     0xBFC0F400 0x0F801000 d,n,m  -
 SADDLV     AcrossLong     0x9F3FFC00 0x0E303800 d,n    across_size
 SMAXV      AcrossMinMax   0x9F3EFC00 0x0E30A800 d,n    across_size
@@ -67,3 +76,18 @@ FMAXNMP    PairFp         0xBFA0FC00 0x2E20C400 d,n,m  fp_lanes
 FMINNMP    PairFp         0xBFA0FC00 0x2EA0C400 d,n,m  fp_lanes
 FCVTL_H    HalfFp         0xBFFFFC00 0x0E217800 d,n    -
 FCVTN_H    HalfFp         0xBFFFFC00 0x0E216800 d,n    -
+
+# Pixel and media integer forms: halving add/subtract, rounding shifts, bit test, absolute-difference accumulate.
+SHADD      HalvingAdd     0xBF20FC00 0x0E200400 d,n,m  sz < 3
+UHADD      HalvingAdd     0xBF20FC00 0x2E200400 d,n,m  sz < 3
+SRHADD     HalvingAdd     0xBF20FC00 0x0E201400 d,n,m  sz < 3
+URHADD     HalvingAdd     0xBF20FC00 0x2E201400 d,n,m  sz < 3
+SHSUB      HalvingAdd     0xBF20FC00 0x0E202400 d,n,m  sz < 3
+UHSUB      HalvingAdd     0xBF20FC00 0x2E202400 d,n,m  sz < 3
+SRSHR      RoundShift     0xBF80FC00 0x0F002400 d,n    h && (h < 8 || q)
+URSHR      RoundShift     0xBF80FC00 0x2F002400 d,n    h && (h < 8 || q)
+SRSHR_D    RoundShift     0xFF80FC00 0x5F002400 d,n    h >= 8
+URSHR_D    RoundShift     0xFF80FC00 0x7F002400 d,n    h >= 8
+CMTST      TestBits       0xBF20FC00 0x0E208C00 d,n,m  sz < 3 || q
+SABA       AbsDiffAcc     0xBF20FC00 0x0E207C00 d,n,m  sz < 3
+UABA       AbsDiffAcc     0xBF20FC00 0x2E207C00 d,n,m  sz < 3

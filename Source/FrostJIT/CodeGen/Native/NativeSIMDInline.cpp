@@ -20,9 +20,10 @@ bool FrostJIT::native_simd_inlinable(uint32_t w) const {
         case NativeSimdKind::Extract:
         case NativeSimdKind::CompareFp:
         case NativeSimdKind::CompareZeroFp:
-        case NativeSimdKind::CompareZeroInt:
         case NativeSimdKind::ImmediateFp:
-        case NativeSimdKind::Reverse64:
+        case NativeSimdKind::Reverse:
+        case NativeSimdKind::HalvingAdd:
+        case NativeSimdKind::TestBits:
         case NativeSimdKind::WidenShift:
         case NativeSimdKind::WidenHigh:
         case NativeSimdKind::NarrowShift:
@@ -33,6 +34,18 @@ bool FrostJIT::native_simd_inlinable(uint32_t w) const {
         case NativeSimdKind::Dup:
         case NativeSimdKind::ReduceAdd:
             return true;
+        case NativeSimdKind::CompareZeroInt:
+            // CMEQ on 64-bit lanes uses SSE2 dword compares; the ordered tests need pcmpgtq.
+            return ((w >> 22) & 3) != 3 || (((w >> 12) & 31) == 9 && !((w >> 29) & 1)) || has_sse42();
+        case NativeSimdKind::RoundShift:
+            // The scalar D form takes the helper, as does a signed 64-bit shift, which
+            // would need an arithmetic qword shift (AVX-512).
+            return !((w >> 28) & 1) && !(((w >> 19) & 15) >= 8 && !((w >> 29) & 1));
+        case NativeSimdKind::AbsDiffAcc: {
+            // |a-b| = max - min: pmaxub/pmaxsw are SSE2, the other lane types SSE4.1.
+            const unsigned lane = (w >> 22) & 3;
+            return ((w >> 29) & 1) ? (lane == 0 || has_sse41()) : (lane == 1 || has_sse41());
+        }
         case NativeSimdKind::MultiplyAdd:
             return ((w >> 22) & 3) != 2 || has_sse41();  // .4s/.2s need pmulld
         case NativeSimdKind::WidenThree:
@@ -92,10 +105,23 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
         case NativeSimdKind::NarrowShift: {
             const unsigned lane = 31u - __builtin_clz((w >> 19) & 15);
             const unsigned bits = 8u << lane;
-            sse2_op(0x76, 1, 1);                // all ones
+            const unsigned shift = 2 * bits - ((w >> 16) & 127);
             load_vec(0, rn);
-            sse2_imm(0x71 + lane, 0, 2, static_cast<uint8_t>(2 * bits - ((w >> 16) & 127)));
+            if ((w >> 11) & 1) {
+                // RSHRN: (x >> shift) + ((x >> (shift - 1)) & 1) in the source lanes; the
+                // sum never exceeds the lane, unlike adding the rounding constant first.
+                movdqa(2, 0);
+                if (shift > 1) sse2_imm(0x71 + lane, 2, 2, static_cast<uint8_t>(shift - 1));
+                sse2_op(0x76, 1, 1);
+                sse2_imm(0x71 + lane, 1, 2, static_cast<uint8_t>(2 * bits - 1));  // 1 per lane
+                sse2_op(0xDB, 2, 1);
+                sse2_imm(0x71 + lane, 0, 2, static_cast<uint8_t>(shift));
+                sse2_op(lane == 0 ? 0xFD : lane == 1 ? 0xFE : 0xD4, 0, 2);
+            } else {
+                sse2_imm(0x71 + lane, 0, 2, static_cast<uint8_t>(shift));
+            }
             if (lane == 0) {
+                sse2_op(0x76, 1, 1);            // all ones
                 sse2_imm(0x71, 1, 2, 8);        // mask to unsigned byte before packing
                 sse2_op(0xDB, 0, 1);
                 sse2_op(0x67, 0, 0);            // packuswb (no saturation after mask)
@@ -189,17 +215,32 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             return true;
         }
         case NativeSimdKind::CompareZeroInt: {
+            // Opcode bits 16:12: 8 GT (GE when U), 9 EQ (LE when U), 10 LT. GE and LE are
+            // the inverse of LT and GT.
+            const unsigned opc = (w >> 12) & 31;
             load_vec(0, rn);
             sse2_op(0xEF, 1, 1);
-            if (sz < 3) {
-                sse2_op(0x74 + static_cast<int>(sz), 0, 1);      // pcmpeq{b,w,d}
-            } else {
-                // 64-bit lanes with SSE2: both dwords of a lane must be zero.
-                sse2_op(0x76, 0, 1);                             // pcmpeqd
-                sse2_op(0x70, 1, 0); emit_byte(0xB1);            // pshufd xmm1, xmm0: swap dwords
-                sse2_op(0xDB, 0, 1);                             // pand
+            if (opc == 9 && !u) {
+                if (sz < 3) {
+                    sse2_op(0x74 + static_cast<int>(sz), 0, 1);  // pcmpeq{b,w,d}
+                } else {
+                    // 64-bit lanes with SSE2: both dwords of a lane must be zero.
+                    sse2_op(0x76, 0, 1);                         // pcmpeqd
+                    sse2_op(0x70, 1, 0); emit_byte(0xB1);        // pshufd xmm1, xmm0: swap dwords
+                    sse2_op(0xDB, 0, 1);                         // pand
+                }
+                store_vec(0, rd, q);
+                return true;
             }
-            store_vec(0, rd, q);
+            const bool less = opc == 10 || (opc == 8 && u);      // CMLT, CMGE (inverted)
+            const int result = less ? 1 : 0;
+            if (sz < 3) sse2_op(0x64 + static_cast<int>(sz), less ? 1 : 0, less ? 0 : 1);  // pcmpgt{b,w,d}
+            else sse2_38(0x37, less ? 1 : 0, less ? 0 : 1);                                // pcmpgtq
+            if (u) {
+                sse2_op(0x76, 2, 2);
+                sse2_op(0xEF, result, 2);                        // invert
+            }
+            store_vec(result, rd, q);
             return true;
         }
         case NativeSimdKind::ImmediateFp: {
@@ -217,13 +258,18 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             store_vec(0, rd, q);
             return true;
         }
-        case NativeSimdKind::Reverse64: {
+        case NativeSimdKind::Reverse: {
+            // REV64/REV32/REV16 reverse the elements of each 8-, 4- or 2-byte container.
+            const unsigned container = (w & 0x1000) ? 2 : u ? 4 : 8;
             load_vec(0, rn);
-            if (sz == 2) {
+            if (container == 8 && sz == 2) {
                 sse2_op(0x70, 0, 0); emit_byte(0xB1);            // pshufd: swap dwords
             } else {
-                sse_f2(0x70, 0, 0); emit_byte(0x1B);             // pshuflw: reverse words
-                sse2_f3(0x70, 0, 0); emit_byte(0x1B);            // pshufhw
+                if (container != 2) {                            // reorder the words of each container
+                    const uint8_t order = container == 8 ? 0x1B : 0xB1;
+                    sse_f2(0x70, 0, 0); emit_byte(order);        // pshuflw
+                    sse2_f3(0x70, 0, 0); emit_byte(order);       // pshufhw
+                }
                 if (sz == 0) {                                   // then swap bytes in words
                     movdqa(1, 0);
                     sse2_imm(0x71, 0, 6, 8);                     // psllw xmm0, 8
@@ -328,7 +374,7 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             return true;
         }
         case NativeSimdKind::MultiplyAdd: {
-            // MLA: d + n * m per lane, modulo the lane width.
+            // MLA/MLS: d +- n * m per lane, and MUL: n * m, modulo the lane width.
             load_vec(0, rn);
             load_vec(1, rm);
             if (sz == 0) {
@@ -348,9 +394,18 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
             } else {
                 sse2_38(0x40, 0, 1);                                     // pmulld
             }
+            if ((w >> 11) & 1) {                                         // MUL: no accumulator
+                store_vec(0, rd, q);
+                return true;
+            }
             load_vec(1, rd);
-            sse2_op(0xFC + static_cast<int>(sz), 0, 1);                  // paddb/w/d
-            store_vec(0, rd, q);
+            if (u) {
+                sse2_op(0xF8 + static_cast<int>(sz), 1, 0);              // MLS: psubb/w/d, Vd - product
+                store_vec(1, rd, q);
+            } else {
+                sse2_op(0xFC + static_cast<int>(sz), 0, 1);              // MLA: paddb/w/d
+                store_vec(0, rd, q);
+            }
             return true;
         }
         case NativeSimdKind::WidenThree: {
@@ -429,6 +484,158 @@ bool FrostJIT::emit_native_simd_inline(const IRInst& inst) {
                 sse2_op(add, 0, 2);
             }
             store_vec(0, rd, true);
+            return true;
+        }
+        case NativeSimdKind::HalvingAdd: {
+            // SHADD/UHADD (opcode 0), SRHADD/URHADD (2) and SHSUB/UHSUB (4). Byte and
+            // halfword lanes go through pavgb/pavgw, the unsigned (a + b + 1) >> 1:
+            //   URHADD = pavg(n, m)              UHADD = ~pavg(~n, ~m)
+            //   UHSUB  = pavg(n, ~m) ^ S         S = lane sign bit, M = ~S
+            //   SRHADD = pavg(n ^ S, m ^ S) ^ S  SHADD = pavg(n ^ M, m ^ M) ^ M
+            //   SHSUB  = pavg(n ^ S, m ^ M) ^ S
+            // (adding the bias 2^(bits-1) turns the signed lanes into unsigned ones, and a - b
+            // = a' - b'; ~b = 2^bits - 1 - b gives a - b = a + ~b + 1 - 2^bits.) 32-bit lanes use
+            // (a >> 1) + (b >> 1) + carry, with arithmetic shifts when signed.
+            const unsigned opc = (w >> 11) & 31;  // 0 HADD, 2 RHADD, 4 HSUB
+            load_vec(0, rn);
+            load_vec(1, rm);
+            if (sz == 2) {
+                const int shift_kind = u ? 2 : 4;                         // psrld / psrad
+                movdqa(2, 0);
+                if (opc == 0) sse2_op(0xDB, 2, 1);                        // n & m
+                else if (opc == 2) sse2_op(0xEB, 2, 1);                   // n | m
+                else sse2_op(0xDF, 2, 1);                                 // ~n & m
+                sse2_imm(0x72, 2, 6, 31);
+                sse2_imm(0x72, 2, 2, 31);                                 // bit 0 of each lane
+                sse2_imm(0x72, 0, shift_kind, 1);
+                sse2_imm(0x72, 1, shift_kind, 1);
+                sse2_op(opc == 4 ? 0xFA : 0xFE, 0, 1);
+                sse2_op(opc == 4 ? 0xFA : 0xFE, 0, 2);
+                store_vec(0, rd, q);
+                return true;
+            }
+            const int pavg = sz == 0 ? 0xE0 : 0xE3;                       // pavgb / pavgw
+            const uint64_t sign = sz == 0 ? 0x8080808080808080ull : 0x8000800080008000ull;
+            auto flip = [&](int x, uint64_t mask) { emit_mask(2, mask); sse2_op(0xEF, x, 2); };
+            if (u && opc == 2) {
+                sse2_op(pavg, 0, 1);
+            } else if (u && opc == 0) {
+                sse2_op(0x76, 2, 2);                                      // all ones
+                sse2_op(0xEF, 0, 2);
+                sse2_op(0xEF, 1, 2);
+                sse2_op(pavg, 0, 1);
+                sse2_op(0xEF, 0, 2);
+            } else if (u) {                                               // UHSUB
+                sse2_op(0x76, 2, 2);
+                sse2_op(0xEF, 1, 2);                                      // ~m
+                sse2_op(pavg, 0, 1);
+                flip(0, sign);
+            } else if (opc == 2) {                                        // SRHADD
+                emit_mask(2, sign);
+                sse2_op(0xEF, 0, 2);
+                sse2_op(0xEF, 1, 2);
+                sse2_op(pavg, 0, 1);
+                sse2_op(0xEF, 0, 2);
+            } else if (opc == 0) {                                        // SHADD
+                emit_mask(2, ~sign);
+                sse2_op(0xEF, 0, 2);
+                sse2_op(0xEF, 1, 2);
+                sse2_op(pavg, 0, 1);
+                sse2_op(0xEF, 0, 2);
+            } else {                                                      // SHSUB
+                flip(0, sign);
+                flip(1, ~sign);
+                sse2_op(pavg, 0, 1);
+                flip(0, sign);
+            }
+            store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::RoundShift: {
+            // SRSHR/URSHR: RShr(x, s) = (x + 2^(s-1)) >> s, rounding half up.
+            //  - bytes widen to words, shift, and pack back (the result fits a byte);
+            //  - unsigned bytes/halfwords: RShr = ((x >> (s-1)) + 1) >> 1 = pavgw(x >> (s-1), 0),
+            //    which has no intermediate overflow;
+            //  - other lanes: (x >> s) + ((x >> (s-1)) & 1).
+            const unsigned lane = 31u - __builtin_clz((w >> 19) & 15);    // 0 b, 1 h, 2 s, 3 d
+            const unsigned bits = 8u << lane;
+            const unsigned amount = 2 * bits - ((w >> 16) & 127);
+            const uint8_t before = static_cast<uint8_t>(amount - 1);      // may be 0
+            load_vec(0, rn);
+            if (lane == 0) {
+                movdqa(1, 0);
+                if (u) {
+                    sse2_op(0xEF, 2, 2);
+                    sse2_op(0x60, 0, 2);                                  // punpcklbw: zero extend
+                    sse2_op(0x68, 1, 2);                                  // punpckhbw
+                    if (before) { sse2_imm(0x71, 0, 2, before); sse2_imm(0x71, 1, 2, before); }
+                    sse2_op(0xE3, 0, 2);                                  // pavgw with zero: (y + 1) >> 1
+                    sse2_op(0xE3, 1, 2);
+                    sse2_op(0x67, 0, 1);                                  // packuswb
+                } else {
+                    sse2_op(0x60, 0, 0); sse2_imm(0x71, 0, 4, 8);         // sign extend low bytes
+                    sse2_op(0x68, 1, 1); sse2_imm(0x71, 1, 4, 8);         // and high bytes
+                    if (before) { sse2_imm(0x71, 0, 4, before); sse2_imm(0x71, 1, 4, before); }
+                    sse2_op(0x76, 2, 2);
+                    sse2_imm(0x71, 2, 2, 15);                             // 1 per word
+                    sse2_op(0xFD, 0, 2); sse2_op(0xFD, 1, 2);             // y + 1 (|y| <= 128)
+                    sse2_imm(0x71, 0, 4, 1); sse2_imm(0x71, 1, 4, 1);
+                    sse2_op(0x63, 0, 1);                                  // packsswb
+                }
+            } else if (lane == 1 && u) {
+                sse2_op(0xEF, 2, 2);
+                if (before) sse2_imm(0x71, 0, 2, before);
+                sse2_op(0xE3, 0, 2);
+            } else {
+                movdqa(1, 0);
+                sse2_op(0x76, 2, 2);
+                sse2_imm(0x70 + lane, 2, 2, static_cast<uint8_t>(bits - 1));  // 1 per lane
+                if (before) sse2_imm(0x70 + lane, 1, 2, before);
+                sse2_op(0xDB, 1, 2);                                      // rounding bit
+                sse2_imm(0x70 + lane, 0, u ? 2 : 4, static_cast<uint8_t>(amount));
+                sse2_op(lane == 1 ? 0xFD : lane == 2 ? 0xFE : 0xD4, 0, 1);
+            }
+            store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::TestBits: {
+            // CMTST: all ones where Vn & Vm is nonzero.
+            load_vec(0, rn);
+            load_vec(1, rm);
+            sse2_op(0xDB, 0, 1);
+            sse2_op(0xEF, 1, 1);
+            if (sz < 3) {
+                sse2_op(0x74 + static_cast<int>(sz), 0, 1);               // zero lanes -> ones
+            } else {
+                sse2_op(0x76, 0, 1);                                      // pcmpeqd
+                sse2_op(0x70, 1, 0); emit_byte(0xB1);                     // pshufd: swap dwords
+                sse2_op(0xDB, 0, 1);
+            }
+            sse2_op(0x76, 1, 1);
+            sse2_op(0xEF, 0, 1);                                          // invert
+            store_vec(0, rd, q);
+            return true;
+        }
+        case NativeSimdKind::AbsDiffAcc: {
+            // SABA/UABA: Vd += max(n, m) - min(n, m), modulo the lane width.
+            load_vec(0, rn);
+            load_vec(1, rm);
+            movdqa(2, 0);
+            auto select = [&](bool is_max, int dst) {
+                if (u) {
+                    if (sz == 0) sse2_op(is_max ? 0xDE : 0xDA, dst, 1);   // pmaxub / pminub
+                    else sse2_38(sz == 1 ? (is_max ? 0x3E : 0x3A) : (is_max ? 0x3F : 0x3B), dst, 1);
+                } else {
+                    if (sz == 1) sse2_op(is_max ? 0xEE : 0xEA, dst, 1);   // pmaxsw / pminsw
+                    else sse2_38(sz == 0 ? (is_max ? 0x3C : 0x38) : (is_max ? 0x3D : 0x39), dst, 1);
+                }
+            };
+            select(true, 0);
+            select(false, 2);
+            sse2_op(0xF8 + static_cast<int>(sz), 0, 2);                   // psubb/w/d
+            load_vec(1, rd);
+            sse2_op(0xFC + static_cast<int>(sz), 0, 1);                   // paddb/w/d
+            store_vec(0, rd, q);
             return true;
         }
         case NativeSimdKind::RoundFp: {

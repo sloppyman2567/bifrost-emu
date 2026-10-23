@@ -322,6 +322,8 @@ UNIT_TESTS=(
     "simd_addlv|Tests/Unit/jit_simd_addlv.elf||5|checks passed"
     "simd_pairlong|Tests/Unit/jit_simd_pairlong.elf||5|3072 checks passed"
     "simd_minmax|Tests/Unit/jit_simd_minmax.elf||5|432000 checks passed"
+    "simd_pixel|Tests/Unit/jit_simd_pixel.elf||10|376104 checks passed"
+    "simd_round|Tests/Unit/jit_simd_round.elf||10|158628 checks passed"
     "vec_pressure_loop|Tests/Unit/jit_vec_pressure_loop.elf||5|32 lanes passed"
     "simd_pmull|Tests/Unit/jit_simd_pmull.elf||15|10240 checks passed"
     "crc32_instructions|Tests/Unit/jit_crc32.elf||5|checks passed"

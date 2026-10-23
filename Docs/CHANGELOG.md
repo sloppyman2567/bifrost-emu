@@ -12,6 +12,18 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Pixel and media integer NEON forms (2026-10-23)
+
+- Halving add/subtract (`SHADD/UHADD`, `SRHADD/URHADD`, `SHSUB/UHSUB`), rounding shifts (`SRSHR/URSHR`),
+  `RSHRN/RSHRN2`, `CMTST`, `CMGT/CMGE/CMLE/CMLT #0`, `MUL .8b/.16b`, `MLS`, `SABA/UABA` and `REV32/REV16`
+  compile to inline SSE sequences instead of stepping the interpreter (about 130 ns each, and the block lost the
+  vector cache). Found by profiling the English Umamusume client and sweeping the FP/SIMD space against QEMU.
+  A pixel-loop fixture with four such ops falls from 1.28 s to 0.07 s. Encodings are native kinds in
+  `native_simd.txt` (1,480 to 2,169 QEMU-checked words); `make test-native-simd-helpers` now checks the helper
+  bodies the JIT no longer reaches. New regressions: `jit_simd_pixel`, `jit_simd_round`.
+- Still interpreted: the saturating family (`SQADD`, `SQSHRN`, `SQRDMULH`, ...), register rounding shifts and
+  `CLS/CLZ`.
+
 ### Self-loop layout reconcile (2026-10-23)
 
 - `BIFROST_JIT_VERIFY=1` mis-stored a vector register in a loop with more live vectors than XMM slots (`v28`

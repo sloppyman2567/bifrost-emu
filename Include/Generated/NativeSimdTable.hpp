@@ -28,7 +28,7 @@ namespace arm64emu {
     X(Convert64) \
     X(ScalarAdd) \
     X(ReduceAdd) \
-    X(Reverse64) \
+    X(Reverse) \
     X(MultiplyAdd) \
     X(IndexedFma) \
     X(AcrossLong) \
@@ -36,7 +36,11 @@ namespace arm64emu {
     X(WidenThree) \
     X(PairLong) \
     X(PairFp) \
-    X(HalfFp)
+    X(HalfFp) \
+    X(HalvingAdd) \
+    X(RoundShift) \
+    X(TestBits) \
+    X(AbsDiffAcc)
 
 enum class NativeSimdKind : uint8_t {
     None,
@@ -59,6 +63,7 @@ inline NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xFFE0FC00U) == 0x4E001C00U && (imm5 && imm5 != 16)) return K::Insert;  // INS_GPR
     if ((w & 0xBFE08400U) == 0x2E000000U && (((w >> 11) & 15) < (q ? 16u : 8u))) return K::Extract;  // EXT
     if ((w & 0xBF80FC00U) == 0x0F008400U && (h && h < 8)) return K::NarrowShift;  // SHRN
+    if ((w & 0xBF80FC00U) == 0x0F008C00U && (h && h < 8)) return K::NarrowShift;  // RSHRN
     if ((w & 0x9F80FC00U) == 0x0F00A400U && (h && h < 8)) return K::WidenShift;  // SSHLL
     if ((w & 0xBF3FFC00U) == 0x2E213800U && (sz < 3)) return K::WidenHigh;  // SHLL
     if ((w & 0xBFFFFC00U) == 0x0E616800U) return K::NarrowFp;  // FCVTN_D
@@ -70,7 +75,11 @@ inline NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xBFBFFC00U) == 0x0EA0E800U && (fp_lanes)) return K::CompareZeroFp;  // FCMLT_Z
     if ((w & 0xBFBFFC00U) == 0x2EA0C800U && (fp_lanes)) return K::CompareZeroFp;  // FCMGE_Z
     if ((w & 0xBFBFFC00U) == 0x2EA0D800U && (fp_lanes)) return K::CompareZeroFp;  // FCMLE_Z
+    if ((w & 0xBF3FFC00U) == 0x0E208800U && (sz < 3 || q)) return K::CompareZeroInt;  // CMGT_Z
+    if ((w & 0xBF3FFC00U) == 0x2E208800U && (sz < 3 || q)) return K::CompareZeroInt;  // CMGE_Z
     if ((w & 0xBF3FFC00U) == 0x0E209800U && (sz < 3 || q)) return K::CompareZeroInt;  // CMEQ_Z
+    if ((w & 0xBF3FFC00U) == 0x2E209800U && (sz < 3 || q)) return K::CompareZeroInt;  // CMLE_Z
+    if ((w & 0xBF3FFC00U) == 0x0E20A800U && (sz < 3 || q)) return K::CompareZeroInt;  // CMLT_Z
     if ((w & 0x9FF8FC00U) == 0x0F00F400U && (!u || q)) return K::ImmediateFp;  // FMOV_IMM
     if ((w & 0x9F20FC00U) == 0x0E204400U && (sz < 3 || q)) return K::VariableShift;  // SSHL
     if ((w & 0xBFBFFC00U) == 0x0E218800U && (fp_lanes)) return K::RoundFp;  // FRINTN
@@ -84,8 +93,12 @@ inline NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xBFFFFC00U) == 0x0EE1B800U && (q)) return K::Convert64;  // FCVTZS_2D
     if ((w & 0xFFE0FC00U) == 0x5EE08400U) return K::ScalarAdd;  // ADD_D
     if ((w & 0xBF3FFC00U) == 0x0E31B800U && (across_size)) return K::ReduceAdd;  // ADDV
-    if ((w & 0xBF3FFC00U) == 0x0E200800U && (sz < 3)) return K::Reverse64;  // REV64
+    if ((w & 0xBF3FFC00U) == 0x0E200800U && (sz < 3)) return K::Reverse;  // REV64
+    if ((w & 0xBF3FFC00U) == 0x2E200800U && (sz < 2)) return K::Reverse;  // REV32
+    if ((w & 0xBF3FFC00U) == 0x0E201800U && (sz == 0)) return K::Reverse;  // REV16
     if ((w & 0xBF20FC00U) == 0x0E209400U && (sz < 3)) return K::MultiplyAdd;  // MLA
+    if ((w & 0xBF20FC00U) == 0x2E209400U && (sz < 3)) return K::MultiplyAdd;  // MLS
+    if ((w & 0xBF20FC00U) == 0x0E209C00U && (sz == 0)) return K::MultiplyAdd;  // MUL_B
     if ((w & 0xBFC0F400U) == 0x0F801000U) return K::IndexedFma;  // FMLA_ELEM
     if ((w & 0x9F3FFC00U) == 0x0E303800U && (across_size)) return K::AcrossLong;  // SADDLV
     if ((w & 0x9F3EFC00U) == 0x0E30A800U && (across_size)) return K::AcrossMinMax;  // SMAXV
@@ -104,6 +117,19 @@ inline NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xBFA0FC00U) == 0x2EA0C400U && (fp_lanes)) return K::PairFp;  // FMINNMP
     if ((w & 0xBFFFFC00U) == 0x0E217800U) return K::HalfFp;  // FCVTL_H
     if ((w & 0xBFFFFC00U) == 0x0E216800U) return K::HalfFp;  // FCVTN_H
+    if ((w & 0xBF20FC00U) == 0x0E200400U && (sz < 3)) return K::HalvingAdd;  // SHADD
+    if ((w & 0xBF20FC00U) == 0x2E200400U && (sz < 3)) return K::HalvingAdd;  // UHADD
+    if ((w & 0xBF20FC00U) == 0x0E201400U && (sz < 3)) return K::HalvingAdd;  // SRHADD
+    if ((w & 0xBF20FC00U) == 0x2E201400U && (sz < 3)) return K::HalvingAdd;  // URHADD
+    if ((w & 0xBF20FC00U) == 0x0E202400U && (sz < 3)) return K::HalvingAdd;  // SHSUB
+    if ((w & 0xBF20FC00U) == 0x2E202400U && (sz < 3)) return K::HalvingAdd;  // UHSUB
+    if ((w & 0xBF80FC00U) == 0x0F002400U && (h && (h < 8 || q))) return K::RoundShift;  // SRSHR
+    if ((w & 0xBF80FC00U) == 0x2F002400U && (h && (h < 8 || q))) return K::RoundShift;  // URSHR
+    if ((w & 0xFF80FC00U) == 0x5F002400U && (h >= 8)) return K::RoundShift;  // SRSHR_D
+    if ((w & 0xFF80FC00U) == 0x7F002400U && (h >= 8)) return K::RoundShift;  // URSHR_D
+    if ((w & 0xBF20FC00U) == 0x0E208C00U && (sz < 3 || q)) return K::TestBits;  // CMTST
+    if ((w & 0xBF20FC00U) == 0x0E207C00U && (sz < 3)) return K::AbsDiffAcc;  // SABA
+    if ((w & 0xBF20FC00U) == 0x2E207C00U && (sz < 3)) return K::AbsDiffAcc;  // UABA
     return K::None;
 }
 
