@@ -164,14 +164,158 @@ def read_findings(path, limit=16 * 1024 * 1024):
         return log_findings(stream.read().decode(errors="replace").splitlines())
 
 
+def settings_dialog(window, app, settings):
+    """Edit one persistent app profile; changes are staged until Save."""
+    from PyQt6.QtCore import Qt, QUrl
+    from PyQt6.QtGui import QDesktopServices
+    from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                                 QFormLayout, QHeaderView, QHBoxLayout, QLabel, QPushButton,
+                                 QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+    import android_settings
+    from android_package import API
+
+    class Settings(QDialog):
+        def __init__(self):
+            super().__init__(window)
+            self.setWindowTitle(app["label"] + " compatibility profile")
+            self.resize(680, 560)
+            self.settings = dict(settings)
+            layout = QVBoxLayout(self)
+            intro = QLabel("Saved for this app and shared by the launcher and CLI. Changes apply at the next start.")
+            intro.setWordWrap(True); layout.addWidget(intro)
+            tabs = QTabWidget(); layout.addWidget(tabs)
+            general = QWidget(); form = QFormLayout(general)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            self.stats = QCheckBox("Show FPS and graphics stats in the window title")
+            self.stats.setChecked(settings.get("window_stats", True)); form.addRow("Window stats", self.stats)
+            self.back = QComboBox()
+            for name, text in BACK_KEYS: self.back.addItem(text, name)
+            self.back.setCurrentIndex(max(0, self.back.findData(settings.get("back_key", "escape"))))
+            form.addRow("Back key", self.back)
+            self.network = QComboBox()
+            for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
+            self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
+            form.addRow("Network", self.network)
+            runtime = QLabel(f"Android API {API} · bundled runtime")
+            runtime.setWordWrap(True); form.addRow("Runtime", runtime)
+            directory = window.state / app["package"]
+            folder = QPushButton("Open app environment folder")
+            folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory.resolve()))))
+            form.addRow("Environment", folder)
+            tabs.addTab(general, "General")
+
+            compatibility = QWidget(); compat = QVBoxLayout(compatibility)
+            policy = QFormLayout(); self.emulator = QComboBox()
+            for text, value in (("Runtime default", None), ("Off", "0"), ("On", "1")):
+                self.emulator.addItem(text, value)
+            value = settings.get("property.ro.kernel.qemu")
+            if value is not None and value not in ("0", "1"):
+                self.emulator.addItem("Custom: " + (value or "(empty)"), value)
+            self.emulator.setCurrentIndex(max(0, self.emulator.findData(value)))
+            policy.addRow("Android emulator flag", self.emulator); compat.addLayout(policy)
+            self.emulator.setToolTip("Android property: ro.kernel.qemu")
+            note = QLabel("Choose whether this app sees Android's emulator flag. Runtime default uses the bundled image's value.")
+            note.setWordWrap(True); compat.addWidget(note)
+            advanced = QLabel("Advanced device properties")
+            compat.addWidget(advanced)
+            self.properties = QTableWidget(0, 2)
+            self.properties.setHorizontalHeaderLabels(("Property", "Value"))
+            self.properties.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            self.properties.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.properties.setAccessibleName("Device property overrides")
+            for name, value in sorted(android_settings.properties(settings).items()):
+                if name != "ro.kernel.qemu": self.add_property(name, value)
+            compat.addWidget(self.properties)
+            actions = QHBoxLayout()
+            add = QPushButton("Add property"); add.clicked.connect(lambda: self.add_property())
+            remove = QPushButton("Remove selected"); remove.clicked.connect(self.remove_properties)
+            actions.addWidget(add); actions.addWidget(remove); actions.addStretch(); compat.addLayout(actions)
+            hint = QLabel("Remove an override to use the runtime default. Values may be empty. "
+                          "Properties are preserved when the runtime is rebuilt; changing them may require rebuilding it.")
+            hint.setWordWrap(True); compat.addWidget(hint)
+            try:
+                import android_compat
+                data = android_compat.load(); value = android_compat.entry(data, app["package"])
+                text = value["status"] + (f" ({value['checked']})" if value.get("checked") else "") + ". " + value["evidence"]
+            except (OSError, ValueError, KeyError):
+                text = "Compatibility report unavailable"
+            report = QLabel(text); report.setWordWrap(True)
+            report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); compat.addWidget(report)
+            tabs.addTab(compatibility, "Compatibility")
+            managed = app.get("launcher") == "managed_activity"
+            if not managed:
+                self.emulator.setEnabled(False); self.properties.setEnabled(False)
+                add.setEnabled(False); remove.setEnabled(False)
+                note.setText("Device property overrides apply to managed Android apps. This app uses the native Activity runtime.")
+
+            removal = QHBoxLayout()
+            running = app["session"].get("state") in ACTIVE
+            for text, command, tip in (
+                    ("Clear data…", "clear-data", "Delete this game's saves and settings; the game stays installed"),
+                    ("Uninstall…", "uninstall", "Remove this game with all of its data")):
+                button = QPushButton(text)
+                button.setToolTip("Stop the game first" if running else tip); button.setEnabled(not running)
+                button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
+                removal.addWidget(button)
+            removal.addStretch(); layout.addLayout(removal)
+            self.error = QLabel(); self.error.setWordWrap(True); self.error.hide(); layout.addWidget(self.error)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+            reset = buttons.addButton("Restore profile defaults", QDialogButtonBox.ButtonRole.ResetRole)
+            reset.clicked.connect(self.reset_profile)
+            buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+            self.initial = (self.stats.isChecked(), self.back.currentData(), self.network.currentData())
+
+        def add_property(self, name="", value=""):
+            row = self.properties.rowCount(); self.properties.insertRow(row)
+            self.properties.setItem(row, 0, QTableWidgetItem(name))
+            self.properties.setItem(row, 1, QTableWidgetItem(value))
+            self.properties.setCurrentCell(row, 0)
+
+        def remove_properties(self):
+            for row in sorted({i.row() for i in self.properties.selectedIndexes()}, reverse=True):
+                self.properties.removeRow(row)
+
+        def reset_profile(self):
+            self.settings = {}
+            self.stats.setChecked(True); self.back.setCurrentIndex(0); self.network.setCurrentIndex(0)
+            self.initial = (True, "escape", "auto")
+            self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
+
+        def result_settings(self):
+            result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
+            for key, value, initial in zip(("window_stats", "back_key", "network"),
+                    (self.stats.isChecked(), self.back.currentData(), self.network.currentData()), self.initial):
+                if value != initial or key in result: result[key] = value
+            value = self.emulator.currentData()
+            if value is not None: result["property.ro.kernel.qemu"] = value
+            for row in range(self.properties.rowCount()):
+                name = self.properties.item(row, 0).text()
+                value = self.properties.item(row, 1).text()
+                if not name and not value: continue
+                key = android_settings.PROPERTY_PREFIX + name
+                if not android_settings.property_name(key): raise ValueError(f"Invalid property name in row {row + 1}")
+                if name == "ro.kernel.qemu": raise ValueError("Use the Android emulator flag control above for ro.kernel.qemu")
+                if key in result: raise ValueError("Duplicate property: " + name)
+                result[key] = android_settings.parse(key, value)
+            return result
+
+        def accept(self):
+            try: self.result_settings()
+            except ValueError as error:
+                self.error.setText(str(error)); self.error.show(); return
+            super().accept()
+
+    return Settings()
+
+
 def show(state):
     import fcntl
     state = Path(state).resolve()
     try:
         from PyQt6.QtCore import QProcess, QProcessEnvironment, QRectF, QTimer, Qt, QUrl
         from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPainterPath, QPalette, QPixmap
-        from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                                     QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
+        from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,
+                                     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                      QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
                                      QSizePolicy, QStackedWidget, QStyle, QToolButton, QVBoxLayout, QWidget)
     except ImportError as error:
@@ -292,73 +436,6 @@ def show(state):
 
         def mousePressEvent(self, event):
             self.window.select(self.app["package"]); super().mousePressEvent(event)
-
-    class Settings(QDialog):
-        def __init__(self, window, app, settings):
-            super().__init__(window)
-            self.setWindowTitle(app["label"] + " settings")
-            layout = QVBoxLayout(self)
-            form = QFormLayout(); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-            self.stats = QCheckBox("Show FPS and graphics stats in the window title")
-            self.stats.setChecked(settings.get("window_stats", True))
-            form.addRow("Window stats", self.stats)
-            self.back = QComboBox()
-            for name, text in BACK_KEYS: self.back.addItem(text, name)
-            self.back.setCurrentIndex(max(0, self.back.findData(settings.get("back_key", "escape"))))
-            self.back.setToolTip("Host key delivered to the game as Android's Back button")
-            form.addRow("Back key", self.back)
-            self.network = QComboBox()
-            for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
-            self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
-            self.network.setToolTip("What the game sees; Offline hides this computer's network from it")
-            form.addRow("Network", self.network)
-            form.addRow("Compatibility", self.compatibility(app["package"]))
-            profile = QComboBox(); profile.addItem("Default display"); profile.setEnabled(False)
-            form.addRow("Device profile", profile)
-            note = muted(QLabel("Matching your phone's screen and identity is planned; games use the default display for now."))
-            note.setWordWrap(True); form.addRow("", note)
-            layout.addLayout(form)
-            removal = QHBoxLayout()
-            running = app["session"].get("state") in ACTIVE
-            for text, command, tip in (
-                    ("Clear data…", "clear-data", "Delete this game's saves and settings; the game stays installed"),
-                    ("Uninstall…", "uninstall", "Remove this game with all of its data")):
-                button = QPushButton(text)
-                button.setToolTip("Stop the game first" if running else tip); button.setEnabled(not running)
-                # Closing the dialog drops unsaved choices: they would describe data that is gone.
-                button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
-                removal.addWidget(button)
-            removal.addStretch()
-            layout.addLayout(removal)
-            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-            buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
-            layout.addWidget(buttons)
-            self.initial = (self.stats.isChecked(), self.back.currentData(), self.network.currentData())
-            self.settings = dict(settings)
-
-        @staticmethod
-        def compatibility(package):
-            """What is documented about this app (compatibility.json); never a promise."""
-            try:
-                import android_compat
-                data = android_compat.load()
-                value = android_compat.entry(data, package)
-                text = value["status"] + (f" ({value['checked']})" if value.get("checked") else "") + ". " + value["evidence"]
-            except (OSError, ValueError, KeyError):
-                text = "Unavailable"
-            label = muted(QLabel(text)); label.setWordWrap(True)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            return label
-
-        def result_settings(self):
-            # Store only choices the user made, so defaults keep following the emulator's.
-            if self.stats.isChecked() != self.initial[0] or "window_stats" in self.settings:
-                self.settings["window_stats"] = self.stats.isChecked()
-            if self.back.currentData() != self.initial[1] or "back_key" in self.settings:
-                self.settings["back_key"] = self.back.currentData()
-            if self.network.currentData() != self.initial[2] or "network" in self.settings:
-                self.settings["network"] = self.network.currentData()
-            return self.settings
 
     class GoogleAccounts(QDialog):
         """Accounts signed in on this device. Sign-in is microG's own window with Google's page."""
@@ -701,7 +778,7 @@ def show(state):
         def configure(self, app):
             if not PACKAGE.fullmatch(app["package"]): return
             directory = self.state / app["package"]
-            dialog = Settings(self, app, load_settings(directory))
+            dialog = settings_dialog(self, app, load_settings(directory))
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 try:
                     save_settings(directory, dialog.result_settings())

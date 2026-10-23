@@ -364,6 +364,80 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(inventory, original)
 
 
+class LauncherProfileTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from PyQt6.QtWidgets import QApplication
+        except ImportError:
+            raise unittest.SkipTest("PyQt6 is not installed")
+        with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
+            cls.qt = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from PyQt6.QtWidgets import QWidget
+        self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-profile-")
+        self.window = QWidget()
+        self.window.state = Path(self.temporary.name)
+        self.app = {"package": "org.bifrost.fixture", "label": "Fixture",
+                    "launcher": "managed_activity", "session": {"state": "stopped"}}
+        self.dialog = None
+
+    def tearDown(self):
+        if self.dialog: self.dialog.close()
+        self.window.close()
+        self.temporary.cleanup()
+
+    def edit(self, settings):
+        from android_launcher import settings_dialog
+        self.dialog = settings_dialog(self.window, self.app, settings)
+        return self.dialog
+
+    def test_profile_round_trip_uses_the_cli_format_and_cancel_does_not_save(self):
+        from android_settings import save, load, properties
+        saved = {"property.ro.kernel.qemu": "0", "property.debug.fixture": "", "network": "offline"}
+        dialog = self.edit(saved)
+        self.assertEqual(dialog.emulator.currentData(), "0")
+        self.assertEqual(dialog.result_settings(), saved)
+        dialog.add_property("debug.other", "enabled")
+        dialog.back.setCurrentIndex(dialog.back.findData("f2"))
+        output = dialog.result_settings()
+        save(self.window.state, output)
+        self.assertEqual(load(self.window.state), output)
+        self.assertEqual(properties(output), {"ro.kernel.qemu": "0", "debug.fixture": "", "debug.other": "enabled"})
+        dialog.reject()
+        self.assertEqual(saved, {"property.ro.kernel.qemu": "0", "property.debug.fixture": "", "network": "offline"})
+        # Restore defaults is staged; rejecting the dialog leaves the saved file intact.
+        dialog.reset_profile()
+        self.assertEqual(dialog.result_settings(), {})
+        dialog.reject()
+        self.assertEqual(load(self.window.state), output)
+
+    def test_invalid_properties_keep_the_dialog_open_with_a_visible_error(self):
+        dialog = self.edit({})
+        dialog.add_property("debug.fixture", "one")
+        dialog.add_property("debug.fixture", "two")
+        dialog.accept()
+        self.assertIn("Duplicate property", dialog.error.text())
+        self.assertEqual(dialog.result(), 0)
+        dialog.properties.selectRow(1); dialog.remove_properties()
+        dialog.properties.item(0, 1).setText("injected\nproperty=value")
+        with self.assertRaises(ValueError): dialog.result_settings()
+        dialog.properties.item(0, 0).setText("ro.kernel.qemu")
+        with self.assertRaisesRegex(ValueError, "control above"): dialog.result_settings()
+        dialog.properties.item(0, 0).setText("debug.fixture")
+        dialog.properties.item(0, 1).setText("")
+        dialog.accept()
+        self.assertEqual(dialog.result(), 1)
+
+    def test_custom_values_are_preserved_and_native_apps_cannot_edit_device_properties(self):
+        self.app["launcher"] = "native_activity"
+        dialog = self.edit({"property.ro.kernel.qemu": "custom", "property.debug.fixture": "1"})
+        self.assertFalse(dialog.emulator.isEnabled())
+        self.assertFalse(dialog.properties.isEnabled())
+        self.assertEqual(dialog.result_settings(), {"property.ro.kernel.qemu": "custom", "property.debug.fixture": "1"})
+
+
 class SessionResultTests(unittest.TestCase):
     def run_session(self, script):
         from android_sessions import Session

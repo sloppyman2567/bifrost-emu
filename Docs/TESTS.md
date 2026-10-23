@@ -926,6 +926,16 @@ reprovisioned headlessly with its saved `property.ro.kernel.qemu=0` setting;
 the generated property read back as `0` and a second preparation accepted
 the cached runtime inventory. The game was not relaunched for this check.
 
+`LauncherProfileTests` instantiates the real Qt profile editor using the offscreen
+platform. It verifies the CLI-compatible save format, preservation of custom
+and empty property values, staged default restoration and cancellation, rejection
+of duplicate/injected properties, and disabled device controls for native-only
+apps. These three tests, the eight `LauncherArgumentTests`, three settings identity
+tests and two run-from-file tests pass (16 total). An offscreen
+render of Uma's actual saved profile confirms that its emulator flag is Off and
+an unchanged save preserves its saved values. No desktop window or game was
+opened; interactive desktop use remains unverified by these checks.
+
 Final broad checks: the SDL/GL build and library, separate headless build,
 `make generated-check`, and `make verify` pass (87 differential fixtures and
 seven threaded oracle runs). The strict JIT suite passes 326/326; the strict

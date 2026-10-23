@@ -129,6 +129,22 @@ start of that app, from the CLI (`start`, `run`) and the library window alike.
 Changes take effect at the next start. A setting you never chose is not stored,
 so it keeps following the emulator's default.
 
+The launcher's app settings open a **compatibility profile** editor. General
+contains window stats, Back key, network mode, the current bundled Android API
+and a button to open the app environment folder. Compatibility contains an
+Android emulator flag selector (Runtime default / Off / On) and an editable
+property list. Off stores `property.ro.kernel.qemu=0`; arbitrary saved values
+are preserved as a Custom choice. Native-only apps show the device controls
+disabled because that launch path does not consume them.
+
+Add/remove properties there or use the CLI below; both edit the same profile.
+Duplicate names, invalid property names and invalid values keep the dialog open
+with an error. **Restore profile defaults** stages removal of all saved choices;
+Save applies it and Cancel discards it. Changes never clear app data. The
+bundled runtime is identified rather than offering an unsupported Android
+version selector. Runtime version switching, permission policy editing and
+backup/restore are not part of this profile editor.
+
 | Setting | Values | Effect |
 |---|---|---|
 | `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` |
