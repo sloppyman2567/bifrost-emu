@@ -25,7 +25,15 @@ python Scripts/Android/test_android_package.py FrameworkCompatibilityTests Frame
 
 This exercises the pinned image's ART/libcore metadata, not every platform
 compatibility change, developer overrides, or the real DroidGuard payload.
-Japanese Uma still needs an approved restart to verify the original request.
+An approved Japanese Uma restart verified the original request in session
+`1a609cf3b8c64fc1a6a93bf1c5b1731b`: microG and Phonesky both load the cached
+DroidGuard APK's native library successfully. The legacy-target warning about
+writable DEX remains, but no writable-DEX `SecurityException` or DroidGuard
+fallback failure occurs. Phonesky logs a response from the integrity endpoint,
+a nonempty opaque integrity token and its success callback, with no request
+exception or error callback. Token contents and device-integrity labels were
+not inspected; API success does not establish Cygames acceptance, a certified
+device verdict or gameplay.
 An initial fixture using Java NIO `Files.copy` failed with `EINVAL` before DEX
 loading; the final fixture uses stream copying. The NIO copy path remains a
 separate unaddressed failure.
