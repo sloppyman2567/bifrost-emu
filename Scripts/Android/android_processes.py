@@ -72,10 +72,11 @@ def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotoni
 
 class ProcessHost:
     def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None,
-                 activities=None, task_session=None, state=None):
+                 activities=None, task_session=None, state=None, activity_finished=None):
         self.root, self.emu = Path(root), str(emu)
         # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
         self.activities = activities
+        self.activity_finished = activity_finished
         self.task_session, self.state = task_session, state
         self.task_visible = None
         self.home_active = False
@@ -247,6 +248,10 @@ class ProcessHost:
                 if self.activities is None:
                     raise ValueError('Activities of other packages are unavailable')
                 response = self.activities.start(request['directory'])
+            elif request['operation'] == 'activity_finished':
+                if self.activity_finished is None:
+                    raise ValueError('No remote Activity request is active')
+                response = self.activity_finished()
             elif request['operation'] == 'open_url':
                 response = open_url(request['url'], self.last_url)
             elif request['operation'] == 'home':

@@ -1571,7 +1571,13 @@ public final class ManagedLauncher {
                             activities.closeAll();
                             closeActivity(root);
                             jobs.close();
-                            if (hostClosed) serviceRuntime.shutdown(() -> System.exit(0));
+                            // The result belongs to the Activity lifetime, not the
+                            // service VM's. microG may keep services bound after
+                            // its last Activity finishes.
+                            if (remoteRequest != null)
+                                FrameworkProcessRuntime.host(new org.json.JSONObject()
+                                        .put("operation", "activity_finished"));
+                            if (hostClosed || remoteRequest != null) serviceRuntime.shutdown(() -> System.exit(0));
                             else serviceRuntime.whenIdle(() -> System.exit(0));
                             return;
                         }

@@ -884,6 +884,63 @@ class GoogleAccountStateTests(unittest.TestCase):
                              ["--emu", "/emu", "--window-stats", "--binder-broker", "/realm", "--no-jit",
                               "--android-window-plugin", "/plugin.so"])
 
+    def test_activity_result_returns_while_service_session_is_running(self):
+        import json
+        import android_google as google
+        from android_processes import ProcessHost
+        for result_code in (0, -1):
+            with self.subTest(result_code=result_code), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                root = state / "org.example.game/managed/rootfs"
+                request = root / "data/user/0/org.example.game/cache/google-activity" / ("d" * 32)
+                request.mkdir(parents=True)
+                (request / "request.json").write_text(json.dumps({
+                    "component": google.GMS + "/org.microg.gms.games.GamesSignInActivity",
+                    "caller": "org.example.game/org.example.Main", "response": False}))
+                for name in ("intent.bin", "caller.bin"): (request / name).write_bytes(b"request")
+                gms = state / google.GMS / "managed/rootfs"
+                completion = google.ActivityCompletion(state, gms, request)
+                host = ProcessHost.__new__(ProcessHost)
+                host.token, host.activity_finished = "test-capability", completion
+
+                def notify():
+                    client, server = socket.socketpair()
+                    with client, server:
+                        data = json.dumps({"operation": "activity_finished", "token": host.token}).encode()
+                        client.sendall(struct.pack('!I', len(data)) + data)
+                        host.serve(server)
+                        size = struct.unpack('!I', client.recv(4))[0]
+                        return json.loads(client.recv(size))
+
+                def start(*args):
+                    google.stage_request(gms, request)
+                    (gms / google.ACTIVITY / "result.bin").write_bytes(b"activity-data")
+                    (gms / google.ACTIVITY / "nested.json").write_text(json.dumps({
+                        "resultCode": result_code, "response": "none", "data": True}))
+                    self.assertEqual(notify(), {"finished": True})
+                    return {"session_id": "still-running", "supervisor_pid": 123}
+
+                live = {"state": "running", "session_id": "still-running"}
+                relay = google.ActivityRelay(state, root, [])
+                with patch('android_sessions.control', side_effect=[{"state": "exited"}, live]) as control, \
+                        patch('android_package.start_background', side_effect=start), \
+                        patch('android_google.publish_shared') as publish:
+                    relay.run(request)
+                    result = json.loads((request / "result.json").read_text())
+                    self.assertEqual(result["resultCode"], result_code)
+                    self.assertNotIn("error", result)
+                    self.assertEqual((request / "result.bin").read_bytes(), b"activity-data")
+                    # Neither stopping nor waiting for the service process was necessary.
+                    control.assert_called_once_with(state / google.GMS)
+                    publish.assert_called_once_with(state, gms)
+                    shutil.rmtree(request)  # The app consumed the answer before VM teardown.
+                    self.assertEqual(notify(), {"finished": True})
+                    completion()  # The runner's process-exit fallback must not recreate it.
+                    self.assertFalse(request.exists())
+                    publish.assert_called_once()
+                    host.activity_finished = None
+                    self.assertIn("error", notify())
+
     def test_activity_relay_never_follows_guest_symlinks(self):
         # The request directory belongs to the (untrusted) app: a symlink there must not make the
         # host read a file, truncate one, or take a package name for a path.

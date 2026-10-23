@@ -280,6 +280,22 @@ def finish_request(root, request):
     os.close(os.open(request / "done", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
 
 
+class ActivityCompletion:
+    """Publish a remote Activity's answer before its service VM exits, once only."""
+
+    def __init__(self, state, root, request):
+        self.state, self.root, self.request = Path(state), Path(root), Path(request)
+        self.lock, self.finished = threading.Lock(), False
+
+    def __call__(self):
+        with self.lock:
+            if not self.finished:
+                publish_shared(self.state, self.root)
+                finish_request(self.root, self.request)
+                self.finished = True
+        return dict(finished=True)
+
+
 def session_options(emu, emu_args, no_jit, window_plugin):
     """The `android_package.py run` options that start a session like the one being supervised."""
     options, arguments = ["--emu", str(emu)], list(emu_args)

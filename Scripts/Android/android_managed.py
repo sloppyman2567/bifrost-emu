@@ -912,6 +912,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
     # An app's request for one of microG's Activities (this session is the system app's) or none.
     request = metadata.get("request") if metadata.get("system") else None
     if metadata.get("system"): android_google.stage_request(root, request)
+    completion = android_google.ActivityCompletion(app.parent, root, request) if request else None
     trace_args, trace_directory = trace_options(root, trace_apk, trace_after, trace_duration)
     # Linux pathname Unix sockets are limited to 108 bytes. Keep the guest
     # root prefix short even when the installed package lives in a deep path;
@@ -946,7 +947,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     list(emu_args) + (["--no-jit"] if no_jit else [])
                     + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
                 environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args,
-                media_mask=media_mask, activities=relay, task_session=process_session, state=app.parent)))
+                media_mask=media_mask, activities=relay, task_session=process_session, state=app.parent,
+                activity_finished=completion)))
             process_session.task_control = process_host.task
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]
@@ -957,8 +959,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                 status = process_session.run(command, stdout=log, env=environment, timeout=timeout)
             finally:
                 (root / "dev/socket/logdw").unlink(missing_ok=True)
-                android_google.publish_shared(app.parent, root)
-                if request: android_google.finish_request(root, request)
+                if completion: completion()
+                else: android_google.publish_shared(app.parent, root)
                 collect_trace(trace_directory, app / "managed/traces")
                 if trace_directory is not None: shutil.rmtree(trace_directory)
         if status:

@@ -455,6 +455,19 @@ kills the provider the game's clients were bound to: the ad-ID client logged
   accounts into the app's root. The app delivers the result to `onActivityResult`
   and restarts its Play services processes when the accounts changed, because they
   cache the device registration and accounts.
+  Activity completion is acknowledged through the authenticated process host's
+  `activity_finished` operation after the result files are closed and the Activity
+  is destroyed. The host publishes accounts and the result immediately, exactly
+  once; process exit remains a fallback for crashes or older launchers. A remote
+  UI session shuts down its remaining services after returning the result.
+  Waiting for service idleness before forwarding the result left Global Uma
+  paused behind a black microG window after cancellation, even though microG had
+  saved `RESULT_CANCELED` and destroyed its Activity. The host regression covers
+  cancellation and success while the service session remains running, plus
+  duplicate completion after the app consumes the files. The 13 targeted Google
+  account, HOME, browser-link and session-result host checks pass, and the managed
+  launcher dex builds. The verification game launch reaches microG's LoginActivity;
+  result delivery and game advancement in that run are not yet verified.
 - The caller's `AccountAuthenticatorResponse` (add-account and token screens) is
   a Binder of the app and cannot cross: the session's Intent carries a stand-in
   whose `onResult`/`onError` is recorded and relayed to the real one afterwards;
