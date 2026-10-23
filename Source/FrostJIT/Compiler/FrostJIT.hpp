@@ -38,6 +38,7 @@
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/Backend/CpuFeatures.hpp"
 #include "FrostJIT/Runtime/CodeInvalidation.hpp"
+#include "FrostJIT/Runtime/Preemption.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -332,6 +333,9 @@ public:
     void invalidate_dispatch_cache() {
         cache_generation_.store(next_cache_generation_.fetch_add(1, std::memory_order_relaxed),
                                 std::memory_order_release);
+        // Running MT loops and probes poll this epoch: they leave the retired
+        // translation at their next back-edge rather than at the next tick.
+        g_jit_preempt_epoch.fetch_add(1, std::memory_order_release);
     }
     void sync_dispatch_cache() {
         const uint64_t generation = cache_generation_.load(std::memory_order_acquire);
@@ -541,8 +545,25 @@ public:
     // lifetime (re-enabling would reopen a spawn-vs-patch race).
     std::atomic<bool>     mt_active_{false};
     // Stable data cells: generated MT instructions never change after publication.
+    // An edge's jump cell. An empty cell reads as 0. An edge that sets `cold` keeps that address in an
+    // empty cell instead, so its generated code can `jmp [cell]` with no emptiness test (the cold exit
+    // follows the jump); every writer and reader still sees 0 for "empty".
+    struct MtCell {
+        std::atomic<uint64_t> word{0};
+        uint64_t cold = 0;  // set while the edge is emitted, before it is published
+        void store(uint64_t v, std::memory_order order = std::memory_order_seq_cst) { word.store(v ? v : cold, order); }
+        uint64_t exchange(uint64_t v, std::memory_order order = std::memory_order_seq_cst) {
+            const uint64_t old = word.exchange(v ? v : cold, order);
+            return old == cold ? 0 : old;
+        }
+        uint64_t load(std::memory_order order = std::memory_order_seq_cst) const {
+            const uint64_t v = word.load(order);
+            return v == cold ? 0 : v;
+        }
+    };
+    static_assert(offsetof(MtCell, word) == 0);
     struct MtEdge {
-        std::atomic<uint64_t> target{0};
+        MtCell target;
         uint64_t source_pc = 0, target_pc = 0;
         bool live = true; // compiler lock only
         bool cold_entry = false;
@@ -591,6 +612,11 @@ public:
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false);
+    // MT preemption poll (loads only); returns the jne-to-cold patch offset.
+    size_t emit_preempt_poll(int cpu_reg, int scratch);
+    // Published MT code polls the epoch; ST code and timed Tier-2 sampling code
+    // (whose windows count dispatcher resumptions) keep the 256-edge budget.
+    bool preempt_by_epoch() const { return mt_active() && !tier2_sampling_compile_; }
     // Chain-skip BR/BLR/RET exit: jump through the IBL table on a hit.
     void emit_indirect_branch_probe();
     bool emit_selfloop_backedge(uint64_t target_pc);

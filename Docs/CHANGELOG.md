@@ -12,6 +12,20 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Multithreaded JIT overhead (2026-10-23)
+
+- Once a process runs a second vCPU, native code no longer decrements a shared budget at every back-edge, indirect
+  branch and loop iteration. It reads a global preemption epoch (advanced by a 1 ms ticker and by every
+  invalidation) and returns to the dispatcher when it moves. Forward static edges need no check at all, MT self-loops
+  jump straight to their body, and `BL` calls the callee through a revocable cell instead of the helper.
+- Measured against `e7ed1b3c`, the cost of an idle second vCPU fell from +21% to +10% on an arithmetic loop, from
+  +9% to 0% on a branchy kernel, from +22% to +5% on recursive calls, from +53% to +14% on a byte copy, from +17% to +6% on
+  a mutex loop and from +58% to +22% on `malloc`/`free`; single-threaded speed is unchanged. A two-instruction
+  loop still pays +35%.
+- Signals and exits still reach a thread spinning in native code (about 1.4 ms in a test fixture); the thread loops
+  drain them on each tick.
+- Fixed: the `simd_minmax` and `simd_pixel` rows in `run_tests.sh` timed out under `--no-jit`.
+
 ### Desktop library redesign (2026-10-23)
 
 - The Asgard game library has a new visual design: icon-forward cards with calm tonal Play/Stop

@@ -81,6 +81,7 @@ static void resolve_crash_module(DynamicLinker* dl, uint64_t pc,
 int Emulator::run() {
     if (!debugger_->register_task(main_cpu_)) return 1;
     uint64_t count = 0;
+    uint32_t preempt_seen = g_jit_preempt_epoch.load(std::memory_order_relaxed);
     auto t0 = std::chrono::steady_clock::now();
     run_start_time_ = t0;
     // ── Hang watchdog ───────────────────────────────────────────────
@@ -342,8 +343,10 @@ int Emulator::run() {
                 }
             }
         }
-        // Drain the host-signal queue every ~4K instructions.
-        if ((count & 0xFFF) == 0) {
+        // Drain the host-signal queue every ~4K dispatches, and on every MT
+        // preemption tick (native loops return once per tick, not per 4K).
+        const bool preempt_tick = jit_preempt_tick(preempt_seen);
+        if ((count & 0xFFF) == 0 || preempt_tick) {
             drain_host_signals(main_cpu_);
             // Also drain per-CPU pending signals (queued by cross-thread
             // tgkill/tkill/kill). This is the fix for the cross-thread
@@ -352,7 +355,7 @@ int Emulator::run() {
             // rusage/times. Add the ~4K instructions since last drain to
             // the total. (Not exact — we add 4096 each time, but close
             // enough for CPU time estimation.)
-            guest_instructions_total_.fetch_add(4096, std::memory_order_relaxed);
+            if ((count & 0xFFF) == 0) guest_instructions_total_.fetch_add(4096, std::memory_order_relaxed);
         }
         // so guest_instr_to_seconds() has a real conversion factor.
         if ((count & 0xFFFFF) == 0 && count > 0) {

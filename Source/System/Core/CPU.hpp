@@ -320,6 +320,10 @@ public:
     uint64_t jit_call_depth = 0;
     bool jit_dispatch_requested = false;
     uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
+    // Host-only, MT code: the preemption epoch this CPU last observed at a
+    // dispatch boundary (FrostJIT::grant_lease). Polled read-only by backward
+    // edges; a bumped global epoch returns the thread to the dispatcher.
+    uint32_t jit_epoch_seen = 0;
     // Host-only: the running host thread's FrostJIT::IblTable (indirect-
     // branch targets), rebound at every native entry. Null = no fast path.
     void* jit_ibl_table = nullptr;

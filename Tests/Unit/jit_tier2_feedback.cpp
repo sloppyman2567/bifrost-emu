@@ -89,7 +89,7 @@ static bool rewritten_exit(bool mt, bool transition=false) {
         // Simulate an acquired old ST function finishing after transition.
         // Its exit cell must return to dispatch rather than call stale code.
         CPU c; c.pc=A; c.regs[0]=2000; c.regs[30]=STOP; c.jit_stop_pc=STOP;
-        c.jit_chain_budget=256;
+        jit_grant_lease(c);
         c.pc=region(&c,e.get());
         if(c.pc!=A+4096 || c.regs[1]!=2000) return false;
         while(c.pc!=STOP) c.pc=j->run_block(c,*e);

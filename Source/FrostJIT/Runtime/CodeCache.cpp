@@ -22,6 +22,7 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
+#include "FrostJIT/Runtime/Preemption.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"  // CODENAME
 #include <sys/mman.h>
@@ -283,6 +284,19 @@ void FrostJIT::dump_code_cache_stats() {
                 INLINE_CACHE_SETS);
     }
 }
+// Poll the preemption epoch with loads only: scratch = global epoch; compare
+// with the epoch this CPU was granted; the returned jne leaves on a mismatch.
+// MT code uses this instead of the ST edge budget, whose read-modify-write
+// serializes every back-edge through the store buffer. Overwrites RFLAGS.
+size_t FrostJIT::emit_preempt_poll(int cpu_reg, int scratch) {
+    emit_mov_imm64(scratch, reinterpret_cast<uint64_t>(&g_jit_preempt_epoch));
+    if (scratch >= 8) emit_byte(0x45);
+    emit_byte(0x8B); emit_byte(static_cast<uint8_t>(((scratch & 7) << 3) | (scratch & 7)));  // mov s32,[s]
+    if (scratch >= 8) emit_byte(0x44);
+    emit_byte(0x3B); emit_byte(static_cast<uint8_t>(0x80 | ((scratch & 7) << 3) | (cpu_reg & 7)));
+    emit_u32(offsetof(CPU, jit_epoch_seen));                                                // cmp s32,[cpu+seen]
+    return emit_jcc_rel32_placeholder(0x5);                                                 // jne
+}
 // Emit an immutable load/test/jump edge. The dispatcher supplies a bounded
 // lease; expiry or a host callback sentinel returns through the cold tail.
 FrostJIT::MtEdge* FrostJIT::create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off) {
@@ -302,21 +316,33 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     const size_t off = code_buf_used_;
     if (!target_pc || dbg().no_chain) return off;
     MtEdge* edge = create_chain_edge(target_pc, cold_entry, off);
-    // cmp rax,[rdi+jit_stop_pc]; je cold exit
-    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);
-    emit_u32(offsetof(CPU, jit_stop_pc));
-    size_t stop = emit_jcc_rel32_placeholder(0x4);
-    // sub dword [rdi+jit_chain_budget],1; jbe cold exit (also handles zero).
-    emit_byte(0x83); emit_byte(0xAF);
-    emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
-    size_t budget = emit_jcc_rel32_placeholder(0x6);
+    // A static edge to a higher block start cannot close a cycle on its own: a path of such edges
+    // strictly increases the start pc. Only a backward edge (or a self-loop) can recur, so only it
+    // carries the callback-sentinel compare and the preemption poll; a forward edge is two
+    // instructions. An empty cell holds this edge's cold exit, the code that follows the jump.
+    const bool backward = target_pc <= current_start_pc_;
+    std::vector<size_t> cold;
+    if (backward) {
+        // cmp rax,[rdi+jit_stop_pc]; je cold exit
+        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);
+        emit_u32(offsetof(CPU, jit_stop_pc));
+        cold.push_back(emit_jcc_rel32_placeholder(0x4));
+        if (preempt_by_epoch()) {
+            // Epoch moved since the dispatcher's grant: return for signals and exits.
+            cold.push_back(emit_preempt_poll(RDI, R11));
+        } else {
+            // sub dword [rdi+jit_chain_budget],1; jbe cold exit (also handles zero).
+            emit_byte(0x83); emit_byte(0xAF);
+            emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+            cold.push_back(emit_jcc_rel32_placeholder(0x6));
+        }
+    }
     emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&edge->target));
-    emit_load(R11, R11, 0);
-    emit_byte(0x4D); emit_byte(0x85); emit_byte(0xDB); // test r11,r11
-    size_t empty = emit_jcc_rel32_placeholder(0x4);
-    emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3); // jmp r11
-    for (size_t p : {stop, budget, empty})
+    emit_byte(0x41); emit_byte(0xFF); emit_byte(0x23); // jmp qword [r11]
+    for (size_t p : cold)
         patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    edge->target.cold = reinterpret_cast<uint64_t>(code_buf_ + code_buf_used_);
+    edge->target.word.store(edge->target.cold, std::memory_order_relaxed);
     return off;
 }
 // Indirect-branch fast path for a chain-skip BR/BLR/RET exit. Entered with
@@ -353,10 +379,15 @@ void FrostJIT::emit_indirect_branch_probe() {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);          // cmp qword [rdi+depth],0
     emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
     cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
-    // Shared 256-edge lease: return to dispatch (signals, exit) regularly.
-    emit_byte(0x83); emit_byte(0xAF);                            // sub dword [rdi+budget],1
-    emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
-    cold.push_back(emit_jcc_rel32_placeholder(0x6));             // jbe
+    // Return to dispatch (signals, exit) regularly: the shared 256-edge budget
+    // in ST, the read-only preemption epoch once MT code is published.
+    if (preempt_by_epoch()) {
+        cold.push_back(emit_preempt_poll(RDI, R11));
+    } else {
+        emit_byte(0x83); emit_byte(0xAF);                        // sub dword [rdi+budget],1
+        emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+        cold.push_back(emit_jcc_rel32_placeholder(0x6));         // jbe
+    }
     emit_byte(0xFF); emit_byte(0xA1);                            // jmp [rcx+entry]
     emit_u32(static_cast<uint32_t>(entries_off + offsetof(IblEntry, entry)));
     for (size_t p : cold)
@@ -911,6 +942,7 @@ void FrostJIT::enter_multithreaded() {
     // the purge. After that every writer checks mt_active_ and bails.
     bool expected = false;
     if (!mt_active_.compare_exchange_strong(expected, true)) return;
+    jit_start_preempt_ticker();
     if (dbg().jit_verify)
         fprintf(stderr, "[VERIFY] suspended: concurrent guest execution requires oracle tests; shared-memory replay is unsafe\n");
     // No second vCPU exists yet. Retire legacy ST instruction patches once,

@@ -1219,7 +1219,7 @@ returns to dispatch. Ordinary frames (`BIFROST_NO_CHAIN_SKIP=1`) and
 `BIFROST_NO_CHAIN=1` retain the previous indirect exits.
 
 Generated probes check the JIT's dispatch generation, `jit_stop_pc`, nested
-`jit_call_depth` and the shared 256-edge execution lease before jumping.
+`jit_call_depth` and the execution bound (the shared 256-edge budget in ST, the preemption epoch in MT) before jumping.
 Invalidation and Tier-2 publication advance the generation, revoking stale
 entries. The table belongs to the host thread and is rebound at native dispatch
 and helper entry, including for cloned CPUs. Timed Tier-2 trials unbind it to
@@ -1250,7 +1250,7 @@ bound. See [the validation record](TESTS.md#indirect-branches-watchdogs-and-lazy
 Hang detection is now an opt-in diagnostic (`BIFROST_HANG_WATCHDOG=1`): it
 enables the main/worker same-PC limits, main frozen-loop detection and JIT
 dispatch/call-helper limits that can stop or demote valid long-running code.
-This does not disable the chain execution lease, host call-depth limit, guest
+This does not disable the chain preemption bound, host call-depth limit, guest
 memory checks or explicit instruction limits. `test_long_call_loop` checks
 60 million calls on each of the main and worker CPUs against an inline oracle.
 
@@ -2547,8 +2547,8 @@ replay is suspended rather than restoring shared memory underneath workers.
 Tier-1 conditional branches to their own block now retain the current frame,
 eligible GPR pins and cached vectors in MT mode. The back-edge uses an immutable
 guard and an atomic cell pointing to this translation's body, bypassing prologue
-reloads. It checks the callback stop PC and the existing 256-edge execution
-lease; expiry or revocation commits carried state and returns to dispatch.
+reloads. It checks the callback stop PC and the preemption epoch (it used a
+256-edge lease until 2026-10-23); expiry or revocation commits carried state and returns to dispatch.
 Range/full invalidation clears the cell. Target refresh and Tier-2 publication
 never redirect a body cell into a different translation's frame or register
 layout. Cells and retired code retain the existing lifetime policy.
@@ -2588,6 +2588,47 @@ index 73 instead of 94. Unity's il2cpp first-launch extraction built
 destinations such as `il2cpp/ets/bin/.../ystem.Drawing...`, failed, and showed
 "Not enough storage space to install required resources." in SpongeBob 5.12.0.
 
+### MT preemption epoch, forward edges and cell calls (2026-10-23)
+
+MT code paid for bounded execution with a shared read-modify-write: every chain edge, IBL probe and
+self-loop back-edge ran `sub dword [cpu+jit_chain_budget],1`, a loop-carried store-forwarding dependency, then
+loaded and tested its target cell. Measured on a clean `e7ed1b3c` build, a second (idle) vCPU made a 60M-iteration
+LCG loop 21% slower, recursive `fib(18)` 22%, a byte copy 53% and `malloc`/`free` 58%, with the same code
+generator in both modes, so the tax was MT's own.
+
+- **Epoch poll.** `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`) is advanced by a detached ticker thread every
+  1 ms once `enter_multithreaded()` runs, and by every `invalidate_dispatch_cache()`. Each dispatcher entry
+  (`run_block`, `jit_call_helper`, Tier-2 trials) calls `jit_grant_lease(cpu)`, which records the epoch in
+  `CPU::jit_epoch_seen` before native code starts. MT back-edges and IBL probes only load both values
+  (`emit_preempt_poll`: 2 loads and a `jne`, no store); a mismatch takes the existing cold exit to the dispatcher.
+  A bumped epoch also revokes in-flight loops of retired code, as the cell clear did. The thread loops, the SDL
+  thread loop and the main loop drain host and cross-thread signals on every tick, since native loops now return
+  once per tick rather than every few thousand edges. The edge budget stays for ST code and for timed Tier-2
+  sampling code, whose trial windows count dispatcher resumptions (`preempt_by_epoch()`).
+- **Forward edges.** A static edge to a higher block start cannot close a cycle, so it emits only the cell jump
+  (`mov r11, cell; jmp [r11]`). Only edges with `target_pc <= current_start_pc_` carry the sentinel compare and the
+  poll. An empty cell now holds its own cold-exit address (`MtCell::cold`), so no emptiness test is needed.
+- **Self-loops.** The MT back-edge is an immutable direct `jmp` to the body behind the poll and the sentinel
+  compare (`cmp qword [cpu+stop], imm32` for pcs below 2 GiB) instead of a cell load and `jmp rax`. When the block
+  does not read flags across iterations, the NZCV store is skipped as in ST: MT's epoch and sentinel exits resume at the
+  same head, which rewrites the flags first. This also leaves a loop head that faults with stale NZCV, exactly as the ST
+  loop already does.
+- **BL.** MT `BL` is `call [cell]` with the same setup as the ST direct call. The cell holds the callee's entry, or
+  this call site's `jit_call_helper` slow path while the callee is untranslated or retired, so invalidation cannot
+  leave a stale callee address. The callee-completion guard after the call is shared with ST.
+
+Edge cases kept: the epoch is read before native code starts, so a tick during entry is seen at the next poll; a
+fork child runs interpreter-only and needs no ticker; `BIFROST_NO_CHAIN` and `BIFROST_NO_DIRECT_CALL` keep their
+meanings. Not changed: code blocks that never reach a backward edge, IBL probe or cell call (long straight-line
+chains) are bounded by their length, as before for ST.
+
+Measured on the 5800X3D, median of five, ns per iteration, ST vs MT with an idle second vCPU (MT tax):
+`loop` 1.04 vs 1.14 (+9.6%, was +21%), `branchy` 18.50 vs 18.17 (-1.8%, was +9%), `chase` +6.6% (was +13%),
+`calls` 32.6 µs vs 34.2 µs (+5.1%, was +22%), `copy` 0.97 vs 1.11 (+14%, was +53%), `tiny` 0.69 vs 0.93 (+35%,
+was +46%), `mutex` +5.8% (was +17%), `atomic` -5.6% (was +23%), `malloc` +22% (was +58%); ST is unchanged. The
+remaining tax on `tiny` is a two-instruction loop body next to the poll, sentinel compare and jump: it is front-end
+bound and was not reduced further by dropping an instruction.
+
 ### Region publication and execution
 
 Tier-1 and block chaining are the default. Tier-2 promotion is experimental
@@ -2601,7 +2642,8 @@ instruction patches and purges the table. New MT blocks use immutable
 load/test/jump instructions and naturally aligned, lock-free atomic target
 cells. Release publication changes a cell, not an instruction displacement;
 x86-64 loads provide acquire ordering. Fall-through, taken and region-exit
-edges share the mechanism. Direct BL targets retain helper dispatch in MT
+edges share the mechanism. Direct BL targets use the same cells since
+2026-10-23 (see MT preemption epoch below); before that they kept helper dispatch in MT
 mode so invalidation cannot leave an embedded stale callee address.
 
 Eligible MT heads count entries using an atomic XADD in separate writable
@@ -2615,9 +2657,9 @@ MT regions fuse complete loop iterations. Their back-edges enter through
 revocable data cells and rerun the region prologue; loop-carried pinning and
 LICM across these iteration boundaries remain disabled. This differs from
 the single-thread region's internal loop: it gives concurrent invalidation a
-boundary without patching or reclaiming live code. A per-CPU 256-edge budget
-returns chained execution to dispatch, and callback stop sentinels also end
-chains. Both ordinary and chain-skip frame layouts are covered.
+boundary without patching or reclaiming live code. Backward edges poll the
+preemption epoch to return chained execution to dispatch (timed sampling code keeps
+a per-CPU 256-edge budget), and callback stop sentinels also end chains. Both ordinary and chain-skip frame layouts are covered.
 
 Publication advances every CPU's dispatch generation and redirects incoming
 cells to the new head. Region metadata retains all constituent guest ranges,
@@ -2635,8 +2677,7 @@ and churns data mappings. `Scripts/Testing/test_jit_mt.sh` additionally requires
 edge/region publication, verifies both opt-outs and checks chain-skip mode.
 `Scripts/Testing/test_jit_mt_publication.sh` snapshots published MT code bytes before
 eight host CPUs trigger promotion, then checks that promotion, range/full
-invalidation and retranslation preserve the snapshot. It also checks the
-execution lease. The verification gate runs the guest concurrency fixture as an independent oracle,
+invalidation and retranslation preserve the snapshot. It also checks epoch exits. The verification gate runs the guest concurrency fixture as an independent oracle,
 not shared-memory differential replay. These checks do not establish a Doom 3
 FPS improvement; measure representative gameplay separately.
 

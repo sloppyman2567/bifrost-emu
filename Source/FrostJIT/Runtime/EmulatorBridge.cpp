@@ -455,7 +455,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             int ic = 0;
             auto fn = jit->lookup_call_target(*emu, cpu->pc, ic);
             if (fn) {
-                cpu->jit_chain_budget = 256;
+                jit_grant_lease(*cpu);
                 // A cloned CPU may still carry another thread's table.
                 jit->bind_ibl(*cpu);
                 uint64_t pcbefore = cpu->pc;

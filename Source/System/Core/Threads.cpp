@@ -93,6 +93,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     uint64_t last_pc = static_cast<uint64_t>(-1);
     uint64_t same_pc_count = 0;
     uint64_t count = 0;
+    uint32_t preempt_seen = g_jit_preempt_epoch.load(std::memory_order_relaxed);
     try {
         while (cpu.running) {
             try {
@@ -176,10 +177,16 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             // Also drain per-CPU pending signals (queued by cross-thread
             // tgkill/tkill/kill) — fix for the cross-thread CPU-mutation
             // race.
+            // Native MT loops return to this loop once per preemption tick
+            // rather than every few thousand edges, so a tick drains too.
+            const bool preempt_tick = jit_preempt_tick(preempt_seen);
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);
                 emu->drain_pending_signals(cpu);
                 emu->add_guest_instructions(4096);
+            } else if (preempt_tick) {
+                emu->drain_host_signals(cpu);
+                emu->drain_pending_signals(cpu);
             }
             if ((count & 0xFFFFF) == 0) {
                 if (!emu->mem().is_mapped(cpu.pc, 4)) {
@@ -999,6 +1006,7 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
     CPU& cpu = st->cpu;
     constexpr uint64_t SENTINEL_LR = 0x1000;
     uint64_t count = 0;
+    uint32_t preempt_seen = g_jit_preempt_epoch.load(std::memory_order_relaxed);
     int32_t exit_code = 0;
     try {
         // Nested JIT call helpers and post-call exits honor this boundary,
@@ -1026,10 +1034,14 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
                 }
             }
             count++;
+            const bool preempt_tick = jit_preempt_tick(preempt_seen);
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);
                 emu->drain_pending_signals(cpu);
                 emu->add_guest_instructions(4096);
+            } else if (preempt_tick) {
+                emu->drain_host_signals(cpu);
+                emu->drain_pending_signals(cpu);
             }
             if ((count & 0xFFFFF) == 0) {
                 if (!emu->mem().is_mapped(cpu.pc, 4)) break;

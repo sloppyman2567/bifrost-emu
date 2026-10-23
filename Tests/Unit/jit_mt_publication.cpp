@@ -1,10 +1,11 @@
 // Host-side invariants that a guest result oracle cannot observe:
-// published instruction bytes remain immutable, and chains have bounded leases.
+// published instruction bytes remain immutable, and native loops leave on a preemption epoch.
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Core/Signals.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -166,7 +167,12 @@ static bool check_selfloops() {
             std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
             if (cpu.pc != stop || cpu.regs[1] != n * (n - 1) / 2 + 7 + (kind == 4 ? n : 0) ||
                 cpu.regs[2] != n || (cpu.pstate & 0xf0000000) != nzcv ||
-                (kind == 3 && (lo != double(n) || hi != 3.0 * n))) ++failures;
+                (kind == 3 && (lo != double(n) || hi != 3.0 * n))) {
+                std::fprintf(stderr, "selfloop kind %u run: pc=0x%llx x1=%llu x2=%llu flags=0x%x\n", kind,
+                             (unsigned long long)cpu.pc, (unsigned long long)cpu.regs[1],
+                             (unsigned long long)cpu.regs[2], cpu.pstate >> 28);
+                ++failures;
+            }
         };
         run(); // compile before the instruction-byte snapshot
         const size_t prefix = j->code_buf_used();
@@ -180,35 +186,68 @@ static bool check_selfloops() {
         start.store(true, std::memory_order_release);
         for (unsigned repeat = 0; repeat < 100; ++repeat) j->invalidate_range(head, 4);
         for (auto& t : workers) t.join();
-        if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
+        if (std::memcmp(before.data(), j->code_buf(), prefix)) { std::fprintf(stderr, "selfloop kind %u: published bytes changed\n", kind); ++failures; }
         // Expiry and callback sentinels must commit all carried state,
         // including the final comparison flags and dirty vector accumulators.
+        // 0: fresh lease, runs to the end. 1: stale epoch, leaves at the first
+        // back-edge. 2: callback sentinel at the head. 3: a ticker advances the
+        // epoch while the loop runs, so it leaves at an arbitrary iteration.
         auto fn = j->lookup_or_translate(*e, head);
-        for (unsigned boundary = 0; boundary < 3; ++boundary) {
+        const uint64_t total = kind == 2 ? 256 : 5000;
+        unsigned mid_loop_exits = 0;
+        for (unsigned boundary = 0; boundary < 4 + 200; ++boundary) {
             CPU cpu; initialize(cpu);
-            cpu.jit_chain_budget = boundary == 0 ? 256 : boundary == 1 ? 0 : 256;
-            if (boundary == 2) cpu.jit_stop_pc = head;
+            jit_grant_lease(cpu);
+            const unsigned mode = boundary < 3 ? boundary : 3;
+            if (mode == 1) cpu.jit_epoch_seen = g_jit_preempt_epoch.load() - 1;
+            if (mode == 2) cpu.jit_stop_pc = head;
+            std::atomic<bool> done{false};
+            std::thread ticker;
+            if (mode == 3) ticker = std::thread([&] {
+                while (!done.load(std::memory_order_relaxed)) {
+                    g_jit_preempt_epoch.fetch_add(1, std::memory_order_release);
+                    std::this_thread::yield();
+                }
+            });
             cpu.pc = fn(&cpu, e.get());
+            done.store(true, std::memory_order_relaxed);
+            if (ticker.joinable()) ticker.join();
             const uint64_t n = cpu.regs[2];
+            const bool finished = n == total;
+            if (!finished) ++mid_loop_exits;
             // Kind 4's loop head reads the carried C and must see it committed. Kind 0's head
             // (ADD, ADD, SUBS) overwrites all four flags before anything can read them, so its
             // back-edge exits skip the store and leave the entry flags in place.
-            const uint32_t nzcv = kind == 4 ? 0x20000000 : 0xa0000000;
-            const uint64_t next_pc = kind == 2 && n == 256 ? head + 16 : head;
+            const uint32_t nzcv = finished ? (kind == 0 || kind == 4 ? 0x60000000 : 0xa0000000)
+                                           : (kind == 4 ? 0x20000000 : 0xa0000000);
+            // A finished loop leaves through its exit edge, a forward edge that carries no poll:
+            // the chain ends at the return block or runs on through it to the host stop.
+            const bool pc_ok = finished ? cpu.pc == stop || cpu.pc == head + 16 : cpu.pc == head;
             double lo, hi;
             std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
-            if (!n || n > 256 || (boundary && n != 1) || cpu.pc != next_pc ||
+            if (!n || n > total || (mode == 0 && !finished) || ((mode == 1 || mode == 2) && n != 1) ||
+                !pc_ok ||
                 cpu.regs[1] != n * (n - 1) / 2 + 7 + (kind == 4 ? n : 0) ||
                 cpu.regs[0] != (kind == 2 ? n : 5000 - n) ||
                 (cpu.pstate & 0xf0000000) != nzcv ||
-                (kind == 3 && (lo != double(n) || hi != 3.0 * n))) ++failures;
+                (kind == 3 && (lo != double(n) || hi != 3.0 * n))) {
+                std::fprintf(stderr, "selfloop kind %u mode %u: n=%llu pc=0x%llx flags=0x%x\n", kind, mode,
+                             (unsigned long long)n, (unsigned long long)cpu.pc, cpu.pstate >> 28);
+                ++failures;
+            }
         }
+        // The loops need no lease to terminate and the ticker must be able to interrupt them.
+        if (!mid_loop_exits) { std::fprintf(stderr, "selfloop kind %u: no epoch exit observed\n", kind); ++failures; }
+        // A thread already inside the loop holds a lease from before the invalidation. Retiring
+        // the code advances the epoch, and retranslation must not revive the retired body.
+        CPU retired; initialize(retired); jit_grant_lease(retired);
         j->invalidate_range(head, 4);
-        // Retranslation must not revive a retired loop's body cell.
         j->lookup_or_translate(*e, head);
-        CPU retired; initialize(retired); retired.jit_chain_budget = 256;
         retired.pc = fn(&retired, e.get());
-        if (retired.pc != head || retired.regs[2] != 1) ++failures;
+        if (retired.pc != head || retired.regs[2] != 1) {
+            std::fprintf(stderr, "selfloop kind %u retired: pc=0x%llx n=%llu\n", kind, (unsigned long long)retired.pc, (unsigned long long)retired.regs[2]);
+            ++failures;
+        }
         // A synchronized code rewrite must execute the new arithmetic,
         // rather than reconnecting a body edge to retired instructions.
         const uint32_t add_three = 0x91000c21;
@@ -226,6 +265,37 @@ static bool check_selfloops() {
         }
     }
     std::puts("jit_mt_publication: self-loop arithmetic, flags, vectors and revocation PASS");
+    return true;
+}
+// A static edge to a higher block start cannot recur, so it carries no poll: with a stale epoch, a
+// chain of forward branches still runs end to end.
+static bool check_forward_chains() {
+    auto e = std::make_unique<Emulator>();
+    constexpr uint64_t base = 0x50000, stop = 0x60000;
+    constexpr unsigned blocks = 300;
+    e->mem().map_range(base, 8192);
+    e->mem().mprotect_guest(base, 8192, 7);
+    std::vector<uint32_t> code;
+    for (unsigned i = 0; i < blocks; ++i) { code.push_back(0x91000400); code.push_back(0x14000001); } // add x0,x0,#1; b .+4
+    code.push_back(0xd65f03c0);                                                                       // ret
+    e->mem().write(base, code.data(), code.size() * 4);
+    e->enable_jit();
+    auto* j = e->jit();
+    j->enter_multithreaded();
+    for (unsigned pass = 0; pass < blocks + 4; ++pass) {  // translate and link one more block per pass
+        CPU cpu; cpu.pc = base; cpu.regs[30] = stop; cpu.jit_stop_pc = stop;
+        for (unsigned steps = 0; cpu.pc != stop && steps < 10000; ++steps) cpu.pc = j->run_block(cpu, *e);
+    }
+    auto fn = j->lookup_or_translate(*e, base);
+    CPU cpu; cpu.pc = base; cpu.regs[30] = stop; cpu.jit_stop_pc = stop;
+    cpu.jit_epoch_seen = g_jit_preempt_epoch.load() - 1;
+    cpu.pc = fn(&cpu, e.get());
+    if (cpu.regs[0] != blocks) {
+        std::fprintf(stderr, "forward chain: %llu of %u blocks ran with a stale epoch\n",
+                     (unsigned long long)cpu.regs[0], blocks);
+        return false;
+    }
+    std::puts("jit_mt_publication: forward edges chain without a poll PASS");
     return true;
 }
 int main() {
@@ -264,14 +334,20 @@ int main() {
     run();
     if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
     CPU bounded;
-    bounded.pc = entry; bounded.regs[0] = 1000000000;
+    bounded.pc = entry; bounded.regs[0] = 1000000000000ull;
     bounded.regs[30] = stop; bounded.jit_stop_pc = stop;
+    const auto started = std::chrono::steady_clock::now();
     bounded.pc = j->run_block(bounded, *e);
-    if (!bounded.regs[2] || bounded.regs[2] > 1024 || bounded.pc == stop) ++failures;
+    // Nothing decrements a lease: the ticker's epoch is what returns this loop to the dispatcher.
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    if (!bounded.regs[2] || bounded.pc == stop || ms > 500) {
+        std::fprintf(stderr, "bounded run: %llu iterations, %lld ms\n", (unsigned long long)bounded.regs[2], (long long)ms);
+        ++failures;
+    }
     j->invalidate_all();
     if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
     if (!check_signal_return(false) || !check_signal_return(true) || !check_selfloops() ||
-        !check_entry_order_loops(false) || !check_entry_order_loops(true)) return 1;
-    std::puts("jit_mt_publication: immutable bytes and bounded leases PASS");
+        !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) return 1;
+    std::puts("jit_mt_publication: immutable bytes and epoch exits PASS");
 }

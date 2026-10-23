@@ -68,7 +68,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     cpu.jit_tier2_trial_work = cpu.jit_tier2_trial_hash = 0;
     const uint64_t start = thread_cpu_ns();
     for (unsigned dispatches = 0; dispatches < 2048; ++dispatches) {
-        cpu.jit_chain_budget = 256;
+        jit_grant_lease(cpu);
         fn(&cpu, &emu);
         if (!cpu.jit_tier2_trial_remaining || !cpu.running ||
             !monitor->enabled.load(std::memory_order_acquire) || trial.decision.load(std::memory_order_acquire) || cpu.pc < trial.lo || cpu.pc >= trial.hi || cpu.pc == cpu.jit_stop_pc) break;

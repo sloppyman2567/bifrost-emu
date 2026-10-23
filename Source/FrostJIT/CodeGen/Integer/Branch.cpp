@@ -25,9 +25,10 @@
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
 namespace arm64emu {
-// Keep the current frame and cached loop state, but let MT invalidation
-// revoke the back-edge through a data cell. Flags must be committed before
-// entering this helper: its lease/sentinel checks overwrite host RFLAGS.
+// Keep the current frame and cached loop state. ST patches the slot; MT code
+// stays immutable and leaves through the preemption epoch (any invalidation
+// advances it). Flags must be committed before entering this helper: its
+// sentinel/epoch checks overwrite host RFLAGS.
 bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     static const bool no_selfloop = getenv("BIFROST_NO_SELFLOOP") != nullptr;
     if (target_pc != current_start_pc_ || no_selfloop ||
@@ -54,30 +55,62 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // its old mapping before the guard and writing the next PC on cold exit.
     clobber_host_reg(RAX);
     selfloop_patch_off_ = code_buf_used_;
-    MtEdge* edge = create_chain_edge(target_pc, false, selfloop_patch_off_);
-    edge->internal_loop = true;
-    edge->target.store(reinterpret_cast<uint64_t>(code_buf_ + block_body_start_off_),
-                       std::memory_order_relaxed);
-    mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
-    emit_mov_imm_to_rax(target_pc);
-    // cmp rax,[rbx+jit_stop_pc]; je cold exit
-    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
-    emit_u32(offsetof(CPU, jit_stop_pc));
-    size_t stop = emit_jcc_rel32_placeholder(0x4);
-    // Same 256-edge lease as ordinary MT chains (zero also expires).
-    emit_byte(0x83); emit_byte(0xAB);
-    emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
-    size_t budget = emit_jcc_rel32_placeholder(0x6);
-    emit_mov_imm_to_rax(reinterpret_cast<uint64_t>(&edge->target));
-    emit_load(RAX, RAX, 0);
-    emit_test_reg(RAX, RAX);
-    size_t empty = emit_jcc_rel32_placeholder(0x4);
-    // Only reconcile the loop layout after every revocation/lease check.
-    // A cold exit below still observes the original branch-point layout.
+    if (!preempt_by_epoch()) {
+        // Timed Tier-2 trials keep the bounded edge budget: a window counts
+        // dispatcher resumptions, so its loops must expire on a short count.
+        MtEdge* edge = create_chain_edge(target_pc, false, selfloop_patch_off_);
+        edge->internal_loop = true;
+        edge->target.store(reinterpret_cast<uint64_t>(code_buf_ + block_body_start_off_),
+                           std::memory_order_relaxed);
+        mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
+        emit_mov_imm_to_rax(target_pc);
+        // cmp rax,[rbx+jit_stop_pc]; je cold exit
+        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
+        emit_u32(offsetof(CPU, jit_stop_pc));
+        size_t stop = emit_jcc_rel32_placeholder(0x4);
+        // Same 256-edge lease as ordinary ST chains (zero also expires).
+        emit_byte(0x83); emit_byte(0xAB);
+        emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
+        size_t budget = emit_jcc_rel32_placeholder(0x6);
+        emit_mov_imm_to_rax(reinterpret_cast<uint64_t>(&edge->target));
+        emit_load(RAX, RAX, 0);
+        emit_test_reg(RAX, RAX);
+        size_t empty = emit_jcc_rel32_placeholder(0x4);
+        // Only reconcile the loop layout after every revocation/lease check.
+        // A cold exit below still observes the original branch-point layout.
+        vec_writeback_dynamic();
+        emit_byte(0xFF); emit_byte(0xE0); // jmp rax (body entry, same frame)
+        for (size_t p : {stop, budget, empty})
+            patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+        // The caller emits the taken cold exit, committing GPRs and vectors.
+        return true;
+    }
+    // Published MT code is immutable, so the body is a direct jump. It leaves
+    // on the callback sentinel or when the preemption epoch moves (a tick or
+    // any invalidation); both checks only read. The epoch exit rebuilds RAX
+    // for the caller's cold exit out of line.
+    size_t expired = emit_preempt_poll(CPU_REG, RAX);
+    size_t stop;
+    if (target_pc <= INT32_MAX) {
+        // cmp qword [rbx+jit_stop_pc],imm32; je cold exit
+        emit_byte(0x48); emit_byte(0x81); emit_byte(0xBB);
+        emit_u32(offsetof(CPU, jit_stop_pc));
+        emit_u32(static_cast<uint32_t>(target_pc));
+    } else {
+        emit_mov_imm_to_rax(target_pc);
+        // cmp rax,[rbx+jit_stop_pc]
+        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
+        emit_u32(offsetof(CPU, jit_stop_pc));
+    }
+    stop = emit_jcc_rel32_placeholder(0x4);
+    // Reconcile the loop layout only after every exit check: a cold exit
+    // below still observes the original branch-point layout.
     vec_writeback_dynamic();
-    emit_byte(0xFF); emit_byte(0xE0); // jmp rax (body entry, same frame)
-    for (size_t p : {stop, budget, empty})
+    emit_byte(0xE9);
+    emit_u32(static_cast<uint32_t>(static_cast<int32_t>(block_body_start_off_ - (code_buf_used_ + 4))));
+    for (size_t p : {expired, stop})
         patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    emit_mov_imm_to_rax(target_pc);
     // The caller emits the taken cold exit, committing GPRs and vectors.
     return true;
 }
@@ -435,9 +468,11 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // (flags_loop_carried_, precomputed in translate_block): the
             // next iteration's first flag-setting op re-establishes host
             // flags before any consumer, so the pstate store is dead work
-            // every iteration (~60 bytes of pushfq/bit-extract/store).
+            // every iteration (~60 bytes of pushfq/bit-extract/store). MT
+            // code shares this: its epoch/sentinel exits resume at the same
+            // head, which rewrites the flags before reading them.
             bool skip_taken_materialize =
-                is_selfloop && !no_selfloop_ && !flags_loop_carried_ && !mt_active();
+                is_selfloop && !no_selfloop_ && !flags_loop_carried_;
             // Otherwise the taken target may itself overwrite the flags first.
             if (!skip_taken_materialize && (clean || exit_flags_dead(bp.target)))
                 skip_taken_materialize = true;

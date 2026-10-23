@@ -36,7 +36,7 @@ static bool check_region_invariant(bool mt) {
         CPU c; c.pc=head; c.regs[0]=count; c.regs[15]=5;
         unsigned entries=0;
         while (c.pc==head && ++entries<=count+1) {
-            c.jit_chain_budget=256; c.pc=fn(&c,e.get());
+            jit_grant_lease(c); c.pc=fn(&c,e.get());
         }
         if (c.pc!=head+code.size()*4 || c.regs[15]!=5) return false;
         for (unsigned a=1;a<=12;++a)
@@ -95,7 +95,7 @@ static bool check_region_vectors(bool mt, bool benchmark) {
             unsigned entries=0;
             FrostJIT::FaultScope scope(j);
             while (actual.pc==head && ++entries<=count+2) {
-                actual.jit_chain_budget=256;
+                jit_grant_lease(actual);
                 actual.pc=fn(&actual,e.get());
             }
             while (reference.pc!=exit) e->step(reference);
@@ -113,7 +113,7 @@ static bool check_region_vectors(bool mt, bool benchmark) {
             c.v_hi[0]=0;
             const auto begin=std::chrono::steady_clock::now();
             FrostJIT::FaultScope scope(j);
-            while (c.pc==head) { c.jit_chain_budget=256; c.pc=fn(&c,e.get()); }
+            while (c.pc==head) { jit_grant_lease(c); c.pc=fn(&c,e.get()); }
             const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
             uint64_t lo=0,hi=0;
             if (arithmetic==0x4e61d400u || arithmetic==0x1e612800u) {
@@ -150,7 +150,7 @@ static bool check_region_vectors(bool mt, bool benchmark) {
             FrostJIT::FaultScope scope(j);
             unsigned entries=0;
             while (c.running && c.pc==head && ++entries<4) {
-                c.jit_chain_budget=256; c.pc=fn(&c,e.get());
+                jit_grant_lease(c); c.pc=fn(&c,e.get());
             }
         }
         if (c.running || c.exit_code!=139 || c.v_lo[0]!=reference.v_lo[0] ||
@@ -198,7 +198,7 @@ static bool check_region_native_simd(bool mt) {
             unsigned entries=0;
             FrostJIT::FaultScope scope(j);
             while (actual.pc==head && ++entries<=n+2) {
-                actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+                jit_grant_lease(actual); actual.pc=fn(&actual,e.get());
             }
             while (reference.pc!=exit) e->step(reference);
             if (actual.pc!=exit || actual.regs[0]!=reference.regs[0] ||
@@ -270,7 +270,7 @@ static bool check_tier1_vector_allocation(bool mt) {
                 FrostJIT::FaultScope scope(j);
                 unsigned entries=0;
                 while (actual.running && actual.pc==head && ++entries<=count+2) {
-                    actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+                    jit_grant_lease(actual); actual.pc=fn(&actual,e.get());
                 }
             }
             if ((fault ? actual.running || actual.exit_code!=139 : actual.pc!=stop) ||
@@ -381,7 +381,7 @@ static bool check_demand_entry_carry(bool mt) {
             while (reference.pc!=end) e->step(reference);
             unsigned entries=0;
             while (actual.pc==head && ++entries<=count+2) {
-                actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+                jit_grant_lease(actual); actual.pc=fn(&actual,e.get());
             }
             if (actual.pc!=end || actual.regs[0]!=reference.regs[0] ||
                 std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
@@ -476,7 +476,7 @@ static bool check_cached_integer_simd(bool mt) {
                 FrostJIT::FaultScope scope(j);
                 unsigned entries=0;
                 while (actual.pc!=stop && ++entries<=count+1) {
-                    actual.jit_chain_budget=256; actual.pc=fn(&actual,e.get());
+                    jit_grant_lease(actual); actual.pc=fn(&actual,e.get());
                 }
             }
             if (actual.pc!=stop || actual.regs[0]!=reference.regs[0] ||
@@ -554,7 +554,7 @@ static bool check_region_fp_memory(bool mt) {
     CPU c; c.pc=head; c.regs[0]=10; c.regs[2]=3; c.regs[3]=data; c.v_lo[1]=UINT64_C(0x3ff0000000000000);
     FrostJIT::FaultScope scope(j);
     unsigned entries=0;
-    while (c.pc==head && ++entries<8) { c.jit_chain_budget=256; c.pc=fn(&c,e.get()); }
+    while (c.pc==head && ++entries<8) { jit_grant_lease(c); c.pc=fn(&c,e.get()); }
     uint64_t stored=0; e->mem().read(data,&stored,sizeof(stored));
     if (c.pc!=exit || c.regs[0]!=13 || c.regs[2] || stored!=UINT64_C(0x4008000000000000)) {
         std::fprintf(stderr,"FP/GPR namespace collision: stored=%llx counter=%llu\n",

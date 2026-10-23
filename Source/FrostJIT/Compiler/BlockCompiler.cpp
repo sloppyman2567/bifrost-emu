@@ -1310,8 +1310,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     if (has_selfloop_slot_) {
         entry.has_selfloop_slot = true;
         entry.selfloop_patch_off = selfloop_patch_off_;
-        // MT body edges were emitted with a revocable data cell. Never
-        // patch their instructions or redirect them to a different prologue.
+        // MT body edges were emitted immutable (an epoch-polled jump, or a
+        // data cell in timed sampling code). Never patch their instructions
+        // or redirect them to a different prologue.
         if (!mt_active()) {
             // Patch the selfloop slot: `jmp rel32` → block body start, or the
             // reconcile stub that precedes it when the loop layout needs one.

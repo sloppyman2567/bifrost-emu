@@ -1068,7 +1068,11 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             // so we can't save RAX across the call. The return value
             // (next PC) will be in RAX after the call — we must NOT
             // overwrite it with a pop.
-            if (direct_call_enabled() && !mt_active()) {
+            // MT code keeps the callee in a revocable data cell (an empty cell
+            // reads as this site's slow path), so no stale address is embedded.
+            // Timed sampling code stays on the helper: its cells are private.
+            const bool mt_cell_call = mt_active() && !tier2_sampling_compile_;
+            if (direct_call_enabled() && (!mt_active() || mt_cell_call)) {
                 // ── Direct BL call ─────────────────────────────────
                 // Emit a patchable `call rel32` slot instead of routing
                 // through jit_call_helper → lookup_call_target. Once the
@@ -1086,7 +1090,15 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 emit_push(WIN_REG);
                 emit_sub_rsp_imm8(8);
                 emit_pushfq();
-                size_t call_slot = emit_call_rel32_placeholder();
+                size_t call_slot = code_buf_used_;
+                MtEdge* call_edge = nullptr;
+                if (mt_cell_call) {
+                    call_edge = create_chain_edge(bp.target, true, call_slot);
+                    emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(&call_edge->target));
+                    emit_byte(0xFF); emit_byte(0x10);  // call qword [rax]
+                } else {
+                    call_slot = emit_call_rel32_placeholder();
+                }
                 // resume (reached by the direct call's `ret` AND by
                 // slow_path's `ret`): restore the aligned frame.
                 emit_popfq();
@@ -1109,15 +1121,21 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 // Slot initially targets slow_path; override to the block fn
                 // when already translated, else record for later patching
                 // (end of the target's translate_block).
-                patch_call_rel32(call_slot, code_buf_ + slow_off);
-                direct_call_sites_[bp.target].emplace_back(call_slot, slow_off);
-                call_site_end_ = std::max(call_site_end_, call_slot + 1);
                 uint64_t (*tfn)(CPU*, Emulator*) = lookup_only_locked(bp.target);
-                if (tfn) {
-                    patch_call_rel32(call_slot, reinterpret_cast<const uint8_t*>(tfn));
+                if (call_edge) {
+                    call_edge->target.cold = reinterpret_cast<uint64_t>(code_buf_ + slow_off);
+                    call_edge->target.word.store(call_edge->target.cold, std::memory_order_relaxed);
+                    if (tfn) call_edge->target.store(reinterpret_cast<uint64_t>(tfn), std::memory_order_relaxed);
                 } else {
-                    if (pending_call_sites_.size() > 1000000) pending_call_sites_.clear();
-                    pending_call_sites_[bp.target].push_back(call_slot);
+                    patch_call_rel32(call_slot, code_buf_ + slow_off);
+                    direct_call_sites_[bp.target].emplace_back(call_slot, slow_off);
+                    call_site_end_ = std::max(call_site_end_, call_slot + 1);
+                    if (tfn) {
+                        patch_call_rel32(call_slot, reinterpret_cast<const uint8_t*>(tfn));
+                    } else {
+                        if (pending_call_sites_.size() > 1000000) pending_call_sites_.clear();
+                        pending_call_sites_[bp.target].push_back(call_slot);
+                    }
                 }
             } else {
                 // Original path: call jit_call_helper (target not yet

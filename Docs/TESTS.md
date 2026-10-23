@@ -30,6 +30,40 @@ menu arrows) will differ from Fusion's.
 cd Scripts/Android && QT_QPA_PLATFORM=offscreen python3 test_android_package.py LauncherLibraryTests
 ```
 
+## MT preemption epoch, forward edges and cell calls (2026-10-23)
+
+Tested on a Ryzen 7 5800X3D at `f5b67318` plus the working tree; no game was run. Overhead numbers are from
+`mtbench` (a throwaway guest fixture of eleven kernels kept outside the repository), median of five, ST vs the same
+kernel with an idle second vCPU, against a clean `e7ed1b3c` build; they are in [JIT.md](JIT.md#mt-preemption-epoch-forward-edges-and-cell-calls-2026-10-23).
+
+Passed: `test_jit_mt` (all five modes), `test_jit_mt_publication` (default and `BIFROST_NO_CHAIN_SKIP=1`),
+`test_jit_tier2_discovery/feedback/measure/mutex` (20 promotion-stress runs), `test_jit_cache`,
+`run_tests.sh --unit --toybox --strict` with the full SDL/GL build (172 of 172) and with `--no-jit` (164 passed, 8
+JIT-only skipped), `make generated-check`, the headless build and `check_headless_headers.sh`. `make verify` runs
+108 sections; its only failure is the known `jit_bfm_extract` limit (see below).
+
+`jit_mt_publication` changed with the contract. The self-loop fixture now covers four ways out of five loop shapes:
+a fresh lease running to completion, a stale epoch (exit at the first back-edge), the callback sentinel, and a thread
+advancing the epoch during the run (200 runs per shape, leaving at arbitrary iterations); all four check registers,
+flags and vector accumulators at the exit, and the last requires at least one mid-loop exit. The retired-loop check
+now grants the lease before the invalidation, which is what an in-flight CPU holds. The bounded-run check expects
+a 10^12-iteration loop to return within 500 ms. `check_forward_chains()` is new: a chain of forward branches runs
+end to end under a stale epoch (it fails at `f5b67318`, where every edge consumed the lease).
+
+Mutation checks: making `emit_preempt_poll` never fire (`jo` instead of `jne`) hangs the bounded-run check until the
+30 s kill, so `test_jit_mt_publication.sh` fails. Two guest fixtures (kept outside the repository) show a thread spinning in a
+tight native loop receives a cross-thread `pthread_kill` in about 1.4 ms (the clean build takes 1.3 to 2.4 ms) and a
+`fork` child exits on a signal; the fork case does not exercise the ticker, because the child is interpreter-only.
+
+Not covered: Tier-2 sampling trials with epoch-polled loops (sampling code keeps the budget by design); a callee
+invalidated while `call [cell]` is in flight beyond what the guest concurrency oracle (`jit_mt_tier2`) and
+`test_long_call_loop` (60 million calls on two CPUs) do; the stale-NZCV-at-a-faulting-loop-head case for MT (it matches ST,
+and no fixture reads flags in a handler there); hosts other than this one; and any application workload. The generated
+instruction encodings were decoded with `objdump`, not compared against an assembler.
+
+Also fixed: the `simd_minmax` and `simd_pixel` rows took 14 s and 20 s under `--no-jit` against limits of 5 s and
+10 s (added at `b0e4b1b8` and `f448d3a2`); the limits are 40 s and 60 s.
+
 ## Pixel and media vector forms, self-loop reconcile (2026-10-23)
 
 Tested on a Ryzen 7 5800X3D (SSE4.2, AVX2, FMA3) at `e7ed1b3c` plus the working tree; no game was run.

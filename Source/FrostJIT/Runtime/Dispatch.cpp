@@ -48,7 +48,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (debug_step) { emu.step(cpu); return cpu.pc; }
     FaultScope fault_scope(this);
     cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
-    cpu.jit_chain_budget = 256;
+    jit_grant_lease(cpu);
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
     // every slow-path cache hit was a full environ scan per dispatch.
