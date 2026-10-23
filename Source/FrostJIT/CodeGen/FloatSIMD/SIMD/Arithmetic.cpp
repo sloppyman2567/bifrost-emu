@@ -158,6 +158,7 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
             //   pminub/pmaxub (size=1) = DA/DE
             //   pminsw/pmaxsw (size=2, signed) = EA/EE
             //   pminud/pmaxud (size=4, SSE4.1) = 38 3B / 38 3F
+            //   pminuw/pmaxuw (size=2, SSE4.1) = 38 3A / 38 3E
             // For signed min/max on size=1, we can use pminsb/pmaxsb (SSE4.1=38 38/3C)
             // For simplicity, only support the SSE2 ones natively; fall back otherwise.
             uint8_t op_byte = 0;
@@ -191,10 +192,12 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
             } else if (opc == 3 || opc == 4) {  // unsigned min/max
                 if (esize == 1) {
                     op_byte = (opc == 3) ? 0xDA : 0xDE;  // pminub/pmaxub
-                } else if (esize == 4 && has_sse41()) {
+                } else if ((esize == 2 || esize == 4) && has_sse41()) {
+                    // pminuw = 66 0F 38 3A ; pmaxuw = 66 0F 38 3E (SSE4.1)
                     // pminud = 66 0F 38 3B ; pmaxud = 66 0F 38 3F (SSE4.1)
                     needs_38_prefix = true;
-                    op_byte = (opc == 3) ? 0x3B : 0x3F;
+                    if (esize == 2) op_byte = (opc == 3) ? 0x3A : 0x3E;
+                    else            op_byte = (opc == 3) ? 0x3B : 0x3F;
                 } else {
                     supported = false;
                 }

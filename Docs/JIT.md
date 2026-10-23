@@ -15,6 +15,24 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Unsigned halfword min/max are native (2026-10-23)
+
+`UMAX`/`UMIN` with 16-bit lanes (`.4h`, `.8h`) took `emit_call_interp` while the byte and
+word forms were native: `SIMD_ARITH` had no halfword unsigned min/max. It now emits
+`pminuw`/`pmaxuw` (66 0F 38 3A / 3E, SSE4.1), the same host-feature gate as the word forms
+(`pminud`/`pmaxud`); a host without SSE4.1 still takes the interpreter step. Unsigned
+halfword clamps are common in 16-bit pixel and audio code, and one interpreted step
+costs about 130 ns here, which also forces the whole block out of the vector cache.
+
+A pixel-style loop with four interpreted vector ops (`umax`, `umin`, `urshr`, `srshr`, all
+`.8h`, 2.6 million iterations each) took 1.38 s; with the two min/max forms native it takes
+0.64 s (three runs each, 0.07 s without the vector ops; the interpreted inventory from
+`BIFROST_FALLBACK_PROFILE` no longer lists them). `Tests/Unit/jit_simd_minmax.c`
+checks UMAX/UMIN/SMAX/SMIN for every lane size and both widths, with Rd distinct from,
+equal to Rn and equal to Rm, against a lane model written from the Arm ARM pseudocode
+(432,000 checks; edge values plus random lanes, Q=0 results must clear the upper half).
+The model passes under QEMU, the interpreter and the JIT, and under `BIFROST_JIT_VERIFY=1`.
+
 ## Bitfield moves use immediate shifts and the allocator's register (2026-10-21)
 
 `UBFM`/`SBFM` (ubfx, sbfx, ubfiz, sbfiz, lsl, lsr, asr, uxt*, sxt*) were emitted

@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Native unsigned halfword min/max (2026-10-23)
+
+- `UMAX`/`UMIN` `.4h`/`.8h` were interpreted one instruction at a time (about 130 ns each, and the
+  block could not use the vector cache). They now compile to `pminuw`/`pmaxuw` on SSE4.1 hosts.
+  Found by profiling the English Umamusume client and confirmed with a pixel-loop fixture
+  (1.38 s to 0.64 s with two of its four interpreted ops removed). New regression:
+  `Tests/Unit/jit_simd_minmax.c`.
+
 ### Crash reports name the library (2026-10-21)
 
 - With `--debug fault` (`BIFROST_FAULT_TRACE`), a guest fault now also prints the mapping, file and
