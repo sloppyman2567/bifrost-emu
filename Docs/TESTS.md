@@ -25,8 +25,13 @@ permission and stop-token behavior were reviewed against Android 15's
 [ActiveServices](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/ActiveServices.java).
 This gate does not validate a real isolated-process lifecycle, sticky restarts,
 the complete Android background-execution policy, or Google integrity verdicts.
-The original Phonesky-to-DroidGuard failure was observed in Japanese Uma's log;
-the target game's request has not yet been rerun with this change.
+An approved Japanese Uma restart also verified the target path: Phonesky reports
+`bindService=true` and receives DroidGuard's `onServiceConnected`; the missing
+process-supervisor exception no longer occurs. Session
+`f760d4d8368c4f73b6f432e6e0328685` subsequently fails in DroidGuard's dynamic
+class loader because ART rejects its writable cached `the.apk`. microG's fallback
+throws `NotImplementedError`, and Phonesky reports `DroidGuard failed`. This is a
+separate code-loading failure, not a device-integrity verdict or gameplay success.
 
 ## Guest ptrace (2026-10-22)
 
