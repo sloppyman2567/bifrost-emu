@@ -33,6 +33,32 @@ See [current support](../SUPPORT.md#android-scope-and-v20-plans),
 [host media](#host-media-decoding-2026-10-14) and the
 [roadmap](../roadmap.md) for the latest scope and remaining work.
 
+### Per-process compatibility defaults (2026-10-23)
+
+`FrameworkCompatibility` initializes ART's target SDK and disabled compatibility
+changes, installs `AppCompatCallbacks`, then runs libcore's application
+specialization hook before Application creation. Main apps and service children
+use their own `ApplicationInfo`, including provisioned system packages; a child
+does not inherit the session game's target SDK. Defaults come from the verified
+runtime's partition and APEX `etc/compatconfig/*.xml` files, with
+`enableSinceTargetSdk`, `enableAfterTargetSdk` and disabled-by-default rules.
+Unknown changes retain Android's enabled default. This implements the metadata
+available in the provisioned image (currently the ART/libcore inventory), not
+system_server's per-package developer overrides or the complete platform change
+catalogue. An empty metadata inventory or conflicting entries fails initialization
+explicitly.
+
+This fixes microG API-29 processes incorrectly receiving
+`ENFORCE_READ_ONLY_JAVA_DCL` (218865702), enabled only for API 34+ targets.
+The launcher previously left Android's default compatibility delegate installed,
+which enabled every queried change. Cached file permissions are untouched and
+API 34+ processes still reject writable dynamic DEX. The contract follows
+[ActivityThread](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/app/ActivityThread.java),
+[RuntimeInit](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/com/android/internal/os/RuntimeInit.java),
+[CompatChange](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/compat/CompatChange.java)
+and the image's compatibility metadata. This does not supply hardware
+attestation or a Google integrity verdict.
+
 ### Ad SDK framework gaps (2026-10-17)
 
 Hungry Shark World's rewarded videos failed with "No advert is available":

@@ -31,6 +31,7 @@ from android_processes import ProcessHost
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_DIR = ROOT / "Guest/Android/Managed"
 LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/FrameworkServices.java",
+                    "Framework/FrameworkCompatibility.java",
                     "Framework/FrameworkPackages.java", "Framework/FrameworkConnectivity.java",
                     "Framework/FrameworkServiceRuntime.java", "Framework/FrameworkTrace.java",
                     "Framework/FrameworkDisplay.java", "Framework/FrameworkInputMethod.java",

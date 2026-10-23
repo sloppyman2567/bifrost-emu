@@ -1153,6 +1153,7 @@ public final class ManagedLauncher {
     // args: --app <package> <code dir> <launcher class> [<split>=<apk>]...
     private static void bindApplicationMetadata(Object thread, Context system, ApplicationInfo app,
                                                 Object loaded) throws Exception {
+        FrameworkCompatibility.install(app);
         // handleBindApplication installs this before creating the Application.
         // setArgV0 alone names /proc but leaves Application.getProcessName()
         // null; Chromium records that Java name in its data-directory lock.

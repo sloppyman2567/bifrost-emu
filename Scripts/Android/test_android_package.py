@@ -553,6 +553,24 @@ class FrameworkDisplayContractTests(FrameworkPackageContractTests):
     marker = "FRAMEWORK_DISPLAY_CONTRACT_OK"
 
 
+class FrameworkCompatibilityTests(FrameworkPackageContractTests):
+    probe_class = "FrameworkCompatibilityProbe"
+    output_name = "android-framework-compatibility"
+    marker = "FRAMEWORK_COMPATIBILITY_OK"
+
+    def check_mode(self, mode):
+        from test_android_framework import run
+        for target in (29, 33, 34, 35):
+            with self.subTest(target=target):
+                output = ROOT / "build" / self.output_name / mode / str(target)
+                passed = run(ARGS.emu.resolve(), self.runtime, self.art, self.probe / "classes.dex",
+                             mode, output, 90, services=True, main_class=self.probe_class,
+                             probe_args=(str(target),), app_id=10000,
+                             libraries=(ROOT / "build/android-adapters/libbifrost-activity.so",))
+                self.assertTrue(passed, f"{mode} API {target} compatibility failed; see {output}")
+                self.assertIn(self.marker, (output / (mode + ".log")).read_text())
+
+
 class FrameworkServiceRoutingTests(FrameworkPackageContractTests):
     probe_class = "FrameworkServiceRoutingProbe"
     output_name = "android-service-child-routing"
@@ -571,7 +589,11 @@ class FrameworkServiceRoutingTests(FrameworkPackageContractTests):
                         "--manifest", str(manifest), "-o", str(apk), "--min-sdk-version", "26", "--target-sdk-version", "35"],
                        check=True, capture_output=True)
         with zipfile.ZipFile(apk, "a") as archive:
-            archive.write(cls.probe / "classes.dex", "classes.dex")
+            # ART maps stored DEX directly only when its ZIP data is 4-byte aligned.
+            dex = zipfile.ZipInfo("classes.dex")
+            padding = -(archive.fp.tell() + 30 + len(dex.filename) + 4) % 4
+            dex.extra = struct.pack("<HH", 0xffff, padding) + bytes(padding)
+            archive.writestr(dex, (cls.probe / "classes.dex").read_bytes())
         apk.chmod(0o444)
 
     def check_mode(self, mode):

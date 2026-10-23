@@ -4,6 +4,32 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Per-process compatibility defaults (2026-10-23)
+
+`FrameworkCompatibilityTests` runs separate real ART VMs targeting API 29, 33,
+34 and 35. Each loads a read-only DEX and attempts the same writable DEX:
+targets 29/33 allow it, while 34/35 throw `SecurityException`. The fixture
+executes a method from the loaded DEX, checks the compatibility gate's boundary
+and verifies disabled-by-default metadata. Both JIT and interpreter are tested
+without desktop windows. `FrameworkServiceRoutingTests` additionally verifies
+that normal binding installs API-29 VM and compatibility state in its parent
+and both real service children before their service callbacks run.
+All eight direct DEX cases pass. The three-process interpreter gate also passes
+with its DEX correctly aligned inside the fixture APK. Two earlier runs with
+unaligned DEX missed the existing 30-second child-bootstrap deadline while ART
+extracted code and waited for GC. The runtime deadline was not changed.
+
+```sh
+python Scripts/Android/test_android_package.py FrameworkCompatibilityTests FrameworkServiceRoutingTests
+```
+
+This exercises the pinned image's ART/libcore metadata, not every platform
+compatibility change, developer overrides, or the real DroidGuard payload.
+Japanese Uma still needs an approved restart to verify the original request.
+An initial fixture using Java NIO `Files.copy` failed with `EINVAL` before DEX
+loading; the final fixture uses stream copying. The NIO copy path remains a
+separate unaddressed failure.
+
 ## Child service routing (2026-10-23)
 
 `FrameworkServiceRoutingTests` runs `FrameworkServiceRoutingProbe` headlessly

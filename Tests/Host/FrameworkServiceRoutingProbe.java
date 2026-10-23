@@ -23,6 +23,16 @@ public final class FrameworkServiceRoutingProbe {
     private static final String NAME = "org.bifrost.routing";
     private static volatile boolean rootDestroyed;
     private static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }
+    private static void checkCompatibility() {
+        try {
+            Class<?> runtime = Class.forName("dalvik.system.VMRuntime");
+            Object vm = runtime.getMethod("getRuntime").invoke(null);
+            check(((Integer) runtime.getMethod("getTargetSdkVersion").invoke(vm)) == 29, "process target SDK was not installed");
+            boolean enforced = (Boolean) Class.forName("android.compat.Compatibility")
+                    .getMethod("isChangeEnabled", long.class).invoke(null, 218865702L);
+            check(!enforced, "legacy service process inherited modern compatibility gates");
+        } catch (Exception e) { throw new IllegalStateException(e); }
+    }
     private static Intent intent(Context context, Class<?> type) { return new Intent(context, type); }
     private static File marker(Context context) { return new File(context.getFilesDir(), "helper-destroyed"); }
     public static final class Root extends Service {
@@ -32,6 +42,7 @@ public final class FrameworkServiceRoutingProbe {
     }
     public static final class Helper extends Service {
         private boolean stopped;
+        public void onCreate() { checkCompatibility(); }
         public int onStartCommand(Intent i, int flags, int id) {
             stopped = stopSelfResult(id);
             return START_NOT_STICKY;
@@ -53,6 +64,7 @@ public final class FrameworkServiceRoutingProbe {
         private volatile boolean rootDone, helperDone, selfDone;
         private int helperPid;
         public void onCreate() {
+            checkCompatibility();
             check(System.getenv("ASGARD_PROCESS_TOKEN") == null, "child received supervisor capability");
             try {
                 ClassLoader framework = ClassLoader.getSystemClassLoader();
@@ -127,7 +139,7 @@ public final class FrameworkServiceRoutingProbe {
         PackageInfo pkg = new PackageInfo(); pkg.packageName = NAME;
         ApplicationInfo info = pkg.applicationInfo = new ApplicationInfo();
         info.packageName = info.processName = NAME; info.uid = Process.myUid();
-        info.enabled = true; info.targetSdkVersion = 35;
+        info.enabled = true; info.targetSdkVersion = 29;
         info.flags = ApplicationInfo.FLAG_HAS_CODE;
         info.sourceDir = info.publicSourceDir = "/data/app/org.bifrost.routing-fixture/base.apk";
         info.nativeLibraryDir = "/system/lib64";
@@ -146,6 +158,7 @@ public final class FrameworkServiceRoutingProbe {
         field.set(loaded, FrameworkServiceRoutingProbe.class.getClassLoader());
         Method bind = ManagedLauncher.class.getDeclaredMethod("bindApplicationMetadata", Object.class, Context.class, ApplicationInfo.class, Object.class);
         bind.setAccessible(true); bind.invoke(null, thread, system, info, loaded);
+        checkCompatibility();
         Method make = loaded.getClass().getDeclaredMethod("makeApplicationInner", boolean.class, android.app.Instrumentation.class);
         make.setAccessible(true); Context context = (Context) make.invoke(loaded, false, null);
         field = type.getDeclaredField("mInitialApplication"); field.setAccessible(true); field.set(thread, context);
