@@ -614,6 +614,107 @@ class HostNetworkTests(unittest.TestCase):
             self.assertFalse(host_network_validated())
 
 
+class DexoptCacheTests(unittest.TestCase):
+    def setUp(self):
+        import json
+        import android_managed as managed
+        self.managed = managed
+        self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-dexopt-")
+        self.work = Path(self.temporary.name)
+        self.root = self.work / "rootfs"; self.root.mkdir()
+        self.code = "/data/app/fixture"
+        directory = self.root / self.code.lstrip("/"); directory.mkdir(parents=True)
+        (directory / "base.apk").write_bytes(b"signed APK fixture")
+        self.metadata = {"package": "org.bifrost.fixture", "files": {"base.apk": managed.file_hash(directory / "base.apk")}}
+        self.runtime = {"identity": {"framework": "verified framework", "launcher": "one", "properties": {}}}
+        self.env = {"BOOTCLASSPATH": "/system/framework/framework.jar"}
+        self.write_runtime()
+        self.compiles = 0
+        def tool(root, emu, env, no_jit, binary, *args, timeout):
+            if binary.endswith("dex2oat64"):
+                self.compiles += 1
+                for name in ("base.odex", "base.vdex", "base.art"):
+                    path = root / self.code.lstrip("/") / "oat/arm64" / name
+                    path.write_bytes((name + str(self.compiles)).encode())
+            return subprocess.CompletedProcess([], 0, b"", b"")
+        self.mock = patch.object(managed, "run_guest_tool", side_effect=tool)
+        self.mock.start()
+
+    def tearDown(self):
+        self.mock.stop(); self.temporary.cleanup()
+
+    def write_runtime(self):
+        import json
+        (self.work / "runtime.json").write_text(json.dumps(self.runtime))
+
+    def compile(self):
+        self.managed.dexopt(self.work, self.root, self.metadata, self.code, Path("/unused"), self.env)
+
+    def test_unrelated_settings_hit_cache_but_compilation_inputs_invalidate(self):
+        self.compile(); self.assertEqual(self.compiles, 1)
+        self.runtime["identity"].update(launcher="two", properties={"ro.kernel.qemu": "0"},
+                                        media_mask=0, microg="new version", settings_key="other")
+        self.write_runtime()
+        prop = self.root / "debug_ramdisk/adb_debug.prop"; prop.parent.mkdir()
+        prop.write_text("ro.kernel.qemu=0\n")
+        self.compile(); self.assertEqual(self.compiles, 1)
+        prop.write_text("dalvik.vm.isa.arm64.variant=cortex-a53\n")
+        self.compile(); self.assertEqual(self.compiles, 2)
+        prop.write_text("dalvik.vm.boot-image=/system/framework/other.art\n")
+        self.compile(); self.assertEqual(self.compiles, 3)
+        self.runtime["identity"]["framework"] = "new ART and boot image"
+        self.write_runtime(); self.compile(); self.assertEqual(self.compiles, 4)
+        self.env["BOOTCLASSPATH"] += ":/system/framework/extension.jar"
+        self.compile(); self.assertEqual(self.compiles, 5)
+        self.metadata["files"]["base.apk"] = "new signed APK"
+        self.compile(); self.assertEqual(self.compiles, 6)
+        profile = self.root / "data/misc/profiles/ref/org.bifrost.fixture/primary.prof"
+        profile.parent.mkdir(parents=True); profile.write_bytes(b"reference profile")
+        self.compile(); self.assertEqual(self.compiles, 7)
+        profile.write_bytes(b"changed reference profile")
+        self.compile(); self.assertEqual(self.compiles, 8)
+
+    def test_artifacts_are_verified_and_legacy_cache_migrates_without_compiling(self):
+        import json
+        self.compile()
+        key = self.managed.read_dexopt_stamp(self.work)
+        legacy = {k: key[k] for k in ("apk", "filter", "profile", "failed")}
+        legacy["runtime"] = self.managed.file_hash(self.work / "runtime.json")
+        (self.work / "dexopt.json").write_text(json.dumps(legacy))
+        self.compile(); self.assertEqual(self.compiles, 1)
+        self.assertEqual(self.managed.read_dexopt_stamp(self.work)["schema"], 2)
+        path = self.root / self.code.lstrip("/") / "oat/arm64/base.odex"
+        path.chmod(0o644); path.write_bytes(b"tampered")
+        self.compile(); self.assertEqual(self.compiles, 2)
+        path.unlink()
+        self.compile(); self.assertEqual(self.compiles, 3)
+        legacy["runtime"] = "a different runtime"
+        (self.work / "dexopt.json").write_text(json.dumps(legacy))
+        self.compile(); self.assertEqual(self.compiles, 4)
+
+    def test_artifacts_survive_runtime_rebuild_but_not_framework_change(self):
+        self.compile()
+        fresh = self.work / "fresh"
+        shutil.copytree(self.root, fresh, ignore=shutil.ignore_patterns("oat"))
+        directory = fresh / self.code.lstrip("/"); directory.chmod(0o555)
+        identity = dict(self.runtime["identity"], launcher="new launcher", properties={"ro.kernel.qemu": "0"})
+        result = self.managed.retain_dexopt(self.work, self.root, fresh, identity, self.metadata, self.code, self.env)
+        self.assertIsNotNone(result)
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o555)
+        self.assertEqual(self.managed.dexopt_artifacts(self.root, self.code),
+                         self.managed.dexopt_artifacts(fresh, self.code))
+        identity["framework"] = "new ART"
+        self.assertIsNone(self.managed.retain_dexopt(self.work, self.root, fresh, identity, self.metadata, self.code, self.env))
+
+    def test_failed_compilation_is_retried_only_when_compilation_inputs_change(self):
+        with patch.object(self.managed, "run_guest_tool", return_value=subprocess.CompletedProcess([], 1, b"", b"failure")) as tool:
+            self.compile(); self.assertEqual(tool.call_count, 1)
+            self.runtime["identity"]["properties"] = {"ro.kernel.qemu": "0"}
+            self.write_runtime(); self.compile(); self.assertEqual(tool.call_count, 1)
+            self.env["DEX2OATBOOTCLASSPATH"] = "/new/boot.jar"
+            self.compile(); self.assertEqual(tool.call_count, 2)
+
+
 class SettingsIdentityTests(unittest.TestCase):
     def test_saved_properties_survive_reprovisioning_and_reset_to_image_defaults(self):
         import json
@@ -639,7 +740,10 @@ class SettingsIdentityTests(unittest.TestCase):
                 files[name] = managed.file_hash(path)
             (adapters / "adapters.json").write_text(json.dumps({"files": files}))
             dex.write_text("launcher version one")
-            metadata = {"package": "org.bifrost.fixture", "files": {}}
+            code = "/data/app/fixture"
+            package_dir = framework / code.lstrip("/"); package_dir.mkdir(parents=True)
+            (package_dir / "base.apk").write_text("fixture APK")
+            metadata = {"package": "org.bifrost.fixture", "files": {"base.apk": managed.file_hash(package_dir / "base.apk")}}
             def prepare():
                 return managed.prepare_root(app, metadata, "/data/app/fixture", None,
                                             framework, work / "art", adapters, dex)[0]
@@ -652,6 +756,11 @@ class SettingsIdentityTests(unittest.TestCase):
                 self.assertEqual(values(), {"ro.kernel.qemu": "0", "media.c2.hal.selection": "aidl"})
                 data = root / "data/user/0/org.bifrost.fixture/save"
                 data.write_text("saved game")
+                artifacts = root / code.lstrip("/") / "oat/arm64"; artifacts.mkdir(parents=True)
+                for name in ("base.odex", "base.vdex"): (artifacts / name).write_text(name)
+                identity = json.loads((app / "managed/runtime.json").read_text())["identity"]
+                key = managed.dexopt_key(identity, root, metadata, code, {})
+                managed.save_dexopt_stamp(app / "managed", key, root, code, False)
                 self.assertEqual(prepare(), root)  # verified cached runtime
                 dex.write_text("launcher version two")  # force runtime replacement
                 prepare()
@@ -661,6 +770,12 @@ class SettingsIdentityTests(unittest.TestCase):
                 prepare()
                 self.assertEqual(values()["ro.kernel.qemu"], "1")
                 self.assertEqual(data.read_text(), "saved game")
+                self.assertTrue((artifacts / "base.odex").is_file())
+                immutable = json.loads((app / "managed/runtime.json").read_text())["immutable"]
+                self.assertFalse(any("/oat/" in name for name in immutable))
+                with patch.object(managed, "run_guest_tool") as tool:
+                    managed.dexopt(app / "managed", root, metadata, code, Path("/unused"), {})
+                    tool.assert_not_called()
                 prop = root / "debug_ramdisk/adb_debug.prop"
                 prop.write_text(prop.read_text() + "ro.kernel.qemu=0\n")
                 with self.assertRaisesRegex(ValueError, "Modified managed runtime file"):

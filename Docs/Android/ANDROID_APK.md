@@ -326,8 +326,19 @@ launch, `dexopt` in `Scripts/Android/android_managed.py` runs the image's
 does. It merges the current profile into the reference profile and writes
 `<code>/oat/arm64/base.{odex,vdex,art}`: `speed-profile` with an app image once
 a reference profile exists, otherwise `verify` (the image's install filter
-without a profile). `managed/dexopt.json` records the inputs; unchanged inputs
-and failures are not recompiled until an input changes. A failed compile leaves
+without a profile). `managed/dexopt.json` records the compilation inputs:
+verified framework/ART image identity, APK contents and location, boot classpath,
+class-loader context, ART properties, compiler filter and reference profile.
+Launcher, microG, media routing and unrelated device-property changes (including
+`ro.kernel.qemu`) do not invalidate compiled code. Framework image changes remain
+conservative invalidations. This follows ART's dependency requirements, especially
+the boot classpath; see [ART configuration](https://source.android.com/docs/core/runtime/configure).
+
+Runtime replacement carries matching compiled artifacts forward, verifies their
+hashes, and keeps generated `oat/` files outside the immutable package inventory.
+Missing or modified artifacts trigger compilation. Older cache records migrate
+without compiling only when their original full-runtime key still matches.
+Unchanged failures are not retried until a compilation input changes. A failed compile leaves
 the app on ART's JIT. Split APK dex is not compiled. SpongeBob (68 MB of dex)
 compiles in about 15 s with `verify` and 25 s with a synthetic 5% profile.
 

@@ -947,6 +947,25 @@ finished-session clocks remain stable. Session and launcher argument tests pass
 (11 tests); no game restart or live desktop interaction was performed for this
 visibility change.
 
+ART cache scope regression (`DexoptCacheTests` and the managed-root settings
+fixture): launcher, microG, media and unrelated property changes reuse compiled
+output; APK, framework/ART image, boot classpath, ART properties, reference profile
+and filter changes invalidate it. Missing/tampered artifacts regenerate, legacy
+records migrate only with a matching original key, unchanged failed compilations
+are not repeated, and generated code survives runtime replacement without
+entering the immutable package inventory. The compiler is mocked in these
+focused tests; 18 cache, settings, launcher-argument and session tests pass.
+
+A separate temporary headless app was compiled with the real guest `dex2oat64`,
+then moved to a freshly copied framework root with a changed launcher identity,
+media mask and `ro.kernel.qemu=0`. Cache hits were checked with compiler calls
+forbidden. The real ART runtime mapped the retained `base.odex` and ran its
+Java main successfully in both JIT and interpreter modes, for both `verify` and
+`speed-profile` compilation (a generated full profile). The probe exits explicitly
+after checking ART's mapping; it does not exercise Activity shutdown or game
+playability. Uma's existing speed-profile cache also matched the migration
+criteria in a read-only check; the running game was not restarted or modified.
+
 Final broad checks: the SDL/GL build and library, separate headless build,
 `make generated-check`, and `make verify` pass (87 differential fixtures and
 seven threaded oracle runs). The strict JIT suite passes 326/326; the strict

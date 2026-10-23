@@ -676,7 +676,7 @@ def ensure_app_data(root, package):
         (root / relative / package).mkdir(parents=True, exist_ok=True)
 
 
-def image_properties(root, names):
+def image_properties(root, names, prefixes=()):
     """Read build properties with init's partition precedence (later file wins)."""
     values = {}
     for relative in ("system/build.prop", "system_ext/etc/build.prop", "vendor/default.prop",
@@ -685,7 +685,7 @@ def image_properties(root, names):
         if not path.is_file(): continue
         for line in path.read_text(errors="replace").splitlines():
             key, separator, value = line.strip().partition("=")
-            if separator and key in names: values[key] = value
+            if separator and (key in names or key.startswith(prefixes)): values[key] = value
     return values
 
 
@@ -696,6 +696,88 @@ def run_guest_tool(root, emu, guest_env, no_jit, binary, *args, timeout):
     command = [str(emu), *(["--no-jit"] if no_jit else []), "--android-runtime",
                "--rootfs", str(root), binary, *args]
     return subprocess.run(command, env=environment, capture_output=True, timeout=timeout)
+
+
+DEXOPT_PROPERTIES = {"dalvik.vm.isa.arm64.variant", "dalvik.vm.isa.arm64.features", "dalvik.vm.dex2oat-Xms",
+                     "dalvik.vm.dex2oat-Xmx", "dalvik.vm.appimageformat", "dalvik.vm.dex2oat-max-image-block-size",
+                     "dalvik.vm.dex2oat-resolve-startup-strings"}
+DEXOPT_CONTEXT = "PCL[]"
+
+
+def dexopt_key(identity, root, metadata, code, guest_env):
+    """Compilation dependencies, independently of app-runtime provisioning choices."""
+    profile = root / f"data/misc/profiles/ref/{metadata['package']}/primary.prof"
+    profiled = profile.is_file() and profile.stat().st_size > 0
+    return {"schema": 2, "framework": identity["framework"], "code": code, "context": DEXOPT_CONTEXT,
+            "apk": metadata["files"]["base.apk"], "filter": "speed-profile" if profiled else "verify",
+            "profile": file_hash(profile) if profiled else None,
+            "properties": image_properties(root, DEXOPT_PROPERTIES,
+                ("dalvik.vm.", "persist.sys.dalvik.vm.", "ro.dalvik.vm.", "ro.build.version.")),
+            "environment": {k: guest_env[k] for k in ("BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "ANDROID_ROOT",
+                            "ANDROID_DATA", "ANDROID_ART_ROOT", "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT")
+                            if k in guest_env}}
+
+
+def read_dexopt_stamp(managed):
+    try:
+        value = json.loads((managed / "dexopt.json").read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def dexopt_artifacts(root, code):
+    directory = root / code.lstrip("/") / "oat/arm64"
+    result = {}
+    for name in ("base.odex", "base.vdex", "base.art"):
+        path = directory / name
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()): return None
+        if path.is_file(): result[name] = file_hash(path)
+    return result
+
+
+def valid_dexopt(saved, key, root, code, runtime_hash):
+    if saved.get("schema") == 2:
+        matches = {k: v for k, v in saved.items() if k not in ("failed", "artifacts")} == key
+    else:
+        # Migrate only when the old, stricter runtime key still proves its inputs.
+        matches = (saved.get("runtime") == runtime_hash and
+                   all(saved.get(k) == key[k] for k in ("apk", "filter", "profile")))
+    if not matches: return False
+    if saved.get("failed"): return True
+    artifacts = dexopt_artifacts(root, code)
+    return (artifacts is not None and {"base.odex", "base.vdex"} <= artifacts.keys()
+            and (saved.get("schema") != 2 or artifacts == saved.get("artifacts")))
+
+
+def save_dexopt_stamp(managed, key, root, code, failed):
+    pending = managed / ".dexopt.json"
+    pending.write_text(json.dumps(dict(key, failed=failed,
+        artifacts={} if failed else dexopt_artifacts(root, code)), sort_keys=True) + "\n")
+    pending.replace(managed / "dexopt.json")
+
+
+def retain_dexopt(managed, old, fresh, identity, metadata, code, guest_env):
+    """Carry verified artifacts through a rebuild that did not change compiler inputs."""
+    runtime = managed / "runtime.json"
+    if not old.is_dir() or not runtime.is_file() or "base.apk" not in metadata["files"]: return None
+    previous = json.loads(runtime.read_text())["identity"]
+    old_key = dexopt_key(previous, old, metadata, code, guest_env)
+    key = dexopt_key(identity, fresh, metadata, code, guest_env)
+    saved = read_dexopt_stamp(managed)
+    if old_key != key or not valid_dexopt(saved, old_key, old, code, file_hash(runtime)): return None
+    if not saved.get("failed"):
+        directory = fresh / code.lstrip("/")
+        mode = directory.stat().st_mode
+        try:
+            directory.chmod(mode | stat.S_IWUSR)
+            target = directory / "oat/arm64"
+            target.mkdir(parents=True, exist_ok=True)
+            for name in dexopt_artifacts(old, code):
+                shutil.copy2(old / code.lstrip("/") / "oat/arm64" / name, target / name)
+        finally:
+            directory.chmod(mode)
+    return key, bool(saved.get("failed"))
 
 
 def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
@@ -728,24 +810,21 @@ def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
                   file=sys.stderr)
     profiled = profile.is_file() and profile.stat().st_size > 0
     compiler_filter = "speed-profile" if profiled else "verify"
-    stamp_path = managed / "dexopt.json"
-    stamp = {"runtime": file_hash(managed / "runtime.json"), "apk": metadata["files"]["base.apk"],
-             "filter": compiler_filter, "profile": file_hash(profile) if profiled else None}
+    runtime = managed / "runtime.json"
+    stamp = dexopt_key(json.loads(runtime.read_text())["identity"], root, metadata, code, guest_env)
     outputs = [root / oat.lstrip("/") / name for name in ("base.odex", "base.vdex", "base.art")]
-    saved = json.loads(stamp_path.read_text()) if stamp_path.is_file() else {}
+    saved = read_dexopt_stamp(managed)
     # A failure is not retried until an input changes.
-    if {k: v for k, v in saved.items() if k != "failed"} == stamp and (
-            saved.get("failed") or all(path.is_file() for path in outputs[:2])):
+    if valid_dexopt(saved, stamp, root, code, file_hash(runtime)):
+        if saved.get("schema") != 2:
+            save_dexopt_stamp(managed, stamp, root, code, bool(saved.get("failed")))
         return
-    properties = image_properties(root, {
-        "dalvik.vm.isa.arm64.variant", "dalvik.vm.isa.arm64.features", "dalvik.vm.dex2oat-Xms",
-        "dalvik.vm.dex2oat-Xmx", "dalvik.vm.appimageformat", "dalvik.vm.dex2oat-max-image-block-size",
-        "dalvik.vm.dex2oat-resolve-startup-strings"})
+    properties = stamp["properties"]
     arguments = ["--dex-file=" + apk, "--dex-location=" + apk, "--oat-file=" + oat + "/base.odex",
                  "--instruction-set=arm64",
                  "--instruction-set-variant=" + properties.get("dalvik.vm.isa.arm64.variant", "generic"),
                  "--instruction-set-features=" + properties.get("dalvik.vm.isa.arm64.features", "default"),
-                 "--compiler-filter=" + compiler_filter, "--class-loader-context=PCL[]",
+                 "--compiler-filter=" + compiler_filter, "--class-loader-context=" + stamp["context"],
                  "--compilation-reason=" + ("bg-dexopt" if profiled else "install")]
     for option in ("Xms", "Xmx"):
         if properties.get("dalvik.vm.dex2oat-" + option):
@@ -779,9 +858,7 @@ def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
             if path.exists(): path.chmod(0o444)
     finally:
         directory.chmod(mode)
-    pending = managed / ".dexopt.json"
-    pending.write_text(json.dumps(dict(stamp, failed=failed), sort_keys=True) + "\n")
-    pending.replace(stamp_path)
+    save_dexopt_stamp(managed, stamp, root, code, failed)
 
 
 def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex, media_mask=15):
@@ -867,11 +944,13 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         (fresh / "data/data").symlink_to("user/0")
         (fresh / "data/dalvik-cache/arm64").mkdir(parents=True, exist_ok=True)
         (fresh / "storage/emulated/0").mkdir(parents=True, exist_ok=True)
+        retained_dexopt = retain_dexopt(managed, root, fresh, identity, metadata, code, environment)
         import android_art
         immutable = {name: value for name, value in android_art.inventory(fresh).items()
-                     if name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/",
+                     if (name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/",
                                          "data/app/", "data/local/tmp/"))
-                     or name in ("data/system/users/0/bifrost-ssaid-key", "debug_ramdisk/adb_debug.prop")}
+                     or name in ("data/system/users/0/bifrost-ssaid-key", "debug_ramdisk/adb_debug.prop"))
+                     and not name.startswith(code.lstrip("/") + "/oat/")}
         backup = managed / "previous-rootfs"
         if backup.exists():
             raise ValueError("Interrupted managed runtime replacement; preserve previous-rootfs before retrying")
@@ -885,6 +964,8 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         pending = managed / ".runtime.json"
         pending.write_text(json.dumps({"identity": identity, "immutable": immutable}, sort_keys=True) + "\n")
         pending.replace(stamp)
+        if retained_dexopt is not None:
+            save_dexopt_stamp(managed, retained_dexopt[0], root, code, retained_dexopt[1])
         if backup.exists(): remove_runtime(backup)
     return root, environment
 
