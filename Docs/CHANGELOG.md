@@ -44,6 +44,18 @@ found these; each has a regression test.
   missing directory (`env`, `make`, `xargs`) run the wrong program, and made a non-multi-call program exec itself
   in a loop. That redirect now applies only to existing foreign ELF files and only when the running program is a
   multi-call binary (BusyBox, toybox). Android's exec branch keeps its previous checks.
+- **`posix_spawn`, `system()` and `popen()` failed for every C program.** Both libcs start the child with
+  `clone(CLONE_VM|CLONE_VFORK)`, which was refused with ENOSYS (musl's plain `vfork()` already worked, glibc's did
+  not). It now runs as a copy-on-write fork on the caller's stack. Differences from a real `vfork`, documented in
+  the code: the parent is not suspended, and the child's writes are not visible to it, so with glibc a missing
+  program returns 0 from `posix_spawn` and the child exits 127 (musl returns ENOENT through its pipe).
+- **Resource limits.** `getrlimit` answered "unlimited" for everything and `setrlimit` did nothing: `ulimit -n`
+  printed `unlimited`, `ulimit -n 64` had no effect, and anything sizing itself by the descriptor limit saw infinity.
+  The guest now has its own limit table seeded from the host's (NOFILE 1048576, STACK 8 MiB, as qemu-user reports),
+  inherited by fork and kept across exec; `setrlimit`/`prlimit64` change only that table, validate (EINVAL, EPERM,
+  ESRCH) and `RLIMIT_NOFILE` is enforced (EMFILE).
+- **`kill(pid, 0)`** succeeded for any pid, so `kill -0 $pid` loops waiting for a process to exit never ended; it now
+  reports ESRCH or EPERM like Linux.
 - **Programs started by a shell ran about 70 times slower.** A fork child inherits a disabled copy of the parent's
   JIT and `execve` never switched it back on, so every command a shell launched ran in the interpreter: sorting
   100,000 numbers took 150 s through `ash` against 2.2 s run directly (and 119 s with `--no-jit`). `execve` now gives

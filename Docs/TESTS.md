@@ -13,7 +13,12 @@ difference was reduced to a minimal fixture and, where possible, confirmed again
 checks: trailing slashes, `/`, `getcwd` through symlinks) and `test_signal_semantics` (`test_self_signal`) were extended
 and the new `test_execve` (21 checks: envp, NULL envp, close-on-exec across `open`, `dup`, `F_DUPFD_CLOEXEC`,
 `F_SETFD` and `pipe2`, `#!` scripts including nested and looping, ENOENT/EACCES/ENOEXEC/ELOOP, 100000-byte
-argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. `test_exec_jit.sh` (3 checks) counts JIT instances with `-v` (a shell plus three exec'd pipeline stages: 4; the old
+argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. `test_posix_spawn` (8 checks; musl, also verified with a static glibc build and `--no-jit`), `test_rlimit` (14 checks,
+also passing under qemu-aarch64) and the `kill(pid, 0)` cases in `test_signal_semantics` cover the spawn, limit and
+signal-0 fixes; the previous binary fails them. A shell-level check with `system()` through a rootfs shell returned the
+right status. **Not covered:** glibc's `posix_spawn` error for a missing program (documented difference), `vfork` used for
+its shared-memory side effects, `RLIMIT_*` other than NOFILE (recorded, not enforced), `prlimit64` on another process.
+`test_exec_jit.sh` (3 checks) counts JIT instances with `-v` (a shell plus three exec'd pipeline stages: 4; the old
 binary 1) and `test_exec_mt` runs a multi-threaded program exec'd from a multi-threaded parent, whose spinning
 thread only stops if the child's own preemption ticker runs (without the `pthread_atfork` fix it hangs).
 `test_guest_env.sh` (6 checks) pins the guest environment: the caller's variables arrive and nothing else is

@@ -45,6 +45,14 @@
   and the file exists: a missing file must stay ENOENT, or `execvp` over a `PATH` re-runs the current
   program as the missing name (an exec loop). The Android branch keeps its own checks (no permission
   test, no descriptor closing). `test_execve` covers it.
+- `clone`/`clone3` with CLONE_VFORK and without CLONE_THREAD (glibc `vfork`, both libcs' `posix_spawn`,
+  hence `system` and `popen`) run as a copy-on-write fork on the caller's stack (`clone_is_vfork`): the
+  parent is not suspended and does not see the child's writes. Other CLONE_VM-without-THREAD processes
+  stay ENOSYS. `test_posix_spawn` covers it.
+- Resource limits live in `Emulator::get_rlimit/set_rlimit` (`ResourceLimits.cpp`): seeded from the host,
+  per process, changed only in that table, never on the host. RLIMIT_NOFILE is enforced by `FdTable`
+  (EMFILE). `kill(pid, 0)` asks the host for any pid but the caller's own (ESRCH/EPERM).
+  `test_rlimit` and `test_signal_semantics` cover them.
 - FD_CLOEXEC is per guest descriptor (`FdTable::set_cloexec`): set it wherever a creating call takes
   O_CLOEXEC-style flags, never forward F_SETFD to the shared host fd.
 - A syscall that delivers a signal to its own caller (`kill` of self, `tgkill`, `tkill`)
