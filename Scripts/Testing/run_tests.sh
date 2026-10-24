@@ -505,6 +505,8 @@ UNIT_TESTS=(
     "test_path_syscalls|Tests/Unit/test_path_syscalls.elf||10|test_path_syscalls: ALL PASS"
     "test_execve|Tests/Unit/test_execve.elf||30|test_execve: ALL PASS"
     "test_exec_mt|Tests/Unit/test_exec_mt.elf||60|test_exec_mt: ALL PASS"
+    "test_rlimit|Tests/Unit/test_rlimit.elf||10|test_rlimit: ALL PASS"
+    "test_posix_spawn|Tests/Unit/test_posix_spawn.elf||30|test_posix_spawn: ALL PASS"
     # 60M-call loops (main + worker) must not trip the opt-in hang watchdog.
     "test_long_call_loop|Tests/Unit/test_long_call_loop.elf||30|test_long_call_loop: ALL PASS|JIT"
 )

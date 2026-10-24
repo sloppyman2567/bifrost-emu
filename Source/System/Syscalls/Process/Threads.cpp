@@ -67,13 +67,20 @@ inline bool clone_ns_rejected(uint64_t flags) {
         clone_flags::NEWNET;
     return (flags & kNamespaces) != 0;
 }
-// Sharing an address space does not make a child part of the parent's
-// thread group. In particular vfork must suspend its caller until exec/exit,
-// and the child's exit_group must not kill the parent. The thread backend
-// implements neither contract. Report an unsupported operation rather than
-// run two CPUs on the same vfork stack and corrupt the parent.
+// vfork, as glibc's vfork() and both libcs' posix_spawn() (and so system() and popen()) make it:
+// CLONE_VM|CLONE_VFORK without CLONE_THREAD, often on a stack of the caller's choosing. It runs as a
+// copy-on-write fork. The child cannot corrupt the parent, which a second CPU on the shared stack
+// would, and its exit_group does not kill the parent. The differences from a real vfork: the parent
+// is not suspended until the child execs or exits, and the child's writes are not seen by the parent
+// (glibc's posix_spawn reports an exec failure through such a write; the failure still shows up as
+// the child's exit status 127; musl reports it over a pipe and is unaffected).
+inline bool clone_is_vfork(uint64_t flags) {
+    return (flags & clone_flags::VFORK) && !(flags & clone_flags::THREAD);
+}
+// Any other process sharing an address space (CLONE_VM without CLONE_VFORK or CLONE_THREAD) would need
+// real shared memory between host processes: report it as unsupported.
 inline bool clone_shared_process_unsupported(uint64_t flags) {
-    return (flags & clone_flags::VM) && !(flags & clone_flags::THREAD);
+    return (flags & clone_flags::VM) && !(flags & clone_flags::THREAD) && !(flags & clone_flags::VFORK);
 }
 // Resolve a guest address to "name+0x..." using the dynamic linker's loaded
 // objects and their .dynsym. Used by the BIFROST_FUTEX_BT backtrace dump.
@@ -198,8 +205,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_err(ENOSYS);
                 return 0;
             }
-            if (!(flags & clone_flags::VM)) {
-                // ── Fork path (no CLONE_VM) ──
+            if (!(flags & clone_flags::VM) || clone_is_vfork(flags)) {
+                // ── Fork path (no CLONE_VM, or a vfork run as a fork) ──
                 // Use host fork() for copy-on-write memory. The child
                 // process inherits the entire emulator state and runs
                 // independently. The parent's wait4() forwards to host
@@ -297,8 +304,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // the stack top directly).
             uint64_t stack_top = stack + stack_size;
             if (stack_size == 0) stack_top = stack;  // fork() idiom
-            if (!(flags & clone_flags::VM)) {
-                // Fork path.
+            if (!(flags & clone_flags::VM) || clone_is_vfork(flags)) {
+                // Fork path (a vfork runs as a fork, see clone_is_vfork).
                 int child_pid = emu.fork_guest(cpu, stack_top, flags,
                                                parent_tid, child_tid, tls);
                 if (child_pid < 0) ret_err(ENOMEM);
