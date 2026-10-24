@@ -37,9 +37,9 @@ std::string Yggdrasil::canonical_proc_path(const std::string& path) const {
     if (path.size() != own.size() && path[own.size()] != '/') return path;
     return "/proc/self" + path.substr(own.size());
 }
-void Yggdrasil::set_self_pid(int pid) {
+void Yggdrasil::set_self_pid(int pid, int parent_pid) {
     self_pid_ = pid;
-    initial_ppid_ = pid == 1 ? 0 : static_cast<int>(::getppid());
+    initial_ppid_ = pid == 1 ? 0 : parent_pid > 0 ? parent_pid : static_cast<int>(::getppid());
 }
 Yggdrasil::ProcessIds Yggdrasil::process_ids() const {
     if (self_pid_ == 1) return {1, 1, 1, 1};

@@ -841,6 +841,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     std::array<std::unique_lock<std::mutex>, FUTEX_SHARDS> futex_locks;
     for (size_t i = 0; i < FUTEX_SHARDS; ++i)
         futex_locks[i] = std::unique_lock<std::mutex>(futex_shards_[i].mu);
+    const pid_t forking_pid = ::getpid();
     pid_t child_pid = ::fork();
     debugger_->fork_return(child_pid == 0);
     if (child_pid < 0) {
@@ -848,6 +849,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     }
     if (child_pid == 0) {
         host_fork_child_ = true;
+        fork_parent_pid_ = forking_pid;
         for (auto& shard : futex_shards_) {
             // Do not destroy copied condition variables: their waiter
             // counts refer to vanished parent threads and destruction can
@@ -895,7 +897,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         parent_cpu.sigpending.store(0);
         parent_cpu.pending_head.store(parent_cpu.pending_tail.load());
         shared_sigpending_.store(0);
-        vfs_.set_self_pid(child_tid);
+        vfs_.set_self_pid(child_tid, fork_parent_pid_);
         mem_.uffd_drop_registrations();
         if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
             mem_.store<uint32_t>(ctid_ptr, child_tid);

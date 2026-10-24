@@ -1295,7 +1295,7 @@ click on the app's dialog).
 for its own package: nothing is posted, so they find nothing. Clipboard and
 alarm checks construct a focused clipboard and wait for a real listener alarm.
 `ManagedServiceBatch` exercises these through the real managers; see
-[the test record](../TESTS.md#common-device-services-2026-10-13).
+[the test record](../archive/TESTS-history.md#common-device-services-2026-10-13).
 
 ### User and idle-policy queries (2026-10-14)
 
@@ -1338,7 +1338,7 @@ and
 [LowPowerStandbyController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/power/LowPowerStandbyController.java).
 They do not alter host suspend policy or implement Doze, exemption scheduling,
 foreground services or notification posting. These are local Java service-cache
-contracts; see [runtime checks](../TESTS.md#user-and-idle-policy-queries-2026-10-14).
+contracts; see [runtime checks](../archive/TESTS-history.md#user-and-idle-policy-queries-2026-10-14).
 
 ### Settings, PendingIntents and broadcasts (2026-10-13)
 
@@ -2217,7 +2217,7 @@ Isolated callers cannot start or bind other services, but can stop their own
 service. A dead child releases its outgoing bindings. This permits nested service
 clients such as Phonesky calling microG's DroidGuard without giving the child
 direct access to the host supervisor. The focused headless regression is described
-in [the test guide](../TESTS.md#child-service-routing-2026-10-23).
+in [the test guide](../archive/TESTS-history.md#child-service-routing-2026-10-23).
 
 The real APK service gate checks a different PID, the same ordinary app UID,
 and a synchronous Binder round trip, in addition to local lifecycle behavior.

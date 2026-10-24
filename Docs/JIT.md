@@ -629,7 +629,7 @@ CoreMark throughput fell 0.6% and zstd compression CPU time rose 0.9% in this
 run. CoreMark compilation rose from 14.55 to 15.02 ms and zstd compilation
 from 61.75 to 62.41 ms. Other desktop workloads were not stopped. These
 measurements do not establish a game FPS or stutter improvement. See the
-[validation scope](TESTS.md#allocator-effects-and-region-demand-layouts-2026-10-16).
+[validation scope](archive/TESTS-history.md#allocator-effects-and-region-demand-layouts-2026-10-16).
 
 ## Azur Lane polynomial instructions (2026-10-15)
 
@@ -712,7 +712,7 @@ thread CPU times of 99.042 ms before and 4.181 ms after (23.7x throughput).
 The new binary with vector caching disabled took 8.895 ms. All output bits
 matched an independent QEMU run. These measure this synthetic conversion mix,
 not a game speedup, outfit-change duration or GC pause reduction. The heap
-alignment issue is outside this change. See [validation](TESTS.md#inline-pixel-conversion-helpers-2026-10-15).
+alignment issue is outside this change. See [validation](archive/TESTS-history.md#inline-pixel-conversion-helpers-2026-10-15).
 
 ## Cached integer SIMD (2026-10-15)
 
@@ -736,7 +736,7 @@ unchanged.
 Shift behavior was checked against Arm's [USHR](https://www.scs.stanford.edu/~zyedidia/arm64/ushr_advsimd.html),
 [SRSRA](https://www.scs.stanford.edu/~zyedidia/arm64/srsra_advsimd.html) and
 [SLI](https://www.scs.stanford.edu/~zyedidia/arm64/sli_advsimd.html) pseudocode.
-The [regressions](TESTS.md#cached-integer-simd-2026-10-15) check the changed
+The [regressions](archive/TESTS-history.md#cached-integer-simd-2026-10-15) check the changed
 register paths against the interpreter, with independent QEMU guest runs.
 
 Replaying the captured 31-instruction Unity block at guest PC `0x736b0c929c`
@@ -813,7 +813,7 @@ FPS result. Precise cold recovery still consumes generated code space, and
 its new metadata/next-use planning has compile-time cost; application cache
 size and loading-time benefits are not established here. Temporary benchmark
 sources, JSON results and code dumps remain in `/tmp`. See
-[validation and scope](TESTS.md#tier-1-vector-allocation-under-pressure-2026-10-15).
+[validation and scope](archive/TESTS-history.md#tier-1-vector-allocation-under-pressure-2026-10-15).
 
 ## Tier-1 hot-path code reduction (2026-10-14)
 
@@ -850,7 +850,7 @@ iterations/s for the saved pre-batch binary and 9,893.87 iterations/s after
 this batch (9.3% higher).
 Every run exceeded ten seconds and validated all CRCs. This measures the
 combined batch on one host, not each change separately or game FPS. See
-[validation and limits](TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
+[validation and limits](archive/TESTS-history.md#tier-1-hot-path-code-reduction-2026-10-14).
 
 ### Dead-code compaction accounting follow-up
 
@@ -863,7 +863,7 @@ counts each physical removal once. Repeated optimization also uses the
 current pass's retained count, independently of cumulative statistics.
 This changes allocation/accounting, not instruction semantics or the
 retained IR. The regression and Android validation are recorded in
-[TESTS.md](TESTS.md#dead-code-compaction-accounting-2026-10-14).
+[TESTS.md](archive/TESTS-history.md#dead-code-compaction-accounting-2026-10-14).
 
 ## Azur Lane generated-code audit (2026-10-14)
 
@@ -931,7 +931,7 @@ excluded): 10.1% less loop time on this host. Its generated function shrank
 from 3,627 to 3,593 bytes, including cold paths. A replay of the profiled
 SpongeBob IL2CPP block shrank by seven bytes. These are scoped codegen and
 loop observations, not a gameplay FPS result; see the
-[validation and limits](TESTS.md#scalar-fp-scratch-preservation-2026-10-13).
+[validation and limits](archive/TESTS-history.md#scalar-fp-scratch-preservation-2026-10-13).
 
 ## Planned codegen: retaining guest state across regions
 
@@ -976,7 +976,7 @@ stages rather than assuming cross-region state is already supported.
 The first milestones are mixed FP/vector allocation and validated recovery
 contracts, followed by handoff between two regions. Expanding the scope
 requires measurable benefit and the
-[planned correctness/performance gates](TESTS.md#planned-codegen-and-coremark-acceptance).
+[planned correctness/performance gates](archive/TESTS-history.md#planned-codegen-and-coremark-acceptance).
 CoreMark's integer/control workload requires its own profile; FP throughput
 alone does not predict progress toward 10,000 iterations/s.
 
@@ -1172,7 +1172,7 @@ baseline, 15.8224 s with an eight-block cap, and 15.5748 s with four blocks.
 Each used one warm-up and three measured 110,000-iteration runs with all CRCs
 validated. Eight blocks were approximately neutral on CoreMark; the small
 four-block difference is not a general performance guarantee. These results
-do not establish game FPS. See [validation](TESTS.md#eight-block-superblocks-and-region-vector-state-2026-10-12).
+do not establish game FPS. See [validation](archive/TESTS-history.md#eight-block-superblocks-and-region-vector-state-2026-10-12).
 
 ## Native acquire loads and bounded trial timing (2026-10-12)
 
@@ -1207,7 +1207,7 @@ Five alternating before/after runs of a two-million-iteration aligned acquire
 loop, with Tier-2 disabled and identical guard settings, reduce median loop
 time from 32.4066 ms to 2.4128 ms (13.43x). Each run validates its independent
 final sum. This isolates native acquire-load overhead; it is not a CoreMark
-or FPS result. See [validation and remaining gaps](TESTS.md#native-acquire-loads-and-trial-timing-2026-10-12).
+or FPS result. See [validation and remaining gaps](archive/TESTS-history.md#native-acquire-loads-and-trial-timing-2026-10-12).
 
 ## Indirect branches and host return boundaries (2026-10-12)
 

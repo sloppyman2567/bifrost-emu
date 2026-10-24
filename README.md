@@ -314,7 +314,7 @@ warmup and three interleaved measured runs per binary, every CRC validated,
 on a Ryzen 7 5800X3D. The saved pre-batch binary reports a median of 9,049.03
 iterations/s; the current Tier-1 build reports 9,893.87, **9.3% higher**.
 Every measured run exceeds ten seconds. See [changes](Docs/JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
-and [validation](Docs/TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
+and [validation](Docs/archive/TESTS-history.md#tier-1-hot-path-code-reduction-2026-10-14).
 
 Earlier emulator comparison (October 12, 2026), three runs each with valid
 CRCs; QEMU was not rerun for the October 14 update:

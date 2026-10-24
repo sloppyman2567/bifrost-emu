@@ -345,7 +345,7 @@ known-entry loop growth reduce emitted work. Final interleaved CoreMark medians
 improve from 9,049.03 to 9,893.87 iterations/s (9.3%), with every CRC checked.
 The Android probe also exposed and regression-tested a dead-code compaction
 reserve-accounting underflow. See [implementation](JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
-and [validation](TESTS.md#tier-1-hot-path-code-reduction-2026-10-14).
+and [validation](archive/TESTS-history.md#tier-1-hot-path-code-reduction-2026-10-14).
 
 Next, prioritize sampled codegen paths rather than emitted size alone:
 
@@ -402,7 +402,7 @@ The proposed **26% of native** milestone assumes a native reference near
 workload, thread count and documented compiler/host settings. Native and guest
 runs may require different iteration counts to satisfy the ten-second rule;
 compare normalized throughput, not their total wall times. This percentage
-describes CoreMark only. See [the benchmark acceptance plan](TESTS.md#planned-codegen-and-coremark-acceptance).
+describes CoreMark only. See [the benchmark acceptance plan](archive/TESTS-history.md#planned-codegen-and-coremark-acceptance).
 
 Acceptance: each stage passes focused architectural regressions, independent
 reference checks and real applications. Demonstrate reduced spills/state

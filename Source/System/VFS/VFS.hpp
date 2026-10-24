@@ -224,7 +224,9 @@ public:
     }
     // The guest's own pid as getpid() reports it: 1, or the host pid in a
     // fork child. /proc/<that pid> names the same process as /proc/self.
-    void set_self_pid(int pid);
+    // `parent_pid` is the host pid that forked this process, taken before the fork: reading getppid() in the
+    // child can already see the adopter when the parent exits first.
+    void set_self_pid(int pid, int parent_pid = 0);
     int self_pid() const { return self_pid_; }
     int initial_ppid_ = 0;  // the host parent when self_pid_ was set; 0 in the PID-1 model
     // The process identity getpid/getppid/getpgid/getsid and /proc report:

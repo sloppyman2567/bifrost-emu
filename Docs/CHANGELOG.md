@@ -33,7 +33,8 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   (`Yggdrasil::proc_status_text`). Found while tracing Umamusume's anti-tamper thread, which reads `/proc/<own pid>/status` every
   100 ms and then kills the app (SIGKILL, exit 137, about 10 s in). **This did not stop that kill**: with the full file the
   game still ends itself at the same point, so the check that fails is something else. `test_proc_pid_status` covers the file.
-- **Orphans see parent 1.** `getppid()` and `/proc/self/stat` reported the host's adopter (a session manager or subreaper, pid 1283 here)
+- **Orphans see parent 1.** (The parent pid is taken in the parent before the fork; recording it in the child raced with a parent
+  that exited first and failed `test_orphan_ppid` once in a full run.) `getppid()` and `/proc/self/stat` reported the host's adopter (a session manager or subreaper, pid 1283 here)
   once a forked process's parent had died; a guest orphan now sees parent 1, the guest's init, as on Linux and Android
   (`Yggdrasil::process_ids` compares against the parent recorded at start). `test_orphan_ppid` fails on the previous binary.
 - **`/proc/self/stat` has real resource fields.** State, CPU times, nice, thread count, start time and resident size come from the
@@ -176,7 +177,7 @@ host x86-64 library at the same path (CachyOS's `/lib64` is `/usr/lib`) is never
 libraries such as `libGL.so.1` still get their in-memory stub. Resolution stays inside the rootfs (absolute and `..`
 symlinks included); writes, other paths and sandboxed runs are unchanged. The guest interpreter and the thunk-stub
 check read through the same opens. The built-in linker remains the default; the guest linker adds about 8 to 15 ms of
-startup per run. The rest of this entry is what was checked: see [TESTS.md](TESTS.md#guest-linker-with-a-discovered-rootfs-2026-10-24).
+startup per run. The rest of this entry is what was checked: see [TESTS.md](archive/TESTS-history.md#guest-linker-with-a-discovered-rootfs-2026-10-24).
 
 ### Installable Asgard (2026-10-24)
 
