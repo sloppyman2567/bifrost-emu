@@ -78,5 +78,8 @@
   tree ([ROOTFS.md](../../../Docs/ROOTFS.md)); keep its destinations and the
   default candidates in step. `test_rootfs_discovery.sh` copies the binary away from the
   checkout so the bundled toolchain cannot mask a lookup failure.
+- Android runtime (`--android-runtime` bootstrap and `execve`): PT_INTERP must be a Bionic `linker64`, else the error
+  names the program and interpreter. An image without PT_INTERP (static Bionic executable, or `linker64` as the program)
+  runs itself with `AT_BASE` 0 and no second image; `linker64` then loads `argv[1]`. `test_android_bionic.sh` covers both.
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.

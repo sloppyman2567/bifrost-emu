@@ -327,18 +327,26 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
         }
     }
     if (emu.android_runtime_) {
-        if ((info.interp != "/system/bin/linker64" &&
+        if ((!info.interp.empty() && info.interp != "/system/bin/linker64" &&
              info.interp != "/apex/com.android.runtime/bin/linker64") || !info.phdr_addr)
-            throw EmuError("Android exec requires a Bionic linker64 and mapped program headers");
-        auto interpreter = emu.read_android_elf(info.interp);
-        ElfLoader::Options interpreter_options;
-        interpreter_options.apply_relocations = false;
-        interpreter_options.reserve_image = true;
-        auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
-        if (!loaded.interp.empty())
-            throw EmuError("Android linker64 must not itself require PT_INTERP");
+            throw EmuError("Android exec: " + path + " requests interpreter '" + info.interp +
+                           "', not a Bionic linker64, or has no mapped program headers");
+        // No PT_INTERP: the kernel runs the image itself with AT_BASE 0 (a static Bionic executable,
+        // or linker64 as the program, which then loads argv[1]).
+        ElfLoader::Loaded loaded{};
+        loaded.entry = info.entry;
+        loaded.base_addr = 0;
+        if (!info.interp.empty()) {
+            auto interpreter = emu.read_android_elf(info.interp);
+            ElfLoader::Options interpreter_options;
+            interpreter_options.apply_relocations = false;
+            interpreter_options.reserve_image = true;
+            loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
+            if (!loaded.interp.empty())
+                throw EmuError("Android linker64 must not itself require PT_INTERP");
+            emu.name_elf_segments(loaded, info.interp);
+        }
         emu.name_elf_segments(info, path);
-        emu.name_elf_segments(loaded, info.interp);
         emu.elf_path_ = path;
         emu.vfs_.set_elf_path(path);
         emu.prog_entry_ = info.entry;

@@ -99,3 +99,35 @@ for mode in jit interp tier2; do
     if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
     echo "Bionic OpenSL ES player: $mode passed"
 done
+# Images without a linker64 PT_INTERP run themselves with AT_BASE 0 (a static executable, or linker64
+# as the program), both as the bootstrap program and through execve from a Bionic process.
+clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -static -O2 -Wl,-z,max-page-size=16384 \
+    Tests/Unit/android_static_image.S -o "$runtime/data/local/tmp/android_static_image"
+clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -ffreestanding -fPIE -pie -O2 \
+    -Wl,-z,max-page-size=16384 -Wl,--dynamic-linker=/system/bin/linker64 \
+    -Wl,-rpath,/apex/com.android.runtime/lib64/bionic -Wl,--allow-shlib-undefined \
+    Tests/Unit/android_bionic_start.S Tests/Unit/android_noninterp_exec.c \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libc.so" \
+    "$runtime/apex/com.android.runtime/lib64/bionic/libdl.so" \
+    -o "$runtime/data/local/tmp/android_noninterp_exec"
+for mode in jit interp; do
+    args=()
+    [[ "$mode" != interp ]] || args=(--no-jit)
+    run_noninterp() {
+        env -u BIFROST_ROOT timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" "$@"
+    }
+    log="$task_tmp/noninterp-static-$mode.log"
+    status=0
+    run_noninterp /data/local/tmp/android_static_image > "$log" 2>&1 || status=$?
+    [[ "$status" == 7 ]] && rg -q '^android_static_image: ran without PT_INTERP$' "$log" || { cat "$log" >&2; exit 1; }
+    log="$task_tmp/noninterp-linker-$mode.log"
+    run_noninterp /system/bin/linker64 /data/local/tmp/android_noninterp_exec child > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
+    rg -q '^android_noninterp_exec: linker64 loaded its program$' "$log" || { cat "$log" >&2; exit 1; }
+    log="$task_tmp/noninterp-exec-$mode.log"
+    run_noninterp /data/local/tmp/android_noninterp_exec > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
+    rg -q '^android_noninterp_exec: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+    if rg -q 'Fatal signal|CANNOT LINK|\[crash\]|requires a Bionic linker64' "$log" "$task_tmp"/noninterp-*-"$mode".log; then
+        cat "$log" >&2; exit 1
+    fi
+    echo "Bionic images without PT_INTERP: $mode passed"
+done

@@ -336,23 +336,32 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     //       (debug path).
     uint64_t interp_base = 0;
     if (android_runtime_) {
-        if (info.interp != "/system/bin/linker64" &&
+        if (!info.interp.empty() && info.interp != "/system/bin/linker64" &&
             info.interp != "/apex/com.android.runtime/bin/linker64")
-            throw EmuError("Android runtime bootstrap requires a Bionic linker64 PT_INTERP");
+            throw EmuError("Android runtime bootstrap: " + path + " requests interpreter '" +
+                           info.interp + "', not a Bionic linker64");
         if (!info.phdr_addr)
             throw EmuError("Android runtime ELF has no mapped program-header table");
-        auto interpreter = read_android_elf(info.interp);
-        ElfLoader::Options interpreter_options;
-        interpreter_options.apply_relocations = false;
-        interpreter_options.reserve_image = true;
-        auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
-        if (!loaded.interp.empty())
-            throw EmuError("Android linker64 must not itself require PT_INTERP");
-        name_elf_segments(loaded, info.interp);
         dyn_linker_.reset();
-        entry_ = loaded.entry;
-        interp_base_ = loaded.base_addr;
-        has_lse_ = has_lse_ || loaded.has_lse;
+        if (info.interp.empty()) {
+            // The kernel runs an image without PT_INTERP itself, with AT_BASE 0: a static Bionic
+            // executable, or linker64 as the program (`linker64 PROGRAM ARGS`, which locates itself
+            // from AT_PHDR; see __linker_init in bionic/linker/linker_main.cpp).
+            entry_ = info.entry;
+            interp_base_ = 0;
+        } else {
+            auto interpreter = read_android_elf(info.interp);
+            ElfLoader::Options interpreter_options;
+            interpreter_options.apply_relocations = false;
+            interpreter_options.reserve_image = true;
+            auto loaded = ElfLoader::load(mem_, interpreter, interpreter_options);
+            if (!loaded.interp.empty())
+                throw EmuError("Android linker64 must not itself require PT_INTERP");
+            name_elf_segments(loaded, info.interp);
+            entry_ = loaded.entry;
+            interp_base_ = loaded.base_addr;
+            has_lse_ = has_lse_ || loaded.has_lse;
+        }
         // Guest shim DSOs resolve only explicit adapter exports. Bionic
         // continues to own all ELF relocation/TLS; no custom linker is made.
         if (auto* thunk = graphics_.thunk(); thunk && thunk->enabled()) {
@@ -373,7 +382,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             wire_thunk_audio_runner_();
         }
         wire_thunk_android_runner_();
-        if (verbose_) fprintf(stderr, "[android-runtime] linker64 base=0x%llx entry=0x%llx page_size=%llu\n",
+        if (verbose_) fprintf(stderr, "[android-runtime] %s base=0x%llx entry=0x%llx page_size=%llu\n",
+            info.interp.empty() ? "no-interp image" : "linker64",
             static_cast<unsigned long long>(interp_base_),
             static_cast<unsigned long long>(entry_),
             static_cast<unsigned long long>(Memory::PAGE_SIZE));

@@ -14,6 +14,24 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android: images without a `linker64` interpreter run instead of ending the emulator (2026-10-24)
+
+- A Subway Surfers run on an Ubuntu 25.10 VM ended in Play services with a failure about `linker64` and a program that
+  was not Bionic-linked. The log was not available here, so the exact program is unconfirmed. What was reproduced:
+  `--android-runtime` and `execve` under it threw `Android runtime bootstrap requires a Bionic linker64 PT_INTERP` for
+  every AArch64 image whose PT_INTERP is not `/system/bin/linker64` or the APEX `linker64`, which kills the guest
+  process. That covers statically linked Bionic executables and `linker64` itself (`linker64 PROGRAM ARGS`, the idiom
+  for running a binary from app data). The kernel runs an image without PT_INTERP itself with `AT_BASE` 0, and
+  `linker64` expects exactly that (`__linker_init` locates itself from `AT_PHDR` when `AT_BASE` is 0; AOSP
+  `android-15.0.0_r1`). Both loaders now do this; any other interpreter still fails, with an error naming the program
+  and the interpreter it asked for.
+- `Scripts/Android/test_android_bionic.sh` gains a section (JIT and interpreter): a freestanding static image as the
+  bootstrap program, `linker64` as the bootstrap program, and both through `execve` from a Bionic process. It fails on
+  the previous binary and passes now; the 12-run bootstrap matrix still passes. The static image has no libc, so this
+  tests the loader contract, not a full static Bionic executable.
+- Not fixed or checked: Hungry Shark World's black screen on the same VM (no log; host GL/EGL differences are the
+  suspect), and whether this is what the VM hit.
+
 ### Memory: smaller JIT bookkeeping, small per-thread caches, no Play Store for billing (2026-10-24)
 
 - Battle Cats used 5.25 GiB PSS over five Android runtimes; guest memory was about 1.1 GiB. The rest was mostly JIT
