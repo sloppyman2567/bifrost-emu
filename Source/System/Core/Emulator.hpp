@@ -272,6 +272,14 @@ public:
         return group_exit_.load(std::memory_order_acquire);
     }
     mode_t guest_umask() const { return guest_umask_; }
+    // Guest resource limits (getrlimit/setrlimit/prlimit64): seeded from the host's real limits, held
+    // per guest process (a fork child copies them, execve keeps them) and changed only here, never on
+    // the host, whose own descriptor and stack limits the emulator needs. RLIMIT_NOFILE is enforced on
+    // guest descriptors. `resource` is below RLIM_NLIMITS (16).
+    struct Rlimit64 { uint64_t cur, max; };
+    static constexpr int GUEST_RLIM_NLIMITS = 16;
+    bool get_rlimit(int resource, Rlimit64& out);
+    int set_rlimit(int resource, const Rlimit64& value);  // 0 or -errno
     void set_guest_umask(mode_t m) { guest_umask_ = m & 0777; }
     // Build the default guest environment, propagating locale/timezone-
     // related host env vars. Used by build_initial_stack when set_guest_env
@@ -500,6 +508,8 @@ private:
     // doesn't see false-positive divergences from the host umask being
     // changed twice). Also provides sandbox isolation.
     mode_t guest_umask_ = 0022;  // default: rwxr-xr-x → rw-r--r--
+    std::atomic<bool> rlimits_seeded_{false};
+    std::atomic<uint64_t> rlimit_cur_[GUEST_RLIM_NLIMITS], rlimit_max_[GUEST_RLIM_NLIMITS];
     std::atomic<bool> group_exit_{false};
     std::atomic<int> group_exit_code_{0};
     void group_exit(CPU& caller, int code, int signo);

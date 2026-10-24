@@ -88,10 +88,12 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 163: { // getrlimit(resource, rlim) — AArch64 syscall 163
-            // Return generous infinite limits so libc doesn't choke.
-            // struct rlimit { uint64_t rlim_cur; uint64_t rlim_max; }
-            uint64_t rlim[2] = { static_cast<uint64_t>(-1ULL), static_cast<uint64_t>(-1ULL) };
-            mem_.write(a1, rlim, sizeof(rlim));
+            // struct rlimit { uint64_t rlim_cur; uint64_t rlim_max; }: the guest's own table, seeded
+            // from the host's limits (it used to answer "unlimited" for everything).
+            Emulator::Rlimit64 limit;
+            if (!emu.get_rlimit(static_cast<int>(a0), limit)) { ret_err(EINVAL); return 0; }
+            uint64_t rlim[2] = { limit.cur, limit.max };
+            try { mem_.write(a1, rlim, sizeof(rlim)); } catch (...) { ret_err(EFAULT); return 0; }
             ret_host(0);
             return 0;
         }
@@ -477,17 +479,30 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-        case 261: { // prlimit64 (glibc probes resource limits)
-            // prlimit64(pid, resource, new_rlim, old_rlim)
-            // Return 0 with zeroed rlim if old_rlim is non-NULL.
-            if (a3 != 0) {
-                uint8_t buf[16] = {0};
-                // rlim_cur = RLIM_INFINITY = ~0
-                uint64_t inf = ~0ULL;
-                memcpy(buf, &inf, 8);
-                memcpy(buf + 8, &inf, 8);
-                mem_.write(a3, buf, 16);
+        case 261: { // prlimit64(pid, resource, new_rlim, old_rlim)
+            // Only the caller's own limits exist in this process (a fork child has its own copy).
+            const int target = static_cast<int>(a0);
+            if (target != 0 && target != emu.vfs().process_ids().pid && target != static_cast<int>(::getpid())) {
+                ret_err(ESRCH);
+                return 0;
             }
+            Emulator::Rlimit64 old;
+            if (!emu.get_rlimit(static_cast<int>(a1), old)) { ret_err(EINVAL); return 0; }
+            try {
+                Emulator::Rlimit64 wanted{};
+                if (a2 != 0) {
+                    wanted.cur = mem_.load<uint64_t>(a2);
+                    wanted.max = mem_.load<uint64_t>(a2 + 8);
+                }
+                if (a3 != 0) {  // the old value is reported before the new one takes effect
+                    uint64_t out[2] = { old.cur, old.max };
+                    mem_.write(a3, out, sizeof(out));
+                }
+                if (a2 != 0) {
+                    const int error = emu.set_rlimit(static_cast<int>(a1), wanted);
+                    if (error) { ret_err(-error); return 0; }
+                }
+            } catch (...) { ret_err(EFAULT); return 0; }
             ret_host(0);
             return 0;
         }

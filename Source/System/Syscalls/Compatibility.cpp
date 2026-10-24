@@ -462,10 +462,18 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(EPERM); return 0;
         }
         // ── setrlimit (164) ───────────────────────────────────────────
-        // Accept but don't actually enforce. The guest can't escape the
-        // host's limits anyway. (getrlimit at 163 is in Identity.cpp.)
+        // Recorded in the guest's own limit table (Emulator::set_rlimit), never applied to the host:
+        // the emulator needs its own descriptor and stack limits. RLIMIT_NOFILE is enforced on guest
+        // descriptors. (getrlimit at 163 is in Identity.cpp.)
         case 164: { // setrlimit(resource, rlim)
-            ret_host(0); return 0;
+            Emulator::Rlimit64 wanted;
+            try {
+                wanted.cur = emu.mem().load<uint64_t>(a1);
+                wanted.max = emu.mem().load<uint64_t>(a1 + 8);
+            } catch (...) { ret_err(EFAULT); return 0; }
+            const int error = emu.set_rlimit(static_cast<int>(a0), wanted);
+            if (error) ret_err(-error); else ret_host(0);
+            return 0;
         }
         // ── SysV IPC stubs (186-197) ──────────────────────────────────
         // We don't implement SysV message queues, semaphores, or shared

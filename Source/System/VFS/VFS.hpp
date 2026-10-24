@@ -33,6 +33,7 @@
 #include "System/VFS/Nodes/Node.hpp"
 #include <cstdint>
 #include <atomic>
+#include <climits>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -340,8 +341,11 @@ class FdTable {
 public:
     FdTable();
     ~FdTable() { close_range(0, INT32_MAX); }
-    // Allocate a new guest fd holding `node`. Returns the fd, or -errno.
+    // Allocate a new guest fd holding `node`. Returns the fd, or -errno (-EMFILE once the lowest
+    // free descriptor would reach the RLIMIT_NOFILE soft limit; the node is released then).
     int allocate(std::shared_ptr<Node> node);
+    // RLIMIT_NOFILE for guest descriptors: numbers at or above `limit` are never allocated.
+    void set_fd_limit(int limit) { fd_limit_.store(limit, std::memory_order_relaxed); }
     // Look up the Node for `fd`. Returns nullptr if fd is not open.
     std::shared_ptr<Node> get(int fd) const;
     // Close `fd`. Returns 0 on success, -errno on failure.
@@ -374,6 +378,7 @@ private:
     mutable std::mutex mu_;
     std::unordered_map<int, std::shared_ptr<Node>> table_;
     std::unordered_set<int> cloexec_;  // descriptors with FD_CLOEXEC; guarded by mu_
+    std::atomic<int> fd_limit_{INT_MAX};
     std::vector<std::weak_ptr<Node>> mapping_devices_;
     std::atomic<bool> has_mapping_devices_{false};
     std::vector<std::shared_ptr<Node>> mapping_devices_snapshot();

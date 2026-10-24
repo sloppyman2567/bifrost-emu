@@ -100,6 +100,7 @@ int FdTable::allocate(std::shared_ptr<Node> node) {
     std::lock_guard<std::mutex> g(mu_);
     int fd = 0;
     while (table_.count(fd)) fd++;
+    if (fd >= fd_limit_.load(std::memory_order_relaxed)) return -EMFILE;
     if (node->owns_guest_mappings()) {
         mapping_devices_.push_back(node);
         has_mapping_devices_.store(true, std::memory_order_release);
@@ -139,6 +140,7 @@ int FdTable::dup(int fd, int min_fd) {
     auto node = it->second;
     int new_fd = std::max(min_fd, 0);
     while (table_.count(new_fd)) new_fd++;
+    if (new_fd >= fd_limit_.load(std::memory_order_relaxed)) return -EMFILE;
     table_[new_fd] = node;
     cloexec_.erase(new_fd);
     return new_fd;
