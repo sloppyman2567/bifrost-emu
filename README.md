@@ -121,21 +121,15 @@ sudo make install install-rootfs       # or system-wide, under $(PREFIX)/share/b
 bifrost-emu my_dynamic_app.elf         # finds the rootfs automatically
 ```
 
-`--setup-rootfs` runs `Scripts/Setup/install-rootfs.sh` of the checkout and passes its options on
-(`--system`, `--prefix DIR`, `--full`, `--profile NAME`, `--games`, `--uninstall`).
-Games need more libraries than the base rootfs: `--setup-rootfs --games` installs a `games` profile
-(OpenAL, SDL2_ttf, Vorbis, libpng, libjpeg, libcurl, ...) and `--rootfs-profile games` selects it;
-`--rootfs-list` shows what is installed.
-`./Scripts/Setup/setup-rootfs-all.sh` instead builds the development `rootfs/`
-used by the test suite, with extra real-world libraries.
+`--setup-rootfs` runs the checkout's `Scripts/Setup/install-rootfs.sh` and passes its options on: `--system`,
+`--prefix DIR`, `--full` (more real-world libraries), `--profile NAME`, `--games` and `--uninstall`.
 
-Without `--rootfs`, the first rootfs found among `<executable dir>/rootfs`,
-`<executable dir>/../share/bifrost/rootfs`, `$XDG_DATA_HOME/bifrost/rootfs`
-(default `~/.local/share/bifrost/rootfs`), `/usr/local/share/bifrost/rootfs` and
-`/usr/share/bifrost/rootfs` supplies libraries, like `qemu-aarch64 -L`; the guest
-still sees host paths. `--rootfs PATH` (or `BIFROST_ROOT`, or `[paths] rootfs`)
-instead makes PATH the guest's root, so absolute guest paths resolve inside it.
-A missing C library stops with a message listing the places searched.
+Games need more libraries than the base rootfs. `--setup-rootfs --games` downloads OpenAL, SDL2_ttf, Vorbis, libpng,
+libjpeg, libcurl and their dependencies into a `games` profile; `--rootfs-profile games` selects it and `--rootfs-list`
+shows what is installed. Without any flag, the first rootfs found next to the executable, in the user's data directory
+or system-wide supplies the libraries, like `qemu-aarch64 -L`, and the guest still sees host paths; `--rootfs PATH`
+(or `BIFROST_ROOT`) instead makes PATH the guest's root. The full search order is in the [rootfs guide](Docs/ROOTFS.md).
+`./Scripts/Setup/setup-rootfs-all.sh` builds the development `rootfs/` that the test suite uses.
 
 Android apps install from a signed APK, APKM or APKS bundle:
 
@@ -149,14 +143,11 @@ This needs Asgard: run it from a checkout with the Android tooling provisioned
 `./Scripts/Setup/install-asgard.py` (or `sudo make install-asgard`) so it works from any
 directory. Re-running the installer after an update copies only the files that changed.
 
-`--guest-ld` (experimental; dhewm3 and neverball ran under it, but it is not yet the default) runs dynamic programs under the rootfs's own
-`ld.so`, as a kernel exec would, instead of the built-in linker (still the
-default); it needs the `ld.so.cache` that `setup-rootfs.sh` writes, and thunked
-libraries (GL, SDL2, Vulkan, audio) are served to it as in-memory stubs. It works
-with an installed rootfs found automatically as well as with `--rootfs`: the
-guest's library directories then resolve in that rootfs while everything else
-stays on the host. It passes the same headless dynamic tests as the built-in
-linker; games and other windowed programs have not been compared.
+`--guest-ld` (experimental, not the default) runs dynamic programs under the rootfs's own `ld.so`, as a kernel exec
+would, instead of the built-in linker. It needs the `ld.so.cache` that the rootfs setup writes. Thunked libraries (GL,
+SDL2, Vulkan, audio) are served to it as in-memory stubs, and it works with an automatically found rootfs as well as
+with `--rootfs`. It passes the same test suites as the built-in linker; dhewm3 (120 s) and neverball ran under it, but
+other games and `make verify` have not been run with it.
 
 Useful switches: `-d` traces every instruction, `--no-jit` forces the
 interpreter, `--no-window-stats` removes the FPS title, and `BIFROST_TIER2=1`
