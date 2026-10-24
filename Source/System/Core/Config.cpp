@@ -144,6 +144,7 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
         // [paths]
         if (section == "paths") {
             if (key == "rootfs")   { std::string v = raw_val; unquote(v); rootfs_path = v; return true; }
+            if (key == "profile")  { std::string v = raw_val; unquote(v); rootfs_profile = v; return true; }
             if (key == "cwd")      { std::string v = raw_val; unquote(v); guest_cwd = v; return true; }
         }
         // [signal]
@@ -267,6 +268,7 @@ void Config::apply_env() {
     }
     // [paths]
     env_str ("BIFROST_ROOT",           rootfs_path);
+    env_str ("BIFROST_ROOTFS_PROFILE", rootfs_profile);
     // [signal]
     env_bool("BIFROST_SYSCALL_TRACE",  trace_syscalls);
     // [log]
@@ -305,6 +307,7 @@ void Config::dump(std::string& out) const {
     ss << "\n";
     ss << "[paths]\n";
     ss << "rootfs = \"" << rootfs_path << "\"\n";
+    ss << "profile = \"" << rootfs_profile << "\"\n";
     ss << "cwd    = \"" << guest_cwd   << "\"\n";
     ss << "\n";
     ss << "[signal]\n";

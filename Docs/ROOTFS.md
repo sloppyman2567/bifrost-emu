@@ -18,6 +18,13 @@ synthesized at run time.
    This one supplies libraries only; the guest still sees host paths, except
    that its library directories resolve in the rootfs (below).
 
+**Profiles.** A named rootfs is installed beside the default one, in `<data>/bifrost/rootfs.d/NAME`
+(`$XDG_DATA_HOME`, `<prefix>/share/bifrost`, `/usr/local/share/bifrost`, `/usr/share/bifrost`, or `<executable dir>/rootfs.d/NAME`).
+`--rootfs-profile NAME`, `BIFROST_ROOTFS_PROFILE=NAME` or `[paths] profile = "NAME"` selects it; `bifrost-emu --rootfs-list`
+shows the installed ones (`*` marks the one in use). A profile supplies libraries only, like the default rootfs, and does
+not confine guest paths; `--rootfs` / `BIFROST_ROOT` still sets the sandboxed root and wins over a profile. A profile that is
+not installed is an error naming where it was looked for, never a fall back to another rootfs.
+
 **Library overlay.** With a discovered rootfs (no `--rootfs`), a read-only access by
 the guest to an absolute path under `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` or
 `/etc/ld.so.cache` (open, stat, access, readlink) is answered by the rootfs and by
@@ -42,6 +49,8 @@ a message listing these places.
 ./bifrost-emu --setup-rootfs                 # same as install-rootfs.sh below, with its options
 ./Scripts/Setup/install-rootfs.sh            # for your user (~/.local/share/bifrost/rootfs)
 ./Scripts/Setup/install-rootfs.sh --full     # also the real-world and curl libraries
+./Scripts/Setup/install-rootfs.sh --profile NAME   # a named rootfs: <data>/rootfs.d/NAME
+./Scripts/Setup/install-rootfs.sh --games    # profile "games": plus OpenAL, SDL2_ttf, Vorbis, libpng, libjpeg, libcurl, ...
 sudo make install install-rootfs             # system-wide, in $(PREFIX)/share/bifrost/rootfs
 ./Scripts/Setup/install-rootfs.sh --uninstall   # or: sudo make uninstall-rootfs
 ```
@@ -54,6 +63,17 @@ staging directory beside the destination and renames it into place, so a failed
 run keeps the previous install. The `make` targets never download: run the
 script once as your user before `sudo make install-rootfs`. `DESTDIR` and
 `PREFIX` work as for `make install`. The installed base rootfs is about 70 MB.
+
+### Game libraries
+
+`--games` (profile `games` unless `--profile` says otherwise) runs `Scripts/Setup/fetch-game-libs.py`, which downloads
+pinned Debian `trixie` arm64 packages for the libraries games link against and their dependencies (about 50 packages),
+unpacks only their shared libraries into `usr/lib`, rebuilds `ld.so.cache` and records the packages in
+`etc/bifrost-game-libs.txt`. Checked: Packages.xz against the `Release` file's SHA-256 and every `.deb` against the index
+(SHA-256 and size), all over HTTPS; the `Release` signature is not verified. Never installed: the C runtime and the
+libraries bifrost-emu serves from the host (ALSA, PulseAudio, PipeWire, SDL2, Mesa/GL, X11, Wayland, ...), because a real copy
+would shadow the host-backed one. The install fails when a package needs a newer glibc than the rootfs has. No game data
+is fetched. `bifrost-emu --setup-rootfs --games` runs it; then `bifrost-emu --rootfs-profile games --guest-ld ./game`.
 
 ## Contents
 

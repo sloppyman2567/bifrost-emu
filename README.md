@@ -122,7 +122,10 @@ bifrost-emu my_dynamic_app.elf         # finds the rootfs automatically
 ```
 
 `--setup-rootfs` runs `Scripts/Setup/install-rootfs.sh` of the checkout and passes its options on
-(`--system`, `--prefix DIR`, `--full`, `--uninstall`).
+(`--system`, `--prefix DIR`, `--full`, `--profile NAME`, `--games`, `--uninstall`).
+Games need more libraries than the base rootfs: `--setup-rootfs --games` installs a `games` profile
+(OpenAL, SDL2_ttf, Vorbis, libpng, libjpeg, libcurl, ...) and `--rootfs-profile games` selects it;
+`--rootfs-list` shows what is installed.
 `./Scripts/Setup/setup-rootfs-all.sh` instead builds the development `rootfs/`
 used by the test suite, with extra real-world libraries.
 

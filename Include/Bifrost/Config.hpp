@@ -51,6 +51,7 @@
 //
 //   [paths]
 //   rootfs = ""             # BIFROST_ROOT
+//   profile = ""            # BIFROST_ROOTFS_PROFILE: installed rootfs profile (empty = default)
 //   cwd = "/"               # guest-side cwd
 //
 //   [signal]
@@ -94,6 +95,7 @@ struct Config {
     std::string audio_dump_path;          // WAV path on exit
     // ── [paths] ──────────────────────────────────────────────────────
     std::string rootfs_path;              // BIFROST_ROOT (empty = no VFS root)
+    std::string rootfs_profile;           // BIFROST_ROOTFS_PROFILE (empty = default rootfs)
     std::string guest_cwd     = "/";
     // ── [signal] ─────────────────────────────────────────────────────
     bool     forward_host_signals = true;

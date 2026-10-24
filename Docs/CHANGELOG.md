@@ -25,6 +25,19 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   games under `--guest-ld`; supertux2 does not start there (its rootfs `libcurl-gnutls` wants glibc 2.43) and
   crashes under the built-in linker as well (not caused by the loader precedence change).
 
+### Rootfs profiles and a game-library rootfs (2026-10-24)
+
+- Named rootfs profiles: `install-rootfs.sh --profile NAME` installs to `<data>/rootfs.d/NAME`; `--rootfs-profile NAME`,
+  `BIFROST_ROOTFS_PROFILE` and `[paths] profile` select it for libraries (no path sandbox), `--rootfs-list` shows the
+  installed ones, and an unknown profile is an error naming the places searched. `--rootfs`/`BIFROST_ROOT` still wins.
+- `--games` fetches the libraries games need (OpenAL, SDL2_ttf, Vorbis, libpng, libjpeg, libcurl, ...) from pinned Debian
+  trixie arm64 packages, checked against the `Release`/`Packages.xz` hashes, leaving out the C runtime and the host-backed
+  libraries. Motivation: dhewm3 run without the development rootfs crashed at OpenAL setup, because the rootfs found had no
+  OpenAL and the emulator's 29-function OpenAL stub left `alcIsExtensionPresent` and others unresolved. With a `games`
+  profile dhewm3 ran 120 s under both the built-in linker and `--guest-ld`, with no crash. `test_rootfs_profile.sh` (14
+  checks, no network) and the discovery unit test cover profiles; `fetch-game-libs.py` needs the network and is not in
+  the suite (its resolver output was checked with `--list`, and the downloaded libraries by the dhewm3 runs).
+
 ### `--guest-ld`: emulator-created threads get their TLS from the guest ld.so (2026-10-24)
 
 - A thread the emulator creates itself (SDL_CreateThread, the audio pump, the SDL filter worker) had its TLS laid out

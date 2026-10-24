@@ -35,6 +35,10 @@
 //   --setup-rootfs [OPTIONS]  build and install the guest rootfs, then exit; takes
 //                   install-rootfs.sh's options (--system, --prefix DIR, --full,
 //                   --no-fetch, --uninstall). Needs the checkout's Scripts/.
+//   --rootfs-profile NAME  use the installed rootfs profile NAME (rootfs.d/NAME) for
+//                   libraries only; BIFROST_ROOT / --rootfs still wins. A profile that
+//                   is not installed is an error.
+//   --rootfs-list   list the installed rootfs profiles (* marks the one in use), then exit
 //   --config PATH   load config from PATH (overrides the auto-search)
 //   --print-config  print the resolved config and exit
 //   -V, --version   show version and exit
@@ -48,6 +52,7 @@
 #include "System/Android/Package/PackageLauncher.hpp"
 #include "System/Android/Surface/Surface.hpp"
 #include "System/Syscalls/Files/SocketPolicy.hpp"
+#include "System/Loader/RootfsDiscovery.hpp"
 #include "System/Loader/RootfsSetup.hpp"
 #include <string>
 #include <vector>
@@ -97,6 +102,8 @@ static void print_banner() {
         "    --jit-threshold N  interpret for N insns then switch to JIT\n"
         "    --rootfs PATH      guest root for libraries and paths (BIFROST_ROOT); default: auto-found, libraries only\n"
         "    --setup-rootfs [OPTS]  build and install the guest rootfs, then exit (--system, --prefix DIR, --full, --uninstall)\n"
+        "    --rootfs-profile NAME  use the installed rootfs profile NAME for libraries (see --rootfs-list)\n"
+        "    --rootfs-list      list installed rootfs profiles and exit\n"
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --guest-ld         run dynamic programs under their own guest ld.so (needs a rootfs)\n"
@@ -293,7 +300,7 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) { config_path = argv[i + 1]; i++; }
         } else if (a == "--print-config") {
             print_config_only = true;
-        } else if (a == "--rootfs" || a == "--jit-threshold" ||
+        } else if (a == "--rootfs" || a == "--rootfs-profile" || a == "--jit-threshold" ||
                    a == "--fb-dump" || a == "--audio-dump" ||
                    a == "--android-window-plugin" || a == "--android-binder-broker" ||
                    a == "--android-app-id" || a == "--android-system-uid" || a == "--asgard-service-parent") {
@@ -313,6 +320,7 @@ int main(int argc, char** argv) {
     // A [paths] rootfs from the file reaches the VFS and linker through
     // BIFROST_ROOT, like --rootfs below; an environment value wins.
     if (!cfg.rootfs_path.empty()) setenv("BIFROST_ROOT", cfg.rootfs_path.c_str(), 0);
+    if (!cfg.rootfs_profile.empty()) setenv("BIFROST_ROOTFS_PROFILE", cfg.rootfs_profile.c_str(), 0);
     {
         int back = frost::android_keycode_for_name(cfg.android_back_key);
         if (back < 0) {
@@ -402,6 +410,24 @@ int main(int argc, char** argv) {
         }
         if (a == "--config")                { arg_i += 2; continue; }  // already handled
         if (a == "--print-config")          { arg_i++; continue; }
+        // Selects an installed rootfs profile (rootfs.d/NAME) for libraries; unlike
+        // --rootfs it does not confine the guest's paths.
+        if (a == "--rootfs-profile") {
+            if (arg_i + 1 >= argc || !arm64emu::valid_rootfs_profile_name(argv[arg_i + 1])) {
+                fprintf(stderr, "bifrost-emu: --rootfs-profile requires a NAME (letters, digits, '.', '_', '-')\n");
+                return 2;
+            }
+            setenv("BIFROST_ROOTFS_PROFILE", argv[arg_i + 1], 1);
+            cfg.rootfs_profile = argv[arg_i + 1];
+            arg_i += 2;
+            continue;
+        }
+        if (a == "--rootfs-list") {
+            for (const auto& profile : arm64emu::list_rootfs_profiles())
+                printf("%c %-12s %s\n", profile.active ? '*' : ' ', profile.name.c_str(),
+                       profile.path.empty() ? "(not installed)" : profile.path.c_str());
+            return 0;
+        }
         // Equivalent to `BIFROST_ROOT=PATH bifrost-emu ...` but more
         // ergonomic and works even when the env var isn't inherited.
         if (a == "--rootfs") {
@@ -541,6 +567,12 @@ int main(int argc, char** argv) {
     }
     // No file given → show the Banner
     if (arg_i >= argc) { print_banner(); return 0; }
+    // A named profile that is not installed is an error, not a silent fall back to another rootfs
+    // (an explicit --rootfs / BIFROST_ROOT takes precedence and is not checked here).
+    if (!arm64emu::requested_rootfs_profile().empty() && arm64emu::library_root().empty()) {
+        fprintf(stderr, "bifrost-emu: %s\n", arm64emu::rootfs_search_hint().c_str());
+        return 2;
+    }
     std::string elf_path = argv[arg_i];
     std::vector<std::string> guest_argv;
     guest_argv.push_back(elf_path);

@@ -63,6 +63,10 @@
   (glibc), else `allocate_thread_tls` (built-in linker; musl keeps this layout).
 - `RootfsSetup` implements `--setup-rootfs`: it only locates and runs the checkout's `install-rootfs.sh`
   (status 127 without it); the build stays in the scripts.
+- Rootfs profiles: `rootfs.d/NAME` beside the default rootfs, chosen by `BIFROST_ROOTFS_PROFILE` (set by
+  `--rootfs-profile` / `[paths] profile`); a profile is library-only like a discovered rootfs, an uninstalled one is an
+  error in `Main`, and `BIFROST_ROOT` outranks it. `fetch-game-libs.py` must keep the host-backed libraries (audio,
+  GL, windowing) out of a rootfs.
 - `RootfsDiscovery` picks the library root: `BIFROST_ROOT` (the sandbox, set by
   `--rootfs`, the environment or `[paths] rootfs`), else the first default rootfs
   (next to the executable, `$XDG_DATA_HOME`/`~/.local/share`, `/usr/{local/,}share`).
