@@ -4,6 +4,26 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Shell-level differential testing (2026-10-24)
+
+Found with a throwaway harness (not in the repository): about 70 small scripts run under BusyBox `ash` on bifrost
+and under the host's `sh` with GNU coreutils (commands whose output format is identical), plus single BusyBox
+processes against `qemu-aarch64` (which cannot run children here, so it covers one process at a time). Each real
+difference was reduced to a minimal fixture and, where possible, confirmed against qemu: `test_path_syscalls` (34
+checks: trailing slashes, `/`, `getcwd` through symlinks) and `test_signal_semantics` (`test_self_signal`) were extended
+and the new `test_execve` (21 checks: envp, NULL envp, close-on-exec across `open`, `dup`, `F_DUPFD_CLOEXEC`,
+`F_SETFD` and `pipe2`, `#!` scripts including nested and looping, ENOENT/EACCES/ENOEXEC/ELOOP, 100000-byte
+argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. The previous
+binary fails every one of them (for `test_execve` by running away: each missing-file `execve` re-ran the test).
+All pass under the JIT and the interpreter. Results with the changes: `--unit --toybox` 174/174 (166 with 8 skips under
+`--no-jit`), `--realworld --interactive` 61/61, `--dynamic` 21/21 under both linkers, `--integration` 83/85 (the two
+`android_surface`/`mambo_vulkan` failures need a real display), and the discovery, install, cwd and APK-launch
+scripts pass. `test_execve` has no qemu reference (qemu-user cannot exec AArch64 children without binfmt), so its
+expectations follow `execve(2)`, `binfmt_script` and `fcntl(2)`; a native AArch64 Linux run has not been done.
+**Not covered:** the Android exec branch, `userfaultfd`'s close-on-exec flag, `fexecve` through `/proc/self/fd`,
+and a guest whose interpreter is a host x86-64 binary (a script `#!/bin/sh` run by a program that is not
+BusyBox or toybox now fails with ENOEXEC instead of recursing).
+
 ## Guest working directory (2026-10-24)
 
 `Scripts/Testing/test_guest_cwd.sh` (4 of 4 pass; the previous binary fails 3) runs the toybox shell from a temporary

@@ -25,6 +25,24 @@ found these; each has a regression test.
   returned their first argument (so BusyBox reported "can't kill pid 1") and called the handler with signal 0: the
   result was written after the handler frame had been built. `raise()` and `pthread_kill` were unaffected.
 
+- **`getcwd` after `cd` through a symlink.** `chdir` recorded its argument text, so `cd link; pwd -P` printed `link`;
+  it now records the real directory.
+- **`execve` rewritten** (`Process/Exec.cpp`): it ignored its `envp` argument, so `FOO=bar cmd`, `export` and
+  `PATH=... cmd` never reached any program started from a shell, and it truncated arguments at 4 KiB. It now passes
+  exactly the environment it was given (a NULL `envp` is empty) and arguments up to 128 KiB; follows `#!` scripts
+  (BusyBox ran none, "applet not found"); returns ENOENT, EACCES and ENOEXEC like Linux; updates `/proc/self/exe`
+  and `/proc/self/maps` for the new program; and gives `AT_RANDOM` real entropy (it was all zeros, so stack
+  canaries in every program started from a shell were predictable). The old code answered a **missing** file by
+  re-running the current program under the missing name, which made any `execvp` over a `PATH` with an early
+  missing directory (`env`, `make`, `xargs`) run the wrong program, and made a non-multi-call program exec itself
+  in a loop. That redirect now applies only to existing foreign ELF files and only when the running program is a
+  multi-call binary (BusyBox, toybox). Android's exec branch keeps its previous checks.
+- **`FD_CLOEXEC`** was neither tracked nor honoured: descriptors opened with `O_CLOEXEC` (or `F_SETFD`,
+  `F_DUPFD_CLOEXEC`, `pipe2`, `dup3`, sockets, `MSG_CMSG_CLOEXEC`...) stayed open in the new program, and
+  `F_SETFD` changed the host descriptor shared by every `dup`. The flag is now kept per guest descriptor and
+  `execve` closes flagged ones (not in the Android branch).
+- **`signalfd`** returned the raw host fd to the guest, so reads failed; it is registered like other descriptors.
+
 ### `getcwd` reports the real directory without a sandbox (2026-10-24)
 
 A program run without `BIFROST_ROOT` always saw `/` as its working directory, though its relative paths resolved
