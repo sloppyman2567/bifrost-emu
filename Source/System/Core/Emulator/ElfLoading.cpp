@@ -81,6 +81,30 @@ void Emulator::name_elf_segments(const ElfLoader::Loaded& image, const std::stri
         mem_.name_image(segment.addr, segment.file_end - segment.addr, segment.offset, file);
 }
 
+std::string Emulator::record_executable_path(const std::string& path) {
+    const std::string host_elf_path = yggdrasil::Yggdrasil::remap_path(path);
+    char* resolved = ::realpath(host_elf_path.c_str(), nullptr);
+    if (!resolved) return {};
+    const std::string backing_path = resolved;
+    free(resolved);
+    record_executable_host_file(backing_path, path);
+    return backing_path;
+}
+void Emulator::record_executable_host_file(const std::string& backing_path, const std::string& path) {
+    elf_path_ = backing_path;
+    const std::string mapped_root = yggdrasil::Yggdrasil::remap_path("/");
+    if (mapped_root != "/") {
+        if (char* root = ::realpath(mapped_root.c_str(), nullptr)) {
+            const std::string prefix = std::string(root) == "/" ? "/" : std::string(root) + "/";
+            if (elf_path_.compare(0, prefix.size(), prefix) == 0)
+                elf_path_ = elf_path_.substr(prefix.size() - 1);
+            else
+                elf_path_ = path.front() == '/' ? path : "/" + path;
+            free(root);
+        }
+    }
+    vfs_.set_elf_path(elf_path_, backing_path);
+}
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
                             path.empty() || path.front() != '/'))
@@ -243,22 +267,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         throw EmuError("cannot open " + host_elf_path + ": " + strerror(errno));
     // Linux /proc/self/exe is absolute even when argv[0] is relative.
     // Keep argv/AT_EXECFN unchanged, and strip the sandbox's host prefix.
-    if (char* resolved = ::realpath(host_elf_path.c_str(), nullptr)) {
-        const std::string backing_path = resolved;
-        elf_path_ = resolved;
-        free(resolved);
-        const std::string mapped_root = yggdrasil::Yggdrasil::remap_path("/");
-        if (mapped_root != "/") {
-            if (char* root = ::realpath(mapped_root.c_str(), nullptr)) {
-                const std::string prefix = std::string(root) == "/" ? "/" : std::string(root) + "/";
-                if (elf_path_.compare(0, prefix.size(), prefix) == 0)
-                    elf_path_ = elf_path_.substr(prefix.size() - 1);
-                else
-                    elf_path_ = path.front() == '/' ? path : "/" + path;
-                free(root);
-            }
-        }
-        vfs_.set_elf_path(elf_path_, backing_path);
+    if (const std::string backing_path = record_executable_path(path); !backing_path.empty()) {
         // A rootfs guest's relative paths must never reach the launcher's
         // directory. Diagnostic output paths are made absolute first.
         (void)dbg();

@@ -35,6 +35,18 @@
   thread blocks stays in the process-wide set, which `rt_sigtimedwait`,
   `rt_sigpending`, unblocking and pending delivery also consult; ART's
   SIGQUIT thread dump depends on it. tkill/tgkill stay thread-directed.
+- `execve` lives in `Process/Exec.cpp`. It reads `envp` (a NULL one is empty; the new image gets exactly
+  that), follows `#!` interpreters (four levels, `[interp, arg, script, args]`), returns ENOENT, EACCES
+  (directory or no execute permission, checked through the opened descriptor) and ENOEXEC, closes
+  `FD_CLOEXEC` descriptors at the point of no return, records the real file for `/proc/self/exe`, and
+  gives AT_RANDOM real entropy. Targets are opened through the VFS, never the raw host path
+  (`/proc/self/exe` would be the emulator binary). A foreign ELF (a host `/bin/ls`) is stood in for by
+  the running program only when that is a multi-call binary (`program_is_multicall`: BusyBox, toybox)
+  and the file exists: a missing file must stay ENOENT, or `execvp` over a `PATH` re-runs the current
+  program as the missing name (an exec loop). The Android branch keeps its own checks (no permission
+  test, no descriptor closing). `test_execve` covers it.
+- FD_CLOEXEC is per guest descriptor (`FdTable::set_cloexec`): set it wherever a creating call takes
+  O_CLOEXEC-style flags, never forward F_SETFD to the shared host fd.
 - A syscall that delivers a signal to its own caller (`kill` of self, `tgkill`, `tkill`)
   builds the handler frame inside the syscall: the frame saves x0 as the result and loads
   x0 = signo. Write the result (`ret_host(0)`) BEFORE `deliver_signal` / `send_process_signal`

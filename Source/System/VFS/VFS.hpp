@@ -208,6 +208,8 @@ public:
         elf_backing_path_ = backing_path;
     }
     const std::string& elf_path() const { return elf_path_; }
+    // The host file behind elf_path() (the same as elf_path() when there is no sandbox).
+    const std::string& elf_backing_path() const { return elf_backing_path_; }
     void set_initial_stack(uint64_t address) { initial_stack_ = address; }
     // Live /proc/self/cmdline contents, read from the guest's argv block.
     void set_cmdline_provider(std::function<std::string()> cb) {
@@ -356,8 +358,6 @@ public:
     void close_range(int first, int last);
     // True if `fd` is open.
     bool is_open(int fd) const;
-    // Number of open fds.
-    size_t size() const;
     // FD_CLOEXEC is a property of the descriptor, not of the shared Node: dup()ed
     // descriptors start without it and F_SETFD changes only one of them. execve
     // closes every flagged descriptor (close_on_exec). allocate/dup/dup2 and close
@@ -365,15 +365,17 @@ public:
     void set_cloexec(int fd, bool on);
     bool cloexec(int fd) const;
     void close_on_exec();
+    // Number of open fds.
+    size_t size() const;
     void invalidate_device_mappings(uint64_t addr, uint64_t size);
     int protect_device_mappings(uint64_t addr, uint64_t size, uint64_t prot);
 private:
     // guest fd → shared Node. shared_ptr so dup()/dup2() can alias.
     mutable std::mutex mu_;
     std::unordered_map<int, std::shared_ptr<Node>> table_;
+    std::unordered_set<int> cloexec_;  // descriptors with FD_CLOEXEC; guarded by mu_
     std::vector<std::weak_ptr<Node>> mapping_devices_;
     std::atomic<bool> has_mapping_devices_{false};
-    std::unordered_set<int> cloexec_;  // descriptors with FD_CLOEXEC; guarded by mu_
     std::vector<std::shared_ptr<Node>> mapping_devices_snapshot();
 };
 } // namespace arm64emu::yggdrasil

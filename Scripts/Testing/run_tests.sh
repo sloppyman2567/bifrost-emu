@@ -503,6 +503,7 @@ UNIT_TESTS=(
     "test_compat_syscalls|Tests/Unit/test_compat_syscalls.elf||5|ALL TESTS PASSED"
     # cwd/dirfd-relative path syscalls, chmod argument count, statx AT_EMPTY_PATH.
     "test_path_syscalls|Tests/Unit/test_path_syscalls.elf||10|test_path_syscalls: ALL PASS"
+    "test_execve|Tests/Unit/test_execve.elf||30|test_execve: ALL PASS"
     # 60M-call loops (main + worker) must not trip the opt-in hang watchdog.
     "test_long_call_loop|Tests/Unit/test_long_call_loop.elf||30|test_long_call_loop: ALL PASS|JIT"
 )

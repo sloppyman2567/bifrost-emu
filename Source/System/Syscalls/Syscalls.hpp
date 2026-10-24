@@ -53,6 +53,8 @@ const char* syscall_name_for_crash(uint64_t num);
 int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num);
+// execve (Process/Exec.cpp); the syscall number is implied.
+int64_t syscall_execve(Emulator& emu, CPU& cpu);
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num);
 // ── vDSO clock fast-path ────────────────────────────

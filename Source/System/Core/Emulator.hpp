@@ -749,6 +749,7 @@ private:
     // use brk_, brk_mu_, thread state, etc. directly. Other families use accessors.
     friend int64_t syscall_mem(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_threads(Emulator&, CPU&, uint64_t);
+    friend int64_t syscall_execve(Emulator&, CPU&);
     friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_exit(Emulator&, CPU&, uint64_t);  // exit_group: kill_other_threads
@@ -765,6 +766,13 @@ private:
                                     std::vector<uint64_t>& envp_addrs);
     std::vector<uint8_t> read_android_elf(const std::string& path);
     void name_elf_segments(const ElfLoader::Loaded& image, const std::string& path);
+    // Record the program at `path` for /proc/self/exe: its resolved absolute path (in the guest's
+    // view under a sandbox) and the host file backing it. Returns that file, "" when unresolvable.
+    std::string record_executable_path(const std::string& path);
+    // The same for a program whose host file is already known (`host_file`: a canonical host path,
+    // e.g. read back from an open descriptor, so "/proc/self/exe" and symlinks name the real file).
+    // `guest_hint` is the path the program was named by, used when a sandboxed file is outside the root.
+    void record_executable_host_file(const std::string& host_file, const std::string& guest_hint);
     uint64_t build_initial_stack(uint64_t stack_top,
                                  std::vector<std::string>& argv,
                                  ElfLoader::Loaded& info);
