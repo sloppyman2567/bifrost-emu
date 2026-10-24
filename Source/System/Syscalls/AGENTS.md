@@ -35,6 +35,11 @@
   thread blocks stays in the process-wide set, which `rt_sigtimedwait`,
   `rt_sigpending`, unblocking and pending delivery also consult; ART's
   SIGQUIT thread dump depends on it. tkill/tgkill stay thread-directed.
+- A syscall that delivers a signal to its own caller (`kill` of self, `tgkill`, `tkill`)
+  builds the handler frame inside the syscall: the frame saves x0 as the result and loads
+  x0 = signo. Write the result (`ret_host(0)`) BEFORE `deliver_signal` / `send_process_signal`
+  and never touch x0 afterwards, or the handler sees signal 0 and the call returns its first
+  argument. `test_signal_semantics` (`test_self_signal`) covers it.
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
 - A futex word in a writable MAP_SHARED file mapping (`Memory::shared_futex_word`:

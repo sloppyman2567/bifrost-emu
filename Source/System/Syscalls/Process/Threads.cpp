@@ -1286,8 +1286,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             if (tid == cpu.tid || tid == 0) {
-                // Self-delivery.
+                // Self-delivery. A handler frame is built on this CPU right away, saving x0 as
+                // the syscall's return value and loading x0 = signo: write the return value
+                // first and leave x0 alone afterwards (writing it after left x0 = 0 for the
+                // handler and restored the first argument as the result).
+                ret_host(0);
                 deliver_signal(emu, cpu, signals_, sig);
+                return 0;
             } else {
                 // Cross-thread delivery: push onto the target CPU's
                 // pending queue. The target's run loop drains it at the
@@ -1329,7 +1334,9 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             if (sig == 0) { ret_host(0); return 0; }
             if (sig < 1 || sig > MAX_SIGNAL) { ret_err(EINVAL); return 0; }
             if (tid == cpu.tid || tid == 0) {
+                ret_host(0);  // before delivery, as in tgkill: the handler frame saves x0
                 deliver_signal(emu, cpu, signals_, sig);
+                return 0;
             } else {
                 // Cross-thread: queue on target (see tgkill above).
                 auto target = emu.find_cpu_by_tid(tid);
@@ -1369,8 +1376,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             if (pid == self || pid == 0 || pid < 0 ||
                 pid == static_cast<int>(::getpid())) {
                 // Self-process: process-directed, so the caller, another
-                // thread not blocking it, or the process-wide pending set.
+                // thread not blocking it, or the process-wide pending set. When the caller
+                // takes it, its handler frame is built now and saves x0 as the return value:
+                // write 0 first and do not touch x0 afterwards (see tgkill).
+                ret_host(0);
                 emu.send_process_signal(cpu, sig);
+                return 0;
             } else {
                 // Other process — forward to host kill() so the target
                 // (a forked child process) receives the signal via its

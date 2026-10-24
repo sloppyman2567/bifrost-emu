@@ -368,6 +368,31 @@ static int test_thread_sigill(void) {
     return 0;
 }
 
+// kill/tkill/tgkill on the caller with an unblocked handler: the handler frame is built inside
+// the syscall, so the return value must already be 0 (it used to come back as the first
+// argument) and the handler must receive the signal number (it used to receive 0).
+static volatile int g_self_sig;
+static void self_handler(int s) { g_self_sig = s; }
+static int test_self_signal(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = self_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL)) return 1;
+    const long tid = syscall(SYS_gettid);
+    int bad = 0;
+#define SELF_CASE(label, call) do { g_self_sig = 0; long rc = (call); \
+        if (rc != 0 || g_self_sig != SIGUSR1) { printf("self signal %s: rc=%ld handler saw %d\n", \
+            label, rc, (int)g_self_sig); bad |= 1; } } while (0)
+    SELF_CASE("kill(getpid())", kill(getpid(), SIGUSR1));
+    SELF_CASE("kill(0)", kill(0, SIGUSR1));
+    SELF_CASE("tgkill", syscall(SYS_tgkill, getpid(), tid, SIGUSR1));
+    SELF_CASE("tkill", syscall(SYS_tkill, tid, SIGUSR1));
+    SELF_CASE("pthread_kill(self)", pthread_kill(pthread_self(), SIGUSR1));
+#undef SELF_CASE
+    return bad;
+}
+
 int main(void) {
     alarm(15);
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even if we hang
@@ -390,9 +415,11 @@ int main(void) {
     printf("process-directed sigwait: %s (%d)\n", r8 == 0 ? "ok" : "bad", r8);
     int r9 = test_thread_sigill();
     printf("worker SIGILL handler: %s (%d)\n", r9 == 0 ? "ok" : "bad", r9);
-    if (r0 || r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9) {
-        printf("FAIL (r0=%d r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d)\n",
-               r0, r1, r2, r3, r4, r5, r6, r7, r8, r9);
+    int r10 = test_self_signal();
+    printf("self-directed signals: %s\n", r10 == 0 ? "ok" : "bad");
+    if (r0 || r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9 || r10) {
+        printf("FAIL (r0=%d r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d r10=%d)\n",
+               r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10);
         return 1;
     }
     printf("signal semantics: ALL PASS\n");
