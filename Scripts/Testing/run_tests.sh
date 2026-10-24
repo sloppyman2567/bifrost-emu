@@ -1221,7 +1221,10 @@ START=$(date +%s)
 # Sandbox confinement tests — provision a scratch root with an escaping
 # symlink + outside canary, run with BIFROST_ROOT pointed at it, clean up.
 # The test binary takes no fixture paths (fixed guest-absolute paths).
-if [ "$RUN_INTEGRATION" = "1" ]; then
+# Only when --filter leaves one of the two selected: the post-checks below look for
+# effects of tests that ran, and would otherwise fail for tests that were filtered out.
+sandbox_selected() { [ -z "$FILTER" ] || grep -qiE -- "$FILTER" <<< "$1"; }
+if [ "$RUN_INTEGRATION" = "1" ] && { sandbox_selected test_sandbox || sandbox_selected test_sandbox_in_root; }; then
     SBX=$(mktemp -d "${TMPDIR:-/tmp}/bifrost-sbx-test.XXXXXX")
     if [ -z "$SBX" ]; then
         record_failure "test_sandbox" "could not create sandbox fixture directory"
@@ -1241,7 +1244,8 @@ if [ "$RUN_INTEGRATION" = "1" ]; then
             # relative host path names it (absolute ones are guest paths).
             if cp Tests/Unit/test_sandbox.elf "$SBX/root/test_sandbox.elf" 2>/dev/null; then
                 run_category "Sandbox" "test_sandbox_in_root|$(realpath --relative-to=. "$SBX/root/test_sandbox.elf") --in-root||10|checks passed"
-                if [ ! -f "$SBX/root/cwd-canary" ] || [ -e cwd-canary ]; then
+                if sandbox_selected test_sandbox_in_root &&
+                        { [ ! -f "$SBX/root/cwd-canary" ] || [ -e cwd-canary ]; }; then
                     record_failure "test_sandbox_in_root" "relative guest write escaped the root"
                 fi
                 rm -f cwd-canary

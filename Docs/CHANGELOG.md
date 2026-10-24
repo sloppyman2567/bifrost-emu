@@ -20,6 +20,9 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   the rootfs or system directories. Program-bundled copies (RUNPATH/RPATH, `LD_LIBRARY_PATH`) and Android system
   libraries are unchanged. Checked with the loader trace on `test_gles_contexts`; the windowed tests were not rerun.
 
+- **Test runner.** `run_tests.sh --filter` no longer reports "relative guest write escaped the root" when the
+  sandbox tests were filtered out; the sandbox fixture and its post-checks run only if one of them is selected.
+
 ### Real-world shell fixes found by differential testing (2026-10-24)
 
 A differential run of BusyBox `ash` scripts against native Linux (and single BusyBox processes against `qemu-aarch64`)
