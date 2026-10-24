@@ -600,6 +600,12 @@ private:
     // --guest-ld the symbol is found in the libc the guest ld.so mapped, on first use.
     void mark_guest_multithreaded_();
     std::atomic<bool> libc_single_threaded_looked_up_{false};
+    // glibc TLS block (TPIDR_EL0) for a thread the emulator creates itself. The built-in linker lays it
+    // out from its own objects; under --guest-ld the objects are the guest ld.so's, so it asks that
+    // ld.so (_dl_allocate_tls) for a block with the real DTV and TLS images. 0 on failure.
+    uint64_t allocate_thread_tls_();
+    uint64_t guest_dl_allocate_tls_ = 0;
+    bool guest_dl_allocate_tls_looked_up_ = false;
     // ── Futex table ───────────────────────────────────────────────────
     // (sharded — see futex_shards_ above. The old single-mutex + single-map
     // design was)

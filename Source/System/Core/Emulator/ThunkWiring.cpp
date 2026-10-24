@@ -54,7 +54,7 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
     thunk->set_sdl_filter_cpu_factory([this]() -> std::unique_ptr<CPU> {
         auto cpu = std::make_unique<CPU>();
         if (dyn_linker_) {
-            uint64_t tls = dyn_linker_->allocate_thread_tls(mem_);
+            uint64_t tls = allocate_thread_tls_();
             if (!tls) return {};
             cpu->tpidr_el0 = tls;
             cpu->tpidrro_el0 = tls;
@@ -213,7 +213,7 @@ void Emulator::wire_thunk_audio_runner_() {
                      if (!dyn_linker_) return {};
                      auto cpu = std::make_unique<CPU>();
                      cpu->copy_arch_state_from(main_cpu_);
-                     const uint64_t tls = dyn_linker_->allocate_thread_tls(mem_);
+                     const uint64_t tls = allocate_thread_tls_();
                      if (!tls) return {};
                      cpu->tpidr_el0 = tls;
                      cpu->tpidrro_el0 = tls;

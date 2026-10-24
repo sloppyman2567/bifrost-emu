@@ -25,6 +25,17 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   games under `--guest-ld`; supertux2 does not start there (its rootfs `libcurl-gnutls` wants glibc 2.43) and
   crashes under the built-in linker as well (not caused by the loader precedence change).
 
+### `--guest-ld`: emulator-created threads get their TLS from the guest ld.so (2026-10-24)
+
+- A thread the emulator creates itself (SDL_CreateThread, the audio pump, the SDL filter worker) had its TLS laid out
+  from the built-in linker's objects, which under `--guest-ld` do not include the libc the guest `ld.so` loaded: the
+  block lacked libc's TLS images, so locale-dependent calls died (`strtod` asserted "decimal_len > 0" in an SDL thread).
+  `Emulator::allocate_thread_tls_` now calls the guest `ld.so`'s `_dl_allocate_tls` (found by `GuestLibcSymbol`) on a
+  throwaway vCPU and uses the block it returns, with the real DTV and TLS images. Without a glibc `ld.so` (musl) it
+  keeps the built-in layout. `test_dyn_sdl_thread_malloc` now also calls strtod, ctype and printf in the SDL thread
+  (fails with the old layout, passes with both linkers); both full suites pass 358/358; neverball and dhewm3 ran
+  without errors under `--guest-ld`. Not covered: musl `--guest-ld` threads, which keep the old layout.
+
 ### `bifrost-emu --setup-rootfs` (2026-10-24)
 
 - One command to install the guest rootfs: `bifrost-emu --setup-rootfs [--system|--prefix DIR|--full|--no-fetch|--uninstall]`

@@ -1090,6 +1090,36 @@ void Emulator::mark_guest_multithreaded_() {
     // The exported variable is a char; neighbouring bytes belong to other variables.
     if (libc_single_threaded_addr_) mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
 }
+uint64_t Emulator::allocate_thread_tls_() {
+    if (!dyn_linker_) return 0;
+    if (!guest_linker_) return dyn_linker_->allocate_thread_tls(mem_);
+    // _dl_allocate_tls calls malloc: make sure it takes its locks (the caller is about to run a thread).
+    mark_guest_multithreaded_();
+    static std::mutex lookup_mutex;
+    uint64_t allocate_tls;
+    {
+        std::lock_guard<std::mutex> lock(lookup_mutex);
+        if (!guest_dl_allocate_tls_looked_up_) {
+            guest_dl_allocate_tls_ = find_guest_loader_symbol(mem_, "_dl_allocate_tls");
+            guest_dl_allocate_tls_looked_up_ = true;
+        }
+        allocate_tls = guest_dl_allocate_tls_;
+    }
+    // No glibc ld.so (musl): the built-in layout is all there is.
+    if (!allocate_tls) return dyn_linker_->allocate_thread_tls(mem_);
+    // The call runs on a throwaway vCPU whose own (empty) TLS block only has to carry malloc's
+    // per-thread state for the duration of the call.
+    const uint64_t scratch_tls = dyn_linker_->allocate_thread_tls(mem_);
+    if (!scratch_tls) return 0;
+    CPU scratch;
+    scratch.copy_arch_state_from(main_cpu_);
+    scratch.tpidr_el0 = scratch_tls;
+    scratch.tpidrro_el0 = scratch_tls;
+    scratch.tid = next_tid_.fetch_add(1);
+    scratch.is_fork_process = false;
+    const int64_t null_mem = 0;
+    return call_guest_function(scratch, allocate_tls, &null_mem, 1, nullptr, 0);
+}
 uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     // Allocate a guest stack. 256 KiB is plenty for the game's worker
     // threads (they use only a few stack frames + call chains).
@@ -1099,7 +1129,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     // Per-thread glibc TLS (TPIDR_EL0). Mirrors the clone path's TLS.
     uint64_t tls = 0;
     if (dyn_linker_) {
-        tls = dyn_linker_->allocate_thread_tls(mem_);
+        tls = allocate_thread_tls_();
     }
     // Guest SDL_Thread* handle: a 32-byte zeroed block.
     constexpr uint64_t HANDLE_SIZE = 32;

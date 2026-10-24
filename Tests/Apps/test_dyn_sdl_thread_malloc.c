@@ -1,14 +1,19 @@
-/* test_dyn_sdl_thread_malloc.c — malloc from the main thread and an SDL_CreateThread thread at once.
+/* test_dyn_sdl_thread_malloc.c — an SDL_CreateThread thread: libc TLS, and malloc beside the main thread.
  *
  * The emulator creates SDL threads itself, so it must clear glibc's __libc_single_threaded as
  * pthread_create does. Under --guest-ld the libc is the one the guest ld.so mapped; when the flag
  * stayed set, malloc skipped its arena locks and two threads corrupted the heap (neverball died
  * with "malloc(): unsorted double linked list corrupted").
  *
+ * The thread's TLS must also be a real glibc one: under --guest-ld it came from the built-in linker's
+ * layout, which lacks the guest libc's TLS images, so locale-dependent calls (strtod, ctype, printf)
+ * died with "strtod_l.c: assertion failed: decimal_len > 0".
+ *
  * Build: aarch64-linux-gnu-gcc -O2 -o test_dyn_sdl_thread_malloc.elf test_dyn_sdl_thread_malloc.c -ldl -pthread
  * Run:   ./bifrost-emu [--guest-ld] test_dyn_sdl_thread_malloc.elf
  * Pass:  prints "test_dyn_sdl_thread_malloc: ALL PASS". Exit 77 = skip when the SDL thunk is unavailable.
  */
+#include <ctype.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +42,14 @@ static void churn(const char *who) {
 
 static int sdl_thread(void *arg) {
     (void)arg;
+    volatile int letter = 'q';
+    char text[64];
+    snprintf(text, sizeof text, "%.3f|%5d", 3.14159, 42);
+    if (!isalpha(letter) || toupper(letter) != 'Q' || strtod("2.5", 0) != 2.5 || strcmp(text, "3.142|   42") != 0) {
+        bad = 1;
+        printf("TLS-dependent libc calls gave wrong results in the SDL thread\n");
+        return 1;
+    }
     churn("sdl-thread");
     return 0;
 }

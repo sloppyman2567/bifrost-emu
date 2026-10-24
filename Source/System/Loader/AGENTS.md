@@ -59,7 +59,8 @@
 - Under `--guest-ld` the emulator does not index the guest's libc. Threads it creates itself
   (`spawn_sdl_thread`, audio pump, SDL filter worker) call `Emulator::mark_guest_multithreaded_`, which clears
   `__libc_single_threaded` (found by `GuestLibcSymbol` in the mapped libc); skipping it lets malloc run unlocked.
-  Their TLS still comes from `allocate_thread_tls`, which only knows the built-in linker's objects.
+  Their TLS comes from `Emulator::allocate_thread_tls_`: the guest `ld.so`'s `_dl_allocate_tls` under `--guest-ld`
+  (glibc), else `allocate_thread_tls` (built-in linker; musl keeps this layout).
 - `RootfsSetup` implements `--setup-rootfs`: it only locates and runs the checkout's `install-rootfs.sh`
   (status 127 without it); the build stays in the scripts.
 - `RootfsDiscovery` picks the library root: `BIFROST_ROOT` (the sandbox, set by

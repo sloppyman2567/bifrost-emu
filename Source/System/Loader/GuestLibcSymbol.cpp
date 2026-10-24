@@ -8,15 +8,24 @@
 
 namespace arm64emu {
 
-static bool is_glibc_libc(const std::string& path) {
+static std::string base_name(const std::string& path) {
     const size_t slash = path.rfind('/');
-    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+static bool is_glibc_libc(const std::string& name) {
     return name == "libc.so.6" || name.rfind("libc-", 0) == 0;
 }
 
-uint64_t find_guest_libc_symbol(const Memory& mem, const std::string& symbol) {
+static bool is_glibc_loader(const std::string& name) {
+    return name == "ld-linux-aarch64.so.1" || (name.rfind("ld-", 0) == 0 && name.find(".so") != std::string::npos &&
+                                                name.find("musl") == std::string::npos);
+}
+
+static uint64_t find_symbol(const Memory& mem, bool (*wanted_file)(const std::string&), uint8_t symbol_type,
+                            const std::string& symbol) {
     for (const auto& map : mem.mappings_snapshot()) {
-        if (!map.file || map.offset != 0 || !is_glibc_libc(map.file->path)) continue;
+        if (!map.file || map.offset != 0 || !wanted_file(base_name(map.file->path))) continue;
         const std::string host = map.file->host_path ? map.file->path
                                                      : yggdrasil::Yggdrasil::remap_path(map.file->path);
         std::ifstream file(host, std::ios::binary);
@@ -40,15 +49,23 @@ uint64_t find_guest_libc_symbol(const Memory& mem, const std::string& symbol) {
             file.seekg(static_cast<std::streamoff>(strtab.sh_offset));
             if (!file.read(names.data(), strtab.sh_size)) continue;
             for (const auto& sym : symbols) {
-                if (sym.st_shndx == SHN_UNDEF || ELF64_ST_TYPE(sym.st_info) != STT_OBJECT ||
+                if (sym.st_shndx == SHN_UNDEF || ELF64_ST_TYPE(sym.st_info) != symbol_type ||
                     sym.st_name >= strtab.sh_size || symbol != &names[sym.st_name])
                     continue;
-                // The first PT_LOAD of libc has vaddr 0 and offset 0, so the mapping start is the base.
+                // The first PT_LOAD has vaddr 0 and offset 0, so the mapping start is the base.
                 return map.start + sym.st_value;
             }
         }
     }
     return 0;
+}
+
+uint64_t find_guest_libc_symbol(const Memory& mem, const std::string& symbol) {
+    return find_symbol(mem, is_glibc_libc, STT_OBJECT, symbol);
+}
+
+uint64_t find_guest_loader_symbol(const Memory& mem, const std::string& symbol) {
+    return find_symbol(mem, is_glibc_loader, STT_FUNC, symbol);
 }
 
 }  // namespace arm64emu
