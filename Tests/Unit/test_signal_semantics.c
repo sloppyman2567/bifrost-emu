@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -393,6 +394,22 @@ static int test_self_signal(void) {
     return bad;
 }
 
+// kill(pid, 0) answers "can this pid be signalled": ESRCH once a child has been reaped or for a pid
+// that never existed (it used to succeed for everything, so `kill -0 $pid` loops never ended).
+static int test_kill_zero(void) {
+    int bad = 0;
+    pid_t child = fork();
+    if (child == 0) _exit(0);
+    int st = 0;
+    waitpid(child, &st, 0);
+    errno = 0;
+    if (kill(child, 0) != -1 || errno != ESRCH) { printf("kill(reaped child, 0): expected ESRCH (errno %d)\n", errno); bad = 1; }
+    errno = 0;
+    if (kill(999999, 0) != -1 || errno != ESRCH) { printf("kill(999999, 0): expected ESRCH (errno %d)\n", errno); bad = 1; }
+    if (kill(getpid(), 0) != 0) { printf("kill(self, 0): expected success\n"); bad = 1; }
+    return bad;
+}
+
 int main(void) {
     alarm(15);
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even if we hang
@@ -417,9 +434,11 @@ int main(void) {
     printf("worker SIGILL handler: %s (%d)\n", r9 == 0 ? "ok" : "bad", r9);
     int r10 = test_self_signal();
     printf("self-directed signals: %s\n", r10 == 0 ? "ok" : "bad");
-    if (r0 || r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9 || r10) {
-        printf("FAIL (r0=%d r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d r10=%d)\n",
-               r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10);
+    int r11 = test_kill_zero();
+    printf("kill(pid, 0) existence check: %s\n", r11 == 0 ? "ok" : "bad");
+    if (r0 || r1 || r2 || r3 || r4 || r5 || r6 || r7 || r8 || r9 || r10 || r11) {
+        printf("FAIL (r0=%d r1=%d r2=%d r3=%d r4=%d r5=%d r6=%d r7=%d r8=%d r9=%d r10=%d r11=%d)\n",
+               r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11);
         return 1;
     }
     printf("signal semantics: ALL PASS\n");

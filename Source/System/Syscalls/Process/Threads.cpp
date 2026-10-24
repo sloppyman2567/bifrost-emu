@@ -1006,7 +1006,16 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // from our perspective).
             int pid = static_cast<int>(a0);
             int sig = static_cast<int>(a1);
-            if (sig == 0) { ret_host(0); return 0; }
+            if (sig == 0) {
+                // Signal 0 only asks whether `pid` can be signalled: ourselves always, anything else as
+                // the host answers (ESRCH for a process that is gone, EPERM for one that is not ours).
+                // Scripts poll `kill -0 $pid` to wait for a process to exit.
+                const int me = emu.vfs().process_ids().pid;
+                if (pid == me || pid == 0 || pid < 0 || pid == static_cast<int>(::getpid())) { ret_host(0); return 0; }
+                if (::kill(pid, 0) < 0) { ret_errno(); return 0; }
+                ret_host(0);
+                return 0;
+            }
             if (sig < 1 || sig > MAX_SIGNAL) { ret_err(EINVAL); return 0; }
             // Self: our PID (1 in the PID-1 model, else the host PID), and
             // pid == 0 / pid < 0 (process groups are not modelled). PID 1
@@ -1031,7 +1040,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // children.
                 int r = ::kill(pid, sig);
                 if (r < 0) {
-                    ret_err(ESRCH);
+                    ret_errno();  // ESRCH, or EPERM for a process that is not ours
                     return 0;
                 }
             }
