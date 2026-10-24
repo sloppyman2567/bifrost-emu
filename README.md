@@ -384,7 +384,7 @@ The current version is **2.0.0-alpha.2**, the second pre-release toward the
 | Host graphics, audio and input | [Host integration](Docs/HOST_INTEGRATION.md), [window stats](Docs/window-stats.md) |
 | Embedding | [C API and native bridge](Docs/EMBEDDING.md) |
 | Support and security | [Support matrix](Docs/SUPPORT.md), [security model](Docs/SECURITY.md) |
-| Tests and history | [Test guide](Docs/TESTS.md), [dated test history](Docs/archive/TESTS-history.md), [changelog](Docs/CHANGELOG.md), [third-party notes](Docs/THIRD_PARTY.md); per-app investigation logs are in `Docs/archive/apps/` |
+| Tests and history | [Test guide](Docs/TESTS.md), [dated test history](Docs/archive/TESTS-history.md), [changelog](Docs/CHANGELOG.md) (releases before 2.0.0-alpha.2 are in `Docs/archive/`), [third-party notes](Docs/THIRD_PARTY.md); per-app investigation logs are in `Docs/archive/apps/` |
 | Licensing | [License scope and texts](LICENSES/README.md) |
 | Configuration | [`bifrost.toml.sample`](bifrost.toml.sample) |
 
