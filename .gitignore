@@ -111,3 +111,11 @@ __pycache__/
 
 # Personal media, packages, dumps and scratch files (not part of the repo)
 local/
+
+# Debian package build products
+/debian/.debhelper/
+/debian/bifrost-emu/
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/debhelper-build-stamp
+/debian/files

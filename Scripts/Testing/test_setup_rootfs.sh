@@ -35,4 +35,18 @@ mkdir "$WORK/solo" && cp "$EMU" "$WORK/solo/"
 "$WORK/solo/bifrost-emu" --setup-rootfs >/dev/null 2>&1 && rc=0 || rc=$?
 check "without an installer beside it the status is 127" 127 "$rc"
 
+# An installed package keeps the scripts in <prefix>/share/bifrost/setup (read-only); --setup-rootfs runs a copy
+# from the user's cache, passes the options on and returns the script's status.
+PKG="$WORK/pkg"
+mkdir -p "$PKG/bin" "$PKG/share/bifrost/setup/Scripts/Setup" && cp "$EMU" "$PKG/bin/"
+cat >"$PKG/share/bifrost/setup/Scripts/Setup/install-rootfs.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "stub ran in $(cd "$(dirname "$0")/../.." && pwd) with: $*"
+exit 7
+STUB
+chmod 555 "$PKG/share/bifrost/setup/Scripts/Setup/install-rootfs.sh"
+out=$(env XDG_CACHE_HOME="$WORK/cache" "$PKG/bin/bifrost-emu" --setup-rootfs --profile demo --no-fetch 2>&1) && rc=0 || rc=$?
+check "a packaged installer's status is returned" 7 "$rc"
+check "it runs from the per-user cache, not the read-only package" yes "$([[ $out == *"stub ran in $WORK/cache/bifrost/setup with: --profile demo --no-fetch"* ]] && echo yes || echo no)"
+
 exit $fail

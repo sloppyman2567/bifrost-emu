@@ -1,0 +1,5 @@
+# Tests/Apps/toybox is an AArch64 guest program: the shell that "bifrost-emu --setup-rootfs" puts in the guest
+# rootfs. It is data for the emulator, never run on the host.
+bifrost-emu: binary-from-other-architecture [usr/share/bifrost/setup/Tests/Apps/toybox]
+bifrost-emu: statically-linked-binary [usr/share/bifrost/setup/Tests/Apps/toybox]
+bifrost-emu: arch-dependent-file-in-usr-share [usr/share/bifrost/setup/Tests/Apps/toybox]

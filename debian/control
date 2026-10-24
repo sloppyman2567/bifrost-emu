@@ -1,0 +1,36 @@
+Source: bifrost-emu
+Section: utils
+Priority: optional
+Maintainer: sloppyman2567 <sloppyman2567@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               g++,
+               make,
+               pkg-config,
+               libavcodec-dev,
+               libavutil-dev,
+               libswscale-dev,
+               libegl-dev,
+               libffi-dev,
+               libgl-dev,
+               libsdl3-dev (>= 3.2.0) | libsdl2-dev,
+               libsdl2-dev,
+               libwayland-dev,
+               libx11-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/sloppyman2567/bifrost-emu
+Rules-Requires-Root: no
+
+Package: bifrost-emu
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, ca-certificates, curl, python3, xz-utils
+Recommends: libsdl3-0 (>= 3.2.0), libgl1, libwayland-client0, libx11-6
+Description: run AArch64 Linux programs and Android apps on x86-64
+ bifrost-emu is a user-mode AArch64 emulator with a JIT compiler. It runs
+ ARM64 Linux programs and games (graphics, audio and input go to the host's
+ libraries) and, with the separate Asgard layer, Android apps.
+ .
+ Dynamically linked programs need a guest root filesystem: run
+ "bifrost-emu --setup-rootfs" once. It downloads the glibc and musl toolchains
+ (about 235 MB) and builds a rootfs under ~/.local/share/bifrost.
+ "bifrost-emu --setup-rootfs --games" adds a profile with the libraries games
+ need. Android windows need libsdl3-0 3.2 or newer.

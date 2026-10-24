@@ -416,6 +416,12 @@ install: $(TARGET)
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
 
+# Debian/Ubuntu package (needs build-essential, debhelper and the Build-Depends in debian/control):
+# writes ../bifrost-emu_<version>_amd64.deb. Install it with `sudo apt install ../bifrost-emu_*.deb`.
+.PHONY: deb
+deb:
+	dpkg-buildpackage -us -uc -b -j$$(nproc)
+
 # The guest rootfs lives in $(PREFIX)/share/bifrost/rootfs, where bifrost-emu
 # looks for it. It is built from the toolchains already in Tools/ and never
 # downloads, so `sudo make install-rootfs` does not fetch as root: run

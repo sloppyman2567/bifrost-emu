@@ -1,0 +1,49 @@
+#!/usr/bin/make -f
+# Packaging for bifrost-emu: the project's own Makefile builds ./bifrost-emu; the test suite needs
+# AArch64 guest toolchains that are downloaded on demand, so it is not run at package build time.
+# No LTO: the project's JIT and its helpers are not built or tested with it.
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
+
+# The Makefile only supplies its own flags (-ISource, -std=c++17, -O3, ...) when CXXFLAGS is unset, and
+# the package build environment sets it, so pass the hardening flags and then the project's.
+export CXXFLAGS := $(shell dpkg-buildflags --get CPPFLAGS) $(shell dpkg-buildflags --get CXXFLAGS) \
+    -O3 -std=c++17 -pthread -Wall -Wextra -IInclude -ISource -MMD -MP
+
+SETUP := debian/bifrost-emu/usr/share/bifrost/setup
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) all
+
+override_dh_auto_test:
+
+# Tests/Apps/toybox is an AArch64 guest program (the rootfs shell): not for the host's strip or ldd.
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym -Xtoybox
+
+override_dh_shlibdeps:
+	dh_shlibdeps -Xtoybox
+
+override_dh_dwz:
+	dh_dwz -Xtoybox
+
+override_dh_auto_clean:
+	$(MAKE) clean
+
+override_dh_auto_install:
+	install -D -m 0755 bifrost-emu debian/bifrost-emu/usr/bin/bifrost-emu
+	# The scripts "bifrost-emu --setup-rootfs" runs; it copies this tree to a per-user cache first,
+	# because they download and build next to themselves.
+	install -d $(SETUP)/Scripts/Setup $(SETUP)/Tools/Fetch $(SETUP)/Tests/Apps
+	install -m 0755 Scripts/Setup/*.sh Scripts/Setup/*.py $(SETUP)/Scripts/Setup/
+	install -m 0755 Tools/Fetch/fetch-glibc-toolchain.sh Tools/Fetch/fetch-musl-toolchain.sh $(SETUP)/Tools/Fetch/
+	install -m 0755 Tests/Apps/toybox $(SETUP)/Tests/Apps/toybox
+
+override_dh_installexamples:
+	dh_installexamples bifrost.toml.sample
+	chmod 0644 debian/bifrost-emu/usr/share/doc/bifrost-emu/examples/bifrost.toml.sample
+
+override_dh_installchangelogs:
+	dh_installchangelogs Docs/CHANGELOG.md

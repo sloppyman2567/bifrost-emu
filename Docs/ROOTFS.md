@@ -67,8 +67,10 @@ sudo make install install-rootfs             # system-wide, in $(PREFIX)/share/b
 ```
 
 `bifrost-emu --setup-rootfs [OPTIONS]` runs `Scripts/Setup/install-rootfs.sh` with the same options and exits with
-its status. It finds the script beside the executable (a checkout or `build/<config>/`); an executable installed
-without a checkout exits 127 and says so.
+its status. It finds the script beside the executable (a checkout or `build/<config>/`) or in an installed package's
+`<prefix>/share/bifrost/setup`, which it first copies to `$XDG_CACHE_HOME/bifrost/setup` (default `~/.cache/bifrost/setup`)
+because the scripts download and build next to themselves; downloaded toolchains stay there between runs. An executable
+with neither exits 127 and says so.
 
 `install-rootfs.sh` downloads the glibc and musl toolchains into `Tools/` (about
 235 MB) when they are missing, builds the rootfs with `setup-rootfs.sh` in a

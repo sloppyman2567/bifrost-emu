@@ -27,6 +27,18 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   games under `--guest-ld`; supertux2 does not start there (its rootfs `libcurl-gnutls` wants glibc 2.43) and
   crashes under the built-in linker as well (not caused by the loader precedence change).
 
+### Debian/Ubuntu package (2026-10-24)
+
+- `debian/` builds `bifrost-emu_2.0.0~alpha.2_amd64.deb` (`make deb`): the binary in `/usr/bin`, the sample config, the
+  project changelog, and the rootfs setup scripts in `/usr/share/bifrost/setup` (with the AArch64 `toybox` they install as the
+  rootfs shell). `bifrost-emu --setup-rootfs` now also runs from an installed package, using a copy of those scripts in
+  `~/.cache/bifrost/setup`. Asgard is not in the package.
+- Built and tested in a clean Ubuntu 25.10 userland (gcc 15.2, SDL 3.2.20, ffmpeg 7.1): the source compiled there for the first
+  time; the installed package ran `--version`, an AArch64 `toybox`, `--setup-rootfs` (toolchain download and rootfs build),
+  and dynamically linked glibc and musl hello programs, also under `--guest-ld`. Package builds set their own `CXXFLAGS`, which
+  replaces the Makefile's default flags, so `debian/rules` passes the project's flags after the hardening ones (and turns LTO
+  off). `test_setup_rootfs.sh` covers the packaged-scripts path.
+
 ### Android provisioning on a fresh Ubuntu machine (2026-10-24)
 
 - Found by the first run on an Ubuntu 25.10 VM. `fetch-android-package-tools.py` failed with HTTP 404: it asked Google's

@@ -112,6 +112,16 @@ make                                   # build (SDL2/GL thunks auto-detected)
 ./bifrost-emu Tests/Apps/toybox seq 1 10   # arguments pass through
 ```
 
+On Debian and Ubuntu (25.10 or newer for Android windows) the quickest install is the package:
+
+```bash
+sudo apt install build-essential debhelper pkg-config libavcodec-dev libavutil-dev libswscale-dev \
+     libegl-dev libffi-dev libgl-dev libsdl3-dev libsdl2-dev libwayland-dev libx11-dev
+make deb                                  # writes ../bifrost-emu_2.0.0~alpha.2_amd64.deb
+sudo apt install ../bifrost-emu_*.deb
+bifrost-emu --setup-rootfs                # once: downloads the toolchains and builds the guest rootfs
+```
+
 Dynamically linked programs need a guest root filesystem for their libraries.
 Install a standard one, then run programs directly ([details](Docs/ROOTFS.md)):
 

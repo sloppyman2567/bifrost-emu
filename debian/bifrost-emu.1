@@ -1,0 +1,58 @@
+.TH BIFROST-EMU 1 "October 2026" "bifrost-emu 2.0.0-alpha.2" "User Commands"
+.SH NAME
+bifrost-emu \- run AArch64 Linux programs and Android apps on x86-64
+.SH SYNOPSIS
+.B bifrost-emu
+[\fIOPTION\fR]... \fIPROGRAM\fR [\fIARGUMENT\fR]...
+.br
+.B bifrost-emu \-\-setup\-rootfs
+[\fIOPTION\fR]...
+.SH DESCRIPTION
+Runs an AArch64 Linux ELF program, translating it to x86-64 as it runs. Statically linked programs need
+nothing else. Dynamically linked programs need a guest root filesystem, found automatically next to the
+executable, in the user's data directory or system-wide; create one with \fB\-\-setup\-rootfs\fR.
+.SH OPTIONS
+.TP
+.B \-\-setup\-rootfs [\-\-system | \-\-prefix DIR | \-\-full | \-\-profile NAME | \-\-games | \-\-uninstall]
+Download the glibc and musl toolchains (about 235 MB) and install a guest rootfs, then exit.
+\fB\-\-games\fR adds the libraries games need as profile "games".
+.TP
+.BI \-\-rootfs " PATH"
+Use PATH as the guest's root: libraries come from it and guest paths are confined to it.
+.TP
+.BI \-\-rootfs\-profile " NAME"
+Use the installed rootfs profile NAME for libraries only.
+.TP
+.B \-\-rootfs\-list
+List the installed rootfs profiles; the one in use is marked with an asterisk.
+.TP
+.B \-\-guest\-ld
+Run dynamically linked programs under the rootfs's own dynamic linker (experimental).
+.TP
+.B \-\-no\-jit
+Use the interpreter only.
+.TP
+.BI \-\-config " PATH"
+Read the configuration from PATH. A sample is in /usr/share/doc/bifrost\-emu/examples/.
+.TP
+.B \-V\fR, \fB\-\-version
+Print the version and exit.
+.TP
+.B \-h\fR, \fB\-\-help
+Print the full option list and exit.
+.SH ENVIRONMENT
+.TP
+.B BIFROST_ROOT
+Same as \fB\-\-rootfs\fR.
+.TP
+.B BIFROST_ROOTFS_PROFILE
+Same as \fB\-\-rootfs\-profile\fR.
+.SH FILES
+.TP
+.I ~/.local/share/bifrost/rootfs
+The default guest rootfs; named profiles are in \fI~/.local/share/bifrost/rootfs.d/\fR.
+.TP
+.I ~/.cache/bifrost/setup
+Working copy of the setup scripts, with the downloaded toolchains.
+.SH SEE ALSO
+The project documentation in /usr/share/doc/bifrost\-emu/ and https://github.com/sloppyman2567/bifrost\-emu.

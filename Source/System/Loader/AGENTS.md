@@ -61,8 +61,9 @@
   `__libc_single_threaded` (found by `GuestLibcSymbol` in the mapped libc); skipping it lets malloc run unlocked.
   Their TLS comes from `Emulator::allocate_thread_tls_`: the guest `ld.so`'s `_dl_allocate_tls` under `--guest-ld`
   (glibc), else `allocate_thread_tls` (built-in linker; musl keeps this layout).
-- `RootfsSetup` implements `--setup-rootfs`: it only locates and runs the checkout's `install-rootfs.sh`
-  (status 127 without it); the build stays in the scripts.
+- `RootfsSetup` implements `--setup-rootfs`: it only locates and runs `install-rootfs.sh` (a checkout's, or an installed
+  package's `share/bifrost/setup` copied to `$XDG_CACHE_HOME/bifrost/setup` first; status 127 without either); the build
+  stays in the scripts. `debian/rules` installs that tree, so a script the installer needs must be added there.
 - Rootfs profiles: `rootfs.d/NAME` beside the default rootfs, chosen by `BIFROST_ROOTFS_PROFILE` (set by
   `--rootfs-profile` / `[paths] profile`); a profile is library-only like a discovered rootfs, an uninstalled one is an
   error in `Main`, and `BIFROST_ROOT` outranks it. `fetch-game-libs.py` must keep the host-backed libraries (audio,

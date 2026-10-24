@@ -1,0 +1,20 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: bifrost-emu
+Source: https://github.com/sloppyman2567/bifrost-emu
+
+Files: *
+Copyright: bifrost-emu contributors
+License: Unlicense
+ This is free and unencumbered software released into the public domain.
+ .
+ Anyone is free to copy, modify, publish, use, compile, sell, or
+ distribute this software, either in source code form or as a compiled
+ binary, for any purpose, commercial or non-commercial, and by any
+ means.
+ .
+ For more information, please refer to <http://unlicense.org/>
+
+Files: ThirdParty/*
+Copyright: their respective authors
+License: other
+ Third-party sources keep their own licenses; see LICENSES/ and Docs/THIRD_PARTY.md in the source package.

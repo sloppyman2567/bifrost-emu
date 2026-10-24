@@ -5,8 +5,8 @@
 
 namespace arm64emu {
 
-// Installer script next to the executable (a checkout or build tree), or "" when the
-// executable runs from somewhere without one. `exe_dir` is the executable's directory.
+// Installer script next to the executable (a checkout or build tree) or in an installed package's
+// <prefix>/share/bifrost/setup, or "" when there is none. `exe_dir` is the executable's directory.
 std::string find_rootfs_installer(const std::string& exe_dir);
 
 // Runs Scripts/Setup/install-rootfs.sh with `args` (--system, --prefix DIR, --full,

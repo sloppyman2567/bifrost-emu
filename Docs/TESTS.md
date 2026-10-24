@@ -34,7 +34,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
 ./Scripts/Android/test_android_super.py        # dynamic-partition unpacker vs a synthetic image (--compare SUPER.img: vs lpunpack)
 ./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall
-./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls and reports a missing installer
+./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls, runs a packaged installer from the cache and reports a missing one
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
 ./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
