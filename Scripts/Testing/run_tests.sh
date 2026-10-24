@@ -852,6 +852,9 @@ DYNAMIC_TESTS=(
     # SDL thunk build; exit 77 = skip.
     "test_dyn_sdl_exit_cond|Tests/Apps/test_dyn_sdl_exit.elf cond||20|cond ALL PASS"
     "test_dyn_sdl_exit_mutex|Tests/Apps/test_dyn_sdl_exit.elf mutex||20|mutex ALL PASS"
+    # Main and SDL threads malloc at once: the emulator must clear __libc_single_threaded for threads it
+    # creates, in the guest ld.so's libc too (--guest-ld). Needs the SDL thunk build; exit 77 = skip.
+    "test_dyn_sdl_thread_malloc|Tests/Apps/test_dyn_sdl_thread_malloc.elf||60|test_dyn_sdl_thread_malloc: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

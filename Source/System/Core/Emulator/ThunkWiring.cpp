@@ -61,8 +61,7 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
         }
         cpu->tid = next_tid_.fetch_add(1);
         if (jit_) jit_->enter_multithreaded();
-        if (libc_single_threaded_addr_)
-            mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
+        mark_guest_multithreaded_();
         return cpu;
     });
     thunk->set_glfw_cb_runner(
@@ -224,8 +223,7 @@ void Emulator::wire_thunk_audio_runner_() {
                      // This is the emulator's equivalent of creating a
                      // guest pthread: tell glibc not to use its single-thread
                      // fast paths. Store exactly the exported char byte.
-                     if (libc_single_threaded_addr_)
-                         mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
+                     mark_guest_multithreaded_();
                      return cpu;
                  });
     // Probe after installing the runner and TLS-aware guest CPU factory.

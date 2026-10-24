@@ -56,6 +56,10 @@
   via `open_host_fd`, libraries, `ld.so.cache`) resolve through the VFS library
   overlay (see the VFS guide); the thunk-stub check (`real_library_in_rootfs`) uses
   the same opens so it sees what ld.so sees.
+- Under `--guest-ld` the emulator does not index the guest's libc. Threads it creates itself
+  (`spawn_sdl_thread`, audio pump, SDL filter worker) call `Emulator::mark_guest_multithreaded_`, which clears
+  `__libc_single_threaded` (found by `GuestLibcSymbol` in the mapped libc); skipping it lets malloc run unlocked.
+  Their TLS still comes from `allocate_thread_tls`, which only knows the built-in linker's objects.
 - `RootfsSetup` implements `--setup-rootfs`: it only locates and runs the checkout's `install-rootfs.sh`
   (status 127 without it); the build stays in the scripts.
 - `RootfsDiscovery` picks the library root: `BIFROST_ROOT` (the sandbox, set by

@@ -17,6 +17,7 @@
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Signals.hpp"   // exit_robust_list helper
 #include "System/Loader/DynamicLinker.hpp"  // allocate_thread_tls (SDL threads)
+#include "System/Loader/GuestLibcSymbol.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"  // needed for per-thread JIT + jit_.reset()
 #include "System/Graphics/Thunks/GraphicThunk.hpp"    // GraphicThunk::wake_sdl_semaphores (stop_sdl_threads)
 #include "System/Audio/AudioThunk.hpp"
@@ -435,9 +436,7 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // mode too: workers invalidate it while main runs. No-op after the
     // first spawn.
     if (jit_) jit_->enter_multithreaded();
-    if (libc_single_threaded_addr_) {
-        mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
-    }
+    mark_guest_multithreaded_();
     GuestThread* gtp = gt.get();
     // Start the host thread and install its handle BEFORE publishing the
     // GuestThread to threads_. std::thread's constructor starts the thread
@@ -1078,6 +1077,19 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
     // threads) or a racing stop can join us without a half-dead record.
     st->finished.store(true, std::memory_order_release);
 }
+void Emulator::mark_guest_multithreaded_() {
+    if (guest_linker_ && !libc_single_threaded_looked_up_.load(std::memory_order_acquire)) {
+        static std::mutex lookup_mutex;
+        std::lock_guard<std::mutex> lock(lookup_mutex);
+        if (!libc_single_threaded_looked_up_.load(std::memory_order_relaxed)) {
+            if (!libc_single_threaded_addr_)
+                libc_single_threaded_addr_ = find_guest_libc_symbol(mem_, "__libc_single_threaded");
+            libc_single_threaded_looked_up_.store(true, std::memory_order_release);
+        }
+    }
+    // The exported variable is a char; neighbouring bytes belong to other variables.
+    if (libc_single_threaded_addr_) mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
+}
 uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     // Allocate a guest stack. 256 KiB is plenty for the game's worker
     // threads (they use only a few stack frames + call chains).
@@ -1123,9 +1135,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     // MT-safe gate as spawn_thread (no-op after the first spawn).
     if (jit_) jit_->enter_multithreaded();
     alive_threads_.fetch_add(1);
-    if (libc_single_threaded_addr_) {
-        mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
-    }
+    mark_guest_multithreaded_();
     SdlThread* stp = st.get();
     // Start the host thread and install its handle BEFORE publishing to the
     // map: std::thread's ctor starts the thread immediately, so a wait/

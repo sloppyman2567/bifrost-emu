@@ -12,6 +12,19 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### `--guest-ld`: threads the emulator creates no longer corrupt the heap (2026-10-24)
+
+- neverball under `--guest-ld` aborted within seconds with glibc "malloc(): unsorted double linked list corrupted"
+  (5 of 5 runs). Threads the emulator creates itself (SDL_CreateThread, the audio pump, the SDL filter worker) must
+  clear glibc's `__libc_single_threaded`, as `pthread_create` does; the address was only known to the built-in linker,
+  so under `--guest-ld` the flag stayed set and malloc ran without its arena locks on two threads. The emulator now
+  reads the symbol from the libc the guest `ld.so` mapped (`GuestLibcSymbol`) on first use, and stores exactly the
+  char byte (the clone path stored four). Found with a fixture of two threads mallocing at once (crashed 3 of 3 under
+  `--guest-ld`, passed under the built-in linker), then `test_dyn_sdl_thread_malloc`; neverball survived 40 s in two
+  of three runs afterwards and was closed cleanly in the third. Both full suites pass 358/358. Not checked: other
+  games under `--guest-ld`; supertux2 does not start there (its rootfs `libcurl-gnutls` wants glibc 2.43) and
+  crashes under the built-in linker as well (not caused by the loader precedence change).
+
 ### `bifrost-emu --setup-rootfs` (2026-10-24)
 
 - One command to install the guest rootfs: `bifrost-emu --setup-rootfs [--system|--prefix DIR|--full|--no-fetch|--uninstall]`

@@ -595,6 +595,11 @@ private:
     // to 0 when creating the first guest thread (glibc's pthread_create
     // does the same) so multi-threaded guests take the correct paths.
     uint64_t libc_single_threaded_addr_ = 0;
+    // Tells glibc a second thread exists (clears __libc_single_threaded), as its pthread_create does,
+    // for threads the emulator creates itself (SDL threads, audio and filter workers). Under
+    // --guest-ld the symbol is found in the libc the guest ld.so mapped, on first use.
+    void mark_guest_multithreaded_();
+    std::atomic<bool> libc_single_threaded_looked_up_{false};
     // ── Futex table ───────────────────────────────────────────────────
     // (sharded — see futex_shards_ above. The old single-mutex + single-map
     // design was)
