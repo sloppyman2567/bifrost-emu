@@ -262,6 +262,12 @@ final class FrameworkServiceRuntime {
     // services, so the stub is never bound.
     private static final ComponentName MICROG_AD_REQUESTS =
             new ComponentName("com.google.android.gms", "org.microg.gms.ads.AdRequestService");
+    // In-app purchases are not offered. Binding the Play Store companion's
+    // billing service started a whole Play Store runtime (~370 MiB) for every
+    // game that links the Play Billing Library; a failed bind is what a device
+    // without the Play Store reports, and the library answers BILLING_UNAVAILABLE.
+    private static final ComponentName MICROG_BILLING =
+            new ComponentName("com.android.vending", "com.android.vending.billing.InAppBillingService");
 
     synchronized int bind(Object[] a, boolean instance) throws Exception {
         if (remote != null) {
@@ -276,6 +282,7 @@ final class FrameworkServiceRuntime {
         ServiceInfo info = resolve(identity, a[0], intent, (String) a[3], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
         if (info == null) return 0;
         if (MICROG_AD_REQUESTS.equals(new ComponentName(info.packageName, info.name))) return 0;
+        if (MICROG_BILLING.equals(new ComponentName(info.packageName, info.name))) return 0;
         // ActiveServices returns 0 when bringUpServiceLocked cannot start
         // the hosting process. Context.bindService then returns false.
         // An unavailable process must not become an uncaught SDK exception.
@@ -439,6 +446,12 @@ final class FrameworkServiceRuntime {
             });
             notifyIdle();
         }
+    }
+
+    // No service record (created, starting or stopping) lives in `child`.
+    synchronized boolean idle(FrameworkProcessRuntime.Child child) {
+        for (Record record : tokens.values()) if (record.child == child) return false;
+        return true;
     }
 
     private void stopIfUnused(Record record) throws Exception {

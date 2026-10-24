@@ -48,8 +48,10 @@ final class FrameworkProcessRuntime {
         int pid, uid;
         Object applicationThread;
         volatile boolean dead;
-        // Served a manifest receiver: stays as a cached process until the session ends.
+        // Served a manifest receiver: stays cached until it has been idle for IDLE_STOP_MS.
         volatile boolean cached;
+        // Last receiver, last service stop or last provider release (uptime ms).
+        volatile long lastActive;
         Child(ComponentInfo info, String processName) { this.info = info; this.processName = processName; }
     }
 
@@ -288,6 +290,7 @@ final class FrameworkProcessRuntime {
             child.cached = true;
             try {
                 schedule(child, method, types, args);
+                idleLater(child);
                 return;
             } catch (IllegalStateException exited) {
                 // Stopped between the lookup and the call: start a fresh process once.
@@ -302,6 +305,25 @@ final class FrameworkProcessRuntime {
 
     void stop(Child child) {
         if (!child.cached && (content == null || !content.hosting(child))) died(child);
+        else idleLater(child);
+    }
+
+    // ActivityManager may kill an empty cached process at any time; here each
+    // one is a whole emulated runtime with its own JIT (350-450 MiB). A child
+    // with no service record and no provider reference stops once nothing has
+    // used it for IDLE_STOP_MS, the 60 s background broadcast timeout of
+    // Android 15's BroadcastConstants, so a receiver it ran has finished.
+    private static final long IDLE_STOP_MS = 60_000;
+
+    void idleLater(Child child) {
+        child.lastActive = android.os.SystemClock.uptimeMillis();
+        if (main == null) return;
+        main.postDelayed(() -> {
+            if (child.dead || android.os.SystemClock.uptimeMillis() - child.lastActive < IDLE_STOP_MS) return;
+            if (!services.idle(child) || (content != null && content.hosting(child))) return;
+            System.out.println("ASGARD_PROCESS_IDLE_STOP pid=" + child.pid + " process=" + child.processName);
+            died(child);
+        }, IDLE_STOP_MS);
     }
 
     static final class Remote {

@@ -14,6 +14,20 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Memory: smaller JIT bookkeeping, small per-thread caches, no Play Store for billing (2026-10-24)
+
+- Battle Cats used 5.25 GiB PSS over five Android runtimes; guest memory was about 1.1 GiB. The rest was mostly JIT
+  code (1.4 GB, all live) and live host heap. A new `[JIT] metadata MiB:` stats line attributes the per-block heap.
+  `BlockEntry` shrank from 232 to 160 bytes (fields grouped by size, 32-bit code offsets), MT keeps no back-reference
+  index, and the per-edge slot map is gone (an edge records its slot). A 29,638-block MT fixture went from 658 to
+  468 bytes per block. Per-thread inline dispatch caches start at 16 KiB and grow to the previous 512 KiB only after
+  evicting one target per set (the game has ~200 threads). Generated code is unchanged.
+- The Play Store companion's billing service is no longer bound (in-app purchases are not offered): it had started a
+  ~370 MiB runtime per game; games now see billing as unavailable. Cached helper processes stop after 60 s with no
+  service, provider reference or receiver (not yet observed to fire in a game).
+- Battle Cats with both: 4.41 GiB peak (runs of different length; indicative). New `jit_dispatch_cache_growth`. Not
+  addressed: JIT code size, the game's remaining non-JIT heap (~500 MiB), why the WebView service stays alive.
+
 ### `--guest-ld`: threads the emulator creates no longer corrupt the heap (2026-10-24)
 
 - neverball under `--guest-ld` aborted within seconds with glibc "malloc(): unsorted double linked list corrupted"

@@ -151,16 +151,41 @@ thread_local FrostJIT::LastBlockCache FrostJIT::tls_last_block_;
 thread_local uint64_t FrostJIT::tls_stat_exec_ = 0;
 thread_local uint64_t FrostJIT::tls_stat_instr_ = 0;
 thread_local FrostJIT::InlineCacheSet* FrostJIT::tls_inline_cache_ = nullptr;
+thread_local uint32_t FrostJIT::tls_inline_cache_mask_ = 0;
+thread_local uint32_t FrostJIT::tls_inline_cache_evictions_ = 0;
+std::atomic<size_t> FrostJIT::inline_cache_bytes_{0};
 // The hot path reads a plain TLS pointer (no TLS-init call); a pthread key
 // destructor frees the sets when a dispatching thread exits.
-void FrostJIT::ensure_inline_cache() {
-    if (tls_inline_cache_) return;
+static pthread_key_t inline_cache_key() {
     static pthread_key_t key;
     static const int key_error = pthread_key_create(&key, [](void* sets) {
-        delete[] static_cast<InlineCacheSet*>(sets);
+        // Key destructors run in the exiting thread, before its TLS is freed.
+        FrostJIT::inline_cache_bytes_.fetch_sub((FrostJIT::tls_inline_cache_mask_ + 1) *
+                                                sizeof(FrostJIT::InlineCacheSet), std::memory_order_relaxed);
+        delete[] static_cast<FrostJIT::InlineCacheSet*>(sets);
     });
-    tls_inline_cache_ = new InlineCacheSet[INLINE_CACHE_SETS];
-    if (key_error == 0) pthread_setspecific(key, tls_inline_cache_);
+    (void)key_error;  // a failed key leaks the sets at thread exit, as before
+    return key;
+}
+void FrostJIT::ensure_inline_cache() {
+    if (tls_inline_cache_) return;
+    tls_inline_cache_ = new InlineCacheSet[INLINE_CACHE_MIN_SETS];
+    tls_inline_cache_mask_ = INLINE_CACHE_MIN_SETS - 1;
+    tls_inline_cache_evictions_ = 0;
+    inline_cache_bytes_.fetch_add(INLINE_CACHE_MIN_SETS * sizeof(InlineCacheSet), std::memory_order_relaxed);
+    pthread_setspecific(inline_cache_key(), tls_inline_cache_);
+}
+// Entries are only a cache of the block table, so growth starts empty.
+void FrostJIT::grow_inline_cache() {
+    const uint32_t sets = std::min<uint32_t>((tls_inline_cache_mask_ + 1) * 4, INLINE_CACHE_SETS);
+    InlineCacheSet* grown = new InlineCacheSet[sets];
+    inline_cache_bytes_.fetch_add((sets - (tls_inline_cache_mask_ + 1)) * sizeof(InlineCacheSet),
+                                  std::memory_order_relaxed);
+    delete[] tls_inline_cache_;
+    tls_inline_cache_ = grown;
+    tls_inline_cache_mask_ = sets - 1;
+    tls_inline_cache_evictions_ = 0;
+    pthread_setspecific(inline_cache_key(), tls_inline_cache_);
 }
 thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in X86Emitter.cpp

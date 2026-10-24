@@ -192,7 +192,9 @@ void FrostJIT::revoke_tier2_samples_locked(Tier2Trial& trial) {
     for (auto& item : trial.sampling_blocks) {
         auto& block = item.second;
         for (size_t off : {block.chain_patch_off, block.taken_chain_patch_off}) {
-            if (!off || off + 5 > CODE_BUF_SIZE || mt_edge_slots_.count(off)) continue;
+            const bool cell = std::any_of(trial.sampling_edges.begin(), trial.sampling_edges.end(),
+                                          [&](const MtEdge* edge) { return edge->slot == off; });
+            if (!off || off + 5 > CODE_BUF_SIZE || cell) continue;
             if (code_buf_[off] != 0xE9) continue;
             make_writable();
             write_unpatched_slot(off);

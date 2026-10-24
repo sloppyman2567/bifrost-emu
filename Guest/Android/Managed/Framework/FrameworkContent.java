@@ -220,6 +220,7 @@ final class FrameworkContent {
             if (connection != null) {
                 connection.stable = Math.max(0, connection.stable + stable);
                 connection.unstable = Math.max(0, connection.unstable + unstable);
+                if (connection.stable + connection.unstable == 0) processes.idleLater(connection.hosted.child);
                 return !connection.dead;
             }
         }
@@ -232,6 +233,7 @@ final class FrameworkContent {
             if (connection != null) {
                 if (stable && connection.stable > 0) connection.stable--;
                 else if (!stable && connection.unstable > 0) connection.unstable--;
+                if (connection.stable + connection.unstable == 0) processes.idleLater(connection.hosted.child);
                 return;
             }
         }

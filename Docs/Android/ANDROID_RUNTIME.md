@@ -149,6 +149,14 @@ therefore never binds `com.google.android.gms/org.microg.gms.ads.AdRequestServic
 `bindService` returns false and GMA requests the ad itself. Other microG
 services bind normally.
 
+In-app purchases are not offered, so the Play Store companion's
+`com.android.vending/com.android.vending.billing.InAppBillingService` is never
+bound either (2026-10-24). Binding it had started a whole Play Store runtime
+(about 370 MiB PSS) for every game that links the Play Billing Library; a
+failed bind is what a device without the Play Store reports. Battle Cats then
+logs `BillingClient: Connection to Billing service is blocked.` and continues.
+Other Play Store services still start its process on demand.
+
 The local path then loaded an ad and precached its video with GMA's
 ExoPlayer, which calls Android 15's `LoudnessCodecController`. `FrameworkAudio`
 now serves the `IAudioService` loudness methods as
@@ -513,9 +521,18 @@ session starts: `FrameworkBroadcasts` passes `scheduleReceiver` to
 `FrameworkProcessRuntime.receiver`, as a oneway call whose result is not awaited
 (an ordered broadcast moves on at once). The Intent carries the receiver's
 component, as `BroadcastQueue` sets it and `ActivityThread.handleReceiver`
-reads it. A process that served a receiver stays cached until the session ends;
-before this, stopping a child with its last Service lost a receiver scheduled
-in that window. A child process still cannot send to another process.
+reads it. A process that served a receiver stays cached; before this,
+stopping a child with its last Service lost a receiver scheduled in that window.
+Since 2026-10-24 a cached child stops once nothing has used it for 60 s (the
+background broadcast timeout of Android 15's `BroadcastConstants`): no service
+record, no provider reference, no receiver delivered in that time.
+`FrameworkProcessRuntime.idleLater` re-checks after a receiver, after the last
+service stops in a process kept for a provider or receiver, and when a
+provider's last reference is released, and logs `ASGARD_PROCESS_IDLE_STOP`.
+ActivityManager may kill such empty cached processes at any time; here each is
+a whole emulated runtime with its own JIT. The rule has not yet been seen to
+fire in a game: in Battle Cats the WebView service stayed alive while the game
+ran, for a reason not yet traced. A child process still cannot send to another process.
 Before this fix the broadcast threw `UnsupportedOperationException`, which
 ended the first real Google login after Google had accepted it ("problem
 connecting to Google services"; the account was stored anyway).

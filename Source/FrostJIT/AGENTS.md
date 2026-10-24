@@ -130,3 +130,8 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   encoding width to the ALU operation, preserving operand setup and lazy NZCV.
 - Restore the complete ST chain-skip slot through `write_unpatched_slot`;
   its unpatched form is `kSlotNop5`. MT revokes data cells, never instructions.
+- Per-block bookkeeping is the JIT's largest heap cost (~700k blocks per Android app;
+  `[JIT] metadata MiB:` in `Runtime/MemoryStats.cpp`). Keep `BlockEntry` grouped by
+  field size, with 32-bit code offsets. MT keeps no `back_refs_` (its edges are reached
+  through `mt_edge_refs_`); an MT slot's cell is found with `mt_slot_edge(source_pc, slot)`.
+  Add a container to `dump_memory_stats` when you add per-block state.

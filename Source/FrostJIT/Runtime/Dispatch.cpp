@@ -262,10 +262,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                         try_chain_block(pc, chain_it->second);
                     }
                 }
-                auto brit = back_refs_.find(pc);
-                if (brit != back_refs_.end()) {
-                    chain_back_references(pc);
-                }
+                // MT keeps no back references; its edges are refreshed by target.
+                if (mt_active() || back_refs_.count(pc)) chain_back_references(pc);
                 blocks_mutex_.unlock();
             }
         } else {

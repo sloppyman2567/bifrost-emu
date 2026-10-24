@@ -15,6 +15,58 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Per-block bookkeeping and per-thread dispatch caches (2026-10-24)
+
+Battle Cats (title screen, five runtime processes: the game, the WebView
+renderer, GMS, the WebView service, the Play Store companion) used 5.25 GiB
+PSS, of which only about 1.1 GiB was guest memory. Per process, `malloc_info`
+showed the host heap was live data, not fragmentation (the game 964 MiB, the
+renderer 465 MiB, 122-146 MiB in each helper), and `[JIT] code-cache` showed
+1.4 GB of live code (the game 555 MB for 709k blocks, about 145 host bytes per
+guest instruction; nothing retired).
+
+`[JIT] metadata MiB:` (printed after `[JIT] code-cache`, `Runtime/MemoryStats.cpp`)
+now reports the heap behind each per-block container, from container sizes and
+capacities with glibc chunk rounding and libstdc++ node layouts. A generated
+MT fixture with 29,638 blocks measured 658 bytes per block before the changes
+below and 468 after:
+
+- `BlockEntry` groups its fields by size and keeps code-buffer offsets in 32
+  bits (`CODE_BUF_SIZE` is asserted to fit): 232 -> 160 bytes, a 176-byte
+  instead of 256-byte malloc chunk per `blocks_` node.
+- MT keeps no `back_refs_`: `chain_back_references` only refreshes
+  `mt_edge_refs_` cells there, Tier-2 redirection returns before using it,
+  and retirement clears the same cells through `mt_edge_refs_[victim]`. The
+  dispatcher's chain retry refreshes MT edges without consulting it.
+- `mt_edge_slots_` (code offset -> edge, one hash node per edge) is gone. An
+  `MtEdge` records its slot in what was padding; `mt_slot_edge` scans the
+  source's one to three edges in `mt_source_refs_`. `patch_chain` takes the
+  source PC, and the Tier-2 sampling revoke matches `trial.sampling_edges`.
+- Each thread's inline dispatch cache starts at 256 sets (16 KiB) and
+  quadruples, up to the previous 8,192 sets, once it has evicted one target
+  per set since its last resize; clearing writes only the current size. An
+  app's ~200 threads are mostly idle pools, and 512 KiB each had been about
+  100 MiB in the game. The 64 KiB IBL table keeps its size: generated code
+  masks with `IBL_ENTRIES`.
+
+Generated code is unchanged. With the new build Battle Cats peaked at
+4.41 GiB (the game 1,982 MiB, the renderer 1,084 MiB); its game process
+reported 520 bytes of bookkeeping per block (339 MiB: `blocks_` 145, MT edges
+and their maps 146, code words 29, thread caches 28 MiB for 230 threads). The
+runs differ in length (peaks at 81 s and about 100 s), and part of the drop is
+the Play Store companion no longer running (see the Android runtime guide), so
+the total is indicative. A hot indirect-call fixture (3,000 targets, 300
+rounds) ran in the same time (about 0.26 s) as before. `jit_dispatch_cache_growth`
+calls 2,048 targets from four threads while another unmaps code to change the
+dispatch generation. The focused JIT/threading suite (77), `make verify` (its
+known `jit_bfm_extract` timeout aside) and the MT/Tier-2 scripts pass.
+`test_jit_mt_publication` fails intermittently in mode 0 of its self-loop
+check, before and after this change (6/200 and 4/200 runs): the preemption
+ticker that `enter_multithreaded` starts can end a fresh-lease loop early.
+
+The game's remaining heap besides this bookkeeping (about 500 MiB) is not yet
+attributed, and code size is the larger cost.
+
 ## Unsigned halfword min/max are native (2026-10-23)
 
 `UMAX`/`UMIN` with 16-bit lanes (`.4h`, `.8h`) took `emit_call_interp` while the byte and
@@ -2458,10 +2510,11 @@ is disabled. `jit_fp_interp_step` also gives native stack profilers a separate
 entry from `jit_interp_step`. Use inventories with a sampling profile and
 action markers; counts alone do not measure the duration or cause of a hitch.
 
-The thread-local dispatch cache uses 8,192 two-way sets (16,384 entries,
-512 KiB per dispatching thread). It is allocated on a thread's first
-dispatch and freed at thread exit (pthread key), so host threads that never
-run guest code carry none of it. With the previous 1,024 sets, SpongeBob
+The thread-local dispatch cache uses up to 8,192 two-way sets (16,384
+entries, 512 KiB per dispatching thread). It starts at 256 sets and grows
+fourfold after one eviction per set (see the 2026-10-24 section). It is
+allocated on a thread's first dispatch and freed at thread exit (pthread key),
+so host threads that never run guest code carry none of it. With the previous 1,024 sets, SpongeBob
 gameplay sent 32% of dispatches (7.9M per 15 s, nearly all evictions) to the
 900k-entry shared table, whose bucket walk and lock made `run_block` about
 10% of sampled CPU; the larger cache's in-game effect is not yet measured.

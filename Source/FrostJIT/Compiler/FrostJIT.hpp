@@ -416,7 +416,7 @@ public:
     // and computed gotos don't pay the shared_mutex + unordered_map cost
     // on every dispatch.
     //
-    // 8192 two-way sets (16,384 targets). Aligned functions and library
+    // Up to 8192 two-way sets (16,384 targets). Aligned functions and library
     // offsets can hash to the same set; retain both hot targets instead of
     // paying the shared table lock on every alternating call. Way 0 is MRU.
     // With 1024 sets SpongeBob missed 32% of dispatches, nearly all by
@@ -424,7 +424,11 @@ public:
     // thread's first dispatch (sync_dispatch_cache) and freed at thread
     // exit, so threads that never run guest code do not carry it.
     // Owner/generation checks revoke both ways before dispatch.
+    // A thread starts with INLINE_CACHE_MIN_SETS and quadruples once it has
+    // evicted one target per set since its last resize: an Android app's
+    // ~190 threads are mostly idle pools, and 512 KiB each was ~100 MiB.
     static constexpr int INLINE_CACHE_SETS = 8192;
+    static constexpr int INLINE_CACHE_MIN_SETS = 256;
     struct InlineCacheEntry {
         uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
@@ -435,9 +439,13 @@ public:
         InlineCacheEntry ways[2];
     };
     static thread_local InlineCacheSet* tls_inline_cache_;  // null until first dispatch
+    static thread_local uint32_t tls_inline_cache_mask_;    // set count - 1
+    static thread_local uint32_t tls_inline_cache_evictions_;  // since the last resize
+    static std::atomic<size_t> inline_cache_bytes_;  // every thread's sets (memory stats)
     static void ensure_inline_cache();  // allocates this thread's sets
+    static void grow_inline_cache();    // replaces them with an empty table 4x larger
     static void clear_inline_cache() {
-        if (tls_inline_cache_) std::fill_n(tls_inline_cache_, INLINE_CACHE_SETS, InlineCacheSet{});
+        if (tls_inline_cache_) std::fill_n(tls_inline_cache_, tls_inline_cache_mask_ + 1, InlineCacheSet{});
     }
     struct DispatchStats {
         uint64_t last = 0, way0 = 0, way1 = 0, table = 0, evictions = 0;
@@ -447,7 +455,7 @@ public:
     std::atomic<uint64_t> dispatch_last_hits_{0}, dispatch_way0_hits_{0}, dispatch_way1_hits_{0};
     std::atomic<uint64_t> dispatch_table_lookups_{0}, dispatch_evictions_{0};
     static size_t inline_cache_set(uint64_t pc) {
-        return ((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SETS - 1);
+        return ((pc >> 2) ^ (pc >> 17)) & tls_inline_cache_mask_;
     }
     void note_last_cache_hit() {
         if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.last;
@@ -458,14 +466,19 @@ public:
     void inline_cache_insert(uint64_t pc, uint64_t (*fn)(CPU*, Emulator*), int count,
                              uint64_t (*chain)(CPU*, Emulator*) = nullptr) {
         if (!tls_inline_cache_) return;
-        auto& set = tls_inline_cache_[inline_cache_set(pc)];
-        if (set.ways[0].pc != pc) {
-            if (__builtin_expect(dispatch_stats_enabled_, 0) &&
-                set.ways[1].pc != ~0ULL && set.ways[1].pc != pc)
-                ++tls_dispatch_stats_.evictions;
-            set.ways[1] = set.ways[0];
+        auto* set = &tls_inline_cache_[inline_cache_set(pc)];
+        if (set->ways[0].pc != pc) {
+            if (set->ways[1].pc != ~0ULL && set->ways[1].pc != pc) {
+                if (__builtin_expect(dispatch_stats_enabled_, 0)) ++tls_dispatch_stats_.evictions;
+                if (__builtin_expect(++tls_inline_cache_evictions_ > tls_inline_cache_mask_, 0) &&
+                    tls_inline_cache_mask_ + 1 < static_cast<uint32_t>(INLINE_CACHE_SETS)) {
+                    grow_inline_cache();
+                    set = &tls_inline_cache_[inline_cache_set(pc)];
+                }
+            }
+            set->ways[1] = set->ways[0];
         }
-        set.ways[0] = InlineCacheEntry{pc, fn, count, chain};
+        set->ways[0] = InlineCacheEntry{pc, fn, count, chain};
     }
     void inline_cache_erase(uint64_t pc) {
         if (!tls_inline_cache_) return;
@@ -565,6 +578,7 @@ public:
     struct MtEdge {
         MtCell target;
         uint64_t source_pc = 0, target_pc = 0;
+        uint32_t slot = 0;  // code offset the edge was emitted for (fits the padding)
         bool live = true; // compiler lock only
         bool cold_entry = false;
         bool sampling_private = false;
@@ -606,7 +620,8 @@ public:
     static_assert(offsetof(MtHotCounter, hits) == 4);
     std::vector<std::unique_ptr<MtEdge>> mt_edges_;
     std::unordered_map<uint64_t, std::vector<MtEdge*>> mt_edge_refs_, mt_source_refs_;
-    std::unordered_map<size_t, MtEdge*> mt_edge_slots_;
+    // The edge source_pc emitted at code offset `slot`; its 1-3 edges are scanned.
+    MtEdge* mt_slot_edge(uint64_t source_pc, size_t slot);
     std::vector<std::unique_ptr<MtHotCounter>> mt_hot_counters_;
     std::unordered_map<size_t, MtHotCounter*> mt_counter_sites_;
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
@@ -637,6 +652,8 @@ public:
     std::atomic<uint64_t> code_cache_overflows{0};
     std::atomic<uint64_t> code_cache_budget_fallbacks{0};
     void dump_code_cache_stats();
+    // Host heap held by per-block bookkeeping (Runtime/MemoryStats.cpp).
+    void dump_memory_stats();
     // Interval Tier-1 compile time/stalls and invalidations by reason.
     void dump_compile_stats();
     // ── SMC / mapping invalidation ──────────────────────────────────
@@ -931,6 +948,9 @@ private:
     // chain_target_pc_ == 0 means "not chainable" (indirect branch,
     // SVC, conditional branch — runtime-dependent next PC).
     struct BlockEntry {
+        // Fields are grouped by size so that the entry, and its node in
+        // blocks_ (one per translation, ~700k in an Android game), carry no
+        // padding. Code-buffer offsets fit 32 bits (CODE_BUF_SIZE).
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         // Chain-skip entry point (BIFROST_CHAIN_SKIP=1): a second entry into
         // the block PAST the prologue (push/frame/reg-setup), at the block
@@ -940,81 +960,10 @@ private:
         // 32 KB unified frame is reused by every block in the chain. NULL
         // when chain-skip is disabled (chain slots then target `fn`).
         uint64_t (*chain_entry)(CPU*, Emulator*) = nullptr;
-        bool ends_with_branch = false;
-        size_t  chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
         uint64_t chain_target_pc = 0;  // statically-known next PC, or 0
-        bool    chained = false;       // true once the slot has been patched to a jmp
-        int     instr_count = 0;      // number of ARM64 instructions in this block
-        size_t emitted_bytes = 0;    // actual host code size for region admission
-        bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
-        int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
-        int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
-        // Generated entry counters own Tier-2 hotness. Each translation
-        // bounds promotion attempts; differential replay has a separate budget.
-        bool     tier2_hot_logged = false;
-        unsigned tier2_attempts = 0; // bounded retries while branch samples warm up
-        uint64_t verify_count = 0; // independent of Tier-2 entry hotness
-
-        // True if this BlockEntry is a tier-2 region fn (registered by
-        // tier2_fire_region). Region entries have NO chain slots (their
-        // chained/taken_chained are set true and the slots are 0), so any
-        // repatch logic must never treat them as standalone blocks — and a
-        // region fire must not repatch the stale standalone slots of a block
-        // that has since become a DIFFERENT region's head (overlapping
-        // traces share blocks; hijacking those slots cross-wires regions).
-        bool     is_region = false;
-        Tier2RegionMonitor* tier2_monitor = nullptr;
-        // Offset of the tier-2 in-code hot-head counter (8 bytes of counter
-        // state just before the fn entry; the prologue `inc`/`cmp`/`jne` fire
-        // path against it). 0 = no counter emitted (block ineligible, or tier-2
-        // off). The fire path overwrites the `inc` with a `jmp rel32` over the
-        // whole counter+fire sequence once the block fires, so a hot block
-        // stops paying the per-entry counter cost for the rest of the run.
-        size_t   tier2_counter_off = 0;
-        // Total length of the tier-2 counter+fire sequence at
-        // tier2_counter_off (inc+cmp+jne+fire path). tier2_counter_disable
-        // overwrites the leading `inc` (6 bytes) with `jmp rel32` of
-        // (tier2_counter_len - 5) to skip the whole sequence. 0 = none.
-        size_t   tier2_counter_len = 0;
-        // True if the block contains an SVC (syscall / thunk) instruction.
-        // The verify re-run must NOT re-execute such blocks (the syscall has
-        // host side effects), so the full-memory verifier (MEMFULL) skips them.
-        bool    has_svc = false;
-        // True if the block calls out mid-block (BL/BLR callee or CALL_INTERP
-        // fallback). The fixed-step interp re-run steps INTO the callee while
-        // the JIT ran it as a call-and-continue, so end PCs never match and
-        // the callee's stores escape the snapshot — quarantined like SVC.
-        bool    has_call = false;
-        // Conditional back-edge into this block's body, retaining its frame
-        // and cached registers. ST uses a patched rel32 jump; MT uses an
-        // immutable guard and revocable body-target cell with a bounded lease.
-        // has_selfloop_slot = false means no slot was emitted (block is not
-        // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
-        bool    has_selfloop_slot = false;
-        size_t  selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
-        // Taken-path chaining: a second 5-byte chain slot at
-        // the end of the conditional-branch TAKEN path (ret + 4 NOPs). When
-        // the taken target is translated, it's patched to `jmp rel32` so the
-        // loop-back edge of a hot conditional loop skips the dispatcher.
-        // has_taken_chain_slot = false when no slot was emitted (block has no
-        // conditional branch, or the taken target is its own start — that case
-        // uses self-loop chaining instead).
-        bool    has_taken_chain_slot = false;
-        size_t  taken_chain_patch_off = 0;   // offset of the taken-path slot
         uint64_t taken_chain_target_pc = 0;  // taken-path target, or 0
-        bool    taken_chained = false;       // true once patched to a jmp
-        // Verify-mode: set true after the first BIFROST_JIT_VERIFY dispatch
-        // of this block. Subsequent dispatches skip the per-block divergence
-        // check (which is expensive due to mprotect toggling + interpreter
-        // replay). This is essential for self-loop blocks, where verify mode
-        // must un-patch the self-loop slot to run one iteration at a time —
-        // without this flag, every loop iteration would pay the verify
-        // overhead (~30s for a 3652-instruction test instead of <1s).
-        // First-dispatch verify still catches real codegen bugs because
-        // divergences almost always manifest on the first execution with
-        // any input values. The flag is only consulted when verify mode
-        // is active.
-        bool    verified_once = false;
+        uint64_t verify_count = 0; // independent of Tier-2 entry hotness
+        Tier2RegionMonitor* tier2_monitor = nullptr;
         // Verify-mode memory save/restore: list of (arm_reg, offset, width)
         // for every STORE_MEM in this block whose address can be statically
         // resolved to (saved_arm_reg + offset). At verify time, we snapshot
@@ -1041,22 +990,34 @@ private:
         // (atomic refcount increment) instead of deep-copying the vector.
         // Null by default; only populated in BIFROST_JIT_VERIFY mode.
         std::shared_ptr<std::vector<StoreInfo>> store_infos;
-        // True if this block contains a STORE_MEM whose address base could
-        // NOT be statically resolved to an ARM reg (e.g. the base is loaded
-        // from memory). Such stores are invisible to the store_infos-based
-        // memory verifier. Set at translate time; used by the MEMFULL
-        // (BIFROST_JIT_VERIFY_MEMFULL) full-memory diff.
-        bool has_unresolved_store = false;
-        // Local flag-input analysis for differential verification only.
-        // A false value does not mean incoming NZCV is dead: this block
-        // may pass it through to a later consumer or back to its caller.
-        bool reads_pstate_before_set = true;
         // Inlined BL-leaf callee ranges: (callee_pc, instr_count) pairs for
         // every leaf inlined into this block (ir counts them in instr_count
         // but they live at the callee address, not contiguous with the
         // caller). invalidate_range checks these too — an SMC on an
         // inlined leaf must drop its inliner.
         std::vector<std::pair<uint64_t, int>> inlined_ranges_;
+        uint32_t chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
+        uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
+        uint32_t selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
+        uint32_t emitted_bytes = 0;    // actual host code size for region admission
+        // Offset of the tier-2 in-code hot-head counter (8 bytes of counter
+        // state just before the fn entry; the prologue `inc`/`cmp`/`jne` fire
+        // path against it). 0 = no counter emitted (block ineligible, or tier-2
+        // off). The fire path overwrites the `inc` with a `jmp rel32` over the
+        // whole counter+fire sequence once the block fires, so a hot block
+        // stops paying the per-entry counter cost for the rest of the run.
+        uint32_t tier2_counter_off = 0;
+        // Total length of the tier-2 counter+fire sequence at
+        // tier2_counter_off (inc+cmp+jne+fire path). tier2_counter_disable
+        // overwrites the leading `inc` (6 bytes) with `jmp rel32` of
+        // (tier2_counter_len - 5) to skip the whole sequence. 0 = none.
+        uint32_t tier2_counter_len = 0;
+        int     instr_count = 0;      // number of ARM64 instructions in this block
+        int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
+        int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
+        // Generated entry counters own Tier-2 hotness. Each translation
+        // bounds promotion attempts; differential replay has a separate budget.
+        unsigned tier2_attempts = 0; // bounded retries while branch samples warm up
         // The instruction words this translation fetched, as a span of
         // code_words_. Recorded only for contiguous Tier-1 blocks (no
         // inlined leaf, no region). Cache maintenance and mprotect keep a
@@ -1074,10 +1035,69 @@ private:
         // on every dispatch lookup.
         uint32_t flag_deps_off = 0;
         uint16_t flag_deps_count = 0;
+        bool ends_with_branch = false;
+        bool    chained = false;       // true once the slot has been patched to a jmp
+        bool    taken_chained = false;       // true once patched to a jmp
+        bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
+        bool     tier2_hot_logged = false;
+        // True if this BlockEntry is a tier-2 region fn (registered by
+        // tier2_fire_region). Region entries have NO chain slots (their
+        // chained/taken_chained are set true and the slots are 0), so any
+        // repatch logic must never treat them as standalone blocks — and a
+        // region fire must not repatch the stale standalone slots of a block
+        // that has since become a DIFFERENT region's head (overlapping
+        // traces share blocks; hijacking those slots cross-wires regions).
+        bool     is_region = false;
+        // True if the block contains an SVC (syscall / thunk) instruction.
+        // The verify re-run must NOT re-execute such blocks (the syscall has
+        // host side effects), so the full-memory verifier (MEMFULL) skips them.
+        bool    has_svc = false;
+        // True if the block calls out mid-block (BL/BLR callee or CALL_INTERP
+        // fallback). The fixed-step interp re-run steps INTO the callee while
+        // the JIT ran it as a call-and-continue, so end PCs never match and
+        // the callee's stores escape the snapshot — quarantined like SVC.
+        bool    has_call = false;
+        // Conditional back-edge into this block's body, retaining its frame
+        // and cached registers. ST uses a patched rel32 jump; MT uses an
+        // immutable guard and revocable body-target cell with a bounded lease.
+        // has_selfloop_slot = false means no slot was emitted (block is not
+        // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
+        bool    has_selfloop_slot = false;
+        // Taken-path chaining: a second 5-byte chain slot at
+        // the end of the conditional-branch TAKEN path (ret + 4 NOPs). When
+        // the taken target is translated, it's patched to `jmp rel32` so the
+        // loop-back edge of a hot conditional loop skips the dispatcher.
+        // has_taken_chain_slot = false when no slot was emitted (block has no
+        // conditional branch, or the taken target is its own start — that case
+        // uses self-loop chaining instead).
+        bool    has_taken_chain_slot = false;
+        // Verify-mode: set true after the first BIFROST_JIT_VERIFY dispatch
+        // of this block. Subsequent dispatches skip the per-block divergence
+        // check (which is expensive due to mprotect toggling + interpreter
+        // replay). This is essential for self-loop blocks, where verify mode
+        // must un-patch the self-loop slot to run one iteration at a time —
+        // without this flag, every loop iteration would pay the verify
+        // overhead (~30s for a 3652-instruction test instead of <1s).
+        // First-dispatch verify still catches real codegen bugs because
+        // divergences almost always manifest on the first execution with
+        // any input values. The flag is only consulted when verify mode
+        // is active.
+        bool    verified_once = false;
+        // True if this block contains a STORE_MEM whose address base could
+        // NOT be statically resolved to an ARM reg (e.g. the base is loaded
+        // from memory). Such stores are invisible to the store_infos-based
+        // memory verifier. Set at translate time; used by the MEMFULL
+        // (BIFROST_JIT_VERIFY_MEMFULL) full-memory diff.
+        bool has_unresolved_store = false;
+        // Local flag-input analysis for differential verification only.
+        // A false value does not mean incoming NZCV is dead: this block
+        // may pass it through to a later consumer or back to its caller.
+        bool reads_pstate_before_set = true;
         // Differential verification compares NZCV after a block; an exit that
         // legitimately left stale flags in pstate must not be compared.
         bool skips_dead_flag_store = false;
     };
+    static_assert(CODE_BUF_SIZE <= UINT32_MAX, "BlockEntry code offsets are 32-bit");
     struct Tier2Trial {
         Tier2RegionMonitor* monitor = nullptr;
         BlockEntry baseline, candidate_entry;
@@ -1190,7 +1210,8 @@ private:
     void lock_table();
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
-    bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);
+    // MT stores the target in source_pc's edge cell emitted at that offset.
+    bool patch_chain(uint64_t source_pc, size_t chain_patch_off, const uint8_t* target_fn);
     // Patch every recorded direct BL call slot targeting `target_pc` so the
     // `call rel32` lands on `target_fn`. Mirrors patch_chain's W^X pattern.
     void patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn);

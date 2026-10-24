@@ -305,12 +305,19 @@ FrostJIT::MtEdge* FrostJIT::create_chain_edge(uint64_t target_pc, bool cold_entr
     cell->sampling_private = tier2_sampling_compile_;
     cell->cold_entry = cold_entry;
     cell->target_pc = target_pc;
+    cell->slot = static_cast<uint32_t>(off);
     MtEdge* edge = cell.get();
     mt_edges_.push_back(std::move(cell));
     mt_edge_refs_[target_pc].push_back(edge);
     mt_source_refs_[current_start_pc_].push_back(edge);
-    mt_edge_slots_[off] = edge;
     return edge;
+}
+FrostJIT::MtEdge* FrostJIT::mt_slot_edge(uint64_t source_pc, size_t slot) {
+    auto refs = mt_source_refs_.find(source_pc);
+    if (refs == mt_source_refs_.end()) return nullptr;
+    for (MtEdge* edge : refs->second)
+        if (edge->slot == slot) return edge;
+    return nullptr;
 }
 size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     const size_t off = code_buf_used_;
@@ -420,13 +427,13 @@ void FrostJIT::retire_mt_source(uint64_t pc) {
     }
     mt_source_refs_.erase(refs);
 }
-bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
+bool FrostJIT::patch_chain(uint64_t source_pc, size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
     // MT publication updates only the data cell, never live instructions.
     if (mt_active()) {
-        auto slot = mt_edge_slots_.find(chain_patch_off);
-        if (slot == mt_edge_slots_.end() || !slot->second->live) return false;
-        slot->second->target.store(reinterpret_cast<uint64_t>(target_fn), std::memory_order_release);
+        MtEdge* edge = mt_slot_edge(source_pc, chain_patch_off);
+        if (!edge || !edge->live) return false;
+        edge->target.store(reinterpret_cast<uint64_t>(target_fn), std::memory_order_release);
         mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
@@ -502,7 +509,7 @@ void FrostJIT::unpatch_direct_calls(uint64_t target_pc) {
     }
     std::atomic_thread_fence(std::memory_order_release);
 }
-void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
+void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
     // Fall-through chain slot.
     if (!entry.chained && entry.chain_target_pc != 0) {
         auto it = blocks_.find(entry.chain_target_pc);
@@ -512,7 +519,7 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
             const uint8_t* target = (chain_skip_enabled() && it->second.chain_entry)
                 ? reinterpret_cast<const uint8_t*>(it->second.chain_entry)
                 : reinterpret_cast<const uint8_t*>(it->second.fn);
-            if (patch_chain(entry.chain_patch_off, target)) {
+            if (patch_chain(pc, entry.chain_patch_off, target)) {
                 entry.chained = true;
                 block_chains_patched++;
             }
@@ -527,7 +534,7 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
             const uint8_t* target = (chain_skip_enabled() && it->second.chain_entry)
                 ? reinterpret_cast<const uint8_t*>(it->second.chain_entry)
                 : reinterpret_cast<const uint8_t*>(it->second.fn);
-            if (patch_chain(entry.taken_chain_patch_off, target)) {
+            if (patch_chain(pc, entry.taken_chain_patch_off, target)) {
                 entry.taken_chained = true;
                 block_chains_patched++;
             }
@@ -556,7 +563,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         BlockEntry& entry = sit->second;
         // Fall-through slot.
         if (!entry.chained && entry.chain_target_pc == target_pc) {
-            if (patch_chain(entry.chain_patch_off, target_fn)) {
+            if (patch_chain(src_pc, entry.chain_patch_off, target_fn)) {
                 entry.chained = true;
                 block_chains_patched++;
             }
@@ -564,7 +571,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         // Taken-path slot.
         if (!entry.taken_chained && entry.has_taken_chain_slot
             && entry.taken_chain_target_pc == target_pc) {
-            if (patch_chain(entry.taken_chain_patch_off, target_fn)) {
+            if (patch_chain(src_pc, entry.taken_chain_patch_off, target_fn)) {
                 entry.taken_chained = true;
                 block_chains_patched++;
             }
@@ -584,6 +591,10 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     // spent ~96% of its translate time in that scan).
 }
 void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
+    // MT chaining reaches its predecessors through mt_edge_refs_ cells, and
+    // the MT transition clears this index; keeping it would cost ~80 bytes
+    // per block for no reader.
+    if (mt_active()) return;
     // Memory cap. Patched slots never need their entry again, so rebuild
     // from the slots that are still unpatched instead of clearing.
     constexpr size_t kBackRefCap = 1000000;
@@ -826,10 +837,9 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
     // Caller holds the compiler lock and has selected exact victims.
     if (victims.empty()) return;
     invalidate_dispatch_cache();
-    auto unpatch_slot = [&](size_t off) {
+    auto unpatch_slot = [&](uint64_t source_pc, size_t off) {
         if (mt_active()) {
-            auto slot = mt_edge_slots_.find(off);
-            if (slot != mt_edge_slots_.end()) slot->second->target.store(0, std::memory_order_release);
+            if (MtEdge* edge = mt_slot_edge(source_pc, off)) edge->target.store(0, std::memory_order_release);
             return;
         }
         if (off + 5 > CODE_BUF_SIZE) return;
@@ -863,12 +873,12 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
                     published.tier2_monitor->trial && published.tier2_monitor->trial->decision.load() == 0
                     ? published.tier2_monitor->trial->baseline : published;
                 if (se.chained && se.chain_target_pc == vpc) {
-                    unpatch_slot(se.chain_patch_off);
+                    unpatch_slot(src_pc, se.chain_patch_off);
                     se.chained = false;
                 }
                 if (se.taken_chained && se.has_taken_chain_slot
                     && se.taken_chain_target_pc == vpc) {
-                    unpatch_slot(se.taken_chain_patch_off);
+                    unpatch_slot(src_pc, se.taken_chain_patch_off);
                     se.taken_chained = false;
                 }
             }

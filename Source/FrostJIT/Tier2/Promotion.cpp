@@ -315,7 +315,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                         auto target = sample_target(exit.first, false);
                         if (!target || !exit.second) continue;
                         make_writable();
-                        patch_chain(exit.second, reinterpret_cast<const uint8_t*>(target));
+                        patch_chain(copy.first, exit.second, reinterpret_cast<const uint8_t*>(target));
                     }
                 }
             }
