@@ -55,6 +55,21 @@ static int access_guest_path(int hfd, const std::string& guest, int mode, int fl
     const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;
     return ::faccessat(dir, path.c_str(), mode, flags) < 0 ? -errno : 0;
 }
+// Trailing-slash rules (Linux path_resolution(7)): "x/" must name a directory. open_parent
+// strips the slash so mkdir/rmdir work; where a non-directory would otherwise be accepted,
+// the syscall must fail the way the kernel does.
+static bool slash_names_non_directory(const yggdrasil::Yggdrasil::ParentDir& pd) {
+    if (!pd.trailing_slash) return false;
+    struct stat st;
+    return ::fstatat(pd.fd, pd.base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISDIR(st.st_mode);
+}
+// rename("f/", ...) and rename("f", "g/") need f to be a directory.
+static bool rename_slash_violation(const yggdrasil::Yggdrasil::ParentDir& from,
+                                   const yggdrasil::Yggdrasil::ParentDir& to) {
+    if (!from.trailing_slash && !to.trailing_slash) return false;
+    struct stat st;
+    return ::fstatat(from.fd, from.base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISDIR(st.st_mode);
+}
 int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -143,6 +158,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
             if (!pd.valid()) { ret_errno(); return 0; }
+            if (pd.trailing_slash) { ret_err(ENOENT); return 0; }  // cannot create a non-directory "x/"
             int r = ::mknodat(pd.fd, pd.base.c_str(),
                               static_cast<mode_t>(a2), static_cast<dev_t>(a3));
             if (r < 0) { ret_errno(); return 0; }
@@ -177,6 +193,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
             if (!pd.valid()) { ret_errno(); return 0; }
+            if (!(a2 & AT_REMOVEDIR) && slash_names_non_directory(pd)) { ret_err(ENOTDIR); return 0; }
             int r = ::unlinkat(pd.fd, pd.base.c_str(), static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -199,6 +216,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!old_pd.valid()) { ret_errno(); return 0; }
             auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
             if (!new_pd.valid()) { ret_errno(); return 0; }
+            if (rename_slash_violation(old_pd, new_pd)) { ret_err(ENOTDIR); return 0; }
             int r = ::renameat(old_pd.fd, old_pd.base.c_str(),
                                new_pd.fd, new_pd.base.c_str());
             if (r < 0) { ret_errno(); return 0; }
@@ -223,6 +241,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!old_pd.valid()) { ret_errno(); return 0; }
             auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
             if (!new_pd.valid()) { ret_errno(); return 0; }
+            if (rename_slash_violation(old_pd, new_pd)) { ret_err(ENOTDIR); return 0; }
 #ifdef SYS_renameat2
             int r = ::syscall(SYS_renameat2, old_pd.fd, old_pd.base.c_str(),
                               new_pd.fd, new_pd.base.c_str(),
@@ -260,6 +279,8 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!old_pd.valid()) { ret_errno(); return 0; }
             auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
             if (!new_pd.valid()) { ret_errno(); return 0; }
+            if (new_pd.trailing_slash) { ret_err(ENOENT); return 0; }  // a link is never a directory "x/"
+            if (slash_names_non_directory(old_pd)) { ret_err(ENOTDIR); return 0; }
             int r;
             if ((a4 & AT_SYMLINK_FOLLOW) &&
                 yggdrasil::Yggdrasil::path_confined(old_hfd, old_guest)) {
@@ -302,6 +323,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, new_guest);
             if (!pd.valid()) { ret_errno(); return 0; }
+            if (pd.trailing_slash) { ret_err(ENOENT); return 0; }  // a symlink is never a directory "x/"
             int r = ::symlinkat(oldp.c_str(), pd.fd, pd.base.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;

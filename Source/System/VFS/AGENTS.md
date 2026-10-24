@@ -4,6 +4,11 @@
   lexical `..` cleanup. Preserve the secure host-path resolution used by open,
   stat, access, readlink and mutation paths; do not replace it with string-prefix
   checks or host realpath followed by an unprotected open.
+- `open_parent` strips trailing slashes (`ParentDir::trailing_slash` records it) and
+  treats "/" as the root itself (base "."); a direct child of "/" has parent "/", never "".
+  Where Linux says `x/` must be a directory the caller enforces it (unlink, rename: ENOTDIR;
+  symlink, link, mknod: ENOENT). BusyBox `mkdir -p` creates `a/` and then `a/b/`. Covered by
+  `test_path_syscalls`.
 - A path syscall must never hand a remapped path to a host call that resolves
   it: `remap_path` is lexical only and host symlinks would escape. Name-level
   operations (create, unlink, rename, link) use `open_parent`; calls that act

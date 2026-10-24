@@ -140,13 +140,17 @@ public:
     struct ParentDir {
         int fd = -1;
         bool owned = false;
+        // The path ended in '/' (stripped from `base`): the final component must be
+        // a directory, which callers whose syscall differs on that (unlink, rename,
+        // symlink, link, mknod) enforce themselves.
+        bool trailing_slash = false;
         std::string base;
         ~ParentDir() { if (owned && fd >= 0) ::close(fd); }
         ParentDir() = default;
         ParentDir(const ParentDir&) = delete;
         ParentDir& operator=(const ParentDir&) = delete;
         ParentDir(ParentDir&& o) noexcept
-            : fd(o.fd), owned(o.owned), base(std::move(o.base)) {
+            : fd(o.fd), owned(o.owned), trailing_slash(o.trailing_slash), base(std::move(o.base)) {
             o.fd = -1;
             o.owned = false;
         }

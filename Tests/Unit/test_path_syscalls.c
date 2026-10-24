@@ -66,6 +66,38 @@ int main(void) {
     CHECK(size == 4, "statx AT_EMPTY_PATH reports the descriptor's size");
     if (f >= 0) close(f);
 
+    // Trailing slashes and "/": BusyBox `mkdir -p a/b` creates "a/", then "a/b/".
+    errno = 0;
+    CHECK(mkdir("tsd/", 0755) == 0, "mkdir with a trailing slash");
+    errno = 0;
+    CHECK(mkdir("tsd/", 0755) == -1 && errno == EEXIST, "mkdir of an existing directory with a trailing slash is EEXIST");
+    errno = 0;
+    CHECK(mkdir("tsd/x//", 0755) == 0, "mkdir with two trailing slashes");
+    errno = 0;
+    CHECK(mkdir("/", 0755) == -1 && errno == EEXIST, "mkdir(\"/\") is EEXIST");
+    errno = 0;
+    CHECK(mkdir("///", 0755) == -1 && errno == EEXIST, "mkdir(\"///\") is EEXIST");
+    // A direct child of "/" has parent "/": it used to be the empty string, so ENOENT.
+    errno = 0;
+    CHECK(mkdir("/tmp/", 0755) == -1 && errno == EEXIST, "mkdir(\"/tmp/\") is EEXIST");
+    errno = 0;
+    CHECK(mkdir("/tmp", 0755) == -1 && errno == EEXIST, "mkdir(\"/tmp\") is EEXIST");
+    errno = 0;
+    CHECK(rmdir("tsd/x/") == 0 && rmdir("tsd/") == 0, "rmdir with trailing slashes");
+    // "x/" must name a directory, so non-directories keep failing the way Linux does.
+    errno = 0;
+    CHECK(unlink("file/") == -1 && errno == ENOTDIR && access("file", F_OK) == 0, "unlink(\"file/\") is ENOTDIR and keeps the file");
+    errno = 0;
+    CHECK(rename("file/", "renamed") == -1 && errno == ENOTDIR, "rename(\"file/\", x) is ENOTDIR");
+    errno = 0;
+    CHECK(rename("file", "renamed/") == -1 && errno == ENOTDIR, "rename(file, \"x/\") is ENOTDIR");
+    errno = 0;
+    CHECK(symlink("file", "slink/") == -1 && errno == ENOENT, "symlink at \"x/\" is ENOENT");
+    errno = 0;
+    CHECK(link("file", "hlink/") == -1 && errno == ENOENT, "link at \"x/\" is ENOENT");
+    errno = 0;
+    CHECK(stat("file/", &st) == -1 && errno == ENOTDIR && stat("sub/", &st) == 0, "stat with a trailing slash needs a directory");
+
     CHECK(rmdir("sub") == 0, "cwd-relative rmdir");
     unlink("file");
     if (dfd2 >= 0) close(dfd2);

@@ -435,8 +435,21 @@ int Yggdrasil::open_host_dir(const std::string& guest_path) {
 // root is set (parent opened under the root fd), or (b) the path is
 // relative and host_dirfd itself resolves inside the root. Otherwise the
 // parent opens exactly as before (legacy behavior, unchanged).
+static Yggdrasil::ParentDir open_parent_stripped(int host_dirfd, const std::string& guest_path);
+// Linux accepts trailing slashes on mkdir/rmdir/rename of directories ("a/" is "a") and
+// "/" names the root itself, so BusyBox `mkdir -p` (which creates "a/", then "a/b/") needs
+// both. The basename must not contain '/', so strip them here and remember that we did.
 Yggdrasil::ParentDir Yggdrasil::open_parent(int host_dirfd,
                                             const std::string& guest_path) {
+    std::string path = guest_path;
+    bool trailing = false;
+    while (path.size() > 1 && path.back() == '/') { path.pop_back(); trailing = true; }
+    ParentDir pd = open_parent_stripped(host_dirfd, path);
+    pd.trailing_slash = trailing;
+    return pd;
+}
+static Yggdrasil::ParentDir open_parent_stripped(int host_dirfd, const std::string& guest_path) {
+    using ParentDir = Yggdrasil::ParentDir;
     ParentDir pd;
     if (guest_path.empty()) { errno = ENOENT; return pd; }
     std::string root = sandbox_root_str();
@@ -446,7 +459,8 @@ Yggdrasil::ParentDir Yggdrasil::open_parent(int host_dirfd,
         std::string host_path = map_guest_path(guest_path, root.c_str());
         if (host_path.empty()) { errno = ENOENT; return pd; }  // denied
         size_t slash = host_path.rfind('/');
-        std::string parent = host_path.substr(0, slash);
+        // A direct child of "/" has parent "/", not the empty string ("/tmp".substr(0, 0)).
+        std::string parent = slash == 0 ? std::string("/") : host_path.substr(0, slash);
         base = host_path.substr(slash + 1);
         if (!root.empty() && uses_sandbox(root, guest_path)) {
             if (host_path.size() == root.size()) {
@@ -500,7 +514,15 @@ Yggdrasil::ParentDir Yggdrasil::open_parent(int host_dirfd,
             pd.base = base;
             return pd;
         }
-        // No sandbox: plain parent open (identical to before).
+        // No sandbox: plain parent open (identical to before), except "/" itself.
+        if (host_path == "/") {
+            int rootdir = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (rootdir < 0) return pd;  // errno set
+            pd.fd = rootdir;
+            pd.owned = true;
+            pd.base = ".";  // mkdir("/") is EEXIST, not a lookup of ""
+            return pd;
+        }
         dir = parent;
     } else {
         // Relative path: split guest-side, resolve parent under dirfd.
@@ -510,9 +532,7 @@ Yggdrasil::ParentDir Yggdrasil::open_parent(int host_dirfd,
                                  : guest_path.substr(0, slash);
         base = (slash == std::string::npos) ? guest_path
                                             : guest_path.substr(slash + 1);
-        // Strip trailing slashes from the basename side is wrong;
-        // trailing slashes mean "must be a dir" — but the basename must
-        // not contain '/'. A trailing slash would make base empty:
+        // open_parent strips trailing slashes, so the basename is never empty here.
         if (base.empty()) { errno = ENOENT; return pd; }
         if (reldir.empty()) {
             // Direct child of dirfd: no parent open needed; the dirfd
