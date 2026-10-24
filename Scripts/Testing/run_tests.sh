@@ -917,7 +917,7 @@ REALWORLD_TESTS=(
     "rw_busybox_head|Tests/Apps/realworld/busybox-aarch64 head -n1|line1\nline2|5|^line1$"
     "rw_busybox_tail|Tests/Apps/realworld/busybox-aarch64 tail -n1|line1\nline2|5|^line2$"
     "rw_busybox_whoami|Tests/Apps/realworld/busybox-aarch64 whoami||5|^$(whoami)$"
-    "rw_busybox_pwd|Tests/Apps/realworld/busybox-aarch64 pwd||5|^/$"
+    "rw_busybox_pwd|Tests/Apps/realworld/busybox-aarch64 pwd||5|^${PWD}\$"
     "rw_busybox_mktemp|Tests/Apps/realworld/busybox-aarch64 mktemp||5|^/tmp/tmp"
     "rw_busybox_printf_str|Tests/Apps/realworld/busybox-aarch64 printf hello||5|^hello$"
     "rw_busybox_true2|Tests/Apps/realworld/busybox-aarch64 sh -c true||5|"

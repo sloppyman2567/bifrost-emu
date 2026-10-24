@@ -11,6 +11,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +98,27 @@ int main(void) {
     CHECK(link("file", "hlink/") == -1 && errno == ENOENT, "link at \"x/\" is ENOENT");
     errno = 0;
     CHECK(stat("file/", &st) == -1 && errno == ENOTDIR && stat("sub/", &st) == 0, "stat with a trailing slash needs a directory");
+
+    // getcwd reports the real directory, never the symlink the program changed through.
+    {
+        char *real_root = realpath(dir, NULL);
+        char want[PATH_MAX], got[PATH_MAX];
+        CHECK(real_root != NULL, "realpath of the test directory");
+        snprintf(want, sizeof(want), "%s/realdir", real_root ? real_root : "");
+        CHECK(mkdir("realdir", 0755) == 0 && symlink("realdir", "linkdir") == 0, "create a directory and a symlink to it");
+        CHECK(chdir("linkdir") == 0 && getcwd(got, sizeof(got)) && strcmp(got, want) == 0,
+              "getcwd after chdir through a symlink is the real path");
+        CHECK(chdir("..") == 0 && getcwd(got, sizeof(got)) && strcmp(got, real_root) == 0,
+              "chdir(\"..\") from there returns to the parent of the real directory");
+        int linkfd = open("linkdir", O_RDONLY | O_DIRECTORY);
+        CHECK(linkfd >= 0 && fchdir(linkfd) == 0 && getcwd(got, sizeof(got)) && strcmp(got, want) == 0,
+              "getcwd after fchdir through a symlink is the real path");
+        if (linkfd >= 0) close(linkfd);
+        CHECK(chdir(real_root) == 0, "chdir back by absolute path");
+        unlink("linkdir");
+        rmdir("realdir");
+        free(real_root);
+    }
 
     CHECK(rmdir("sub") == 0, "cwd-relative rmdir");
     unlink("file");

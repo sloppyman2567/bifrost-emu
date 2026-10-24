@@ -55,6 +55,19 @@ static int access_guest_path(int hfd, const std::string& guest, int mode, int fl
     const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;
     return ::faccessat(dir, path.c_str(), mode, flags) < 0 ? -errno : 0;
 }
+// After a successful chdir/fchdir the guest cwd is the directory it really is, symlinks resolved
+// (getcwd(2) never returns a symlink path), in the guest's view. Recording the argument text made
+// `cd link; pwd -P` print "link". A sandboxed program whose cwd is outside the root (an executable
+// beside its assets) keeps the textual path, as before: no guest path names that directory.
+static void record_guest_cwd(Emulator& emu, const std::string& fallback) {
+    char physical[PATH_MAX];
+    if (::getcwd(physical, sizeof(physical)) &&
+        (!yggdrasil::Yggdrasil::sandbox_inside_root() || yggdrasil::Yggdrasil::path_inside_root(physical))) {
+        emu.vfs().apply_chdir(yggdrasil::Yggdrasil::guest_view_of_host_path(physical));
+    } else if (!fallback.empty()) {
+        emu.vfs().apply_chdir(fallback);
+    }
+}
 // Trailing-slash rules (Linux path_resolution(7)): "x/" must name a directory. open_parent
 // strips the slash so mkdir/rmdir work; where a non-directory would otherwise be accepted,
 // the syscall must fail the way the kernel does.
@@ -480,10 +493,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 if (saved >= 0) ::close(saved);
             }
-            char buf[PATH_MAX];
-            if (::getcwd(buf, sizeof(buf))) {
-                emu.vfs().apply_chdir(std::string(buf));
-            }
+            record_guest_cwd(emu, std::string());
             ret_host(r);
             return 0;
         }
@@ -531,7 +541,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
             }
             if (saved >= 0) ::close(saved);
-            emu.vfs().apply_chdir(guest_path);
+            record_guest_cwd(emu, guest_path);
             ret_host(r);
             return 0;
         }
