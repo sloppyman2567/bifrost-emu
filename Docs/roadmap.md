@@ -460,8 +460,10 @@ correctness coverage.
 - Move glibc programs to the real guest `ld-linux-aarch64.so.1` instead of the
   native dynamic linker, as `--android-runtime` already does for Bionic's
   `linker64`. The experimental `--guest-ld` mode passes the dynamic test
-  suites and loads thunked libraries through in-memory stubs; Doom 3 and
-  cold-start measurements remain before it can become the default. The native linker imitates ld.so internals (`link_map`,
+  suites and loads thunked libraries through in-memory stubs. Doom 3 ran 120 s
+  under it (2026-10-24, with the thread TLS and `__libc_single_threaded` fixes for
+  emulator-created threads); other games, `make verify` and cold-start measurements
+  remain before it can become the default. The native linker imitates ld.so internals (`link_map`,
   `_rtld_global_ro` hooks, main-executable initializer ownership) and breaks
   when glibc changes; a legacy-start program ran every constructor twice until
   October 20. Needs a replacement for the thunk `dlopen`/`dlsym` interception,

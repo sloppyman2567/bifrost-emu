@@ -71,8 +71,12 @@ Large host adapters are divided by the APIs or protocols they implement:
   display instances.
 - `Loader/DynamicLinker/`: parsing, library search/loading, symbol lookup,
   relocations, linking, dlopen, glibc patches, ld-linux shims and thread TLS.
-- `Loader/RootfsDiscovery.cpp`: the library root (`BIFROST_ROOT`, else a default
-  rootfs next to the executable or in the user/system data directories).
+- `Loader/RootfsDiscovery.cpp`: the library root (`BIFROST_ROOT`, else the selected
+  rootfs profile, else a default rootfs next to the executable or in the user/system
+  data directories) and `--rootfs-list`.
+- `Loader/RootfsSetup.cpp`: `--setup-rootfs`, which runs the checkout's `install-rootfs.sh`.
+- `Loader/GuestLibcSymbol.cpp`: finds symbols in the libc and `ld.so` a guest `ld.so`
+  mapped (`--guest-ld`), for the thread flag and TLS of emulator-created threads.
 
 ## Syscall families
 

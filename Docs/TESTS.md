@@ -45,6 +45,20 @@ failures need a real display and fail the same way before the change under SDL d
 `test_sandbox_in_root` pass). Not tested: BusyBox itself (the reporter's `busybox-arm64` is not in the repository), and a
 program outside a sandbox that sets `BIFROST_ROOT` (its cwd is still `/`).
 
+## Rootfs profiles, thread fixes and `--setup-rootfs` (2026-10-24)
+
+Full strict suite: 358 of 358 under the built-in linker (104 s) and 358 of 358 under `--guest-ld` (101 s), run after the last
+code change of the day. New or extended tests: `test_dyn_sdl_thread_malloc` (an `SDL_CreateThread` thread calls `strtod`,
+ctype and printf and mallocs beside the main thread; with the old code `--guest-ld` died in `strtod` and corrupted the heap
+in 3 of 3 runs of the fixture it came from, the built-in linker passed), `test_rootfs_profile.sh` (14 checks: install,
+list, select by flag, environment and config, missing and invalid names, uninstall; no network), `test_setup_rootfs.sh` (6
+checks) and the discovery unit test (profile names, candidate order, listing). Run by hand: dhewm3 for 120 s with a
+downloaded `games` profile under the built-in linker and under `--guest-ld`, neverball under `--guest-ld` (it aborted in
+5 of 5 runs before the thread fixes; afterwards it ran 40 s or until the window was closed, in 4 runs). Not covered:
+`fetch-game-libs.py` needs the network and is not in the suite (checked by `--list` and by the dhewm3 runs); games were
+started and watched for crashes, not played; musl programs under `--guest-ld` keep the old thread TLS layout; other
+games and `make verify` under `--guest-ld` were not run.
+
 ## Guest linker with a discovered rootfs (2026-10-24)
 
 The 17 headless dynamic tests, the 3 thunk/SDL tests (SDL dummy drivers) and the 7 real-world dynamic programs give the

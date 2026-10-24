@@ -149,7 +149,7 @@ This needs Asgard: run it from a checkout with the Android tooling provisioned
 `./Scripts/Setup/install-asgard.py` (or `sudo make install-asgard`) so it works from any
 directory. Re-running the installer after an update copies only the files that changed.
 
-`--guest-ld` (experimental) runs dynamic programs under the rootfs's own
+`--guest-ld` (experimental; dhewm3 and neverball ran under it, but it is not yet the default) runs dynamic programs under the rootfs's own
 `ld.so`, as a kernel exec would, instead of the built-in linker (still the
 default); it needs the `ld.so.cache` that `setup-rootfs.sh` writes, and thunked
 libraries (GL, SDL2, Vulkan, audio) are served to it as in-memory stubs. It works
