@@ -12,6 +12,7 @@
 #include "System/VFS/Nodes/TerminalIoctls.hpp"  // shared ioctl dispatch
 #include "System/VFS/Nodes/InterfaceIoctls.hpp"
 #include "System/Memory/Memory.hpp"
+#include "System/Loader/RootfsDiscovery.hpp"
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -200,6 +201,31 @@ static bool is_numeric_proc_pid(const std::string& p) {
     if (i == 6) return false;  // "self", "sys", ... — not numeric
     return i == n || p[i] == '/';
 }
+// Lexically normalize "." and ".." (chroot-style: ".." at the root stays at
+// the root). Without this, a guest path of "/../../etc/passwd" produced
+// "$ROOT/../../etc/passwd" and read a host file outside the sandbox. The
+// result starts with '/' or is empty (for "/" or an all-"." path).
+static std::string lexical_normalize(const std::string& guest_path) {
+    std::string norm;
+    size_t i = 0;
+    while (i < guest_path.size()) {
+        size_t j = guest_path.find('/', i);
+        if (j == std::string::npos) j = guest_path.size();
+        std::string comp = guest_path.substr(i, j - i);
+        if (comp.empty() || comp == ".") {
+            // no-op
+        } else if (comp == "..") {
+            size_t slash = norm.rfind('/');
+            if (slash == std::string::npos) norm.clear();
+            else norm.erase(slash);
+        } else {
+            norm += '/';
+            norm += comp;
+        }
+        i = j + 1;
+    }
+    return norm;
+}
 // Helper: remap a guest path to a host path using BIFROST_ROOT.
 // `root_override` ("" = read env): lets callers that already snapshotted
 // the root pass it explicitly so map and open can't disagree under a
@@ -241,34 +267,45 @@ std::string map_guest_path(const std::string& guest_path,
     if (xauth && xauth[0] == '/' && guest_path == xauth) return guest_path;
     std::string root(bifrost_root);
     while (root.size() > 1 && root.back() == '/') root.pop_back();
-    // Lexically normalize "." and ".." before remapping (chroot-style:
-    // ".." at the root stays at the root). Without this, a guest path of
-    // "/../../etc/passwd" produced "$ROOT/../../etc/passwd" and read a
-    // host file outside the sandbox.
-    std::string norm;
-    size_t i = 0;
-    while (i < guest_path.size()) {
-        size_t j = guest_path.find('/', i);
-        if (j == std::string::npos) j = guest_path.size();
-        std::string comp = guest_path.substr(i, j - i);
-        if (comp.empty() || comp == ".") {
-            // no-op
-        } else if (comp == "..") {
-            size_t slash = norm.rfind('/');
-            if (slash == std::string::npos) norm.clear();
-            else norm.erase(slash);
-        } else {
-            norm += '/';
-            norm += comp;
-        }
-        i = j + 1;
-    }
-    return root + norm;  // norm is empty for "/" (or all-"." paths)
+    return root + lexical_normalize(guest_path);  // empty for "/" (or all-"." paths)
 }
 // Static method exposed via Yggdrasil so syscall handlers don't need to
 // friend HostPaths.cpp's free function.
 std::string Yggdrasil::remap_path(const std::string& guest_path) {
     return map_guest_path(guest_path);
+}
+// ── Library overlay ──────────────────────────────────────────────────
+// With no BIFROST_ROOT, guest absolute paths name host files, but the guest's
+// libraries are AArch64 and sit in the default rootfs (RootfsDiscovery). A
+// read-only access to a library path therefore resolves there, and only there:
+// the host's /lib and /usr/lib hold x86-64 files that are never valid for the
+// guest, and answering a miss with one (a host libGL.so.1 at /lib64) would stop
+// the thunk stub from being offered. This is what lets a guest ld.so
+// (--guest-ld) find its libraries and /etc/ld.so.cache without sandboxing the
+// program. Only these paths are overlaid, never a write, and never while a
+// sandbox is set. Resolution is confined under the rootfs (RESOLVE_IN_ROOT) so
+// its absolute symlinks stay inside it.
+static bool overlay_target(const std::string& guest_path, std::string& root,
+                           std::string& host_path) {
+    if (guest_path.empty() || guest_path[0] != '/') return false;
+    if (!sandbox_root_str().empty()) return false;
+    const std::string norm = lexical_normalize(guest_path);
+    auto under = [&norm](const char* base) {
+        const size_t n = std::strlen(base);
+        return norm.compare(0, n, base) == 0 && (norm.size() == n || norm[n] == '/');
+    };
+    if (!(under("/lib") || under("/lib64") || under("/usr/lib") || under("/usr/lib64") ||
+          norm == "/etc/ld.so.cache"))
+        return false;
+    root = ::arm64emu::find_default_rootfs();
+    if (root.empty()) return false;
+    host_path = root + norm;
+    return true;
+}
+int Yggdrasil::open_overlay_path(const std::string& guest_path, bool follow) {
+    std::string root, host_path;
+    if (!overlay_target(guest_path, root, host_path)) return NO_OVERLAY;
+    return open_rooted(root, host_path, O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW), 0);
 }
 std::unique_ptr<Node> Yggdrasil::open_host(const std::string& guest_path,
                                            int flags, mode_t mode, int* err_out) {
@@ -294,6 +331,18 @@ int Yggdrasil::open_host_fd(const std::string& guest_path, int flags,
     std::string root = sandbox_root_str();
     std::string host_path = map_guest_path(guest_path, root.c_str());
     if (host_path.empty()) { errno = ENOENT; return -1; }  // denied proc path
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT) && !(flags & O_TRUNC) &&
+            (flags & O_TMPFILE) != O_TMPFILE) {
+        std::string overlay_root, overlay_host;
+        if (overlay_target(guest_path, overlay_root, overlay_host)) {
+            // A miss is ENOENT, never a host file. O_DIRECT on a directory is retried
+            // without it, as for every other open below.
+            int fd = open_rooted(overlay_root, overlay_host, flags, 0);
+            if (fd < 0 && errno == EINVAL && (flags & O_DIRECT))
+                fd = open_rooted(overlay_root, overlay_host, flags & ~O_DIRECT, 0);
+            return fd;
+        }
+    }
     bool confine = uses_sandbox(root, guest_path);
     if (!confine && host_path.front() != '/' && dirfd_confined(AT_FDCWD)) {
         char cwd[PATH_MAX];

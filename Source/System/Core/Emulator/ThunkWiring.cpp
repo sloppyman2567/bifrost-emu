@@ -553,17 +553,29 @@ bool real_library_in_rootfs(const std::string& soname) {
     }
     for (const char* d : {"/lib64", "/usr/lib64", "/lib", "/usr/lib", "/usr/lib/aarch64-linux-gnu"})
         dirs.push_back(d);
-    if (std::ifstream conf(yggdrasil::Yggdrasil::remap_path("/etc/ld.so.conf")); conf) {
-        for (std::string line; std::getline(conf, line);)
-            if (!line.empty() && line[0] == '/') dirs.push_back(line);
+    // Both reads go through the guest-path open: confined under BIFROST_ROOT, or found in the
+    // default rootfs (library overlay), exactly where the guest ld.so will look.
+    if (int fd = yggdrasil::Yggdrasil::open_host_fd("/etc/ld.so.conf", O_RDONLY | O_CLOEXEC); fd >= 0) {
+        if (FILE* conf = fdopen(fd, "r")) {
+            char line[4096];
+            while (fgets(line, sizeof(line), conf)) {
+                std::string text(line);
+                while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+                if (!text.empty() && text[0] == '/') dirs.push_back(text);
+            }
+            fclose(conf);
+        } else {
+            ::close(fd);
+        }
     }
     for (const auto& d : dirs) {
-        std::ifstream f(yggdrasil::Yggdrasil::remap_path(d + "/" + soname), std::ios::binary);
+        const int fd = yggdrasil::Yggdrasil::open_host_fd(d + "/" + soname, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
         unsigned char h[20];
-        if (f && f.read(reinterpret_cast<char*>(h), sizeof(h)) &&
-            h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F' &&
-            h[18] == 183 && h[19] == 0)
-            return true;
+        const bool aarch64_elf = ::read(fd, h, sizeof(h)) == static_cast<ssize_t>(sizeof(h)) &&
+            h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F' && h[18] == 183 && h[19] == 0;
+        ::close(fd);
+        if (aarch64_elf) return true;
     }
     return false;
 }

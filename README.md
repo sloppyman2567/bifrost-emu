@@ -145,9 +145,13 @@ This needs Asgard: run it from a checkout with the Android tooling provisioned
 directory. Re-running the installer after an update copies only the files that changed.
 
 `--guest-ld` (experimental) runs dynamic programs under the rootfs's own
-`ld.so`, as a kernel exec would, instead of the built-in linker; it needs the
-`ld.so.cache` that `setup-rootfs.sh` writes, and thunked libraries (GL, SDL2,
-Vulkan, audio) are served to it as in-memory stubs.
+`ld.so`, as a kernel exec would, instead of the built-in linker (still the
+default); it needs the `ld.so.cache` that `setup-rootfs.sh` writes, and thunked
+libraries (GL, SDL2, Vulkan, audio) are served to it as in-memory stubs. It works
+with an installed rootfs found automatically as well as with `--rootfs`: the
+guest's library directories then resolve in that rootfs while everything else
+stays on the host. It passes the same headless dynamic tests as the built-in
+linker; games and other windowed programs have not been compared.
 
 Useful switches: `-d` traces every instruction, `--no-jit` forces the
 interpreter, `--no-window-stats` removes the FPS title, and `BIFROST_TIER2=1`

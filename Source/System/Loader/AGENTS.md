@@ -45,7 +45,11 @@
   library (dhewm3's `libopenal.so.1` lost `alcIsExtensionPresent` that way).
   `--guest-ld` forwards the host `LD_LIBRARY_PATH` to the guest, in guest
   paths; the default environment omits it for the native linker. Run
-  `run_tests.sh --guest-ld` alongside the default dynamic suite.
+  `run_tests.sh --guest-ld` alongside the default dynamic suite. With a
+  discovered rootfs and no `BIFROST_ROOT`, the guest linker's own opens (interpreter
+  via `open_host_fd`, libraries, `ld.so.cache`) resolve through the VFS library
+  overlay (see the VFS guide); the thunk-stub check (`real_library_in_rootfs`) uses
+  the same opens so it sees what ld.so sees.
 - `RootfsDiscovery` picks the library root: `BIFROST_ROOT` (the sandbox, set by
   `--rootfs`, the environment or `[paths] rootfs`), else the first default rootfs
   (next to the executable, `$XDG_DATA_HOME`/`~/.local/share`, `/usr/{local/,}share`).

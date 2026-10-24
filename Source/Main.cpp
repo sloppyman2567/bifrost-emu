@@ -94,7 +94,7 @@ static void print_banner() {
         "    --rootfs PATH      guest root for libraries and paths (BIFROST_ROOT); default: auto-found, libraries only\n"
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
-        "    --guest-ld         run dynamic programs under their own guest ld.so (--rootfs)\n"
+        "    --guest-ld         run dynamic programs under their own guest ld.so (needs a rootfs)\n"
         "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
         "    --android-services provide the API-35 Binder service-manager subset\n"
         "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"

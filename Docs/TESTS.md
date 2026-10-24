@@ -4,6 +4,23 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Guest linker with a discovered rootfs (2026-10-24)
+
+The 17 headless dynamic tests, the 3 thunk/SDL tests (SDL dummy drivers) and the 7 real-world dynamic programs give the
+same results under `--guest-ld` and the built-in linker with `BIFROST_ROOT` set (every test passes under both). With no
+`BIFROST_ROOT` and a discovered rootfs, a script running the 20 dynamic programs from outside the rootfs passes 20 of 20
+under `--guest-ld` and under the built-in linker. A first version that fell through to the host on a rootfs miss failed
+the thunk tests (host x86-64 `libGL.so.1`), which is why a miss is now `ENOENT`. `test_rootfs_discovery.sh` (11 pass)
+gains `--guest-ld` hello/dlopen/thunk-stub cases; the previous binary fails each. By hand, with a hostile rootfs: an
+absolute symlink and a `..`-climbing symlink both stayed inside it, a miss was ENOENT, `/etc/hostname` and writes
+reached the host as before. `run_tests.sh --unit --toybox --quick` passes 173 of 173 and `--integration` 83 of 85 with
+7 skips (the two failures, `android_surface` and `mambo_vulkan`, need a real display and fail identically with the
+previous binaries under SDL dummy drivers; `test_sandbox` and `test_sandbox_in_root` pass). A runner artifact: with
+`--filter`, `run_tests.sh` still checks the sandbox canary and reports a false "relative guest write escaped the root".
+The 17 core dynamic tests also pass under `--no-jit --guest-ld` (interpreter engine). Not covered: games and other
+windowed programs under the guest linker (the reason it is not the default), `make verify`, and a host whose `/lib` is
+not a symlink.
+
 ## Installable Asgard (2026-10-24)
 
 `Scripts/Testing/test_asgard_install.py` (10 tests, pass) runs the installer from a small fake checkout: the

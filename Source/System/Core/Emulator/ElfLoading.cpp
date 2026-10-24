@@ -359,7 +359,9 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         // it through AT_ENTRY; AT_BASE is the interpreter's load address.
         const std::string host_interp = yggdrasil::Yggdrasil::remap_path(info.interp);
         std::vector<uint8_t> interpreter;
-        if (FILE* ifile = fopen(host_interp.c_str(), "rb")) {
+        // Confined under BIFROST_ROOT, or found in the default rootfs (library overlay).
+        const int interpreter_fd = yggdrasil::Yggdrasil::open_host_fd(info.interp, O_RDONLY | O_CLOEXEC);
+        if (FILE* ifile = interpreter_fd >= 0 ? fdopen(interpreter_fd, "rb") : nullptr) {
             fseek(ifile, 0, SEEK_END);
             const long isz = ftell(ifile);
             fseek(ifile, 0, SEEK_SET);

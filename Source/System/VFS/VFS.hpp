@@ -167,6 +167,15 @@ public:
                                   bool follow);
     // "/proc/self/fd/N": the kernel magic link to exactly that open file.
     static std::string proc_fd_path(int host_fd);
+    // Library overlay (no BIFROST_ROOT only): an absolute guest path under /lib,
+    // /lib64, /usr/lib, /usr/lib64 or /etc/ld.so.cache is looked up in the default
+    // rootfs and nowhere else (a host file there is never a valid guest library).
+    // Returns an O_PATH fd (resolved confined under the rootfs), -1 with errno when
+    // the path is overlaid but absent or unreadable there, or NO_OVERLAY when it is
+    // not overlaid and the caller proceeds with the host path. Read-only callers
+    // (stat, access, readlink; open_host_fd for read-only opens) use it.
+    static constexpr int NO_OVERLAY = -2;
+    static int open_overlay_path(const std::string& guest_path, bool follow);
     // True when a BIFROST_ROOT sandbox is active.
     static bool sandbox_inside_root();
     // Canonical host path of the BIFROST_ROOT sandbox ("" when inactive).

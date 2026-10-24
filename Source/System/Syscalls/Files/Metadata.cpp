@@ -39,6 +39,11 @@ static int stat_guest_path(int hfd, const std::string& raw_path, int flags,
         if (target.fd < 0) return -errno;
         return ::fstatat(target.fd, "", st, AT_EMPTY_PATH) < 0 ? -errno : 0;
     }
+    ScopedHostFd overlaid(Yggdrasil::open_overlay_path(raw_path, !(flags & AT_SYMLINK_NOFOLLOW)));
+    if (overlaid.fd != Yggdrasil::NO_OVERLAY) {  // a library path: the default rootfs decides
+        if (overlaid.fd < 0) return -errno;
+        return ::fstatat(overlaid.fd, "", st, AT_EMPTY_PATH) < 0 ? -errno : 0;
+    }
     const std::string path = Yggdrasil::remap_path(raw_path);
     // An absolute path ignores dirfd (POSIX).
     const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;

@@ -46,6 +46,26 @@ expect_hello "musl via executable-adjacent rootfs" HOME="$WORK/home" XDG_DATA_HO
 expect_hello "glibc via executable-adjacent rootfs" HOME="$WORK/home" XDG_DATA_HOME= "$INST" Tests/Apps/hello_dyn_glibc.elf
 rm "$WORK/inst/rootfs"
 
+# The guest ld.so (--guest-ld) with only a discovered rootfs: its library, ld.so.cache and
+# interpreter opens must resolve in the rootfs, while the program stays on the host.
+for libc in musl glibc; do
+    expect_hello "$libc under --guest-ld via XDG_DATA_HOME" HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" \
+        "$INST" --guest-ld Tests/Apps/hello_dyn_$libc.elf
+done
+# dlopen through the guest ld.so, then a thunked library: with no libGL in the rootfs the open must be
+# ENOENT (never the host's x86-64 libGL at the same path), so the thunk stub is offered. 77 = no GL thunk build.
+for fixture in test_dlopen:"test_dlopen: ALL PASS" test_dyn_thunk_stub:"test_dyn_thunk_stub: ALL PASS"; do
+    name=${fixture%%:*}; want=${fixture#*:}
+    [[ -f Tests/Apps/$name.elf ]] || { echo "SKIP $name (fixture not built)"; continue; }
+    set +e
+    out=$(env -u BIFROST_ROOT SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" \
+          "$INST" --guest-ld Tests/Apps/$name.elf 2>&1); status=$?
+    set -e
+    if [[ $status -eq 77 ]]; then echo "SKIP $name under --guest-ld (exit 77)"
+    elif [[ $status -eq 0 ]] && grep -q "$want" <<<"$out"; then echo "PASS $name under --guest-ld with a discovered rootfs"
+    else echo "FAIL $name under --guest-ld (status $status)"; echo "$out" | head -3; fail=1; fi
+done
+
 # No rootfs anywhere: a clear error, exit status 1, no guest crash.
 set +e
 out=$(env -u BIFROST_ROOT HOME="$WORK/home" XDG_DATA_HOME= "$INST" Tests/Apps/hello_dyn_musl.elf 2>&1)

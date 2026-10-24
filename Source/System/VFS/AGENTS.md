@@ -12,6 +12,15 @@
   and operate on the O_PATH fd (`AT_EMPTY_PATH`) or its `proc_fd_path`.
   Unsandboxed paths keep their direct host call. `test_sandbox` and the
   host-side canary check in `run_tests.sh` cover each call.
+- Library overlay (`open_overlay_path`, `overlay_target` in `HostPaths.cpp`): with no
+  `BIFROST_ROOT`, a read-only open/stat/access/readlink of an absolute path under
+  `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` or `/etc/ld.so.cache` is answered by the
+  default rootfs only (`NO_OVERLAY` means "not overlaid"; any other failure is the
+  answer, never a host fallback: a host x86-64 `/lib64/libGL.so.1` would otherwise stop
+  the thunk stub). It reuses `open_rooted` (RESOLVE_IN_ROOT), normalizes `..` first with
+  `lexical_normalize` (shared with `map_guest_path`), never applies to writes or while a
+  sandbox is set, and a new read-only call site must try it before the host path. Run
+  `Scripts/Testing/test_rootfs_discovery.sh` and the sandbox regressions.
 - Relative `AT_FDCWD` lookups follow the host cwd. A guest whose executable
   lies inside the root starts with the host cwd inside it
   (`enter_root_cwd`: the in-root launch directory, else the root), and

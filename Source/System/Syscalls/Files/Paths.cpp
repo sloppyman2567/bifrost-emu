@@ -42,6 +42,14 @@ static int access_guest_path(int hfd, const std::string& guest, int mode, int fl
         return ::faccessat(AT_FDCWD, Yggdrasil::proc_fd_path(target.fd).c_str(), mode,
                            flags & AT_EACCESS) < 0 ? -errno : 0;
     }
+    if (!(mode & ~7) && !(flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW))) {
+        ScopedHostFd overlaid(Yggdrasil::open_overlay_path(guest, !(flags & AT_SYMLINK_NOFOLLOW)));
+        if (overlaid.fd != Yggdrasil::NO_OVERLAY) {  // a library path: the default rootfs decides
+            if (overlaid.fd < 0) return -errno;
+            return ::faccessat(AT_FDCWD, Yggdrasil::proc_fd_path(overlaid.fd).c_str(), mode,
+                               flags & AT_EACCESS) < 0 ? -errno : 0;
+        }
+    }
     const std::string path = Yggdrasil::remap_path(guest);
     // An absolute path ignores dirfd (POSIX).
     const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;
@@ -369,6 +377,9 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (yggdrasil::Yggdrasil::path_confined(hfd, path_str)) {
                     ScopedHostFd link(yggdrasil::Yggdrasil::open_confined_path(hfd, path_str, false));
                     n = link.fd < 0 ? -1 : ::readlinkat(link.fd, "", buf, sizeof(buf));
+                } else if (ScopedHostFd overlaid(yggdrasil::Yggdrasil::open_overlay_path(path_str, false));
+                           overlaid.fd != yggdrasil::Yggdrasil::NO_OVERLAY) {  // a library path
+                    n = overlaid.fd < 0 ? -1 : ::readlinkat(overlaid.fd, "", buf, sizeof(buf));
                 } else {
                     std::string host_path = yggdrasil::Yggdrasil::remap_path(path_str);
                     n = ::readlinkat(hfd, host_path.c_str(), buf, sizeof(buf));

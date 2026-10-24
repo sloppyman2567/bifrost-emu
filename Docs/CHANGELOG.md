@@ -12,6 +12,17 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Guest linker with a discovered rootfs (2026-10-24)
+
+`--guest-ld` now works with an installed rootfs found automatically; it used to need an explicit `--rootfs`, which also
+sandboxes the program. A library overlay in the VFS answers the guest's read-only opens, stats, access checks and
+readlinks of `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` and `/etc/ld.so.cache` from that rootfs, and only from it: a
+host x86-64 library at the same path (CachyOS's `/lib64` is `/usr/lib`) is never offered to the guest, so thunked
+libraries such as `libGL.so.1` still get their in-memory stub. Resolution stays inside the rootfs (absolute and `..`
+symlinks included); writes, other paths and sandboxed runs are unchanged. The guest interpreter and the thunk-stub
+check read through the same opens. The built-in linker remains the default; the guest linker adds about 8 to 15 ms of
+startup per run. The rest of this entry is what was checked: see [TESTS.md](TESTS.md#guest-linker-with-a-discovered-rootfs-2026-10-24).
+
 ### Installable Asgard (2026-10-24)
 
 `Scripts/Setup/install-asgard.py` (and `make install-asgard` / `uninstall-asgard`) installs a self-contained Asgard

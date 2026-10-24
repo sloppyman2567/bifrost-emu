@@ -15,7 +15,16 @@ synthesized at run time.
    `<executable dir>/rootfs`, `<executable dir>/../share/bifrost/rootfs`,
    `$XDG_DATA_HOME/bifrost/rootfs` (default `~/.local/share/bifrost/rootfs`),
    `/usr/local/share/bifrost/rootfs`, `/usr/share/bifrost/rootfs`.
-   This one supplies libraries only; the guest still sees host paths.
+   This one supplies libraries only; the guest still sees host paths, except
+   that its library directories resolve in the rootfs (below).
+
+**Library overlay.** With a discovered rootfs (no `--rootfs`), a read-only access by
+the guest to an absolute path under `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` or
+`/etc/ld.so.cache` (open, stat, access, readlink) is answered by the rootfs and by
+nothing else: a missing file is `ENOENT`, never the host's x86-64 file at that path.
+Resolution is confined inside the rootfs, so its absolute symlinks stay in it. This is
+what lets a guest `ld.so` (`--guest-ld`) find its libraries. Every other path, and every
+write, goes to the host as before; with `--rootfs` the whole sandbox applies instead.
 
 `<prefix>/bin/bifrost-emu` therefore finds `<prefix>/share/bifrost/rootfs`
 whatever the prefix. With none found, a program whose libc is missing stops with
