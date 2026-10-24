@@ -172,6 +172,105 @@ bool Yggdrasil::procfs_stat(const std::string& requested, int flags,
     return true;
 }
 
+// A complete Linux /proc/<pid>/status for this process; the debugger's view of a task (name, state, ids,
+// tracer, credentials) replaces the fields it knows, so a task's file has every field and the same layout.
+std::string Yggdrasil::proc_status_text(const std::string& task_fields) const {
+    // Linux reports the task comm (prctl PR_SET_NAME) here.
+    std::string name = comm_provider_ ? comm_provider_() : "bifrost-emu";
+    uint64_t vm_total = 0;
+    if (maps_provider_) {
+        for (const auto& e : maps_provider_()) {
+            vm_total += (e.end - e.start);
+        }
+    }
+    if (vm_total == 0) vm_total = 8 * 1024 * 1024;
+    char vm_sz[64], vm_rss[64];
+    snprintf(vm_sz,  sizeof(vm_sz),  "%8llu kB",
+             static_cast<unsigned long long>(vm_total / 1024));
+    snprintf(vm_rss, sizeof(vm_rss), "%8llu kB",
+             static_cast<unsigned long long>(vm_total / 1024));
+    std::string s;
+    s += "Name:\t" + name + "\n";
+    s += "Umask:\t0022\n";
+    s += "State:\tR (running)\n";
+    const ProcessIds ids = process_ids();
+    s += "Tgid:\t" + std::to_string(ids.pid) + "\n";
+    s += "Ngid:\t0\n";
+    s += "Pid:\t" + std::to_string(ids.pid) + "\n";
+    s += "PPid:\t" + std::to_string(ids.ppid) + "\n";
+    std::string debug_status;
+    if (debug_status_provider_ && debug_status_provider_(ids.pid, debug_status)) {
+        size_t at = debug_status.find("TracerPid:");
+        size_t end = debug_status.find('\n', at);
+        s += at == std::string::npos ? "TracerPid:\t0\n" : debug_status.substr(at, end - at + 1);
+    } else s += "TracerPid:\t0\n";
+    for (const auto& identity : {std::make_pair("Uid", process_uid_), std::make_pair("Gid", process_gid_)}) {
+        s += std::string(identity.first) + ":";
+        for (int i = 0; i < 4; ++i) s += '\t' + std::to_string(identity.second);
+        s += '\n';
+    }
+    s += "NStgid:\t" + std::to_string(ids.pid) + "\n";
+    s += "NSpid:\t" + std::to_string(ids.pid) + "\n";
+    s += "NSpgid:\t" + std::to_string(ids.pgid) + "\n";
+    s += "NSsid:\t" + std::to_string(ids.sid) + "\n";
+    s += "VmPeak:"; s += vm_sz;  s += "\n";
+    s += "VmSize:"; s += vm_sz;  s += "\n";
+    s += "VmLck:\t 0 kB\n";
+    s += "VmPin:\t 0 kB\n";
+    s += "VmHWM:";  s += vm_rss; s += "\n";
+    s += "VmRSS:";  s += vm_rss; s += "\n";
+    s += "RssAnon:\t 4096 kB\n";
+    s += "RssFile:\t 0 kB\n";
+    s += "RssShmem:\t 0 kB\n";
+    s += "VmData:"; s += vm_sz;  s += "\n";
+    s += "VmStk:\t 128 kB\n";
+    s += "VmExe:\t 8 kB\n";
+    s += "VmLib:\t 4096 kB\n";
+    s += "VmPTE:\t 32 kB\n";
+    s += "VmSwap:\t 0 kB\n";
+    s += "HugetlbPages:\t 0 kB\n";
+    s += "CoreDumping:\t0\n";
+    s += "Threads:\t1\n";
+    s += "SigQ:\t0/256\n";
+    s += "SigPnd:\t0000000000000000\n";
+    s += "ShdPnd:\t0000000000000000\n";
+    s += "SigBlk:\t0000000000000000\n";
+    s += "SigIgn:\t0000000000000000\n";
+    s += "SigCgt:\t0000000000000000\n";
+    s += "CapInh:\t0000000000000000\n";
+    s += process_uid_ ? "CapPrm:\t0000000000000000\n" : "CapPrm:\t0000003fffffffff\n";
+    s += process_uid_ ? "CapEff:\t0000000000000000\n" : "CapEff:\t0000003fffffffff\n";
+    s += "CapBnd:\t0000003fffffffff\n";
+    s += "CapAmb:\t0000000000000000\n";
+    s += "NoNewPrivs:\t0\n";
+    s += "Seccomp:\t0\n";
+    s += "Speculation_Store_Bypass:\tvulnerable\n";
+    s += "Cpus_allowed:\t01\n";
+    s += "Mems_allowed:\t1\n";
+    s += "voluntary_ctxt_switches:\t0\n";
+    s += "nonvoluntary_ctxt_switches:\t0\n";
+    // Replace each field the task text carries; the namespace ids follow Tgid and Pid.
+    auto replace_field = [&s](const std::string& key, const std::string& value) {
+        const size_t at = s.find(key + ":\t");
+        if (at == std::string::npos) return;
+        s.replace(at, s.find('\n', at) - at + 1, key + ":\t" + value + "\n");
+    };
+    for (size_t line = 0; line < task_fields.size();) {
+        const size_t end = task_fields.find('\n', line);
+        const std::string text = task_fields.substr(line, end == std::string::npos ? std::string::npos : end - line);
+        const size_t colon = text.find(":\t");
+        if (colon != std::string::npos) {
+            const std::string key = text.substr(0, colon), value = text.substr(colon + 2);
+            replace_field(key, value);
+            if (key == "Tgid") replace_field("NStgid", value);
+            if (key == "Pid") replace_field("NSpid", value);
+        }
+        if (end == std::string::npos) break;
+        line = end + 1;
+    }
+    return s;
+}
+
 std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                                              int flags, mode_t /*mode*/,
                                              int* err_out) {
@@ -184,7 +283,7 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
             uint64_t tid = std::stoull(number);
             std::string text;
             if (tid <= INT32_MAX && debug_status_provider_(static_cast<int>(tid), text))
-                return serve_static(text, flags);
+                return serve_static(proc_status_text(text), flags);
         }
     }
     // Directory listings.
@@ -359,83 +458,7 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
     // ── /proc/self/status → process info (LAZY) ─────────────────────
     // Status includes VmSize/VmRSS which depend on live memory layout.
     if (path == "/proc/self/status") {
-        return serve_lazy([this]() -> std::string {
-            // Linux reports the task comm (prctl PR_SET_NAME) here.
-            std::string name = comm_provider_ ? comm_provider_() : "bifrost-emu";
-            uint64_t vm_total = 0;
-            if (maps_provider_) {
-                for (const auto& e : maps_provider_()) {
-                    vm_total += (e.end - e.start);
-                }
-            }
-            if (vm_total == 0) vm_total = 8 * 1024 * 1024;
-            char vm_sz[64], vm_rss[64];
-            snprintf(vm_sz,  sizeof(vm_sz),  "%8llu kB",
-                     static_cast<unsigned long long>(vm_total / 1024));
-            snprintf(vm_rss, sizeof(vm_rss), "%8llu kB",
-                     static_cast<unsigned long long>(vm_total / 1024));
-            std::string s;
-            s += "Name:\t" + name + "\n";
-            s += "Umask:\t0022\n";
-            s += "State:\tR (running)\n";
-            const ProcessIds ids = process_ids();
-            s += "Tgid:\t" + std::to_string(ids.pid) + "\n";
-            s += "Ngid:\t0\n";
-            s += "Pid:\t" + std::to_string(ids.pid) + "\n";
-            s += "PPid:\t" + std::to_string(ids.ppid) + "\n";
-            std::string debug_status;
-            if (debug_status_provider_ && debug_status_provider_(ids.pid, debug_status)) {
-                size_t at = debug_status.find("TracerPid:");
-                size_t end = debug_status.find('\n', at);
-                s += at == std::string::npos ? "TracerPid:\t0\n" : debug_status.substr(at, end - at + 1);
-            } else s += "TracerPid:\t0\n";
-            for (const auto& identity : {std::make_pair("Uid", process_uid_), std::make_pair("Gid", process_gid_)}) {
-                s += std::string(identity.first) + ":";
-                for (int i = 0; i < 4; ++i) s += '\t' + std::to_string(identity.second);
-                s += '\n';
-            }
-            s += "NStgid:\t" + std::to_string(ids.pid) + "\n";
-            s += "NSpid:\t" + std::to_string(ids.pid) + "\n";
-            s += "NSpgid:\t" + std::to_string(ids.pgid) + "\n";
-            s += "NSsid:\t" + std::to_string(ids.sid) + "\n";
-            s += "VmPeak:"; s += vm_sz;  s += "\n";
-            s += "VmSize:"; s += vm_sz;  s += "\n";
-            s += "VmLck:\t 0 kB\n";
-            s += "VmPin:\t 0 kB\n";
-            s += "VmHWM:";  s += vm_rss; s += "\n";
-            s += "VmRSS:";  s += vm_rss; s += "\n";
-            s += "RssAnon:\t 4096 kB\n";
-            s += "RssFile:\t 0 kB\n";
-            s += "RssShmem:\t 0 kB\n";
-            s += "VmData:"; s += vm_sz;  s += "\n";
-            s += "VmStk:\t 128 kB\n";
-            s += "VmExe:\t 8 kB\n";
-            s += "VmLib:\t 4096 kB\n";
-            s += "VmPTE:\t 32 kB\n";
-            s += "VmSwap:\t 0 kB\n";
-            s += "HugetlbPages:\t 0 kB\n";
-            s += "CoreDumping:\t0\n";
-            s += "Threads:\t1\n";
-            s += "SigQ:\t0/256\n";
-            s += "SigPnd:\t0000000000000000\n";
-            s += "ShdPnd:\t0000000000000000\n";
-            s += "SigBlk:\t0000000000000000\n";
-            s += "SigIgn:\t0000000000000000\n";
-            s += "SigCgt:\t0000000000000000\n";
-            s += "CapInh:\t0000000000000000\n";
-            s += process_uid_ ? "CapPrm:\t0000000000000000\n" : "CapPrm:\t0000003fffffffff\n";
-            s += process_uid_ ? "CapEff:\t0000000000000000\n" : "CapEff:\t0000003fffffffff\n";
-            s += "CapBnd:\t0000003fffffffff\n";
-            s += "CapAmb:\t0000000000000000\n";
-            s += "NoNewPrivs:\t0\n";
-            s += "Seccomp:\t0\n";
-            s += "Speculation_Store_Bypass:\tvulnerable\n";
-            s += "Cpus_allowed:\t01\n";
-            s += "Mems_allowed:\t1\n";
-            s += "voluntary_ctxt_switches:\t0\n";
-            s += "nonvoluntary_ctxt_switches:\t0\n";
-            return s;
-        }, flags);
+        return serve_lazy([this]() { return proc_status_text(); }, flags);
     }
     // ── Static-content files ────────────────────────────────────────
     if (path == "/proc/meminfo") {

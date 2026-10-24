@@ -25,6 +25,17 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   games under `--guest-ld`; supertux2 does not start there (its rootfs `libcurl-gnutls` wants glibc 2.43) and
   crashes under the built-in linker as well (not caused by the loader precedence change).
 
+### `/proc/<pid>/status` is a complete status file (2026-10-24)
+
+- For a task the guest debugger knows (every process in the fork family, including the app itself), `/proc/<pid>/status`
+  was the debugger's eight-field summary (about 150 bytes: no `Threads`, `VmRSS`, signal masks, `Seccomp`, ...). It is now the
+  same complete text as `/proc/self/status` with the debugger's name, state, ids, tracer and credentials filled in
+  (`Yggdrasil::proc_status_text`). Found while tracing Umamusume's anti-tamper thread, which reads `/proc/<own pid>/status` every
+  100 ms and then kills the app (SIGKILL, exit 137, about 10 s in). **This did not stop that kill**: with the full file the
+  game still ends itself at the same point, so the check that fails is something else. `test_proc_pid_status` covers the file.
+  The Umamusume kill is unresolved; its trace shows the app forking helper children (`clone` with SIGCHLD), killing one and polling it
+  with `kill(pid, 0)`, then killing itself and another child.
+
 ### Rootfs profiles and a game-library rootfs (2026-10-24)
 
 - Named rootfs profiles: `install-rootfs.sh --profile NAME` installs to `<data>/rootfs.d/NAME`; `--rootfs-profile NAME`,

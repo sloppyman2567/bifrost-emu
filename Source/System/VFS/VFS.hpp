@@ -231,6 +231,8 @@ public:
     // for fork children and Binder-broker apps (self_pid != 1).
     struct ProcessIds { int pid, ppid, pgid, sid; };
     ProcessIds process_ids() const;
+    // Full /proc/<pid>/status text; `task_fields` (the debugger's "Key:\tvalue" lines) overrides what it knows.
+    std::string proc_status_text(const std::string& task_fields = {}) const;
     std::string canonical_proc_path(const std::string& path) const;
     // Wire up the graphics backend (for /dev/fb0). May be null if the
     // emulator was built without SDL2 and the guest never opens /dev/fb0.

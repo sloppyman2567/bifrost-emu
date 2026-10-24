@@ -410,6 +410,8 @@ UNIT_TESTS=(
     # Linux argv/env string layout, live /proc/self/cmdline (setArgV0 and
     # setproctitle rewrites, also after execve), /proc/<getpid()> == self.
     "test_proc_cmdline|Tests/Unit/test_proc_cmdline.elf||10|ALL PASS"
+    # /proc/<pid>/status of a debugger-registered task is a complete status file.
+    "test_proc_pid_status|Tests/Unit/test_proc_pid_status.elf||10|test_proc_pid_status: ALL PASS"
     # Guest ptrace ownership, blocked-parent attach, regsets and stepping.
     "test_ptrace|Tests/Unit/test_ptrace.elf||30|ALL PASS"
     # exit_group / fatal default signals from any thread end the process;
