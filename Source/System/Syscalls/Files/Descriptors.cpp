@@ -168,10 +168,8 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINVAL));
                 return 0;
             }
-            // Note: O_CLOEXEC tracking is not yet implemented in FdTable;
-            // for now we accept the flag and ignore it (no execve in
-            // single-process guests, so FD_CLOEXEC is moot).
             int r = fds_.dup2(static_cast<int>(a0), static_cast<int>(a1));
+            if (r >= 0 && (a2 & O_CLOEXEC)) fds_.set_cloexec(r, true);
             ret_host(r);
             return 0;
         }
@@ -194,6 +192,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { ret_errno(); return 0; }
             int g0 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[0], O_RDONLY));
             int g1 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[1], O_WRONLY));
+            if (a1 & O_CLOEXEC) { fds_.set_cloexec(g0, true); fds_.set_cloexec(g1, true); }
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d pipe2 hfd0=%d gfd0=%d hfd1=%d gfd1=%d\n",
                         cpu.tid, hfds[0], g0, hfds[1], g1);
@@ -535,37 +534,21 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
                     // default case, returning 0 (success). This made the
                     // guest think it got fd=0 (stdin), corrupting stdin
                     // for Python's os.dup, Java fd management, etc.
-                    // We don't track per-fd FD_CLOEXEC in FdTable, but we
-                    // can still allocate a new fd pointing to the same Node.
-                    // The FD_CLOEXEC flag is lost — that's a known
-                    // limitation (only matters if the guest later execve's,
-                    // which is rare). The fd allocation is correct.
                     int min_fd = static_cast<int>(a2);
                     if (min_fd < 0) min_fd = 0;
                     int r = fds_.dup(static_cast<int>(a0), min_fd);
                     if (r < 0) { ret_err(EBADF); return 0; }
+                    fds_.set_cloexec(r, true);
                     ret_host(r);
                     return 0;
                 }
-                case F_GETFD: {  // 1 — get fd flags (FD_CLOEXEC)
-                    if (hfd >= 0) {
-                        int r = ::fcntl(hfd, F_GETFD);
-                        ret_host(r < 0 ? 0 : r);
-                    } else {
-                        ret_host(0);
-                    }
+                case F_GETFD:  // 1 — descriptor flags: only FD_CLOEXEC exists, kept per guest fd
+                    ret_host(fds_.cloexec(static_cast<int>(a0)) ? FD_CLOEXEC : 0);
                     return 0;
-                }
-                case F_SETFD: {  // 2 — set fd flags (FD_CLOEXEC)
-                    if (hfd >= 0) {
-                        int r = ::fcntl(hfd, F_SETFD, static_cast<int>(a2));
-                        if (r < 0) { ret_errno(); return 0; }
-                        ret_host(r);
-                    } else {
-                        ret_host(0);
-                    }
+                case F_SETFD:  // 2 — it is the guest descriptor's flag, not the shared host fd's
+                    fds_.set_cloexec(static_cast<int>(a0), (a2 & FD_CLOEXEC) != 0);
+                    ret_host(0);
                     return 0;
-                }
                 case F_GETFL: {  // 3 — get file status flags
                     // Query the host fd for live flags (including any
                     // previously applied via F_SETFL). Fall back to the

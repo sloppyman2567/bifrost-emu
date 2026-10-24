@@ -105,6 +105,7 @@ int FdTable::allocate(std::shared_ptr<Node> node) {
         has_mapping_devices_.store(true, std::memory_order_release);
     }
     table_[fd] = std::move(node);
+    cloexec_.erase(fd);
     return fd;
 }
 std::shared_ptr<Node> FdTable::get(int fd) const {
@@ -124,6 +125,7 @@ int FdTable::close(int fd) {
         if (it == table_.end()) return -EBADF;
         closing = std::move(it->second);
         table_.erase(it);
+        cloexec_.erase(fd);
     }
     return 0;
 }
@@ -138,6 +140,7 @@ int FdTable::dup(int fd, int min_fd) {
     int new_fd = std::max(min_fd, 0);
     while (table_.count(new_fd)) new_fd++;
     table_[new_fd] = node;
+    cloexec_.erase(new_fd);
     return new_fd;
 }
 int FdTable::dup2(int fd, int new_fd) {
@@ -152,6 +155,7 @@ int FdTable::dup2(int fd, int new_fd) {
         auto& slot = table_[new_fd];
         closing = std::move(slot);
         slot = std::move(source);
+        cloexec_.erase(new_fd);
     }
     return new_fd;
 }
@@ -172,8 +176,32 @@ void FdTable::close_range(int first, int last) {
     for (int fd : to_close) {
         closing.push_back(std::move(table_.at(fd)));
         table_.erase(fd);
+        cloexec_.erase(fd);
     }
     g.unlock();
+}
+void FdTable::set_cloexec(int fd, bool on) {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!table_.count(fd)) return;
+    if (on) cloexec_.insert(fd); else cloexec_.erase(fd);
+}
+bool FdTable::cloexec(int fd) const {
+    std::lock_guard<std::mutex> g(mu_);
+    return cloexec_.count(fd) != 0;
+}
+void FdTable::close_on_exec() {
+    // As in close(): destroy the nodes after dropping mu_ (device destructors take their own locks).
+    std::vector<std::shared_ptr<Node>> closing;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        for (int fd : cloexec_) {
+            auto it = table_.find(fd);
+            if (it == table_.end()) continue;
+            closing.push_back(std::move(it->second));
+            table_.erase(it);
+        }
+        cloexec_.clear();
+    }
 }
 bool FdTable::is_open(int fd) const {
     std::lock_guard<std::mutex> g(mu_);

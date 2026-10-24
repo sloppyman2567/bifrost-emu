@@ -43,7 +43,7 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
         case 19: { // eventfd2(count, flags) — aarch64 syscall 19
             int hfd = ::eventfd(static_cast<unsigned int>(a0), static_cast<int>(a1));
             if (hfd < 0) { ret_errno(); return 0; }
-            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            int gfd = register_host_fd(emu, hfd, O_RDWR, a1 & O_CLOEXEC);  // EFD_CLOEXEC
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d eventfd2 hfd=%d gfd=%d\n", cpu.tid, hfd, gfd);
             ret_host(gfd);
@@ -52,7 +52,7 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
         case 20: { // epoll_create1(flags) — aarch64 syscall 20
             int hfd = ::epoll_create1(static_cast<int>(a0));
             if (hfd < 0) { ret_errno(); return 0; }
-            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            int gfd = register_host_fd(emu, hfd, O_RDWR, a0 & O_CLOEXEC);  // EPOLL_CLOEXEC
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d epoll_create1 hfd=%d gfd=%d\n", cpu.tid, hfd, gfd);
             ret_host(gfd);
@@ -273,7 +273,7 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
         case 85: { // timerfd_create(clockid, flags) — aarch64 syscall 85
             int hfd = ::timerfd_create(static_cast<int>(a0), static_cast<int>(a1));
             if (hfd < 0) { ret_errno(); return 0; }
-            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            int gfd = register_host_fd(emu, hfd, O_RDWR, a1 & O_CLOEXEC);  // TFD_CLOEXEC
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d timerfd_create hfd=%d gfd=%d\n", cpu.tid, hfd, gfd);
             ret_host(gfd);
@@ -330,6 +330,7 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             // and close() releases the host descriptor through FdTable.
             int guest_fd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(
                 fd, O_RDONLY | (static_cast<int>(a0) & O_NONBLOCK)));
+            if (a0 & O_CLOEXEC) fds_.set_cloexec(guest_fd, true);  // IN_CLOEXEC
             ret_host(static_cast<uint64_t>(guest_fd));
             return 0;
         }
@@ -387,10 +388,20 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_err(EFAULT);
                 return 0;
             }
-            int fd = ::signalfd(static_cast<int>(a0), &host_mask,
-                                static_cast<int>(a3));
+            // fd == -1 creates a signalfd; otherwise it updates the mask of the signalfd
+            // behind a GUEST descriptor. The host fd is wrapped like every other fd; handing
+            // the raw host number to the guest made reads fail with EBADF.
+            int existing = -1;
+            if (static_cast<int>(a0) != -1) {
+                auto node = fds_.get(static_cast<int>(a0));
+                existing = node ? node->host_fd() : -1;
+                if (existing < 0) { ret_err(EBADF); return 0; }
+            }
+            int fd = ::signalfd(existing, &host_mask, static_cast<int>(a3));
             if (fd < 0) { ret_errno(); return 0; }
-            ret_host(static_cast<uint64_t>(fd));
+            if (existing >= 0) { ret_host(a0); return 0; }
+            ret_host(static_cast<uint64_t>(register_host_fd(
+                emu, fd, O_RDONLY | (static_cast<int>(a3) & O_NONBLOCK), a3 & O_CLOEXEC)));  // SFD_CLOEXEC
             return 0;
         }
         case 279: { // memfd_create(name, flags) — AArch64 279
@@ -410,7 +421,7 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int hfd = static_cast<int>(::syscall(SYS_memfd_create, name.c_str(),
                                 static_cast<unsigned int>(a1)));
             if (hfd < 0) { ret_errno(); return 0; }
-            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            int gfd = register_host_fd(emu, hfd, O_RDWR, a1 & 1);  // MFD_CLOEXEC
             ret_host(gfd);
             return 0;
         }

@@ -58,8 +58,11 @@ inline int resolve_sock_fd(Emulator& emu, uint64_t guest_fd) {
 // Register a freshly-created host fd in the FdTable and return the guest
 // fd. Uses O_RDWR as the default flags (sockets don't have a meaningful
 // "flags" field at creation time — they're full-duplex).
-inline int register_host_fd(Emulator& emu, int hfd, int flags = O_RDWR) {
+// `cloexec` marks the new descriptor FD_CLOEXEC (the creating call's O_CLOEXEC-style flag).
+inline int register_host_fd(Emulator& emu, int hfd, int flags = O_RDWR, bool cloexec = false) {
     if (hfd < 0) return hfd;
-    return emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, flags));
+    const int gfd = emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, flags));
+    if (cloexec && gfd >= 0) emu.fds().set_cloexec(gfd, true);
+    return gfd;
 }
 } // namespace arm64emu

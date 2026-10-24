@@ -30,8 +30,9 @@ namespace arm64emu {
 // copyback faults; only a completed receive transfers ownership to FdTable.
 class ReceivedSocketRights {
 public:
-    ReceivedSocketRights(yggdrasil::FdTable& fds, msghdr& message)
-        : fds_(fds), message_(message) {}
+    // `cloexec`: recvmsg was given MSG_CMSG_CLOEXEC, so the new descriptors are FD_CLOEXEC.
+    ReceivedSocketRights(yggdrasil::FdTable& fds, msghdr& message, bool cloexec = false)
+        : fds_(fds), message_(message), cloexec_(cloexec) {}
     ~ReceivedSocketRights() {
         size_t index = 0;
         for (auto* c = CMSG_FIRSTHDR(&message_); c; c = CMSG_NXTHDR(&message_, c)) {
@@ -57,6 +58,7 @@ public:
                 auto node = std::make_shared<yggdrasil::HostNode>(host, flags < 0 ? O_RDWR : flags);
                 int invalid = -1; memcpy(CMSG_DATA(c) + off, &invalid, sizeof(invalid));
                 int guest = fds_.allocate(node);
+                if (cloexec_) fds_.set_cloexec(guest, true);
                 guest_fds_.push_back(guest);
                 memcpy(CMSG_DATA(c) + off, &guest, sizeof(guest));
                 ++converted_;
@@ -70,6 +72,7 @@ private:
     std::vector<int> guest_fds_;
     size_t converted_ = 0;
     bool committed_ = false;
+    bool cloexec_ = false;
 };
 static void xseq_append(const char* path, char dir, const uint8_t* p, size_t n) {
     if (!path) return;
@@ -122,7 +125,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             int hfd = ::socket(static_cast<int>(a0), static_cast<int>(a1),
                                static_cast<int>(a2));
             if (hfd < 0) { ret_errno(); return 0; }
-            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            int gfd = register_host_fd(emu, hfd, O_RDWR, a1 & SOCK_CLOEXEC);
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d socket dom=%llu type=%llu hfd=%d gfd=%d\n",
                         cpu.tid, (unsigned long long)a0, (unsigned long long)a1, hfd, gfd);
@@ -135,8 +138,8 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
                                  static_cast<int>(a2), fds);
             if (r < 0) { ret_errno(); return 0; }
             // Register both ends in the FdTable.
-            int g0 = register_host_fd(emu, fds[0], O_RDWR);
-            int g1 = register_host_fd(emu, fds[1], O_RDWR);
+            int g0 = register_host_fd(emu, fds[0], O_RDWR, a1 & SOCK_CLOEXEC);
+            int g1 = register_host_fd(emu, fds[1], O_RDWR, a1 & SOCK_CLOEXEC);
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d socketpair dom=%llu type=%llu hfd0=%d gfd0=%d hfd1=%d gfd1=%d\n",
                         cpu.tid, (unsigned long long)a0, (unsigned long long)a1, fds[0], g0, fds[1], g1);
@@ -280,6 +283,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             // Register the new socket fd in the FdTable.
             int gfd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(new_hfd, O_RDWR));
+            if (a3 & SOCK_CLOEXEC) fds_.set_cloexec(gfd, true);
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d accept4 hfd=%d gfd=%d\n", cpu.tid, new_hfd, gfd);
             ret_host(static_cast<uint64_t>(gfd));
@@ -604,7 +608,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ssize_t r = ::recvmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
-            ReceivedSocketRights received_rights(fds_, host_msg);
+            ReceivedSocketRights received_rights(fds_, host_msg, (a2 & MSG_CMSG_CLOEXEC) != 0);
             received_rights.adopt();
             if (static_cast<int>(a0) == 3 && dbg().xtrace && r > 0) {
                 // peek what is actually sitting in the kernel socket queue

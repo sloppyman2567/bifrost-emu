@@ -108,6 +108,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             // Adopt into the FdTable.
             int guest_fd = fds_.allocate(std::shared_ptr<yggdrasil::Node>(std::move(node)));
+            if (a2 & O_CLOEXEC) fds_.set_cloexec(guest_fd, true);
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d openat gfd=%d path=%.60s\n",
                         cpu.tid, guest_fd, path.c_str());
@@ -131,7 +132,9 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(err ? err : -ENOENT)));
                 return 0;
             }
-            ret_host(static_cast<uint64_t>(emu.fds().allocate(std::move(node))));
+            const int new_fd = emu.fds().allocate(std::move(node));
+            if (flags & O_CLOEXEC) emu.fds().set_cloexec(new_fd, true);
+            ret_host(static_cast<uint64_t>(new_fd));
             return 0;
         }
         // ── faccessat2 (syscall 439) ─────────────────────────────────
