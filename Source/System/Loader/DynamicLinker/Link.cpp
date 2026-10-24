@@ -66,7 +66,6 @@ bool DynamicLinker::link(CPU& cpu,
     symbols_.clear();
     versioned_symbols_.clear();
     error_.clear();
-    libc_missing_ = false;
     next_tls_mod_id_ = 1;
     tls_surplus_used_ = 0;
     static_tls_size_ = 0;
@@ -198,7 +197,6 @@ bool DynamicLinker::link(CPU& cpu,
     // the first unresolved libc call.
     if (!missing_libc.empty()) {
         error_ = "cannot find the C library " + missing_libc;
-        libc_missing_ = true;
         return false;
     }
     // Now apply relocations for all loaded objects. We do this after

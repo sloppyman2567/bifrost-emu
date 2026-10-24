@@ -50,9 +50,9 @@
   `--rootfs`, the environment or `[paths] rootfs`), else the first default rootfs
   (next to the executable, `$XDG_DATA_HOME`/`~/.local/share`, `/usr/{local/,}share`).
   A discovered root only adds library directories in `find_library`; it must never
-  set `BIFROST_ROOT` or confine guest paths. A missing libc is fatal
-  (`libc_missing()` throws in `load_elf_file`), because the guest `ld.so` fallback
-  cannot recover. `Scripts/Setup/install-rootfs.sh` produces the installable
+  set `BIFROST_ROOT` or confine guest paths. Any native link failure, a missing libc
+  included, is fatal (`load_elf_file` throws): there is no guest `ld.so` fallback,
+  and an unrelocated program only crashes. `--guest-ld` is chosen up front. `Scripts/Setup/install-rootfs.sh` produces the installable
   tree ([ROOTFS.md](../../../Docs/ROOTFS.md)); keep its destinations and the
   default candidates in step. `test_rootfs_discovery.sh` copies the binary away from the
   checkout so the bundled toolchain cannot mask a lookup failure.

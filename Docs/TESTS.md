@@ -59,7 +59,9 @@ timezone, as `setup-rootfs.sh` always has.
 `XDG_DATA_HOME` and `BIFROST_ROOT` precedence. `Scripts/Testing/test_rootfs_discovery.sh` copies the emulator to a
 temporary directory, then runs `hello_dyn_musl` and `hello_dyn_glibc` with no `--rootfs`/`BIFROST_ROOT` through
 `XDG_DATA_HOME`, `~/.local/share` and an executable-adjacent rootfs, and requires a hint, exit status 1 and no
-signal 11 when none exists: six of six pass. The unmodified binary fails the musl cases and the missing-rootfs case
+signal 11 when none exists, and now a fixture whose `PT_DYNAMIC` lies outside every load segment must stop with the
+native-link reason and exit status 1 (the old binary printed "falling back to guest ld.so" and crashed, status 139):
+seven of seven pass. The unmodified binary fails the musl cases and the missing-rootfs case
 (status 139); its glibc cases pass only because of the checkout's bundled toolchain directory. A throwaway dynamic
 glibc fixture (outside the repository) saw a host file by absolute path under a discovered rootfs and not under
 `--rootfs`. `--guest-ld`, `BIFROST_ROOT` and a static toybox run were rechecked by hand; the full

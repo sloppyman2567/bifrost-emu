@@ -266,9 +266,6 @@ public:
     int64_t tls_tp_offset(uint64_t mod_id) const;
     const std::vector<LoadedObject>& objects() const { return objects_; }
     const std::string& error() const { return error_; }
-    // True when link() failed because the C library could not be found; the
-    // guest ld.so fallback cannot succeed either.
-    bool libc_missing() const { return libc_missing_; }
     // Loader-wide lock accessor (see loader_mu_ below). External code
     // that iterates objects() or reads TLS state directly (e.g. the
     // syscall 0x1001 _dl_allocate_tls handler in Syscalls/HostCalls/DynamicLinker.cpp) must hold
@@ -455,7 +452,6 @@ private:
     // stat@GLIBC_2.17).
     std::unordered_map<std::string, SymEntry> versioned_symbols_;
     std::string error_;
-    bool libc_missing_ = false;
     // Optional ifunc resolver callback (set by Emulator before link()).
     // The first parameter is the CPU to borrow while running the
     // resolver (the calling thread for runtime dl*; main_cpu_ during

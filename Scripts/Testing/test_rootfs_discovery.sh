@@ -58,4 +58,30 @@ else
     echo "FAIL missing rootfs (status $status)"; echo "$out" | head -5; fail=1
 fi
 
+# Any native link failure (here: a PT_DYNAMIC outside every load segment) must stop with the
+# reason, not run the unrelocated program. The old "falling back to guest ld.so" message led
+# to a crash.
+python3 -I - Tests/Apps/hello_dyn_musl.elf "$WORK/no_dynamic.elf" <<'PY'
+import struct, sys
+data = bytearray(open(sys.argv[1], "rb").read())
+phoff, = struct.unpack_from("<Q", data, 32)
+entsize, count = struct.unpack_from("<HH", data, 54)
+for i in range(count):
+    base = phoff + i * entsize
+    if struct.unpack_from("<I", data, base)[0] == 2:           # PT_DYNAMIC
+        struct.pack_into("<Q", data, base + 16, 0x7000_0000)    # p_vaddr outside every PT_LOAD
+open(sys.argv[2], "wb").write(data)
+PY
+chmod +x "$WORK/no_dynamic.elf"
+set +e
+out=$(env -u BIFROST_ROOT HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$INST" "$WORK/no_dynamic.elf" 2>&1)
+status=$?
+set -e
+if [[ $status -eq 1 ]] && grep -q 'native dynamic linking failed: parse_dynamic: no PT_DYNAMIC' <<<"$out" \
+        && ! grep -q -E 'signal 11|falling back' <<<"$out"; then
+    echo "PASS a native link failure stops with the reason and exits 1"
+else
+    echo "FAIL a native link failure (status $status)"; echo "$out" | head -4; fail=1
+fi
+
 exit $fail

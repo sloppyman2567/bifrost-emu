@@ -59,6 +59,9 @@ only; guest paths still resolve on the host, as with `qemu-aarch64 -L`. `--rootf
 - Before this, a musl program outside a checkout with no `--rootfs` ran into a null-pointer crash after "could not
   find libc.so" (glibc worked only through the checkout's bundled toolchain directory). A missing libc is now a
   fatal error that lists the places searched.
+- Any native link failure now stops with its reason (exit 1). The loader used to print "falling back to guest
+  ld.so" and carry on, but nothing ran the guest linker (`--guest-ld` is chosen before linking, and
+  `BIFROST_NO_NATIVE_DYNLINK` before that), so the unrelocated program crashed with SIGSEGV.
 - A `[paths] rootfs` in the config file only changed the launch pre-check; it now reaches `BIFROST_ROOT` like
   `--rootfs`. The pre-check error no longer says only static binaries run.
 
