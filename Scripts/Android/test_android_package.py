@@ -1805,6 +1805,47 @@ class RunFromFileTests(unittest.TestCase):
             self.assertEqual(run(apk)[1], True)
 
 
+class AndroidPathsTests(unittest.TestCase):
+    """Where Asgard keeps state and finds the emulator: checkout or installed tree."""
+
+    def setUp(self):
+        import android_paths
+        self.paths = android_paths
+        self.work = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work.cleanup)
+        self.root = Path(self.work.name) / "prefix/share/bifrost/asgard"
+        self.root.mkdir(parents=True)
+        for patcher in (patch.object(android_paths, "ROOT", self.root),
+                        patch.dict(os.environ, {"XDG_DATA_HOME": "", "HOME": self.work.name}, clear=False)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        os.environ.pop("BIFROST_ANDROID_STATE", None)
+
+    def test_a_source_checkout_keeps_state_and_emulator_in_the_checkout(self):
+        self.assertFalse(self.paths.installed())
+        self.assertEqual(self.paths.state_root(), self.root / "android-state")
+        self.assertEqual(self.paths.emulator(), self.root / "bifrost-emu")
+
+    def test_an_installed_tree_keeps_state_per_user_and_uses_the_emulator_beside_it(self):
+        (self.root / ".asgard-install").write_text("{}")
+        self.assertTrue(self.paths.installed())
+        self.assertEqual(self.paths.state_root(), Path(self.work.name) / ".local/share/bifrost/android")
+        with patch.dict(os.environ, {"XDG_DATA_HOME": "/xdg/data"}):
+            self.assertEqual(self.paths.state_root(), Path("/xdg/data/bifrost/android"))
+        with patch.dict(os.environ, {"XDG_DATA_HOME": "relative"}):  # the XDG spec ignores relative paths
+            self.assertEqual(self.paths.state_root(), Path(self.work.name) / ".local/share/bifrost/android")
+        binary = self.root.parents[2] / "bin/bifrost-emu"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        self.assertEqual(self.paths.emulator(), binary)
+
+    def test_an_explicit_state_directory_wins_in_both_layouts(self):
+        with patch.dict(os.environ, {"BIFROST_ANDROID_STATE": "/elsewhere/state"}):
+            self.assertEqual(self.paths.state_root(), Path("/elsewhere/state"))
+            (self.root / ".asgard-install").write_text("{}")
+            self.assertEqual(self.paths.state_root(), Path("/elsewhere/state"))
+
+
 class DebugChannelTests(unittest.TestCase):
     def test_channels_set_only_switches_the_emulator_reads(self):
         import asgard

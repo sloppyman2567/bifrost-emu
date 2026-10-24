@@ -12,6 +12,17 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Installable Asgard (2026-10-24)
+
+`Scripts/Setup/install-asgard.py` (and `make install-asgard` / `uninstall-asgard`) installs a self-contained Asgard
+(about 1 GiB: scripts, tools, framework and ART images, adapters, managed launcher, microG) under
+`<prefix>/share/bifrost/asgard` with an `asgard` command, and `bifrost-emu app.apk` finds it beside its own `bin/`, in
+`$XDG_DATA_HOME/bifrost/asgard`, or in `/usr/local` or `/usr/share`. Running the installer again copies only files whose
+size, time, mode or link target changed (`--verify` compares contents), replaces each atomically, removes files the
+checkout dropped, and reports an interrupted run. An installed Asgard keeps app state in
+`~/.local/share/bifrost/android`; `BIFROST_ANDROID_STATE` selects another directory for every layout. Checkout
+behavior is unchanged. See [ANDROID_APK.md](Android/ANDROID_APK.md#installing-asgard).
+
 ### Running an installed package file skips the installer (2026-10-24)
 
 `asgard.py run FILE` (and so `bifrost-emu FILE`) ran `install` on every launch: signature verification,

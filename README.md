@@ -139,9 +139,10 @@ Android apps install from a signed APK, APKM or APKS bundle:
 python3 Scripts/Android/android_package.py run org.example.game   # an installed package id
 ```
 
-This needs the Android tooling provisioned from a source checkout
-([APK guide](Docs/Android/ANDROID_APK.md)); it runs the checkout's
-`Scripts/Android/asgard.py`, or the one named by `BIFROST_ASGARD`.
+This needs Asgard: run it from a checkout with the Android tooling provisioned
+([APK guide](Docs/Android/ANDROID_APK.md)), or install it once with
+`./Scripts/Setup/install-asgard.py` (or `sudo make install-asgard`) so it works from any
+directory. Re-running the installer after an update copies only the files that changed.
 
 `--guest-ld` (experimental) runs dynamic programs under the rootfs's own
 `ld.so`, as a kernel exec would, instead of the built-in linker; it needs the

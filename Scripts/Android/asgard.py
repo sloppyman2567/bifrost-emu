@@ -17,6 +17,8 @@ import time
 import tempfile
 import xml.etree.ElementTree as ET
 
+import android_paths
+
 ROOT = Path(__file__).resolve().parents[2]
 HEADER = struct.Struct("<IIIIQQ")
 MAGIC, VERSION = 0x41534744, 2
@@ -286,8 +288,8 @@ def install_for_run(script, state, arguments):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
-    parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    parser.add_argument("--state-root", type=Path, default=android_paths.state_root())
+    parser.add_argument("--emu", type=Path, default=android_paths.emulator())
     parser.add_argument("--debug", metavar="CHANNELS", default="",
                         help="trace channels, comma-separated: " + ", ".join(DEBUG_CHANNELS) +
                              " (a running realm broker keeps the channels it started with)")

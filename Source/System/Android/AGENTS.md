@@ -180,6 +180,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - `Package/PackageLauncher` is the only place `bifrost-emu app.apk` is
   recognized: it execs Asgard (it never installs or runs a package itself) and
   must drop `BIFROST_ROOT`. `Scripts/Testing/test_apk_launch.sh` checks it with
-  a stub Asgard; keep its argument order in step with `asgard.py`.
+  a stub Asgard; keep its argument order and its search list (`asgard_candidates`)
+  in step with `asgard.py` and `Scripts/Setup/install-asgard.py`.
+- `Scripts/Setup/install-asgard.py` copies exactly what Asgard reads under its root
+  (its `FILES` list); when a script or module starts reading a new root-relative
+  path at run time, add it there. An installed tree is not writable at run time:
+  nothing may write below `ROOT`, and state defaults come from
+  `Scripts/Android/android_paths.py`. `test_asgard_install.py` covers the installer.
 
 - Managed HOME activates Asgard through ProcessHost, then changes task visibility on the guest main thread. Preserve Activity instances and pause/stop/restart/resume order; old window plugins must return ENOTSUP for missing visibility callbacks.

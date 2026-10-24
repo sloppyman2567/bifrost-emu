@@ -33,6 +33,24 @@ bool has_android_package_extension(const std::string& path) {
     return ext == ".apk" || ext == ".apkm" || ext == ".apks" || ext == ".xapk";
 }
 
+std::vector<std::string> asgard_candidates(const std::string& exe_dir, const char* override_path,
+                                           const char* xdg_data_home, const char* home) {
+    static const char* const script = "/Scripts/Android/asgard.py";
+    std::vector<std::string> paths;
+    if (override_path && *override_path) paths.push_back(override_path);
+    if (!exe_dir.empty()) {
+        paths.push_back(exe_dir + script);                               // source checkout
+        paths.push_back(exe_dir + "/../share/bifrost/asgard" + script);  // <prefix>/bin + <prefix>/share
+    }
+    if (xdg_data_home && xdg_data_home[0] == '/')
+        paths.push_back(std::string(xdg_data_home) + "/bifrost/asgard" + script);
+    else if (home && home[0] == '/')
+        paths.push_back(std::string(home) + "/.local/share/bifrost/asgard" + script);
+    paths.push_back(std::string("/usr/local/share/bifrost/asgard") + script);
+    paths.push_back(std::string("/usr/share/bifrost/asgard") + script);
+    return paths;
+}
+
 int exec_android_package(const std::string& package,
                          const std::vector<std::string>& args,
                          const std::string& window_plugin) {
@@ -46,18 +64,18 @@ int exec_android_package(const std::string& package,
         return 126;
     }
     const std::string exe = self_exe();
+    const std::vector<std::string> candidates = asgard_candidates(
+        exe.substr(0, exe.rfind('/') == std::string::npos ? 0 : exe.rfind('/')),
+        getenv("BIFROST_ASGARD"), getenv("XDG_DATA_HOME"), getenv("HOME"));
     std::string asgard;
-    if (const char* override_path = getenv("BIFROST_ASGARD"); override_path && *override_path) {
-        asgard = override_path;
-    } else if (size_t slash = exe.rfind('/'); slash != std::string::npos) {
-        asgard = exe.substr(0, slash) + "/Scripts/Android/asgard.py";
-    }
-    if (asgard.empty() || access(asgard.c_str(), R_OK) != 0) {
-        fprintf(stderr,
-                "bifrost-emu: Android packages run through Asgard, but '%s' was not found.\n"
-                "  Run bifrost-emu from a source checkout with the Android tooling provisioned\n"
-                "  (see Docs/Android/ANDROID_APK.md), or set BIFROST_ASGARD to its asgard.py.\n",
-                asgard.empty() ? "Scripts/Android/asgard.py" : asgard.c_str());
+    for (const auto& path : candidates)
+        if (access(path.c_str(), R_OK) == 0) { asgard = path; break; }
+    if (asgard.empty()) {
+        fprintf(stderr, "bifrost-emu: Android packages run through Asgard, which was not found in:\n");
+        for (const auto& path : candidates) fprintf(stderr, "  %s\n", path.c_str());
+        fprintf(stderr, "  Install it with Scripts/Setup/install-asgard.py from a source checkout whose\n"
+                        "  Android tooling is provisioned (Docs/Android/ANDROID_APK.md), or set\n"
+                        "  BIFROST_ASGARD to an asgard.py.\n");
         return 127;
     }
     // The package runs in Asgard's own managed roots; a BIFROST_ROOT meant for

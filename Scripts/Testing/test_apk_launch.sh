@@ -63,9 +63,24 @@ mkdir -p "$WORK/lone"; cp "$EMU" "$WORK/lone/bifrost-emu"
 out=$(BIFROST_ASGARD="$TREE/Scripts/Android/asgard.py" "$WORK/lone/bifrost-emu" "$WORK/game.apk" 2>&1)
 check grep -q '"run"' <<<"$out"
 
-NAME="missing Asgard stops with status 127 and a hint"
-set +e; out=$(env -u BIFROST_ASGARD "$WORK/lone/bifrost-emu" "$WORK/game.apk" 2>&1); status=$?; set -e
-check test "$status" = 127 -a -n "$(grep 'BIFROST_ASGARD' <<<"$out")"
+NAME="finds an installed Asgard in <prefix>/share/bifrost/asgard beside <prefix>/bin"
+mkdir -p "$WORK/prefix/bin" "$WORK/prefix/share/bifrost/asgard/Scripts/Android"
+cp "$EMU" "$WORK/prefix/bin/bifrost-emu"
+cp "$TREE/Scripts/Android/asgard.py" "$WORK/prefix/share/bifrost/asgard/Scripts/Android/asgard.py"
+out=$(env -u BIFROST_ASGARD HOME="$WORK/nohome" XDG_DATA_HOME= "$WORK/prefix/bin/bifrost-emu" "$WORK/game.apk" 2>&1)
+check grep -q '"run"' <<<"$out"
+
+NAME="finds a per-user install under XDG_DATA_HOME"
+mkdir -p "$WORK/xdg/bifrost/asgard/Scripts/Android"
+cp "$TREE/Scripts/Android/asgard.py" "$WORK/xdg/bifrost/asgard/Scripts/Android/asgard.py"
+out=$(env -u BIFROST_ASGARD HOME="$WORK/nohome" XDG_DATA_HOME="$WORK/xdg" "$WORK/lone/bifrost-emu" "$WORK/game.apk" 2>&1)
+check grep -q '"run"' <<<"$out"
+
+NAME="missing Asgard stops with status 127, lists where it looked and names the installer"
+set +e; out=$(env -u BIFROST_ASGARD HOME="$WORK/nohome" XDG_DATA_HOME= "$WORK/lone/bifrost-emu" "$WORK/game.apk" 2>&1); status=$?; set -e
+check test "$status" = 127 -a -n "$(grep 'BIFROST_ASGARD' <<<"$out")" -a -n "$(grep 'install-asgard.py' <<<"$out")" \
+    -a -n "$(grep '/usr/local/share/bifrost/asgard/Scripts/Android/asgard.py' <<<"$out")" \
+    -a -n "$(grep "$WORK/nohome/.local/share/bifrost/asgard" <<<"$out")"
 
 NAME="a file that is not a ZIP is rejected with status 126"
 set +e; out=$("$TREE/bifrost-emu" "$WORK/fake.apk" 2>&1); status=$?; set -e

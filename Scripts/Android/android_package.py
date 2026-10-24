@@ -20,6 +20,7 @@ import time
 import uuid
 import zipfile
 
+import android_paths
 import android_preflight as preflight
 import android_settings
 
@@ -846,7 +847,7 @@ def start_background(package, state, options=()):
 def add_launch_options(parser):
     from android_managed import add_trace_arguments
     add_trace_arguments(parser)
-    parser.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    parser.add_argument("--emu", type=Path, default=android_paths.emulator())
     parser.add_argument("--no-jit", action="store_true")
     parser.add_argument("--binder-broker", type=Path, help="join an Asgard shared Binder realm")
     parser.add_argument("--android-window-plugin", type=Path)
@@ -859,7 +860,7 @@ def add_launch_options(parser):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-root", type=Path, default=ROOT / "android-state")
+    parser.add_argument("--state-root", type=Path, default=android_paths.state_root())
     commands = parser.add_subparsers(dest="command", required=True)
     installer = commands.add_parser("install")
     installer.add_argument("input", type=Path)
@@ -927,7 +928,7 @@ def main():
     diagnostic.add_argument("package")
     diagnostic.add_argument("--library", action="append", help="packaged basename; repeatable, default all")
     diagnostic.add_argument("--preload", action="append", help="packaged basename to load first; repeatable in order")
-    diagnostic.add_argument("--emu", type=Path, default=ROOT / "bifrost-emu")
+    diagnostic.add_argument("--emu", type=Path, default=android_paths.emulator())
     diagnostic.add_argument("--no-jit", action="store_true")
     diagnostic.add_argument("--timeout", type=int, default=45, help="seconds per library, 1..300")
     args = parser.parse_args()

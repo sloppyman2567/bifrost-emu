@@ -48,11 +48,45 @@ python3 Scripts/Android/android_package.py run org.example.package \
 `bifrost-emu PATH.apk` does the same without naming Asgard: a file ending in `.apk`,
 `.apkm`, `.apks` or `.xapk` replaces the process with `python3 asgard.py --emu
 <this binary> run PATH [args]` (so exit status and signals pass through), taking
-`-d`/`--allow-downgrade` and `--android-window-plugin PATH` along. It looks for
-`Scripts/Android/asgard.py` next to the executable, or at `$BIFROST_ASGARD`; an
-installed binary alone has no Android tooling, so there it stops with that
-hint (status 127; 126 for a file that is not a ZIP). `BIFROST_ROOT` is removed
+`-d`/`--allow-downgrade` and `--android-window-plugin PATH` along. It uses the first
+`Scripts/Android/asgard.py` it finds in: `$BIFROST_ASGARD`; next to the executable
+(a source checkout); `<executable dir>/../share/bifrost/asgard`; `$XDG_DATA_HOME/bifrost/asgard`
+(default `~/.local/share/bifrost/asgard`); `/usr/local/share/bifrost/asgard`;
+`/usr/share/bifrost/asgard`. If none exists it lists them and names the installer
+(status 127; 126 for a file that is not a ZIP). `BIFROST_ROOT` is removed
 from the environment first, because it would confine every Android process.
+
+### Installing Asgard
+
+`Scripts/Setup/install-asgard.py` installs a self-contained Asgard so the emulator works without
+the source tree. Provision the checkout first (the commands above), then:
+
+```bash
+./Scripts/Setup/install-asgard.py              # for your user: ~/.local/share/bifrost/asgard, ~/.local/bin/asgard
+sudo make install install-asgard               # or system-wide, under $(PREFIX) (default /usr/local)
+./Scripts/Setup/install-asgard.py --dry-run    # after updating the checkout: what would change
+./Scripts/Setup/install-asgard.py              # copy only the files that differ
+./Scripts/Setup/install-asgard.py --uninstall  # or: sudo make uninstall-asgard
+```
+
+It copies what Asgard reads at run time, about 1 GiB at the same relative paths: the scripts and
+`Tools/Android` modules, `Tools/android-tools` and `Tools/android-runtime`, `Guest/Android`
+(the managed launcher's sources and the codec fingerprint inputs), the framework and ART root
+images, the guest adapters, the managed launcher dex and the microG archives. Tests and
+build-only sources are not installed. Re-running updates in place: a file is copied when its size,
+modification time, mode or link target differs (`--verify` also compares contents, which finds a
+same-size edit), each replaced atomically so a running session keeps the file it opened, and files
+the checkout no longer has are removed. The `.asgard-install` marker records `complete: false` while
+a run is in progress, so an interrupted run is reported and finished by the next one. Updating an
+install that root owns needs root. First installs use `cp --reflink=auto`, so they are near-instant
+on filesystems that can share blocks and a plain copy elsewhere.
+
+An installed Asgard cannot write into its own tree, so app state (installed apps, saves, settings)
+lives in `~/.local/share/bifrost/android` (`$XDG_DATA_HOME/bifrost/android`), not in the checkout's
+`android-state`. Set `BIFROST_ANDROID_STATE` to use another directory, such as an existing
+`android-state`, for both layouts; `--state-root` still overrides it per command. Running a package
+file (`asgard.py run FILE`, `bifrost-emu FILE`) installs it into that state on first use. The host
+needs Python 3.12 or newer and a JDK with `java` and `keytool`, as for the checkout.
 `asgard.py run PATH.apk` (also `.apkm`, `.apks`, `.xapk`) installs the file and
 then runs its package, as `wine app.exe` does. `install` records the SHA-256 of
 the file it installed (`source_sha256` in `package.json`); `run FILE` hashes the

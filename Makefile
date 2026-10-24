@@ -411,6 +411,7 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
 	@echo "Dynamic programs also need a rootfs: make install-rootfs (system) or Scripts/Setup/install-rootfs.sh (user)."
+	@echo "Android apps need Asgard: make install-asgard (system) or Scripts/Setup/install-asgard.py (user)."
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
@@ -420,6 +421,16 @@ uninstall:
 # downloads, so `sudo make install-rootfs` does not fetch as root: run
 # Scripts/Setup/install-rootfs.sh once as your user first (or fetch the
 # toolchains yourself).
+# Asgard (the Android layer) goes to $(PREFIX)/share/bifrost/asgard with a `asgard`
+# command in $(PREFIX)/bin. Run it again after updating the checkout: only the files
+# that differ are copied. The checkout must already be provisioned for Android.
+.PHONY: install-asgard uninstall-asgard
+install-asgard:
+	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(PREFIX)"
+
+uninstall-asgard:
+	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(PREFIX)" --uninstall
+
 .PHONY: install-rootfs uninstall-rootfs
 install-rootfs:
 	Scripts/Setup/install-rootfs.sh --prefix "$(DESTDIR)$(PREFIX)" --no-fetch

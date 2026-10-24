@@ -4,6 +4,21 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Installable Asgard (2026-10-24)
+
+`Scripts/Testing/test_asgard_install.py` (10 tests, pass) runs the installer from a small fake checkout: the
+first install (links, empty and read-only directories, no tests or build-only sources, marker, wrapper), an
+unchanged re-run, `--dry-run`, an update that copies only what changed and removes what went away (an untouched file
+keeps its inode and time), repair of a tampered read-only tree, size-only and time-only changes, `--verify` finding a
+same-size edit, an unprovisioned checkout, uninstall refusing foreign or symlinked locations. Four deliberate faults
+(never removing stale files, ignoring size, ignoring time, never comparing contents) each fail a test. `AndroidPathsTests`
+(3) and `RunFromFileTests` pass; `test_apk_launch.sh` now also finds Asgard beside `bin/` and in `XDG_DATA_HOME`.
+With the real checkout, a first install (1,927 entries, 1.1 GiB, under a second with reflinks) was updated in place after
+drift (changed, deleted and stray files) and a read-only tree; a real SpongeBob bundle installed through the read-only
+copy into a temporary state in about 5 s, and the launch-time reads (managed launcher dex check, both microG
+archives, the framework image check, the installed-app integrity gate) succeeded from it. **No guest was launched
+from an installed tree, nothing was tried on another distribution, and a system-wide install as root was not run.**
+
 ## Skipping an unchanged install (2026-10-24)
 
 `RunFromFileTests` (3 tests, pass) now includes `test_run_skips_installing_a_file_that_is_already_installed`: the
@@ -3630,6 +3645,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_rootfs_discovery.sh  # dynamic programs find a rootfs without flags
 ./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
+./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update and removal (fake checkout)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec
 ./Scripts/Testing/test_late_tls_pthread.sh  # existing/new threads, reuse, pointer/alignment/weak cases
 ./Scripts/Testing/run_thunk_compat.sh       # SDL/GL/Vulkan ABI probes in both modes
