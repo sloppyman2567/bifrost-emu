@@ -21,6 +21,9 @@
   `lexical_normalize` (shared with `map_guest_path`), never applies to writes or while a
   sandbox is set, and a new read-only call site must try it before the host path. Run
   `Scripts/Testing/test_rootfs_discovery.sh` and the sandbox regressions.
+- With no sandbox the guest cwd is the host cwd: `load_elf_file` starts `guest_cwd_` from
+  `getcwd`, because guest paths are host paths and relative ones follow it. Only a program
+  inside `BIFROST_ROOT` gets a guest-view cwd (`enter_root_cwd`). `test_guest_cwd.sh` covers it.
 - Relative `AT_FDCWD` lookups follow the host cwd. A guest whose executable
   lies inside the root starts with the host cwd inside it
   (`enter_root_cwd`: the in-root launch directory, else the root), and

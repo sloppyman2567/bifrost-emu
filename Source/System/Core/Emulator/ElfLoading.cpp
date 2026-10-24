@@ -267,7 +267,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (f) fclose(f);
             throw EmuError("cannot enter BIFROST_ROOT: " + std::string(strerror(-error)));
         }
-        if (!cwd.empty()) guest_cwd_ = cwd;
+        if (!cwd.empty()) {
+            guest_cwd_ = cwd;
+        } else if (yggdrasil::Yggdrasil::sandbox_root_path().empty()) {
+            // No sandbox: guest paths are host paths and relative ones follow the host cwd, so
+            // that is the guest's cwd. Leaving "/" made getcwd lie, and a shell that builds an
+            // absolute path from it (BusyBox `cd dir` -> chdir("/dir")) failed with ENOENT.
+            char host_cwd[PATH_MAX];
+            if (::getcwd(host_cwd, sizeof(host_cwd))) guest_cwd_ = host_cwd;
+        }
     }
 
     std::vector<uint8_t> data;

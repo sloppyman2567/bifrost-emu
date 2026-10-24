@@ -4,6 +4,16 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Guest working directory (2026-10-24)
+
+`Scripts/Testing/test_guest_cwd.sh` (4 of 4 pass; the previous binary fails 3) runs the toybox shell from a temporary
+directory: `pwd` equals the host's, `cd $(pwd)/folder/sub` (the BusyBox pattern) reaches it, relative `cd` and `..` stay in
+step with the host, and an absolute `cd` back works. After the change `--unit --toybox` passes 173 of 173,
+`--dynamic` 21 of 21 under both linkers, and `--integration` 83 of 85 (the two `android_surface`/`mambo_vulkan`
+failures need a real display and fail the same way before the change under SDL dummy drivers; `test_sandbox` and
+`test_sandbox_in_root` pass). Not tested: BusyBox itself (the reporter's `busybox-arm64` is not in the repository), and a
+program outside a sandbox that sets `BIFROST_ROOT` (its cwd is still `/`).
+
 ## Guest linker with a discovered rootfs (2026-10-24)
 
 The 17 headless dynamic tests, the 3 thunk/SDL tests (SDL dummy drivers) and the 7 real-world dynamic programs give the
@@ -3663,6 +3673,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ```sh
 ./Scripts/Testing/test_rootfs_discovery.sh  # dynamic programs find a rootfs without flags
 ./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
+./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update and removal (fake checkout)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec

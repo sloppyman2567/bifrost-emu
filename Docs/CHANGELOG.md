@@ -12,6 +12,13 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### `getcwd` reports the real directory without a sandbox (2026-10-24)
+
+A program run without `BIFROST_ROOT` always saw `/` as its working directory, though its relative paths resolved
+against the real one. `ls` worked, but BusyBox's `cd dir` builds `getcwd() + "/dir"` and failed with "can't cd to dir"
+(found on a clean Ubuntu VM; toybox's `pwd` printed `/folder` after `cd folder`). The guest cwd now starts as the host cwd
+when no sandbox is active; sandboxed programs are unchanged. This long predates the other changes in this release.
+
 ### Guest linker with a discovered rootfs (2026-10-24)
 
 `--guest-ld` now works with an installed rootfs found automatically; it used to need an explicit `--rootfs`, which also
