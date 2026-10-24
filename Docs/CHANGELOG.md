@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Running an installed package file skips the installer (2026-10-24)
+
+`asgard.py run FILE` (and so `bifrost-emu FILE`) ran `install` on every launch: signature verification,
+`aapt2` inspection and extraction and hashing of every library and asset, only to find at the end that the same
+package was already installed. `install` now records the file's SHA-256 (`source_sha256`), and `run` skips the installer
+when an installed app with an existing root recorded the same hash. Apps installed earlier are installed once more,
+which records it. Reinstalling by `asgard.py install` is unchanged.
+
 ### `bifrost-emu app.apk` (2026-10-24)
 
 Giving `bifrost-emu` a `.apk`, `.apkm`, `.apks` or `.xapk` file now installs and runs it through Asgard, like

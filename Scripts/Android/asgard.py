@@ -196,6 +196,7 @@ def ensure_broker(state, emu):
 
 
 PACKAGE_FILES = (".apk", ".apkm", ".apks", ".xapk")
+MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024  # android_package.MAX_TOTAL: larger files fail to install
 # Debug channels, like WINEDEBUG: each turns on trace switches that Source/System/Core/DebugFlags.hpp
 # reads when it is present. Only logging switches belong here, never ones that change execution.
 DEBUG_CHANNELS = {
@@ -225,6 +226,38 @@ def debug_environment(channels):
     return {variable: "1" for name in names for variable in DEBUG_CHANNELS[name]}
 
 
+def file_sha256(path):
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def installed_from(state, source):
+    """The package already installed from exactly this file, or None.
+
+    `install` records the SHA-256 of the file it installed. A match whose
+    root still exists means installing would only re-verify and re-extract
+    the same bytes; the run path re-checks every installed file anyway."""
+    if not source.is_file() or source.stat().st_size > MAX_PACKAGE_BYTES:
+        return None
+    wanted = None
+    for metadata_path in sorted(state.glob("*/package.json")):
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, ValueError):
+            continue
+        recorded = metadata.get("source_sha256") if isinstance(metadata, dict) else None
+        if not recorded or metadata.get("package") != metadata_path.parent.name \
+                or not (metadata_path.parent / "rootfs").is_dir():
+            continue
+        wanted = wanted or file_sha256(source)
+        if recorded == wanted:
+            return metadata["package"]
+    return None
+
+
 def install_for_run(script, state, arguments):
     """`run app.apk` installs the file (a no-op for an identical, installed one) and runs its package."""
     downgrade = [arg for arg in arguments if arg in ("-d", "--allow-downgrade")]
@@ -235,6 +268,10 @@ def install_for_run(script, state, arguments):
         if downgrade:
             raise ValueError("--allow-downgrade requires an APK/APKM file to install")
         return arguments
+    package = installed_from(state, Path(arguments[index]))
+    if package:
+        print(f"Already installed {package}; skipping installation", flush=True)
+        return arguments[:index] + [package] + arguments[index + 1:]
     installed = subprocess.run([sys.executable, script, "--state-root", str(state), "install",
                                 *(["--allow-downgrade"] if downgrade else []), arguments[index]],
                                stdout=subprocess.PIPE, text=True)

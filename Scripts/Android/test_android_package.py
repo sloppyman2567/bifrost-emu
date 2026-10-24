@@ -1760,6 +1760,50 @@ class RunFromFileTests(unittest.TestCase):
             with patch("builtins.print"), self.assertRaisesRegex(ValueError, "Could not install"):
                 asgard.install_for_run(str(installer), root, [str(root / "broken.apk")])
 
+    def test_run_skips_installing_a_file_that_is_already_installed(self):
+        import asgard
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = root / "installer.py"
+            installer.write_text("import sys\nprint('Installed org.bifrost.fixture version 3: 1 signed APKs')\n")
+            apk = root / "game.apk"
+            apk.write_bytes(b"signed package bytes")
+            other = root / "other.apk"
+            other.write_bytes(b"another package")
+
+            def record(name, **fields):
+                app = root / name
+                (app / "rootfs").mkdir(parents=True, exist_ok=True)
+                (app / "package.json").write_text(json.dumps({"package": name, **fields}))
+
+            def run(source):
+                with patch("builtins.print"), patch.object(asgard.subprocess, "run", wraps=subprocess.run) as spawn:
+                    result = asgard.install_for_run(str(installer), root, [str(source), "--timeout", "5"])
+                return result, spawn.called
+
+            # No installed app records this file: the installer runs.
+            self.assertEqual(run(apk), (["org.bifrost.fixture", "--timeout", "5"], True))
+            # An app installed from exactly this file is run without the installer.
+            record("org.example.game", source_sha256=asgard.file_sha256(apk))
+            self.assertEqual(run(apk), (["org.example.game", "--timeout", "5"], False))
+            # A different file, an app without a recorded hash (installed before it existed),
+            # a record under the wrong directory, a missing root and unreadable metadata all install.
+            self.assertEqual(run(other)[1], True)
+            record("org.example.legacy")
+            (root / "org.example.game/package.json").write_text(json.dumps(
+                {"package": "org.example.other", "source_sha256": asgard.file_sha256(apk)}))
+            (root / "broken").mkdir()
+            (root / "broken/package.json").write_text("{not json")
+            self.assertEqual(run(apk)[1], True)
+            record("org.example.game", source_sha256=asgard.file_sha256(apk))
+            shutil.rmtree(root / "org.example.game/rootfs")
+            self.assertEqual(run(apk)[1], True)
+            # Changing the file after installing it invalidates the record.
+            record("org.example.game", source_sha256=asgard.file_sha256(apk))
+            apk.write_bytes(b"signed package bytes, upgraded")
+            self.assertEqual(run(apk)[1], True)
+
 
 class DebugChannelTests(unittest.TestCase):
     def test_channels_set_only_switches_the_emulator_reads(self):
@@ -2117,6 +2161,7 @@ class PackageTests(unittest.TestCase):
         metadata = self.install(self.bundle, state)
         self.assertEqual(metadata["apk_count"], 2)
         self.assertEqual(metadata["arm64_library_count"], 2)
+        self.assertEqual(metadata["source_sha256"], package.digest(self.bundle))
         self.assertEqual(metadata["launcher"]["kind"], "native_activity")
         self.assertEqual(metadata["media"]["image_sha256"], package.media.IMAGE_SHA256)
         self.assertEqual((state / "org.bifrost.fixture/package.json").is_file(), True)
@@ -2238,6 +2283,7 @@ class PackageTests(unittest.TestCase):
     def test_invalid_install_does_not_replace_existing_package(self):
         state = self.work / "rollback-state"
         original = self.install(self.bundle, state)
+        self.assertEqual(original["source_sha256"], package.digest(self.bundle))
         before = (state / "org.bifrost.fixture/package.json").read_bytes()
         with self.assertRaisesRegex(ValueError, "requires split"):
             self.install(self.base, state)

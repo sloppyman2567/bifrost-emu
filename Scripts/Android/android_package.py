@@ -244,6 +244,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
         # Snapshot the input first: verification and installation see the same bytes.
         snapshot = staging / "input.zip"
         snapshot_input(source, snapshot)
+        source_sha256 = digest(snapshot)
         with zipfile.ZipFile(snapshot) as archive:
             regular_archive(archive)
         with preflight.apk_paths(snapshot, staging) as paths:
@@ -437,6 +438,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                     "version_code": base["version_code"],
                     "version_name": base["version_name"],
                     "icon": icon.name if icon else None,
+                    "source_sha256": source_sha256,
                     "installed_at": int(time.time()),
                     "signers": certificates,
                     "guest_code": guest_code,

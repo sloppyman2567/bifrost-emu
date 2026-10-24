@@ -4,6 +4,18 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Skipping an unchanged install (2026-10-24)
+
+`RunFromFileTests` (3 tests, pass) now includes `test_run_skips_installing_a_file_that_is_already_installed`: the
+installer is not started for a file whose hash an installed app recorded, and is started for a different file,
+an app without a recorded hash, a record under the wrong directory name, a missing root, unreadable metadata and a
+file changed after install; disabling the skip fails it. The real signed-install fixture
+(`test_invalid_install_does_not_replace_existing_package`, real aapt2/apksigner, no window) passes and checks
+`source_sha256` equals the bundle's SHA-256; the persistence/launch test has the same assertion but was **not
+run**, because it launches a guest. The speedup itself was not measured, and no real game was started. A bundle
+reordered into a different file with the same contents records its own hash, so the original file installs once
+more the next time it is run.
+
 ## APK launch (2026-10-24)
 
 `Scripts/Testing/test_apk_launch.sh` (14 of 14 pass; the binary without the change exits 126 at the first run) uses a

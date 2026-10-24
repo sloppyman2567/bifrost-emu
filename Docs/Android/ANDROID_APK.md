@@ -54,9 +54,15 @@ installed binary alone has no Android tooling, so there it stops with that
 hint (status 127; 126 for a file that is not a ZIP). `BIFROST_ROOT` is removed
 from the environment first, because it would confine every Android process.
 `asgard.py run PATH.apk` (also `.apkm`, `.apks`, `.xapk`) installs the file and
-then runs its package, as `wine app.exe` does. Reinstalling an identical,
-already installed file is accepted but still verifies its signatures, so a
-large package is re-checked on every such run; use the package id to skip that.
+then runs its package, as `wine app.exe` does. `install` records the SHA-256 of
+the file it installed (`source_sha256` in `package.json`); `run FILE` hashes the
+file and, when an installed app with an existing root recorded the same hash,
+skips the installer and runs that package (it prints `Already installed ...`).
+The run still verifies every installed file, so a modified install is caught.
+Skipping needs a hash: an app installed before this field existed is installed
+once more, which records it. A changed or different file, or an app installed
+from another file with the same package id, takes the full install path, which
+verifies signatures and the version, as `asgard.py install FILE` always does.
 Upgrades and identical-version reinstalls retain app data and saved settings.
 An older version requires an explicit downgrade option:
 
