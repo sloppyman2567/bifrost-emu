@@ -23,6 +23,11 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
 - **Test runner.** `run_tests.sh --filter` no longer reports "relative guest write escaped the root" when the
   sandbox tests were filtered out; the sandbox fixture and its post-checks run only if one of them is selected.
 
+- **glibc thread-stack cache.** Overlapping threads with 8 MiB stacks overflow glibc's stack cache, which frees
+  stacks through the versioned `_dl_deallocate_tls@GLIBC_PRIVATE`; the shim overrode only the unversioned name, so
+  the real ld-linux version ran and called a NULL `__rtld_free`. Both names now map to the shim
+  (`test_dyn_thread_stack_cache`).
+
 ### Real-world shell fixes found by differential testing (2026-10-24)
 
 A differential run of BusyBox `ash` scripts against native Linux (and single BusyBox processes against `qemu-aarch64`)

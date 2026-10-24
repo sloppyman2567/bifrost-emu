@@ -608,7 +608,13 @@ bool DynamicLinker::register_ld_linux_shim_() {
         if (key.rfind("__tls_get_addr@", 0) == 0)
             entry = SymEntry{code_base + OFF_TLSADDR, STB_GLOBAL_};
     }
+    // libc's JUMP_SLOT is the versioned _dl_deallocate_tls@GLIBC_PRIVATE, so
+    // both tables are overridden: the real ld-linux version walks its own DTV
+    // and calls __rtld_free, a pointer only ld-linux's startup initializes
+    // (NULL here). It ran whenever the NPTL stack cache evicted a thread stack.
     symbols_["_dl_deallocate_tls"] =
+        SymEntry{code_base + OFF_TLSFREE, STB_GLOBAL_};
+    versioned_symbols_["_dl_deallocate_tls@GLIBC_PRIVATE"] =
         SymEntry{code_base + OFF_TLSFREE, STB_GLOBAL_};
     // Override glibc's dl_iterate_phdr with our stub that calls syscall
     // 0x1007. glibc's implementation walks the link_map list, which we

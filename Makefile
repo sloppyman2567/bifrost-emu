@@ -470,6 +470,7 @@ GLIBC_DYN_SRCS := \
 	Tests/Apps/test_dyn_threads.c \
 	Tests/Apps/test_dyn_pthread_stress.c \
 	Tests/Apps/test_dyn_pthread_8thread.c \
+	Tests/Apps/test_dyn_thread_stack_cache.c \
 	Tests/Apps/test_dyn_main_locks.c \
 	Tests/Apps/xwayland_wire.c
 

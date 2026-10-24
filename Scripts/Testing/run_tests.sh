@@ -823,6 +823,9 @@ DYNAMIC_TESTS=(
     # for the "8-thread race" bug (context.md Turn 78 Issue #3). Tests
     # 8 threads x 4 waves with __thread long tls_array[8] per thread.
     "test_dyn_pthread_8thread|Tests/Apps/test_dyn_pthread_8thread.elf||30|test_dyn_pthread_8thread: ALL PASS"
+    # Overlapping 8 MiB-stack threads overflow glibc's stack cache, which frees stacks through
+    # _dl_deallocate_tls: the shim must override the versioned symbol libc binds to.
+    "test_dyn_thread_stack_cache|Tests/Apps/test_dyn_thread_stack_cache.elf||15|test_dyn_thread_stack_cache: ALL PASS"
     # Main-thread struct pthread tid: rwlocks and error-checking/recursive
     # mutexes on the main thread returned EDEADLK (OpenSSL 3 providers).
     "test_dyn_main_locks|Tests/Apps/test_dyn_main_locks.elf||10|test_dyn_main_locks: ALL PASS"
