@@ -177,4 +177,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   changes. Installed-app creation, surface startup and rendering checkpoints
   cover different behavior; report the checkpoint actually reached.
 
+- `Package/PackageLauncher` is the only place `bifrost-emu app.apk` is
+  recognized: it execs Asgard (it never installs or runs a package itself) and
+  must drop `BIFROST_ROOT`. `Scripts/Testing/test_apk_launch.sh` checks it with
+  a stub Asgard; keep its argument order in step with `asgard.py`.
+
 - Managed HOME activates Asgard through ProcessHost, then changes task visibility on the guest main thread. Preserve Activity instances and pause/stop/restart/resume order; old window plugins must return ENOTSUP for missing visibility callbacks.

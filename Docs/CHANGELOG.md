@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### `bifrost-emu app.apk` (2026-10-24)
+
+Giving `bifrost-emu` a `.apk`, `.apkm`, `.apks` or `.xapk` file now installs and runs it through Asgard, like
+`asgard.py run`, instead of rejecting it as a non-ELF. Exit status and signals pass through (the process is replaced),
+`-d` and `--android-window-plugin` are forwarded, and `BIFROST_ROOT` is dropped. Asgard is found next to the
+executable or at `$BIFROST_ASGARD`; a binary installed on its own has no Android tooling and says so. Details in
+[ANDROID_APK.md](Android/ANDROID_APK.md).
+
 ### Installable rootfs (2026-10-24)
 
 `Scripts/Setup/install-rootfs.sh` builds a standard rootfs (glibc and musl, about 70 MB) and installs it where

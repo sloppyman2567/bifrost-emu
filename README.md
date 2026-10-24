@@ -133,9 +133,13 @@ A missing C library stops with a message listing the places searched.
 Android apps install from a signed APK, APKM or APKS bundle:
 
 ```bash
-python3 Scripts/Android/android_package.py install /path/to/game.apkm
-python3 Scripts/Android/android_package.py run org.example.game
+./bifrost-emu /path/to/game.apkm      # installs if needed, then runs (.apk/.apkm/.apks/.xapk)
+python3 Scripts/Android/android_package.py run org.example.game   # an installed package id
 ```
+
+This needs the Android tooling provisioned from a source checkout
+([APK guide](Docs/Android/ANDROID_APK.md)); it runs the checkout's
+`Scripts/Android/asgard.py`, or the one named by `BIFROST_ASGARD`.
 
 `--guest-ld` (experimental) runs dynamic programs under the rootfs's own
 `ld.so`, as a kernel exec would, instead of the built-in linker; it needs the

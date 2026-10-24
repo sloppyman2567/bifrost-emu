@@ -6,6 +6,7 @@
 //
 // Usage:
 //   bifrost-emu [options] <elf-file> [args...]
+//   bifrost-emu <package.apk|.apkm|.apks|.xapk> [args...]   (install and run via Asgard)
 //
 // Options:
 //   -d, --debug     trace every instruction to stderr
@@ -41,6 +42,7 @@
 #include "Bifrost/Config.hpp"
 #include "Interpreter/Decoder/Decoder.hpp"
 #include "System/Graphics/Display/WindowStats.hpp"
+#include "System/Android/Package/PackageLauncher.hpp"
 #include "System/Android/Surface/Surface.hpp"
 #include "System/Syscalls/Files/SocketPolicy.hpp"
 #include <string>
@@ -73,6 +75,7 @@ static void print_banner() {
         "  x86_64 <─────────────────> ARM64\n"
         "\n"
         "  Usage: bifrost-emu [options] <elf-file> [args...]\n"
+        "         bifrost-emu <app.apk|.apkm|.apks|.xapk> [-d]   install and run an Android app\n"
         "\n"
         "  Options:\n"
         "    -d, --debug        trace every instruction to stderr\n"
@@ -534,6 +537,11 @@ int main(int argc, char** argv) {
     std::vector<std::string> guest_argv;
     guest_argv.push_back(elf_path);
     for (int i = arg_i + 1; i < argc; i++) guest_argv.push_back(argv[i]);
+    // An Android package (APK/APKM/APKS/XAPK) is installed and run by Asgard.
+    if (arm64emu::has_android_package_extension(elf_path))
+        return arm64emu::exec_android_package(
+            elf_path, std::vector<std::string>(guest_argv.begin() + 1, guest_argv.end()),
+            android_window_plugin);
     // Friendly error if the file is missing or not an AArch64 ELF.
     // Pre-checks run against the host-side (BIFROST_ROOT-remapped) path;
     // load_elf_file still receives the guest path so /proc/self/exe stays

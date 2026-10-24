@@ -4,6 +4,16 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## APK launch (2026-10-24)
+
+`Scripts/Testing/test_apk_launch.sh` (14 of 14 pass; the binary without the change exits 126 at the first run) uses a
+stub `asgard.py` in a temporary tree and checks the exact argument list, the launch directory, every package
+extension (upper case too), `--android-window-plugin`, the returned exit status, `BIFROST_ROOT` removal,
+`BIFROST_ASGARD`, status 127 without Asgard or for a missing file, status 126 for a non-ZIP, and that a plain ELF
+still runs. By hand, a bogus ZIP through the real `asgard.py` reached `android_package.py install` and was rejected
+without touching the Android state directory. **No real APK was installed or run**: that opens a window and changes
+installed-app state, so end-to-end launch of an actual game through this path is untested.
+
 ## Rootfs install (2026-10-24)
 
 `Scripts/Testing/test_rootfs_install.sh` (11 of 11 pass) installs from the toolchains already in `Tools/` into a
@@ -3607,6 +3617,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ```sh
 ./Scripts/Testing/test_rootfs_discovery.sh  # dynamic programs find a rootfs without flags
 ./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
+./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec
 ./Scripts/Testing/test_late_tls_pthread.sh  # existing/new threads, reuse, pointer/alignment/weak cases
 ./Scripts/Testing/run_thunk_compat.sh       # SDL/GL/Vulkan ABI probes in both modes

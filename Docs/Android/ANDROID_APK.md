@@ -45,6 +45,14 @@ python3 Scripts/Android/android_package.py run org.example.package \
     --android-window-plugin build/release-sdl1-gl1/plugins/android-window-sdl.so
 ```
 
+`bifrost-emu PATH.apk` does the same without naming Asgard: a file ending in `.apk`,
+`.apkm`, `.apks` or `.xapk` replaces the process with `python3 asgard.py --emu
+<this binary> run PATH [args]` (so exit status and signals pass through), taking
+`-d`/`--allow-downgrade` and `--android-window-plugin PATH` along. It looks for
+`Scripts/Android/asgard.py` next to the executable, or at `$BIFROST_ASGARD`; an
+installed binary alone has no Android tooling, so there it stops with that
+hint (status 127; 126 for a file that is not a ZIP). `BIFROST_ROOT` is removed
+from the environment first, because it would confine every Android process.
 `asgard.py run PATH.apk` (also `.apkm`, `.apks`, `.xapk`) installs the file and
 then runs its package, as `wine app.exe` does. Reinstalling an identical,
 already installed file is accepted but still verifies its signatures, so a
