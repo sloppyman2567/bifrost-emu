@@ -5,7 +5,7 @@
   rather than being mapped as guest machine code. Absolute-path failures retain
   the existing soname/root/toolchain search behavior.
 - Precedence of thunk over a real AArch64 file (`thunk_overrides_found_lib_`): a
-  libGL/libEGL/libGLESv2/libwayland-/libgbm/libvulkan/libX11 copy found in the rootfs or
+  libGL/libEGL/libGLESv2/libwayland-/libgbm/libvulkan copy found in the rootfs or
   system directories yields to the host thunk (a mapped Mesa has no display to
   talk to). A copy reached through the parent's RUNPATH/RPATH or `LD_LIBRARY_PATH`, and
   anything under `/system`, `/vendor`, `/apex`, keeps loading. `--guest-ld` is separate:

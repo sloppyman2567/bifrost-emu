@@ -418,7 +418,7 @@ public:
     // Returns true if `soname` is a known graphic library.
     static bool is_thunk_supported_lib_(const std::string& soname);
     // True when a real AArch64 copy of a host-graphics library (GL/EGL/
-    // GLES/Wayland/gbm/Vulkan/X11) found in the guest rootfs or system
+    // GLES/Wayland/gbm/Vulkan) found in the guest rootfs or system
     // directories must give way to the thunk: the host owns the display, so
     // a mapped Mesa driver would talk to nothing. A copy bundled by the
     // program itself (parent RUNPATH/RPATH, LD_LIBRARY_PATH) or an Android

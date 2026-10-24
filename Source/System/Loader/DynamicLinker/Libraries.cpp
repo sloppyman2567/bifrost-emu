@@ -355,12 +355,12 @@ bool DynamicLinker::thunk_overrides_found_lib_(const std::string& soname,
                                                const std::string& parent_rpath) const {
     if (!thunk_resolver_ || !is_thunk_supported_lib_(soname)) return false;
     auto starts_with = [](const std::string& s, const char* p) { return s.rfind(p, 0) == 0; };
-    // Only display/graphics stacks: audio and Android adapters (libandroid, liblog) keep
+    // Only the GL/Wayland/Vulkan stacks (a real libX11 speaks the wire protocol that
+    // xwayland_wire tests): audio and Android adapters (libandroid, liblog) keep
     // loading their real guest copies.
     if (!(starts_with(soname, "libGL.so") || starts_with(soname, "libEGL.so")
           || starts_with(soname, "libGLESv2.so") || starts_with(soname, "libwayland-")
-          || starts_with(soname, "libgbm") || starts_with(soname, "libvulkan")
-          || starts_with(soname, "libX11")))
+          || starts_with(soname, "libgbm") || starts_with(soname, "libvulkan")))
         return false;
     const size_t slash = found_path.rfind('/');
     if (slash == std::string::npos) return false;

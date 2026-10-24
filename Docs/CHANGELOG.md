@@ -16,7 +16,7 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
 
 - With `./rootfs` next to the executable, `gles_*` and `wayland_*` programs loaded the rootfs's real AArch64
   `libEGL.so.1` instead of the host GL thunk and crashed. The loader fell back to the thunk only when the library
-  file was missing or not AArch64; it now prefers the thunk for GL/EGL/GLES/Wayland/gbm/Vulkan/X11 libraries found in
+  file was missing or not AArch64; it now prefers the thunk for GL/EGL/GLES/Wayland/gbm/Vulkan libraries found in
   the rootfs or system directories. Program-bundled copies (RUNPATH/RPATH, `LD_LIBRARY_PATH`) and Android system
   libraries are unchanged. Checked with the loader trace on `test_gles_contexts`; the windowed tests were not rerun.
 
