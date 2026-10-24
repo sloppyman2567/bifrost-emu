@@ -26,6 +26,12 @@ Resolution is confined inside the rootfs, so its absolute symlinks stay in it. T
 what lets a guest `ld.so` (`--guest-ld`) find its libraries. Every other path, and every
 write, goes to the host as before; with `--rootfs` the whole sandbox applies instead.
 
+**Host graphics libraries.** A rootfs may hold real AArch64 Mesa (`libEGL.so.1`, libGL,
+libwayland-*, ...). The dynamic linker still binds those sonames to the host GL/display
+thunks, so the graphical tests behave the same with or without an adjacent `./rootfs`;
+only a copy the program brings itself (its RUNPATH/RPATH, `LD_LIBRARY_PATH`) is loaded
+as guest code. Under `--guest-ld` a real rootfs file is used, as with the native linker.
+
 `<prefix>/bin/bifrost-emu` therefore finds `<prefix>/share/bifrost/rootfs`
 whatever the prefix. With none found, a program whose libc is missing stops with
 a message listing these places.

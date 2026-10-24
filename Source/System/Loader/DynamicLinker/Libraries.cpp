@@ -235,6 +235,8 @@ uint64_t DynamicLinker::load_shared_library(CPU& cpu,
     bool aarch64_elf = data.size() >= 20
         && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
         && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
+    if (aarch64_elf && thunk_overrides_found_lib_(soname, path, parent_runpath, parent_rpath))
+        aarch64_elf = false;
     if (!aarch64_elf) {
         if (thunk_resolver_ && is_thunk_supported_lib_(soname)) {
             return register_thunk_library_(soname);
@@ -345,6 +347,44 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
                 soname.c_str(), added, syms.size());
     }
     return thunk_base;
+}
+// ── thunk_overrides_found_lib_ ─────────────────────────────────────────
+bool DynamicLinker::thunk_overrides_found_lib_(const std::string& soname,
+                                               const std::string& found_path,
+                                               const std::string& parent_runpath,
+                                               const std::string& parent_rpath) const {
+    if (!thunk_resolver_ || !is_thunk_supported_lib_(soname)) return false;
+    auto starts_with = [](const std::string& s, const char* p) { return s.rfind(p, 0) == 0; };
+    // Only display/graphics stacks: audio and Android adapters (libandroid, liblog) keep
+    // loading their real guest copies.
+    if (!(starts_with(soname, "libGL.so") || starts_with(soname, "libEGL.so")
+          || starts_with(soname, "libGLESv2.so") || starts_with(soname, "libwayland-")
+          || starts_with(soname, "libgbm") || starts_with(soname, "libvulkan")
+          || starts_with(soname, "libX11")))
+        return false;
+    const size_t slash = found_path.rfind('/');
+    if (slash == std::string::npos) return false;
+    const std::string dir = found_path.substr(0, slash);
+    auto listed = [&](const std::string& list) {
+        size_t pos = 0;
+        while (pos <= list.size()) {
+            size_t colon = list.find(':', pos);
+            if (colon == std::string::npos) colon = list.size();
+            std::string entry = list.substr(pos, colon - pos);
+            while (entry.size() > 1 && entry.back() == '/') entry.pop_back();
+            if (!entry.empty() && entry == dir) return true;
+            pos = colon + 1;
+        }
+        return false;
+    };
+    if (listed(parent_runpath) || listed(parent_rpath)) return false;
+    if (const char* llp = getenv("LD_LIBRARY_PATH")) if (listed(llp)) return false;
+    for (const char* android : {"/system/", "/vendor/", "/apex/"})
+        if (found_path.find(android) != std::string::npos) return false;
+    if (dynlink_trace_enabled())
+        fprintf(stderr, "[dynlink] '%s' found at '%s' but the host thunk takes precedence\n",
+                soname.c_str(), found_path.c_str());
+    return true;
 }
 // ── is_thunk_supported_lib_ ────────────────────────────────────────────
 // Returns true if `soname` matches the naming pattern of a library that

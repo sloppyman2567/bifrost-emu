@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Host GL thunks beat a discovered rootfs's Mesa (2026-10-24)
+
+- With `./rootfs` next to the executable, `gles_*` and `wayland_*` programs loaded the rootfs's real AArch64
+  `libEGL.so.1` instead of the host GL thunk and crashed. The loader fell back to the thunk only when the library
+  file was missing or not AArch64; it now prefers the thunk for GL/EGL/GLES/Wayland/gbm/Vulkan/X11 libraries found in
+  the rootfs or system directories. Program-bundled copies (RUNPATH/RPATH, `LD_LIBRARY_PATH`) and Android system
+  libraries are unchanged. Checked with the loader trace on `test_gles_contexts`; the windowed tests were not rerun.
+
 ### Real-world shell fixes found by differential testing (2026-10-24)
 
 A differential run of BusyBox `ash` scripts against native Linux (and single BusyBox processes against `qemu-aarch64`)

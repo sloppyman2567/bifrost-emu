@@ -63,6 +63,8 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
         bool aarch64_elf = data.size() >= 20
             && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
             && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
+        if (aarch64_elf && thunk_overrides_found_lib_(path, found_path, parent_runpath, parent_rpath))
+            aarch64_elf = false;
         if (aarch64_elf) {
             resolved = found_path;
             std::vector<uint8_t> file_data = std::move(data);
