@@ -12,6 +12,19 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Real-world shell fixes found by differential testing (2026-10-24)
+
+A differential run of BusyBox `ash` scripts against native Linux (and single BusyBox processes against `qemu-aarch64`)
+found these; each has a regression test.
+
+- **`mkdir -p` and trailing slashes.** `mkdir a/` and every BusyBox `mkdir -p` failed with ENOENT, because path
+  splitting turned `a/` into an empty name; `/` and direct children of `/` (`mkdir -p /tmp/x/y`) failed the same
+  way. Trailing slashes are now stripped, with the Linux rules kept where they differ: `unlink("file/")` and
+  `rename("file/", ...)` are ENOTDIR, creating a symlink, link or node at `"x/"` is ENOENT.
+- **Signals to yourself.** `kill(getpid(), SIGUSR1)`, `kill(0, ...)`, `tgkill` and `tkill` with an installed handler
+  returned their first argument (so BusyBox reported "can't kill pid 1") and called the handler with signal 0: the
+  result was written after the handler frame had been built. `raise()` and `pthread_kill` were unaffected.
+
 ### `getcwd` reports the real directory without a sandbox (2026-10-24)
 
 A program run without `BIFROST_ROOT` always saw `/` as its working directory, though its relative paths resolved
