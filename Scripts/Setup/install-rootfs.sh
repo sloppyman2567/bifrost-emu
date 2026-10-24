@@ -9,6 +9,7 @@
 #   ./Scripts/Setup/install-rootfs.sh --full         # also real-world and curl libraries
 #   ./Scripts/Setup/install-rootfs.sh --profile NAME # a named rootfs: <data>/rootfs.d/NAME (bifrost-emu --rootfs-profile NAME)
 #   ./Scripts/Setup/install-rootfs.sh --games        # also game libraries (OpenAL, SDL2_ttf, Vorbis, ...); profile "games"
+#   ./Scripts/Setup/install-rootfs.sh --rebuild      # with --games: rebuild from scratch instead of updating an existing install
 #   ./Scripts/Setup/install-rootfs.sh --no-fetch     # never download; use toolchains already in Tools/
 #   ./Scripts/Setup/install-rootfs.sh --uninstall    # remove the rootfs at the chosen location
 #   ./Scripts/Setup/install-rootfs.sh --help
@@ -17,7 +18,9 @@
 # failed run leaves an existing install untouched. Run it as your own user;
 # it downloads the glibc and musl toolchains into the checkout's Tools/ unless
 # --no-fetch is given (the make targets use --no-fetch so root never downloads).
-# --games downloads the game libraries from Debian (fetch-game-libs.py) even with --no-fetch.
+# --games downloads the game libraries from Debian (fetch-game-libs.py) even with --no-fetch. When the
+# destination already is a rootfs, --games checks its game libraries against the Debian index, exits if they are
+# current, and otherwise updates a copy of it in place of rebuilding (no toolchains needed); --rebuild forces a rebuild.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -28,6 +31,7 @@ PROFILE=""
 GAMES=0
 FULL=0
 FETCH=1
+REBUILD=0
 UNINSTALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,6 +43,7 @@ while [ $# -gt 0 ]; do
                      PROFILE="$2"; shift ;;
         --games)     GAMES=1 ;;
         --full)      FULL=1 ;;
+        --rebuild)   REBUILD=1 ;;
         --no-fetch)  FETCH=0 ;;
         --uninstall) UNINSTALL=1 ;;
         --help|-h)   sed -n '2,/^set /p' "$0" | sed '$d; s/^# \?//'; exit 0 ;;
@@ -67,7 +72,17 @@ if [ "$UNINSTALL" = 1 ]; then
     exit 0
 fi
 
-if [ ! -d Tools/aarch64-linux-gnu-cross ] || [ ! -d Tools/aarch64-linux-musl-cross ]; then
+# --games on an existing rootfs: refresh only the game libraries.
+UPDATE=0
+if [ "$GAMES" = 1 ] && [ "$FULL" = 0 ] && [ "$REBUILD" = 0 ] && has_loader "$DEST"; then
+    if python3 -I Scripts/Setup/fetch-game-libs.py "$DEST" --check; then
+        echo "$DEST is up to date."
+        exit 0
+    fi
+    UPDATE=1
+fi
+
+if [ "$UPDATE" = 0 ] && { [ ! -d Tools/aarch64-linux-gnu-cross ] || [ ! -d Tools/aarch64-linux-musl-cross ]; }; then
     if [ "$FETCH" = 0 ]; then
         echo "error: the glibc/musl toolchains are missing from Tools/." >&2
         echo "  Run ./Scripts/Setup/install-rootfs.sh as your own user first (it downloads them)," >&2
@@ -85,8 +100,13 @@ OLD=""
 cleanup() { rm -rf -- "$STAGE" ${OLD:+"$OLD"}; }
 trap cleanup EXIT
 
-echo "Building rootfs in $STAGE"
-BIFROST_ROOTFS_INSTALLER=1 ./Scripts/Setup/setup-rootfs.sh "$STAGE"
+if [ "$UPDATE" = 1 ]; then
+    echo "Updating a copy of $DEST in $STAGE"
+    cp -a -- "$DEST/." "$STAGE/"
+else
+    echo "Building rootfs in $STAGE"
+    BIFROST_ROOTFS_INSTALLER=1 ./Scripts/Setup/setup-rootfs.sh "$STAGE"
+fi
 if [ "$FULL" = 1 ]; then
     ./Scripts/Setup/fetch-realworld-libs.sh "$STAGE"
     ./Scripts/Setup/fetch-curl-deps.sh "$STAGE"

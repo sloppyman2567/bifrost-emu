@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install the AArch64 shared libraries that games need into a guest rootfs.
 
-Usage: fetch-game-libs.py ROOTFS [--suite trixie] [--mirror URL] [--list]
+Usage: fetch-game-libs.py ROOTFS [--suite trixie] [--mirror URL] [--list | --check]
 
 Downloads pinned Debian arm64 packages (OpenAL, SDL2_ttf, Vorbis, libpng, libjpeg, libcurl, ...)
 and their dependencies, and unpacks only their shared libraries into ROOTFS/usr/lib. Nothing is
@@ -14,6 +14,10 @@ verified (no gpg is required), so this relies on HTTPS to the mirror.
 Libraries that bifrost-emu serves from the host (audio, GL, windowing: ALSA, PulseAudio, SDL2, Mesa,
 X11, Wayland, ...) and the C runtime already in the rootfs are never installed: a real copy would
 shadow the host-backed one. The install fails if a package needs a newer glibc than the rootfs has.
+
+Run on a rootfs that already has game libraries, it only replaces what changed. --check downloads no
+packages: it compares ROOTFS/etc/bifrost-game-libs.txt with the suite's current index and exits 0 when
+the install is up to date, 3 when it is missing or stale.
 """
 import argparse
 import hashlib
@@ -30,6 +34,8 @@ import urllib.request
 ROOT_PACKAGES = [
     "libopenal1", "libsdl2-ttf-2.0-0", "libvorbisfile3", "libvorbis0a", "libogg0",
     "libpng16-16t64", "libjpeg62-turbo", "libcurl4t64", "libopenhmd0", "libfreetype6",
+    "libsdl2-image-2.0-0", "libsdl2-mixer-2.0-0", "libsndfile1", "libopus0", "libopusfile0", "libmpg123-0t64",
+    "libwebp7", "libsqlite3-0", "libxml2", "libtiff6",
 ]
 
 # Never installed: the C runtime is the rootfs's own, and these are backed by host thunks.
@@ -37,7 +43,7 @@ EXCLUDED = re.compile(
     r"^(libc6|libc-bin|libgcc-s1|libstdc\+\+6|gcc-.*-base|libasound2.*|libpulse.*|pulseaudio.*|libpipewire.*|"
     r"libsndio.*|libjack.*|libportaudio.*|libsdl2-2\.0-0|libsdl2-[0-9].*|libgl1.*|libglx.*|libglvnd.*|libegl.*|"
     r"libgles.*|libgbm.*|libdrm.*|libvulkan.*|libx11.*|libxcb.*|libxau.*|libxdmcp.*|libwayland.*|libdbus.*|"
-    r"libsystemd.*|libudev.*|debconf|dpkg|perl-base|ca-certificates|openssl)$")
+    r"libsystemd.*|libudev.*|debconf.*|cdebconf.*|dpkg|perl-base|ca-certificates|openssl)$")
 
 CHUNK = 1 << 20
 
@@ -190,6 +196,8 @@ def main():
     parser.add_argument("--suite", default="trixie", help="Debian suite to take packages from (default: %(default)s)")
     parser.add_argument("--mirror", default="https://deb.debian.org/debian")
     parser.add_argument("--list", action="store_true", help="resolve and print the packages, download nothing")
+    parser.add_argument("--check", action="store_true",
+                        help="report whether ROOTFS's game libraries match the suite (exit 0 current, 3 not)")
     args = parser.parse_args()
 
     rootfs = os.path.abspath(args.rootfs)
@@ -214,16 +222,39 @@ def main():
             print(f"{name} {chosen[name]['Version']}")
         return 0
 
+    manifest_path = os.path.join(rootfs, "etc", "bifrost-game-libs.txt")
+    installed = {}
+    if os.path.isfile(manifest_path):
+        with open(manifest_path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 3 and not line.startswith("#"):
+                    installed[parts[0]] = parts[2]
+    wanted = {name: chosen[name]["SHA256"] for name in chosen}
+    if args.check:
+        added, changed, removed = (sorted(wanted.keys() - installed.keys()),
+                                   sorted(n for n in wanted.keys() & installed.keys() if wanted[n] != installed[n]),
+                                   sorted(installed.keys() - wanted.keys()))
+        if not (added or changed or removed):
+            print(f"game libraries up to date ({len(wanted)} packages)")
+            return 0
+        print(f"game libraries need an update: {len(added)} new, {len(changed)} changed, {len(removed)} dropped")
+        return 3
+
     manifest = []
     for name in sorted(chosen):
         fields = chosen[name]
+        if installed.get(name) == fields["SHA256"]:
+            print(f"  {name} {fields['Version']}: up to date")
+            manifest.append(f"{name} {fields['Version']} {fields['SHA256']}")
+            continue
         deb = fetch(f"{args.mirror}/{fields['Filename']}", timeout=300)
         if len(deb) != int(fields["Size"]) or hashlib.sha256(deb).hexdigest() != fields["SHA256"]:
             sys.exit(f"error: {name} does not match the package index (size or SHA-256)")
         files = unpack_libraries(deb, rootfs)
         print(f"  {name} {fields['Version']}: {len(files)} library files")
         manifest.append(f"{name} {fields['Version']} {fields['SHA256']}")
-    with open(os.path.join(rootfs, "etc", "bifrost-game-libs.txt"), "w") as f:
+    with open(manifest_path, "w") as f:
         f.write(f"# Debian {args.suite} arm64 packages unpacked by fetch-game-libs.py\n")
         f.write("\n".join(manifest) + "\n")
     return 0

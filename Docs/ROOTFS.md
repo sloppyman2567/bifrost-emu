@@ -61,7 +61,8 @@ is a small stub, which is why games need the `games` profile below.
 ./Scripts/Setup/install-rootfs.sh            # for your user (~/.local/share/bifrost/rootfs)
 ./Scripts/Setup/install-rootfs.sh --full     # also the real-world and curl libraries
 ./Scripts/Setup/install-rootfs.sh --profile NAME   # a named rootfs: <data>/rootfs.d/NAME
-./Scripts/Setup/install-rootfs.sh --games    # profile "games": plus OpenAL, SDL2_ttf, Vorbis, libpng, libjpeg, libcurl, ...
+./Scripts/Setup/install-rootfs.sh --games    # profile "games": plus OpenAL, SDL2_ttf/image/mixer, Vorbis, libsndfile, libpng, libjpeg, libcurl, ...
+./Scripts/Setup/install-rootfs.sh --games --rebuild   # rebuild the profile from scratch instead of updating it
 sudo make install install-rootfs             # system-wide, in $(PREFIX)/share/bifrost/rootfs
 ./Scripts/Setup/install-rootfs.sh --uninstall   # or: sudo make uninstall-rootfs
 ```
@@ -82,13 +83,19 @@ script once as your user before `sudo make install-rootfs`. `DESTDIR` and
 ### Game libraries
 
 `--games` (profile `games` unless `--profile` says otherwise) runs `Scripts/Setup/fetch-game-libs.py`, which downloads
-pinned Debian `trixie` arm64 packages for the libraries games link against and their dependencies (about 50 packages),
+pinned Debian `trixie` arm64 packages for the libraries games link against and their dependencies (about 70 packages: OpenAL,
+SDL2_ttf/image/mixer, Vorbis/Opus/FLAC/mpg123/libsndfile, libpng/jpeg/tiff/webp, FreeType, libcurl with its TLS stack, SQLite, libxml2),
 unpacks only their shared libraries into `usr/lib`, rebuilds `ld.so.cache` and records the packages in
 `etc/bifrost-game-libs.txt`. Checked: Packages.xz against the `Release` file's SHA-256 and every `.deb` against the index
 (SHA-256 and size), all over HTTPS; the `Release` signature is not verified. Never installed: the C runtime and the
 libraries bifrost-emu serves from the host (ALSA, PulseAudio, PipeWire, SDL2, Mesa/GL, X11, Wayland, ...), because a real copy
 would shadow the host-backed one. The install fails when a package needs a newer glibc than the rootfs has. No game data
-is fetched. `bifrost-emu --setup-rootfs --games` runs it; then `bifrost-emu --rootfs-profile games ./game`
+is fetched. When the destination already is a rootfs, `--games` first runs `fetch-game-libs.py --check`, which compares
+`etc/bifrost-game-libs.txt` with the suite's current index: if nothing is new or changed it stops, otherwise it copies the
+installed rootfs to a staging directory, downloads only the new or changed packages, rebuilds `ld.so.cache` and renames it
+into place (no toolchains needed; packages dropped from the list leave their old files behind until `--rebuild`).
+A program that fails with `libcurl.so.4: cannot open shared object file` was run without the profile: add
+`--rootfs-profile games`. `bifrost-emu --setup-rootfs --games` runs it; then `bifrost-emu --rootfs-profile games ./game`
 (add `--guest-ld` to run under the rootfs's own `ld.so`). dhewm3 ran 120 s under each linker this way.
 
 ## Contents
