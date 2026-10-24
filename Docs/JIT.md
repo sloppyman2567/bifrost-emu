@@ -2502,7 +2502,7 @@ generated code, and the host-window address resolves through
 `/proc/<pid>/maps` to the guest library and file offset. The file is not
 removed at exit.
 
-A [native Doom 3 capture](Apps/doom3.md#native-dispatch-profile-2026-10-12)
+A [native Doom 3 capture](archive/apps/doom3-history.md#native-dispatch-profile-2026-10-12)
 on October 12 resolves this distinction: native stacks in `jit_ldxr` account
 for 11.1% of sampled user CPU, and Tier-2 trial timing for 6.57%, while
 `run_block` itself accounts for 2.09% leaf time. The broad SIGPROF dispatch
