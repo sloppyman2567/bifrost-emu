@@ -70,7 +70,7 @@ std::string rootfs_search_hint() {
              self_exe_dir(), getenv("XDG_DATA_HOME"), getenv("HOME")))
         text += " " + dir;
     return text + "); pass --rootfs PATH, set BIFROST_ROOT, or run "
-                  "Scripts/Setup/setup-rootfs.sh";
+                  "`bifrost-emu --setup-rootfs`";
 }
 
 }  // namespace arm64emu

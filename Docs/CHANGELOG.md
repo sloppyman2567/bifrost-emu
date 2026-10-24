@@ -12,6 +12,14 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### `bifrost-emu --setup-rootfs` (2026-10-24)
+
+- One command to install the guest rootfs: `bifrost-emu --setup-rootfs [--system|--prefix DIR|--full|--no-fetch|--uninstall]`
+  runs the checkout's `install-rootfs.sh` and returns its status (127 when the executable has no checkout beside it).
+  The "no rootfs found" message now points to it. It is a front end: the toolchain download and rootfs build
+  stay in the scripts. `test_setup_rootfs.sh` covers install, a flag-free run from the installed layout, uninstall
+  and the 127 case.
+
 ### Host GL thunks beat a discovered rootfs's Mesa (2026-10-24)
 
 - With `./rootfs` next to the executable, `gles_*` and `wayland_*` programs loaded the rootfs's real AArch64

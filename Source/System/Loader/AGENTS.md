@@ -56,6 +56,8 @@
   via `open_host_fd`, libraries, `ld.so.cache`) resolve through the VFS library
   overlay (see the VFS guide); the thunk-stub check (`real_library_in_rootfs`) uses
   the same opens so it sees what ld.so sees.
+- `RootfsSetup` implements `--setup-rootfs`: it only locates and runs the checkout's `install-rootfs.sh`
+  (status 127 without it); the build stays in the scripts.
 - `RootfsDiscovery` picks the library root: `BIFROST_ROOT` (the sandbox, set by
   `--rootfs`, the environment or `[paths] rootfs`), else the first default rootfs
   (next to the executable, `$XDG_DATA_HOME`/`~/.local/share`, `/usr/{local/,}share`).

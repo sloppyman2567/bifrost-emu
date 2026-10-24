@@ -116,11 +116,13 @@ Dynamically linked programs need a guest root filesystem for their libraries.
 Install a standard one, then run programs directly ([details](Docs/ROOTFS.md)):
 
 ```bash
-./Scripts/Setup/install-rootfs.sh      # for your user, ~/.local/share/bifrost/rootfs (~235 MB download)
+./bifrost-emu --setup-rootfs           # for your user, ~/.local/share/bifrost/rootfs (~235 MB download)
 sudo make install install-rootfs       # or system-wide, under $(PREFIX)/share/bifrost
 bifrost-emu my_dynamic_app.elf         # finds the rootfs automatically
 ```
 
+`--setup-rootfs` runs `Scripts/Setup/install-rootfs.sh` of the checkout and passes its options on
+(`--system`, `--prefix DIR`, `--full`, `--uninstall`).
 `./Scripts/Setup/setup-rootfs-all.sh` instead builds the development `rootfs/`
 used by the test suite, with extra real-world libraries.
 

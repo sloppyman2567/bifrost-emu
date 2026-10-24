@@ -39,13 +39,16 @@ a message listing these places.
 ## Installing one
 
 ```sh
+./bifrost-emu --setup-rootfs                 # same as install-rootfs.sh below, with its options
 ./Scripts/Setup/install-rootfs.sh            # for your user (~/.local/share/bifrost/rootfs)
 ./Scripts/Setup/install-rootfs.sh --full     # also the real-world and curl libraries
 sudo make install install-rootfs             # system-wide, in $(PREFIX)/share/bifrost/rootfs
 ./Scripts/Setup/install-rootfs.sh --uninstall   # or: sudo make uninstall-rootfs
 ```
 
-`install-rootfs.sh` downloads the glibc and musl toolchains into `Tools/` (about
+`bifrost-emu --setup-rootfs [OPTIONS]` finds `Scripts/Setup/install-rootfs.sh` beside the executable (a checkout
+or `build/<config>/`), runs it with the options and exits with its status; an executable installed without
+the checkout exits 127 and says so. `install-rootfs.sh` downloads the glibc and musl toolchains into `Tools/` (about
 235 MB) when they are missing, builds the rootfs with `setup-rootfs.sh` in a
 staging directory beside the destination and renames it into place, so a failed
 run keeps the previous install. The `make` targets never download: run the

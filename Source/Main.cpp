@@ -32,6 +32,9 @@
 //                   BIFROST_ROOT=PATH). Without it, a rootfs found next to the
 //                   executable or under ~/.local/share/bifrost/rootfs
 //                   supplies libraries only.
+//   --setup-rootfs [OPTIONS]  build and install the guest rootfs, then exit; takes
+//                   install-rootfs.sh's options (--system, --prefix DIR, --full,
+//                   --no-fetch, --uninstall). Needs the checkout's Scripts/.
 //   --config PATH   load config from PATH (overrides the auto-search)
 //   --print-config  print the resolved config and exit
 //   -V, --version   show version and exit
@@ -45,6 +48,7 @@
 #include "System/Android/Package/PackageLauncher.hpp"
 #include "System/Android/Surface/Surface.hpp"
 #include "System/Syscalls/Files/SocketPolicy.hpp"
+#include "System/Loader/RootfsSetup.hpp"
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -92,6 +96,7 @@ static void print_banner() {
         "    --jit              enable frostJIT (default; for compatibility)\n"
         "    --jit-threshold N  interpret for N insns then switch to JIT\n"
         "    --rootfs PATH      guest root for libraries and paths (BIFROST_ROOT); default: auto-found, libraries only\n"
+        "    --setup-rootfs [OPTS]  build and install the guest rootfs, then exit (--system, --prefix DIR, --full, --uninstall)\n"
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --guest-ld         run dynamic programs under their own guest ld.so (needs a rootfs)\n"
@@ -247,6 +252,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
         return arm64emu::window_stats::ui_main(std::atoi(argv[2]));
+    // Not a guest run: hand the remaining arguments to the rootfs installer.
+    if (argc >= 2 && std::string(argv[1]) == "--setup-rootfs")
+        return arm64emu::run_rootfs_setup(std::vector<std::string>(argv + 2, argv + argc));
     bool debug   = false;
     bool verbose = false;
     bool quiet   = false;
