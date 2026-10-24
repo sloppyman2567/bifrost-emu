@@ -15,6 +15,8 @@ import tempfile
 import urllib.request
 import zipfile
 
+import android_super
+
 ROOT = Path(__file__).resolve().parents[2]
 URL = "https://dl.google.com/android/repository/sys-img/android/arm64-v8a-35_r02.zip"
 IMAGE_SIZE = 769099654
@@ -205,8 +207,7 @@ def extract_system(archive, temporary):
     disk.unlink()
     partitions = temporary / "partitions"
     partitions.mkdir()
-    subprocess.run(["lpunpack", "-p", "system", str(image), str(partitions)],
-                   capture_output=True, check=True, timeout=120)
+    android_super.unpack(image, partitions, ["system"])
     system = partitions / "system.img"
     return system, notice_data
 
@@ -214,7 +215,7 @@ def extract_system(archive, temporary):
 def install(destination, archive=None):
     if destination.exists():
         return verify(destination)
-    for tool in ("debugfs", "lpunpack", "readelf"):
+    for tool in ("debugfs", "readelf"):
         if not shutil.which(tool):
             raise ValueError(f"{tool} is required to extract real Android media libraries")
     archive = image_archive(archive)

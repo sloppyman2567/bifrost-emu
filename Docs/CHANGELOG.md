@@ -27,6 +27,19 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   games under `--guest-ld`; supertux2 does not start there (its rootfs `libcurl-gnutls` wants glibc 2.43) and
   crashes under the built-in linker as well (not caused by the loader precedence change).
 
+### Android provisioning on a fresh Ubuntu machine (2026-10-24)
+
+- Found by the first run on an Ubuntu 25.10 VM. `fetch-android-package-tools.py` failed with HTTP 404: it asked Google's
+  `android-15.0.0_r1` tag for `Tools/linux/lib/d8.jar` and `apksigner.jar`, which live under lowercase `tools/`; this machine
+  already had the files, so it never fetched them. With the corrected paths both match their pinned SHA-256 (checked against a
+  fresh download into an empty tree).
+- `lpunpack` is not packaged by Ubuntu 24.04, 25.10 or 26.04 (only `simg2img`), so ART, framework and media provisioning could
+  not run there. `Tools/Android/android_super.py` now unpacks the dynamic partitions (liblp metadata, checksum-verified, linear
+  and zero extents). All five partitions of the pinned image are byte-identical to `lpunpack`'s, and ART (532 files), framework
+  (1,053) and media (154 libraries) provisioning pass their pinned inventories with `lpunpack` absent from `PATH`.
+  `test_android_super.py` covers it with a synthetic image.
+- Not an error: `clang`/`lld`/`libsdl3-dev` must be installed for the Android steps (the VM bundle's steps now say so).
+
 ### `/proc/<pid>/status` is a complete status file (2026-10-24)
 
 - For a task the guest debugger knows (every process in the fork family, including the app itself), `/proc/<pid>/status`

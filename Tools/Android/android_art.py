@@ -164,7 +164,7 @@ def install(destination, archive=None):
                 without_bionic_links(actual) != without_bionic_links(metadata["files"])):
             raise ValueError("Refusing modified ART runtime")
         return update_bionic_inventory(destination, metadata, manifest)
-    for tool in ("debugfs", "lpunpack", "readelf"):
+    for tool in ("debugfs", "readelf"):
         if not shutil.which(tool):
             raise ValueError(f"Required ART extraction tool: {tool}")
     archive = image_archive(archive)

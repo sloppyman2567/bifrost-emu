@@ -318,8 +318,9 @@ python3 Scripts/Android/android_package.py --state-root android-state/real-media
     install /path/to/package.apkm --media-root build/android-media
 ```
 
-Provisioning requires `debugfs`, `lpunpack` (Android partition tools) and
-`readelf`. The first download is approximately 734 MiB; extraction needs several
+Provisioning requires `debugfs` and `readelf`; it unpacks the dynamic
+partitions itself (`Tools/Android/android_super.py`), so AOSP's `lpunpack`, which
+Ubuntu does not package, is not needed. The first download is approximately 734 MiB; extraction needs several
 GiB of temporary disk space. It reads GPT/dynamic partitions and APEX payloads
 without mounting filesystems. The image and complete extracted file set are
 SHA-256 pinned. The source image cache and existing bundles are verified before

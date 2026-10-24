@@ -18,6 +18,7 @@ from android_media import (ROOT, IMAGE_SHA256, image_archive, extract_system, du
                            without_bionic_links, install_bionic_links, BIONIC_LINKS,
                            update_inventory, digest)
 import android_art
+import android_super
 import android_codecs
 
 # Classpath order comes from the image's own boot image files (see
@@ -248,8 +249,7 @@ def install(destination, art_root, archive=None):
         # init loads these after /system/build.prop. product sets
         # ro.dalvik.vm.enable_uffd_gc, which with userfaultfd selects ART's
         # CMC collector: the collector the image's boot image was built for.
-        subprocess.run(["lpunpack", "-p", "system_ext", "-p", "product", "-p", "vendor", str(work / "super.img"),
-                        str(work / "partitions")], capture_output=True, check=True, timeout=300)
+        android_super.unpack(work / "super.img", work / "partitions", ["system_ext", "product", "vendor"])
         for partition in ("system_ext", "product"):
             dump(work / "partitions" / f"{partition}.img", "/etc/build.prop",
                  root / partition / "etc/build.prop")

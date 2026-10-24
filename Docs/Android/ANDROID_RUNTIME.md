@@ -3316,7 +3316,7 @@ BIFROST_NO_ASLR=1 python3 Scripts/Android/test_android_jni.py --timeout 60
 python3 Scripts/Android/test_android_jni.py --mode qemu   # qemu-aarch64 reference run
 ```
 
-Requirements: Python 3.11+, `debugfs`, `lpunpack`, `readelf`, Clang/LLD and a
+Requirements: Python 3.11+, `debugfs`, `readelf`, Clang/LLD and a
 JDK 17+. The image download is approximately 734 MiB; extraction needs several GiB
 of scratch disk space. An existing verified Media NDK source archive is reused.
 The DEX compiler is checksum-pinned D8 from AOSP `android-15.0.0_r1`.
