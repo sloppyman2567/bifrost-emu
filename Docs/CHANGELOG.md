@@ -28,6 +28,10 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   the real ld-linux version ran and called a NULL `__rtld_free`. Both names now map to the shim
   (`test_dyn_thread_stack_cache`).
 
+- **Shell prompt.** The rootfs `/etc/profile` sets `PS1='\h:\w\$ '`, so toybox `sh` shows the host and working directory
+  instead of a bare `$ ` (`\u` printed a blank in toybox, so it is not used). Existing rootfs installs keep the old
+  profile until `install-rootfs.sh` is rerun.
+
 ### Real-world shell fixes found by differential testing (2026-10-24)
 
 A differential run of BusyBox `ash` scripts against native Linux (and single BusyBox processes against `qemu-aarch64`)

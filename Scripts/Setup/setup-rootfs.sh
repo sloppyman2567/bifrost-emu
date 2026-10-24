@@ -183,7 +183,7 @@ cat > "$ROOTFS/etc/profile" <<'EOF'
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
 export HOME=/root
 export TERM=linux
-export PS1='$ '
+export PS1='\h:\w\$ '
 EOF
 
 # /etc/shells — list of valid login shells
