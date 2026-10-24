@@ -110,12 +110,17 @@ make                                   # build (SDL2/GL thunks auto-detected)
 ./bifrost-emu Tests/Apps/toybox seq 1 10   # arguments pass through
 ```
 
-Dynamically linked programs need a guest root filesystem for their libraries:
+Dynamically linked programs need a guest root filesystem for their libraries.
+Install a standard one, then run programs directly ([details](Docs/ROOTFS.md)):
 
 ```bash
-./Scripts/Setup/setup-rootfs-all.sh    # glibc + musl toolchains and libraries (~250 MB)
-./bifrost-emu my_dynamic_app.elf       # finds the rootfs automatically
+./Scripts/Setup/install-rootfs.sh      # for your user, ~/.local/share/bifrost/rootfs (~235 MB download)
+sudo make install install-rootfs       # or system-wide, under $(PREFIX)/share/bifrost
+bifrost-emu my_dynamic_app.elf         # finds the rootfs automatically
 ```
+
+`./Scripts/Setup/setup-rootfs-all.sh` instead builds the development `rootfs/`
+used by the test suite, with extra real-world libraries.
 
 Without `--rootfs`, the first rootfs found among `<executable dir>/rootfs`,
 `<executable dir>/../share/bifrost/rootfs`, `$XDG_DATA_HOME/bifrost/rootfs`

@@ -12,6 +12,15 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Installable rootfs (2026-10-24)
+
+`Scripts/Setup/install-rootfs.sh` builds a standard rootfs (glibc and musl, about 70 MB) and installs it where
+discovery finds it: `--user` (default, `~/.local/share/bifrost/rootfs`), `--system`, or `--prefix DIR`;
+`--full` adds the real-world libraries and `--uninstall` removes it. It builds beside the destination and renames
+into place, so a failed run keeps the old install. `make install-rootfs` / `uninstall-rootfs` do the same under
+`$(DESTDIR)$(PREFIX)/share/bifrost/rootfs` without downloading, and `make install` points to them. Layout and search
+order are in [ROOTFS.md](ROOTFS.md).
+
 ### Dynamic programs start without `--rootfs` (2026-10-24)
 
 `bifrost-emu prog` now finds a rootfs for a dynamic program by itself: `<executable dir>/rootfs`,

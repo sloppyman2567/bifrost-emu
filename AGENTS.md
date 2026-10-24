@@ -14,6 +14,7 @@ interpreter, Linux syscalls/VFS, dynamic linking and host graphics/audio adapter
   reference instruction semantics.
 - [System guidance](Source/System/AGENTS.md): memory, loader, syscalls, VFS,
   Android and host integration. Narrower guides live beside those subsystems.
+- [Guest rootfs](Docs/ROOTFS.md): discovery order, installing and the install layout.
 - [Android runtime](Docs/Android/ANDROID_RUNTIME.md), [Binder](Docs/Android/ANDROID_BINDER.md),
   [APK tooling](Docs/Android/ANDROID_APK.md), [tests](Docs/TESTS.md).
 

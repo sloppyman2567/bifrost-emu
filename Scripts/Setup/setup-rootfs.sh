@@ -346,11 +346,15 @@ fi
 python3 -I "$PROJECT_ROOT/Scripts/Setup/make-ld-cache.py" "$ROOTFS" || \
     echo "warning: ld.so.cache not generated; --guest-ld needs it" >&2
 
-echo ""
-echo "Rootfs setup complete at: $ROOTFS"
-echo ""
-echo "To use it:"
-echo "  export BIFROST_ROOT=$ROOTFS"
-echo "  ./bifrost-emu Tests/Apps/hello_dyn_glibc.elf"
-echo ""
-echo "To refresh libraries after a toolchain update, re-run this script."
+# install-rootfs.sh builds in a staging directory and prints its own summary.
+if [ -z "${BIFROST_ROOTFS_INSTALLER:-}" ]; then
+    echo ""
+    echo "Rootfs setup complete at: $ROOTFS"
+    echo ""
+    echo "To use it:"
+    echo "  export BIFROST_ROOT=$ROOTFS"
+    echo "  ./bifrost-emu Tests/Apps/hello_dyn_glibc.elf"
+    echo ""
+    echo "To refresh libraries after a toolchain update, re-run this script."
+    echo "To install it where bifrost-emu finds it without flags: ./Scripts/Setup/install-rootfs.sh"
+fi

@@ -410,9 +410,22 @@ PREFIX ?= /usr/local
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
+	@echo "Dynamic programs also need a rootfs: make install-rootfs (system) or Scripts/Setup/install-rootfs.sh (user)."
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
+
+# The guest rootfs lives in $(PREFIX)/share/bifrost/rootfs, where bifrost-emu
+# looks for it. It is built from the toolchains already in Tools/ and never
+# downloads, so `sudo make install-rootfs` does not fetch as root: run
+# Scripts/Setup/install-rootfs.sh once as your user first (or fetch the
+# toolchains yourself).
+.PHONY: install-rootfs uninstall-rootfs
+install-rootfs:
+	Scripts/Setup/install-rootfs.sh --prefix "$(DESTDIR)$(PREFIX)" --no-fetch
+
+uninstall-rootfs:
+	Scripts/Setup/install-rootfs.sh --prefix "$(DESTDIR)$(PREFIX)" --uninstall
 
 clean:
 	rm -rf build bifrost-emu bifrost-emu-dbg *.o *.d libbifrost.a

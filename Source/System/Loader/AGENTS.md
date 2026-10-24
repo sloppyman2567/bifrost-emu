@@ -52,7 +52,9 @@
   A discovered root only adds library directories in `find_library`; it must never
   set `BIFROST_ROOT` or confine guest paths. A missing libc is fatal
   (`libc_missing()` throws in `load_elf_file`), because the guest `ld.so` fallback
-  cannot recover. `test_rootfs_discovery.sh` copies the binary away from the
+  cannot recover. `Scripts/Setup/install-rootfs.sh` produces the installable
+  tree ([ROOTFS.md](../../../Docs/ROOTFS.md)); keep its destinations and the
+  default candidates in step. `test_rootfs_discovery.sh` copies the binary away from the
   checkout so the bundled toolchain cannot mask a lookup failure.
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.

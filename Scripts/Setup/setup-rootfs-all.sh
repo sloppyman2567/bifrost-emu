@@ -147,6 +147,9 @@ if [ -d rootfs ]; then
     echo "    ./bifrost-emu --rootfs ./rootfs Tests/Apps/hello_dyn_glibc.elf"
     echo "    ./bifrost-emu --rootfs ./rootfs Tests/Apps/test_dyn_write.elf"
     echo
+    echo "  To install a standard rootfs where bifrost-emu finds it without flags:"
+    echo "    ./Scripts/Setup/install-rootfs.sh"
+    echo
     echo "  Or set BIFROST_ROOT:"
     echo "    export BIFROST_ROOT=\$PWD/rootfs"
     echo "    ./bifrost-emu Tests/Apps/hello_dyn_glibc.elf"

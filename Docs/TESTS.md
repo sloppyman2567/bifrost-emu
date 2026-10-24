@@ -4,6 +4,18 @@ Dated checkpoints record the revision and scope tested at that time. Earlier
 failures and totals remain as history; use later checkpoints for superseding
 results. Passing fixtures do not establish untested application behavior.
 
+## Rootfs install (2026-10-24)
+
+`Scripts/Testing/test_rootfs_install.sh` (11 of 11 pass) installs from the toolchains already in `Tools/` into a
+temporary prefix, copies the emulator to `PREFIX/bin`, and runs both hello fixtures with no flags and no rootfs
+argument, which exercises the `<exe dir>/../share/bifrost/rootfs` layout. It also checks the loaders, `ld.so.cache`,
+`/etc`, leftover staging directories, reinstall replacing the old tree, uninstall refusing a directory without a
+loader, and uninstall. By hand: a rebuild that fails (bad `AARCH64_SYSROOT`) kept the existing install and removed
+its staging directory; `make install-rootfs`/`uninstall-rootfs` work with `DESTDIR`; missing toolchains with
+`--no-fetch` stop with a message and create nothing. Not tested: a real system-wide install as root, `--full` (needs
+the network), `--user` into a real home, and the downloads themselves. Installed files carry the installing user's
+timezone, as `setup-rootfs.sh` always has.
+
 ## Rootfs discovery (2026-10-24)
 
 `make test-rootfs-discovery` (host unit test, passes) covers the loader-file check, candidate order, relative
@@ -3594,6 +3606,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 
 ```sh
 ./Scripts/Testing/test_rootfs_discovery.sh  # dynamic programs find a rootfs without flags
+./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec
 ./Scripts/Testing/test_late_tls_pthread.sh  # existing/new threads, reuse, pointer/alignment/weak cases
 ./Scripts/Testing/run_thunk_compat.sh       # SDL/GL/Vulkan ABI probes in both modes
