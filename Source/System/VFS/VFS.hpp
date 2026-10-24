@@ -224,11 +224,14 @@ public:
     }
     // The guest's own pid as getpid() reports it: 1, or the host pid in a
     // fork child. /proc/<that pid> names the same process as /proc/self.
-    void set_self_pid(int pid) { self_pid_ = pid; }
+    void set_self_pid(int pid);
     int self_pid() const { return self_pid_; }
+    int initial_ppid_ = 0;  // the host parent when self_pid_ was set; 0 in the PID-1 model
     // The process identity getpid/getppid/getpgid/getsid and /proc report:
     // the PID-1 model of a plain run, or the host process's own identity
     // for fork children and Binder-broker apps (self_pid != 1).
+    // An orphan (its starting parent has died and the host adopted it) sees parent 1, the guest's init, as on
+    // Linux and Android; the host's adopter (a session manager, a subreaper) is not a guest process.
     struct ProcessIds { int pid, ppid, pgid, sid; };
     ProcessIds process_ids() const;
     // Full /proc/<pid>/status text; `task_fields` (the debugger's "Key:\tvalue" lines) overrides what it knows.

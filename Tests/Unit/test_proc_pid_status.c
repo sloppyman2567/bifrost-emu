@@ -52,8 +52,33 @@ static void check_status(const char *path, pid_t pid) {
     CHECK(field(text, "Threads") >= 1, "Threads is at least 1");
 }
 
+// /proc/self/stat: the resource fields are a process's own, not zeros.
+static void check_stat(void) {
+    char text[1024];
+    int n = read_file("/proc/self/stat", text, sizeof text);
+    CHECK(n > 0, "/proc/self/stat is readable");
+    const char *close = strrchr(text, ')');
+    char state = 0;
+    long ppid, pgrp, session, tty, tpgid;
+    unsigned long flags, minflt, cminflt, majflt, cmajflt, utime, stime, cutime, cstime;
+    long priority, nice, threads, itreal;
+    unsigned long long starttime;
+    unsigned long vsize;
+    long rss;
+    int got = close ? sscanf(close + 1, " %c %ld %ld %ld %ld %ld %lu %lu %lu %lu %lu %lu %lu %lu %lu %ld %ld %ld %ld %llu %lu %ld",
+                             &state, &ppid, &pgrp, &session, &tty, &tpgid, &flags, &minflt, &cminflt, &majflt, &cmajflt,
+                             &utime, &stime, &cutime, &cstime, &priority, &nice, &threads, &itreal, &starttime, &vsize,
+                             &rss) : 0;
+    CHECK(got == 22, "/proc/self/stat has all fields up to rss");
+    CHECK(state == 'R' || state == 'S' || state == 'D', "state is a running or sleeping state");
+    CHECK(threads >= 1, "num_threads is at least 1");
+    CHECK(starttime > 0, "starttime is not zero");
+    CHECK(vsize > 0 && rss > 0, "vsize and rss are not zero");
+}
+
 int main(void) {
     char path[64];
+    check_stat();
     // Before any fork /proc/<getpid()> is the same file as /proc/self.
     snprintf(path, sizeof path, "/proc/%d/status", getpid());
     check_status("/proc/self/status", getpid());

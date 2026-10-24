@@ -16,6 +16,7 @@
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Graphics/Display/Graphics.hpp"
+#include <sstream>
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -374,14 +375,38 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                 if (slash != std::string::npos) comm = comm.substr(slash + 1);
                 if (comm.size() > 15) comm = comm.substr(0, 15);
             }
-            std::string stat = std::to_string(ids.pid) + " (" + comm + ") R";
+            // The guest is a host process: its state, CPU times, nice value, thread count, start time and
+            // memory sizes are the host's own (a stat file with a zero start time and size is not a process's).
+            std::vector<std::string> host_fields(53);
+            if (FILE* host = fopen("/proc/self/stat", "r")) {
+                char text[1024];
+                const size_t n = fread(text, 1, sizeof text - 1, host);
+                fclose(host);
+                text[n] = '\0';
+                if (const char* close = strrchr(text, ')')) {
+                    std::istringstream rest(close + 1);
+                    for (unsigned field = 3; field <= 52 && (rest >> host_fields[field]); ++field) {}
+                }
+            }
+            auto from_host = [&host_fields](unsigned field, const char* fallback) {
+                return host_fields[field].empty() ? std::string(fallback) : host_fields[field];
+            };
+            std::string stat = std::to_string(ids.pid) + " (" + comm + ") " + from_host(3, "R");
             for (unsigned field = 4; field <= 52; ++field) {
                 stat += ' ';
                 switch (field) {
+                    case 23: {  // vsize: what the guest has mapped, not the host's window reservation
+                        uint64_t mapped = 0;
+                        if (maps_provider_)
+                            for (const auto& e : maps_provider_()) mapped += e.end - e.start;
+                        stat += std::to_string(mapped ? mapped : 8ull * 1024 * 1024);
+                        break;
+                    }
+                    case 14: case 15: case 16: case 17: case 19: case 20: case 22: case 24:
+                        stat += from_host(field, field == 20 ? "1" : "0"); break;
                     case 4: stat += std::to_string(ids.ppid); break;
                     case 5: stat += std::to_string(ids.pgid); break;
                     case 6: stat += std::to_string(ids.sid); break;
-                    case 20: stat += "1"; break;
                     case 8: stat += "-1"; break;
                     case 18: stat += "20"; break;
                     case 28: stat += std::to_string(initial_stack_); break;

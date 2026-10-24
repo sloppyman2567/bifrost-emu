@@ -33,8 +33,16 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   (`Yggdrasil::proc_status_text`). Found while tracing Umamusume's anti-tamper thread, which reads `/proc/<own pid>/status` every
   100 ms and then kills the app (SIGKILL, exit 137, about 10 s in). **This did not stop that kill**: with the full file the
   game still ends itself at the same point, so the check that fails is something else. `test_proc_pid_status` covers the file.
-  The Umamusume kill is unresolved; its trace shows the app forking helper children (`clone` with SIGCHLD), killing one and polling it
-  with `kill(pid, 0)`, then killing itself and another child.
+- **Orphans see parent 1.** `getppid()` and `/proc/self/stat` reported the host's adopter (a session manager or subreaper, pid 1283 here)
+  once a forked process's parent had died; a guest orphan now sees parent 1, the guest's init, as on Linux and Android
+  (`Yggdrasil::process_ids` compares against the parent recorded at start). `test_orphan_ppid` fails on the previous binary.
+- **`/proc/self/stat` has real resource fields.** State, CPU times, nice, thread count, start time and resident size come from the
+  host process (the guest is one), and `vsize` from the guest's mappings; they were `R` and zeros. `test_proc_pid_status` checks them.
+- **Umamusume still kills itself (unresolved).** The app forks a helper, which forks a monitor; the monitor reads the app's status,
+  writes 4 bytes to a pipe, kills the helper, polls `kill(helper, 0)` until it is gone, reads `/proc/<own pid>/stat` and kills the app.
+  It runs only because, before `4dfec242`, `kill(pid, 0)` never failed, which kept that polling loop from ever ending (verified
+  once by restoring the old behaviour, which was then reverted). The three fixes above did not change the outcome, so the check
+  that makes the monitor kill the app is still unknown.
 
 ### Rootfs profiles and a game-library rootfs (2026-10-24)
 
