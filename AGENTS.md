@@ -35,6 +35,10 @@ such as "misc", "common" or "core". The current version lives in
 - Preserve existing uncommitted work. Keep changes scoped; work on the current
   branch unless asked otherwise. Commit related code and docs only; never push
   without explicit approval.
+- `core.fileMode` is false here, so git does not notice executable bits: a new
+  script with a shebang is committed non-executable unless you run
+  `git update-index --chmod=+x PATH`. A clone or archive then fails on
+  `./Scripts/...`. Check with `git ls-files -s PATH` (100755).
 - Keep throwaway probes/logs outside the repository. Diagnostic switches belong
   in `Source/System/Core/DebugFlags.hpp`, not repeated getenv calls in hot paths.
 - Android runtime provisioning must retain `/system/lib64/{libc,libm,libdl}.so`
