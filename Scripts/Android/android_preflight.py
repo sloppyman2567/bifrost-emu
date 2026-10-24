@@ -99,9 +99,11 @@ def xmltree_nodes(output):
         if attribute and stack:
             name = attribute[1].split(":")[-1]
             value = attribute[2].strip()
-            raw = re.search(r'\(Raw: ("(?:[^"\\]|\\.)*")\)', value)
+            # AAPT2 prints the value between the quotes as it is, without escaping
+            # (tools/aapt2/Debug.cpp), so a pathPattern like ".*\.ext" is not JSON.
+            raw = re.search(r'\(Raw: "(.*)"\)$', value)
             if raw:
-                value = json.loads(raw[1])
+                value = raw[1]
             stack[-1][1]["attributes"][name] = value
     if len(roots) != 1 or roots[0]["tag"] != "manifest":
         raise ValueError("AAPT2 did not decode a manifest element tree")

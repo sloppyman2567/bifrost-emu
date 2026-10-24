@@ -74,5 +74,22 @@ class PreflightTests(unittest.TestCase):
             {"class":"android.app.NativeActivity","kind":"native_activity",
              "native_library":"engine","native_entrypoint":"ANativeActivity_onCreate"})
 
+    def test_xmltree_raw_values_are_taken_literally(self):
+        # AAPT2 does not escape Raw values: a regex pathPattern keeps its backslashes (Melon Sandbox).
+        tree = "\n".join([
+            "N: android=http://schemas.android.com/apk/res/android (line=2)",
+            "  E: manifest (line=2)",
+            "    A: package=\"org.test\" (Raw: \"org.test\")",
+            "    E: application (line=5)",
+            "      E: data (line=9)",
+            "        A: http://schemas.android.com/apk/res/android:pathPattern(0x0101002c)=\".*\\..*\\.melsave\""
+            " (Raw: \".*\\..*\\.melsave\")",
+            "        A: http://schemas.android.com/apk/res/android:scheme(0x01010027)=\"say \\\"hi\\\" \\u00e9\""
+            " (Raw: \"say \\\"hi\\\" \\u00e9\")",
+        ])
+        data = preflight.xmltree_nodes(tree)["children"][0]["children"][0]["attributes"]
+        self.assertEqual(data["pathPattern"], ".*\\..*\\.melsave")
+        self.assertEqual(data["scheme"], 'say \\"hi\\" \\u00e9')
+
 
 if __name__ == "__main__": unittest.main()

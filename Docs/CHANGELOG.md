@@ -14,6 +14,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android: packages whose manifest has a backslash install again (2026-10-24)
+
+- Installing Melon Sandbox (an XAPK) stopped with `Invalid \escape: line 1 column 4 (char 3)`. Its manifest has
+  `android:pathPattern=".*\.melsave"`, and `android_preflight.xmltree_nodes` decoded AAPT2's `(Raw: "...")` text with
+  `json.loads`. AAPT2 prints that value verbatim between the quotes without escaping (`tools/aapt2/Debug.cpp`, AOSP
+  `android-15.0.0_r1`), so any regex path pattern, and any value containing a backslash, failed every install. The
+  value is now taken literally. `test_android_preflight.py` fails on the old parser with the same error; the real
+  package then installs into a scratch state root (2 signed APKs, 22 ARM64 libraries). Installed copies under
+  `$PREFIX/share/bifrost/asgard` need `make install-asgard` to pick this up. Not checked: whether the game runs.
+
 ### Android: images without a `linker64` interpreter run instead of ending the emulator (2026-10-24)
 
 - A Subway Surfers run on an Ubuntu 25.10 VM ended in Play services with a failure about `linker64` and a program that
