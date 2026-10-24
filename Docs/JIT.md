@@ -2618,8 +2618,9 @@ generator in both modes, so the tax was MT's own.
   leave a stale callee address. The callee-completion guard after the call is shared with ST.
 
 Edge cases kept: the epoch is read before native code starts, so a tick during entry is seen at the next poll; a
-fork child runs interpreter-only and needs no ticker; `BIFROST_NO_CHAIN` and `BIFROST_NO_DIRECT_CALL` keep their
-meanings. Not changed: code blocks that never reach a backward edge, IBL probe or cell call (long straight-line
+fork child runs interpreter-only until it execs (the new image then gets a fresh JIT, `Emulator::restart_jit_for_exec`),
+and the ticker is forgotten in a fork child (`pthread_atfork`) so an exec'd multi-threaded program starts its own;
+`BIFROST_NO_CHAIN` and `BIFROST_NO_DIRECT_CALL` keep their meanings. Not changed: code blocks that never reach a backward edge, IBL probe or cell call (long straight-line
 chains) are bounded by their length, as before for ST.
 
 Measured on the 5800X3D, median of five, ns per iteration, ST vs MT with an idle second vCPU (MT tax):

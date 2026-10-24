@@ -15,6 +15,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `RegisterAlloc/` owns scalar mappings and spills; `Runtime/` owns dispatch,
   caching, fault recovery and profiling. Tier-2 has separate planning/emission
   and publication contracts; Tier-1 success alone does not validate it.
+- JIT lifetime across fork/exec: `fork_guest` switches the inherited JIT off in the child (its code
+  buffer and locks belong to threads that no longer exist) and `execve` gives the new image a fresh
+  one (`Emulator::restart_jit_for_exec`, which abandons the old JIT because the caller is still
+  returning through its code buffer). Anything process-wide a JIT starts (the preemption ticker)
+  must be re-startable in a fork child (`pthread_atfork`). Without this every program a shell runs
+  was about 70 times slower. `test_exec_jit.sh` and `test_exec_mt` cover it.
 - Preserve aliases and precise fault state. Spill/drop mappings before
   overwriting a live host register. Taken-path emission must not consume dirty
   state needed while emitting the fall-through path. Keep bounds, permissions

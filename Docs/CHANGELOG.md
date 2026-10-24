@@ -44,6 +44,12 @@ found these; each has a regression test.
   missing directory (`env`, `make`, `xargs`) run the wrong program, and made a non-multi-call program exec itself
   in a loop. That redirect now applies only to existing foreign ELF files and only when the running program is a
   multi-call binary (BusyBox, toybox). Android's exec branch keeps its previous checks.
+- **Programs started by a shell ran about 70 times slower.** A fork child inherits a disabled copy of the parent's
+  JIT and `execve` never switched it back on, so every command a shell launched ran in the interpreter: sorting
+  100,000 numbers took 150 s through `ash` against 2.2 s run directly (and 119 s with `--no-jit`). `execve` now gives
+  the new image a fresh JIT, and the preemption ticker is restarted in a fork child so an exec'd multi-threaded
+  program can be preempted. Results are unchanged (a pipeline's checksum matches the host's); Android's exec branch
+  and `--no-jit` are unchanged.
 - **`FD_CLOEXEC`** was neither tracked nor honoured: descriptors opened with `O_CLOEXEC` (or `F_SETFD`,
   `F_DUPFD_CLOEXEC`, `pipe2`, `dup3`, sockets, `MSG_CMSG_CLOEXEC`...) stayed open in the new program, and
   `F_SETFD` changed the host descriptor shared by every `dup`. The flag is now kept per guest descriptor and

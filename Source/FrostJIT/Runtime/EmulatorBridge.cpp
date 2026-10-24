@@ -149,6 +149,15 @@ void Emulator::enable_jit() {
         }
     }
 }
+void Emulator::restart_jit_for_exec() {
+    if (!jit_) return;
+    // Abandon the old JIT instead of destroying it: this thread is still inside its code buffer
+    // (the execve syscall was called from JIT code and returns through it), and destroying it would
+    // unmap that buffer. It is released with the process.
+    (void)jit_.release();
+    jit_enabled_ = false;
+    enable_jit();
+}
 void Emulator::print_jit_stats() {
     if (!jit_ || !jit_enabled_) return;
     // Aggregate main JIT + all per-thread JITs for a complete picture.

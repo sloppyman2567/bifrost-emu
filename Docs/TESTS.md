@@ -13,7 +13,10 @@ difference was reduced to a minimal fixture and, where possible, confirmed again
 checks: trailing slashes, `/`, `getcwd` through symlinks) and `test_signal_semantics` (`test_self_signal`) were extended
 and the new `test_execve` (21 checks: envp, NULL envp, close-on-exec across `open`, `dup`, `F_DUPFD_CLOEXEC`,
 `F_SETFD` and `pipe2`, `#!` scripts including nested and looping, ENOENT/EACCES/ENOEXEC/ELOOP, 100000-byte
-argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. `test_guest_env.sh` (6 checks) pins the guest environment: the caller's variables arrive and nothing else is
+argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. `test_exec_jit.sh` (3 checks) counts JIT instances with `-v` (a shell plus three exec'd pipeline stages: 4; the old
+binary 1) and `test_exec_mt` runs a multi-threaded program exec'd from a multi-threaded parent, whose spinning
+thread only stops if the child's own preemption ticker runs (without the `pthread_atfork` fix it hangs).
+`test_guest_env.sh` (6 checks) pins the guest environment: the caller's variables arrive and nothing else is
 added, `LD_*`/`BIFROST_*` are dropped, `PWD` is corrected or kept when it is a valid logical path, `PATH` and `HOME`
 default when missing, and a sandbox keeps the curated environment; `test_env.c` no longer asserts `HOME=/root` and
 `TERM=linux`. The previous binary fails every one of them (for `test_execve` by running away: each missing-file
@@ -3698,6 +3701,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
 ./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
+./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update and removal (fake checkout)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec

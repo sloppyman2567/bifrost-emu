@@ -300,6 +300,12 @@ public:
     static Emulator* active_emulator() { return g_active_emu_; }
     FrostJIT*       jit() { return jit_.get(); }
     void            enable_jit();
+    // After execve: give the new image a fresh JIT. A fork child inherits the parent's FrostJIT
+    // copy-on-write with the JIT switched off (its code buffer and locks belong to threads that
+    // do not exist here), and an exec in the same process leaves the old one stopped; either way
+    // the new program would run in the interpreter, about 70 times slower. A no-op when the JIT
+    // was never enabled (--no-jit).
+    void            restart_jit_for_exec();
     // SMC / mapping invalidation (see FrostJIT::invalidate_range/all):
     // drops JIT translations overlapping [addr, addr+size) (or everything)
     // on the main JIT and every per-thread JIT. Collects JIT pointers

@@ -260,9 +260,8 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // without touching the code buffer. The stale JIT code can
     // finish executing safely (it just returns to run_block,
     // which calls emu.step() because jit_disabled_ is true).
-    // After the current block ends, the run loop checks
-    // jit_enabled_ (false after fork) and switches to pure
-    // interpreter mode for the new binary.
+    // Once the image is replaced, restart_jit_for_exec() abandons
+    // this JIT and builds a fresh one for the new program.
     if (emu.jit()) {
         emu.jit()->jit_disabled_.store(true, std::memory_order_relaxed);
     }
@@ -468,6 +467,9 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
         cpu.tpidrro_el0 = cpu.tpidr_el0;
         mem_.map_range(0, 4096);
     }
+    // The new image gets its own JIT (see restart_jit_for_exec); Android's exec branch keeps the
+    // interpreter, as before.
+    if (!emu.android_runtime_) emu.restart_jit_for_exec();
     // Return 0 to indicate execve succeeded (the syscall doesn't
     // actually return on success — we just set PC to the entry
     // point and continue).
