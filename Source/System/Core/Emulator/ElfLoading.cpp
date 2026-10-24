@@ -166,6 +166,14 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         return debugger_->status(tid, text);
     });
     vfs_.set_audio(&audio_);
+    // /proc/self/mem: reads and writes of guest memory that fail where it is not mapped.
+    vfs_.set_memory_access(
+        [this](uint64_t addr, void* buf, size_t n) {
+            try { mem_.read(addr, buf, n); return true; } catch (const EmuError&) { return false; }
+        },
+        [this](uint64_t addr, const void* buf, size_t n) {
+            try { mem_.write(addr, buf, n); return true; } catch (const EmuError&) { return false; }
+        });
     // /proc/self/maps lists every guest mapping as the kernel does: real
     // permissions, and file offset, device, inode and resolved path for
     // file-backed pages. The callback captures `this`; the Emulator outlives

@@ -38,11 +38,19 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   (`Yggdrasil::process_ids` compares against the parent recorded at start). `test_orphan_ppid` fails on the previous binary.
 - **`/proc/self/stat` has real resource fields.** State, CPU times, nice, thread count, start time and resident size come from the
   host process (the guest is one), and `vsize` from the guest's mappings; they were `R` and zeros. `test_proc_pid_status` checks them.
-- **Umamusume still kills itself (unresolved).** The app forks a helper, which forks a monitor; the monitor reads the app's status,
-  writes 4 bytes to a pipe, kills the helper, polls `kill(helper, 0)` until it is gone, reads `/proc/<own pid>/stat` and kills the app.
-  It runs only because, before `4dfec242`, `kill(pid, 0)` never failed, which kept that polling loop from ever ending (verified
-  once by restoring the old behaviour, which was then reverted). The three fixes above did not change the outcome, so the check
-  that makes the monitor kill the app is still unknown.
+- **`/proc/self/mem` and `/proc/self/pagemap` are the guest's.** `open("/proc/<own pid>/mem")` failed with ENOENT and pagemap reads
+  came from the host's page table (`ProcMemoryNode` now serves both over the guest's memory: mem reads and writes it, EIO where
+  unmapped; pagemap reports present, file-backed and exclusive flags with the frame number hidden). Umamusume opens both right before
+  it starts forking helpers; with them fixed its self-destruct helper (SIGKILL, exit 137) no longer runs and the app instead exits
+  with status 0 about 8 s in, after a forked child that stats `/proc` and `/proc/%d` exits with code 142. `test_proc_mem_pagemap`
+  passes natively and in the emulator and fails on the previous binary.
+- **Umamusume still does not run (unresolved).** Its anti-tamper code forks a helper, which forks a monitor that kills the helper,
+  waits for it to vanish with `kill(helper, 0)`, reads `/proc/<own pid>/stat` and then kills the app. That self-destruct sequence
+  only completed after `4dfec242` made `kill(pid, 0)` honest (restoring the old behaviour once let the game run; it was reverted
+  because it hangs every `kill -0` polling loop). The status, orphan, `stat` and memory-file fixes above changed the outcome from
+  SIGKILL to a clean exit about 8 s in; which environment check the game still fails is unknown. Checks seen before the exit:
+  its own library, `/proc/self/maps` and `environ`, the three `libc.so` paths, `/proc/<pid>/status`, `libart.so`, pagemap, `mem`, and a
+  forked child that stats `/proc` and `/proc/%d`.
 
 ### Rootfs profiles and a game-library rootfs (2026-10-24)
 

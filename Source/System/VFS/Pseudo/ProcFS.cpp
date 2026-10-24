@@ -12,6 +12,7 @@
 //     emulator startup.
 #include "System/VFS/VFS.hpp"
 #include "System/VFS/Nodes/MemfdNode.hpp"
+#include "System/VFS/Nodes/ProcMemoryNode.hpp"
 #include "System/VFS/Nodes/DirectoryNode.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/Memory/Memory.hpp"
@@ -286,6 +287,14 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
             if (tid <= INT32_MAX && debug_status_provider_(static_cast<int>(tid), text))
                 return serve_static(proc_status_text(text), flags);
         }
+    }
+    // Guest memory and its page flags, over the guest's own address space (not the host's).
+    if (path == "/proc/self/mem" || path == "/proc/self/pagemap") {
+        const bool mem = path == "/proc/self/mem";
+        if (!mem && (flags & O_ACCMODE) != O_RDONLY) { *err_out = -EACCES; return nullptr; }
+        return std::make_unique<ProcMemoryNode>(
+            mem ? ProcMemoryNode::Kind::Mem : ProcMemoryNode::Kind::Pagemap, flags, memory_read_, memory_write_,
+            maps_provider_);
     }
     // Directory listings.
     if (path == "/proc" || path == "/proc/") {

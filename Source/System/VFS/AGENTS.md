@@ -39,6 +39,12 @@
   `/proc/self/task/<tid>/comm` (and `/proc/thread-self/comm`, rewritten in
   `open_guest_at`) reads and renames one guest TID with `comm_write`
   semantics. Guest TIDs are not host TIDs; never pass those through.
+- `/proc/self/mem` and `/proc/self/pagemap` (also `/proc/<own pid>/…`) are served by `ProcMemoryNode` over the guest's
+  address space, never the host's: mem reads and writes guest memory (EIO where unmapped); pagemap reports present, file-backed
+  and exclusive-anonymous flags from the guest mappings with the frame number 0. Other pids' `/proc/<pid>/mem` stay denied.
+- A task's `/proc/<pid>/status` is the complete status text with the debugger's name, state, ids, tracer and credentials filled
+  in; `/proc/self/stat` takes state, times, nice, threads, start time and RSS from the host process and `vsize` from the
+  guest mappings. An orphan (its starting parent died) sees parent 1.
 - `/proc` mappings and main-stack views describe real guest mappings without
   overlaps. `/proc/self/maps` follows `fs/proc/task_mmu.c` `show_map_vma`:
   real permissions, `s`/`p`, file offset, `major:minor` and inode of the file,

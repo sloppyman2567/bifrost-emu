@@ -284,13 +284,29 @@ int main(int argc, char **argv) {
         if (f >= 0) close(f);
         chdir("/");
     }
-    // 13. /proc/self/mem denied (emulator-memory read primitive).
+    // 13. /proc/self/mem is the guest's own address space, never the emulator's: a guest value reads back
+    // through it, an unmapped address fails with EIO, and another process's mem stays denied.
     {
-        errno = 0;
+        static volatile int marker = 0x5afe0042;
         int f = open("/proc/self/mem", O_RDONLY);
+        CHECK(f >= 0, "/proc/self/mem opens under root");
+        if (f >= 0) {
+            int back = 0;
+            CHECK(pread(f, &back, sizeof back, (off_t)(unsigned long)&marker) == (ssize_t)sizeof back && back == marker,
+                  "/proc/self/mem reads guest memory");
+            char byte;
+            errno = 0;
+            CHECK(pread(f, &byte, 1, (off_t)0x7f0000000000ULL) == -1 && errno == EIO,
+                  "/proc/self/mem fails with EIO where the guest has nothing mapped");
+            close(f);
+        }
+        char other[32];
+        snprintf(other, sizeof other, "/proc/%d/mem", getpid() == 2 ? 3 : 2);  // never this process
+        errno = 0;
+        f = open(other, O_RDONLY);
         int e = errno;
-        CHECK(f < 0, "/proc/self/mem denied under root");
-        CHECK(e == ENOENT, "/proc/self/mem denial is ENOENT");
+        CHECK(f < 0, "another process's /proc/<pid>/mem denied under root");
+        CHECK(e == ENOENT, "another process's mem denial is ENOENT");
         if (f >= 0) close(f);
     }
 
