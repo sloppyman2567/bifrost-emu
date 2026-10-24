@@ -5,6 +5,11 @@ See [the source map](../../Docs/ARCHITECTURE.md) for subsystem entry points.
 ELF/dynamic linking, `Syscalls/` Linux ABI translation, `VFS/` guest paths and
 devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs.
 
+- Guest environment (`Emulator::build_default_guest_env`): without `BIFROST_ROOT` the guest gets the
+  caller's own environment, read from `/proc/self/environ` (libraries linked into the emulator change
+  `environ`), minus `LD_*`, `BIFROST_*` and `_`; PATH and HOME default only when missing, PWD names the
+  real cwd. A sandbox gets the curated environment (HOME=/root and an allowlist of host variables).
+  `test_guest_env.sh` covers both; do not add emulator-internal variables to the guest.
 - Preserve the guest/host boundary: guest handles and addresses must round-trip
   through guest memory; host pointers are not valid guest pointers. Keep existing
   bounce/writeback and mapping lifetime contracts.

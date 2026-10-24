@@ -1,9 +1,9 @@
 // test_env.c — Test host env var propagation to the guest.
 //
-// bifrost-emu should propagate locale/timezone-related host env vars
-// (TZ, LANG, LC_*) to the guest so locale-aware programs display the
-// user's local time and language conventions. This test verifies that:
-//   1. Core env vars (PATH, HOME, SHELL, TERM) are always set
+// Without a sandbox bifrost-emu passes the caller's environment to the
+// guest (PATH and HOME get a default only when the caller had none), so
+// locale-aware programs see the user's TZ/LANG. This test verifies that:
+//   1. PATH and HOME are set (their values are the caller's: not asserted)
 //   2. localtime() + strftime() work without crashing
 //   3. setenv() round-trips work (the guest can modify its own env)
 //
@@ -39,9 +39,9 @@ int main(void) {
     snprintf(msg, sizeof(msg), "PATH=%s\n", path ? path : "(null)");
     write(2, msg, strlen(msg));
     CHECK(path && path[0] != '\0', "PATH is set");
-    CHECK(home && strcmp(home, "/root") == 0, "HOME=/root");
-    CHECK(shell && strcmp(shell, "/bin/sh") == 0, "SHELL=/bin/sh");
-    CHECK(term && strcmp(term, "linux") == 0, "TERM=linux");
+    CHECK(home && home[0] != '\0', "HOME is set");
+    snprintf(msg, sizeof(msg), "SHELL=%s TERM=%s\n", shell ? shell : "(unset)", term ? term : "(unset)");
+    write(2, msg, strlen(msg));
 
     // 2. Verify localtime() + gmtime() don't crash.
     time_t now = time(NULL);

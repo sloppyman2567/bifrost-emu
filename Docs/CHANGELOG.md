@@ -25,6 +25,13 @@ found these; each has a regression test.
   returned their first argument (so BusyBox reported "can't kill pid 1") and called the handler with signal 0: the
   result was written after the handler frame had been built. `raise()` and `pthread_kill` were unaffected.
 
+- **The guest's environment.** Without a sandbox the guest always got a fixed environment (`HOME=/root`,
+  `TERM=linux`, `PATH=/tmp/aarch64-bin:...`, no custom variables) instead of the caller's. It now gets the caller's
+  own, as under qemu-user: `HOME`, `TERM`, `LANG`, `PATH` and anything else (`DEBUG=1 bifrost-emu prog` works,
+  `cd $HOME/dir` stops failing, colour and terminal handling follow the real `TERM`). `LD_*`, `BIFROST_*` and `_` are
+  not passed, `PATH` and `HOME` get a default only when missing, and `PWD` names the real directory. The block is
+  read from `/proc/self/environ`, because sdl2-compat adds `SDL2_COMPAT` and `SDL3_VERSION` to the emulator's own
+  environment before `main`. Programs in a `--rootfs` sandbox keep the curated environment.
 - **`getcwd` after `cd` through a symlink.** `chdir` recorded its argument text, so `cd link; pwd -P` printed `link`;
   it now records the real directory.
 - **`execve` rewritten** (`Process/Exec.cpp`): it ignored its `envp` argument, so `FOO=bar cmd`, `export` and

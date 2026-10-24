@@ -13,8 +13,11 @@ difference was reduced to a minimal fixture and, where possible, confirmed again
 checks: trailing slashes, `/`, `getcwd` through symlinks) and `test_signal_semantics` (`test_self_signal`) were extended
 and the new `test_execve` (21 checks: envp, NULL envp, close-on-exec across `open`, `dup`, `F_DUPFD_CLOEXEC`,
 `F_SETFD` and `pipe2`, `#!` scripts including nested and looping, ENOENT/EACCES/ENOEXEC/ELOOP, 100000-byte
-argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. The previous
-binary fails every one of them (for `test_execve` by running away: each missing-file `execve` re-ran the test).
+argument and 50000-byte environment string, `/proc/self/exe` of a different program, `AT_RANDOM`) added. `test_guest_env.sh` (6 checks) pins the guest environment: the caller's variables arrive and nothing else is
+added, `LD_*`/`BIFROST_*` are dropped, `PWD` is corrected or kept when it is a valid logical path, `PATH` and `HOME`
+default when missing, and a sandbox keeps the curated environment; `test_env.c` no longer asserts `HOME=/root` and
+`TERM=linux`. The previous binary fails every one of them (for `test_execve` by running away: each missing-file
+`execve` re-ran the test).
 All pass under the JIT and the interpreter. Results with the changes: `--unit --toybox` 174/174 (166 with 8 skips under
 `--no-jit`), `--realworld --interactive` 61/61, `--dynamic` 21/21 under both linkers, `--integration` 83/85 (the two
 `android_surface`/`mambo_vulkan` failures need a real display), and the discovery, install, cwd and APK-launch
@@ -3694,6 +3697,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_rootfs_discovery.sh  # dynamic programs find a rootfs without flags
 ./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
 ./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
+./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update and removal (fake checkout)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec

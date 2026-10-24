@@ -12,6 +12,8 @@
 #include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
 #include <fcntl.h>
+#include <limits.h>
+#include <pwd.h>
 #include <unistd.h>
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include <algorithm>
@@ -32,11 +34,16 @@
 #include <vector>
 namespace arm64emu {
 // ── Default guest environment ──────────────────────────────────────────
-// Builds a minimal but realistic environment for the guest, propagating
-// locale/timezone-related host env vars so programs like `toybox uptime`,
-// `date`, `ls` display correct local time and language conventions.
+// Without a sandbox the guest is the caller's own program, so it gets the caller's environment, as
+// under qemu-user: HOME, TERM, LANG, PATH and any custom variable (`DEBUG=1 bifrost-emu prog`).
+// Left out: LD_* (the host's loader settings mean nothing to an AArch64 program; --guest-ld
+// forwards LD_LIBRARY_PATH itself), BIFROST_* (emulator-internal switches) and `_`. PATH and HOME
+// get a default only when missing, PWD always matches the real cwd.
 //
-// Propagated vars (if set on host):
+// A BIFROST_ROOT sandbox gets the curated environment below instead: the guest has its own root
+// (HOME=/root, a fixed PATH), and only the variables listed there come from the host.
+//
+// Curated environment, propagated vars (if set on host):
 //   TZ, LANG, LC_ALL, LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE,
 //   LC_MONETARY, LC_MESSAGES, LC_PAPER, LC_NAME, LC_ADDRESS,
 //   LC_TELEPHONE, LC_MEASUREMENT, LC_IDENTIFICATION,
@@ -45,7 +52,65 @@ namespace arm64emu {
 // NOT propagated (sandbox/security):
 //   LD_PRELOAD, LD_LIBRARY_PATH (would break the emulated loader),
 //   BIFROST_* (emulator-internal flags must not leak to guest).
+static void append_guest_env_extras(std::vector<std::string>& envs);
+
+// The caller's environment for an unsandboxed guest (see above).
+static std::vector<std::string> build_inherited_guest_env() {
+    std::vector<std::string> envs;
+    bool has_path = false, has_home = false;
+    char cwd[PATH_MAX];
+    const bool have_cwd = ::getcwd(cwd, sizeof(cwd)) != nullptr;
+    std::string host_pwd;
+    // The environment the process was STARTED with: libraries linked into the emulator (sdl2-compat
+    // sets SDL2_COMPAT and SDL3_VERSION in a constructor) and our own setenv calls change `environ`,
+    // and none of that is the caller's. The kernel keeps the original block in /proc/self/environ.
+    std::vector<std::string> host_env;
+    {
+        std::string block;
+        if (FILE* f = fopen("/proc/self/environ", "rb")) {
+            char chunk[4096];
+            size_t n;
+            while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) block.append(chunk, n);
+            fclose(f);
+        }
+        for (size_t pos = 0; pos < block.size();) {
+            const size_t end = block.find('\0', pos);
+            const size_t stop = end == std::string::npos ? block.size() : end;
+            if (stop > pos) host_env.push_back(block.substr(pos, stop - pos));
+            pos = stop + 1;
+        }
+        if (host_env.empty())
+            for (char** entry = environ; entry && *entry; ++entry) host_env.push_back(*entry);
+    }
+    for (const std::string& text : host_env) {
+        const size_t eq = text.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        const std::string name = text.substr(0, eq);
+        if (name.compare(0, 3, "LD_") == 0 || name.compare(0, 8, "BIFROST_") == 0 || name == "_") continue;
+        if (name == "PWD") { host_pwd = text.substr(eq + 1); continue; }
+        if (name == "PATH") has_path = true;
+        if (name == "HOME") has_home = true;
+        envs.push_back(text);
+    }
+    if (!has_path) envs.push_back("PATH=/usr/local/bin:/usr/bin:/bin");
+    if (!has_home) {
+        const struct passwd* pw = ::getpwuid(::getuid());
+        envs.push_back(std::string("HOME=") + (pw && pw->pw_dir && pw->pw_dir[0] ? pw->pw_dir : "/"));
+    }
+    // PWD as the shell left it when it still names the cwd (it may be a logical path through
+    // a symlink), else the real directory.
+    char resolved[PATH_MAX];
+    if (have_cwd) {
+        const bool valid = !host_pwd.empty() && host_pwd[0] == '/' && ::realpath(host_pwd.c_str(), resolved) &&
+                           std::string(resolved) == cwd;
+        envs.push_back("PWD=" + (valid ? host_pwd : std::string(cwd)));
+    }
+    append_guest_env_extras(envs);
+    return envs;
+}
+
 std::vector<std::string> Emulator::build_default_guest_env() {
+    if (!yggdrasil::Yggdrasil::sandbox_inside_root()) return build_inherited_guest_env();
     std::vector<std::string> envs;
     // Core environment every guest needs.
     envs.push_back("PATH=/tmp/aarch64-bin:/bin:/usr/bin:/sbin:/usr/sbin");
@@ -109,9 +174,13 @@ std::vector<std::string> Emulator::build_default_guest_env() {
             envs.push_back(std::string(propagate[i]) + "=" + v);
         }
     }
-    // BIFROST_GUEST_ENV="KEY=VAL;KEY2=VAL2": debug passthrough so host env
-    // vars the curated list doesn't cover (e.g. MIMALLOC_*) can reach the
-    // guest. Split on ';'.
+    append_guest_env_extras(envs);
+    return envs;
+}
+// BIFROST_GUEST_ENV="KEY=VAL;KEY2=VAL2": debug passthrough so host env
+// vars the curated list doesn't cover (e.g. MIMALLOC_*) can reach the
+// guest. Split on ';'.
+static void append_guest_env_extras(std::vector<std::string>& envs) {
     if (const char* extra = getenv("BIFROST_GUEST_ENV")) {
         std::string s(extra);
         size_t pos = 0;
@@ -125,7 +194,6 @@ std::vector<std::string> Emulator::build_default_guest_env() {
             pos = semi + 1;
         }
     }
-    return envs;
 }
 // ── vDSO loader ───────────────────────────────────────
 // Maps the embedded AArch64 vDSO ELF into guest memory and returns the
