@@ -71,6 +71,8 @@ Large host adapters are divided by the APIs or protocols they implement:
   display instances.
 - `Loader/DynamicLinker/`: parsing, library search/loading, symbol lookup,
   relocations, linking, dlopen, glibc patches, ld-linux shims and thread TLS.
+- `Loader/RootfsDiscovery.cpp`: the library root (`BIFROST_ROOT`, else a default
+  rootfs next to the executable or in the user/system data directories).
 
 ## Syscall families
 

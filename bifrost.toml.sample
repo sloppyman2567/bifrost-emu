@@ -52,7 +52,10 @@ dump        = ""          # write WAV here on exit (empty = no dump)
 
 # ── Filesystem paths ──────────────────────────────────────────────────
 [paths]
-rootfs = ""               # BIFROST_ROOT — guest VFS root; see Docs/SECURITY.md
+rootfs = ""               # BIFROST_ROOT — guest VFS root; see Docs/SECURITY.md.
+                          # Empty: a rootfs next to the executable, under
+                          # ~/.local/share/bifrost/rootfs or /usr/share/bifrost/rootfs
+                          # supplies libraries only (guest paths stay on the host).
 cwd    = "/"              # guest-side current working directory
 
 # ── Signal handling ───────────────────────────────────────────────────

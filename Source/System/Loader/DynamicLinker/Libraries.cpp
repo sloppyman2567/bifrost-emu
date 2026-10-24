@@ -2,6 +2,7 @@
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Memory/Memory.hpp"
+#include "System/Loader/RootfsDiscovery.hpp"
 #include "Bifrost/Types.hpp"
 #include "Bifrost/Version.hpp"
 #include <algorithm>
@@ -28,9 +29,10 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
     //      per the gABI (only if no DT_RUNPATH was seen in any object).
     //      We approximate by searching it before RUNPATH.
     //   0.5. Parent object's DT_RUNPATH (per-object, $ORIGIN-expanded).
-    //   1. BIFROST_ROOT sandbox (if set) — $BIFROST_ROOT/lib and
-    //      $BIFROST_ROOT/usr/lib. This lets the user provide a self-
-    //      contained rootfs without polluting the host's multiarch dirs.
+    //   1. Library root — $BIFROST_ROOT (sandbox, if set), else the default
+    //      rootfs (see RootfsDiscovery.hpp): <root>/lib, <root>/usr/lib, ...
+    //      This lets the user provide a self-contained rootfs without
+    //      polluting the host's multiarch dirs.
     //   2. LD_LIBRARY_PATH entries (user override).
     //   3. /usr/aarch64-linux-gnu/lib/         (Debian/Ubuntu multiarch)
     //   4. /usr/lib/aarch64-linux-gnu/         (newer Debian multiarch)
@@ -74,23 +76,19 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             pos = colon + 1;
         }
     }
-    // 1. BIFROST_ROOT sandbox.
-    if (const char* root = getenv("BIFROST_ROOT")) {
-        std::string r(root);
-        // Strip trailing slash(es) for clean concatenation.
-        while (r.size() > 1 && r.back() == '/') r.pop_back();
-        if (!r.empty()) {
-            dirs.push_back(r + "/lib");
-            dirs.push_back(r + "/lib64");
-            dirs.push_back(r + "/usr/lib");
-            dirs.push_back(r + "/usr/lib64");
-            // Debian/Ubuntu multiarch triplet dirs (neverball's
-            // libSDL2_ttf/vorbis/openhmd live here — without these the
-            // loader fell through to host x86_64 libs or empty thunks
-            // and the game died calling NULL).
-            dirs.push_back(r + "/lib/aarch64-linux-gnu");
-            dirs.push_back(r + "/usr/lib/aarch64-linux-gnu");
-        }
+    // 1. Library root.
+    const std::string root = library_root();
+    if (!root.empty()) {
+        dirs.push_back(root + "/lib");
+        dirs.push_back(root + "/lib64");
+        dirs.push_back(root + "/usr/lib");
+        dirs.push_back(root + "/usr/lib64");
+        // Debian/Ubuntu multiarch triplet dirs (neverball's
+        // libSDL2_ttf/vorbis/openhmd live here — without these the
+        // loader fell through to host x86_64 libs or empty thunks
+        // and the game died calling NULL).
+        dirs.push_back(root + "/lib/aarch64-linux-gnu");
+        dirs.push_back(root + "/usr/lib/aarch64-linux-gnu");
     }
     // 2. LD_LIBRARY_PATH.
     if (const char* llp = getenv("LD_LIBRARY_PATH")) {
@@ -114,20 +112,15 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
     dirs.push_back("/lib");
     // 3.5. Android-compatible library paths.
     // Android games and Android-ported apps look for shared libraries
-    // in /system/lib64 and /vendor/lib64. When BIFROST_ROOT is set,
-    // these resolve to $BIFROST_ROOT/system/lib64 etc. (created by
-    // setup-rootfs.sh as symlinks to ../lib64). Adding them here lets
-    // Android-style DT_NEEDED entries (e.g., "libGLESv2.so") resolve
-    // from the rootfs.
-    if (const char* root = getenv("BIFROST_ROOT")) {
-        std::string r(root);
-        while (r.size() > 1 && r.back() == '/') r.pop_back();
-        if (!r.empty()) {
-            dirs.push_back(r + "/system/lib");
-            dirs.push_back(r + "/system/lib64");
-            dirs.push_back(r + "/vendor/lib");
-            dirs.push_back(r + "/vendor/lib64");
-        }
+    // in /system/lib64 and /vendor/lib64. These resolve to
+    // <root>/system/lib64 etc. (created by setup-rootfs.sh as symlinks to
+    // ../lib64). Adding them here lets Android-style DT_NEEDED entries
+    // (e.g., "libGLESv2.so") resolve from the rootfs.
+    if (!root.empty()) {
+        dirs.push_back(root + "/system/lib");
+        dirs.push_back(root + "/system/lib64");
+        dirs.push_back(root + "/vendor/lib");
+        dirs.push_back(root + "/vendor/lib64");
     }
     // 8. Bundled toolchain libs (auto-detected relative to the
     //    executable's directory, so it works regardless of CWD).

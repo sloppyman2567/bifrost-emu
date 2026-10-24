@@ -26,8 +26,11 @@
 //   --jit-threshold N  interpret for the first N instructions, then JIT.
 //                       0 = JIT from start (default). Useful for short
 //                       programs where JIT compilation overhead dominates.
-//   --rootfs PATH   set rootfs for dynamic linking (equivalent to
-//                   BIFROST_ROOT=PATH)
+//   --rootfs PATH   use PATH as the guest root: libraries come from it and
+//                   guest paths are confined to it (equivalent to
+//                   BIFROST_ROOT=PATH). Without it, a rootfs found next to the
+//                   executable or under ~/.local/share/bifrost/rootfs
+//                   supplies libraries only.
 //   --config PATH   load config from PATH (overrides the auto-search)
 //   --print-config  print the resolved config and exit
 //   -V, --version   show version and exit
@@ -85,7 +88,7 @@ static void print_banner() {
         "    --no-jit           use interpreter only (JIT is on by default)\n"
         "    --jit              enable frostJIT (default; for compatibility)\n"
         "    --jit-threshold N  interpret for N insns then switch to JIT\n"
-        "    --rootfs PATH      set rootfs for dynamic linking (BIFROST_ROOT)\n"
+        "    --rootfs PATH      guest root for libraries and paths (BIFROST_ROOT); default: auto-found, libraries only\n"
         "    --config PATH      load config from PATH\n"
         "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --guest-ld         run dynamic programs under their own guest ld.so (--rootfs)\n"
@@ -154,7 +157,7 @@ static void set_raw_terminal() {
     at_quick_exit(restore_terminal);  // guest SIGKILL (Emulator::signal_exit)
 }
 // ── Quick ELF sanity check (friendlier than letting the loader throw) ────
-static bool looks_like_static_aarch64_elf(const std::string& path) {
+static bool looks_like_aarch64_elf(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
     unsigned char hdr[20];
@@ -296,6 +299,9 @@ int main(int argc, char** argv) {
     }
     // Apply env vars (they override the file).
     cfg.apply_env();
+    // A [paths] rootfs from the file reaches the VFS and linker through
+    // BIFROST_ROOT, like --rootfs below; an environment value wins.
+    if (!cfg.rootfs_path.empty()) setenv("BIFROST_ROOT", cfg.rootfs_path.c_str(), 0);
     {
         int back = frost::android_keycode_for_name(cfg.android_back_key);
         if (back < 0) {
@@ -528,7 +534,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> guest_argv;
     guest_argv.push_back(elf_path);
     for (int i = arg_i + 1; i < argc; i++) guest_argv.push_back(argv[i]);
-    // Friendly error if the file is missing or not a static AArch64 ELF.
+    // Friendly error if the file is missing or not an AArch64 ELF.
     // Pre-checks run against the host-side (BIFROST_ROOT-remapped) path;
     // load_elf_file still receives the guest path so /proc/self/exe stays
     // consistent with the guest filesystem view.
@@ -538,10 +544,10 @@ int main(int argc, char** argv) {
                 host_elf.c_str(), strerror(errno));
         return 127;  // 127 = "command not found" convention
     }
-    if (!looks_like_static_aarch64_elf(host_elf)) {
+    if (!looks_like_aarch64_elf(host_elf)) {
         fprintf(stderr,
             "bifrost-emu: '%s' is not a 64-bit little-endian AArch64 ELF.\n"
-            "bifrost-emu only runs static AArch64 Linux binaries.\n",
+            "bifrost-emu runs AArch64 Linux binaries, static or dynamic.\n",
             host_elf.c_str());
         return 126;  // 126 = "found but not executable" convention
     }

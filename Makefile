@@ -590,6 +590,12 @@ test-native-simd-helpers:
 	$(CXX) $(CXXFLAGS) Tests/Host/native_simd_helpers.cpp Source/FrostJIT/CodeGen/Native/NativeSIMD.cpp -o $(OBJDIR)/native_simd_helpers $(LDFLAGS)
 	./$(OBJDIR)/native_simd_helpers Tools/CodeGen/native_simd_expected.txt
 
+.PHONY: test-rootfs-discovery
+test-rootfs-discovery:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Host/rootfs_discovery.cpp Source/System/Loader/RootfsDiscovery.cpp -o $(OBJDIR)/rootfs_discovery $(LDFLAGS)
+	./$(OBJDIR)/rootfs_discovery
+
 .PHONY: test-audio-frame-counters
 test-audio-frame-counters:
 	@mkdir -p $(OBJDIR)

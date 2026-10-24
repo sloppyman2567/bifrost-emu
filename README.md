@@ -110,12 +110,20 @@ make                                   # build (SDL2/GL thunks auto-detected)
 ./bifrost-emu Tests/Apps/toybox seq 1 10   # arguments pass through
 ```
 
-Dynamically linked programs need a guest root filesystem:
+Dynamically linked programs need a guest root filesystem for their libraries:
 
 ```bash
 ./Scripts/Setup/setup-rootfs-all.sh    # glibc + musl toolchains and libraries (~250 MB)
-./bifrost-emu --rootfs $PWD/rootfs my_dynamic_app.elf   # or export BIFROST_ROOT
+./bifrost-emu my_dynamic_app.elf       # finds the rootfs automatically
 ```
+
+Without `--rootfs`, the first rootfs found among `<executable dir>/rootfs`,
+`<executable dir>/../share/bifrost/rootfs`, `$XDG_DATA_HOME/bifrost/rootfs`
+(default `~/.local/share/bifrost/rootfs`), `/usr/local/share/bifrost/rootfs` and
+`/usr/share/bifrost/rootfs` supplies libraries, like `qemu-aarch64 -L`; the guest
+still sees host paths. `--rootfs PATH` (or `BIFROST_ROOT`, or `[paths] rootfs`)
+instead makes PATH the guest's root, so absolute guest paths resolve inside it.
+A missing C library stops with a message listing the places searched.
 
 Android apps install from a signed APK, APKM or APKS bundle:
 

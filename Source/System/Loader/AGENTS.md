@@ -46,5 +46,13 @@
   `--guest-ld` forwards the host `LD_LIBRARY_PATH` to the guest, in guest
   paths; the default environment omits it for the native linker. Run
   `run_tests.sh --guest-ld` alongside the default dynamic suite.
+- `RootfsDiscovery` picks the library root: `BIFROST_ROOT` (the sandbox, set by
+  `--rootfs`, the environment or `[paths] rootfs`), else the first default rootfs
+  (next to the executable, `$XDG_DATA_HOME`/`~/.local/share`, `/usr/{local/,}share`).
+  A discovered root only adds library directories in `find_library`; it must never
+  set `BIFROST_ROOT` or confine guest paths. A missing libc is fatal
+  (`libc_missing()` throws in `load_elf_file`), because the guest `ld.so` fallback
+  cannot recover. `test_rootfs_discovery.sh` copies the binary away from the
+  checkout so the bundled toolchain cannot mask a lookup failure.
 - Run glibc/musl dynamic tests, dlopen/thread/TLS regressions and static startup
   with the correct toolchain and rootfs. Static stand-ins do not test dynlink.

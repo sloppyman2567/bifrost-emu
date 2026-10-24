@@ -29,6 +29,7 @@
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Memory/Memory.hpp"
+#include "System/Loader/RootfsDiscovery.hpp"
 #include "Bifrost/Types.hpp"
 #include "Bifrost/Version.hpp"
 #include <algorithm>
@@ -65,6 +66,7 @@ bool DynamicLinker::link(CPU& cpu,
     symbols_.clear();
     versioned_symbols_.clear();
     error_.clear();
+    libc_missing_ = false;
     next_tls_mod_id_ = 1;
     tls_surplus_used_ = 0;
     static_tls_size_ = 0;
@@ -126,6 +128,7 @@ bool DynamicLinker::link(CPU& cpu,
     // Recursively load DT_NEEDED libraries. We use a worklist to handle
     // transitive dependencies (libc → ld-musl, libm → libc, etc.).
     std::vector<size_t> worklist = {0};
+    std::string missing_libc;
     size_t max_libs = 32;  // sanity limit to prevent infinite loops
     while (!worklist.empty() && objects_.size() < max_libs) {
         size_t idx = worklist.back();
@@ -166,23 +169,20 @@ bool DynamicLinker::link(CPU& cpu,
                     if (lib_base == 0) {
                         // Library not found — not necessarily fatal
                         // (some programs dlopen at runtime). Log and
-                        // continue. If BIFROST_ROOT is not set, suggest
-                        // setting it up.
+                        // continue.
+                        if (soname == "libc.so" || soname == "libc.so.6" ||
+                            soname == "libc.musl-aarch64.so.1")
+                            missing_libc = soname;
                         fprintf(stderr, "[%s] dynamic linker: could not "
                                 "find %s (continuing)\n",
                                 CODENAME, soname.c_str());
-                        // First-miss hint: if BIFROST_ROOT is unset or
-                        // the rootfs doesn't have libs, suggest setup.
+                        // First-miss hint: without a rootfs, say where one
+                        // is looked for and how to provide it.
                         static bool hinted = false;
-                        if (!hinted) {
-                            const char* root = getenv("BIFROST_ROOT");
-                            if (!root || root[0] == '\0') {
-                                hinted = true;
-                                fprintf(stderr, "[%s] hint: set BIFROST_ROOT "
-                                        "or use --rootfs for dynamic linking "
-                                        "(run ./Scripts/Setup/setup-rootfs.sh)\n",
-                                        CODENAME);
-                            }
+                        if (!hinted && library_root().empty()) {
+                            hinted = true;
+                            fprintf(stderr, "[%s] hint: %s\n", CODENAME,
+                                    rootfs_search_hint().c_str());
                         }
                         continue;
                     }
@@ -193,6 +193,13 @@ bool DynamicLinker::link(CPU& cpu,
             // Reading the dynamic section failed — skip this object.
             continue;
         }
+    }
+    // Without its C library nothing can run; stop here rather than crash at
+    // the first unresolved libc call.
+    if (!missing_libc.empty()) {
+        error_ = "cannot find the C library " + missing_libc;
+        libc_missing_ = true;
+        return false;
     }
     // Now apply relocations for all loaded objects. We do this after
     // all libraries are loaded so symbol resolution can find symbols

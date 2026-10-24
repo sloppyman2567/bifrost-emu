@@ -12,6 +12,20 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Dynamic programs start without `--rootfs` (2026-10-24)
+
+`bifrost-emu prog` now finds a rootfs for a dynamic program by itself: `<executable dir>/rootfs`,
+`<executable dir>/../share/bifrost/rootfs`, `$XDG_DATA_HOME/bifrost/rootfs` (default
+`~/.local/share/bifrost/rootfs`), then `/usr/local/share` and `/usr/share`. A discovered rootfs supplies libraries
+only; guest paths still resolve on the host, as with `qemu-aarch64 -L`. `--rootfs`, `BIFROST_ROOT` and
+`[paths] rootfs` keep their meaning (library root plus path confinement).
+
+- Before this, a musl program outside a checkout with no `--rootfs` ran into a null-pointer crash after "could not
+  find libc.so" (glibc worked only through the checkout's bundled toolchain directory). A missing libc is now a
+  fatal error that lists the places searched.
+- A `[paths] rootfs` in the config file only changed the launch pre-check; it now reaches `BIFROST_ROOT` like
+  `--rootfs`. The pre-check error no longer says only static binaries run.
+
 ### Thread exit after the guest unmaps its own stack (2026-10-23)
 
 A detached Bionic thread unmaps its stack and TLS block and then calls `exit`. The exit path still
