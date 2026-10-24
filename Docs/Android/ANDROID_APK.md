@@ -21,6 +21,9 @@ require guest ART and Android framework startup.
 
 ## Setup and use
 
+On Debian and Ubuntu the `bifrost-emu-asgard` package does all of the provisioning below: install it and run `asgard-setup`
+(see the README). The rest of this section is the manual route from a source checkout.
+
 Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
 `java` and `keytool`. The signing and manifest tools are checksum-pinned AOSP
 downloads; no full Android SDK installation is required.

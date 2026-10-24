@@ -1,0 +1,54 @@
+#!/bin/bash
+# asgard-setup — install Asgard, bifrost-emu's Android layer, from the files of the bifrost-emu-asgard package.
+#
+# Usage: asgard-setup [--system | --prefix DIR | --uninstall | --dry-run | --verify]   (install-asgard.py's options)
+#
+# Downloads the pinned Android pieces (about 1.5 GB in all, checked by hash: the Bionic runtime, an Android
+# 15 system image of 734 MiB for ART, the framework and the media libraries, the signing tools and microG),
+# builds the adapters and launcher, then installs Asgard (about 1.1 GB) under ~/.local by default. Needs
+# several GB of free disk space while it runs. The working copy is ~/.cache/bifrost/setup.
+set -euo pipefail
+
+SRC=/usr/share/bifrost/setup
+WORK="${XDG_CACHE_HOME:-${HOME:?HOME is not set}/.cache}/bifrost/setup"
+
+case "${1:-}" in
+    -h|--help) sed -n '2,/^set /p' "$0" | sed '$d; s/^# \?//'; exit 0 ;;
+esac
+
+missing=()
+for tool in python3 java javac keytool clang ld.lld debugfs readelf curl; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+    echo "error: missing tools: ${missing[*]}" >&2
+    echo "  sudo apt install default-jdk-headless clang lld e2fsprogs binutils curl python3" >&2
+    exit 1
+fi
+
+mkdir -p "$WORK"
+cp -a "$SRC/." "$WORK/"
+cd "$WORK"
+
+# Uninstalling (or listing what would change) needs no provisioning.
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall) exec python3 Scripts/Setup/install-asgard.py "$@" ;;
+    esac
+done
+
+python3 Tools/Android/fetch-android-runtime.py
+python3 Tools/Android/fetch-aapt2.py
+python3 Tools/Android/fetch-android-package-tools.py
+python3 Tools/Android/build-android-adapters.py
+python3 Scripts/Android/android_managed.py build
+python3 Tools/Android/android_art.py
+python3 Tools/Android/android_framework.py
+python3 - <<'PY'
+import sys
+sys.path.insert(0, "Tools/Android")
+import android_microg as microg
+for package in microg.PACKAGES:
+    print(microg.archive(package))
+PY
+exec python3 Scripts/Setup/install-asgard.py "$@"

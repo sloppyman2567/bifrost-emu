@@ -122,6 +122,14 @@ sudo apt install ../bifrost-emu_*.deb
 bifrost-emu --setup-rootfs                # once: downloads the toolchains and builds the guest rootfs
 ```
 
+Android apps need Asgard, which `make deb` also packages as `bifrost-emu-asgard`:
+
+```bash
+sudo apt install ../bifrost-emu-asgard_*.deb      # also pulls in clang, lld and a headless JDK
+asgard-setup                                      # once: ~1.5 GB of pinned downloads, then installs ~1.1 GB under ~/.local
+bifrost-emu /path/to/app.apkm                     # installs and runs it
+```
+
 Dynamically linked programs need a guest root filesystem for their libraries.
 Install a standard one, then run programs directly ([details](Docs/ROOTFS.md)):
 

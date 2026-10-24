@@ -264,8 +264,11 @@ def install(prefix, verify, dry_run):
     changed, removed = sync(tree, source_plan(), verify, dry_run)
     if dry_run:
         return
-    revision = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
-                              capture_output=True, text=True).stdout.strip()
+    try:  # only a label: absent without git or outside a checkout (an installed package's setup tree)
+        revision = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+    except OSError:
+        revision = ""
     write_marker(tree, complete=True, source_revision=revision or None, updated_at=int(time.time()))
     if changed or removed:
         compileall.compile_dir(tree / "Scripts/Android", quiet=2)

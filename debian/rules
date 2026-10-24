@@ -40,6 +40,21 @@ override_dh_auto_install:
 	install -m 0755 Scripts/Setup/*.sh Scripts/Setup/*.py $(SETUP)/Scripts/Setup/
 	install -m 0755 Tools/Fetch/fetch-glibc-toolchain.sh Tools/Fetch/fetch-musl-toolchain.sh $(SETUP)/Tools/Fetch/
 	install -m 0755 Tests/Apps/toybox $(SETUP)/Tests/Apps/toybox
+	# bifrost-emu-asgard: what "asgard-setup" needs to provision and install Asgard (see Scripts/Setup/install-asgard.py).
+	install -D -m 0755 debian/asgard-setup debian/bifrost-emu-asgard/usr/bin/asgard-setup
+	for d in Scripts/Android Tools/Android Tools/CodeGen Guest/Android Include ThirdParty/GLRegistry; do \
+	    mkdir -p debian/bifrost-emu-asgard/usr/share/bifrost/setup/$$d; \
+	    cp -a $$d/. debian/bifrost-emu-asgard/usr/share/bifrost/setup/$$d/; \
+	done
+	find debian/bifrost-emu-asgard/usr/share/bifrost/setup \( -name __pycache__ -o -name '*.pyc' -o -name 'test_*' -o -name 'run_*.sh' \) -prune -exec rm -rf {} +
+	# Source files keep an executable bit in the repository; only scripts (a "#!" first line) should have one.
+	find debian/bifrost-emu-asgard/usr/share/bifrost/setup -type f -exec sh -c 'head -c2 "$$1" | grep -q "#!" || chmod 0644 "$$1"' _ {} \;
+	install -D -m 0644 Source/System/Audio/AudioThunk/AudioThunk.cpp \
+	    debian/bifrost-emu-asgard/usr/share/bifrost/setup/Source/System/Audio/AudioThunk/AudioThunk.cpp
+	install -D -m 0644 Tests/Unit/android_bionic_start.S debian/bifrost-emu-asgard/usr/share/bifrost/setup/Tests/Unit/android_bionic_start.S
+	install -D -m 0644 Tests/Unit/android_jni/Bootstrap.java debian/bifrost-emu-asgard/usr/share/bifrost/setup/Tests/Unit/android_jni/Bootstrap.java
+	install -D -m 0644 Tests/Unit/android_jni/bridge.c debian/bifrost-emu-asgard/usr/share/bifrost/setup/Tests/Unit/android_jni/bridge.c
+	# (install-asgard.py itself is in bifrost-emu's Scripts/Setup, which this package depends on.)
 
 override_dh_installexamples:
 	dh_installexamples bifrost.toml.sample

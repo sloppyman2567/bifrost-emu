@@ -33,6 +33,13 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   project changelog, and the rootfs setup scripts in `/usr/share/bifrost/setup` (with the AArch64 `toybox` they install as the
   rootfs shell). `bifrost-emu --setup-rootfs` now also runs from an installed package, using a copy of those scripts in
   `~/.cache/bifrost/setup`. Asgard is not in the package.
+- A second package, `bifrost-emu-asgard`, holds Asgard's tooling (the Android scripts, adapter and launcher sources, headers, and the
+  GL registry the adapters are generated from) and one command, `asgard-setup`. It copies the tree to `~/.cache/bifrost/setup`,
+  downloads and checks the pinned Android pieces, builds the adapters and launcher, provisions ART and the framework, fetches
+  microG and runs `install-asgard.py`. The Android system image, ART, the framework and microG are downloaded on first use, not
+  shipped. In a clean Ubuntu 25.10 userland both packages installed and `asgard-setup` completed (ART 532 files, framework 1,053
+  files, install 1.1 GB, a second install a no-op, `asgard compat` runs); no Android app was run there. `install-asgard.py` no
+  longer crashes when `git` is missing or the tree is not a checkout (the revision stamp is optional).
 - Built and tested in a clean Ubuntu 25.10 userland (gcc 15.2, SDL 3.2.20, ffmpeg 7.1): the source compiled there for the first
   time; the installed package ran `--version`, an AArch64 `toybox`, `--setup-rootfs` (toolchain download and rootfs build),
   and dynamically linked glibc and musl hello programs, also under `--guest-ld`. Package builds set their own `CXXFLAGS`, which

@@ -34,3 +34,28 @@ Description: run AArch64 Linux programs and Android apps on x86-64
  (about 235 MB) and builds a rootfs under ~/.local/share/bifrost.
  "bifrost-emu --setup-rootfs --games" adds a profile with the libraries games
  need. Android windows need libsdl3-0 3.2 or newer.
+
+Package: bifrost-emu-asgard
+Architecture: amd64
+Depends: ${misc:Depends},
+         bifrost-emu (= ${binary:Version}),
+         binutils,
+         ca-certificates,
+         clang,
+         curl,
+         default-jdk-headless,
+         e2fsprogs,
+         lld,
+         python3,
+         xz-utils
+Recommends: libsdl3-0 (>= 3.2.0)
+Description: Asgard, the Android layer of bifrost-emu: setup tooling
+ Asgard runs Android apps (.apk, .apkm, .apks, .xapk) on bifrost-emu with a real
+ Bionic, ART and the Android 15 framework. This package holds the tooling and
+ the one command that sets it up: "asgard-setup" downloads the pinned Android
+ pieces (about 1.5 GB, checked by hash), builds the adapters and launcher and
+ installs Asgard under ~/.local (about 1.1 GB). Nothing from Google or the
+ Android Open Source Project is shipped in the package itself.
+ .
+ Afterwards "bifrost-emu app.apk" installs and runs an app from any directory.
+ Android windows need libsdl3-0 3.2 or newer.

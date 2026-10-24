@@ -1,0 +1,20 @@
+.TH ASGARD-SETUP 1 "October 2026" "bifrost-emu 2.0.0-alpha.2" "User Commands"
+.SH NAME
+asgard-setup \- install Asgard, the Android layer of bifrost-emu
+.SH SYNOPSIS
+.B asgard-setup
+[\fB\-\-system\fR | \fB\-\-prefix\fR \fIDIR\fR | \fB\-\-uninstall\fR | \fB\-\-dry\-run\fR | \fB\-\-verify\fR]
+.SH DESCRIPTION
+Downloads the pinned Android pieces (the Bionic runtime, an Android 15 system image of 734 MiB for ART, the
+framework and media libraries, the signing tools and microG; about 1.5 GB in all, each checked by hash), builds
+the adapters and launcher, and installs Asgard (about 1.1 GB) under \fI~/.local\fR. It needs several GB of free
+disk space while it runs and keeps its working copy in \fI~/.cache/bifrost/setup\fR.
+.PP
+Afterwards \fBbifrost-emu\fR \fIapp.apk\fR installs and runs an Android app from any directory. Android windows need
+libsdl3\-0 3.2 or newer.
+.SH OPTIONS
+The options are those of install\-asgard.py: \fB\-\-system\fR installs under /usr/local (needs root), \fB\-\-prefix\fR
+\fIDIR\fR under DIR, \fB\-\-uninstall\fR removes an install, \fB\-\-dry\-run\fR lists what would change and
+\fB\-\-verify\fR compares file contents.
+.SH SEE ALSO
+.BR bifrost-emu (1)
