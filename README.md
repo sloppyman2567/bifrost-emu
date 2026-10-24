@@ -34,12 +34,14 @@ Existing binaries need no cross-compiler and no QEMU.
   `make verify` replays JIT blocks against the interpreter.
 - **Android apps without a phone** — *Asgard* runs real Bionic, ART and the
   Android 15 framework with a shared Binder broker, installs signed APK sets
-  and plays a Unity/IL2CPP game.
+  (`bifrost-emu game.apk` installs and runs one) and plays a Unity/IL2CPP game.
 - **Your real GPU, audio and input** — GL, EGL, GLES, Vulkan, SDL2/SDL3, ALSA
   and PulseAudio calls are forwarded to host libraries; Android windows render
   at the monitor's native pixel density.
 - **A Linux personality** — 200+ syscalls, threads, signals, futexes,
-  userfaultfd, and a virtual `/proc`, `/dev` and `/sys` (*Yggdrasil* VFS).
+  userfaultfd, cooperative `ptrace`, and a virtual `/proc`, `/dev` and `/sys`
+  (*Yggdrasil* VFS). Dynamic programs find an [installed rootfs](Docs/ROOTFS.md)
+  without flags.
 - **Embeddable** — a C API (`libbifrost`) and an Android native-bridge
   adapter; see [embedding](Docs/EMBEDDING.md).
 

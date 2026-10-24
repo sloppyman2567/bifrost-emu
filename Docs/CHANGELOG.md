@@ -124,6 +124,85 @@ them. `test_thread_exit_unmapped_tls` reproduces it (QEMU passes; the previous b
   (1.38 s to 0.64 s with two of its four interpreted ops removed). New regression:
   `Tests/Unit/jit_simd_minmax.c`.
 
+### Per-process Android compatibility defaults (2026-10-23)
+
+`FrameworkCompatibility` now initializes ART's target SDK and disabled compatibility changes for each app process
+before `Application` creation, using the image's `etc/compatconfig/*.xml` metadata (`enableSinceTargetSdk`,
+`enableAfterTargetSdk`, disabled-by-default). Main apps and service children use their own `ApplicationInfo`; a child no
+longer inherits the game's target SDK. Before, the default delegate enabled every queried change, so microG's API-29
+processes got `ENFORCE_READ_ONLY_JAVA_DCL`, which applies only to API 34+ targets.
+`FrameworkCompatibilityTests` run real ART VMs targeting API 29, 33, 34 and 35 in both engines. Only the metadata in the
+provisioned image is implemented, not `system_server`'s per-package overrides, and no hardware attestation or Google
+verdict is supplied. A later approved Japanese Uma restart got a nonempty integrity token from Phonesky with no
+writable-DEX exception; that is API success, not acceptance by the game.
+
+### Child service routing (2026-10-23)
+
+Service children now send start, stop, bind, unbind, peek and stop-self requests over the authenticated Binder
+controller to the session parent, which alone holds the host process-supervisor capability. The controller checks the
+child's key, Binder PID and UID, then resolution checks package, user, export status and permissions (cached service
+records included). Isolated callers cannot start or bind other services, and a dead child releases its bindings. This
+lets nested clients such as Phonesky call microG's DroidGuard. `FrameworkServiceRoutingTests` run three supervised
+processes under real ART and Binder headlessly; real isolated-process lifecycles, sticky restarts and the full
+background-execution policy are not covered.
+
+### ART cache scope (2026-10-23)
+
+The compiled-code cache is keyed by its compilation inputs only (`managed/dexopt.json`): framework/ART image identity,
+APK contents and location, boot classpath, class-loader context, ART properties, compiler filter and reference profile.
+Launcher, microG, media routing and unrelated property changes, `ro.kernel.qemu` included, no longer invalidate it.
+Runtime replacement carries verified artifacts forward, older records migrate only when their original key still
+matches, and an unchanged failed compile is not retried. The compiler is mocked in the cache tests; a separate
+headless app compiled with the real `dex2oat64` ran from the retained odex in JIT and interpreter modes.
+
+### Asgard app profiles and startup visibility (2026-10-23)
+
+- The launcher's app settings open a compatibility profile editor: window stats, Back key, network mode, the bundled
+  Android API and an emulator-flag selector (Runtime default, Off, On) with an editable property list.
+- `asgard.py config APP property.NAME VALUE` saves per-app Android property overrides for managed apps (at most 91
+  UTF-8 bytes, no control characters); they survive upgrades and runtime reprovisioning and rebuild the generated
+  runtime at the next start without touching app data.
+- `install --allow-downgrade` (`-d`; also `run FILE -d`) installs an older version. The signer must still match and every
+  signature and integrity check still runs; saves are kept and are not converted to the older schema.
+- A starting session shows its current preparation step (file verification, media, runtime, optimization, launch) with
+  a running clock, and Open full log opens the preparation log until the game writes output; Uma had sat in
+  preparation for about 108 seconds with a frozen display.
+
+### Managed Activity orientation (2026-10-22)
+
+The top Activity's requested orientation now controls the SDL window in play mode (portrait, landscape, release;
+`BEHIND` inherits the next Activity), with display rotation, bounds and configuration published through the resize path.
+Fixed-size apps keep their panel dimensions with the axes swapped. Before this, the request was stored and never
+applied, which held Uma Global's `Screen.WaitDeviceOrientation` coroutine on its cover art. An approved live run
+advanced past the cover art; gameplay and Google sign-in were not tested. Physical sensor rotation and Activity
+recreation are not implemented.
+
+### Remote Activity results (2026-10-22)
+
+A remote Activity (microG's sign-in window) returns its result through the authenticated process host as soon as it is
+destroyed (`activity_finished`), instead of waiting for its service processes to go idle. Waiting left Global Uma paused
+behind a black microG window after cancellation. Process exit remains the fallback for crashes and older launchers.
+
+### Guest ptrace (2026-10-22)
+
+The unconditional `ptrace` EPERM is replaced by cooperative tracing of an emulator's fork family: TRACEME, ATTACH, SEIZE,
+INTERRUPT, CONT, DETACH, SINGLESTEP (one interpreted instruction, then back to the JIT), PEEK/POKE, GETSIGINFO,
+GETREGSET/SETREGSET for AArch64 GPR, FPSIMD and TLS, EXITKILL, `wait4`/`waitid` stops, and TracerPid in
+`/proc/<tid>/status`. No host debugger is attached and no host register state is exposed. Syscall tracing,
+fork/clone/exec event options, hardware debug registers and unrelated emulator processes are unsupported;
+`BIFROST_PTRACE_TRACE=1` logs requests. `test_ptrace` matches native Linux on the portable checks and runs the AArch64
+register and stepping checks in every Bifrost engine. Global's forked self-debugging child (a concrete startup
+blocker) now attaches and reaches Application creation; the same run later fails in surface preparation, so
+rendering and gameplay are unverified.
+
+### Procfs inode identity (2026-10-22)
+
+Synthetic procfs nodes now report the directory-entry inode from path stat, descriptor stat, relative directory-fd stat,
+`AT_EMPTY_PATH` and `statx`, as one file should; path stat returned the host proc inode and a descriptor the backing
+memfd's. A loader integrity check in Global compared `/proc/filesystems`' entry inode with `newfstatat`. `/proc/self/exe`
+keeps its own path. `test_proc_rewind` passes on native Linux and every Bifrost engine mode; SysFS/DevFS identity and
+procfs `d_type` constants are not changed.
+
 ### Crash reports name the library (2026-10-21)
 
 - With `--debug fault` (`BIFROST_FAULT_TRACE`), a guest fault now also prints the mapping, file and
