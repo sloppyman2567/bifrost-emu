@@ -14,6 +14,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Asgard: service processes end with the session supervisor (2026-10-25)
+
+- When a session's supervisor was killed mid-shutdown, the Play services and system helper processes it had started kept
+  running: two were still resident 44 minutes after their game crashed (about 490 MB). `ProcessHost.spawn` now passes
+  `--asgard-service-parent <supervisor pid>`, the flag the broker and codec helpers already use, so the kernel
+  SIGKILLs each child when the spawning thread's process dies (`PR_SET_PDEATHSIG`, then a parent-pid recheck for the race).
+  `Scripts/Android/test_asgard_process_host.py` checks the command line, kills a real supervisor and requires the emulator
+  child to be gone, and runs a control without the flag to show the check can see a leak.
+- `asgard realm stop --force` still ends those service processes: `broker_clients` keeps ignoring parent-bound helpers
+  but counts `--service-child` processes as clients.
+- `Scripts/Testing/verify_jit.sh` runs `jit_dispatch_cache_growth` (four caller threads and a thread mapping and unmapping
+  code) in threaded-oracle mode, like the other concurrent fixtures; shared-memory replay is unsafe for it.
+
 ### Graphics thunks: pointer queries return the guest's pointer, not the driver's (2026-10-25)
 
 - The seven commands the new registry guard listed as pending (`glGetPointerv`, `glGetBufferPointerv`,

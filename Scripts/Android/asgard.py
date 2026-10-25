@@ -212,8 +212,10 @@ def broker_clients(path):
             words = Path(f"/proc/{entry}/cmdline").read_bytes().split(b"\0")
         except OSError:
             continue
+        # Helpers bound to a parent (media codecs) are not clients; supervised Android service processes are.
         if b"--android-binder-broker" in words and str(path).encode() in words \
-                and b"--asgard-service-parent" not in words and b"--asgard-broker" not in words:
+                and (b"--asgard-service-parent" not in words or b"--service-child" in words) \
+                and b"--asgard-broker" not in words:
             clients.append(int(entry))
     return clients
 

@@ -188,7 +188,10 @@ class ProcessHost:
                     (self.root / path.lstrip('/')).mkdir(parents=True, exist_ok=True)
                     option = '-Dbifrost.apk.trace.dir=' + path
                 art_options.append(option)
+            # The kernel kills the child with the supervisor (it follows the spawning thread, which
+            # lives as long as the host), so an interrupted session leaves no service processes.
             command = [self.emu, *self.emu_args, '--android-runtime', '--android-services',
+                       '--asgard-service-parent', str(os.getpid()),
                        '--android-binder-broker', self.socket,
                        '--android-app-id', str(uid), '--rootfs', str(self.root),
                        '/system/bin/app_process64', '-Xuse-stderr-logger', *art_options,

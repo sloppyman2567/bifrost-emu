@@ -73,9 +73,10 @@ class StaleBrokerTests(unittest.TestCase):
         app = self.spawn("--android-binder-broker", path, "--android-runtime")
         self.spawn("--asgard-broker", path)
         self.spawn("--asgard-service-parent", 1, "--android-binder-broker", path)
+        service = self.spawn("--asgard-service-parent", 1, "--android-binder-broker", path, "--service-child")
         self.spawn("--android-binder-broker", self.directory / "another.sock")
         time.sleep(0.3)
-        self.assertEqual(asgard.broker_clients(path), [app.pid])
+        self.assertEqual(sorted(asgard.broker_clients(path)), sorted([app.pid, service.pid]))
 
     @unittest.skipUnless(EMU.is_file(), "needs a bifrost-emu build (BIFROST_EMU)")
     def test_idle_stale_broker_restarts_and_a_busy_one_is_refused(self):

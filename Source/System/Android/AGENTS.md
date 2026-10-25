@@ -196,4 +196,5 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   nothing may write below `ROOT`, and state defaults come from
   `Scripts/Android/android_paths.py`. `test_asgard_install.py` covers the installer.
 
+- `ProcessHost` starts every service child with `--asgard-service-parent <its pid>` from its single long-lived thread (the parent-death signal follows the spawning thread); keep both, or a killed supervisor leaves orphaned service processes. `asgard.broker_clients` treats `--service-child` processes as clients and other parent-bound helpers as not.
 - Managed HOME activates Asgard through ProcessHost, then changes task visibility on the guest main thread. Preserve Activity instances and pause/stop/restart/resume order; old window plugins must return ENOTSUP for missing visibility callbacks.

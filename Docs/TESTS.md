@@ -67,6 +67,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Android/test_android_super.py        # dynamic-partition unpacker vs a synthetic image (--compare SUPER.img: vs lpunpack)
 ./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), injected clock
 ./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force
+./Scripts/Android/test_asgard_process_host.py   # service children carry --asgard-service-parent and die with a killed supervisor (real emulator, plus a control)
 make test-android-wheel-gestures               # wheel/pinch/middle-drag as two-finger gestures (SDL-free); test-android-sdl-backend checks them through the backend
 ./Scripts/Testing/test_window_stats.sh         # window stats modes, overlay and sensors (SDL probes open windows unless SDL_VIDEODRIVER=offscreen)
 ./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall
