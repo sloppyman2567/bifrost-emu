@@ -7,6 +7,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include "FrostJIT/Runtime/FallbackProfile.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/Generations.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include <csignal>
 #include <cstdint>
@@ -112,10 +113,48 @@ void bifrost_prof_init(FrostJIT* jit) {
 bool bifrost_prof_active() {
     return prof_enabled.load(std::memory_order_relaxed);
 }
+JitSet::~JitSet() {
+    // The reaper must not touch an instance this destructor is about to free.
+    for (auto& jit : owned_) jit_generations::forget(jit.get());
+}
+FrostJIT* JitSet::add(std::unique_ptr<FrostJIT> fresh) {
+    std::lock_guard<std::mutex> g(mu_);
+    FrostJIT* jit = fresh.get();
+    owned_.push_back(std::move(fresh));
+    live_.push_back(jit);
+    current_.store(jit, std::memory_order_release);
+    return jit;
+}
+std::vector<FrostJIT*> JitSet::all() const {
+    std::lock_guard<std::mutex> g(mu_);
+    std::vector<FrostJIT*> out;
+    for (const auto& jit : owned_) out.push_back(jit.get());
+    return out;
+}
+size_t JitSet::live_snapshot(FrostJIT** out) const {
+    std::lock_guard<std::mutex> g(mu_);
+    live_.erase(std::remove_if(live_.begin(), live_.end(), [](FrostJIT* jit) { return jit->released(); }),
+                live_.end());
+    size_t n = 0;
+    for (FrostJIT* jit : live_) if (n < kMaxLive) out[n++] = jit;
+    return n;
+}
+void JitSet::abandon() {
+    std::lock_guard<std::mutex> g(mu_);
+    current_.store(nullptr, std::memory_order_release);
+    for (auto& jit : owned_) (void)jit.release();
+    owned_.clear();
+    live_.clear();
+}
+void Emulator::configure_jit(FrostJIT& jit) {
+    jit.set_direct_window(mem_.direct_window(), &mem_);
+    jit.set_vdso_range(vdso_base_, vdso_size_);
+    jit.set_renewable(jit_shared_mode_);
+}
 void Emulator::enable_jit() {
     if (jit_) return;
     // Shared-JIT mode (default): spawned threads share the main's FrostJIT,
-    // saving 64 MiB per thread. This requires the code buffer to be RWX
+    // saving 64 MiB of code-cache per thread. This requires the code buffer to be RWX
     // (not W^X) so translation (writes) and execution (reads/exec) can
     // happen concurrently. W^X would toggle mprotect on the WHOLE buffer,
     // crashing any thread executing JIT code.
@@ -135,12 +174,12 @@ void Emulator::enable_jit() {
     if (shared_jit_mode) {
         setenv("BIFROST_NO_WEX", "1", 1);
     }
-    jit_ = std::make_unique<FrostJIT>();
-    jit_enabled_ = (jit_ != nullptr);
+    jit_shared_mode_ = shared_jit_mode;
+    jit_.add(std::make_unique<FrostJIT>());
+    jit_enabled_ = static_cast<bool>(jit_);
     jit_wanted_ = jit_enabled_;
     if (jit_enabled_) {
-        jit_->set_direct_window(mem_.direct_window(), &mem_);
-        jit_->set_vdso_range(vdso_base_, vdso_size_);
+        configure_jit(*jit_.get());
         if (verbose_) {
             const auto& cf = jit_->cpu_features();
             fprintf(stderr, "[%s] frostJIT enabled (x86 codegen, %s mode, "
@@ -150,12 +189,32 @@ void Emulator::enable_jit() {
         }
     }
 }
+bool Emulator::renew_jit(FrostJIT* full) {
+    if (jit_generations::unreleased() >= jit_generations::kMaxUnreleased) return false;
+    std::lock_guard<std::mutex> g(jit_renew_mu_);
+    if (jit_.get() != full) return true;  // another thread already replaced it
+    if (jit_generations::unreleased() >= jit_generations::kMaxUnreleased) return false;
+    auto fresh = std::make_unique<FrostJIT>();
+    configure_jit(*fresh);
+    // Join multithreaded mode before any thread can run it (the ticker is already running).
+    if (full->mt_active()) fresh->enter_multithreaded();
+    const size_t used = full->code_buf_used(), blocks = full->cache_entries();
+    jit_.add(std::move(fresh));
+    full->retire();
+    if (verbose_) {
+        size_t retired = 0, released = 0;
+        jit_generations::counts(retired, released);
+        fprintf(stderr, "[%s] frostJIT: code cache full (%zu KiB, %zu blocks): replaced by a fresh one "
+                "(%zu retired, %zu released)\n", CODENAME, used >> 10, blocks, retired, released);
+    }
+    return true;
+}
 void Emulator::restart_jit_for_exec() {
     if (!jit_ && !jit_wanted_) return;
     // Abandon the old JIT instead of destroying it: this thread is still inside its code buffer
     // (the execve syscall was called from JIT code and returns through it), and destroying it would
     // unmap that buffer. It is released with the process.
-    (void)jit_.release();
+    jit_.abandon();
     jit_enabled_ = false;
     enable_jit();
 }
@@ -173,6 +232,18 @@ void Emulator::print_jit_stats() {
     size_t    code_size        = jit_->code_buf_size();
     size_t    cache_entries    = jit_->cache_entries();
     size_t    num_jits         = 1;  // main JIT
+    // Earlier generations of the main JIT: their work counts toward the totals, not the cache size.
+    const auto all_jits = jit_.all();
+    for (FrostJIT* old : all_jits) {
+        if (old == jit_.get()) continue;
+        blocks_translated += old->blocks_translated;
+        blocks_executed   += old->blocks_executed;
+        instructions      += old->instructions_executed;
+        cache_hits        += old->cache_hits;
+        cache_misses      += old->cache_misses;
+        fallbacks         += old->interpreter_fallbacks;
+        chains            += old->block_chains_patched;
+    }
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         for (auto& gt : threads_) {
@@ -203,6 +274,12 @@ void Emulator::print_jit_stats() {
             static_cast<unsigned long long>(chains));
     fprintf(stderr, "[%s] frostJIT: code cache %zu/%zu bytes, %zu blocks\n",
             CODENAME, code_used, code_size * num_jits, cache_entries);
+    if (all_jits.size() > 1) {
+        size_t retired = 0, released = 0;
+        jit_generations::counts(retired, released);
+        fprintf(stderr, "[%s] frostJIT: %zu code cache generations, %zu retired, %zu released\n",
+                CODENAME, all_jits.size(), retired, released);
+    }
     if (blocks_executed > 0) {
         double avg = static_cast<double>(instructions) /
                      static_cast<double>(blocks_executed);
@@ -406,7 +483,10 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     // callee block, which jit_call_helper dispatches WITHOUT the run_block
     // verify path, so MEMFULL never sees those blocks).
     static const bool interp_bl_call_ = (getenv("BIFROST_INTERP_BL_CALL") != nullptr);
-    auto* jit = emu->jit();
+    // Starts on the instance whose code called this helper; once that instance is retired the
+    // loop moves to the current one (below), so a long callee does not interpret forever.
+    auto* jit = FrostJIT::running(*emu);
+    FrostJIT::FaultScope helper_scope(jit);
     // ── Block-dispatch watchdog (mirrors run_block) ────────────────
     // Thread-local count of dispatches through this helper, checked
     // against GLOBAL_BLOCK_LIMIT (1e12 ≈ 14h of pure dispatch). The old
@@ -436,9 +516,15 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     uint64_t dbg2_count = 0;
     while (cpu->running && !cpu->jit_dispatch_requested && cpu->pc != return_pc &&
            (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {
+        if (__builtin_expect(jit && jit->retired(), 0)) {
+            FrostJIT* current = emu->jit();
+            if (current && current != jit) { jit = current; FrostJIT::retarget_scope(jit); }
+        }
         bool debug_step = emu->debugger_poll(*cpu);
         if (!cpu->running || cpu->jit_dispatch_requested) break;
         if (debug_step) { emu->step(*cpu); continue; }
+        // The callee ended at an SVC it left unrun (see emit_call_native_svc).
+        if (__builtin_expect(cpu->jit_svc_pc != 0, 0) && jit && jit->run_pending_svc(*cpu, *emu)) continue;
         if (__builtin_expect(hang_watchdog && ++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
             if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);
             fprintf(stderr, "[JIT] jit_call_helper watchdog: %llu blocks dispatched by a thread — disabling JIT (likely codegen bug)\n",

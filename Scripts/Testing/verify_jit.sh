@@ -37,7 +37,7 @@ for source in "${sources[@]}"; do
     if [[ ! -f "$fixture" || "$source" -nt "$fixture" ]]; then
         echo "FAIL: missing/stale $fixture; run make setup-tests"; failed=1; continue
     fi
-    if [[ "$name" == jit_mt_tier2 || "$name" == jit_host_fault || "$name" == jit_llsc_native ]]; then
+    if [[ "$name" == jit_mt_tier2 || "$name" == jit_host_fault || "$name" == jit_llsc_native || "$name" == jit_cache_generations ]]; then
         # These fixtures exercise concurrent publication/invalidation or faults.
         # Shared-memory differential replay is deliberately unsafe here.
         run_check "$name" threaded-oracle 60 "$fixture"

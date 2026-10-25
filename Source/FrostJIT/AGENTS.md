@@ -134,4 +134,16 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `[JIT] metadata MiB:` in `Runtime/MemoryStats.cpp`). Keep `BlockEntry` grouped by
   field size, with 32-bit code offsets. MT keeps no `back_refs_` (its edges are reached
   through `mt_edge_refs_`); an MT slot's cell is found with `mt_slot_edge(source_pc, slot)`.
-  Add a container to `dump_memory_stats` when you add per-block state.
+  Add a container to `dump_memory_stats` when you add per-block state, and to
+  `release_resources` (`Runtime/Generations.cpp`) when it is per-block or generated code addresses it.
+- A full code cache is replaced as a whole: `Emulator::renew_jit` makes a fresh `FrostJIT` current and
+  retires the old one, which the reaper releases only once every thread acked a dispatch boundary with no
+  generated frames (`cpu.jit_call_depth == 0` in `run_block`) or is parked in a syscall that C++ runs
+  (`Runtime/Generations.hpp` has the protocol). The object outlives its release because generated code
+  addresses its members. A helper that generated code calls finds its instance with
+  `FrostJIT::running(emu)`, never `emu.jit()`, and a loop that dispatches blocks must follow the current
+  instance (`jit_call_helper` retargets). Never block for long inside generated frames: that pins a generation.
+- A non-thunk SVC leaves its block with `cpu.jit_svc_pc` set and C++ runs it (`run_pending_svc`, which
+  clears the field first because `clone` copies the CPU). Anything else that calls a block's `fn` directly
+  and then reads `cpu.pc` must run a pending SVC before executing at that pc. Thunk SVCs (`x8 == 0x1000`)
+  stay inline.

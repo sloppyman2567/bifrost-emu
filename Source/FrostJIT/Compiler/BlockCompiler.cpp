@@ -62,6 +62,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     block_words_.clear();
     if (!code_buf_) return nullptr;
     if (code_budget_exhausted_) {
+        renewal_wanted_.store(true, std::memory_order_relaxed);  // retried: a renewal may have been refused
         BlockEntry fallback;
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
@@ -1236,6 +1237,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         if (!private_entry) publish_or_stage(start_pc, fallback);
         code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
         code_budget_exhausted_ = true;
+        renewal_wanted_.store(true, std::memory_order_relaxed);
         // W^X: make the buffer executable again before returning (we may
         // have written partial code before the overflow was detected).
         make_executable();

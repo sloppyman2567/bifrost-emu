@@ -14,6 +14,25 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### A full JIT code cache is replaced, and syscalls leave generated code (2026-10-25)
+
+- The JIT never freed or reused generated code, so a long session only grew (Melon Playground: 968 MB of
+  code mapping after ten minutes, 4.7 to 5.0 GB for the game process) and a full 1 GiB cache left the process
+  in the interpreter for good. When the budget (`BIFROST_JIT_CACHE_MB`, default now 512 MiB) runs out, the
+  emulator replaces the whole `FrostJIT`; a reaper frees the old code mapping and per-block metadata once no
+  thread can still run it. At most one retired instance may wait to be released, so the worst case, a thread that
+  never leaves its generated frames, is twice the budget (the old 1 GiB) and then the old interpreter fallback.
+  Non-thunk syscalls now leave the generated block before running (`cpu.jit_svc_pc`), so threads blocked in
+  futex, epoll or sleep do not pin it; thunk calls stay inline.
+- Measured on a guest that compiles 680 MB of code per pass: peak RSS 949 MB before, 179 MB at a 64 MiB budget,
+  138 MB at 32 MiB; the price is recompiling code that no longer fits (20.7 s instead of 7.1 s for that
+  guest, a cycle larger than the cache). A syscall costs about 12 ns more; indirect calls are unchanged. In one
+  five-minute Melon Playground run (played, default budget) the game held 3.87 GB at 266 s against 4.70 GB in an
+  earlier session, the JIT was replaced twice and both old copies were released; not a controlled comparison,
+  and hitching was not recorded. `[JIT] generations:` (with `--verbose` or `BIFROST_STATS_PERIOD`) shows whether
+  generations are released and how many threads delay it. Details in
+  [JIT.md](JIT.md#code-cache-generations-and-syscall-exits-2026-10-25). New `jit_generations` test.
+
 ### Wheel, trackpad pinch and middle-drag zoom and pan touch apps (2026-10-25)
 
 - Touch-driven games had no way to zoom or move their view with a mouse. The mouse wheel and a trackpad pinch now

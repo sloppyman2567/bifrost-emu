@@ -287,6 +287,8 @@ UNIT_TESTS=(
     # BIFROST_FORK_STUCK_SECONDS: a fork child that does not finish an execve reports where it is blocked.
     "fork_stuck_report|Scripts/Testing/test_fork_stuck_report.sh||60|fork_stuck_report: ALL PASS|HOST_JIT"
     "jit_cache|Scripts/Testing/test_jit_cache.sh||65|jit_cache: ALL PASS|HOST_JIT"
+    # A full code cache is replaced as a whole while threads sleep in syscalls, nest calls, rewrite code and take signals.
+    "jit_generations|Scripts/Testing/test_jit_generations.sh||120|jit_generations: ALL PASS|HOST_JIT"
     "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
     "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
     "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries and concurrent phases PASS|HOST_JIT"

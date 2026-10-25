@@ -30,7 +30,7 @@ namespace arm64emu {
 // region instead of the old per-block functions.
 void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site) {
     if (!emu) return;
-    FrostJIT* jit = emu->jit();
+    FrostJIT* jit = FrostJIT::running(*emu);
     if (!jit) return;
     jit->tier2_fire_region(*emu, pc, site);
 }

@@ -89,6 +89,39 @@ class DynamicLinker;
 void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst);
 // ── Emulator ──────────────────────────────────────────────────────────
 struct SimdDpFields;
+// Every FrostJIT an emulator has created. The last one added is current; earlier ones were
+// retired by Emulator::renew_jit (their code cache filled up) and live as long as the process,
+// because generated code still addresses their members (see FrostJIT/Runtime/Generations.hpp).
+class JitSet {
+public:
+    JitSet() = default;
+    ~JitSet();
+    JitSet(const JitSet&) = delete;
+    JitSet& operator=(const JitSet&) = delete;
+    FrostJIT* get() const { return current_.load(std::memory_order_acquire); }
+    FrostJIT* operator->() const { return get(); }
+    explicit operator bool() const { return get() != nullptr; }
+    // Makes `fresh` current and keeps the previous one.
+    FrostJIT* add(std::unique_ptr<FrostJIT> fresh);
+    // Calls `fn` on every instance whose generated code may still run: the current one and
+    // retired ones not yet released. Cheap enough for every cache-maintenance invalidation.
+    template <class Fn> void for_each_live(Fn&& fn) const {
+        FrostJIT* live[kMaxLive];
+        const size_t n = live_snapshot(live);
+        for (size_t i = 0; i < n; ++i) fn(live[i]);
+    }
+    std::vector<FrostJIT*> all() const;
+    // Leaks every instance: the caller (a fork child, an exec) is still inside one's code.
+    void abandon();
+private:
+    static constexpr size_t kMaxLive = 8;  // current + retired-unreleased is at most 2
+    size_t live_snapshot(FrostJIT** out) const;
+    mutable std::mutex mu_;
+    std::vector<std::unique_ptr<FrostJIT>> owned_;
+    mutable std::vector<FrostJIT*> live_;
+    std::atomic<FrostJIT*> current_{nullptr};
+};
+
 class Emulator {
 public:
     // guest_window_max caps the guest address space (see Memory::Memory).
@@ -308,6 +341,10 @@ public:
     static Emulator* active_emulator() { return g_active_emu_; }
     FrostJIT*       jit() { return jit_.get(); }
     void            enable_jit();
+    // A JIT whose code budget ran out asks for a successor (FrostJIT::translate_entry). Makes a
+    // fresh instance current and retires `full`; false when too many retired instances are
+    // still unreleased, and `full` then stays the current (interpreter-falling-back) one.
+    bool            renew_jit(FrostJIT* full);
     // After execve: give the new image a fresh JIT. A fork child inherits the parent's FrostJIT
     // copy-on-write with the JIT switched off (its code buffer and locks belong to threads that
     // do not exist here), and an exec in the same process leaves the old one stopped; either way
@@ -760,7 +797,10 @@ private:
 #endif
     static void kick_signal_handler(int signo);
     // ── frostJIT ──────────────────────────────────────────────────────
-    std::unique_ptr<FrostJIT> jit_;
+    JitSet jit_;
+    std::mutex jit_renew_mu_;
+    void configure_jit(FrostJIT& jit);
+    bool jit_shared_mode_ = false;  // enable_jit(): threads share one instance, which alone is renewable
     bool jit_enabled_ = false;
     bool jit_wanted_ = false;  // enable_jit() ran: a fork child drops the inherited JIT, its exec'd image gets a new one
     uint64_t jit_threshold_ = 0;  // 0 = use JIT from start; N = interp for N instructions

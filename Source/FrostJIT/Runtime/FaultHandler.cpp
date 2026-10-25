@@ -126,6 +126,10 @@ static void native_fault_handler(int signo, siginfo_t* info, void* context) {
     errno = saved_errno;
 }
 
+FrostJIT* FrostJIT::running(Emulator& emu) {
+    FrostJIT* scope = fault_jit_.load(std::memory_order_relaxed);
+    return scope && scope->renewable_ ? scope : emu.jit();
+}
 FrostJIT::FaultScope::FaultScope(FrostJIT* jit)
     : saved_(fault_jit_.load(std::memory_order_relaxed)) {
     fault_jit_.store(jit, std::memory_order_relaxed);

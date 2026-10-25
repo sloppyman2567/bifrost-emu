@@ -21,6 +21,8 @@
 #include "Bifrost/Types.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "FrostJIT/Runtime/FallbackProfile.hpp"
+#include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/Generations.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -223,3 +225,17 @@ extern "C" void jit_native_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
     }
     emu->syscall(*cpu);
 }
+static_assert(arm64emu::GraphicThunk::SYSCALL_NUMBER == arm64emu::FrostJIT::THUNK_SVC_NUMBER,
+              "generated SVC exits keep thunk calls inline by this x8 value");
+namespace arm64emu {
+bool FrostJIT::run_pending_svc(CPU& cpu, Emulator& emu) {
+    const uint64_t svc_pc = cpu.jit_svc_pc;
+    cpu.jit_svc_pc = 0;  // before the syscall: clone copies this CPU
+    if (cpu.pc != svc_pc) return false;
+    // With no native frame below, a thread blocked in the syscall does not hold this
+    // instance's code (see Generations.hpp); the next dispatch boundary leaves the park.
+    if (!cpu.jit_call_depth) jit_generations::park();
+    jit_native_svc(&emu, &cpu, svc_pc);
+    return true;
+}
+} // namespace arm64emu

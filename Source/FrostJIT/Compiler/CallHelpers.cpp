@@ -473,13 +473,18 @@ void FrostJIT::emit_call_vdso_clock(uint64_t arm_pc) {
     // The helper may have touched cpu.regs[]/vregs — reload everything.
     invalidate_all_vregs();
 }
-// ── emit_call_native_svc — native syscall dispatch ─────────────────────
-// Like emit_call_vdso_clock, but calls jit_native_svc(emu, cpu, svc_pc)
-// instead of stepping the interpreter. Used for non-vDSO SVCs: the helper
-// advances cpu.pc to svc_pc+4 and runs Emulator::syscall() directly,
-// skipping step()/decode/syscall-dispatch. SVC never coexists with the
-// vec cache (SVC disqualifies the block in vec_cache_may_enable), so no
-// writeback/reload round-trip is needed here.
+// ── emit_call_native_svc — syscall exit ─────────────────────────────────
+// A thunk SVC (x8 == THUNK_SVC_NUMBER: the GraphicThunk/AudioThunk/DisplayThunk
+// trampolines) is short and very frequent, so it keeps the inline call into
+// jit_native_svc. Every other SVC can block for as long as the guest likes
+// (futex, epoll, sleep), and a thread blocked inside a generated-code frame
+// pins that code in memory. It records the SVC's address in cpu.jit_svc_pc and
+// leaves the block instead; run_block and jit_call_helper then run the syscall
+// from C++ (FrostJIT::run_pending_svc), which also advances cpu.pc, so the
+// semantics match the interpreter's SVC_IMM case: the PC is already the return
+// address while the syscall runs, and the syscall may change cpu.pc.
+// SVC never coexists with the vec cache (SVC disqualifies the block in
+// vec_cache_may_enable), so no writeback/reload round-trip is needed here.
 void FrostJIT::emit_call_native_svc(uint64_t arm_pc) {
     flush_all_vregs();
     if (flags_in_host_) {
@@ -490,6 +495,14 @@ void FrostJIT::emit_call_native_svc(uint64_t arm_pc) {
     if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
         evict_vreg(31);
     }
+    // flush_all_vregs left cpu.regs[] current, so x8 is read from memory.
+    emit_load(RCX, CPU_REG, REGS_OFF + 8 * 8);
+    emit_alu_imm(RCX, 7, THUNK_SVC_NUMBER);  // CMP
+    const size_t thunk = emit_jcc_rel32_placeholder(0x4);  // JE
+    emit_mov_imm_to_rax(arm_pc);
+    emit_store(CPU_REG, offsetof(CPU, jit_svc_pc), RAX);
+    const size_t joined = emit_jmp_rel32_placeholder();
+    patch_jcc_rel32(thunk, static_cast<int32_t>(code_buf_used_ - (thunk + 6)));
     emit_push(WIN_REG);  // save R10 (caller-saved)  — 1 push
     emit_push(RAX);      // save RAX                 — 2 pushes (EVEN → no align fixup)
     // Set cpu.pc = svc_pc (the helper advances it to svc_pc+4).
@@ -504,7 +517,9 @@ void FrostJIT::emit_call_native_svc(uint64_t arm_pc) {
     emit_pop(WIN_REG);   // restore WIN_REG
     // Reload PC into RAX (the syscall may have changed cpu.pc).
     emit_load(RAX, CPU_REG, PC_OFF);
-    // The syscall may have touched cpu.regs[]/vregs — reload everything.
+    // Pending SVC: RAX is its address, which the epilogue stores as cpu.pc.
+    patch_jmp_rel32(joined, static_cast<int32_t>(code_buf_used_ - (joined + 5)));
+    // The helper may have touched cpu.regs[]/vregs — reload everything.
     invalidate_all_vregs();
 }
 } // namespace arm64emu

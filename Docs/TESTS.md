@@ -16,12 +16,36 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](Apps/vkquake.md).
 
-The fully provisioned suite is 361 runs under `run_tests.sh --strict` (2026-10-24), in these categories: unit
+The fully provisioned suite was 361 runs under `run_tests.sh --strict` (2026-10-24; `jit_generations` adds one), in these categories: unit
 (focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
 `Tests/Asm/`), sandbox, per-thread JIT, interactive (scripted stdin), toybox, real-world static and dynamic programs,
 dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitted by `--quick`). The runner prints
 each category's count when it starts, and `--filter REGEX` runs only the tests whose names match. Without a configured rootfs the
 dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
+
+### Code-cache generations (2026-10-25)
+
+`Tests/Unit/jit_cache_generations.c`, run by `Scripts/Testing/test_jit_generations.sh` (about 8 s), forces a
+1 MiB code budget so the shared JIT is replaced about 500 times while threads sleep in nanosleep and futex,
+one waits in a futex inside a nested call, two run nested call loops that compile throughout, the main thread
+rewrites code with instruction-cache maintenance, a 3 ms timer delivers signals, and a child forks afterwards;
+every result is checked. The default layout must release each retired generation; the ordinary-frame layout
+(`BIFROST_NO_CHAIN_SKIP=1`) keeps only the first and falls back, which the script accepts. `test_jit_cache.sh` now
+expects renewals at a 1 MiB budget.
+
+Run on the final build: the 333 unit, integration, toybox and real-world runs (`--quick`) passed at the default
+budget. With `BIFROST_JIT_CACHE_MB=1`, 332 of those 333 passed, and the 22 dynamic-linking runs selected with
+`--filter 'test_dyn|hello_dyn|dlopen|dladdr'` passed. The one failure, `jit_tier2_discovery`, passes at the
+default budget. It fails at 1 or 2 MiB with no renewal at all (a gdb breakpoint on `Emulator::renew_jit` never
+fires): the test drives `lookup_or_translate` and `compile_tier2_region` directly, which do not go through
+`translate_entry`, so it meets the plain budget limit as it did before; that the budget is simply too small for
+its compiles is likely but was not checked. The generations fixture also passed 20 of 20 repeated runs
+pinned to different CPU sets, three at a time. `make verify` reported two failures, both present before this
+change: `jit_bfm_extract` times out (exit 124; the 95 s against the 30 s limit recorded on 2026-10-23, not
+re-measured on the old tree), and `jit_dispatch_cache_growth` is a threaded fixture that `verify_jit.sh` runs
+under differential replay, which logs a PC divergence and "suspended" (identical output from the pre-change
+binary). The full strict suite and the Android tests were not run. One real game, Melon Playground, ran five
+minutes on this build while being played and stayed up (memory numbers in [JIT.md](JIT.md)).
 
 ## Running tests
 

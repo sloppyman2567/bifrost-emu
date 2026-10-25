@@ -25,7 +25,7 @@ struct DebugFlags {
     bool media_trace = false; // BIFROST_MEDIA_TRACE — decoded frame transport
     // ── X protocol wire / fd-lifecycle traces ─────────────────────────
     size_t jit_cache_initial_mb = 64; // BIFROST_JIT_CACHE_INITIAL_MB: growth-regression diagnostic
-    size_t jit_cache_mb = 1024; // BIFROST_JIT_CACHE_MB: bounded cache-budget diagnostic (1..1024 MiB)
+    size_t jit_cache_mb = 512; // BIFROST_JIT_CACHE_MB: code-cache budget before the JIT is replaced (1..1024 MiB)
     int jit_block_limit = 32; // BIFROST_JIT_BLOCK_LIMIT: bounded instruction-cap comparison (8..128)
     bool xtrace   = false;  // BIFROST_XTRACE     — X wire + fd lifecycle
     bool xfull    = false;  // BIFROST_XFULL      — full X request payload dumps

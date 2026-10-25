@@ -49,28 +49,26 @@ namespace arm64emu {
 // today — this ordering keeps it that way).
 void Emulator::invalidate_jit_range(uint64_t addr, uint64_t size, CodeInvalidation reason) {
     std::vector<std::shared_ptr<GuestThread>> per_thread;
-    FrostJIT* main_jit = nullptr;
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        main_jit = jit_.get();
         for (auto& gt : threads_) {
             if (gt && gt->jit) per_thread.push_back(gt);
         }
     }
-    if (main_jit) main_jit->invalidate_range(addr, size, reason);
+    // Every shared instance that can still run code: a retired generation's threads may not have
+    // left it yet, and it must not keep running code the guest has rewritten.
+    jit_.for_each_live([&](FrostJIT* shared) { shared->invalidate_range(addr, size, reason); });
     for (auto& gt : per_thread) gt->jit->invalidate_range(addr, size, reason);
 }
 void Emulator::invalidate_jit_all() {
     std::vector<std::shared_ptr<GuestThread>> per_thread;
-    FrostJIT* main_jit = nullptr;
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        main_jit = jit_.get();
         for (auto& gt : threads_) {
             if (gt && gt->jit) per_thread.push_back(gt);
         }
     }
-    if (main_jit) main_jit->invalidate_all();
+    jit_.for_each_live([&](FrostJIT* shared) { shared->invalidate_all(); });
     for (auto& gt : per_thread) gt->jit->invalidate_all();
 }
 // The robust-list exit walk is inlined in thread_entry below; the
@@ -86,11 +84,10 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // for table mutations, released before block execution.
     // Opt out via BIFROST_NO_SHARED_JIT=1 for per-thread JIT (lock-free,
     // 64 MiB per thread).
-    FrostJIT* thread_jit = gt->jit.get();
-    if (thread_jit == nullptr) {
-        thread_jit = emu->jit_.get();  // shared mode
-    }
-    bool use_jit = (thread_jit != nullptr);
+    // Shared mode re-reads the current instance on every dispatch: a full code cache is replaced
+    // by a fresh FrostJIT (Emulator::renew_jit).
+    FrostJIT* own_jit = gt->jit.get();
+    bool use_jit = (own_jit != nullptr || emu->jit_.get() != nullptr);
     constexpr uint64_t HANG_LIMIT = 50'000'000;
     // Opt-in diagnostic (BIFROST_HANG_WATCHDOG): never stop a valid thread.
     static const bool hang_watchdog = dbg().hang_watchdog;
@@ -106,7 +103,9 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                     // (BIFROST_NO_SHARED_JIT=1) or the shared main FrostJIT
                     // (default, Task 3). The shared mode serializes run_block
                     // via blocks_mutex_; the per-thread mode is lock-free.
-                    thread_jit->run_block(cpu, *emu);
+                    FrostJIT* thread_jit = own_jit ? own_jit : emu->jit_.get();
+                    if (thread_jit) thread_jit->run_block(cpu, *emu);
+                    else emu->step(cpu);  // a fork child abandoned the inherited JIT
                 } else {
                     emu->step(cpu);
                 }
@@ -1025,7 +1024,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // queue of waiting writers, by threads that do not exist here, and this process's guest memory syscalls
         // invalidate code through it. The child runs interpreted, so abandon the JIT without destroying it (as
         // restart_jit_for_exec does: this thread is still inside its code buffer): invalidation then finds none.
-        (void)jit_.release();
+        jit_.abandon();
         // After fork(), the child inherits g_active_emu_ from the parent,
         // which points to the PARENT's Emulator — a dangling pointer in
         // the child's address space. When SIGINT (Ctrl-C) arrives in the

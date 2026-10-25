@@ -16,7 +16,7 @@
 namespace arm64emu {
 
 uint64_t tier2::measured_region_entry(CPU* cpu, Emulator* emu, void* trial) {
-    return emu->jit()->tier2_measure(*cpu, *emu, trial);
+    return FrostJIT::running(*emu)->tier2_measure(*cpu, *emu, trial);
 }
 static uint64_t thread_cpu_ns() {
     timespec ts{};

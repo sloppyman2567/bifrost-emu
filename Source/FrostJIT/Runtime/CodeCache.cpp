@@ -20,6 +20,8 @@
 //   try_chain_block       — try to chain `entry` to its translated target
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/Generations.hpp"
+#include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "FrostJIT/Runtime/Preemption.hpp"
@@ -94,7 +96,14 @@ bool FrostJIT::staged_entry_invalidated(uint64_t pc) {
     }
     return false;
 }
+// A compile that ran the code budget out asks the emulator for a successor. This runs
+// with no table or compiler lock held; Emulator::renew_jit retires this instance.
 bool FrostJIT::translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
+    const bool found = compile_entry(emu, pc, out);
+    if (renewal_wanted()) emu.renew_jit(this);
+    return found;
+}
+bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     auto copy_locked = [&] {
         auto it = blocks_.find(pc);
         if (it == blocks_.end()) return false;
@@ -240,6 +249,12 @@ void FrostJIT::dump_code_cache_stats() {
             (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
             mt_active() ? 1 : 0);
+    {
+        size_t retired = 0, released = 0;
+        jit_generations::counts(retired, released);
+        fprintf(stderr, "[JIT] generations: retired=%zu released=%zu blocked_by_threads=%zu this=%s\n", retired,
+                released, jit_generations::blockers(), retired_.load(std::memory_order_relaxed) ? "retired" : "current");
+    }
     // Shape of the published code: guest instructions covered against host bytes emitted, to
     // tell bytes-per-instruction growth from sheer block count when the cache is large.
     {

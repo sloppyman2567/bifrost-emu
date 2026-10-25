@@ -18,7 +18,7 @@ namespace arm64emu {
 // Tail-called only after the generated frame has been dismantled. All guest
 // state is current, so cache revocation cannot strand live register mappings.
 uint64_t tier2::feedback_exit(CPU* cpu, Emulator* emu, void* monitor) noexcept {
-    try { if (emu && emu->jit()) emu->jit()->tier2_region_feedback(*cpu, monitor); }
+    try { if (emu) if (FrostJIT* jit = FrostJIT::running(*emu)) jit->tier2_region_feedback(*cpu, monitor); }
     catch (...) {} // never unwind into the generated caller
     return cpu->pc;
 }

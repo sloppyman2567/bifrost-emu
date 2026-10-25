@@ -324,6 +324,11 @@ public:
     static constexpr uint64_t JIT_MAX_CALL_DEPTH = 16;
     uint64_t jit_call_depth = 0;
     bool jit_dispatch_requested = false;
+    // Host-only: the guest address of an SVC that a generated block exited
+    // without running (zero = none). The dispatcher runs the syscall from C++
+    // (FrostJIT::run_pending_svc), so a thread blocked in it holds no
+    // generated-code frame and its code buffer can be retired and released.
+    uint64_t jit_svc_pc = 0;
     uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
     // Host-only, MT code: the preemption epoch this CPU last observed at a
     // dispatch boundary (FrostJIT::grant_lease). Polled read-only by backward

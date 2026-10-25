@@ -154,6 +154,9 @@ public:
     private:
         FrostJIT* saved_;
     };
+    // The scope follows the instance whose code runs: a nested call loop that moves to the
+    // current instance after a renewal retargets it (the enclosing FaultScope restores the old one).
+    static void retarget_scope(FrostJIT* jit) { fault_jit_.store(jit, std::memory_order_relaxed); }
     static bool redirect_memory_fault(int signo, void* info, void* context);
     // Returns the block's fn pointer, translating if needed.
     // If the block is interp_only, returns nullptr (caller falls back to interpreter).
@@ -684,6 +687,29 @@ public:
     // slot-unpatch/TLS-drop discipline as invalidate_range, applied to
     // every block. Rare — full O(N) scan.
     void invalidate_all();
+    // ── Generations (Runtime/Generations.{hpp,cpp}) ─────────────────
+    // A full code cache is replaced as a whole: Emulator::renew_jit publishes a fresh
+    // FrostJIT and calls retire() on this one. Its code stays valid until the reaper finds
+    // every thread past it; release_resources() then frees the code mapping and the
+    // per-block metadata and leaves the object (generated code addresses its members).
+    // Only the emulator's shared instance is renewable.
+    void set_renewable(bool on) { renewable_ = on; }
+    bool renewable() const { return renewable_; }
+    bool retired() const { return retired_.load(std::memory_order_acquire); }
+    bool released() const { return released_.load(std::memory_order_acquire); }
+    uint64_t retired_epoch() const { return retired_epoch_; }
+    void set_retired_epoch(uint64_t epoch) { retired_epoch_ = epoch; }
+    // True once the code budget ran out and a successor should replace this instance.
+    bool renewal_wanted() const {
+        return renewable_ && renewal_wanted_.load(std::memory_order_relaxed) && !retired();
+    }
+    void retire();
+    void release_resources();
+    // The instance whose generated code the calling thread is executing (the innermost
+    // run_block scope), or the emulator's current one. Helpers that generated code calls
+    // must use it, not Emulator::jit(): after a renewal the two differ until the thread
+    // returns to its dispatcher. Per-thread instances keep the legacy lookup.
+    static FrostJIT* running(Emulator& emu);
     // Multithread-safe transition (see mt_active_): retire legacy slots and
     // permanently disable rewrites of published instructions. Called from the thread
     // spawn paths BEFORE the second vCPU's host thread starts. No-op after
@@ -699,6 +725,15 @@ public:
     // diagnosing what the JIT spends its time executing. Takes the block
     // table's shared lock internally.
     void dump_pc_histogram(const uint64_t* rips, uint32_t n, uint32_t top = 20);
+    // x8 value of the host-call trampolines (GraphicThunk/AudioThunk/DisplayThunk
+    // SYSCALL_NUMBER; InterpreterBridge.cpp asserts they agree). Such SVCs stay
+    // inline in generated code; every other SVC leaves it first (see
+    // emit_call_native_svc).
+    static constexpr uint32_t THUNK_SVC_NUMBER = 0x1000;
+    // Runs the SVC a block left pending in cpu.jit_svc_pc. Returns false when
+    // cpu.pc moved first (signal delivery, debugger): the instruction then runs
+    // wherever the guest resumes it.
+    bool run_pending_svc(CPU& cpu, Emulator& emu);
     static constexpr int REGS_OFF   = 0;
     static constexpr int SP_OFF     = 256;
     static constexpr int PC_OFF     = 264;
@@ -843,6 +878,9 @@ private:
     size_t   code_buf_used_ = 0;
     bool     code_buf_overflow_ = false;
     bool     code_budget_exhausted_ = false;
+    bool renewable_ = false;
+    std::atomic<bool> renewal_wanted_{false}, retired_{false}, released_{false};
+    uint64_t retired_epoch_ = 0;
     uint8_t* window_base_ = nullptr;
     const Memory* guest_memory_ = nullptr;
     // Address-sorted fault sites, packed as {code offset, recovery offset}.
@@ -1205,6 +1243,8 @@ private:
     // translation produced no entry. Never returns holding blocks_mutex_.
     // MT compiles run under the shared lock; ST keeps the exclusive path.
     bool translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out);
+    // translate_entry without the renewal check that follows it.
+    bool compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out);
     // Contended acquisitions add their wait to table_lock_wait_ns.
     void lock_table_shared();
     void lock_table();

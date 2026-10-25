@@ -15,6 +15,94 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Code-cache generations and syscall exits (2026-10-25)
+
+Generated code is never recycled in place: a stale function pointer, a chain edge or a live native
+frame can still point into it. A full code cache therefore used to leave the process in the
+interpreter for good, and a long session only ever grew. Melon Playground reached 968 MB of
+code mapping after ten minutes (4.7 to 5.0 GB resident for the game process).
+
+A full cache is now replaced as a whole. When a compile runs the budget out
+(`BIFROST_JIT_CACHE_MB`, default now 512 MiB), `translate_entry` asks the emulator for a successor
+(`Emulator::renew_jit`): a fresh `FrostJIT` becomes current and the full one is retired
+(`FrostJIT::retire`: `invalidate_all`, then the retired flag, then the global epoch advances).
+`Emulator` keeps every instance in a `JitSet`; the last is current. Only the shared instance is
+renewable (per-thread instances, `BIFROST_NO_SHARED_JIT=1`, keep the old behaviour).
+
+A retired instance stays mapped until no thread can run its code (`Runtime/Generations.{hpp,cpp}`).
+Every thread has a slot. At a dispatch boundary with no generated frames (`cpu.jit_call_depth == 0`
+at `run_block` entry) it reads the epoch and stores it (acked); a retired instance's `run_block`
+forwards to the current one, so an acked thread runs only newer code. A thread blocked in a
+syscall that a block handed back to C++ is parked (below); leaving the park exchanges the flag
+with a full barrier before the epoch read, which orders a reaper that saw "parked" before the
+thread's forward. A reaper thread releases an instance once every slot is acked or parked
+(`FrostJIT::release_resources`): it unmaps the code buffer and the fault table and frees the
+per-block metadata, including the heap cells the generated code addressed directly (MT edges,
+hot counters, Tier-2 monitors). The 56 KiB object stays, because generated code embeds the
+address of members such as `cache_generation_` and a parked thread may still return through
+`run_block` on it. It then calls `malloc_trim`.
+
+Syscalls leave generated code first. A block that reaches a non-thunk SVC stores its address in
+`cpu.jit_svc_pc` and returns; `run_block` (and the nested `jit_call_helper` loop) runs the syscall
+from C++ (`FrostJIT::run_pending_svc`) with `cpu.pc` already advanced, as before. A thread blocked
+in futex, epoll or sleep then has no generated frame on its stack, so it does not hold the retired
+cache. Thunk SVCs (`x8 == 0x1000`, GL/audio/display calls: short and very frequent) stay inline. A
+signal or the debugger that moves `cpu.pc` first drops the pending SVC, and the guest re-executes
+it where it resumes, which is the architectural behaviour for a signal that arrives before the
+instruction. `run_pending_svc` clears the field before the syscall, because `clone` copies the CPU.
+
+What can keep a retired generation alive: a thread blocked inside generated frames (a thunk SVC,
+a native nested call from `jit_call_helper`), or one that never returns to its dispatcher. At most
+one retired instance may be unreleased (`kMaxUnreleased`); while it is pinned the current one, once
+full, falls back to the interpreter exactly as the single cache did before. So the worst case is
+twice the budget, which with the 512 MiB default equals the old 1 GiB ceiling. A nested
+`jit_call_helper` loop follows the current instance once its own is retired (`retarget_scope`), so
+a long callee does not interpret forever; helpers called from generated code (Tier-2 fire,
+trials, feedback) use `FrostJIT::running`, the instance whose code is executing. Under
+`BIFROST_NO_CHAIN_SKIP=1` (ordinary frames, native BL/BLR calls) the whole program runs inside
+nested frames, so only the first generation is ever replaced and later ones fall back.
+
+`[JIT] generations: retired=N released=M blocked_by_threads=K` (with the other `[JIT]` lines under
+`BIFROST_STATS_PERIOD` and at exit with `--verbose`) shows whether releases keep up and how many
+threads kept the oldest retired instance alive at the reaper's last look.
+
+Measured (2026-10-25, one host; the recompile cost is the price of the bound):
+
+- `bigcode` (a throwaway guest, not in the repository: 60,000 distinct functions called round-robin,
+  three passes; one pass translates 240,296 blocks, 680 MB of code; peak host RSS from `/proc/PID/status` VmHWM). The
+  results are identical at every budget.
+
+  | build, budget | peak RSS | wall time |
+  |---|---|---|
+  | before, 1024 MiB | 949 MB | 7.1 s |
+  | after, 1024 MiB | 949 MB | 7.2 s |
+  | after, 128 MiB | not sampled | 20.7 s |
+  | after, 64 MiB | 179 MB | 20.8 s |
+  | after, 32 MiB | 138 MB | not timed |
+
+  When the code in use exceeds the budget every pass recompiles it (this workload is the worst case,
+  a cycle larger than the cache), so the wall time is the compile time of one pass per pass. When it
+  fits, nothing changes.
+- A syscall loop (`getppid`, 1.5 M calls, pinned to one core, five alternating runs): 106 to 118.5 ns
+  per call (+12 ns: the extra dispatch). An indirect-call loop (20 M calls through a table of eight):
+  5.0 ns per call before and after.
+- Melon Playground, five minutes of play with the 512 MiB default, one run: game RSS 3.87 GB with a 398 MB
+  code mapping at 266 s, flat at 3.85 to 3.89 GB from about 110 s to 295 s. The JIT was replaced twice and
+  both old generations were released (`retired=2 released=2 blocked_by_threads=0`: no thread pinned a
+  generation); the current one held 582,164 blocks and 423 MB of code, metadata 289 MiB. The pre-change
+  reading from another session was 4.70 GB with an 858 MB mapping at 263 s and 5.03 GB at 633 s. This is
+  not a controlled A/B (different play, one run each; the side-by-side run with the old build was stopped),
+  and whether the two renewals caused a visible hitch was not recorded. A renewal discards every block, so
+  each one recompiles the working set (hundreds of thousands of blocks, seconds of compile time across the
+  threads that need them). A persistent
+  translation cache (`--jit-disk-cache`, work not yet committed when this was written) is meant to make
+  that cheaper; it was run together with renewals only on the pressure fixture (correct results), not in a game.
+
+Tests: `Tests/Unit/jit_cache_generations.c` through `Scripts/Testing/test_jit_generations.sh` (1 MiB
+budget, about 500 renewals: sleepers in nanosleep and futex, a futex wait inside a nested call,
+nested call loops that compile throughout, rewritten code, signals, a fork afterwards; every result
+checked), and `test_jit_cache.sh`, which now expects renewals at a 1 MiB budget.
+
 ## Per-block bookkeeping and per-thread dispatch caches (2026-10-24)
 
 Battle Cats (title screen, five runtime processes: the game, the WebView
@@ -2144,8 +2232,12 @@ physical backing on writes; reservation does not allocate 1 GiB of RAM.
 Published code is never moved or recycled because cached function pointers
 and live call frames can still reference it. At the budget limit, one failed
 compilation marks the budget exhausted; subsequent new PCs receive cached
-single-step interpreter entries without repeating decode and code generation.
-Branch-fixup writes check buffer bounds even after an emission overflow.
+single-step interpreter entries without repeating decode and code generation,
+and the emulator replaces the whole instance (see the generations section at
+the top: the full one is released once no thread can run it). An instance that
+cannot be replaced, because the previous one is still pinned, stays in that
+interpreter fallback. Branch-fixup writes check buffer bounds even after an
+emission overflow.
 
 Call-target lookups honor cached interpreter entries. Shared block-table
 reads and publication hold `blocks_mutex_`, with a separate locked lookup for
@@ -2157,12 +2249,12 @@ rewrites of published instructions; its chaining and Tier-2 publication use
 atomic data cells. Code is not recycled while another CPU can execute it.
 
 `BIFROST_STATS_PERIOD` reports cache usage, capacity, budget, growth and
-overflow counts. The cached diagnostic settings `BIFROST_JIT_CACHE_MB`
-(default 1024) and `BIFROST_JIT_CACHE_INITIAL_MB` (default 64) accept 1..1024
-MiB; initial capacity is clipped to the budget. `Scripts/Testing/test_jit_cache.sh`
-checks a three-thread guest with a forced 1 MiB budget and a growth run,
-including repeated interpreter-only calls, exact results, one bounded
-overflow and no repeated translation of cached fallback targets.
+overflow counts. The cached settings `BIFROST_JIT_CACHE_MB`
+(default 512, the budget before the JIT is replaced) and `BIFROST_JIT_CACHE_INITIAL_MB`
+(default 64) accept 1..1024 MiB; initial capacity is clipped to the budget.
+`Scripts/Testing/test_jit_cache.sh` checks a three-thread guest with a forced
+1 MiB budget (repeated renewals, exact results) and a growth run (no renewal,
+no repeated translation of cached fallback targets).
 
 Range invalidation queries an ordered, conservative index from 256-byte guest
 granules to the PCs of published blocks whose own or inlined/Tier-2 dependency

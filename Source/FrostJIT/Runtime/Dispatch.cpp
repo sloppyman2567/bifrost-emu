@@ -7,6 +7,7 @@
 // via translate_block() (BlockCompiler.cpp) and cache it. Also handles
 // verify mode (BIFROST_JIT_VERIFY=1) and block chaining.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/Generations.hpp"
 #include "System/Core/Emulator.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "System/Core/DebugFlags.hpp"
@@ -42,11 +43,23 @@ void FrostJIT::bind_ibl(CPU& cpu) {
     cpu.jit_ibl_table = tls_ibl_.get();
 }
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
-    if (!cpu.jit_call_depth) cpu.jit_dispatch_requested = false;
+    if (!cpu.jit_call_depth) {
+        cpu.jit_dispatch_requested = false;
+        // No generated frame is on this thread's stack: leave a park, observe the epoch, and
+        // hand over to the successor if this instance was retired (see Generations.hpp).
+        jit_generations::boundary();
+        if (__builtin_expect(retired_.load(std::memory_order_acquire), 0)) {
+            FrostJIT* current = emu.jit();
+            if (current && current != this) return current->run_block(cpu, emu);
+        }
+    }
     bool debug_step = emu.debugger_poll(cpu);
     if (!cpu.running || (cpu.jit_call_depth && cpu.jit_dispatch_requested)) return cpu.pc;
     if (debug_step) { emu.step(cpu); return cpu.pc; }
     FaultScope fault_scope(this);
+    // A block that reached a (non-thunk) SVC left it unrun: run it here, with no generated frame
+    // on this thread's stack (see emit_call_native_svc).
+    if (__builtin_expect(cpu.jit_svc_pc != 0, 0) && run_pending_svc(cpu, emu)) return cpu.pc;
     cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
     jit_grant_lease(cpu);
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled

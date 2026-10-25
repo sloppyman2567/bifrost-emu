@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bounded pressure and growth checks; three guest threads validate results.
+# Bounded pressure and growth checks; three guest threads validate results. A full code cache
+# replaces the shared JIT (generations; test_jit_generations.sh covers that in depth).
 # Selective invalidation: line publishes and mprotect keep unchanged
 # translations, and direct BL callers (chain-skip off) see rewritten callees.
 set -euo pipefail
@@ -38,12 +39,17 @@ for budget in (1,64):
     used,capacity,limit,blocks,growths,overflows,fallbacks,mt=map(int,rows[-1])
     assert 0<used<=capacity<=limit==budget*1024*1024
     assert mt==1,'Test did not enter shared multithread mode'
-    if budget==1:
-        assert overflows==1 and fallbacks>0,(overflows,fallbacks)
-    else:
-        assert growths>0 and overflows==0 and fallbacks==0,(growths,overflows,fallbacks)
     translated=int(re.findall(r'(\d+) blocks translated',log)[-1])
-    assert translated<20000,'Cached fallback targets are being recompiled'
-    print(f'cache budget {budget} MiB: correct results, {translated} translations, {overflows} overflows')
+    generations=re.findall(r'generations: retired=(\d+) released=(\d+)',log)
+    assert generations,'No generation counters'
+    retired,released=map(int,generations[-1])
+    if budget==1:
+        # The 1 MiB cache fills over and over: each time the JIT is replaced instead of falling
+        # back to the interpreter for good, and the retired one is released.
+        assert retired>=1 and released>=retired-1,(retired,released)
+    else:
+        assert growths>0 and overflows==0 and fallbacks==0 and retired==0,(growths,overflows,fallbacks,retired)
+        assert translated<20000,'Cached fallback targets are being recompiled'
+    print(f'cache budget {budget} MiB: correct results, {translated} translations, {retired} generations retired')
 print('jit_cache: ALL PASS')
 PY
