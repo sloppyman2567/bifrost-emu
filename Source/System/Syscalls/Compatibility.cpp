@@ -459,6 +459,15 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
             // process does not leave the session its supervisor manages;
             // EPERM is the kernel's answer for a process-group leader.
             if (emu.vfs().process_ids().pid == 1) { ret_host(1); return 0; }
+            // A host-fork child of a plain run is a real process with real ids (forkpty and every
+            // daemon call setsid): make the real session, which getsid and /proc then report.
+            // The Android runtime keeps EPERM: its supervisor owns the session its helpers share.
+            if (emu.host_fork_child() && !emu.android_runtime()) {
+                const pid_t session = ::setsid();
+                if (session < 0) { ret_errno(); return 0; }
+                ret_host(static_cast<uint64_t>(session));
+                return 0;
+            }
             ret_err(EPERM); return 0;
         }
         // ── setrlimit (164) ───────────────────────────────────────────

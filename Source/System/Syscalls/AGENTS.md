@@ -31,6 +31,8 @@
   Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and
   `/proc/self/{stat,status}` must agree with it; a leader's TID equals its
   PID, including after execve.
+  `setsid` is real for a host-fork child of a plain run (forkpty, daemons: `getsid`, `/proc` and the pty's `TIOCGSID` then agree); the PID-1 model
+  answers 1, and the Android runtime keeps EPERM because its supervisor owns the session its helpers share.
 - Host-forwarded signals and `kill` of the own process are process-directed:
   route them through `Emulator::send_process_signal` (Linux
   `complete_signal`), never to whichever thread drained them. A signal every

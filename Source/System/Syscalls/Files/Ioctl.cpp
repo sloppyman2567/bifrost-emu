@@ -19,6 +19,7 @@
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/VFS/VFS.hpp"
 #include "System/VFS/Nodes/Node.hpp"
+#include "System/VFS/Nodes/TerminalIoctls.hpp"
 #include "System/Graphics/Display/Graphics.hpp"
 #include <errno.h>
 #include <fcntl.h>
@@ -36,6 +37,20 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF));
+                return 0;
+            }
+            // A host-identity process (fork child, Binder-realm app) has real session ids, so its
+            // terminal's session is the host's answer; the PID-1 model answers 1 in the terminal helper.
+            if (static_cast<uint32_t>(a1) == yggdrasil::ioctl_num::REQ_TIOCGSID &&
+                emu.vfs().process_ids().pid != 1 && node->host_fd() >= 0) {
+                pid_t session = 0;
+                if (::ioctl(node->host_fd(), TIOCGSID, &session) < 0) {
+                    cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno));
+                    return 0;
+                }
+                try { mem_.store<int32_t>(a2, static_cast<int32_t>(session)); }
+                catch (...) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)); return 0; }
+                cpu.regs[0] = 0;
                 return 0;
             }
             // Dispatch to the Node. Each Node subclass implements

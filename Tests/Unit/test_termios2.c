@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -73,9 +74,7 @@ int main(void) {
     close(p[0]); close(p[1]);
 
     // A real pseudo terminal created inside the guest.
-    // The emulator does not implement TIOCSPTLCK/TIOCGPTN yet (a guest cannot create a pty),
-    // so this part is skipped, loudly, until it does; the termios2 forwarding to a real
-    // terminal was checked with a pty owned by the test harness instead.
+    // Skipped, loudly, on an implementation without TIOCSPTLCK (qemu-user has it).
     int m = open("/dev/ptmx", O_RDWR | O_NOCTTY);
     int unlock = 0, n = -1;
     if (m >= 0 && ioc(m, TIOCSPTLCK, &unlock) == -ENOTTY) {
@@ -124,9 +123,13 @@ int main(void) {
             set.c_cflag = (set.c_cflag & ~K_CBAUD) | K_B38400;
             CHECK(ioc(s, TCSETS2, &set) == 0, "TCSETS2 with B38400");
 
-            // A bad user pointer is EFAULT, not a crash.
-            CHECK(ioc(s, TCGETS2, (void *)8) == -EFAULT, "TCGETS2 with a bad pointer");
-            CHECK(ioc(s, TCSETS2, (void *)8) == -EFAULT, "TCSETS2 with a bad pointer");
+            // A bad user pointer is EFAULT, not a crash. An inaccessible page is a pointer every
+            // implementation must reject (the emulator tolerates tiny addresses such as 8).
+            void *bad = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            CHECK(bad != MAP_FAILED, "mmap");
+            CHECK(ioc(s, TCGETS2, bad) == -EFAULT, "TCGETS2 with a bad pointer");
+            CHECK(ioc(s, TCSETS2, bad) == -EFAULT, "TCSETS2 with a bad pointer");
+            CHECK(ioc(s, TCSETSW2, bad) == -EFAULT, "TCSETSW2 with a bad pointer");
 
             ioc(s, TCSETS2, &old2);
             close(s);

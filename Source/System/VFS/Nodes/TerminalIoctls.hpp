@@ -65,14 +65,29 @@ namespace ioctl_num {
     constexpr uint32_t REQ_TCSETS2    = 0x402C542B;  // write termios2
     constexpr uint32_t REQ_TCSETSW2   = 0x402C542C;  // drain output, then write
     constexpr uint32_t REQ_TCSETSF2   = 0x402C542D;  // drain input, then write
+    constexpr uint32_t REQ_TCSBRK     = 0x5409;  // tcdrain / tcsendbreak(0): value argument
+    constexpr uint32_t REQ_TCXONC     = 0x540A;  // tcflow: value argument
+    constexpr uint32_t REQ_TCFLSH     = 0x540B;  // tcflush: value argument
+    constexpr uint32_t REQ_TIOCEXCL   = 0x540C;  // exclusive open
+    constexpr uint32_t REQ_TIOCNXCL   = 0x540D;  // clear exclusive open
     constexpr uint32_t REQ_TIOCSCTTY  = 0x540E;  // set controlling tty
     constexpr uint32_t REQ_TIOCGPGRP  = 0x540F;  // get foreground pgrp
     constexpr uint32_t REQ_TIOCSPGRP  = 0x5410;  // set foreground pgrp
+    constexpr uint32_t REQ_TIOCOUTQ   = 0x5411;  // bytes queued for output
     constexpr uint32_t REQ_TIOCGWINSZ = 0x5413;  // get window size
+    constexpr uint32_t REQ_TIOCSWINSZ = 0x5414;  // set window size (the tty then signals SIGWINCH)
     constexpr uint32_t REQ_FIONREAD   = 0x541B;  // bytes available to read
+    constexpr uint32_t REQ_TIOCPKT    = 0x5420;  // packet mode on a pty master
     constexpr uint32_t REQ_FIONBIO    = 0x5421;  // set/clear non-blocking I/O
     constexpr uint32_t REQ_TIOCNOTTY  = 0x5422;  // detach controlling tty
+    constexpr uint32_t REQ_TCSBRKP    = 0x5425;  // tcsendbreak(n): value argument
     constexpr uint32_t REQ_TIOCGSID   = 0x5429;  // get session id
+    // _IOR('T', 0x30, unsigned) and friends: the pty master's setup requests.
+    constexpr uint32_t REQ_TIOCGPTN   = 0x80045430;  // slave number of a pty master
+    constexpr uint32_t REQ_TIOCSPTLCK = 0x40045431;  // lock (1) or unlock (0) the slave
+    constexpr uint32_t REQ_TIOCGPTLCK = 0x80045439;  // is the slave locked
+    constexpr uint32_t REQ_TIOCGEXCL  = 0x80045440;  // is the terminal opened exclusively
+    constexpr uint32_t REQ_TIOCGPTPEER = 0x5441;     // open the slave of a master: returns an fd
 }  // namespace ioctl_num
 // ── dispatch_terminal_ioctl — shared ioctl handler ─────────────────────
 // Forward terminal-related ioctls to the host fd, marshalling the
@@ -89,7 +104,13 @@ namespace ioctl_num {
 // host fds but not on stdin/stdout/stderr).
 inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
                                     uint64_t argp, Memory& mem) {
-    if (argp == 0) return -EFAULT;
+    // TCFLSH, TCSBRK, TCXONC, TCSBRKP and the exclusive-mode requests take a value (often 0), not a pointer.
+    const bool value_argument =
+        request == ioctl_num::REQ_TCSBRK || request == ioctl_num::REQ_TCXONC ||
+        request == ioctl_num::REQ_TCFLSH || request == ioctl_num::REQ_TCSBRKP ||
+        request == ioctl_num::REQ_TIOCEXCL || request == ioctl_num::REQ_TIOCNXCL ||
+        request == ioctl_num::REQ_TIOCSCTTY || request == ioctl_num::REQ_TIOCNOTTY;
+    if (argp == 0 && !value_argument) return -EFAULT;
     switch (request) {
         case ioctl_num::REQ_TIOCGWINSZ: {
             struct winsize ws;
@@ -98,6 +119,48 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
             mem.write(argp, &ws, sizeof(ws));
             return 0;
         }
+        case ioctl_num::REQ_TIOCSWINSZ: {
+            struct winsize ws{};
+            mem.read(argp, &ws, sizeof(ws));  // four 16-bit fields, the same on every architecture
+            return ::ioctl(host_fd, TIOCSWINSZ, &ws) < 0 ? -errno : 0;
+        }
+        // An int the kernel writes (the pty number, lock state, queued bytes, line discipline).
+        case ioctl_num::REQ_TIOCGPTN:
+        case ioctl_num::REQ_TIOCGPTLCK:
+        case ioctl_num::REQ_TIOCGEXCL:
+        case ioctl_num::REQ_TIOCOUTQ: {
+            uint32_t v = 0;
+            if (::ioctl(host_fd, request, &v) < 0) return -errno;
+            mem.store<uint32_t>(argp, v);
+            return 0;
+        }
+        // An int the kernel reads (lock/unlock, packet mode).
+        case ioctl_num::REQ_TIOCSPTLCK:
+        case ioctl_num::REQ_TIOCPKT: {
+            int v = mem.load<int32_t>(argp);
+            return ::ioctl(host_fd, request, &v) < 0 ? -errno : 0;
+        }
+        // The argument is the value itself, not a pointer.
+        case ioctl_num::REQ_TCSBRK:
+        case ioctl_num::REQ_TCXONC:
+        case ioctl_num::REQ_TCFLSH:
+        case ioctl_num::REQ_TCSBRKP:
+            return ::ioctl(host_fd, request, static_cast<unsigned long>(static_cast<int>(argp))) < 0 ? -errno : 0;
+        // The guest's session is virtual (plain runs present PID 1 as the session leader, see
+        // TIOCGSID below), so acquiring a controlling terminal is the host's answer when the
+        // emulator really is a leader, and success when the kernel only says "you are not a
+        // session leader". Giving the terminal up is never forwarded: it would detach the
+        // emulator's own terminal.
+        case ioctl_num::REQ_TIOCSCTTY: {
+            if (::ioctl(host_fd, request, static_cast<unsigned long>(static_cast<int>(argp))) < 0 && errno != EPERM)
+                return -errno;
+            return 0;
+        }
+        case ioctl_num::REQ_TIOCNOTTY:
+            return 0;
+        case ioctl_num::REQ_TIOCEXCL:
+        case ioctl_num::REQ_TIOCNXCL:
+            return ::ioctl(host_fd, request) < 0 ? -errno : 0;
         case ioctl_num::REQ_TCGETS: {
             KernelTermios t{};
             int r = ::ioctl(host_fd, TCGETS, &t);

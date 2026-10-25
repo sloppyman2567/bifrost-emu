@@ -678,6 +678,18 @@ int HostNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
     return r < 0 ? -errno : 0;
 }
+// TIOCGPTPEER opens the slave of a pty master and returns a new descriptor, so it
+// needs the fd table. The flags are the open flags (O_RDWR, O_NOCTTY, O_CLOEXEC),
+// whose values are the same on AArch64 and x86-64.
+int HostNode::ioctl_thread(uint32_t request, uint64_t argp, Memory& mem, CPU& cpu, FdTable& fds) {
+    if (request != ioctl_num::REQ_TIOCGPTPEER) return ioctl(request, argp, mem);
+    const int flags = static_cast<int>(argp) & (O_ACCMODE | O_NOCTTY | O_CLOEXEC);
+    const int peer = ::ioctl(fd_, request, flags);
+    if (peer < 0) return -errno;
+    const int gfd = fds.allocate(std::make_shared<HostNode>(peer, flags & ~O_CLOEXEC));
+    if (gfd >= 0 && (flags & O_CLOEXEC)) fds.set_cloexec(gfd, true);
+    return gfd;
+}
 // HostNode::ioctl — handle terminal and FIONREAD ioctls by forwarding
 // to the host fd. Moved here from Ioctl.cpp's heuristic
 // dispatch. refactored to use the shared

@@ -512,6 +512,9 @@ UNIT_TESTS=(
     "jit_blr_lr|Tests/Unit/jit_blr_lr.elf||10|checks passed"
     # termios2 ioctls (glibc 2.42+ isatty/tcgetattr/tcsetattr).
     "test_termios2|Tests/Unit/test_termios2.elf||10|checks passed"
+    # Guest-created ptys: kernel ABI, then the libc view (forkpty + exec of toybox).
+    "test_pty|Tests/Unit/test_pty.elf||20|checks passed"
+    "test_forkpty|Tests/Unit/test_forkpty.elf||30|test_forkpty: ALL PASS"
     "jit_interp_exit|Tests/Unit/jit_interp_exit.elf||10|2001/2001 checks passed"
     "jit_flags_passthrough|Tests/Unit/jit_flags_passthrough.elf||10|checks passed"
     "jit_flags_exit_dead|Tests/Unit/jit_flags_exit_dead.elf||30|ALL PASS"

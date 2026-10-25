@@ -66,4 +66,11 @@
 - Run filesystem sandbox regressions and the affected proc/sys/device probes.
 
 - Raw TCGETS/TCSETS use the 36-byte kernel termios layout, never host libc struct termios (which can be larger). Preserve guest buffer bounds on both real and synthetic TTY paths.
-  TCGETS2/TCSETS2/TCSETSW2/TCSETSF2 (44-byte `termios2`) are answered the same way, synthetic terminal included: glibc 2.42+ implements `isatty`, `tcgetattr` and `tcsetattr` with them, so leaving them unhandled makes every terminal "not a tty" and breaks raw mode. `test_termios2` covers the ABI; a guest cannot create its own pty yet (TIOCSPTLCK/TIOCGPTN are unhandled).
+  TCGETS2/TCSETS2/TCSETSW2/TCSETSF2 (44-byte `termios2`) are answered the same way, synthetic terminal included: glibc 2.42+ implements `isatty`, `tcgetattr` and `tcsetattr` with them, so leaving them unhandled makes every terminal "not a tty" and breaks raw mode. `test_termios2` covers the ABI.
+  A guest creates and drives its own pty through the host's `/dev/ptmx` and `/dev/pts/*` (plain `HostNode` passthrough): the master's setup requests
+  (TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK, and TIOCGPTPEER, which returns a new descriptor and so lives in `HostNode::ioctl_thread`) and the tty controls
+  (TIOCSWINSZ, TCFLSH, TCSBRK/TCSBRKP, TCXONC, TIOCOUTQ, TIOCPKT, TIOCEXCL/TIOCNXCL/TIOCGEXCL) are marshalled like TCGETS. TCFLSH, TCSBRK, TCXONC,
+  TCSBRKP, TIOCSCTTY, TIOCNOTTY and the exclusive requests take a *value*: a zero argument is valid, never EFAULT. TIOCNOTTY is never forwarded
+  (it would detach the emulator's own terminal); TIOCSCTTY is, and a plain run's EPERM (not a host session leader) counts as success because its
+  session is virtual. A host-identity process answers TIOCGSID from the host so it agrees with `getsid`. `test_pty` (raw ABI, checked against a native
+  x86-64 build on the real kernel) and `test_forkpty` (libc `openpty`/`forkpty` + exec) cover it.

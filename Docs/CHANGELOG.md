@@ -23,8 +23,27 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   stdio presents for a redirected stdin/stdout answers `TCGETS2` too. Checked on a pty owned by a test harness against
   `qemu-aarch64` with the bundled glibc 2.42 (dynamic `isatty`/`tcgetattr`) and a glibc 2.44 static program (raw mode,
   `SIGWINCH`, `^C`, `^Z`, `^D`, canonical restore); `Tests/Unit/test_termios2.c` checks the ABI against the same expectations.
-  Not covered: a guest cannot create its own pty (`TIOCSPTLCK` and `TIOCGPTN` are unhandled), so `openpty`, `script`
-  and terminal multiplexers inside the guest still fail.
+
+### Guests can create and drive their own pseudo terminals (2026-10-25)
+
+- `openpty`, `forkpty`, `posix_openpt` and everything built on them (`script`, `tmux`, `ssh`, Python's `pty`) failed
+  inside the guest: `/dev/ptmx` opened, but the pty setup requests were unhandled. The master's `TIOCGPTN`, `TIOCSPTLCK`,
+  `TIOCGPTLCK` and `TIOCGPTPEER` (which returns a new descriptor) are now forwarded, with the tty controls programs use on
+  them: `TIOCSWINSZ` (also missing for ordinary terminals, so `stty rows` and window resizes from a guest did nothing),
+  `TCFLSH`, `TCSBRK`, `TCSBRKP`, `TCXONC`, `TIOCOUTQ`, `TIOCPKT` and the exclusive-mode requests. The value-argument requests
+  accept 0 (the old null-pointer check turned `tcflush(fd, TCIFLUSH)` into `EFAULT`). `TIOCSCTTY` is forwarded (a plain
+  run's `EPERM` for "not a session leader" counts as success because its session is virtual), `TIOCNOTTY` is never forwarded,
+  and a host-identity process answers `TIOCGSID` from the host so it agrees with `getsid`.
+- `setsid` is now real in a host-fork child of a plain run, which `forkpty` and every daemon need (it was `EPERM`). The PID-1
+  model still answers 1 and the Android runtime keeps `EPERM`.
+- Checked: `Tests/Unit/test_pty.c` (41 checks on raw ioctls: lock state, slave number, peer, window size, data both ways,
+  flush, drain, packet mode, exclusive mode, errno for non-ptys, a forkpty-style child that leads a session and takes the slave,
+  hang-up with `EIO`) gives the same result as a native x86-64 build on this machine's kernel, under the JIT and the
+  interpreter. `Tests/Unit/test_forkpty.c` runs the libc view (posix_openpt/grantpt/unlockpt/ptsname_r, raw `tcsetattr`,
+  `openpty`, `forkpty` + exec, an interactive `sh` on the pty with its exit status) and passes; the same program built
+  against the bundled glibc 2.42 and run dynamically passes too. `qemu-user` lacks `TIOCGPTLCK`/`TIOCGEXCL`, so the kernel
+  is the reference for those. Not run: bash, vi, tmux or screen themselves, and SIGWINCH delivery to a guest foreground group
+  through a master-side resize (no foreground group exists in the unit test).
 
 ### Android buffer images: no per-image RGBA copy, no leaked textures (2026-10-25)
 
