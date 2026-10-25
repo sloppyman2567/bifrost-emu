@@ -36,16 +36,20 @@ private:
         const uint8_t* mapping = nullptr;
         size_t size = 0;
         int32_t width = 0, height = 0, stride = 0, format = 0;
-        std::vector<uint8_t> rgba;  // converted upload, width * height * 4
         std::unordered_map<uint64_t, ContextImage> contexts;
     };
     uint64_t create(Memory& mem, uint64_t buffer, uint64_t attribs, bool wide);
     bool destroy(uint64_t image);
     void bind(uint32_t target, uint64_t image, bool renderbuffer);
-    void convert(Buffer& buffer);
+    // Converts to tightly packed RGBA8 in `out`: one scratch buffer shared by every image, not a copy per image.
+    void convert(Buffer& buffer, std::vector<uint8_t>& out);
 
     std::mutex mu_;
     std::unordered_map<uint64_t, Buffer> buffers_;  // keyed by guest image handle
+    std::vector<uint8_t> scratch_;
+    // Textures of images destroyed while another context (or none) was current: they can only be deleted
+    // in their own context, so they wait for its next bind. Keyed by host context.
+    std::unordered_map<uint64_t, std::vector<uint32_t>> stale_textures_;
     uint64_t next_ = 0;
 };
 }  // namespace arm64emu

@@ -235,7 +235,9 @@ bool AndroidBufferImages::destroy(uint64_t image) {
     uint64_t current = f.usable ? reinterpret_cast<uint64_t>(f.get_current_context()) : 0;
     for (auto& [context, c] : it->second.contexts) {
         if (c.image) f.destroy_image(c.display, c.image);
-        if (context == current && c.texture) f.delete_textures(1, &c.texture);
+        if (!c.texture) continue;
+        if (context == current) f.delete_textures(1, &c.texture);
+        else stale_textures_[context].push_back(c.texture);
     }
     munmap(const_cast<uint8_t*>(it->second.mapping), it->second.size);
     buffers_.erase(it);
@@ -251,6 +253,7 @@ void AndroidBufferImages::forget_context(uint64_t context) {
         if (it->second.image) f.destroy_image(it->second.display, it->second.image);
         buffer.contexts.erase(it);
     }
+    stale_textures_.erase(context);  // its texture names went with it
 }
 
 void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffer) {
@@ -268,12 +271,23 @@ void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffe
         return;
     }
     Buffer& b = it->second;
+    // Free textures of images destroyed elsewhere while this context was not current.
+    if (auto stale = stale_textures_.find(reinterpret_cast<uint64_t>(context)); stale != stale_textures_.end()) {
+        f.delete_textures(static_cast<int>(stale->second.size()), stale->second.data());
+        stale_textures_.erase(stale);
+    }
     ContextImage& c = b.contexts[reinterpret_cast<uint64_t>(context)];
     const char* version = reinterpret_cast<const char*>(f.get_string(kVersion));
     bool es3 = version && !std::strstr(version, "OpenGL ES 2") && !std::strstr(version, "OpenGL ES-C");
-    convert(b);
+    // RGBA8 is already in the upload format: read it from the mapping in place (a row length for the gralloc
+    // stride where the context has one) instead of copying every frame. Other formats convert into the scratch.
+    const bool direct = b.format == 1 && (es3 || b.stride == b.width);
+    const void* pixels;
+    if (direct) pixels = b.mapping + BF_GRALLOC_OFFSET;
+    else { convert(b, scratch_); pixels = scratch_.data(); }
     {
         UploadState saved(f, es3);
+        if (direct && es3 && b.stride != b.width) f.pixel_store(kUnpackRowLength, b.stride);
         if (!c.texture) {
             c.display = f.get_current_display();
             f.gen_textures(1, &c.texture);
@@ -282,13 +296,15 @@ void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffe
             f.tex_parameteri(kTexture2D, kMagFilter, kLinear);
             f.tex_parameteri(kTexture2D, kWrapS, kClampToEdge);
             f.tex_parameteri(kTexture2D, kWrapT, kClampToEdge);
-            f.tex_image(kTexture2D, 0, kRgba, b.width, b.height, 0, kRgba, kUnsignedByte, b.rgba.data());
+            f.tex_image(kTexture2D, 0, kRgba, b.width, b.height, 0, kRgba, kUnsignedByte, pixels);
         } else {
             // Sub-image updates keep the storage the EGLImage shares;
             // glTexImage2D would orphan it.
             f.bind_texture(kTexture2D, c.texture);
-            f.tex_sub_image(kTexture2D, 0, 0, 0, b.width, b.height, kRgba, kUnsignedByte, b.rgba.data());
+            f.tex_sub_image(kTexture2D, 0, 0, 0, b.width, b.height, kRgba, kUnsignedByte, pixels);
         }
+        // UploadState restores a row length only when the app had one set.
+        if (direct && es3 && b.stride != b.width) f.pixel_store(kUnpackRowLength, 0);
     }
     if (!c.image) {
         const int attribs[] = {kTextureLevel, 0, kImagePreserved, kTrue, kNone};
@@ -301,11 +317,11 @@ void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffe
 // Linear gralloc pixels (after the metadata page) to tightly packed RGBA8.
 // YUV420 is planar Y, V, U with 2x2 chroma (gralloc_mapper.c planes()); its
 // matrix and range follow the buffer's dataspace, as FrameworkSurfaces does.
-void AndroidBufferImages::convert(Buffer& b) {
+void AndroidBufferImages::convert(Buffer& b, std::vector<uint8_t>& scratch) {
     const uint8_t* pixels = b.mapping + BF_GRALLOC_OFFSET;
     const int w = b.width, h = b.height, stride = b.stride;
-    b.rgba.resize(size_t(w) * h * 4);
-    uint8_t* out = b.rgba.data();
+    scratch.resize(size_t(w) * h * 4);
+    uint8_t* out = scratch.data();
     if (b.format == 35 || b.format == 0x32315659) {
         const int32_t space = dataspace(b.mapping);
         const int standard = (space >> 16) & 63;

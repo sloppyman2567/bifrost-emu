@@ -14,6 +14,20 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android buffer images: no per-image RGBA copy, no leaked textures (2026-10-25)
+
+- An `EGL_NATIVE_BUFFER_ANDROID` image (HWUI, WebView, TextureView video) kept a full RGBA copy of its buffer for its
+  whole life and converted into it on every bind. RGBA8 buffers now upload straight from the gralloc mapping (a row
+  length carries the stride; contexts without one still convert), and other formats convert into one scratch shared by
+  all images. A texture of an image destroyed while another context was current was never deleted; it is now freed at
+  its context's next bind. Checked by the 11 windowless GL/EGL tests and `test_managed_hardware_canvas` (window, RGBA
+  and YUV frames read back). The saving is one frame-sized copy per live image, not measured in a game.
+- Found, not changed: four APEX entries (`runtime`, `virt`, `i18n`, `nfcservices`) link to `/system/lib64/libc++.so`,
+  which the provisioned system image never carried, so `liblog.so` cannot load for an executable outside the `[art]`
+  linker section (Crashlytics' crash helper under `/data/app` prints `libc++.so not found`). Linking it to the ART APEX
+  copy fixes it but changes the framework manifest hash, which every prepared app root includes, so each installed app would
+  rebuild its root and re-optimise once; left for the next framework provisioning change.
+
 ### `[mem]` line: where a process's resident memory is (2026-10-25)
 
 - With `BIFROST_STATS_PERIOD=N` (and at exit with `--verbose`) each emulator process prints one `[mem]` line next to

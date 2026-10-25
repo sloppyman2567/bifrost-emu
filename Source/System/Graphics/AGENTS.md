@@ -28,6 +28,11 @@
   Each GL context gets its own host texture and EGL image. Refresh with
   `glTexSubImage2D` (glTexImage2D would orphan the image's storage), and
   restore every unpack/texture binding touched so the tracker's view holds.
+  RGBA8 buffers upload straight from the mapping (GL_UNPACK_ROW_LENGTH for the
+  gralloc stride, reset afterwards); other formats convert into one scratch
+  shared by all images, never a copy per image. A texture can only be deleted
+  in its own context, so one left by an image destroyed elsewhere waits in
+  `stale_textures_` for that context's next bind.
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);
   every soname registration takes one.
 - Preserve stack/FP argument ABI, nested pointer arrays and string returns.
