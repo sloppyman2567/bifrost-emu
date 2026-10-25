@@ -6,7 +6,7 @@
 // The CPU owns:
 //   - The 31 general-purpose registers (X0..X30) + SP + PC + PSTATE
 //   - The 32 SIMD/FP registers (V0..V31), stored as low/high 64-bit halves
-//   - Per-vCPU decode cache (2-way set-associative, ~1.5 MiB)
+//   - Per-vCPU decode cache (2-way set-associative, 1.7 MiB of address space, mapped on first use)
 //   - Per-vCPU page cache (for the Memory hot path)
 //   - Local exclusive monitor state (for LDXR/STXR atomics)
 //   - Thread-local storage pointers (TPIDR_EL0, TPIDRRO_EL0)
@@ -89,8 +89,14 @@ public:
     // ── Per-CPU decode cache ───────────────────────────────────────
     // Lives in CPU (not Emulator) so each vCPU has its own cache with
     // no locking. 2-way set-associative: 8192 sets × 2 ways = 16384
-    // entries (~1.5 MiB per vCPU). This is the hot path — ~100% hit
-    // rate for tight loops.
+    // entries (1.7 MiB of address space per vCPU). This is the hot path —
+    // ~100% hit rate for tight loops. A game runs hundreds of vCPUs and
+    // most interpret little, so the cache is one anonymous mapping that
+    // the kernel provides zero-filled and faults in page by page, mapped
+    // on the first interpreted instruction: a vCPU holds only the pages
+    // its PCs hash to, and none if it never interprets. (As a vector it
+    // was filled at construction: 1.7 MiB resident per thread, about
+    // 640 MB for the 363 threads of one game.)
     //
     // upgraded from direct-mapped to 2-way
     // set-associative to reduce conflict misses.
@@ -100,16 +106,35 @@ public:
     static constexpr size_t DECODE_CACHE_SETS = 1 << DECODE_CACHE_BITS;
     static constexpr size_t DECODE_CACHE_SET_MASK = DECODE_CACHE_SETS - 1;
     struct CacheEntry {
-        uint64_t    tag = UINT64_MAX;  // PC; UINT64_MAX = empty slot
+        // ~PC; zero = empty slot, so a fresh zero page is a page of empty entries
+        // (~PC is zero only for PC = UINT64_MAX, never an instruction address).
+        uint64_t    tag = 0;
         // d.raw is also part of the key: a reused PC may hold new code.
         DecodedInst d;
     };
-    std::vector<CacheEntry> decode_cache{DECODE_CACHE_SIZE};
+    class DecodeCache {
+    public:
+        DecodeCache() = default;
+        DecodeCache(const DecodeCache&) {}  // a copied CPU starts with an empty cache of its own
+        DecodeCache& operator=(const DecodeCache&) { clear(); return *this; }
+        ~DecodeCache();
+        // The entries, mapped on first use.
+        CacheEntry* entries() {
+            if (__builtin_expect(!entries_, 0)) allocate();
+            return entries_;
+        }
+        // LRU bit per set: 0 = way 0 most-recently-used, 1 = way 1 MRU. Valid after entries().
+        uint8_t* lru() { return lru_; }
+        // Every entry empty again (execve): the pages are released, not rewritten.
+        void clear();
+    private:
+        void allocate();
+        CacheEntry* entries_ = nullptr;
+        uint8_t* lru_ = nullptr;
+    };
+    DecodeCache decode_cache;
     uint64_t decode_cache_hits = 0;
     uint64_t decode_cache_misses = 0;
-    // LRU bit per set: 0 = way 0 most-recently-used, 1 = way 1 MRU.
-    std::vector<uint8_t> decode_cache_lru =
-        std::vector<uint8_t>((DECODE_CACHE_SETS + 7) / 8, 0);
     // Address set via set_tid_address() — used by futex on child
     // termination (set_child_tid). When this thread exits, the kernel
     // writes the TID to *tid_address and performs a futex wake on it.

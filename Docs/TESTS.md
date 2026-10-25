@@ -23,6 +23,14 @@ dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitte
 each category's count when it starts, and `--filter REGEX` runs only the tests whose names match. Without a configured rootfs the
 dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
 
+### Thread memory and the guest's RAM view (2026-10-25)
+
+`test_thread_memory.sh` runs 1 and 200 idle guest threads and reads the emulator's peak RSS from `/proc`; the 200-thread run
+may exceed the 1-thread run by at most 120 MB (28 MB now, 352 MB before the decode cache became lazy; the script
+fails on the old build). `test_guest_memory.sh` checks the policy function on the host (cap, pressure, inconsistent
+and empty hosts) and then `/proc/meminfo` against `sysinfo` inside the guest at the default cap, 2048 MB and no cap
+(toybox's field order, `free <= available <= total`, no swap, the expected total).
+
 ### Code-cache generations (2026-10-25)
 
 `Tests/Unit/jit_cache_generations.c`, run by `Scripts/Testing/test_jit_generations.sh` (about 8 s), forces a

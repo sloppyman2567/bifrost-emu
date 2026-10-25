@@ -289,6 +289,10 @@ UNIT_TESTS=(
     "jit_cache|Scripts/Testing/test_jit_cache.sh||65|jit_cache: ALL PASS|HOST_JIT"
     # A full code cache is replaced as a whole while threads sleep in syscalls, nest calls, rewrite code and take signals.
     "jit_generations|Scripts/Testing/test_jit_generations.sh||120|jit_generations: ALL PASS|HOST_JIT"
+    # The guest sees the host's real memory pressure under a capped total, identically in /proc/meminfo and sysinfo.
+    "guest_memory|Scripts/Testing/test_guest_memory.sh||60|guest_memory: ALL PASS|HOST_JIT"
+    # An idle guest thread costs well under 1 MiB of resident memory (the decode cache is mapped on first use).
+    "thread_memory|Scripts/Testing/test_thread_memory.sh||60|thread_memory: ALL PASS|HOST_JIT"
     "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
     "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
     "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries and concurrent phases PASS|HOST_JIT"

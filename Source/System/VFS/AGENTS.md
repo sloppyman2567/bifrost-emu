@@ -39,6 +39,9 @@
   `/proc/self/task/<tid>/comm` (and `/proc/thread-self/comm`, rewritten in
   `open_guest_at`) reads and renames one guest TID with `comm_write`
   semantics. Guest TIDs are not host TIDs; never pass those through.
+- `/proc/meminfo` and the `sysinfo` syscall come from one view, `Core/GuestMemoryView` (the host's real free and
+  available memory under a total capped at 8 GiB, `BIFROST_GUEST_MEMORY_MB`): never hard-code figures, because
+  Android's `MemoryInfo`, Unity and Chromium size themselves from them. Keep toybox's first eight field names in order.
 - `/proc/self/mem` and `/proc/self/pagemap` (also `/proc/<own pid>/…`) are served by `ProcMemoryNode` over the guest's
   address space, never the host's: mem reads and writes guest memory (EIO where unmapped); pagemap reports present, file-backed
   and exclusive-anonymous flags from the guest mappings with the frame number 0. Other pids' `/proc/<pid>/mem` stay denied.

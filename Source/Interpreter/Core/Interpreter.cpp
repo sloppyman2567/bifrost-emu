@@ -117,32 +117,35 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         size_t set_idx = (cpu.pc >> 2) & CPU::DECODE_CACHE_SET_MASK;
         size_t way0 = set_idx * 2;
         size_t way1 = way0 + 1;
-        CPU::CacheEntry& ce0 = cpu.decode_cache[way0];
-        CPU::CacheEntry& ce1 = cpu.decode_cache[way1];
+        CPU::CacheEntry* const cache = cpu.decode_cache.entries();  // mapped by the first instruction
+        uint8_t* const lru = cpu.decode_cache.lru();
+        const uint64_t tag = ~cpu.pc;  // zero is the empty slot
+        CPU::CacheEntry& ce0 = cache[way0];
+        CPU::CacheEntry& ce1 = cache[way1];
         const DecodedInst* dp;
-        if (__builtin_expect(ce0.tag == cpu.pc && ce0.d.raw == inst, 1)) {
+        if (__builtin_expect(ce0.tag == tag && ce0.d.raw == inst, 1)) {
             dp = &ce0.d;
             cpu.decode_cache_hits++;
             // Update LRU: way 0 is now MRU.
-            cpu.decode_cache_lru[set_idx >> 3] &= ~(1u << (set_idx & 7));
-        } else if (__builtin_expect(ce1.tag == cpu.pc && ce1.d.raw == inst, 1)) {
+            lru[set_idx >> 3] &= ~(1u << (set_idx & 7));
+        } else if (__builtin_expect(ce1.tag == tag && ce1.d.raw == inst, 1)) {
             dp = &ce1.d;
             cpu.decode_cache_hits++;
             // Update LRU: way 1 is now MRU.
-            cpu.decode_cache_lru[set_idx >> 3] |= (1u << (set_idx & 7));
+            lru[set_idx >> 3] |= (1u << (set_idx & 7));
         } else {
             // Miss: evict the LRU way.
-            bool lru_bit = (cpu.decode_cache_lru[set_idx >> 3] >> (set_idx & 7)) & 1;
+            bool lru_bit = (lru[set_idx >> 3] >> (set_idx & 7)) & 1;
             CPU::CacheEntry& victim = lru_bit ? ce0 : ce1;
             decode(victim.d, inst);
-            victim.tag = cpu.pc;
+            victim.tag = tag;
             dp = &victim.d;
             cpu.decode_cache_misses++;
             // The victim way is now MRU.
             if (lru_bit) {
-                cpu.decode_cache_lru[set_idx >> 3] &= ~(1u << (set_idx & 7));
+                lru[set_idx >> 3] &= ~(1u << (set_idx & 7));
             } else {
-                cpu.decode_cache_lru[set_idx >> 3] |= (1u << (set_idx & 7));
+                lru[set_idx >> 3] |= (1u << (set_idx & 7));
             }
         }
         const DecodedInst& d = *dp;

@@ -14,6 +14,25 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Idle guest threads cost 0.15 MiB instead of 1.8 MiB, and the guest sees real RAM (2026-10-25)
+
+- Every guest CPU built a 16,384-entry interpreter decode cache (1.7 MiB) when it was created, writing every entry,
+  so each thread held 1.7 MiB resident whether or not it ever interpreted an instruction. Measured with idle
+  threads: 100 threads 239 MB before, 76 MB after; 300 threads 594 MB before, 106 MB after (peak RSS of the
+  emulator, one core pinned). The cache is now one anonymous mapping, mapped on the first interpreted
+  instruction and faulted in page by page (an empty entry is an all-zero tag, the tag holds the complement of the
+  PC), and released on `execve`. The interpreter is no faster or slower (two micro-benchmarks, interpreter only,
+  within 1%). A game with 363 threads should drop by roughly 640 MB (363 x 1.7 MiB: calculated, not yet measured
+  in the game), and each helper runtime by its own thread count.
+- `/proc/meminfo` was a fixed fake (16 GiB total, 12 GiB available, no pressure, whatever the host had), so on a
+  smaller machine a game, Unity and Chromium sized their caches for 16 GiB and Android's
+  `ActivityManager.MemoryInfo` could never report low memory. `/proc/meminfo` and `sysinfo` now share one view
+  (`System/Core/GuestMemoryView`): the host's real free and available memory under a total capped at 8 GiB
+  (`BIFROST_GUEST_MEMORY_MB`, 0 = no cap). `sysinfo` reports no swap and `mem_unit` 1, as `/proc/meminfo` does. How much this
+  trims a game is not measured.
+- Tests: `thread_memory` (200 idle threads may add at most 120 MB; the old build adds 352 MB) and `guest_memory`
+  (policy edge cases on the host, then both views inside the guest at three caps).
+
 ### A full JIT code cache is replaced, and syscalls leave generated code (2026-10-25)
 
 - The JIT never freed or reused generated code, so a long session only grew (Melon Playground: 968 MB of

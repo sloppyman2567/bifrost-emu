@@ -35,6 +35,7 @@
 #include <syscall.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
+#include "System/Core/GuestMemoryView.hpp"
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
@@ -420,19 +421,20 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.store<uint64_t>(a0 + 8,  si.loads[0]);
                 mem_.store<uint64_t>(a0 + 16, si.loads[1]);
                 mem_.store<uint64_t>(a0 + 24, si.loads[2]);
-                // Memory: use host's real values
-                mem_.store<uint64_t>(a0 + 32, si.totalram);
-                mem_.store<uint64_t>(a0 + 40, si.freeram);
-                mem_.store<uint64_t>(a0 + 48, si.sharedram);
-                mem_.store<uint64_t>(a0 + 56, si.bufferram);
-                mem_.store<uint64_t>(a0 + 64, si.totalswap);
-                mem_.store<uint64_t>(a0 + 72, si.freeswap);
+                // Memory: the same view /proc/meminfo shows (GuestMemoryView.hpp), in bytes.
+                const GuestMemoryInfo mem = guest_memory_info();
+                mem_.store<uint64_t>(a0 + 32, mem.total);
+                mem_.store<uint64_t>(a0 + 40, mem.free);
+                mem_.store<uint64_t>(a0 + 48, mem.shmem);
+                mem_.store<uint64_t>(a0 + 56, mem.buffers);
+                mem_.store<uint64_t>(a0 + 64, 0);  // no swap, as in /proc/meminfo
+                mem_.store<uint64_t>(a0 + 72, 0);
                 // procs: use host's real proc count
                 mem_.store<uint16_t>(a0 + 80, si.procs);
                 mem_.store<uint16_t>(a0 + 82, 0);  // pad
                 mem_.store<uint64_t>(a0 + 88, si.totalhigh);
                 mem_.store<uint64_t>(a0 + 96, si.freehigh);
-                mem_.store<uint32_t>(a0 + 104, si.mem_unit);
+                mem_.store<uint32_t>(a0 + 104, 1);  // the memory fields above are bytes
                 mem_.store<uint32_t>(a0 + 108, 0); // padding
                 ret_host(0);
             } catch (...) {

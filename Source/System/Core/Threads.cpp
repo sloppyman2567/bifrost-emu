@@ -369,11 +369,9 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     //       deliver future signals to a stack it doesn't own.
     gt->cpu.sigpending.store(0);
     gt->cpu.altstack = CPU::AltStack{};
-    // Clear the per-vCPU decode cache so the child doesn't inherit
-    // stale entries from the parent (the cache entries are keyed by PC,
-    // but the LRU state should start fresh).
-    std::fill(gt->cpu.decode_cache.begin(), gt->cpu.decode_cache.end(),
-              CPU::CacheEntry{});
+    // The child must not inherit stale decode cache entries from the
+    // parent (they are keyed by PC, but the LRU state should start fresh).
+    gt->cpu.decode_cache.clear();
     // Named clone flag constants (per Linux include/uapi/linux/sched.h).
     // Use a BIFROST_ prefix to avoid collision with system headers
     // that may #define CLONE_SETTLS etc.

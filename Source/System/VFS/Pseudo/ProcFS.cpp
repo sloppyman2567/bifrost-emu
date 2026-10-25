@@ -17,6 +17,7 @@
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Graphics/Display/Graphics.hpp"
+#include "System/Core/GuestMemoryView.hpp"
 #include <sstream>
 #include <algorithm>
 #include <cerrno>
@@ -496,47 +497,57 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
     }
     // ── Static-content files ────────────────────────────────────────
     if (path == "/proc/meminfo") {
+        // The host's real memory pressure under a phone-sized total (GuestMemoryView.hpp).
         // Field order matters! toybox's `free` reads fields consecutively
         // by name (MemTotal, MemFree, Buffers, Cached, Shmem, SwapTotal,
         // SwapFree, SwapCached) and breaks when a name doesn't match.
         // We put those 8 fields FIRST, then the rest. Format matches
         // Linux's /proc/meminfo exactly (field name, colons, right-
         // justified width, " kB").
+        const GuestMemoryInfo mem = guest_memory_info();
+        const uint64_t total_kb = mem.total / 1024;
+        // The remaining fields are plausible fixed shares of the total (tuned for a 16 GiB total).
+        auto share = [&](uint64_t kb16) { return kb16 * total_kb / 16777216ull; };
         std::string s;
+        auto field = [&s](const char* name, uint64_t kb) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "%-15s %8llu kB\n", name, static_cast<unsigned long long>(kb));
+            s += buf;
+        };
         // ── Fields read by toybox `free` (must be consecutive) ──────
-        s += "MemTotal:       16777216 kB\n";
-        s += "MemFree:         8388608 kB\n";
-        s += "Buffers:               0 kB\n";
-        s += "Cached:          4194304 kB\n";
-        s += "Shmem:                 0 kB\n";
-        s += "SwapTotal:             0 kB\n";
-        s += "SwapFree:              0 kB\n";
-        s += "SwapCached:            0 kB\n";
+        field("MemTotal:", total_kb);
+        field("MemFree:", mem.free / 1024);
+        field("Buffers:", mem.buffers / 1024);
+        field("Cached:", mem.cached / 1024);
+        field("Shmem:", mem.shmem / 1024);
+        field("SwapTotal:", 0);
+        field("SwapFree:", 0);
+        field("SwapCached:", 0);
         // ── Other fields (order doesn't matter for `free`) ──────────
-        s += "MemAvailable:   12582912 kB\n";
-        s += "Active:          4194304 kB\n";
-        s += "Inactive:        2097152 kB\n";
-        s += "Active(anon):    2097152 kB\n";
-        s += "Inactive(anon):        0 kB\n";
-        s += "Active(file):    2097152 kB\n";
-        s += "Inactive(file):  2097152 kB\n";
-        s += "Unevictable:           0 kB\n";
-        s += "Mlocked:               0 kB\n";
-        s += "Dirty:                 0 kB\n";
-        s += "Writeback:             0 kB\n";
-        s += "AnonPages:       2097152 kB\n";
-        s += "Mapped:           524288 kB\n";
-        s += "KReclaimable:     262144 kB\n";
-        s += "Slab:             262144 kB\n";
-        s += "SReclaimable:     262144 kB\n";
-        s += "SUnreclaim:             0 kB\n";
-        s += "KernelStack:        8192 kB\n";
-        s += "PageTables:        16384 kB\n";
-        s += "CommitLimit:     8388608 kB\n";
-        s += "Committed_AS:    2097152 kB\n";
-        s += "VmallocTotal:    8388608 kB\n";
-        s += "VmallocUsed:      262144 kB\n";
-        s += "VmallocChunk:    8126464 kB\n";
+        field("MemAvailable:", mem.available / 1024);
+        field("Active:", share(4194304));
+        field("Inactive:", share(2097152));
+        field("Active(anon):", share(2097152));
+        field("Inactive(anon):", 0);
+        field("Active(file):", share(2097152));
+        field("Inactive(file):", share(2097152));
+        field("Unevictable:", 0);
+        field("Mlocked:", 0);
+        field("Dirty:", 0);
+        field("Writeback:", 0);
+        field("AnonPages:", share(2097152));
+        field("Mapped:", share(524288));
+        field("KReclaimable:", share(262144));
+        field("Slab:", share(262144));
+        field("SReclaimable:", share(262144));
+        field("SUnreclaim:", 0);
+        field("KernelStack:", share(8192));
+        field("PageTables:", share(16384));
+        field("CommitLimit:", total_kb / 2);
+        field("Committed_AS:", share(2097152));
+        field("VmallocTotal:", share(8388608));
+        field("VmallocUsed:", share(262144));
+        field("VmallocChunk:", share(8126464));
         s += "HugePages_Total:       0\n";
         s += "HugePages_Free:        0\n";
         s += "Hugepagesize:       2048 kB\n";

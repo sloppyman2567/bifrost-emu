@@ -454,8 +454,8 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // wrong decoded instructions — causing the child to execute
     // garbage and exit with code 133 (SIGTRAP from a BRK in the
     // wrongly-decoded instruction stream). Setting all tags to
-    // UINT64_MAX (the "empty" sentinel) forces a fresh decode.
-    for (auto& ce : cpu.decode_cache) ce.tag = UINT64_MAX;
+    // zero (the "empty" sentinel) forces a fresh decode.
+    cpu.decode_cache.clear();
     if (dbg().exec_trace) {
         fprintf(stderr, "[exec] post-execve: pc=0x%llx sp=0x%llx "
                 "tid=%d regs zeroed, decode cache invalidated\n",
