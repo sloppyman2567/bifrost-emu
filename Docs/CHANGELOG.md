@@ -27,6 +27,12 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   linker section (Crashlytics' crash helper under `/data/app` prints `libc++.so not found`). Linking it to the ART APEX
   copy fixes it but changes the framework manifest hash, which every prepared app root includes, so each installed app would
   rebuild its root and re-optimise once; left for the next framework provisioning change.
+- Found, not reproduced: one Melon Playground session (2026-10-24, an older build) ended after its WebView renderer,
+  showing an AdMob ad, logged a Chromium IPC validation error (`VALIDATION_ERROR_UNEXPECTED_STRUCT_HEADER`: a message
+  that did not parse) and exited; the app then took a null-pointer SIGSEGV (`fault_addr=0x0 pc=0x724ef774`, last
+  syscall 135). It is the only one in the 40 recorded sessions (80,000 log lines); the other frequent errors there are
+  fallbacks or app-specific (audio policy queries, a host-driver fence message, missing `SensitiveContentProtectionService`,
+  purchases and ads without Play services).
 
 ### `[mem]` line: where a process's resident memory is (2026-10-25)
 
