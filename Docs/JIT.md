@@ -2671,7 +2671,9 @@ generator in both modes, so the tax was MT's own.
   leave a stale callee address. The callee-completion guard after the call is shared with ST.
 
 Edge cases kept: the epoch is read before native code starts, so a tick during entry is seen at the next poll; a
-fork child runs interpreter-only until it execs (the new image then gets a fresh JIT, `Emulator::restart_jit_for_exec`),
+fork child runs interpreter-only until it execs and drops the inherited JIT without destroying it (its block-table and
+compile locks may be held by threads that no longer exist; the new image gets a fresh JIT, `Emulator::restart_jit_for_exec`,
+because `jit_wanted_` remembers that one was enabled),
 and the ticker is forgotten in a fork child (`pthread_atfork`) so an exec'd multi-threaded program starts its own;
 `BIFROST_NO_CHAIN` and `BIFROST_NO_DIRECT_CALL` keep their meanings. Not changed: code blocks that never reach a backward edge, IBL probe or cell call (long straight-line
 chains) are bounded by their length, as before for ST.

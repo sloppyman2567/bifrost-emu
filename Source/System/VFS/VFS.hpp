@@ -388,6 +388,8 @@ public:
     size_t size() const;
     void invalidate_device_mappings(uint64_t addr, uint64_t size);
     int protect_device_mappings(uint64_t addr, uint64_t size, uint64_t prot);
+    // Held across a host fork() so the child's copy of mu_ is not locked by a thread that does not exist there.
+    std::mutex& mutex_for_fork() { return mu_; }
 private:
     // guest fd → shared Node. shared_ptr so dup()/dup2() can alias.
     mutable std::mutex mu_;

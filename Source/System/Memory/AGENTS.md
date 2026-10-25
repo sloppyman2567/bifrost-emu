@@ -24,7 +24,9 @@ State shared between them goes in `MemoryInternal.hpp`.
 - File-backed MAP_SHARED and MAP_PRIVATE mappings retain their host backing
   and file identity. Never preload them into anonymous copies. Detach partial
   replaced/unmapped aliases before zeroing anonymous storage. Preserve identity
-  through fork/remap and refault file contents after MADV_DONTNEED.
+  through fork/remap and refault file contents after MADV_DONTNEED. `mu_` is held across a host fork
+  (`mutex_for_fork`) and re-initialized in the child (`reset_mutex_in_fork_child`): a read/write lock copies its
+  queue of waiting writers, which the child cannot serve.
 - `mappings_snapshot` builds `/proc/self/maps` from `vmas_`, splitting runs at
   protection, file identity and offset discontinuities. Loader-copied ELF
   pages are named with `name_image`; `detach_file_locked` drops those names

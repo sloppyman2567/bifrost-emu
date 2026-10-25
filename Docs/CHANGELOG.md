@@ -14,6 +14,28 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Fork children no longer hang or copy the game, and an exec'd child drops the parent's memory (2026-10-24)
+
+- Melon Sandbox's game process alone reached 3.5 GiB, with hung children on top. Its ad SDKs run helper commands from
+  Java, which is a host fork of the emulator. The children (`pag_io_N`, `TBBGThread`, `default_npth_th`) never ran:
+  each sat in `futex_wait`, holding a copy of the game's memory and about 2,000 descriptors. A stack of a hung child
+  (read from a fixture, not from the game) showed two causes. `Memory::shared_futex_word` waited for a read lock on
+  the guest memory index, and, with the JIT busy, `FrostJIT::invalidate_range` waited for the block table's lock. A
+  host `fork()` copies lock state: a lock another thread held stays held, and a read/write lock also copies its queue of
+  waiting writers and hands the lock to one that does not exist in the child.
+- `fork_guest` now holds the comm table, futex shards, thread lists, guest descriptor table and guest memory index
+  across the fork (all-or-none with backoff, falling back to the old behavior after 3 s), re-initializes the memory
+  read/write lock in the child, and drops the inherited JIT there (the child ran interpreted anyway; an exec'd Linux
+  image still gets a fresh one).
+- `execve` in a fork child wrote zeros through every old mapping: a host buffer as large as each mapping and a private
+  copy of every page, just before discarding them. It now drops the pages. A 256 MiB parent's exec'd child held
+  262 MiB of private memory and now holds 6 MiB. The old zeroing also wrote through mappings shared with the parent.
+- `test_fork_lock_contention`: fork and fork+exec with six kinds of contending threads; the first three forks hung on
+  the previous build every time, now none of 200 per run do. `fork_exec_memory` measures the exec'd child from the
+  host's `/proc`. 70 of 71 related repo tests pass on a headless build; `sdl_thread` fails identically on the
+  unmodified headless build. Not checked: Melon Sandbox itself on this build, and any SDL/GL build of these changes.
+  Zombie children the guest never waits for remain (they hold no memory).
+
 ### Closing a game window exits with status 0 (2026-10-24)
 
 - Closing an Android game's window ends with the app killing itself (`Process.killProcess`, SIGKILL). The session

@@ -24,12 +24,14 @@
 #include "Bifrost/Version.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <system_error>
 #include <mutex>
+#include <shared_mutex>
 #include <pthread.h>
 #include <signal.h>
 #include <string>
@@ -833,14 +835,49 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     fflush(stdout);
     fflush(stderr);
     debugger_->before_fork();
-    // A leaf lock: holding it across fork keeps the child from inheriting
-    // it locked by a thread that does not exist there.
-    std::unique_lock<std::mutex> comm_lock(comm_mu_);
-    // Freeze the private futex maps while copying them. The child inherits
-    // guest words, but none of the parent's host waiters (Linux fork(2)).
+    // The child is a copy of this process in which only this thread exists, so a lock another thread holds at the
+    // fork stays locked there for good (and what it guards may be half updated). Take every lock the child, or the
+    // guest code it runs, uses at once, as pthread_atfork handlers do: the comm table, the private futex maps (the
+    // child inherits guest words but none of the parent's host waiters, Linux fork(2)), the thread lists, the guest
+    // descriptor table and the guest memory index. Try them all and release on any failure, so no lock is waited
+    // for while another is held and threads that nest them in a different order cannot deadlock with the fork.
+    std::unique_lock<std::mutex> comm_lock(comm_mu_, std::defer_lock);
     std::array<std::unique_lock<std::mutex>, FUTEX_SHARDS> futex_locks;
     for (size_t i = 0; i < FUTEX_SHARDS; ++i)
-        futex_locks[i] = std::unique_lock<std::mutex>(futex_shards_[i].mu);
+        futex_locks[i] = std::unique_lock<std::mutex>(futex_shards_[i].mu, std::defer_lock);
+    std::unique_lock<std::mutex> threads_lock(threads_mu_, std::defer_lock);
+    std::unique_lock<std::mutex> sdl_threads_lock(sdl_threads_mu_, std::defer_lock);
+    std::unique_lock<std::mutex> descriptors_lock(fds_.mutex_for_fork(), std::defer_lock);
+    std::unique_lock<std::shared_mutex> memory_lock(mem_.mutex_for_fork(), std::defer_lock);
+    const auto release_all = [&] {
+        for (auto* lock : {&memory_lock}) if (lock->owns_lock()) lock->unlock();
+        for (auto* lock : {&descriptors_lock, &sdl_threads_lock, &threads_lock, &comm_lock})
+            if (lock->owns_lock()) lock->unlock();
+        for (auto& lock : futex_locks) if (lock.owns_lock()) lock.unlock();
+    };
+    const auto try_all = [&] {
+        bool held = comm_lock.try_lock();
+        for (size_t i = 0; held && i < FUTEX_SHARDS; ++i) held = futex_locks[i].try_lock();
+        held = held && threads_lock.try_lock() && sdl_threads_lock.try_lock() && descriptors_lock.try_lock() &&
+               memory_lock.try_lock();
+        if (!held) release_all();
+        return held;
+    };
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        auto pause = std::chrono::microseconds(20);
+        while (!try_all()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                // Never worse than before: the locks that were always taken, and a child that may inherit the rest.
+                fprintf(stderr, "[fork] could not quiesce all locks within 3 s; forking without them\n");
+                comm_lock.lock();
+                for (auto& lock : futex_locks) lock.lock();
+                break;
+            }
+            std::this_thread::sleep_for(pause);
+            pause = std::min(pause * 2, std::chrono::microseconds(2000));
+        }
+    }
     const pid_t forking_pid = ::getpid();
     pid_t child_pid = ::fork();
     debugger_->fork_return(child_pid == 0);
@@ -859,8 +896,22 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
             shard.slots.clear();
         }
     }
+    // The child's guest memory and descriptors are consistent copies now; the parent's other threads may go on.
+    if (memory_lock.owns_lock()) {
+        if (child_pid == 0) {
+            memory_lock.release();  // not unlocked: the queue of waiters it copied must not be handed the lock
+            mem_.reset_mutex_in_fork_child();
+        } else {
+            memory_lock.unlock();
+        }
+    }
+    if (descriptors_lock.owns_lock()) descriptors_lock.unlock();
     for (auto& lock : futex_locks) lock.unlock();
-    if (child_pid > 0) comm_lock.unlock();
+    if (child_pid > 0) {
+        if (sdl_threads_lock.owns_lock()) sdl_threads_lock.unlock();
+        if (threads_lock.owns_lock()) threads_lock.unlock();
+        comm_lock.unlock();
+    }
     if (child_pid == 0) {
         // The forking thread is the child's only task (copy_process).
         if (parent_cpu.tid != vfs_.self_pid()) {
@@ -924,6 +975,11 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // from jit_interp_step works, but is never executed again.
         // The buffer is freed automatically when the child process exits.
         jit_enabled_ = false;
+        // The inherited JIT's locks (the block table's read/write lock, the compile locks) can be held, or carry a
+        // queue of waiting writers, by threads that do not exist here, and this process's guest memory syscalls
+        // invalidate code through it. The child runs interpreted, so abandon the JIT without destroying it (as
+        // restart_jit_for_exec does: this thread is still inside its code buffer): invalidation then finds none.
+        (void)jit_.release();
         // After fork(), the child inherits g_active_emu_ from the parent,
         // which points to the PARENT's Emulator — a dangling pointer in
         // the child's address space. When SIGINT (Ctrl-C) arrives in the
@@ -942,17 +998,17 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // handles instead — a forked child normally execve()s immediately,
         // and a child that doesn't gets a clean single-threaded state
         // (alive_threads_=0 re-enables the single-thread futex fast path).
-        {
-            std::lock_guard<std::mutex> gt_lock(threads_mu_);
-            (void)new std::vector<std::shared_ptr<GuestThread>>(std::move(threads_));
-        }
-        {
-            std::lock_guard<std::mutex> st_lock(sdl_threads_mu_);
-            (void)new std::unordered_map<uint64_t, std::shared_ptr<SdlThread>>(
-                std::move(sdl_threads_));
-            (void)new std::vector<std::shared_ptr<SdlThread>>(
-                std::move(retired_sdl_threads_));
-        }
+        // threads_mu_ and sdl_threads_mu_ are still held from before the fork (unlocked here), or, after the
+        // fallback above, locked here as they always were.
+        if (!threads_lock.owns_lock()) threads_lock.lock();
+        (void)new std::vector<std::shared_ptr<GuestThread>>(std::move(threads_));
+        threads_lock.unlock();
+        if (!sdl_threads_lock.owns_lock()) sdl_threads_lock.lock();
+        (void)new std::unordered_map<uint64_t, std::shared_ptr<SdlThread>>(
+            std::move(sdl_threads_));
+        (void)new std::vector<std::shared_ptr<SdlThread>>(
+            std::move(retired_sdl_threads_));
+        sdl_threads_lock.unlock();
         if (stats_reporter_thread_.joinable()) {
             stats_reporter_stop_.store(true, std::memory_order_relaxed);
             (void)new std::thread(std::move(stats_reporter_thread_));

@@ -283,26 +283,24 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // the old binary (malloc locks, thread structures) and hits
     // an assertion failure (BRK #1000 = musl's a_crash()).
     //
-    // We zero out the pages in the mmap_alloc region. This
-    // clears stale heap data, malloc locks, and thread structures.
-    // The new binary's musl will see zeroed memory and initialize
-    // fresh. We don't zero the stack (at Memory::STACK_TOP) or the
-    // binary's own PT_LOAD segments (below 0x40000000).
+    // We discard the pages in the mmap_alloc region. This clears
+    // stale heap data, malloc locks, and thread structures: anonymous
+    // pages read back as zero, so the new binary's musl will see zeroed
+    // memory and initialize fresh. We don't touch the stack (at
+    // Memory::STACK_TOP) or the binary's own PT_LOAD segments (below
+    // 0x40000000). Pages are dropped, never written: a fork child shares
+    // them copy-on-write with its parent, and writing zeros through
+    // them copied the whole image (and a host buffer as large as each
+    // mapping) just before the exec threw it away.
     {
         auto allocs = mem_.allocations_snapshot();
         for (auto& [addr, size] : allocs) {
             // Heap allocations live below AND above the main-stack
             // region (mmap_alloc skips over the stack); none overlap
-            // the stack itself, so no upper bound here — zeroing
+            // the stack itself, so no upper bound here — discarding
             // must cover stale heap data on both sides.
             if (addr >= Memory::MMAP_BASE_MIN) {
-                // Zero out the pages at this allocation.
-                try {
-                    std::vector<uint8_t> zeros(size, 0);
-                    mem_.write(addr, zeros.data(), size);
-                } catch (...) {
-                    // Page might not be mapped — skip.
-                }
+                mem_.madvise_dontneed(addr, size);
                 mem_.untrack_allocation(addr, size);
             }
         }

@@ -282,6 +282,8 @@ UNIT_TESTS=(
     "simd_fp_indexed|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS"
     "round_away|Tests/Unit/jit_round_away.elf||5|round_away: ALL PASS"
     "doom_gap|Tests/Unit/jit_doom_gap.elf||10|doom_gap: ALL PASS"
+    # An exec'd fork child drops the parent's memory instead of copying it (host /proc measurement).
+    "fork_exec_memory|Scripts/Testing/test_fork_exec_memory.sh||75|fork_exec_memory: ALL PASS|HOST_JIT"
     "jit_cache|Scripts/Testing/test_jit_cache.sh||65|jit_cache: ALL PASS|HOST_JIT"
     "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
     "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
@@ -377,6 +379,9 @@ UNIT_TESTS=(
     # fork() with live guest threads: the child must not inherit joinable
     # host std::threads for threads that no longer exist.
     "test_fork_threads|Tests/Unit/test_fork_threads.elf||20|ALL PASS"
+    # fork() and fork()+execve() while other threads hold the memory, thread, descriptor and futex locks: the
+    # child must not inherit one locked (or a read/write lock's queue of waiting writers).
+    "test_fork_lock_contention|Tests/Unit/test_fork_lock_contention.elf||120|ALL PASS"
     # Memory range-safety: wrapping munmap rejected,
     # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
     # and above-window MAP_FIXED r/w cycles run sequentially.

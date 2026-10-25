@@ -760,6 +760,7 @@ private:
     // ── frostJIT ──────────────────────────────────────────────────────
     std::unique_ptr<FrostJIT> jit_;
     bool jit_enabled_ = false;
+    bool jit_wanted_ = false;  // enable_jit() ran: a fork child drops the inherited JIT, its exec'd image gets a new one
     uint64_t jit_threshold_ = 0;  // 0 = use JIT from start; N = interp for N instructions
     uint64_t interp_count_  = 0;  // instructions run under interpreter (for threshold)
     // ── Dynamic linker (for dynamically-linked binaries) ────────────

@@ -21,6 +21,8 @@
   sigreturn frame) use `force_signal`, which reverts a blocked or ignored
   signal to SIG_DFL; only asynchronous kill/tgkill/queued signals use
   `deliver_signal` directly.
+  `execve` discards the old image's pages (`madvise_dontneed`, then `untrack_allocation`); never write zeros through
+  them: a fork child shares them copy-on-write with its parent and the write copies every page.
   A real host-fork child's `exit_group` instead uses host `_exit`: copied host
   waiter/display resources must not be torn down. Use Emulator's fork ownership
   flag, not the CPU's host-PID identity flag (also set for Binder-realm apps).

@@ -196,6 +196,12 @@ public:
         mmap_next_ = MMAP_BASE_MIN;
         high_next_ = LOW_REGION_SIZE;
     }
+    // Held across a host fork() so the child's copy of mu_ is not locked by a thread that does not exist there.
+    std::shared_mutex& mutex_for_fork() { return mu_; }
+    // In the fork child, after taking mutex_for_fork() in the parent: a read/write lock records the queue of threads
+    // waiting for it, and the child's copy would hand the lock to a waiting writer that does not exist there.
+    // The index it guards was consistent when the parent took it, and no other thread exists in the child.
+    void reset_mutex_in_fork_child() { new (&mu_) std::shared_mutex(); }
     // MADV_DONTNEED: discard covered pages without unmapping them.
     // Anonymous pages read back as zero; file pages refault from
     // the file. mimalloc reuses decommitted segments as "initially zero".

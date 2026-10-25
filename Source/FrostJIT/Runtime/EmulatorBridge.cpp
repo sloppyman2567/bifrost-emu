@@ -137,6 +137,7 @@ void Emulator::enable_jit() {
     }
     jit_ = std::make_unique<FrostJIT>();
     jit_enabled_ = (jit_ != nullptr);
+    jit_wanted_ = jit_enabled_;
     if (jit_enabled_) {
         jit_->set_direct_window(mem_.direct_window(), &mem_);
         jit_->set_vdso_range(vdso_base_, vdso_size_);
@@ -150,7 +151,7 @@ void Emulator::enable_jit() {
     }
 }
 void Emulator::restart_jit_for_exec() {
-    if (!jit_) return;
+    if (!jit_ && !jit_wanted_) return;
     // Abandon the old JIT instead of destroying it: this thread is still inside its code buffer
     // (the execve syscall was called from JIT code and returns through it), and destroying it would
     // unmap that buffer. It is released with the process.
