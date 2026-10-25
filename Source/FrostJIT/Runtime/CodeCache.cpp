@@ -375,6 +375,11 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
 void FrostJIT::emit_indirect_branch_probe() {
     constexpr int32_t entries_off = offsetof(IblTable, entries);
     std::vector<size_t> cold;
+    // Inside a nested jit_call_helper or a native BL callee the return PC must reach
+    // that caller, so every probe misses there: test it before the table work.
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);          // cmp qword [rdi+depth],0
+    emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
+    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
     // RCX = this thread's table; none bound (trial, foreign entry) → cold.
     emit_load(RCX, RDI, offsetof(CPU, jit_ibl_table));
     emit_test_reg(RCX, RCX);
@@ -397,10 +402,6 @@ void FrostJIT::emit_indirect_branch_probe() {
     emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);          // cmp rax,[rdi+stop]
     emit_u32(offsetof(CPU, jit_stop_pc));
     cold.push_back(emit_jcc_rel32_placeholder(0x4));             // je
-    // Inside a nested jit_call_helper the return PC must reach that loop.
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);          // cmp qword [rdi+depth],0
-    emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
-    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
     // Return to dispatch (signals, exit) regularly: the shared 256-edge budget
     // in ST, the read-only preemption epoch once MT code is published.
     if (preempt_by_epoch()) {

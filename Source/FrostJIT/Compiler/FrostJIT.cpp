@@ -545,7 +545,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             flush_invalidate_host_regs(MEM_CLOBBER);
             emit_mov_imm64(RAX, inst.arm_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
-            emit_load(RDI, RBP, emu_slot_off());
+            emit_load_emu(RDI);
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             emit_mov_imm32(RCX, inst.llsc_width() | (inst.llsc_exclusive() ? 0 : 0x100));
@@ -567,7 +567,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             flush_invalidate_host_regs(MEM_CLOBBER);
             emit_mov_imm64(RAX, inst.arm_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
-            emit_load(RDI, RBP, emu_slot_off());
+            emit_load_emu(RDI);
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
@@ -590,7 +590,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             flush_invalidate_host_regs(MEM_CLOBBER);
             emit_mov_imm64(RAX, inst.arm_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
-            emit_load(RDI, RBP, emu_slot_off());
+            emit_load_emu(RDI);
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
@@ -1040,7 +1040,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             emit_call_depth_guard();
             emit_load(RAX, CPU_REG, PC_OFF);
             emit_mov_reg(RDI, CPU_REG);
-            emit_load(RSI, RBP, emu_slot_off());
+            emit_load_emu(RSI);
             emit_mov_reg(RDX, RAX);  // RDX = target_pc
             emit_push(WIN_REG);
             // Guest NZCV is in cpu.pstate; the callee owns its result.
@@ -1086,7 +1086,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             emit_call_depth_guard();
             // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
-            emit_load(RSI, RBP, emu_slot_off());
+            emit_load_emu(RSI);
             emit_mov_imm64(RDX, bp.target);  // RDX = target_pc (use imm64 for >4GB)
             // Save WIN_REG (R10, caller-saved) before the call.
             // emit_call_abs clobbers RAX (to load the function address),
@@ -1108,13 +1108,14 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 // so the caller's live state survives the direct call.
                 // Until patched, the slot dispatches through slow_path
                 // (jit_call_helper) — identical semantics to the old path.
-                // Alignment: 1 push (WIN_REG) → odd → emit_call_aligned
-                // would emit `sub rsp,8; pushfq` around the call; mirror
-                // that exactly so the direct target AND slow_path both see
-                // RSP%16==0 at their call site (body-entry RSP%16==8).
+                // Alignment: WIN_REG plus 16 bytes of padding keep the
+                // direct target AND slow_path at RSP%16==0 at their call
+                // site (body-entry RSP%16==8). No flags are saved: guest
+                // NZCV is in cpu.pstate and `add rsp` below clobbers the
+                // host flags anyway, while a PUSHF/POPF pair costs 11 and
+                // 37 macro-ops on Zen 3 (Agner Fog's instruction tables).
                 emit_push(WIN_REG);
-                emit_sub_rsp_imm8(8);
-                emit_pushfq();
+                emit_sub_rsp_imm8(16);
                 size_t call_slot = code_buf_used_;
                 MtEdge* call_edge = nullptr;
                 if (mt_cell_call) {
@@ -1126,8 +1127,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 }
                 // resume (reached by the direct call's `ret` AND by
                 // slow_path's `ret`): restore the aligned frame.
-                emit_popfq();
-                emit_add_rsp_imm8(8);
+                emit_add_rsp_imm8(16);
                 emit_pop(WIN_REG);
                 emit_call_depth_leave();
                 size_t jmp_past = emit_jmp_rel32_placeholder();  // skip slow_path

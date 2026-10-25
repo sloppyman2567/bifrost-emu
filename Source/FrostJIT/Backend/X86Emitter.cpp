@@ -402,6 +402,8 @@ void FrostJIT::emit_call_aligned(void* target, int num_pushed, bool preserve_fla
     emit_popfq();
     if (need_align) emit_add_rsp_imm8(8);
 }
+void FrostJIT::emit_load_emu(int dst) { emit_load(dst, CPU_REG, offsetof(CPU, jit_emu)); }
+void FrostJIT::emit_store_emu(int src) { emit_store(CPU_REG, offsetof(CPU, jit_emu), src); }
 // ── ARM64 reg access (all in [RBX + REGS_OFF + 8*n]) ──────────────────
 void FrostJIT::emit_load_arm(int xr, int ar) {
     if (ar >= 0 && ar <= 30) emit_load(xr, CPU_REG, REGS_OFF + 8*ar);
@@ -760,7 +762,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
         //
         // Args: RDI = emu, RSI = cpu, RDX = addr, RCX = width
         emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
-        emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
+        emit_load_emu(RDI); // rdi = emu
         emit_mov_reg(RSI, CPU_REG);          // rsi = cpu (for SIGSEGV delivery)
         if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (+off already in idx)
         emit_mov_imm32(RCX, w);              // rcx = width
@@ -834,7 +836,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
         // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
         emit_push(src_reg);            // save val — 1 push
         emit_push(WIN_REG);            // save R10      — 2 pushes (EVEN)
-        emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
+        emit_load_emu(RDI); // rdi = emu
         emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
         if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (sum in idx)
         if (src_reg != RCX) emit_mov_reg(RCX, src_reg);  // rcx = val

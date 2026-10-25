@@ -209,7 +209,7 @@ void FrostJIT::emit_taken_path_epilogue() {
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_tier2_edge_profile(true);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
-    emit_load(RSI, RBP, emu_slot_off()); // rsi = emu
+    emit_load_emu(RSI); // rsi = emu
     // ── Taken-path chain slot ──
     // 5 bytes reserved at the end of the taken path. Under chain-skip the
     // slot is 5 NOPs followed by the cold exit (`mov rsp,rbp; pop×6; ret`),
@@ -317,7 +317,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 vec_cache_writeback_all(false);
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
-                emit_load(RSI, RBP, emu_slot_off());
+                emit_load_emu(RSI);
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -370,7 +370,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 vec_cache_writeback_all(false);
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
-                emit_load(RSI, RBP, emu_slot_off());
+                emit_load_emu(RSI);
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -538,7 +538,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 vec_cache_writeback_all(false);
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
-                emit_load(RSI, RBP, emu_slot_off());
+                emit_load_emu(RSI);
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -598,7 +598,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         case IROp::SIMD_NATIVE_STRUCT: {
             clobber_flags(); flush_all_vregs();
             emit_mov_imm64(RAX, inst.arm_pc); emit_store(CPU_REG, PC_OFF, RAX);
-            emit_load(RDI, RBP, emu_slot_off()); emit_mov_reg(RSI, CPU_REG);
+            emit_load_emu(RDI); emit_mov_reg(RSI, CPU_REG);
             emit_mov_imm64(RDX, inst.native_structure_params().pack());
             emit_push(WIN_REG);
             emit_call_aligned(&native_structure, 1);

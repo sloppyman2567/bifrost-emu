@@ -15,6 +15,42 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Direct-call padding, probe order and the emulator pointer (2026-10-25)
+
+A review of the generated code (`BIFROST_JIT_DUMP=1`, bytes through `objdump -b binary
+-mi386:x86-64`) found three avoidable costs:
+
+- **Direct `BL` calls saved host flags for alignment only.** The call sequence (`BL_CALL`) pushed
+  `RFLAGS` and popped it after the callee, 24 bytes of frame in all, though guest NZCV is in
+  `cpu.pstate` and the `add rsp` that follows clobbers the host flags anyway. It now reserves the
+  same 24 bytes with `sub rsp,16` after the `WIN_REG` push. On Zen 3 `PUSHF` is 11 macro-ops and `POPF` 37
+  (reciprocal throughput 4 and 13 cycles, Agner Fog's instruction tables). `BL_CALL` exists only
+  with chain-skip off (`BIFROST_NO_CHAIN_SKIP=1`; under chain-skip `bl_call_disabled_` makes `BL`
+  end the block and chain), so the default configuration does not run this path. A throwaway loop
+  of one non-leaf call plus two leaf calls took 26.7 ns per iteration before and 15.7 ns after with
+  chain-skip off, five alternating runs each. With chain-skip on (the default) it takes 9.7 ns
+  before and after; QEMU takes 36.5 ns.
+- **The indirect-branch probe tested the call depth last.** A `RET` inside a nested
+  `jit_call_helper` (`jit_call_depth != 0`) always misses, but ran about 13 instructions of table
+  work first. The depth compare is now the probe's first instruction; the other checks are unchanged.
+- **The `Emulator*` lived in the frame, 32 KiB below the saved registers.** Every prologue stored
+  it at `[rbp-0x7ff8]` and every exit and helper call loaded it from there, so each nested native
+  call touched a second page, 32 KiB (the same L1D set) away. It is now `CPU::jit_emu`, stored by
+  every prologue (`emit_store_emu`) and loaded through `RBX` (`emit_load_emu`); a chain edge skips
+  the prologue but keeps the CPU. The default-mode call loop above went from 9.7-9.9 to 9.6-9.7 ns
+  per iteration (five alternating pairs): about 1%, on a loop that never nests deeply.
+
+Checked: `run_tests.sh --unit --toybox --realworld --quick` (243 of 243) and `--unit --fwd` (178 of 178)
+pass. `--unit --no-chain-skip` has two failures, `test_fork_lock_contention` and `test_exec_mt`,
+which fail the same way with the previous binary. The `make test-native-simd-helpers` link line lacked
+`DecodeCache.cpp` since 62e0fdf6, which stopped `make verify` before its differential gate; it is added.
+Not measured: any game, and how often the 16-level `JIT_MAX_CALL_DEPTH` limit unwinds a call stack.
+
+Still open from the same review: the default return path is the indirect-branch probe (about 21
+instructions and six loads per `RET`), every exit still loads `RSI` with the emulator pointer that
+chain successors no longer read, and `build_ssa` and `lower_ssa` each run `validate_ssa` in release
+builds (about 1-2% of a very short cold run, not worth removing a safety net on that evidence).
+
 ## Code-cache generations and syscall exits (2026-10-25)
 
 Generated code is never recycled in place: a stale function pointer, a chain edge or a live native

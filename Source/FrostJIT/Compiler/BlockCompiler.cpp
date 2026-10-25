@@ -609,12 +609,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // 4095. Disabled mode keeps the old per-block frame.
     emit_u32(chain_skip_enabled() ? kChainSkipFrameBytes : stack_bytes);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
-    // Stash the Emulator* into the frame slot (emu_slot_off(), below the
-    // block's vreg slots / the chain-skip frame ceiling). R14 is then FREE
+    // Stash the Emulator* in CPU::jit_emu. R14 is then FREE
     // for vreg allocation in every block — all emu-consuming codegen sites
-    // load emu from this slot instead of R14. RSI still holds
+    // load emu from there instead of R14. RSI still holds
     // emu at this point (entry arg), untouched since the prologue started.
-    emit_store(RBP, emu_slot_off(), RSI);
+    emit_store_emu(RSI);
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): recorded here, BEFORE the
     // window load and the vector-cache prologue loads. Chain edges jump to
     // this offset, skipping the predecessor's frame teardown and THIS
@@ -626,9 +625,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX needs no
     // setup — it holds cpu persistently across the chain edge (reserved
     // reg). R14 is allocatable, so emu does NOT flow through
-    // a register: the predecessor's epilogue set RSI=emu from the shared
-    // chain frame's fixed emu slot (emu_slot_off()), and a successor that
-    // skips its own prologue still reads that slot. Disabled mode leaves
+    // a register: the predecessor's epilogue set RSI=emu from CPU::jit_emu,
+    // and a successor that skips its own prologue still reads it. Disabled mode leaves
     // chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
@@ -730,7 +728,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // distance) in pushfq/popfq, preserving RFLAGS AND restoring the
         // ABI stack alignment for the stub (JIT body RSP%16==8 at this
         // point; pushfq makes it 16-aligned for the `call`).
-        emit_load(RDI, RBP, emu_slot_off());
+        emit_load_emu(RDI);
         emit_mov_imm64(RSI, start_pc);
         emit_mov_imm64(RDX, tier2_counter_off_);
         emit_call_aligned(reinterpret_cast<void*>(&tier2_fire_stub), 0);
@@ -1133,7 +1131,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // after the call. When the block is chained, the next prologue sees
     // the correct RDI=cpu / RSI=emu.
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx
-    emit_load(RSI, RBP, emu_slot_off());  // rsi = emu (from the frame slot; R14 is a free vreg reg now)
+    emit_load_emu(RSI);  // rsi = emu (from the frame slot; R14 is a free vreg reg now)
     size_t chain_patch_off;
     if (chain_skip_enabled()) {
         // ── Chain-skip epilogue ─────────────────────────────────────

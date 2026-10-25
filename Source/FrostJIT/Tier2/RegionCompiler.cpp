@@ -245,10 +245,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Chain-skip: allocate the SAME unified 32 KB frame as every block so a
     // chain edge into the region's chain_entry sees an identical layout
-    // (vreg slots -8*(v-32) fit either way; emu_slot_off() is mode-aware).
+    // (vreg slots -8*(v-32) fit either way).
     emit_u32(chain_skip_enabled() ? kChainSkipFrameBytes : stack_bytes);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB);  // mov rbx, rdi (CPU)
-    emit_store(RBP, emu_slot_off(), RSI);               // stash Emulator*
+    emit_store_emu(RSI);               // stash Emulator*
     // Chain-skip entry label (mirror translate_block's chain_entry_off_):
     // recorded AFTER the emu stash, BEFORE the R10 window load / pin
     // preloads / preheader. Chain edges bare-jmp here with the ROOT's
@@ -452,7 +452,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
         emit_mov_imm_to_rax(trace.head_pc);
         emit_store(CPU_REG, PC_OFF, RAX);
-        emit_mov_reg(RDI, CPU_REG); emit_load(RSI, RBP, emu_slot_off());
+        emit_mov_reg(RDI, CPU_REG); emit_load_emu(RSI);
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX); emit_ret();
@@ -728,7 +728,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         emit_mov_imm_to_rax(pc);
         emit_store(CPU_REG, PC_OFF, RAX);
         emit_mov_reg(RDI, CPU_REG);
-        emit_load(RSI, RBP, emu_slot_off());
+        emit_load_emu(RSI);
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -780,7 +780,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             emit_mov_imm_to_rax(c.side_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
             emit_mov_reg(RDI, CPU_REG);
-            emit_load(RSI, RBP, emu_slot_off());
+            emit_load_emu(RSI);
             emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(tier2_current_monitor_));
             emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&tier2::feedback_exit));
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
@@ -796,7 +796,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     if (!cell_exit_patches.empty()) {
         const size_t tail = code_buf_used_;
         emit_mov_reg(RDI, CPU_REG);
-        emit_load(RSI, RBP, emu_slot_off());
+        emit_load_emu(RSI);
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -826,7 +826,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         size_t tail_off = code_buf_used_;
         emit_store(CPU_REG, PC_OFF, RAX);     // cpu.pc = rax (exit pc)
         emit_mov_reg(RDI, CPU_REG);           // mov rdi, rbx
-        emit_load(RSI, RBP, emu_slot_off());  // rsi = emu
+        emit_load_emu(RSI);  // rsi = emu
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);  // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);

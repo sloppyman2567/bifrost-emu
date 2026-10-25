@@ -362,6 +362,11 @@ public:
     // Host-only: the running host thread's FrostJIT::IblTable (indirect-
     // branch targets), rebound at every native entry. Null = no fast path.
     void* jit_ibl_table = nullptr;
+    // Host-only: the Emulator this CPU runs under. Every block prologue stores it
+    // (chain edges skip the prologue but keep the CPU), and generated code loads it
+    // from here rather than from a frame slot: the 32 KiB chain-skip frame put that
+    // slot a page away from the rest of each native call's stack.
+    void* jit_emu = nullptr;
     // Host-only Tier-2 observations. Generated hot completions deposit one
     // credit using a flag-neutral store; cold exits consume it in C++.
     // Slots are CPU-local. Collisions can only delay retirement, not create

@@ -143,6 +143,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   addresses its members. A helper that generated code calls finds its instance with
   `FrostJIT::running(emu)`, never `emu.jit()`, and a loop that dispatches blocks must follow the current
   instance (`jit_call_helper` retargets). Never block for long inside generated frames: that pins a generation.
+- Generated code reads the `Emulator*` from `CPU::jit_emu` (`emit_load_emu`); every block and region
+  prologue stores it (`emit_store_emu`) and a chain edge keeps it because the CPU is the same. Do not
+  put it back in a frame slot: the 32 KiB chain-skip frame made that a page away from the rest of
+  each native call's stack.
 - A non-thunk SVC leaves its block with `cpu.jit_svc_pc` set and C++ runs it (`run_pending_svc`, which
   clears the field first because `clone` copies the CPU). Anything else that calls a block's `fn` directly
   and then reads `cpu.pc` must run a pending SVC before executing at that pc. Thunk SVCs (`x8 == 0x1000`)

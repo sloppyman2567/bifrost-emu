@@ -619,7 +619,7 @@ test-ir-ssa:
 .PHONY: test-native-simd-helpers
 test-native-simd-helpers:
 	@mkdir -p $(OBJDIR)
-	$(CXX) $(CXXFLAGS) Tests/Host/native_simd_helpers.cpp Source/FrostJIT/CodeGen/Native/NativeSIMD.cpp -o $(OBJDIR)/native_simd_helpers $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) Tests/Host/native_simd_helpers.cpp Source/FrostJIT/CodeGen/Native/NativeSIMD.cpp Source/System/Core/DecodeCache.cpp -o $(OBJDIR)/native_simd_helpers $(LDFLAGS)
 	./$(OBJDIR)/native_simd_helpers Tools/CodeGen/native_simd_expected.txt
 
 .PHONY: test-rootfs-discovery
