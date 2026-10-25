@@ -443,6 +443,7 @@ public final class ManagedLauncher {
     }
 
     private static UnsupportedOperationException unsupported(String service, String method) {
+        FrameworkServices.unsupported(service, method);
         return new UnsupportedOperationException(service + "." + method);
     }
 

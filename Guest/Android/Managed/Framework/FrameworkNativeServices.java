@@ -54,7 +54,7 @@ final class FrameworkNativeServices {
             if (code != GET_DEVICE_CONNECTION_STATE && code != GET_OUTPUT && code != PRODUCT_STRATEGIES
                     && code != VOLUME_GROUPS && code != 44 && code != 49 && code != 51 && code != 52
                     && code != 53)
-                return super.onTransact(code, data, reply, flags);
+                return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             data.enforceInterface(DESCRIPTOR);
             if (code == GET_DEVICE_CONNECTION_STATE) {
                 // AudioSystem.getDeviceConnectionState(device, address): the profile has no
@@ -141,7 +141,7 @@ final class FrameworkNativeServices {
                 data.enforceInterface(DESCRIPTOR);
                 return true;  // one-way state reports: nothing observes them here
             }
-            return super.onTransact(code, data, reply, flags);
+            return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
         }
     }
 
@@ -180,7 +180,7 @@ final class FrameworkNativeServices {
             }
             if (code != SAMPLE_RATE && code != FRAME_COUNT && code != LATENCY
                     && code != 23 && code != 45 && code != 46)
-                return super.onTransact(code, data, reply, flags);
+                return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             data.enforceInterface(DESCRIPTOR);
             int output = 1;
             if (code == 23) {
@@ -233,7 +233,7 @@ final class FrameworkNativeServices {
                 case 8: // ENABLE_REPLAY_DATA_INJECTION
                 case 9: // ENABLE_HAL_BYPASS_REPLAY_DATA_INJECTION
                     break;
-                default: return super.onTransact(code, data, reply, flags);
+                default: return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             }
             data.enforceInterface(DESCRIPTOR);
             if (code == 1 || code == 4 || code == 7) {
@@ -378,7 +378,7 @@ final class FrameworkNativeServices {
         @Override protected synchronized boolean onTransact(int code, Parcel data,
                 Parcel reply, int flags) throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code < 1 || code > 4) return super.onTransact(code, data, reply, flags);
+            if (code < 1 || code > 4) return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             data.enforceInterface(DESCRIPTOR);
             int count = code == 2 ? data.readInt() : 0;
             data.enforceNoDataAvail();
@@ -429,7 +429,7 @@ final class FrameworkNativeServices {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != SET_TRANSACTION_STATE) return super.onTransact(code, data, reply, flags);
+            if (code != SET_TRANSACTION_STATE) return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             data.enforceInterface(DESCRIPTOR);
             int start = data.dataPosition(), size = data.readInt();
             if (size < 4 || size > data.dataSize() - start)
@@ -528,7 +528,7 @@ final class FrameworkNativeServices {
                 displayQuery(code, data, reply);
                 return true;
             }
-            if (code != CREATE_DISPLAY_EVENT_CONNECTION) return super.onTransact(code, data, reply, flags);
+            if (code != CREATE_DISPLAY_EVENT_CONNECTION) return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             data.enforceInterface(DESCRIPTOR);
             int source = data.readInt(), registration = data.readInt();
             IBinder layer = data.readStrongBinder();

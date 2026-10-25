@@ -151,7 +151,7 @@ final class FrameworkPendingIntents implements FrameworkServices.Call {
         }, new Binder() {
             @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                     throws android.os.RemoteException {
-                if (code != TARGET_TRANSACTION) return super.onTransact(code, data, reply, flags);
+                if (code != TARGET_TRANSACTION) return FrameworkServices.unknownTransaction(SENDER_DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
                 data.enforceInterface(SENDER_DESCRIPTOR);
                 Intent target = null;
                 String owner = null, resolvedType = null;

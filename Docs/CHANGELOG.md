@@ -14,6 +14,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android services: unsupported calls are named in the log (2026-10-25)
+
+- An app call that a service stand-in does not answer (an `UnsupportedOperationException` from a Java service, or a
+  transaction a native Binder stand-in refuses) now writes `SERVICE_CALL_UNSUPPORTED <service> <call>` once per process,
+  where it used to surface only as an exception in the app or an unknown-transaction status. Opt-in APK tracing was the
+  only other way to see which method an app needed. The app's behaviour is unchanged. `FrameworkServices` holds the
+  reporter (capped at 256 distinct calls); the seven native stand-ins in `FrameworkNativeServices`, the audio track,
+  pending-intent sender and account-response binders report through it.
+- `ManagedServiceBatch` (604 checks, real emulator, JIT mode) passes with the new check; its normal run names two
+  deliberate limits, `uimode setApplicationNightMode` and `activity sendIntentSender`. The interpreter-mode run was not repeated.
+
 ### Asgard: service processes end with the session supervisor (2026-10-25)
 
 - When a session's supervisor was killed mid-shutdown, the Play services and system helper processes it had started kept

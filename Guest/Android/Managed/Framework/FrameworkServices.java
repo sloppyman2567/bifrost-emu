@@ -14,6 +14,21 @@ final class FrameworkServices {
     boolean diagnostic;
     private final Map<String, String> interfaces = new LinkedHashMap<>();
     private final Map<String, Call> handlers = new LinkedHashMap<>();
+    // A call no stand-in answers reaches the app as an exception or an unknown-transaction status.
+    // Name each one once per process in the log, so a missing method shows without opt-in tracing;
+    // the cap bounds the set if an app invents calls.
+    private static final java.util.Set<String> unsupportedCalls = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    static void unsupported(String service, String call) {
+        if (unsupportedCalls.size() < 256 && unsupportedCalls.add(service + " " + call))
+            System.err.println("SERVICE_CALL_UNSUPPORTED " + service + " " + call);
+    }
+    // For `return unknownTransaction(DESCRIPTOR, code, super.onTransact(...))` in a Binder stand-in:
+    // Binder's own codes (interface, dump, shell command) are handled and not reported.
+    static boolean unknownTransaction(String descriptor, int code, boolean handled) {
+        if (!handled && code >= Binder.FIRST_CALL_TRANSACTION && code <= Binder.LAST_CALL_TRANSACTION)
+            unsupported(descriptor, "transaction " + code);
+        return handled;
+    }
     interface Call {
         Object invoke(String method, Object[] arguments) throws Exception;
         // null means coverage has not yet been classified, not that all
@@ -88,6 +103,7 @@ final class FrameworkServices {
                         FrameworkTrace.end(trace, result, null);
                         return result;
                     } catch (Throwable error) {
+                        if (error instanceof UnsupportedOperationException) unsupported(name, method.getName());
                         FrameworkTrace.end(trace, null, error);
                         throw error;
                     }

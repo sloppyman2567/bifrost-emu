@@ -468,7 +468,7 @@ final class FrameworkAccounts implements FrameworkServices.Call {
                 case FIRST_CALL_TRANSACTION: onResult(data.readTypedObject(Bundle.CREATOR)); return true;
                 case FIRST_CALL_TRANSACTION + 1: return true;  // onRequestContinued
                 case FIRST_CALL_TRANSACTION + 2: onError(data.readInt(), data.readString()); return true;
-                default: return super.onTransact(code, data, reply, flags);
+                default: return FrameworkServices.unknownTransaction(RESPONSE_DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             }
         }
 

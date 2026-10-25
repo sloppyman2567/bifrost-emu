@@ -571,6 +571,38 @@ public final class ManagedServiceBatch {
         invoke(protection, "setSensitiveContentProtection", new Binder(), NAME, false);
         try { invoke(protection, "setSensitiveContentProtection", null, NAME, true); throw new AssertionError("null token"); }
         catch (NullPointerException expected) { checks++; }
+
+        // A call no stand-in answers is named once in the log, as an exception from a Java service
+        // and as an unknown transaction from a native one; the app still sees the failure.
+        java.io.PrintStream saved = System.err;
+        java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
+        System.setErr(new java.io.PrintStream(captured, true));
+        try {
+            Object game = endpoint("game", "android.app.IGameManagerService");
+            for (int i = 0; i < 3; i++) {
+                try { invoke(game, "getAvailableGameModes", NAME, 0); throw new AssertionError("unsupported call answered"); }
+                catch (UnsupportedOperationException expected) { checks++; }
+            }
+            Parcel in = Parcel.obtain(), out = Parcel.obtain();
+            try {
+                for (int i = 0; i < 3; i++) {
+                    in.setDataPosition(0);
+                    in.writeInterfaceToken("android.media.IAudioPolicyService");
+                    check(!policy.transact(9999, in, out, 0), "an unknown policy call was accepted");
+                }
+                check(policy.transact(IBinder.INTERFACE_TRANSACTION, Parcel.obtain(), out, 0), "interface query refused");
+            } finally { in.recycle(); out.recycle(); }
+        } finally { System.setErr(saved); }
+        String log = captured.toString();
+        check(count(log, "SERVICE_CALL_UNSUPPORTED game getAvailableGameModes\n") == 1, "Java call report: " + log);
+        check(count(log, "SERVICE_CALL_UNSUPPORTED android.media.IAudioPolicyService transaction 9999\n") == 1,
+                "native call report: " + log);
+        check(count(log, "SERVICE_CALL_UNSUPPORTED") == 2, "binder's own codes must not be reported: " + log);
+    }
+    private static int count(String text, String part) {
+        int n = 0;
+        for (int at = text.indexOf(part); at >= 0; at = text.indexOf(part, at + part.length())) n++;
+        return n;
     }
 
     private static void power(Context context) throws Exception {

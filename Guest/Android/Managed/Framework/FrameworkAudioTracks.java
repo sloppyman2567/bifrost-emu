@@ -235,7 +235,7 @@ final class FrameworkAudioTracks {
         @Override protected synchronized boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(TRACK_DESCRIPTOR); return true; }
-            if (code < GET_CBLK || code > SET_PLAYBACK_RATE) return super.onTransact(code, data, reply, flags);
+            if (code < GET_CBLK || code > SET_PLAYBACK_RATE) return FrameworkServices.unknownTransaction(TRACK_DESCRIPTOR, code, super.onTransact(code, data, reply, flags));
             data.enforceInterface(TRACK_DESCRIPTOR);
             if (released) { writeFailure(reply, new Failure(NO_INIT, "track released")); return true; }
             switch (code) {

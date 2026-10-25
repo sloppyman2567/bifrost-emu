@@ -980,6 +980,15 @@ Java service's actual image interface signatures as `implemented`,
 native Binder endpoints are outside this inventory. Registration rejects a
 declared method absent from the provisioned interface.
 
+A call no stand-in answers is named in the session log, once per process and call, as
+`SERVICE_CALL_UNSUPPORTED <service> <call>`: for a Java service the method that threw
+`UnsupportedOperationException` (`FrameworkServices.unsupported`, also used by
+`ManagedLauncher.unsupported`), for a native Binder stand-in the descriptor and transaction number
+`FrameworkServices.unknownTransaction` saw `Binder.onTransact` refuse (Binder's own interface, dump and shell codes
+are not reported). The app still gets the exception or the unknown-transaction status; the line only makes a missing
+method visible without opt-in APK tracing. The set holds at most 256 entries. `ManagedServiceBatch.nativeServices`
+checks one of each kind and that repeats and Binder's own codes stay silent.
+
 Audio focus follows the Android 15
 [MediaFocusControl](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/audio/MediaFocusControl.java)
 and FocusRequester stack rules: permanent/transient/duck losses, restoration,
