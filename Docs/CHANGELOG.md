@@ -14,6 +14,18 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Terminal: glibc 2.42+ guests see a tty (2026-10-25)
+
+- glibc 2.42 and newer implement `isatty`, `tcgetattr` and `tcsetattr` with `TCGETS2`/`TCSETS2`/`TCSETSW2`/`TCSETSF2`
+  (the 44-byte `termios2`), which were unhandled: on a real terminal `isatty()` returned 0 and `tcgetattr` failed with
+  `ENOTTY`, so line editing, raw mode and colour detection broke for any guest built on glibc 2.42 or newer, including the
+  bundled Arm GNU toolchain and rootfs. They are now forwarded to the host terminal, and the synthetic terminal that
+  stdio presents for a redirected stdin/stdout answers `TCGETS2` too. Checked on a pty owned by a test harness against
+  `qemu-aarch64` with the bundled glibc 2.42 (dynamic `isatty`/`tcgetattr`) and a glibc 2.44 static program (raw mode,
+  `SIGWINCH`, `^C`, `^Z`, `^D`, canonical restore); `Tests/Unit/test_termios2.c` checks the ABI against the same expectations.
+  Not covered: a guest cannot create its own pty (`TIOCSPTLCK` and `TIOCGPTN` are unhandled), so `openpty`, `script`
+  and terminal multiplexers inside the guest still fail.
+
 ### Android buffer images: no per-image RGBA copy, no leaked textures (2026-10-25)
 
 - An `EGL_NATIVE_BUFFER_ANDROID` image (HWUI, WebView, TextureView video) kept a full RGBA copy of its buffer for its

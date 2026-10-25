@@ -510,6 +510,8 @@ UNIT_TESTS=(
     "futex_shared_memfd|Tests/Unit/futex_shared_memfd.elf||30|FUTEX_SHARED_MEMFD_OK"
     "jit_call_exit|Tests/Unit/jit_call_exit.elf||10|checks passed"
     "jit_blr_lr|Tests/Unit/jit_blr_lr.elf||10|checks passed"
+    # termios2 ioctls (glibc 2.42+ isatty/tcgetattr/tcsetattr).
+    "test_termios2|Tests/Unit/test_termios2.elf||10|checks passed"
     "jit_interp_exit|Tests/Unit/jit_interp_exit.elf||10|2001/2001 checks passed"
     "jit_flags_passthrough|Tests/Unit/jit_flags_passthrough.elf||10|checks passed"
     "jit_flags_exit_dead|Tests/Unit/jit_flags_exit_dead.elf||30|ALL PASS"

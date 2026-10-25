@@ -66,3 +66,4 @@
 - Run filesystem sandbox regressions and the affected proc/sys/device probes.
 
 - Raw TCGETS/TCSETS use the 36-byte kernel termios layout, never host libc struct termios (which can be larger). Preserve guest buffer bounds on both real and synthetic TTY paths.
+  TCGETS2/TCSETS2/TCSETSW2/TCSETSF2 (44-byte `termios2`) are answered the same way, synthetic terminal included: glibc 2.42+ implements `isatty`, `tcgetattr` and `tcsetattr` with them, so leaving them unhandled makes every terminal "not a tty" and breaks raw mode. `test_termios2` covers the ABI; a guest cannot create its own pty yet (TIOCSPTLCK/TIOCGPTN are unhandled).

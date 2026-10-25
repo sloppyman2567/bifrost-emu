@@ -48,11 +48,18 @@ int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
     // Check if this is a TCGETS request and the host fd is not a TTY.
     // If so, return a fake termios struct so isatty() returns 1.
     static const bool fake_tty = (getenv("BIFROST_NO_FAKE_TTY") == nullptr);
-    if (fake_tty && request == 0x5401) {  // TCGETS
+    const bool termios2 = request == ioctl_num::REQ_TCGETS2;
+    if (fake_tty && (request == ioctl_num::REQ_TCGETS || termios2)) {
         // First try the real ioctl. If it succeeds, the host fd IS a
         // TTY — return the real termios.
         KernelTermios t{};
-        if (::ioctl(fd_, TCGETS, &t) == 0) {
+        if (termios2) {
+            KernelTermios2 t2{};
+            if (::ioctl(fd_, ioctl_num::REQ_TCGETS2, &t2) == 0) {
+                try { mem.write(argp, &t2, sizeof(t2)); } catch (...) { return -EFAULT; }
+                return 0;
+            }
+        } else if (::ioctl(fd_, TCGETS, &t) == 0) {
             try { mem.write(argp, &t, sizeof(t)); } catch (...) { return -EFAULT; }
             return 0;
         }
@@ -80,6 +87,13 @@ int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
         t.c_cc[VWERASE] = 0x17;  // ^W
         t.c_cc[VLNEXT] = 0x16;   // ^V
         t.c_cc[VEOL2] = 0;
+        if (termios2) {
+            KernelTermios2 t2{};
+            std::memcpy(&t2, &t, sizeof(t));  // same leading fields
+            t2.c_ispeed = t2.c_ospeed = 38400;
+            try { mem.write(argp, &t2, sizeof(t2)); } catch (...) { return -EFAULT; }
+            return 0;
+        }
         try { mem.write(argp, &t, sizeof(t)); } catch (...) { return -EFAULT; }
         return 0;
     }

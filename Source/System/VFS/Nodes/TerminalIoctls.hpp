@@ -36,6 +36,15 @@ struct KernelTermios {
     uint8_t c_line, c_cc[19];
 };
 static_assert(sizeof(KernelTermios) == 36);
+// struct termios2 (TCGETS2/TCSETS2*): the same fields plus the numeric line speeds. glibc 2.42
+// and newer read and write the terminal through these (isatty, tcgetattr, tcsetattr), so a guest
+// that only gets TCGETS answered sees every terminal as "not a tty".
+struct KernelTermios2 {
+    uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
+    uint8_t c_line, c_cc[19];
+    uint32_t c_ispeed, c_ospeed;
+};
+static_assert(sizeof(KernelTermios2) == 44);
 // ── AArch64 Linux ioctl request numbers (from <asm-generic/ioctls.h>) ──
 // These match the values the guest AArch64 binary uses when it issues
 // an ioctl syscall. We hardcode them (instead of relying on the host's
@@ -49,6 +58,13 @@ namespace ioctl_num {
     constexpr uint32_t REQ_TCSETS     = 0x5402;  // write termios
     constexpr uint32_t REQ_TCSETSW    = 0x5403;  // drain output, then write
     constexpr uint32_t REQ_TCSETSF    = 0x5404;  // drain input, then write
+    // _IOR/_IOW('T', 0x2A..0x2D, struct termios2), 44 bytes. The host is x86-64, whose kernel
+    // uses the same numbers and layout, so they are forwarded as they are (glibc's <sys/ioctl.h>
+    // does not define them).
+    constexpr uint32_t REQ_TCGETS2    = 0x802C542A;  // read termios2
+    constexpr uint32_t REQ_TCSETS2    = 0x402C542B;  // write termios2
+    constexpr uint32_t REQ_TCSETSW2   = 0x402C542C;  // drain output, then write
+    constexpr uint32_t REQ_TCSETSF2   = 0x402C542D;  // drain input, then write
     constexpr uint32_t REQ_TIOCSCTTY  = 0x540E;  // set controlling tty
     constexpr uint32_t REQ_TIOCGPGRP  = 0x540F;  // get foreground pgrp
     constexpr uint32_t REQ_TIOCSPGRP  = 0x5410;  // set foreground pgrp
@@ -105,6 +121,22 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
                 default:                     host_req = TCSETSF; break;
             }
             int r = ::ioctl(host_fd, host_req, &t);
+            if (r < 0) return -errno;
+            return 0;
+        }
+        case ioctl_num::REQ_TCGETS2: {
+            KernelTermios2 t{};
+            int r = ::ioctl(host_fd, ioctl_num::REQ_TCGETS2, &t);
+            if (r < 0) return -errno;
+            mem.write(argp, &t, sizeof(t));
+            return 0;
+        }
+        case ioctl_num::REQ_TCSETS2:
+        case ioctl_num::REQ_TCSETSW2:
+        case ioctl_num::REQ_TCSETSF2: {
+            KernelTermios2 t{};
+            mem.read(argp, &t, sizeof(t));
+            int r = ::ioctl(host_fd, request, &t);
             if (r < 0) return -errno;
             return 0;
         }
