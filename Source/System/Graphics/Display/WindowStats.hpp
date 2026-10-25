@@ -17,6 +17,9 @@ DrmClient read_drm_client(std::istream &input);
 bool sum_drm_clients(const std::vector<DrmClient> &clients,
                      const std::string &device, uint64_t &bytes);
 std::string vram_text(uint64_t used, uint64_t total, bool known);
+// The GPU this process renders with, from the DRM clients it holds open: the sysfs device with the most
+// resident memory (the only one when there is a single). Empty when it holds none.
+std::string pick_gpu_device(const std::vector<DrmClient> &clients);
 }
 // Monotonic presentation clock, independent of guest time and instruction rate.
 struct Clock {

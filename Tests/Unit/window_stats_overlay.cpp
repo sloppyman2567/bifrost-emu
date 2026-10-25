@@ -1,6 +1,7 @@
 // Host sensors (against fixture /proc and /sys trees) and the in-window stats panel.
 #include "System/Graphics/Display/HostSensors.hpp"
 #include "System/Graphics/Display/StatsOverlay.hpp"
+#include "System/Graphics/Display/WindowStats.hpp"
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -59,10 +60,16 @@ int main() {
   put(gpu + "/hwmon/hwmon4/temp2_label", "junction\n");
   put(gpu + "/hwmon/hwmon4/temp2_input", "79000\n");
   put(gpu + "/gpu_busy_percent", "41\n");
+  put(gpu + "/mem_info_vram_total", "8573157376\n");
+  put(gpu + "/mem_info_vram_used", "2674360320\n");
+  fs::create_directories(root / "sys/bus/pci/drivers/amdgpu");
+  fs::create_directory_symlink("../../../../bus/pci/drivers/amdgpu", gpu + "/driver");
   HostSensors sensors(proc, sys);
   auto first = sensors.sample(10000000000ULL, gpu);
   assert(first.cpu_percent < 0 && first.process_percent < 0);  // a rate needs two samples
   assert(near(first.cpu_temp, 65.5) && near(first.gpu_temp, 63) && near(first.gpu_percent, 41));
+  assert(first.vram_known && first.vram_total == 8573157376ULL && first.vram_used == 2674360320ULL);
+  assert(first.gpu_driver == "amdgpu");
   assert(first.ram_known && first.ram_total == 16000000ULL * 1024 && first.ram_used == 12000000ULL * 1024);
   put(root / "proc/stat", "cpu  200 0 200 800 100 0 0 0 0 0\n");  // +200 busy of +300 total
   put(root / "proc/self/stat", "7 (probe) S 1 1 1 0 -1 0 0 0 0 0 150 150 0 0 20 0 1 0 1 1 1\n");
@@ -73,6 +80,46 @@ int main() {
   assert(near(second.process_percent, 100.0 * (100.0 / rate) / 1.0 / cpus));  // 100 ticks in one second
   // Without a known GPU its readings stay unavailable.
   assert(sensors.sample(12000000000ULL, "").gpu_temp < 0 && sensors.sample(13000000000ULL, "").gpu_percent < 0);
+  assert(!sensors.sample(14000000000ULL, "").vram_known && sensors.sample(15000000000ULL, "").gpu_driver.empty());
+  // Counters that disagree (used above total) are not trusted.
+  put(gpu + "/mem_info_vram_used", "9999999999999\n");
+  assert(!sensors.sample(16000000000ULL, gpu).vram_known);
+
+  // Without a usage file (not amdgpu) the process's DRM engine times give the share: the busiest engine over the
+  // elapsed time and its engine count, each client once, other GPUs ignored.
+  {
+    detail::DrmEngines e;
+    assert(detail::parse_drm_engines("drm-driver: i915\ndrm-client-id: 7\ndrm-pdev: 0000:00:02.0\n"
+        "drm-engine-render: 1000 ns\ndrm-engine-capacity-render: 2\ndrm-engine-copy: 5 ns\n"
+        "drm-cycles-render: 9\ndrm-engine-video: 3 cycles\n", e));
+    assert(e.client == "7" && e.pdev == "0000:00:02.0" && e.busy_ns.size() == 2 && e.busy_ns["render"] == 1000 &&
+           e.busy_ns["copy"] == 5 && e.capacity["render"] == 2);
+    assert(!detail::parse_drm_engines("drm-engine-render: 1 ns\n", e));  // not a DRM client
+    const auto client = [](const char *id, const char *pdev, const char *ns, const char *capacity = "") {
+      return std::string("drm-client-id: ") + id + "\ndrm-pdev: " + pdev + "\ndrm-engine-render: " + ns + " ns\n" + capacity;
+    };
+    const fs::path root2 = fs::temp_directory_path() / ("bifrost-overlay-engines-" + std::to_string(getpid()));
+    fs::remove_all(root2);
+    const auto device = (root2 / "sys/devices/pci0/0000:03:00.0").string();  // no gpu_busy_percent here
+    fs::create_directories(device);
+    put(root2 / "proc/self/fdinfo/3", client("5", "0000:03:00.0", "1000000000"));
+    put(root2 / "proc/self/fdinfo/4", client("5", "0000:03:00.0", "1000000000"));  // the same client again
+    put(root2 / "proc/self/fdinfo/5", client("6", "0000:09:00.0", "99000000000"));  // another GPU
+    put(root2 / "proc/self/fdinfo/6", "pos:\t0\nflags:\t02\n");                     // not a DRM fd
+    HostSensors engines((root2 / "proc").string(), (root2 / "sys").string());
+    assert(engines.sample(100000000000ULL, device).gpu_percent < 0);  // the first sample has nothing to compare
+    put(root2 / "proc/self/fdinfo/3", client("5", "0000:03:00.0", "1500000000"));
+    put(root2 / "proc/self/fdinfo/4", client("5", "0000:03:00.0", "1500000000"));
+    assert(near(engines.sample(101000000000ULL, device).gpu_percent, 50));  // 0.5 s busy in 1 s, counted once
+    // Descriptors of one client always show the same counters.
+    for (const char *fd : {"3", "4"})
+      put(root2 / "proc/self/fdinfo" / fd, client("5", "0000:03:00.0", "2000000000", "drm-engine-capacity-render: 2\n"));
+    assert(near(engines.sample(102000000000ULL, device).gpu_percent, 25));  // two render engines share the time
+    for (const char *fd : {"3", "4"})
+      put(root2 / "proc/self/fdinfo" / fd, client("5", "0000:03:00.0", "9000000000", "drm-engine-capacity-render: 1\n"));
+    assert(near(engines.sample(103000000000ULL, device).gpu_percent, 100));  // never above 100
+    fs::remove_all(root2);
+  }
 
   // Intel: the package sensor wins over per-core ones.
   fs::remove_all(root / "sys");
@@ -91,6 +138,19 @@ int main() {
   assert(HostSensors(proc, sys).sample(1000000000ULL, "").cpu_temp < 0);
   fs::remove_all(root);
 
+  // The GPU in use is the device whose DRM clients hold the most memory, each client counted once.
+  {
+    using arm64emu::window_stats::detail::DrmClient;
+    using arm64emu::window_stats::detail::pick_gpu_device;
+    DrmClient render{"0000:09:00.0", "5", 3000, true}, scanout{"0000:07:00.0", "6", 100, true};
+    assert(pick_gpu_device({}) == "");
+    assert(pick_gpu_device({render}) == "0000:09:00.0");
+    assert(pick_gpu_device({scanout, render, render}) == "0000:09:00.0");  // a duplicate fd is not double usage
+    DrmClient unknown{"0000:07:00.0", "7", 0, false}, anonymous{"0000:05:00.0", "", 9999, true};
+    assert(pick_gpu_device({unknown}) == "0000:07:00.0");                  // unknown usage still names a device
+    assert(pick_gpu_device({anonymous, scanout}) == "0000:07:00.0");       // a node without a client id is ignored
+  }
+
   // Text.
   assert(detail::short_cpu_name("AMD Ryzen 7 5800X3D 8-Core Processor") == "AMD Ryzen 7 5800X3D");
   assert(detail::short_cpu_name("Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz") == "Intel Core i7-9700K");
@@ -108,26 +168,44 @@ int main() {
   stats.vram_known = true;
   stats.cpu_name = "AMD Ryzen 7 5800X3D 8-Core Processor";
   stats.gpu_name = "AMD Radeon RX 7600 (radeonsi, navi33)";
+  // A row is a 4-character label, a 4-character percentage, a space, an 8-cell meter, two spaces and a detail.
+  const auto row = [](const char *label, const char *percent, const std::string &detail) {
+    return std::string("\n") + label + percent + std::string(11, ' ') + detail + "\n";
+  };
+  const std::string deg = "\xC2\xB0" "C";
   const auto text = flat(overlay_lines(stats));
-  assert(text.find("BIFROST-EMU 2.0.0-ALPHA.2\nSUBWAY SURFERS\nANDROID EGL  60 FPS  16.7 MS\n") == 0);
-  assert(text.find("1440X1384  FRAME 123456\n") != std::string::npos);
-  assert(text.find("CPU 34%  72\xC2\xB0" "C  EMU 13%\n") != std::string::npos);
-  assert(text.find("GPU 58%  64\xC2\xB0" "C  VRAM 1.2/8.2 GB\n") != std::string::npos);
-  assert(text.find("RAM 12.3/31.3 GB  EMU 2.1 GB\n") != std::string::npos);
-  assert(text.find("AMD RYZEN 7 5800X3D\nAMD RADEON RX 7600\n") != std::string::npos);
+  assert(text.find("BIFROST-EMU 2.0.0-ALPHA.2\nSUBWAY SURFERS\n60 FPS  16.7 MS  ANDROID EGL\n\n") == 0);
+  assert(text.find(row("CPU ", " 34%", "72" + deg)) != std::string::npos);
+  assert(text.find(row("GPU ", " 58%", "64" + deg)) != std::string::npos);
+  assert(text.find(row("VRAM", " 15%", "1.2/8.2 GB")) != std::string::npos);
+  assert(text.find(row("RAM ", " 39%", "12.3/31.3 GB")) != std::string::npos);
+  assert(text.find("\n\nEMU 13% CPU  2.1 GB\nAMD RADEON RX 7600\n") != std::string::npos);
   stats.active = false; stats.sensors = SensorReading{}; stats.vram_known = false; stats.app.clear();
-  stats.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)";
+  stats.process_rss = 0; stats.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)";
   const auto idle = flat(overlay_lines(stats));
-  assert(idle.find("\nANDROID EGL  IDLE\n") != std::string::npos);
-  assert(idle.find("CPU --%  --\xC2\xB0" "C  EMU --%\n") != std::string::npos);
-  assert(idle.find("GPU --%  --\xC2\xB0" "C  VRAM --\n") != std::string::npos);
-  assert(idle.find("RAM --  EMU 2.1 GB\n") != std::string::npos && idle.find("\nLLVMPIPE\n") != std::string::npos);
+  assert(idle.find("\nIDLE  ANDROID EGL\n") != std::string::npos);
+  assert(idle.find(row("CPU ", " --%", "--" + deg)) != std::string::npos);
+  assert(idle.find(row("VRAM", " --%", "--")) != std::string::npos);
+  assert(idle.find(row("RAM ", " --%", "--")) != std::string::npos);
+  assert(idle.find("\n\nEMU --% CPU  --\nLLVMPIPE\n") != std::string::npos);
+  // A meter row draws a bar (the track plus a fill in the colour for its load), not glyphs.
+  {
+    stats.sensors.cpu_percent = 50; stats.sensors.gpu_percent = 96;
+    const auto rows = overlay_lines(stats);
+    const OverlayLine *cpu = nullptr, *gpu = nullptr;
+    for (const auto &line : rows) {
+      if (line.size() > 1 && line[0].text.rfind("CPU", 0) == 0) cpu = &line;
+      if (line.size() > 1 && line[0].text.rfind("GPU", 0) == 0) gpu = &line;
+    }
+    assert(cpu && gpu && cpu->at(3).meter > 0.49 && cpu->at(3).meter < 0.51 && gpu->at(3).color != cpu->at(3).color);
+    assert(cpu->at(3).text.size() == 8 && cpu->at(3).meter <= 1);
+  }
 
   // Rendering: small, translucent, rounded, text opaque.
   assert(overlay_scale(720) == 2 && overlay_scale(1384) == 2 && overlay_scale(2160) == 3 && overlay_scale(99999) == 5);
   const std::vector<OverlayLine> lines = {{{"AB", 0xFFFFFFFF}}, {{"C", 0xFF00FF00}}};
   const auto image = render_overlay(lines, 2);
-  assert(image.w == 2 * 12 - 2 + 12 && image.h == 2 * 18 - 4 + 12 && image.argb.size() == size_t(image.w) * image.h);
+  assert(image.w == 2 * 12 - 2 + 16 && image.h == 2 * 18 - 4 + 12 && image.argb.size() == size_t(image.w) * image.h);
   assert(image.argb[0] == 0 && image.argb[image.w - 1] == 0 && image.argb.back() == 0);  // rounded corners
   const uint32_t panel = image.argb[size_t(image.h / 2) * image.w + image.w - 2];
   assert((panel >> 24) > 0x40 && (panel >> 24) < 0xE0);  // translucent, not clear and not solid
@@ -135,6 +213,6 @@ int main() {
   for (auto pixel : image.argb) { white |= pixel == 0xFFFFFFFF; green |= pixel == 0xFF00FF00; }
   assert(white && green);
   // Unknown and lower-case characters still draw: no out-of-range glyph access.
-  assert(render_overlay({{{"a~\xC3\xA9\x01", 0xFFFFFFFF}}}, 1).w == 4 * 6 - 1 + 6);
+  assert(render_overlay({{{"a~\xC3\xA9\x01", 0xFFFFFFFF}}}, 1).w == 4 * 6 - 1 + 8);
   return 0;
 }

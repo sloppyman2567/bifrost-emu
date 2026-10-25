@@ -9,8 +9,8 @@ display=Source/System/Graphics/Display
 ${CXX:-g++} -std=c++17 -pthread -IInclude -ISource -IThirdParty/VulkanHeaders/include Tests/Unit/window_stats_clock.cpp \
     $display/WindowStats.cpp $display/HostSensors.cpp $display/StatsOverlay.cpp -ldl -o "$TASK_TMP/clock"
 "$TASK_TMP/clock"
-${CXX:-g++} -std=c++17 -IInclude -ISource Tests/Unit/window_stats_overlay.cpp $display/HostSensors.cpp \
-    $display/StatsOverlay.cpp -o "$TASK_TMP/overlay"
+${CXX:-g++} -std=c++17 -pthread -IInclude -ISource -IThirdParty/VulkanHeaders/include Tests/Unit/window_stats_overlay.cpp \
+    $display/WindowStats.cpp $display/HostSensors.cpp $display/StatsOverlay.cpp -ldl -o "$TASK_TMP/overlay"
 "$TASK_TMP/overlay"
 make cross SRC=Tests/Apps/test_window_stats.c OUT=Tests/Apps/test_window_stats.elf > "$TASK_TMP/build.log" 2>&1
 run_probe() {

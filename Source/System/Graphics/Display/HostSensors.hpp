@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
 
 namespace arm64emu::window_stats {
@@ -15,6 +16,10 @@ struct SensorReading {
   double gpu_temp = unavailable;
   uint64_t ram_used = 0, ram_total = 0;  // bytes; used = MemTotal - MemAvailable
   bool ram_known = false;
+  // The GPU's own memory counters (amdgpu: mem_info_vram_*), for the whole machine rather than this process.
+  uint64_t vram_used = 0, vram_total = 0;
+  bool vram_known = false;
+  std::string gpu_driver;  // kernel driver of the GPU device ("amdgpu", "i915", ...), empty when unknown
 };
 namespace detail {
 struct CpuTimes {
@@ -24,6 +29,14 @@ struct CpuTimes {
 bool parse_cpu_stat(const std::string &text, CpuTimes &times);
 // utime + stime in clock ticks from /proc/PID/stat (the command name may contain spaces and parentheses).
 bool parse_process_ticks(const std::string &text, uint64_t &ticks);
+// One DRM client's engine counters from /proc/PID/fdinfo (Linux "DRM client usage stats"): cumulative busy
+// nanoseconds per engine (`drm-engine-<name>`) and how many engines share a name (`drm-engine-capacity-<name>`).
+struct DrmEngines {
+  std::string client, pdev;
+  std::map<std::string, uint64_t> busy_ns, capacity;
+};
+// False when the text is not a DRM client (it has no drm-client-id).
+bool parse_drm_engines(const std::string &fdinfo, DrmEngines &engines);
 // Whole degrees plausible for a die sensor, from a hwmon/thermal value in millidegrees.
 bool plausible_temperature(long long millidegrees, double &celsius);
 }  // namespace detail
@@ -46,7 +59,10 @@ private:
   detail::CpuTimes last_cpu_;
   uint64_t last_ticks_ = 0, last_ticks_ns_ = 0;
   bool have_cpu_ = false, have_ticks_ = false;
+  double engine_percent(uint64_t now_ns, const std::string &gpu_device);
   std::string cpu_path_, gpu_path_, gpu_for_;
   bool cpu_scanned_ = false;
+  std::map<std::string, uint64_t> last_engine_ns_;
+  uint64_t last_engine_time_ = 0;
 };
 }  // namespace arm64emu::window_stats

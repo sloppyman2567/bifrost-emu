@@ -8,10 +8,13 @@ namespace {
 constexpr uint32_t kPanel = 0xA80C1018;   // about 66% opaque: the game stays visible behind it
 constexpr uint32_t kAccent = 0xFF7FD4FF;
 constexpr uint32_t kText = 0xFFEAF0F7;
-constexpr uint32_t kDim = 0xFF9AA7B8;
+constexpr uint32_t kDim = 0xFF8A97A8;
+constexpr uint32_t kTrack = 0xFF2A3342;   // the empty part of a meter
+constexpr uint32_t kRule = 0xFF3A4556;
 constexpr uint32_t kWarn = 0xFFFFC857;
 constexpr uint32_t kHot = 0xFFFF6B5E;
-constexpr int kColumns = 38;  // characters per line, at most
+constexpr int kColumns = 31;  // characters per line, at most
+constexpr int kMeterCells = 8;
 
 // 5x7 glyphs, one byte per column with bit 0 at the top row: ASCII 0x20..0x5F (lower case prints as
 // upper case), and the degree sign. The digit and letter shapes are the classic 5x7 matrix.
@@ -66,8 +69,29 @@ std::string format(const char *pattern, double a = 0, double b = 0) {
 std::string percent(double value) { return value < 0 ? "--%" : format("%.0f%%", value); }
 std::string degrees(double value) { return value < 0 ? "--\xC2\xB0" "C" : format("%.0f\xC2\xB0" "C", value); }
 std::string gigabytes(uint64_t bytes) { return format("%.1f", bytes / 1e9); }
-uint32_t load_color(double value) { return value >= 95 ? kWarn : kText; }
+std::string pad_left(std::string text, size_t width) {
+  return text.size() < width ? std::string(width - text.size(), ' ') + text : text;
+}
+std::string pad_right(std::string text, size_t width) {
+  return text.size() < width ? text + std::string(width - text.size(), ' ') : text;
+}
+// Load and fullness turn amber from 80 percent and red from 95; temperatures at 80 and 90 degrees.
+uint32_t load_color(double value) { return value >= 95 ? kHot : value >= 80 ? kWarn : kAccent; }
 uint32_t heat_color(double value) { return value >= 90 ? kHot : value >= 80 ? kWarn : kText; }
+// One aligned row: label, percentage, a meter, then a detail such as a temperature or a size.
+OverlayLine meter_row(const char *label, double percent_value, const std::string &detail, uint32_t detail_color) {
+  const bool known = percent_value >= 0;
+  const uint32_t color = known ? load_color(percent_value) : kDim;
+  return {{pad_right(label, 4), kDim},
+          {pad_left(percent(percent_value), 4), known && percent_value >= 80 ? color : kText},
+          {" ", kText},
+          {std::string(kMeterCells, ' '), color, known ? std::min(1.0, percent_value / 100.0) : 0.0},
+          {"  ", kText},
+          {detail, detail_color}};
+}
+double fraction_percent(uint64_t used, uint64_t total) {
+  return total ? 100.0 * static_cast<double>(used) / static_cast<double>(total) : -1;
+}
 }  // namespace
 
 namespace detail {
@@ -136,24 +160,24 @@ std::vector<OverlayLine> overlay_lines(const OverlayStats &s) {
   std::vector<OverlayLine> lines;
   lines.push_back({{"BIFROST-EMU " + overlay_text(s.version), kAccent}});
   if (!s.app.empty()) lines.push_back({{trim(overlay_text(s.app), kColumns), kText}});
-  std::string rate = s.active ? (s.fps > 0 ? format("%.0f FPS  %.1f MS", s.fps, 1000.0 / s.fps) : "0 FPS") : "IDLE";
-  lines.push_back({{trim(overlay_text(s.backend), 14) + "  " + rate, kText}});
-  lines.push_back({{format("%.0f", s.width) + "X" + format("%.0f", s.height) + "  FRAME " +
-                        format("%.0f", static_cast<double>(s.frames)), kDim}});
+  OverlayLine rate;
+  if (!s.active) rate.push_back({"IDLE", kWarn});
+  else if (s.fps > 0) rate.push_back({format("%.0f FPS  %.1f MS", s.fps, 1000.0 / s.fps), kText});
+  else rate.push_back({"0 FPS", kText});
+  rate.push_back({"  " + trim(overlay_text(s.backend), 12), kDim});
+  lines.push_back(std::move(rate));
+  lines.push_back({{"", kRule, -1, true}});
   const auto &r = s.sensors;
-  lines.push_back({{"CPU ", kDim}, {percent(r.cpu_percent), load_color(r.cpu_percent)}, {"  ", kText},
-                   {degrees(r.cpu_temp), heat_color(r.cpu_temp)},
-                   {"  EMU " + percent(r.process_percent), kDim}});
-  OverlayLine gpu = {{"GPU ", kDim}, {percent(r.gpu_percent), load_color(r.gpu_percent)}, {"  ", kText},
-                     {degrees(r.gpu_temp), heat_color(r.gpu_temp)}};
-  gpu.push_back({s.vram_known && s.vram_total
-                     ? "  VRAM " + gigabytes(s.vram_used) + "/" + gigabytes(s.vram_total) + " GB"
-                     : "  VRAM --", kDim});
-  lines.push_back(std::move(gpu));
-  lines.push_back({{"RAM ", kDim},
-                   {r.ram_known ? gigabytes(r.ram_used) + "/" + gigabytes(r.ram_total) + " GB" : "--", kText},
-                   {s.process_rss ? "  EMU " + gigabytes(s.process_rss) + " GB" : "", kDim}});
-  if (!s.cpu_name.empty()) lines.push_back({{trim(overlay_text(detail::short_cpu_name(s.cpu_name)), kColumns), kDim}});
+  lines.push_back(meter_row("CPU", r.cpu_percent, degrees(r.cpu_temp), heat_color(r.cpu_temp)));
+  lines.push_back(meter_row("GPU", r.gpu_percent, degrees(r.gpu_temp), heat_color(r.gpu_temp)));
+  const bool vram = s.vram_known && s.vram_total;
+  lines.push_back(meter_row("VRAM", vram ? fraction_percent(s.vram_used, s.vram_total) : -1,
+                            vram ? gigabytes(s.vram_used) + "/" + gigabytes(s.vram_total) + " GB" : "--", kText));
+  lines.push_back(meter_row("RAM", r.ram_known ? fraction_percent(r.ram_used, r.ram_total) : -1,
+                            r.ram_known ? gigabytes(r.ram_used) + "/" + gigabytes(r.ram_total) + " GB" : "--", kText));
+  lines.push_back({{"", kRule, -1, true}});
+  lines.push_back({{"EMU " + percent(r.process_percent) + " CPU  " +
+                        (s.process_rss ? gigabytes(s.process_rss) + " GB" : std::string("--")), kDim}});
   if (!s.gpu_name.empty()) lines.push_back({{trim(overlay_text(detail::short_gpu_name(s.gpu_name)), kColumns), kDim}});
   return lines;
 }
@@ -166,13 +190,21 @@ OverlayImage render_overlay(const std::vector<OverlayLine> &lines, int scale) {
     for (const auto &run : line) width += glyph_count(run.text);
     columns = std::max(columns, width);
   }
-  const int pad = 3 * scale, advance = 6 * scale, pitch = 9 * scale;
+  const int pad_x = 4 * scale, pad_y = 3 * scale, advance = 6 * scale, pitch = 9 * scale, rule_pitch = 5 * scale;
+  auto height_of = [&](const OverlayLine &line) { return !line.empty() && line[0].rule ? rule_pitch : pitch; };
+  int content = 0;
+  for (const auto &line : lines) content += height_of(line);
   OverlayImage image;
-  image.w = static_cast<int>(columns) * advance - scale + 2 * pad;
-  image.h = static_cast<int>(lines.size()) * pitch - 2 * scale + 2 * pad;
+  image.w = static_cast<int>(columns) * advance - scale + 2 * pad_x;
+  image.h = content - 2 * scale + 2 * pad_y;  // the last line has no gap below it
   image.argb.assign(static_cast<size_t>(image.w) * image.h, kPanel);
-  // Rounded corners: pixels outside a quarter circle of radius 2 * scale stay transparent.
-  const int radius = 2 * scale;
+  auto fill = [&](int x, int y, int w, int h, uint32_t color) {
+    for (int row = std::max(0, y); row < std::min(image.h, y + h); ++row)
+      for (int column = std::max(0, x); column < std::min(image.w, x + w); ++column)
+        image.argb[static_cast<size_t>(row) * image.w + column] = color;
+  };
+  // Rounded corners: pixels outside a quarter circle of radius 3 * scale stay transparent.
+  const int radius = 3 * scale;
   for (int y = 0; y < radius; ++y)
     for (int x = 0; x < radius; ++x) {
       const double dx = radius - x - 0.5, dy = radius - y - 0.5;
@@ -182,24 +214,32 @@ OverlayImage render_overlay(const std::vector<OverlayLine> &lines, int scale) {
           image.argb[static_cast<size_t>(flip_y ? image.h - 1 - y : y) * image.w +
                      (flip_x ? image.w - 1 - x : x)] = 0;
     }
-  int top = pad;
+  int top = pad_y;
   for (const auto &line : lines) {
-    int left = pad;
+    int left = pad_x;
     for (const auto &run : line) {
+      if (run.rule) {
+        fill(pad_x, top + 2 * scale, image.w - 2 * pad_x, std::max(1, scale / 2 + 1), run.color);
+        continue;
+      }
+      if (run.meter >= 0) {
+        const int width = static_cast<int>(glyph_count(run.text)) * advance - scale;
+        const int bar_top = top + 2 * scale, bar_height = 3 * scale;
+        fill(left, bar_top, width, bar_height, kTrack);
+        fill(left, bar_top, static_cast<int>(std::lround(width * std::min(1.0, run.meter))), bar_height, run.color);
+        left += static_cast<int>(glyph_count(run.text)) * advance;
+        continue;
+      }
       for (size_t i = 0; i < run.text.size();) {
         const uint8_t *columns_bits = glyph(run.text, i);
         for (int column = 0; column < 5; ++column)
-          for (int row = 0; row < 7; ++row) {
-            if (!(columns_bits[column] & (1 << row))) continue;
-            for (int dy = 0; dy < scale; ++dy)
-              for (int dx = 0; dx < scale; ++dx)
-                image.argb[static_cast<size_t>(top + row * scale + dy) * image.w +
-                           (left + column * scale + dx)] = run.color;
-          }
+          for (int row = 0; row < 7; ++row)
+            if (columns_bits[column] & (1 << row))
+              fill(left + column * scale, top + row * scale, scale, scale, run.color);
         left += advance;
       }
     }
-    top += pitch;
+    top += height_of(line);
   }
   return image;
 }

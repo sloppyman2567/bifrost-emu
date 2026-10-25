@@ -5,6 +5,8 @@
 #include <dirent.h>
 #include <fstream>
 #include <functional>
+#include <set>
+#include <vector>
 #include <sstream>
 #include <unistd.h>
 
@@ -42,6 +44,29 @@ bool parse_process_ticks(const std::string &text, uint64_t &ticks) {
     }
   }
   return false;
+}
+bool parse_drm_engines(const std::string &fdinfo, DrmEngines &engines) {
+  engines = DrmEngines{};
+  std::istringstream input(fdinfo);
+  std::string line;
+  bool client = false;
+  while (std::getline(input, line)) {
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const std::string key = line.substr(0, colon);
+    std::istringstream value(line.substr(colon + 1));
+    if (key == "drm-client-id") { client = static_cast<bool>(value >> engines.client); continue; }
+    if (key == "drm-pdev") { value >> engines.pdev; continue; }
+    const bool capacity = key.rfind("drm-engine-capacity-", 0) == 0;
+    if (!capacity && key.rfind("drm-engine-", 0) != 0) continue;
+    uint64_t number = 0;
+    std::string unit;
+    if (!(value >> number)) continue;
+    value >> unit;
+    if (capacity ? !unit.empty() : unit != "ns") continue;  // engine times are always nanoseconds
+    (capacity ? engines.capacity : engines.busy_ns)[key.substr(capacity ? 20 : 11)] = number;
+  }
+  return client;
 }
 bool plausible_temperature(long long millidegrees, double &celsius) {
   if (millidegrees < 1000 || millidegrees > 150000) return false;  // 0 means not powered or unsupported
@@ -135,6 +160,46 @@ double HostSensors::temperature(const std::string &path) {
   return SensorReading::unavailable;
 }
 
+// GPU busy share of this process: for each engine, the busy time of every distinct DRM client on the GPU
+// since the last call, over the elapsed time and the number of engines of that name; the busiest engine counts
+// (engines run concurrently). Unavailable until a second sample, or when the driver exposes no counters.
+double HostSensors::engine_percent(uint64_t now_ns, const std::string &gpu_device) {
+  std::map<std::string, uint64_t> busy, capacity;
+  std::set<std::string> seen;
+  bool any = false;
+  DIR *dir = opendir((proc_ + "/self/fdinfo").c_str());
+  if (!dir) return SensorReading::unavailable;
+  std::vector<std::string> names;
+  while (const auto *entry = readdir(dir))
+    if (entry->d_name[0] != '.') names.push_back(entry->d_name);
+  closedir(dir);
+  for (const auto &name : names) {
+    detail::DrmEngines client;
+    const auto text = read(proc_ + "/self/fdinfo/" + name);
+    if (text.find("drm-client-id") == std::string::npos || !detail::parse_drm_engines(text, client)) continue;
+    // A PCI address ends the sysfs device path; platform GPUs report none and are accepted as they are.
+    if (!client.pdev.empty() && (gpu_device.size() < client.pdev.size() ||
+        gpu_device.compare(gpu_device.size() - client.pdev.size(), client.pdev.size(), client.pdev))) continue;
+    if (!seen.insert(client.pdev + "/" + client.client).second) continue;
+    for (const auto &[engine, ns] : client.busy_ns) { busy[engine] += ns; any = true; }
+    for (const auto &[engine, count] : client.capacity) capacity[engine] = std::max<uint64_t>(1, count);
+  }
+  double percent = SensorReading::unavailable;
+  if (any && !last_engine_ns_.empty() && now_ns > last_engine_time_) {
+    percent = 0;
+    for (const auto &[engine, ns] : busy) {
+      const auto before = last_engine_ns_.find(engine);
+      if (before == last_engine_ns_.end() || ns < before->second) continue;
+      const double share = 100.0 * double(ns - before->second) /
+                           (double(now_ns - last_engine_time_) * double(capacity.count(engine) ? capacity[engine] : 1));
+      percent = std::max(percent, std::min(100.0, share));
+    }
+  }
+  last_engine_ns_ = any ? busy : std::map<std::string, uint64_t>{};
+  last_engine_time_ = now_ns;
+  return percent;
+}
+
 const SensorReading &HostSensors::sample(uint64_t now_ns, const std::string &gpu_device) {
   if (sample_ns_ && now_ns - sample_ns_ < 1000000000ULL) return reading_;
   SensorReading next;
@@ -167,11 +232,31 @@ const SensorReading &HostSensors::sample(uint64_t now_ns, const std::string &gpu
   next.cpu_temp = temperature(cpu_path_);
   if (gpu_device != gpu_for_) { gpu_path_ = gpu_device.empty() ? std::string() : gpu_sensor_path(gpu_device); gpu_for_ = gpu_device; }
   if (!gpu_device.empty()) {
+    char driver[256];
+    const ssize_t length = readlink((gpu_device + "/driver").c_str(), driver, sizeof(driver) - 1);
+    if (length > 0) {
+      const std::string link(driver, static_cast<size_t>(length));
+      next.gpu_driver = link.substr(link.rfind('/') == std::string::npos ? 0 : link.rfind('/') + 1);
+    }
+    const auto counter = [&](const char *name, uint64_t &value) {
+      const auto text = trimmed(read(gpu_device + "/" + name));
+      char *end = nullptr;
+      const auto number = strtoull(text.c_str(), &end, 10);
+      if (text.empty() || *end) return false;
+      value = number;
+      return true;
+    };
+    uint64_t used = 0, total = 0;
+    if (counter("mem_info_vram_total", total) && counter("mem_info_vram_used", used) && total && used <= total) {
+      next.vram_total = total; next.vram_used = used; next.vram_known = true;
+    }
     next.gpu_temp = temperature(gpu_path_);
     const auto busy = trimmed(read(gpu_device + "/gpu_busy_percent"));  // amdgpu
     char *end = nullptr;
     const long value = strtol(busy.c_str(), &end, 10);
     if (!busy.empty() && !*end && value >= 0 && value <= 100) next.gpu_percent = double(value);
+    // No usage file (not amdgpu): the kernel's per-process engine times, as Intel and other drivers report.
+    if (next.gpu_percent < 0) next.gpu_percent = engine_percent(now_ns, gpu_device);
   }
   reading_ = next;
   sample_ns_ = now_ns;

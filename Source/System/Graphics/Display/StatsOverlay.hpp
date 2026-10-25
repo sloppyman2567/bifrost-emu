@@ -25,6 +25,8 @@ struct OverlayStats {
 struct OverlayRun {
   std::string text;
   uint32_t color;
+  double meter = -1;  // 0..1: a usage bar as wide as `text` (spaces) instead of glyphs
+  bool rule = false;  // a thin divider across the panel instead of text
 };
 using OverlayLine = std::vector<OverlayRun>;
 std::vector<OverlayLine> overlay_lines(const OverlayStats &stats);

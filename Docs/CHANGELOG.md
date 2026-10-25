@@ -14,6 +14,18 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Window stats overlay: cleaner layout and real GPU data (2026-10-24)
+
+- The overlay panel is now aligned rows with a meter each for CPU, GPU, VRAM and RAM, thin rules between sections
+  and a dim footer, instead of a dense block of text; window size and frame count are gone. Rendered offscreen and
+  looked at over bright and dark backgrounds; not yet seen on a live window.
+- GPU readings were missing because the GPU was only identified from a GL context current on the presenting thread,
+  and the lookup gave up after four frames. It is now found from the DRM node the process holds open (fdinfo), so
+  usage, temperature and VRAM appear without a context. amdgpu's own counters give whole-GPU usage and VRAM; other
+  drivers fall back to the kernel's per-process `drm-engine-*` times (this process's share). On this machine's AMD GPU
+  both usage paths agree (about 20 and 24 percent for a running game against the whole GPU). Other drivers are
+  untested on hardware; NVIDIA's proprietary driver is still unsupported (it needs NVML).
+
 ### Window stats are opt-in, with an in-window overlay and layout modes (2026-10-24)
 
 - Window stats were on by default and filled the window title. They are now **off**: a window shows only the game's

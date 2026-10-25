@@ -129,6 +129,20 @@ bool detail::sum_drm_clients(const std::vector<DrmClient> &clients,
   return !seen.empty();
 }
 
+std::string detail::pick_gpu_device(const std::vector<DrmClient> &clients) {
+  std::map<std::string, uint64_t> resident;
+  std::set<std::pair<std::string, std::string>> seen;
+  for (const auto &client : clients) {
+    if (client.id.empty() || client.device.empty() || !seen.insert({client.device, client.id}).second) continue;
+    resident[client.device] += client.known ? client.resident : 0;
+  }
+  std::string best;
+  uint64_t most = 0;
+  for (const auto &[device, bytes] : resident)
+    if (best.empty() || bytes > most) { best = device; most = bytes; }
+  return best;
+}
+
 std::string detail::vram_text(uint64_t used, uint64_t total, bool known) {
   if (!total) return "unavailable/shared";
   char text[96];
@@ -146,10 +160,10 @@ static std::string drm_device(dev_t device) {
   return result;
 }
 
-static bool used_vram(const std::string &device, uint64_t &bytes) {
-  DIR *dir = opendir("/proc/self/fdinfo");
-  if (!dir) return false;
+static std::vector<detail::DrmClient> drm_clients() {
   std::vector<detail::DrmClient> clients;
+  DIR *dir = opendir("/proc/self/fdinfo");
+  if (!dir) return clients;
   while (const auto *entry = readdir(dir)) {
     if (entry->d_name[0] == '.') continue;
     const std::string number = entry->d_name;
@@ -164,7 +178,10 @@ static bool used_vram(const std::string &device, uint64_t &bytes) {
     clients.push_back(std::move(client));
   }
   closedir(dir);
-  return detail::sum_drm_clients(clients, device, bytes);
+  return clients;
+}
+static bool used_vram(const std::string &device, uint64_t &bytes) {
+  return detail::sum_drm_clients(drm_clients(), device, bytes);
 }
 
 // These are host measurements, never guest /proc emulation. RSS includes the
@@ -271,7 +288,7 @@ static uint64_t egl_vram(void *egl, std::string &drm) {
   return bytes;
 }
 
-static void gpu_info(std::string &name, uint64_t &vram, std::string &device) {
+static bool gpu_info(std::string &name, uint64_t &vram, std::string &device, bool want_vram) {
   // This runs on a presenting thread with its GL context current. Every entry
   // is resolved from the host DSO, never from guest thunks or SDL2/SDL3 globals.
   static void *gl = dlopen("libGL.so.1", RTLD_LAZY | RTLD_LOCAL);
@@ -279,18 +296,20 @@ static void gpu_info(std::string &name, uint64_t &vram, std::string &device) {
   using Current = void *(*)();
   auto egl_current = egl ? reinterpret_cast<Current>(dlsym(egl, "eglGetCurrentContext")) : nullptr;
   auto glx_current = gl ? reinterpret_cast<Current>(dlsym(gl, "glXGetCurrentContext")) : nullptr;
-  if (!(egl_current && egl_current()) && !(glx_current && glx_current())) return;
+  if (!(egl_current && egl_current()) && !(glx_current && glx_current())) return false;
   using GetString = const unsigned char *(*)(unsigned);
   auto string = gl ? reinterpret_cast<GetString>(dlsym(gl, "glGetString")) : nullptr;
   const auto *renderer = string ? string(0x1f01) : nullptr; // GL_RENDERER
-  if (!renderer) return;
+  if (!renderer) return false;
   name = reinterpret_cast<const char *>(renderer);
+  if (!want_vram) return true;
   if (egl) vram = egl_vram(egl, device);
   using MesaQuery = int (*)(int, unsigned *);
   auto query = gl ? reinterpret_cast<MesaQuery>(dlsym(gl, "glXQueryCurrentRendererIntegerMESA")) : nullptr;
   unsigned mb = 0, unified = 1;
   if (!vram && query && query(0x8188, &unified) && !unified && query(0x8187, &mb))
     vram = uint64_t(mb) * 1024 * 1024;
+  return true;
 }
 struct State {
   Clock clock;
@@ -308,7 +327,8 @@ struct State {
   std::string device;
   uint64_t used_vram = 0, vram_sample = 0;
   bool vram_known = false;
-  unsigned gpu_attempts = 0;
+  unsigned vram_attempts = 0;  // capacity lookups (they create a Vulkan instance), bounded
+  uint64_t device_ns = 0;
   OverlayImage overlay;
   uint64_t overlay_seq = 0, overlay_taken = 0;
   ~State() {
@@ -375,9 +395,11 @@ static void record_present(State &state, const char *backend, uint64_t now) {
     fprintf(stderr, "[render] bifrost-emu %s: rendering started (%s)\n",
             VERSION, backend);
   state.clock.present(now);
-  if (enabled() && (state.gpu.empty() || !state.vram) && state.gpu_attempts < 4) {
-    ++state.gpu_attempts; gpu_info(state.gpu, state.vram, state.device);
-  }
+  // The renderer name only needs a current context, so ask until one is; the capacity lookup is bounded.
+  const bool want_vram = !state.vram && state.vram_attempts < 4;
+  if (enabled() && (state.gpu.empty() || want_vram) &&
+      gpu_info(state.gpu, state.vram, state.device, want_vram) && want_vram)
+    ++state.vram_attempts;
 }
 
 static std::string update(State &state, const WindowInfo &info, uint64_t now) {
@@ -398,6 +420,10 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
     state.vram_sample = now;
   }
   packet.used_vram = state.used_vram; packet.vram_known = state.vram_known;
+  if (state.device.empty() && (!state.device_ns || now - state.device_ns >= 1000000000ULL)) {
+    state.device_ns = now;
+    state.device = detail::pick_gpu_device(drm_clients());
+  }
   const SensorReading &sensors = host_sensors.sample(now, state.device);
   packet.cpu_percent = sensors.cpu_percent; packet.cpu_temp = sensors.cpu_temp;
   packet.gpu_percent = sensors.gpu_percent; packet.gpu_temp = sensors.gpu_temp;
@@ -417,11 +443,14 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   if (state.native && dbg().window_stats_overlay) {
     OverlayStats stats;
     stats.version = VERSION; stats.app = state.title; stats.backend = state.backend;
-    stats.gpu_name = state.gpu; stats.cpu_name = cpu;
+    stats.gpu_name = state.gpu.empty() ? sensors.gpu_driver : state.gpu; stats.cpu_name = cpu;
     stats.fps = packet.fps; stats.active = now - state.clock.last_ns <= 2000000000ULL;
     stats.width = packet.w; stats.height = packet.h; stats.frames = packet.frames;
     stats.sensors = sensors; stats.process_rss = packet.ram;
-    stats.vram_used = packet.used_vram; stats.vram_total = packet.vram; stats.vram_known = packet.vram_known;
+    // The GPU's own counters cover the whole machine, as other monitors show; else this process's share.
+    stats.vram_known = sensors.vram_known || packet.vram_known;
+    stats.vram_used = sensors.vram_known ? sensors.vram_used : packet.used_vram;
+    stats.vram_total = sensors.vram_known ? sensors.vram_total : packet.vram;
     state.overlay = render_overlay(overlay_lines(stats), overlay_scale(info.h));
     ++state.overlay_seq;
   }

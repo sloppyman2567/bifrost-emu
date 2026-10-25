@@ -89,30 +89,37 @@ host input. Nothing is drawn through the guest's GL or Vulkan state, and nothing
 It refreshes at most four times a second and scales its 5x7 built-in font with the window height (2x up to
 about 1440p, 3x at 4K). It shows, from top to bottom:
 
-- `BIFROST-EMU` and the version, the app's own title and the presentation backend with FPS and frame time
+- `BIFROST-EMU` and the version, the app's own title, and FPS and frame time with the presentation backend
   (`IDLE` after two seconds without a frame);
-- window size and presented frame count;
-- `CPU` usage and temperature, and `EMU` (this process's share of all CPUs);
-- `GPU` usage and temperature, and VRAM used/total;
-- system RAM used/total and this process's resident memory;
-- the shortened CPU and GPU names (`llvmpipe` identifies a software renderer).
+- aligned `CPU`, `GPU`, `VRAM` and `RAM` rows, each with a percentage, a meter and a detail (a temperature, or
+  used/total memory); meters and numbers turn amber from 80 percent and red from 95, temperatures at 80 and 90
+  degrees Celsius;
+- a dim footer: `EMU`, this process's CPU share and resident memory, and the shortened GPU name (`llvmpipe`
+  identifies a software renderer).
 
-Values that cannot be read show `--`. Temperatures turn amber at 80 and red at 90 degrees Celsius. A window plugin
-without popup layers logs once and keeps the title statistics.
+Values that cannot be read show `--` with an empty meter. A window plugin without popup layers logs once and keeps
+the title statistics.
 
 Readings come from generic Linux interfaces, sampled once a second, with no vendor tools or libraries:
 
 - CPU usage: `/proc/stat`; the process share: `/proc/self/stat`, divided by the online CPU count.
 - CPU temperature: the hwmon package sensor by driver (`k10temp`, `zenpower`, `coretemp`, `cpu_thermal`,
   `soc_thermal`, `acpitz`), else a thermal zone (`x86_pkg_temp`, `cpu-thermal`, `soc-thermal`).
-- GPU temperature and usage: the rendering GPU's own sysfs device (found through EGL's DRM render node, so a
-  presenting GL context is needed): hwmon temperature (the `edge` label, else the first input) and amdgpu's
-  `gpu_busy_percent`. Other drivers expose no usage file here, so they show `--` for usage; hosts whose renderer
-  has no DRM node (software GL) show `--` for both.
-- System RAM: `MemTotal` minus `MemAvailable`; VRAM: the DRM fdinfo accounting described above.
+- The GPU: the sysfs device of the DRM node this process has open (its `/proc/self/fdinfo` clients; the one with
+  the most resident memory), so no GL context is needed. Its hwmon temperature uses the `edge` label, else the
+  first input.
+- GPU usage: amdgpu's `gpu_busy_percent` (the whole GPU). Without that file, the kernel's DRM client usage
+  statistics (`drm-engine-*` times in fdinfo, which Intel and other drivers print): this process's busiest engine
+  over the elapsed time and engine count. That is this process's share, not the whole GPU.
+- VRAM: amdgpu's `mem_info_vram_*` (the whole GPU), else the per-process DRM accounting described above.
+- System RAM: `MemTotal` minus `MemAvailable`.
 
-Checked against `sensors` and `/proc/meminfo` on one AMD CPU and GPU. The Intel `coretemp`, ARM, thermal-zone and
-non-AMD GPU layouts are covered by fixture trees only, not real hardware.
+Driver support, honestly: on AMD (amdgpu, an RX 7600) everything was checked against `sensors`, sysfs and
+`/proc/meminfo`, and the engine-time path against `gpu_busy_percent` (a running game read about 20 percent by engine
+time while the GPU reported 23 to 24). Other drivers are covered by fixture trees and the documented formats only:
+Intel (i915, xe) and others should give usage through fdinfo, nouveau, radeon and xe a hwmon temperature; an
+integrated GPU usually has no temperature of its own. NVIDIA's proprietary driver exposes neither DRM statistics nor
+hwmon, so it shows `--` (reading it needs NVML, which is not implemented). Software renderers have no GPU device.
 
 **Other windows** (SDL, GLFW, Vulkan and framebuffer windows of Linux guests) do not get the embedded panel. For
 them `--window-stats-overlay` is a desktop HUD in a separate process, positioned over the game client area and
