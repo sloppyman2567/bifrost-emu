@@ -34,6 +34,7 @@ bool SDL_SetTextInputArea(SDL_Window *window, const SDL_Rect *rect, int cursor) 
 int SDL_PeepEvents(SDL_Event *events, int count, SDL_EventAction action, Uint32 min, Uint32 max) {
     (void)events; (void)count; (void)action; (void)min; (void)max; return 0;
 }
+SDL_Keymod SDL_GetModState(void) { return getenv("BIFROST_TEST_SDL_SHIFT") ? SDL_KMOD_LSHIFT : SDL_KMOD_NONE; }
 bool SDL_PushEvent(SDL_Event *event) { return event != NULL; }
 SDL_Scancode SDL_GetScancodeFromName(const char *name) { (void)name; return SDL_SCANCODE_UNKNOWN; }
 SDL_Keycode SDL_GetKeyFromScancode(SDL_Scancode code, SDL_Keymod mods, bool event) {
@@ -114,11 +115,45 @@ bool SDL_GetWindowSizeInPixels(SDL_Window *window, int *width, int *height) {
     int scale = ((struct fake_window *)window)->scale;
     *width *= scale; *height *= scale; return result;
 }
+/* One-shot events for the wheel gestures: a mode "wheel#2" is delivered once, then nothing until it changes.
+   The cursor is at (400, 300) in a 800x600 window. */
+static char delivered_mode[64];
 bool SDL_PollEvent(SDL_Event *event) {
     const char *mode = getenv("BIFROST_TEST_SDL_EVENT");
     if (!mode) return false;
     memset(event, 0, sizeof(*event));
     event->common.timestamp = 123000000;
+    if (!strncmp(mode, "gesture-", 8)) {
+        if (!strcmp(mode, delivered_mode)) return false;
+        snprintf(delivered_mode, sizeof(delivered_mode), "%s", mode);
+        const char *what = mode + 8;
+        if (!strncmp(what, "wheel", 5)) {
+            event->type = SDL_EVENT_MOUSE_WHEEL; event->wheel.windowID = 1;
+            event->wheel.mouse_x = 400; event->wheel.mouse_y = 300;
+            event->wheel.y = (float)atof(strchr(what, ':') + 1);
+            if (strstr(what, "flipped")) event->wheel.direction = SDL_MOUSEWHEEL_FLIPPED;
+        } else if (!strncmp(what, "middle-down", 11) || !strncmp(what, "middle-up", 9)) {
+            event->type = what[7] == 'd' ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+            event->button.windowID = 1; event->button.button = SDL_BUTTON_MIDDLE;
+            event->button.x = 400; event->button.y = 300;
+        } else if (!strncmp(what, "move", 4)) {
+            event->type = SDL_EVENT_MOUSE_MOTION; event->motion.windowID = 1;
+            event->motion.x = 410; event->motion.y = 310;
+            event->motion.state = strstr(what, "held") ? SDL_BUTTON_MMASK : 0;
+        } else if (!strncmp(what, "left-down", 9)) {
+            event->type = SDL_EVENT_MOUSE_BUTTON_DOWN; event->button.windowID = 1;
+            event->button.button = SDL_BUTTON_LEFT; event->button.x = 10; event->button.y = 20;
+        } else if (!strncmp(what, "left-up", 7)) {
+            event->type = SDL_EVENT_MOUSE_BUTTON_UP; event->button.windowID = 1;
+            event->button.button = SDL_BUTTON_LEFT; event->button.x = 10; event->button.y = 20;
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+        } else if (!strncmp(what, "pinch", 5)) {
+            event->type = SDL_EVENT_PINCH_UPDATE; event->pinch.windowID = 1;
+            event->pinch.scale = (float)atof(strchr(what, ':') + 1);
+#endif
+        } else { return false; }
+        return true;
+    }
     if (!strcmp(mode, "key")) {
         event->type = SDL_EVENT_KEY_DOWN; event->key.windowID = 1;
         event->key.scancode = SDL_SCANCODE_A; event->key.raw = 30;

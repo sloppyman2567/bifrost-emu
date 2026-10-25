@@ -124,6 +124,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   pointer ids and `POINTER_DOWN/UP` actions. The 55-word op-3 record is
   shared by `HostCalls/Android.cpp`, `activity_window.c` and
   `ManagedLauncher`; change all three together.
+- Wheel, trackpad pinch and middle-drag input become synthetic two-finger gestures in `Window/WheelGestures`
+  (SDL-free; the SDL3 backend queues its events ahead of newer ones). Fingers never stay down: they lift on idle,
+  button press, focus loss and close. Test with `make test-android-wheel-gestures` and
+  `make test-android-sdl-backend` (the fake SDL3 in `Tests/Host/android_sdl3_fixture.c`).
 - Host text input: an editor with a live `InputConnection` is bound to a host
   `IInputMethodSession` (`FrameworkInputMethod`; no input channel, so keys keep
   reaching views). The launcher starts the host's text input from its poll loop

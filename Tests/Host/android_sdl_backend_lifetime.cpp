@@ -6,6 +6,7 @@
 #include <iterator>
 #include <string>
 #include <unistd.h>
+#include <SDL3/SDL.h>
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "SDL3 lifetime check failed at %d: %s\n", __LINE__, #x); return 1; } } while (0)
 static std::string contents(const char *path) {
@@ -58,8 +59,64 @@ int main() {
   CHECK(first->poll(event) == 1 && event.x == 20 && event.y == 40 && event.action == 0);
   setenv("BIFROST_TEST_SDL_EVENT", "other-window", 1);
   CHECK(first->poll(event) == 0 && event.type == 0);
+  // The left button is still down from above: a wheel step is not a pinch then.
+  setenv("BIFROST_TEST_SDL_EVENT", "gesture-wheel-held:1", 1);
+  CHECK(first->poll(event) == 0 && event.type == 0);
+  // Gestures arrive as synthetic fingers around the cursor, in order, whatever else is polled. The window is 1600x1200
+  // pixels (2x), the cursor at (800, 600), the fingers 0.20 of the smaller side (240 px) apart before the step.
+  const int32_t kA = 0x7ffffff0, kB = 0x7ffffff1;
+  auto near = [](float a, float b) { return a - b < 0.5f && b - a < 0.5f; };
+  auto next = [&](const char *mode) { setenv("BIFROST_TEST_SDL_EVENT", mode, 1); return first->poll(event); };
+  auto step = [&](int32_t finger, int32_t action, float x, float y) {
+    return first->poll(event) == 1 && event.type == BIFROST_WINDOW_POINTER && event.pointer_id == finger &&
+           event.action == action && near(event.x, x) && near(event.y, y);
+  };
+  CHECK(next("gesture-left-up") == 1 && event.action == 1);
+  CHECK(next("gesture-wheel:1") == 1 && event.pointer_id == kA && event.action == 0 && near(event.x, 680));
+  CHECK(step(kB, 0, 920, 600) && step(kA, 2, 665.6f, 600) && step(kB, 2, 934.4f, 600));
+  CHECK(first->poll(event) == 0);
+  // The fingers lift once the wheel has been quiet for a moment, the second one first.
+  usleep(250000);
+  CHECK(step(kB, 1, 934.4f, 600) && step(kA, 1, 665.6f, 600) && first->poll(event) == 0);
+  // A natural-scrolling (flipped) wheel zooms the same way for the same physical motion: its values are negated.
+  CHECK(next("gesture-wheel-flipped:-1") == 1 && event.pointer_id == kA && event.action == 0);
+  CHECK(step(kB, 0, 920, 600) && step(kA, 2, 665.6f, 600) && step(kB, 2, 934.4f, 600));
+  // A button press lifts them before its own event is delivered.
+  CHECK(next("gesture-left-down") == 1 && event.pointer_id == kB && event.action == 1 && near(event.x, 934.4f));
+  CHECK(step(kA, 1, 665.6f, 600));
+  CHECK(first->poll(event) == 1 && event.pointer_id == 0 && event.action == 0 && near(event.x, 20));
+  CHECK(next("gesture-left-up") == 1 && event.pointer_id == 0 && event.action == 1);
+  // Shift pans: the wheel moves both fingers 0.05 of the smaller side (60 px) per step, content following the wheel.
+  setenv("BIFROST_TEST_SDL_SHIFT", "1", 1);
+  CHECK(next("gesture-wheel-pan:1") == 1 && event.pointer_id == kA && event.action == 0);
+  CHECK(step(kB, 0, 920, 600) && step(kA, 2, 680, 660) && step(kB, 2, 920, 660));
+  unsetenv("BIFROST_TEST_SDL_SHIFT");
+  // Another kind of event ends it at once.
+  CHECK(next("gesture-left-down") == 1 && event.action == 1 && event.pointer_id == kB);
+  CHECK(step(kA, 1, 680, 660));
+  CHECK(first->poll(event) == 1 && event.pointer_id == 0 && event.action == 0);
+  CHECK(next("gesture-left-up") == 1 && event.action == 1);
+  // A held middle button drags both fingers with the cursor (hover moves are not reported while it does).
+  CHECK(next("gesture-middle-down") == 1 && event.pointer_id == kA && event.action == 0);
+  CHECK(step(kB, 0, 920, 600));
+  CHECK(next("gesture-move-held") == 1 && event.pointer_id == kA && event.action == 2 && near(event.x, 700) && near(event.y, 620));
+  CHECK(step(kB, 2, 940, 620) && first->poll(event) == 0);
+  CHECK(next("gesture-middle-up") == 1 && event.pointer_id == kB && event.action == 1);
+  CHECK(step(kA, 1, 700, 620) && first->poll(event) == 0);
+  // After it the cursor moves are ordinary hover events again.
+  CHECK(next("gesture-move") == 1 && event.pointer_id == 0 && event.action == 7);
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+  // A trackpad pinch spreads the fingers around the cursor, by the event's scale.
+  CHECK(next("gesture-pinch:1.5") == 1 && event.pointer_id == kA && event.action == 0);
+  CHECK(step(kB, 0, 940, 620) && step(kA, 2, 640, 620) && step(kB, 2, 1000, 620));
+  unsetenv("BIFROST_TEST_SDL_EVENT");
+  first->close();  // a gesture still running when the window closes sends nothing more
+  CHECK(first->poll(event) == 0);
+  first->close(); first.reset();
+#else
   unsetenv("BIFROST_TEST_SDL_EVENT");
   first->close(); first.reset();
+#endif
   // Opening keeps the requested desktop size: no host resize follows creation.
   CHECK(contents(log) == "video-init\nwindow-create\nvideo-init\nwindow-create\nwindow-icon\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
   CHECK(second->resize(320, 240, false) == 0);

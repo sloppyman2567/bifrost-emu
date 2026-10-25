@@ -14,6 +14,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Wheel, trackpad pinch and middle-drag zoom and pan touch apps (2026-10-25)
+
+- Touch-driven games had no way to zoom or move their view with a mouse. The mouse wheel and a trackpad pinch now
+  pinch-zoom around the cursor, Shift+wheel (or a sideways scroll) pans with two fingers, and holding the middle
+  button drags both fingers with the cursor. The fingers are synthetic, go down together and lift when the wheel has
+  been quiet for 160 ms, so nothing stays pressed; a zoom that runs out of room lifts and starts again, so a long
+  scroll keeps zooming. They are off while the left or right button is held. Implemented in
+  `Source/System/Android/Window/WheelGestures`; checked by `make test-android-wheel-gestures` and through the SDL3
+  backend with a fake SDL3 (`make test-android-sdl-backend`). Not yet tried on a live window.
+
 ### `asgard-setup` shows download progress (2026-10-24)
 
 - The setup's downloads (about 1.5 GB, 734 MiB of it the Android 15 system image) printed nothing until they were done.

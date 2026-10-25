@@ -3036,7 +3036,11 @@ the new Activity is idle, and `onSaveInstanceState` is not called on it
 software. Their topmost orientation request now controls the display in play
 mode; launch flags, task affinities and `onNewIntent` are not modelled.
 A mouse's back/forward buttons send `KEYCODE_BACK`/`KEYCODE_FORWARD`, as
-Android's InputReader synthesizes them. The configured back key
+Android's InputReader synthesizes them. The mouse wheel, a trackpad pinch and a
+held middle button reach apps as two-finger pinch and pan gestures (see
+[the window plugin input contract](ANDROID_WINDOW_PLUGINS.md)); these are what
+a touch-driven game such as Melon Sandbox uses to zoom and move its view. They
+are checked against a fake SDL3 and the unit test, not on a live desktop. The configured back key
 (`[android] back_key`, `BIFROST_ANDROID_BACK_KEY`; default `escape`, `none`
 disables) is delivered as `KEYCODE_BACK` to NativeActivity and managed apps
 alike; that host key then no longer reaches apps under its own code.

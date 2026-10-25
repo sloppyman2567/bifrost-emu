@@ -1,4 +1,5 @@
 #include "System/Android/Window/WindowBackend.hpp"
+#include "System/Android/Window/WheelGestures.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include <cerrno>
 #include <chrono>
@@ -44,7 +45,7 @@ namespace {
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
   X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
   X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
-  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio)
+  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -746,6 +747,8 @@ public:
     backdrop_.reset();
     clear_binding();
     mouse_fingers_ = 0;
+    gestures_ = {};
+    pending_.clear();
     if (window_) {
       sdl_.DestroyWindow(window_);
       window_ = nullptr;
@@ -902,6 +905,26 @@ public:
     out = {};
 #if defined(BIFROST_USE_SDL3)
     if (!window_) return 0;
+    gesture_out_.clear();
+    gestures_.idle(static_cast<uint64_t>(monotonic_ms()), gesture_out_);
+    pending_.insert(pending_.end(), gesture_out_.begin(), gesture_out_.end());
+    // Synthetic fingers of a wheel gesture go out in order, ahead of the event that came after them.
+    if (pending_.empty()) {
+      const int result = poll_sdl(out);
+      if (pending_.empty()) return result;
+      if (result == 1) pending_.push_back(out);
+    }
+    out = pending_.front();
+    pending_.pop_front();
+    return 1;
+#else
+    return 0;
+#endif
+  }
+private:
+#if defined(BIFROST_USE_SDL3)
+  int poll_sdl(AndroidWindowEvent &out) {
+    out = {};
     if (text_reports_ > 0) {  // the rest of a long commit, before any later event
       --text_reports_;
       out.type = BIFROST_WINDOW_TEXT;
@@ -954,6 +977,11 @@ public:
       if (e.type == SDL_EVENT_QUIT) { out.type = BIFROST_WINDOW_CLOSE; return 1; }
       if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == id) {
         out.type = BIFROST_WINDOW_CLOSE; return 1;
+      }
+      if (gesture_event(e, id, out.time_ms)) {
+        if (pending_.empty()) continue;
+        out = {};
+        return 0;
       }
       // Also sent when the window moves to a display with another scale.
       if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && e.window.windowID == id) {
@@ -1057,12 +1085,91 @@ public:
         return 1;
       }
     }
-#endif
     out = {};
     return 0;
   }
-private:
-#if defined(BIFROST_USE_SDL3)
+  // The cursor in app pixels, as the pointer events report it.
+  bool app_point(float x, float y, float &app_x, float &app_y, int &pixel_w, int &pixel_h) {
+    int logical_w = 0, logical_h = 0;
+    if (!sdl_.GetWindowSizeInPixels(window_, &pixel_w, &pixel_h) ||
+        !sdl_.GetWindowSize(window_, &logical_w, &logical_h) ||
+        pixel_w <= 0 || pixel_h <= 0 || logical_w <= 0 || logical_h <= 0) return false;
+    app_x = (x * static_cast<float>(pixel_w) / logical_w - g_fit.x.load()) / g_fit.scale.load();
+    app_y = (y * static_cast<float>(pixel_h) / logical_h - g_fit.y.load()) / g_fit.scale.load();
+    return true;
+  }
+  // Mouse wheel, trackpad pinch and middle-button drag as two-finger touch gestures (WheelGestures), queued in
+  // pending_. True when the event was used up here; a button press only lifts the fingers and goes on.
+  bool gesture_event(const SDL_Event &e, SDL_WindowID id, int64_t time_ms) {
+    const uint64_t now = static_cast<uint64_t>(time_ms);
+    gesture_out_.clear();
+    auto queue_and_return = [&](bool used) {
+      pending_.insert(pending_.end(), gesture_out_.begin(), gesture_out_.end());
+      return used;
+    };
+    auto view = [&](float x, float y, float &ax, float &ay) {
+      int pixel_w = 0, pixel_h = 0;
+      if (!app_point(x, y, ax, ay, pixel_w, pixel_h)) return false;
+      gestures_.set_view(fixed_w_ ? fixed_w_ : pixel_w, fixed_w_ ? fixed_h_ : pixel_h);
+      return true;
+    };
+    float ax = 0, ay = 0;
+    switch (e.type) {
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+      if (e.window.windowID == id) gestures_.cancel(now, gesture_out_);
+      return queue_and_return(false);
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      if (e.button.windowID != id || e.button.which == SDL_TOUCH_MOUSEID) return false;
+      if (e.button.button == SDL_BUTTON_MIDDLE) {
+        if (mouse_fingers_ || !view(e.button.x, e.button.y, ax, ay)) return true;
+        gestures_.drag_begin(ax, ay, now, gesture_out_);
+        return queue_and_return(true);
+      }
+      if (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT)
+        gestures_.cancel(now, gesture_out_);
+      return queue_and_return(false);
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (e.button.windowID != id || e.button.which == SDL_TOUCH_MOUSEID ||
+          e.button.button != SDL_BUTTON_MIDDLE) return false;
+      gestures_.drag_end(now, gesture_out_);
+      return queue_and_return(true);
+    case SDL_EVENT_MOUSE_MOTION:
+      if (e.motion.windowID != id || e.motion.which == SDL_TOUCH_MOUSEID) return false;
+      if (view(e.motion.x, e.motion.y, ax, ay)) { cursor_x_ = ax; cursor_y_ = ay; }
+      if (!gestures_.dragging()) return false;
+      if (!(e.motion.state & SDL_BUTTON_MMASK)) gestures_.drag_end(now, gesture_out_);  // released elsewhere
+      else gestures_.drag_move(cursor_x_, cursor_y_, now, gesture_out_);
+      return queue_and_return(true);
+    case SDL_EVENT_MOUSE_WHEEL: {
+      if (e.wheel.windowID != id || e.wheel.which == SDL_TOUCH_MOUSEID || mouse_fingers_ ||
+          !view(e.wheel.mouse_x, e.wheel.mouse_y, ax, ay)) return true;
+      cursor_x_ = ax; cursor_y_ = ay;
+      const float flip = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0f : 1.0f;  // up is positive
+      const float dx = e.wheel.x * flip, dy = e.wheel.y * flip;
+      const bool shift = (sdl_.GetModState() & SDL_KMOD_SHIFT) != 0;
+      if (shift || std::fabs(dx) > std::fabs(dy)) {
+        const float step = gestures_.scroll_step();
+        gestures_.pan(-dx * step, dy * step, ax, ay, now, gesture_out_);
+      } else if (dy != 0) {
+        gestures_.zoom(std::pow(1.12, dy), ax, ay, now, gesture_out_);
+      }
+      return queue_and_return(true);
+    }
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+    case SDL_EVENT_PINCH_UPDATE:
+      if (e.pinch.windowID != id || mouse_fingers_) return true;
+      gestures_.zoom(e.pinch.scale, cursor_x_, cursor_y_, now, gesture_out_);
+      return queue_and_return(true);
+    case SDL_EVENT_PINCH_END:
+      gestures_.cancel(now, gesture_out_);
+      return queue_and_return(true);
+    case SDL_EVENT_PINCH_BEGIN:
+      return true;
+#endif
+    default:
+      return false;
+    }
+  }
   int fail(const char *operation) {
     std::fprintf(stderr, "[android] SDL3 %s failed: %s\n", operation, sdl_.GetError());
     return -EIO;
@@ -1107,6 +1214,11 @@ private:
   // AndroidSurfaceManager assigns the Android pointer ids.
   static constexpr int32_t kMouseFinger = 0, kMouseSecondFinger = 1, kFirstTouchFinger = 2;
   uint32_t mouse_fingers_ = 0; // bit per mouse finger reported down
+  // Wheel, pinch and middle-drag gestures: their synthetic fingers wait in pending_ for the next polls.
+  WheelGestures gestures_;
+  std::deque<AndroidWindowEvent> pending_;
+  std::vector<WheelEvent> gesture_out_;
+  float cursor_x_ = 0, cursor_y_ = 0;  // last cursor position in app pixels
   // Desktop text input (set_text_input). Payloads wait here for poll_text;
   // text_reports_ counts TEXT events still owed beyond the one just returned.
   bool text_active_ = false;

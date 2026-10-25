@@ -91,7 +91,16 @@ by its own window ID, converts mouse coordinates to pixels and preserves
 modifier state. The left mouse button is a finger that follows the cursor;
 the right button is a second finger held where it was pressed (steer and
 boost at once). Touchscreen fingers keep separate keys, and SDL's synthetic
-mouse events for touches are ignored. Event work
+mouse events for touches are ignored. The SDL3 adapter also turns desktop
+scrolling into the two-finger gestures a touch app expects (`WheelGestures`):
+the mouse wheel and a trackpad pinch zoom around the cursor, Shift+wheel or a
+horizontal scroll pans, and a held middle button drags both fingers with the
+cursor. These are two synthetic fingers (keys `0x7ffffff0`/`0x7ffffff1`) that
+go down together, move and lift together once the wheel has been quiet for
+160 ms, so nothing stays pressed; a zoom that runs out of room on the surface
+lifts and starts again at the middle spacing, so a long scroll keeps zooming.
+They stay off while the left or right button is held, and a button press, focus
+loss or closing the window lifts them. Event work
 is bounded per pump. Invalid statuses, types, geometry, actions and nonfinite
 pointer values become `-EPROTO`; error/empty outputs discard poisoned data.
 Mouse back/forward buttons become `KEYCODE_BACK`/`KEYCODE_FORWARD` key events,
@@ -192,7 +201,7 @@ These commands open windows; run them only when desktop testing is wanted:
 
 ```bash
 make -j6
-make test-android-window-backend test-android-window-plugin-cli
+make test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli
 make test-android-sdl-backend
 make cross SRC=Tests/Apps/test_android_surface.c OUT=Tests/Apps/test_android_surface.elf
 SDL_VIDEO_DRIVER=wayland ./bifrost-emu Tests/Apps/test_android_surface.elf

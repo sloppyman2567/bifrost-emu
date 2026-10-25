@@ -573,7 +573,7 @@ generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlvie
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-window-plugin-cli
+	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli
 	$(MAKE) verify
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
@@ -588,7 +588,7 @@ ci: setup-tests generated-check $(TARGET)
 check-all: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-window-plugin-cli
+	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
@@ -639,6 +639,12 @@ test-android-window-backend: $(LIB)
 	$(CXX) $(CXXFLAGS) Tests/Unit/android_window_backend_host.cpp $(LIB) -o $(OBJDIR)/android_window_backend_host $(LDFLAGS)
 	./$(OBJDIR)/android_window_backend_host
 
+.PHONY: test-android-wheel-gestures
+test-android-wheel-gestures:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Unit/android_wheel_gestures.cpp Source/System/Android/Window/WheelGestures.cpp -o $(OBJDIR)/android_wheel_gestures
+	./$(OBJDIR)/android_wheel_gestures
+
 .PHONY: test-android-goldfish-media
 test-android-goldfish-media: $(LIB)
 	$(CXX) $(CXXFLAGS) Tests/Unit/android_goldfish_media_host.cpp $(LIB) -o $(OBJDIR)/android_goldfish_media_host $(LDFLAGS)
@@ -650,7 +656,7 @@ ifeq ($(SDL3_AVAILABLE),yes)
 	@mkdir -p $(OBJDIR)/test-wayland
 	$(CC) -std=c11 -Wall -Wextra -fPIC -shared Tests/Host/android_sdl3_fixture.c $(SDL3_CFLAGS) -o $(OBJDIR)/test-wayland/libSDL3.so.0
 	$(CC) -std=c11 -Wall -Wextra -fPIC -shared Tests/Host/wayland_egl_lifetime_fixture.c -o $(OBJDIR)/test-wayland/libwayland-egl.so.1
-	$(CXX) $(CXXFLAGS) Tests/Host/android_sdl_backend_lifetime.cpp Source/System/Android/Window/WindowBackend.cpp -o $(OBJDIR)/android_sdl_backend_lifetime -pthread -ldl $(shell pkg-config --libs wayland-client x11)
+	$(CXX) $(CXXFLAGS) Tests/Host/android_sdl_backend_lifetime.cpp Source/System/Android/Window/WindowBackend.cpp Source/System/Android/Window/WheelGestures.cpp -o $(OBJDIR)/android_sdl_backend_lifetime -pthread -ldl $(shell pkg-config --libs wayland-client x11)
 	LD_LIBRARY_PATH=$(abspath $(OBJDIR)/test-wayland) ./$(OBJDIR)/android_sdl_backend_lifetime
 else
 	@echo "error: test-android-sdl-backend requires USE_SDL3=1 and SDL3 development headers" >&2
@@ -673,9 +679,9 @@ test-android-package: $(TARGET) android-window-plugin android-runtime-adapters
 
 android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
 
-$(ANDROID_WINDOW_PLUGIN): Plugins/AndroidWindowSDL/plugin.cpp Source/System/Android/Window/WindowBackend.cpp Source/System/Android/Window/WindowBackend.hpp Include/Bifrost/AndroidWindowPlugin.h Makefile $(CONFIG_STAMP)
+$(ANDROID_WINDOW_PLUGIN): Plugins/AndroidWindowSDL/plugin.cpp Source/System/Android/Window/WindowBackend.cpp Source/System/Android/Window/WheelGestures.cpp Source/System/Android/Window/WheelGestures.hpp Source/System/Android/Window/WindowBackend.hpp Include/Bifrost/AndroidWindowPlugin.h Makefile $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared Plugins/AndroidWindowSDL/plugin.cpp Source/System/Android/Window/WindowBackend.cpp -o $@ -pthread -ldl $(shell pkg-config --libs wayland-client x11)
+	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -shared Plugins/AndroidWindowSDL/plugin.cpp Source/System/Android/Window/WindowBackend.cpp Source/System/Android/Window/WheelGestures.cpp -o $@ -pthread -ldl $(shell pkg-config --libs wayland-client x11)
 
 test-android-window-plugin: $(LIB)
 	$(CC) -std=c11 -Wall -Wextra -IInclude -fPIC -shared Tests/Host/android_window_plugin_fixture.c -o $(OBJDIR)/android_window_plugin_fixture.so
