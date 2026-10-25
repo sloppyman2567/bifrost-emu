@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 from pathlib import Path
 import socket
 import stat
@@ -165,12 +166,125 @@ def broker_status(state):
     return {"name": "Asgard", "state": "stopped", "socket": str(path)}
 
 
+def broker_pid(path):
+    """The process that owns the broker's control socket (its peer credentials), or None."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            stream.settimeout(2)
+            stream.connect(str(path))
+            pid, _, _ = struct.unpack("3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                                              struct.calcsize("3i")))
+    except OSError:
+        return None
+    return pid or None
+
+
+def same_program(pid, emu):
+    """Whether process `pid` runs the same bytes as the emulator file `emu`.
+
+    /proc/PID/exe still opens the file a process started from after it was replaced (an upgrade installs a new
+    one under the same name). Unknown, such as another user's process, counts as the same: do not disturb it."""
+    try:
+        running, current = os.stat(f"/proc/{pid}/exe"), os.stat(emu)
+        if (running.st_dev, running.st_ino) == (current.st_dev, current.st_ino):
+            return True
+        if running.st_size != current.st_size:
+            return False
+        digests = []
+        for name in (f"/proc/{pid}/exe", str(emu)):
+            digest = hashlib.sha256()
+            with open(name, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(chunk)
+            digests.append(digest.digest())
+        return digests[0] == digests[1]
+    except OSError:
+        return True
+
+
+def broker_clients(path):
+    """Process ids of the emulator processes (apps, helpers) that joined the broker at `path`."""
+    clients = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            words = Path(f"/proc/{entry}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"--android-binder-broker" in words and str(path).encode() in words \
+                and b"--asgard-service-parent" not in words and b"--asgard-broker" not in words:
+            clients.append(int(entry))
+    return clients
+
+
+def process_alive(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def stop_clients(path, grace=3.0):
+    """End the emulator processes still joined to the broker at `path`: SIGTERM, then SIGKILL after `grace` seconds."""
+    pids = broker_clients(path)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(process_alive(pid) for pid in pids):
+        time.sleep(0.05)
+    for pid in pids:
+        if process_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return pids
+
+
+def stop_realm(state, force=False):
+    """Stop the realm's broker. `force` first ends the app processes still joined to it, which otherwise run on
+    with nothing to talk to."""
+    value = broker_status(state)
+    if value["state"] in ("running", "incompatible"):
+        if force:
+            value["ended"] = stop_clients(value["socket"])
+        elif broker_clients(value["socket"]):
+            print("Apps are still joined to this realm and lose their services; "
+                  "use 'realm stop --force' to end them too", file=sys.stderr)
+        try:
+            control(Path(value["socket"]), stop=True, version=value.get("protocol", VERSION))
+        except (OSError, ValueError):
+            pass
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and broker_status(state)["state"] != "stopped":
+            time.sleep(0.05)
+        value["state"] = broker_status(state)["state"]
+    return value
+
+
 def ensure_broker(state, emu):
     directory = state / ".asgard"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (directory / "broker.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         status = broker_status(state)
+        if status["state"] == "running":
+            pid = broker_pid(status["socket"])
+            if pid is None or same_program(pid, emu):
+                return status
+            # An upgrade replaced the emulator while its broker kept running: the protocol number can match
+            # while the Binder behavior no longer does, and a new app then dies on its first service call.
+            if broker_clients(status["socket"]):
+                raise ValueError("The Asgard broker was started by an older build of bifrost-emu and apps are "
+                                 "still using it; close them, or run: asgard realm stop --force")
+            print("Restarting the Asgard broker: it was started by an older build of bifrost-emu", flush=True)
+            status = stop_realm(state)
+            if status["state"] != "stopped":
+                raise ValueError("The old Asgard broker did not stop; run: asgard realm stop --force")
         if status["state"] == "running":
             return status
         if status["state"] == "incompatible":
@@ -302,15 +416,20 @@ def main():
         os.environ.update(debug_environment(args.debug))
         if args.command == "realm":
             operation = remainder[0] if remainder else "status"
-            if len(remainder) > 1 or operation not in ("start", "status", "stop"):
-                parser.error("realm accepts start, status or stop")
+            force = remainder[1:] == ["--force"] and operation in ("stop", "restart")
+            if operation not in ("start", "status", "stop", "restart") or (len(remainder) > 1 and not force):
+                parser.error("realm accepts start, status, stop [--force] or restart [--force]")
             if operation == "start":
                 value = ensure_broker(state, args.emu.resolve())
+            elif operation == "restart":
+                stopped = stop_realm(state, force)
+                value = ensure_broker(state, args.emu.resolve())
+                if "ended" in stopped:
+                    value["ended"] = stopped["ended"]
+            elif operation == "stop":
+                value = stop_realm(state, force)
             else:
                 value = broker_status(state)
-                if operation == "stop" and value["state"] in ("running", "incompatible"):
-                    control(Path(value["socket"]), stop=True, version=value.get("protocol", VERSION))
-                    value["state"] = "stopped"
             print(json.dumps(value))
             return 0
         script = str(ROOT / "Scripts/Android/android_package.py")

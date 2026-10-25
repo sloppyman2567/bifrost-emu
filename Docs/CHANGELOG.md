@@ -14,6 +14,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Asgard: a broker left running by an older build is restarted; `realm stop --force` and `realm restart` (2026-10-24)
+
+- After an upgrade, a new app failed at startup with `IllegalArgumentException` in `ServiceManager.addService`: the
+  broker from before the upgrade was still running (its program file had been replaced), the protocol number still
+  matched, and the new Binder behavior did not. `start` and `run` now compare the broker's program (read through
+  `/proc`, which still opens a replaced file) with the emulator being launched. An idle one is restarted; one with
+  apps still joined is refused with a message naming `asgard realm stop --force`.
+- `realm stop --force` ends the app processes still joined to the broker (SIGTERM, then SIGKILL after 3 s) before
+  stopping it; a plain `stop` now warns when apps are joined. `realm restart [--force]` stops and starts it.
+  `test_asgard_stale_broker.py` starts real brokers from a deliberately different copy of the emulator.
+
 ### Fork children no longer hang or copy the game, and an exec'd child drops the parent's memory (2026-10-24)
 
 - Melon Sandbox's game process alone reached 3.5 GiB, with hung children on top. Its ad SDKs run helper commands from

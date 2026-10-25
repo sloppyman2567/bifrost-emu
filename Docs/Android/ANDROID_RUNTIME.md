@@ -12,9 +12,15 @@ python3 Scripts/Android/asgard.py --state-root android-state realm start
 python3 Scripts/Android/asgard.py --state-root android-state start com.example.app
 python3 Scripts/Android/asgard.py --state-root android-state list
 python3 Scripts/Android/asgard.py --state-root android-state realm status
-# Stop app sessions first; stopping the realm disconnects all its clients.
-python3 Scripts/Android/asgard.py --state-root android-state realm stop
+# Stopping the realm disconnects its clients; --force also ends the app processes still joined to it.
+python3 Scripts/Android/asgard.py --state-root android-state realm stop [--force]
+python3 Scripts/Android/asgard.py --state-root android-state realm restart [--force]
 ```
+
+A broker that an upgrade left running (its program was replaced by a different build) is restarted by the next
+`start` or `run` when no app is joined to it, and refused with a message naming `realm stop --force` when one is:
+the protocol number can match while the Binder behavior no longer does, and a new app then fails on its first
+service call.
 
 `--debug CHANNELS` (before the command, like `WINEDEBUG`) turns on trace output:
 `asgard.py --debug binder,futex run org.example.app`. Channels: `audio`, `binder`,
