@@ -22,6 +22,7 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.Parcel;
 import android.os.PowerManager;
 import android.os.Process;
 import java.io.File;
@@ -492,6 +493,84 @@ public final class ManagedServiceBatch {
         check((Integer) invoke(remote, "requestAudioFocus", attrs, 2, dying, dispatcher, "dead", NAME, null, 0, null, 35) == 0,
                 "dead focus client was granted focus");
         invoke(remote, "abandonAudioFocus", dispatcher, "first", attrs, NAME);
+    }
+
+    // Native platform clients (C++ AudioSystem and AudioTrack, ViewRootImpl) reach these through
+    // Binder and ServiceManager rather than the Java service cache. Each one used to log an error
+    // in every game: the policy call, the missing native "audio" service and the missing
+    // sensitive-content service.
+    private static int audioServiceCode(String method) throws Exception {
+        java.lang.reflect.Field field = Class.forName("android.media.IAudioService$Stub")
+                .getDeclaredField("TRANSACTION_" + method);
+        field.setAccessible(true);
+        return field.getInt(null);
+    }
+    private static void nativeServices() throws Exception {
+        // media.audio_policy transaction 3 is IAudioPolicyService.getDeviceConnectionState: a nonnull
+        // marker and a size-prefixed AudioDevice in, an AudioPolicyDeviceState out.
+        Binder policy = (Binder) launcherField("audioPolicy");
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken("android.media.IAudioPolicyService");
+            data.writeInt(1); data.writeInt(16); data.writeInt(0); data.writeInt(0); data.writeInt(0);
+            check(policy.transact(3, data, reply, 0), "getDeviceConnectionState is not handled");
+            reply.setDataPosition(0); reply.readException();
+            check(reply.readInt() == 0 && reply.dataAvail() == 0, "no device is connected: UNAVAILABLE expected");
+        } finally { data.recycle(); reply.recycle(); }
+        invalid(() -> {
+            Parcel bad = Parcel.obtain(), out = Parcel.obtain();
+            try {
+                bad.writeInterfaceToken("android.media.IAudioPolicyService"); bad.writeInt(0);  // null device
+                policy.transact(3, bad, out, 0);
+            } finally { bad.recycle(); out.recycle(); }
+        });
+        invalid(() -> {
+            Parcel bad = Parcel.obtain(), out = Parcel.obtain();
+            try {
+                bad.writeInterfaceToken("android.media.IAudioPolicyService");
+                bad.writeInt(1); bad.writeInt(4000);  // a size beyond the parcel
+                policy.transact(3, bad, out, 0);
+            } finally { bad.recycle(); out.recycle(); }
+        });
+
+        // Native AudioTrack looks "audio" up with checkService (not the Java cache) and reports its
+        // port id with the one-way playerEvent; native IAudioManager::trackPlayer returns an id.
+        Class<?> manager = Class.forName("android.os.IServiceManager");
+        java.lang.reflect.Method getManager = Class.forName("android.os.ServiceManager")
+                .getDeclaredMethod("getIServiceManager");
+        getManager.setAccessible(true);
+        IBinder nativeAudio = (IBinder) manager.getMethod("checkService", String.class)
+                .invoke(getManager.invoke(null), "audio");
+        check(nativeAudio != null, "native clients cannot find the audio service");
+        int[] piid = new int[2];
+        for (int i = 0; i < 2; i++) {
+            Parcel in = Parcel.obtain(), out = Parcel.obtain();
+            try {
+                in.writeInterfaceToken("android.media.IAudioService");
+                in.writeInt(1);  // a PlayerIdCard follows; the service does not read it
+                check(nativeAudio.transact(audioServiceCode("trackPlayer"), in, out, 0), "trackPlayer failed");
+                out.readException(); piid[i] = out.readInt();
+            } finally { in.recycle(); out.recycle(); }
+        }
+        check(piid[0] > 0 && piid[1] == piid[0] + 1, "player ids " + piid[0] + ", " + piid[1]);
+        for (String oneway : new String[] {"playerEvent", "playerAttributes", "releasePlayer", "playerSessionId"}) {
+            Parcel in = Parcel.obtain();
+            try {
+                in.writeInterfaceToken("android.media.IAudioService");
+                in.writeInt(piid[0]); in.writeInt(7); in.writeInt(42);
+                check(nativeAudio.transact(audioServiceCode(oneway), in, null, IBinder.FLAG_ONEWAY),
+                        oneway + " rejected");
+            } finally { in.recycle(); }
+        }
+
+        // ViewRootImpl asks for this service for every window.
+        Object protection = endpoint("sensitive_content_protection_service",
+                "android.view.ISensitiveContentProtectionManager");
+        check(protection != null, "sensitive content protection service is missing");
+        invoke(protection, "setSensitiveContentProtection", new Binder(), NAME, true);
+        invoke(protection, "setSensitiveContentProtection", new Binder(), NAME, false);
+        try { invoke(protection, "setSensitiveContentProtection", null, NAME, true); throw new AssertionError("null token"); }
+        catch (NullPointerException expected) { checks++; }
     }
 
     private static void power(Context context) throws Exception {
@@ -1139,7 +1218,7 @@ public final class ManagedServiceBatch {
         try {
         usersAndIdle(context);
         audioTracks();
-        notifications(context, packages); audio(context); power(context); wifi(context);
+        notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
         battery(context); vibratorAndKeyguard(context); clipboard(context, packages);
         alarmsAccountsLocation(context);

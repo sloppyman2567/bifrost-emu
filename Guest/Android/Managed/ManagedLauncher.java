@@ -219,6 +219,7 @@ public final class ManagedLauncher {
     // SurfaceFlinger display-event channel): Framework/FrameworkNativeServices.java.
     private static final Binder audioPolicy = new FrameworkNativeServices.AudioPolicy();
     private static final Binder audioFlinger = new FrameworkNativeServices.AudioFlinger();
+    private static final Binder audioService = new FrameworkNativeServices.AudioService();
     private static final Binder mediaMetrics = new FrameworkNativeServices.MediaMetrics();
     private static final Binder sensorService = new FrameworkNativeServices.SensorService();
     private static boolean sensorServiceRegistered;
@@ -711,6 +712,19 @@ public final class ManagedLauncher {
                 default: throw unsupported("game", method);
             }
         });
+        // Android 15 ViewRootImpl looks this service up for every window and logs an error without
+        // it. Nothing here shares the screen, so there is nothing to protect: the one-way report
+        // (window token, package, whether sensitive content is shown) is validated and dropped.
+        services.register("sensitive_content_protection_service",
+                "android.view.ISensitiveContentProtectionManager", (method, a) -> {
+            switch (method) {
+                case "setSensitiveContentProtection":
+                    java.util.Objects.requireNonNull(a[0], "windowToken");
+                    java.util.Objects.requireNonNull(a[1], "packageName");
+                    return null;
+                default: throw unsupported("sensitive_content_protection_service", method);
+            }
+        });
         packages.register(services);
         // Service children share the session's Binder registry. These are
         // device services (system_server/surfaceflinger on Android): a child
@@ -736,6 +750,7 @@ public final class ManagedLauncher {
                     "addService", String.class, IBinder.class);
             add.invoke(null, "media.audio_policy", audioPolicy);
             add.invoke(null, "media.audio_flinger", audioFlinger);
+            add.invoke(null, "audio", audioService);
             add.invoke(null, "media.metrics", mediaMetrics);
         }
         audio.install(services);

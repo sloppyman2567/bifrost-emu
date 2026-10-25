@@ -14,6 +14,22 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android: three platform errors every game logged are gone (2026-10-25)
+
+- Read from a Geometry Dash Lite session (134 error lines): `AudioSystem … Line: 1001 Failed` came from
+  `getDeviceConnectionState`, which the `media.audio_policy` stand-in did not answer (it now answers `UNAVAILABLE`: the
+  profile has no ports); `AudioTrack: binding to audio service failed` was native `AudioTrack` finding no `audio` service in
+  the native ServiceManager (published now, with the calls native `IAudioManager` makes); and `ViewRootImpl:
+  SensitiveContentProtectionService shouldn't be null` was the missing Android 15 service (a validating stub: nothing here
+  shares the screen). Audio worked throughout; these were failed calls with a fallback. `ManagedServiceBatch` has 14 new
+  checks (594 in all), each failing when its fix is removed; the `binding to audio service failed` lines in the batch's own
+  log went from 2 to 0. An installed Asgard needs `asgard realm stop` and `sudo make install-asgard` to pick the launcher up.
+- Looked at and left: the ad SDKs' own messages (AppLovin, LevelPlay, InMobi, Inneractive), a first-run SQLite table
+  message, "Google Play services out of date" (microG reports its real version, and raising it would claim APIs it lacks),
+  `OmxInfoBuilder`, the WebView relro file, and no sensors on a PC. The 96 `AconfigFlags` lines come from the missing
+  `/system/etc/aconfig_flags.pb`; supplying the real file is not just cosmetic, because the framework then keeps the
+  permission elements those flags guard (today every flag-guarded element is skipped), and it changes every app root's hash.
+
 ### Terminal: glibc 2.42+ guests see a tty (2026-10-25)
 
 - glibc 2.42 and newer implement `isatty`, `tcgetattr` and `tcsetattr` with `TCGETS2`/`TCSETS2`/`TCSETSW2`/`TCSETSF2`

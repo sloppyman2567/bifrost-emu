@@ -30,7 +30,8 @@ final class FrameworkNativeServices {
     static final class AudioPolicy extends Binder {
         static final String DESCRIPTOR = "android.media.IAudioPolicyService";
         // Transaction ids from Android 15 IAudioPolicyService.aidl.
-        private static final int GET_OUTPUT = 8, PRODUCT_STRATEGIES = 80, VOLUME_GROUPS = 82;
+        private static final int GET_DEVICE_CONNECTION_STATE = 3, GET_OUTPUT = 8, PRODUCT_STRATEGIES = 80,
+                VOLUME_GROUPS = 82;
         private final List<IBinder> clients = new ArrayList<>();
         private boolean portCallbacks, volumeCallbacks;
         private void readCount(Parcel data) {
@@ -40,13 +41,29 @@ final class FrameworkNativeServices {
                 throw new IllegalArgumentException("invalid port count");
             data.setDataPosition(start + size);
         }
+        // A nonnull marker, then a size-prefixed parcelable the caller's fields do not matter for.
+        private void skipParcelable(Parcel data) {
+            if (data.readInt() != 1) throw new IllegalArgumentException("null parcelable");
+            int start = data.dataPosition(), size = data.readInt();
+            if (size < 4 || size > data.dataSize() - start) throw new IllegalArgumentException("invalid parcelable size");
+            data.setDataPosition(start + size);
+        }
         @Override protected synchronized boolean onTransact(int code, Parcel data,
                 Parcel reply, int flags) throws RemoteException {
             if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
-            if (code != GET_OUTPUT && code != PRODUCT_STRATEGIES && code != VOLUME_GROUPS
-                    && code != 44 && code != 49 && code != 51 && code != 52 && code != 53)
+            if (code != GET_DEVICE_CONNECTION_STATE && code != GET_OUTPUT && code != PRODUCT_STRATEGIES
+                    && code != VOLUME_GROUPS && code != 44 && code != 49 && code != 51 && code != 52
+                    && code != 53)
                 return super.onTransact(code, data, reply, flags);
             data.enforceInterface(DESCRIPTOR);
+            if (code == GET_DEVICE_CONNECTION_STATE) {
+                // AudioSystem.getDeviceConnectionState(device, address): the profile has no
+                // ports (listAudioPorts is empty), so no device is connected.
+                skipParcelable(data);
+                data.enforceNoDataAvail(); reply.writeNoException();
+                reply.writeInt(0); // AudioPolicyDeviceState.UNAVAILABLE
+                return true;
+            }
             if (code == GET_OUTPUT) {
                 int stream = data.readInt();
                 data.enforceNoDataAvail(); reply.writeNoException();
@@ -84,6 +101,47 @@ final class FrameworkNativeServices {
                 reply.writeInt(0); // empty ports/patches vector
             }
             return true;
+        }
+    }
+
+    // The "audio" service as native clients see it. Native AudioTrack finds IAudioService through
+    // ServiceManager (not the Java cache) to report its port id with the oneway playerEvent, and
+    // logged "binding to audio service failed" without one. Only the calls of native IAudioManager
+    // (frameworks/native services/audiomanager, android-15.0.0_r1) are answered: ids are handed
+    // out and state reports are accepted without being kept, as FrameworkAudio does. The codes
+    // come from the framework's own IAudioService.Stub, so they follow its AIDL.
+    static final class AudioService extends Binder {
+        static final String DESCRIPTOR = "android.media.IAudioService";
+        private static final String[] ONEWAY = {"playerAttributes", "playerEvent", "releasePlayer",
+                "recorderEvent", "releaseRecorder", "playerSessionId", "portEvent"};
+        private final int trackPlayer = code("trackPlayer"), trackRecorder = code("trackRecorder");
+        private final java.util.Set<Integer> oneway = new java.util.HashSet<>();
+        private final java.util.concurrent.atomic.AtomicInteger players = new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicInteger recorders = new java.util.concurrent.atomic.AtomicInteger();
+        AudioService() { for (String name : ONEWAY) oneway.add(code(name)); }
+        private static int code(String method) {
+            try {
+                java.lang.reflect.Field field = Class.forName("android.media.IAudioService$Stub")
+                        .getDeclaredField("TRANSACTION_" + method);
+                field.setAccessible(true);
+                return field.getInt(null);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("IAudioService." + method + " is absent from the framework", e);
+            }
+        }
+        @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+            if (code == INTERFACE_TRANSACTION) { reply.writeString(DESCRIPTOR); return true; }
+            if (code == trackPlayer || code == trackRecorder) {
+                data.enforceInterface(DESCRIPTOR);
+                reply.writeNoException();
+                reply.writeInt((code == trackPlayer ? players : recorders).incrementAndGet());
+                return true;
+            }
+            if (oneway.contains(code)) {
+                data.enforceInterface(DESCRIPTOR);
+                return true;  // one-way state reports: nothing observes them here
+            }
+            return super.onTransact(code, data, reply, flags);
         }
     }
 

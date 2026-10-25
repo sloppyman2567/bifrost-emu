@@ -3136,9 +3136,17 @@ and `FRAMEWORK_OK`, but the runner rejects its existing null worker reads
 
 #### Managed audio checkpoint (2026-10-07)
 
+(2026-10-25: policy transaction 3, `getDeviceConnectionState`, answers `UNAVAILABLE` because the profile has no
+ports, and the session also publishes `audio` to the native ServiceManager
+(`FrameworkNativeServices.AudioService`): native `AudioTrack` looks it up with `checkService` to send the one-way
+`playerEvent` with its port id and logged "binding to audio service failed" without it. It answers
+`trackPlayer`/`trackRecorder` with an id and accepts the one-way player and recorder reports without keeping them; the
+codes are read from the framework's `IAudioService.Stub`. `ManagedServiceBatch.nativeServices` transacts with
+both and with a malformed policy request.)
+
 The session's managed launcher registers `media.audio_policy` and
 `media.audio_flinger` stand-ins. They answer only the Android 15 transactions
-native AudioSystem makes here (policy 8/44/49/51/52/53/80/82,
+native AudioSystem makes here (policy 3/8/44/49/51/52/53/80/82,
 flinger 3/5/6/23/45/46; codes
 checked against `IAudioPolicyService.aidl`/`IAudioFlingerService.aidl` at
 `android-15.0.0_r1`): no HAL ports or patches, and the primary output's rate
