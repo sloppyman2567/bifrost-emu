@@ -45,9 +45,16 @@
   guest memory, so a count that outruns it cannot fault the host. `gles_string_arrays` covers
   them; a new function taking an array of strings needs a row with one of these policies.
   `glxmlcheck.py` (part of `make generated-check`) fails any GL/GLES row whose `gl.xml` parameter
-  is a pointer-to-pointer but whose policy is `-`; the output `void **` rows still on its
-  `NESTED_PENDING` list (glGetPointerv, glGetBufferPointerv, glGetVertexAttribPointerv and
-  variants) are known and reported as PENDING, and a new entry needs a reason.
+  is a pointer-to-pointer but whose policy is `-`; a command that must stay unhandled goes on its
+  `NESTED_PENDING` list with a reason and is reported as PENDING (the list is empty now).
+- A query that writes a pointer into a guest `void *` (glGetPointerv, glGetBufferPointerv,
+  glGetVertexAttribPointerv and their EXT/KHR/OES/NV forms) has policy `POINTER_QUERY`: after the
+  host call the dispatcher replaces the driver's value with the one the guest was given, namely the
+  map bounce for `GL_BUFFER_MAP_POINTER` (NULL when unmapped), the stored `glDebugMessageCallback`
+  function and user parameter (the driver never sees them), and, for a client vertex array, its
+  guest address (the host address inside the window that aliases guest memory, less the window
+  base; a byte offset into a bound buffer stays). A client array that was bounced rather than
+  aliased has no guest address to recover. `gles_pointer_queries` covers it.
 - `GraphicThunk::dispatch` marks the symbol it runs (`thunk_call::Scope`,
   `Thunks/ThunkCallRecord.hpp`); the host-fault report in `FrostJIT/Runtime/FaultHandler.cpp` ends
   with `thunk=<name>` when the fault happened inside a graphics thunk call, i.e. in the driver or

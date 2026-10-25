@@ -58,19 +58,11 @@ DELIBERATE = {}
 
 WARN_CAP = 40
 
-# Rows with a pointer-to-pointer parameter and the generic policy that are known
-# and not yet handled. These are OUTPUT pointers: the driver writes a pointer
-# value into guest memory, so the guest can be handed a host address (for
-# example the host mapping behind glGetBufferPointerv(GL_BUFFER_MAP_POINTER)).
-# Reported as WARN so they stay visible; a new entry here needs a reason.
+# Rows with a pointer-to-pointer parameter and the generic policy that are known and not yet
+# handled, command -> reason. Reported as PENDING so they stay visible; a new entry needs a reason.
+# (The output `void **` queries were here until POINTER_QUERY: the driver writes a pointer value into
+# guest memory there, and the guest was handed the driver's host addresses.)
 NESTED_PENDING = {
-    'glGetPointerv': 'out void**: returns a host-side pointer value',
-    'glGetPointervEXT': 'out void**: returns a host-side pointer value',
-    'glGetPointervKHR': 'out void**: returns a host-side pointer value',
-    'glGetBufferPointerv': 'out void**: GL_BUFFER_MAP_POINTER is a host mapping',
-    'glGetBufferPointervOES': 'out void**: GL_BUFFER_MAP_POINTER is a host mapping',
-    'glGetVertexAttribPointerv': 'out void**: returns the translated client array',
-    'glGetVertexAttribPointervNV': 'out void**: returns the translated client array',
 }
 
 

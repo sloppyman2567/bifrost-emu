@@ -58,7 +58,7 @@ VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW', 'MIX',
               'VK', 'WL', 'WL_EGL', 'X11', 'X11XCB', 'XCB', 'GBM', 'XEXT',
               'GLX', 'RANDR', 'XKB', 'ANDROID')
 VALID_RET = ('-', 'str', 'f', 'd')
-VALID_POLICY = ('-', 'SHADER_SOURCE', 'STRING_ARRAY', 'QUERY', 'GET_PROC', 'GET_STRING',
+VALID_POLICY = ('-', 'SHADER_SOURCE', 'STRING_ARRAY', 'POINTER_QUERY', 'QUERY', 'GET_PROC', 'GET_STRING',
                 'DELETE_BUFFERS', 'TRACK_TEX',
                 'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'EL_PTR_ARRAY',
                 'INDIRECT_PTR', 'PRESENT',

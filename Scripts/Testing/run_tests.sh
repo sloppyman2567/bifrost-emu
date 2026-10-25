@@ -645,6 +645,10 @@ INTEGRATION_TESTS=(
     # killed the process in strlen (a WebView ad in Geometry Dash Lite). Needs host EGL + GLES 3;
     # exit 77 = skip.
     "gles_string_arrays|Tests/Apps/test_gles_string_arrays.elf||30|ALL PASS"
+    # Queries that return a pointer (GL_BUFFER_MAP_POINTER, GL_VERTEX_ATTRIB_ARRAY_POINTER, the debug
+    # callback) give the guest its own value, not the driver's host address. Needs host EGL + GLES 3;
+    # exit 77 = skip.
+    "gles_pointer_queries|Tests/Apps/test_gles_pointer_queries.elf||30|ALL PASS"
     # ES extension queries agree after filtering, hidden extensions stay
     # hidden, common extensions' entry points resolve and alias rows run.
     # Needs host EGL + GLES 3; exit 77 = skip.

@@ -14,6 +14,20 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Graphics thunks: pointer queries return the guest's pointer, not the driver's (2026-10-25)
+
+- The seven commands the new registry guard listed as pending (`glGetPointerv`, `glGetBufferPointerv`,
+  `glGetVertexAttribPointerv` and their `EXT`/`KHR`/`OES`/`NV` forms, ten rows) write a pointer into a guest `void *`, and
+  the guest was handed the driver's value. Measured with `Tests/Apps/test_gles_pointer_queries.c` before the fix:
+  `GL_BUFFER_MAP_POINTER` returned a host heap address (`0x555e8bc8d210`) instead of the pointer `glMapBufferRange` had
+  returned (`0x19e70000`), a client vertex array came back as its host-side alias (`0x155e5c3d11d0` for `0x51581d0`), and
+  `glGetPointerv(GL_DEBUG_CALLBACK_FUNCTION / _USER_PARAM)` returned 0 because the thunk keeps the callback to itself. A guest
+  that compared or dereferenced those values got a host address or NULL. The rows now use a `POINTER_QUERY` policy that
+  corrects the written value after the host call; the registry guard's pending list is empty.
+- The test passes under the JIT and the interpreter; the unmapped, after-unmap and byte-offset cases already passed. Not
+  covered: the legacy desktop `GL_*_ARRAY_POINTER` names of `glGetPointerv` get the same address correction but are not
+  tested, and a client array that was bounced instead of aliased (a pointer the guest could not map) cannot be recovered.
+
 ### Graphics thunks: a guard against the next untranslated array, and crash reports that name the call (2026-10-25)
 
 - `Tools/CodeGen/glxmlcheck.py` (in `make generated-check`) now fails a GL/GLES thunk row whose `gl.xml` parameter is a

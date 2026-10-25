@@ -1729,6 +1729,44 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (gl_extensions::filtered_count(&count))
             *reinterpret_cast<int32_t*>(args[1]) = count;
     }
+    // glGetPointerv / glGetBufferPointerv / glGetVertexAttribPointerv write a pointer into a guest
+    // `void *`. What the driver wrote is its own: the host mapping behind a mapped buffer, the
+    // host-translated address of a client vertex array, nothing for the debug callback (the thunk
+    // keeps it, the driver never sees it). The guest compares and dereferences the value, so give
+    // it the one it was handed. args[slot] is the host-side result word (the guest's own word or
+    // the bounce the writeback below copies out).
+    if (entry.spec && entry.spec->policy == thunk::Policy::POINTER_QUERY && impl_->mem) {
+        const auto starts = [&](const char* prefix) { return entry.name.rfind(prefix, 0) == 0; };
+        const bool buffer_query = starts("glGetBufferPointerv");
+        const bool attrib_query = starts("glGetVertexAttribPointerv");
+        const int slot = (buffer_query || attrib_query) ? 2 : 1;
+        const uint64_t pname = (buffer_query || attrib_query) ? args[1] : args[0];
+        if (args[slot]) {
+            auto* word = reinterpret_cast<uint64_t*>(args[slot]);
+            constexpr uint64_t kBufferMapPointer = 0x88BD;
+            constexpr uint64_t kDebugCallbackFunction = 0x8244, kDebugCallbackUserParam = 0x8245;
+            if (buffer_query) {
+                if (pname == kBufferMapPointer) {  // any other pname is the host's INVALID_ENUM
+                    uint64_t pointer = 0;
+                    const uint32_t buffer = impl_->tracker() ? impl_->tracker()->buffer_binding(
+                                                                   static_cast<uint32_t>(args[0])) : 0;
+                    std::lock_guard<std::mutex> g(impl_->mu);
+                    auto it = impl_->gl_buffer_mappings_.find(buffer);
+                    if (buffer && it != impl_->gl_buffer_mappings_.end()) pointer = it->second.bounce;
+                    *word = pointer;
+                }
+            } else if (!attrib_query && (pname == kDebugCallbackFunction || pname == kDebugCallbackUserParam)) {
+                std::lock_guard<std::mutex> lk(impl_->state_mu);
+                *word = pname == kDebugCallbackFunction ? impl_->gl_debug_cb_ : impl_->gl_debug_param_;
+            } else {
+                // A client array reached the driver as an address inside the host window that
+                // aliases guest memory; a byte offset into a bound buffer is small and stays.
+                const uint64_t base = reinterpret_cast<uint64_t>(impl_->mem->direct_window());
+                if (base && *word >= base && *word - base < impl_->mem->window_size())
+                    *word -= base;
+            }
+        }
+    }
     // Write bounced pointer args back into guest memory (clamped to the
     // enclosing live allocation — see safe_writeback_all above).
     safe_writeback_all();
