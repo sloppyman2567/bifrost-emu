@@ -2624,7 +2624,8 @@ Apps may end their own process during that teardown: SpongeBob logs
 right after `APP_STOPPED`, as a phone would. The launcher prints
 `APP_HOST_CLOSED` when the host window closes, and the session supervisor
 reports a SIGKILL exit (137) after that marker as state `closed`, keeping the
-real exit code. A SIGKILL without the marker remains `failed`.
+real exit code in the session record; the command itself then exits 0, as for any
+normal close. A SIGKILL without the marker remains `failed` and exits 137.
 
 ### Framework windows and SurfaceViews (2026-10-13)
 

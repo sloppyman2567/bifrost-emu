@@ -254,7 +254,8 @@ class Session:
                 self.update(state="stopping")
                 terminate_group(child)
             self.update(state=reason, exit_code=code, ended_at=time.time())
-        return code
+        # A user closing the window is a normal ending: the app's own SIGKILL stays in the record, not in the status.
+        return 0 if reason == "closed" else code
 
     def __exit__(self, kind, error, traceback):
         if error is not None or self.data["state"] == "preparing":

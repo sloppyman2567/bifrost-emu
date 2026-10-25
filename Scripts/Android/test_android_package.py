@@ -783,8 +783,15 @@ class SessionResultTests(unittest.TestCase):
                 return code, session.data["state"]
 
     def test_self_kill_after_host_close_is_closed(self):
-        # Unity's Activity teardown calls Process.killProcess on itself.
-        self.assertEqual(self.run_session("echo APP_HOST_CLOSED; kill -9 $$"), (137, "closed"))
+        # Unity's Activity teardown calls Process.killProcess on itself. The user closing the window is a normal
+        # ending: the command succeeds, and the session record keeps the real SIGKILL status.
+        from android_sessions import Session
+        with tempfile.TemporaryDirectory(prefix="bifrost-session-test-") as temporary:
+            with Session(Path(temporary), "org.bifrost.fixture", 10000) as session:
+                stdout, _ = session.logs()
+                with stdout.open("w") as log:
+                    code = session.run(["sh", "-c", "echo APP_HOST_CLOSED; kill -9 $$"], stdout=log)
+                self.assertEqual((code, session.data["state"], session.data["exit_code"]), (0, "closed", 137))
 
     def test_self_kill_without_host_close_fails(self):
         self.assertEqual(self.run_session("echo APP_HOST_CLOSED_LATER; kill -9 $$"), (137, "failed"))

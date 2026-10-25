@@ -14,6 +14,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Closing a game window exits with status 0 (2026-10-24)
+
+- Closing an Android game's window ends with the app killing itself (`Process.killProcess`, SIGKILL). The session
+  supervisor already recorded that as state `closed` ("Closed normally" in the library), but `bifrost-emu app.apk` and
+  `asgard.py run` still returned the raw 137, which a shell reports as a failure and the managed launcher printed as
+  "Managed app exited with status 137". A close after `APP_HOST_CLOSED` now returns 0 and prints nothing; the record
+  keeps `exit_code` 137. A SIGKILL without the marker, a crash and `--timeout` expiry still return their real
+  statuses. Reported as exit code 127; the code paths here only produce 137 for a close, so the 127 itself was not
+  reproduced (127 comes from a package or Asgard that cannot be found, `Source/System/Android/Package`).
+
 ### Window stats overlay: cleaner layout and real GPU data (2026-10-24)
 
 - The overlay panel is now aligned rows with a meter each for CPU, GPU, VRAM and RAM, thin rules between sections
