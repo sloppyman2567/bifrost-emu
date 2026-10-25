@@ -537,6 +537,7 @@ void GraphicThunk::register_known_symbols_() {
         if (spec.ret == thunk::RetKind::STRING)       flags |= THUNK_RET_STRING;
         if (spec.policy == thunk::Policy::SHADER_SOURCE) flags |= THUNK_SHADER_SOURCE;
         if (spec.policy == thunk::Policy::TF_VARYINGS) flags |= THUNK_TF_VARYINGS;
+        if (spec.policy == thunk::Policy::STRING_ARRAY) flags |= THUNK_STRING_ARRAY;
         if (spec.policy == thunk::Policy::GET_PROC)   flags |= THUNK_GET_PROC;
 
         for (uint32_t i = 0; i < fd.n; i++) {

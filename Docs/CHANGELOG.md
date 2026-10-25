@@ -14,6 +14,25 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Graphics thunks: arrays of strings reach the driver as host pointers (2026-10-25)
+
+- A WebView ad in Geometry Dash Lite killed the whole game: Chromium's GPU thread called `glGetUniformIndices`, whose
+  `const GLchar* const* uniformNames` the thunk translated only as far as the array itself. Every entry stayed a guest
+  address, and the host driver's `strlen` took SIGSEGV on it (core dump: `Chrome_InProcGp`, thunk 1644). The same
+  shape was unhandled in the GLES `glTransformFeedbackVaryings` and in `glCreateShaderProgramv` (GL, GLES, `EXT`);
+  `glShaderSource` and the GL `glTransformFeedbackVaryings` already had a policy. The GLES `glTransformFeedbackVaryings` row
+  now uses the existing `TF_VARYINGS` policy, and the others use a new `STRING_ARRAY` policy that rebuilds the array
+  from host string pointers (bouncing a string that is not one accessible host range, any count up to 65,536 instead
+  of 64) before the ordinary call, return value and output writeback. The array is read through guest memory.
+- `Tests/Apps/test_gles_string_arrays.c` (headless EGL pbuffer, GLES 3): uniform lookup by name against the driver's own
+  `glGetActiveUniform`, a missing name, 200 names, a transform feedback varying and a separable program. It crashes
+  the previous build with the same `libc` fault (exit 139) and passes under the JIT and the interpreter.
+- Checked against `gl.xml`: every command with a `const GLchar *const*` parameter now has a policy
+  (`glShaderSource`, `glTransformFeedbackVaryings` and its `EXT` form, `glGetUniformIndices`, `glCreateShaderProgramv` and its
+  `EXT` form, and `glCompileShaderIncludeARB`, found by that scan and covered by the same policy but not by the test: Mesa does not
+  offer `GL_ARB_shading_language_include`). `glShaderSourceARB` has no row, so a guest cannot call it. Nested arrays of
+  other kinds (for example Vulkan) were not examined.
+
 ### Android: three platform errors every game logged are gone (2026-10-25)
 
 - Read from a Geometry Dash Lite session (134 error lines): `AudioSystem … Line: 1001 Failed` came from

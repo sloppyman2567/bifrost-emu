@@ -640,6 +640,11 @@ INTEGRATION_TESTS=(
     # context after another thread's context unbinds its unpack buffer.
     # Needs host EGL + GLES 3; exit 77 = skip.
     "gles_contexts|Tests/Apps/test_gles_contexts.elf||30|ALL PASS"
+    # Calls that take an array of C strings (glGetUniformIndices, glTransformFeedbackVaryings,
+    # glCreateShaderProgramv) reach the driver with host string pointers; an untranslated entry
+    # killed the process in strlen (a WebView ad in Geometry Dash Lite). Needs host EGL + GLES 3;
+    # exit 77 = skip.
+    "gles_string_arrays|Tests/Apps/test_gles_string_arrays.elf||30|ALL PASS"
     # ES extension queries agree after filtering, hidden extensions stay
     # hidden, common extensions' entry points resolve and alias rows run.
     # Needs host EGL + GLES 3; exit 77 = skip.

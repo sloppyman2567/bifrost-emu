@@ -36,6 +36,14 @@
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);
   every soname registration takes one.
 - Preserve stack/FP argument ABI, nested pointer arrays and string returns.
+  A `const char* const*` argument is not translated by the generic `p` pointer rule (that only
+  turns the array's own address into a host pointer; every entry stays a guest address and the
+  driver's `strlen` dies on it). Give the row `SHADER_SOURCE` (glShaderSource), `TF_VARYINGS`
+  (glTransformFeedbackVaryings, count in arg 1, array in arg 2, a GLenum in arg 3) or
+  `STRING_ARRAY` (array in arg 2, count in arg 1, any other arguments and the return value on
+  the generic path: glGetUniformIndices, glCreateShaderProgramv). The array is read through
+  guest memory, so a count that outruns it cannot fault the host. `gles_string_arrays` covers
+  them; a new function taking an array of strings needs a row with one of these policies.
   Guest callback pointers require guest runners, not host function invocation.
   Stage Vulkan storage before taking pointers into it; reallocation invalidates
   those pointers. Preserve deep-marshalling bounds and layout checks.

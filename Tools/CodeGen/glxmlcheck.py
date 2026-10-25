@@ -41,6 +41,7 @@ OWN_MARSHALLING_POLICIES = {
     'VA_PTR',          # conditional client-array translate at a per-name arg
     'GET_PROC',        # returns host proc addresses
     'TF_VARYINGS',     # nested string-array marshal
+    'STRING_ARRAY',    # nested string-array re-marshal after generic translate
 }
 
 # Rows intercepted by name before any marshalling (with the reason).

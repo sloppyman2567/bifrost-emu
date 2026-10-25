@@ -44,6 +44,7 @@ static constexpr uint8_t THUNK_MIXED_FP      = 1u << 2;
 static constexpr uint8_t THUNK_GET_PROC      = 1u << 3;
 static constexpr uint8_t THUNK_TF_VARYINGS   = 1u << 4;
 static constexpr uint8_t THUNK_DOUBLE        = 1u << 5;
+static constexpr uint8_t THUNK_STRING_ARRAY  = 1u << 6;
 struct GraphicThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;

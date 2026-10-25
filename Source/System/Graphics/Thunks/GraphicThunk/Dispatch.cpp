@@ -1,5 +1,6 @@
 // GraphicThunk::dispatch — SVC entry: runs the policy stages, then the generic
 // integer/pointer path (bounces, state tracking, writeback, presentation).
+#include <algorithm>
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/ExtensionFilter.hpp"
 namespace arm64emu {
@@ -866,6 +867,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     };
 
     std::vector<uint8_t> bounce_bufs[kMaxArgs];
+    // STRING_ARRAY: the host string pointers (and any bounced string bytes) handed to the driver
+    // in place of a guest `const char* const*`; they must live until the host call returns.
+    std::vector<const char*> string_array;
+    std::vector<std::vector<uint8_t>> string_array_bounces;
     uint64_t bounce_guest[kMaxArgs] = {0};
     bool bounce_wb[kMaxArgs] = {false};
 
@@ -1369,6 +1374,52 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             args[0], count, host_strs, static_cast<uint32_t>(args[3]));
         cpu.regs[0] = 0;
         return 0;
+    }
+
+    // glGetUniformIndices(program, count, const GLchar* const* names, GLuint* indices) and
+    // glCreateShaderProgramv(type, count, const GLchar* const* strings): arg 2 is an array of
+    // guest C-string pointers. The generic translation above turned args[2] into a host pointer to
+    // that array, whose entries are still guest addresses; the driver would run strlen on them (the
+    // WebView ad that did this killed Geometry Dash Lite). Rebuild the array from host string
+    // pointers, bouncing any string that is not one accessible host range, and let the ordinary
+    // call, return value and output writeback follow. The array is read through guest memory, so a
+    // count that outruns it reads as empty strings instead of faulting here.
+    if ((entry.flags & THUNK_STRING_ARRAY) && impl_->mem && args[2]) {
+        constexpr int kMaxStrings = 1 << 16;
+        constexpr size_t kMaxString = 1 << 20;
+        int count = static_cast<int>(args[1]);
+        if (count < 0) count = 0;
+        if (count > kMaxStrings) count = kMaxStrings;
+        std::vector<uint64_t> guest_strings(static_cast<size_t>(count), 0);
+        try {
+            impl_->mem->read(cpu.regs[2], guest_strings.data(), guest_strings.size() * sizeof(uint64_t));
+        } catch (...) {
+            std::fill(guest_strings.begin(), guest_strings.end(), 0);
+        }
+        string_array.assign(static_cast<size_t>(count), "");
+        for (int i = 0; i < count; i++) {
+            const uint64_t gp = guest_strings[static_cast<size_t>(i)];
+            if (gp == 0) continue;
+            if (uint8_t* hp = impl_->mem->guest_to_host_ptr(gp)) {
+                string_array[static_cast<size_t>(i)] = reinterpret_cast<const char*>(hp);
+                continue;
+            }
+            size_t n = 0;
+            for (; n < kMaxString; n++) {
+                uint8_t c = 0;
+                try { impl_->mem->read(gp + n, &c, 1); } catch (...) { break; }
+                if (c == 0) break;
+            }
+            string_array_bounces.emplace_back(n + 1, 0);
+            try {
+                impl_->mem->read(gp, string_array_bounces.back().data(), n);
+            } catch (...) {
+                string_array_bounces.back().assign(n + 1, 0);
+            }
+            string_array[static_cast<size_t>(i)] =
+                reinterpret_cast<const char*>(string_array_bounces.back().data());
+        }
+        if (count > 0) args[2] = reinterpret_cast<uint64_t>(string_array.data());
     }
 
     if (dbg().thunk_trace) {

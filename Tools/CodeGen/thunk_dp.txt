@@ -30,6 +30,9 @@
 #             -              default generic path
 #             SDL_SURFACE    bridge guest surfaces, formats, palettes and pixels
 #             SHADER_SOURCE  glShaderSource nested string-array marshalling
+#             STRING_ARRAY   arg2 is a `const char* const*` of `arg1` guest C strings
+#                            (glGetUniformIndices, glCreateShaderProgramv): rebuilt as
+#                            host string pointers, then the generic call and writeback
 #             QUERY          GL state queries intercepted by GLStateTracker
 #             GET_PROC       *GetProcAddress: resolve guest name -> trampoline
 #             TRACK_TEX      SDL_CreateTexture: record size for PITCH_H bounce
@@ -302,6 +305,12 @@ glBindImageTexture          GL     iiiiiii       -     -              -   # unit
 glBeginTransformFeedback    GL     i             -     -              -   # primitiveMode
 glEndTransformFeedback      GL     -             -     -              -   # (void)
 glTransformFeedbackVaryings GL     iipi          -     TF_VARYINGS    -   # program,count,varyings,bufferMode
+glTransformFeedbackVaryings GLES   iipi          -     TF_VARYINGS    -   # same nested string array as GL
+glGetUniformIndices        GL     iipp          -     STRING_ARRAY   -   # program,count,names (strings),indices (out)
+glGetUniformIndices        GLES   iipp          -     STRING_ARRAY   -
+glCreateShaderProgramv     GL     iip           -     STRING_ARRAY   -   # type,count,strings; returns the program
+glCreateShaderProgramv     GLES   iip           -     STRING_ARRAY   -
+glCompileShaderIncludeARB  GL     iipp          -     STRING_ARRAY   -   # shader,count,paths (strings),lengths
 glGenSamplers               GL     ip            -     -              -   # count, GLuint* samplers
 glDeleteSamplers            GL     ip            -     -              -   # count, const GLuint* samplers
 glBindSampler               GL     ii            -     -              -   # unit, sampler
@@ -1488,7 +1497,6 @@ glGetTexParameterIuiv      GL     iip           -     -              -
 glGetTexParameterfv        GL     iip           -     -              -     
 glGetTexParameteriv        GL     iip           -     -              -     
 glGetTransformFeedbackVarying GL     iiipppp       -     -              -     
-glGetUniformIndices        GL     iipp          -     -              -     
 glGetUniformfv             GL     iip           -     -              -     
 glGetUniformuiv            GL     iip           -     -              -     
 glGetVertexAttribIiv       GL     iip           -     -              -     
@@ -1854,7 +1862,6 @@ glCopyImageSubData         GLES   iiiiiiiiiiiiiii -     -              -
 glCopyTexImage2D           GLES   iiiiiiii      -     -              -     
 glCopyTexSubImage2D        GLES   iiiiiiii      -     -              -     
 glCopyTexSubImage3D        GLES   iiiiiiiii     -     -              -     
-glCreateShaderProgramv     GLES   iip           -     -              -     
 glDebugMessageControl      GLES   iiiipi        -     -              -     
 glDebugMessageInsert       GLES   iiiiip        -     -              -     
 glDeleteProgramPipelines   GLES   ip            -     -              -     
@@ -1926,7 +1933,6 @@ glGetTexParameterIuiv      GLES   iip           -     -              -
 glGetTexParameterfv        GLES   iip           -     -              -     
 glGetTexParameteriv        GLES   iip           -     -              -     
 glGetTransformFeedbackVarying GLES   iiipppp       -     -              -     
-glGetUniformIndices        GLES   iipp          -     -              -     
 glGetUniformfv             GLES   iip           -     -              -     
 glGetUniformuiv            GLES   iip           -     -              -     
 glGetVertexAttribIiv       GLES   iip           -     -              -     
@@ -2020,7 +2026,6 @@ glTexStorage2DMultisample  GLES   iiiiii        -     -              -
 glTexStorage3D             GLES   iiiiii        -     -              -     
 glTexStorage3DMultisample  GLES   iiiiiii       -     -              -     
 glTexSubImage3D            GLES   iiiiiiiiiiz   -     -              TEXSUBIMAGE3D
-glTransformFeedbackVaryings GLES   iipi          -     -              -     
 glUniform1uiv              GLES   iip           -     -              -     
 glUniform2ui               GLES   iii           -     -              -     
 glUniform2uiv              GLES   iip           -     -              -     
@@ -2116,7 +2121,7 @@ glCoverageModulationTableNV GLES   ip            -     -              -
 glCoverageOperationNV      GLES   i             -     -              -
 glCreateMemoryObjectsEXT   GLES   ip            -     -              -
 glCreateSemaphoresNV       GLES   ip            -     -              -
-glCreateShaderProgramvEXT  GLES   iip           -     -              -
+glCreateShaderProgramvEXT  GLES   iip           -     STRING_ARRAY   -
 glDebugMessageCallbackKHR  GLES   ip            -     GL_DEBUG_CB    -
 glDebugMessageControlKHR   GLES   iiiipi        -     -              -
 glDebugMessageInsertKHR    GLES   iiiiip        -     -              -
@@ -2706,7 +2711,6 @@ glCombinerParameterivNV    GL     ip            -     -              -
 glCombinerStageParameterfvNV GL     iip           -     -              -
 glCommandListSegmentsNV    GL     ii            -     -              -
 glCompileCommandListNV     GL     i             -     -              -
-glCompileShaderIncludeARB  GL     iipp          -     -              -
 glConservativeRasterParameterfNV GL     ii            -     -              -
 glConservativeRasterParameteriNV GL     ii            -     -              -
 glConvolutionParameterf    GL     iii           -     -              -
@@ -2765,7 +2769,6 @@ glCreateSamplers           GL     ip            -     -              -
 glCreateSemaphoresNV       GL     ip            -     -              -
 glCreateShaderObjectARB    GL     i             -     -              -
 glCreateShaderProgramEXT   GL     ip            -     -              -
-glCreateShaderProgramv     GL     iip           -     -              -
 glCreateStatesNV           GL     ip            -     -              -
 glCreateSyncFromCLeventARB GL     ppi           -     -              -
 glCreateTextures           GL     iip           -     -              -

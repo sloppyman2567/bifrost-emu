@@ -34,7 +34,7 @@ SDL_DIR = '/usr/include/SDL2'
 # Policies whose dispatch arms read guest registers directly and own their
 # marshalling — the generic ARGS pointer mask is not applied for them.
 OWN_MARSHALLING_POLICIES = {
-    'GET_PROC', 'GET_STRING', 'SHADER_SOURCE', 'TF_VARYINGS',
+    'GET_PROC', 'GET_STRING', 'SHADER_SOURCE', 'STRING_ARRAY', 'TF_VARYINGS',
     'MAP_BUFFER', 'UNMAP_BUFFER', 'FLUSH_BUFFER',
     'DELETE_BUFFERS', 'DELETE_TRACK', 'ELIDE_BIND',
     'TRACK_TEX', 'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'EL_PTR_ARRAY',
