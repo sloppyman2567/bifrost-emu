@@ -100,6 +100,9 @@ struct DebugFlags {
     bool trace_unimplemented = false;  // BIFROST_TRACE_UNIMPLEMENTED — each syscall ending in ENOSYS, each ioctl ending in ENOTTY, once
     bool binder_trace = false; // BIFROST_BINDER_TRACE — transaction failures and registry calls
     bool trace_madvise = false;  // BIFROST_TRACE_MADVISE — madvise lines
+    // BIFROST_FORK_STUCK_SECONDS — a fork child that has not finished an execve after this many seconds
+    // reports where its guest thread (library+offset) and host thread are blocked; 0 = off.
+    unsigned fork_stuck_seconds = 0;
     bool watch_trap = false;  // BIFROST_WATCH_TRAP — SIGTRAP (host) on the
                               // first write hitting the BIFROST_WATCH range
     // ── capture sinks (paths) ────────────────────────────────────────
@@ -267,6 +270,8 @@ struct DebugFlags {
         f.binder_trace = all || env("BIFROST_BINDER_TRACE");
         f.media_trace = env("BIFROST_MEDIA_TRACE");
         f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");
+        if (const char* value = std::getenv("BIFROST_FORK_STUCK_SECONDS"))
+            f.fork_stuck_seconds = static_cast<unsigned>(std::min(3600UL, std::strtoul(value, nullptr, 10)));
         f.watch_trap = all || env("BIFROST_WATCH_TRAP");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = host_path(p);
         if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = host_path(p);

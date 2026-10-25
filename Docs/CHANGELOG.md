@@ -25,6 +25,14 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   microG and header downloads. Checked with a throttled local server on a pseudo-terminal and piped, and unit tests with
   an injected clock; not run against the real downloads (they are 1.5 GB and the pinned files already exist here).
 
+### `BIFROST_FORK_STUCK_SECONDS`: where a fork child that never execs is blocked (2026-10-24)
+
+- A game's `BGAd-Normal` fork child was still blocked in `futex_wait`, holding a copy of the game's memory and 1,887
+  descriptors, after the fork fixes above were installed, and the game was gone before its stack could be read. With
+  `BIFROST_FORK_STUCK_SECONDS=N` a fork child that has not finished an `execve` after N seconds prints its guest PC
+  and return address as library+offset, and the host stack of its blocked thread (by signalling itself; it then carries
+  on). A long-lived child that never execs is reported once as well. `test_fork_stuck_report` checks it.
+
 ### Helpers that leave an app's process group no longer outlive it (2026-10-24)
 
 - A forked helper that calls `setsid` is not in the app's process group, so ending the session missed it: after a

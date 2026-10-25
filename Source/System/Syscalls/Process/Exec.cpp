@@ -476,6 +476,7 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // The new image gets its own JIT (see restart_jit_for_exec); Android's exec branch keeps the
     // interpreter, as before.
     if (!emu.android_runtime_) emu.restart_jit_for_exec();
+    emu.fork_child_exec_done_.store(true, std::memory_order_release);
     // Return 0 to indicate execve succeeded (the syscall doesn't
     // actually return on success — we just set PC to the entry
     // point and continue).

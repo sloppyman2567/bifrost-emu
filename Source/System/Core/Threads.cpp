@@ -24,6 +24,7 @@
 #include "Bifrost/Version.hpp"
 #include <algorithm>
 #include <array>
+#include <execinfo.h>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -814,6 +815,51 @@ std::shared_ptr<CPU> Emulator::find_cpu_by_tid(int tid) {
     return nullptr;
 }
 // ── Fork support ───────────────────────────────────────────────────────
+// BIFROST_FORK_STUCK_SECONDS: a fork child that is still not through an execve after N seconds reports where its
+// guest thread is (as library+offset, from the guest mappings) and, by signalling its own blocked host thread,
+// where that is. It carries on afterwards. Meant for a child that sits waiting for something that does not exist
+// in it; a long-lived child that never execs is reported once as well.
+namespace {
+pthread_t g_watched_host_thread;
+void report_host_stack(int) {
+    void* frames[48];
+    const int count = backtrace(frames, 48);
+    static const char heading[] = "[fork-stuck] host stack of the forking thread:\n";
+    (void)!::write(2, heading, sizeof(heading) - 1);
+    backtrace_symbols_fd(frames, count, 2);
+}
+}  // namespace
+void Emulator::watch_fork_child(CPU& cpu) {
+    g_watched_host_thread = pthread_self();
+    struct sigaction action{};
+    action.sa_handler = report_host_stack;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    ::sigaction(SIGSYS, &action, nullptr);  // not forwarded to the guest
+    const unsigned seconds = dbg().fork_stuck_seconds;
+    CPU* watched = &cpu;
+    std::thread([this, seconds, watched] {
+        std::this_thread::sleep_for(std::chrono::seconds(seconds));
+        if (fork_child_exec_done_.load(std::memory_order_acquire)) return;
+        const auto mappings = mem_.mappings_snapshot();
+        const auto where = [&](uint64_t address) {
+            char text[512];
+            for (const auto& mapping : mappings)
+                if (address >= mapping.start && address < mapping.end) {
+                    snprintf(text, sizeof(text), "0x%llx (%s+0x%llx)", static_cast<unsigned long long>(address),
+                             mapping.file ? mapping.file->path.c_str() : "anonymous",
+                             static_cast<unsigned long long>(address - mapping.start + mapping.offset));
+                    return std::string(text);
+                }
+            snprintf(text, sizeof(text), "0x%llx (unmapped)", static_cast<unsigned long long>(address));
+            return std::string(text);
+        };
+        fprintf(stderr, "[fork-stuck] pid %d has not finished an execve after %u s: guest pc %s, lr %s, "
+                "last x8 %llu\n", static_cast<int>(::getpid()), seconds, where(watched->pc).c_str(),
+                where(watched->regs[30]).c_str(), static_cast<unsigned long long>(watched->regs[8]));
+        ::pthread_kill(g_watched_host_thread, SIGSYS);
+    }).detach();
+}
 // Fork is implemented via host fork(): the child process inherits a
 // copy-on-write duplicate of the entire emulator state (Memory, CPU,
 // JIT cache). This is the simplest correct approach — the child runs
@@ -990,6 +1036,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // Fix: call install_host_signal_handlers() which sets
         // g_active_emu_ = this (the child's own Emulator).
         install_host_signal_handlers();
+        if (dbg().fork_stuck_seconds) watch_fork_child(parent_cpu);
         // After fork(), only the calling thread exists in the child. Host
         // threads the parent owned (guest vCPUs, SDL workers, the stats
         // reporter) did NOT survive; their std::thread objects are still

@@ -617,6 +617,8 @@ private:
     // Runtime ownership, distinct from CPU::is_fork_process (also used
     // for host PID identity by a freshly started Binder-realm app).
     bool host_fork_child_ = false;
+    std::atomic<bool> fork_child_exec_done_{false};  // a fork child finished an execve (BIFROST_FORK_STUCK_SECONDS)
+    void watch_fork_child(CPU& cpu);
     int fork_parent_pid_ = 0;  // host pid of the process that forked this one (set in the child)
     std::vector<std::unique_ptr<ForkChild>> fork_children_;
     // ── Guest CPU time tracking ──────────────────────────────
