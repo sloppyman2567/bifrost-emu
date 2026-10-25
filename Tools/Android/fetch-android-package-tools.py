@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile
 import urllib.request
 
+import download_progress
+
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "https://android.googlesource.com/platform/prebuilts/sdk/+/android-15.0.0_r1/"
 FILES = {
@@ -36,7 +38,7 @@ def install(destination):
         with urllib.request.urlopen(
             BASE + remote + "?format=TEXT", timeout=60
         ) as response:
-            encoded = response.read(48 * 1024 * 1024 + 1)
+            encoded = download_progress.read(response, 48 * 1024 * 1024, name)
         if len(encoded) > 48 * 1024 * 1024:
             raise ValueError("Tool exceeds download bound")
         data = base64.b64decode(encoded, validate=True)

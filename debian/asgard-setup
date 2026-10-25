@@ -37,13 +37,25 @@ for arg in "$@"; do
     esac
 done
 
+steps=9
+step=0
+announce() { step=$((step + 1)); echo; echo "==> [$step/$steps] $1"; }
+
+announce "Bionic runtime"
 python3 Tools/Android/fetch-android-runtime.py
+announce "AAPT2"
 python3 Tools/Android/fetch-aapt2.py
+announce "APK signing and API tools"
 python3 Tools/Android/fetch-android-package-tools.py
+announce "Adapters (AOSP headers, then a build)"
 python3 Tools/Android/build-android-adapters.py
+announce "Managed launcher"
 python3 Scripts/Android/android_managed.py build
+announce "ART and the Android 15 system image (the large download, about 734 MiB)"
 python3 Tools/Android/android_art.py
+announce "Android framework"
 python3 Tools/Android/android_framework.py
+announce "microG (Google account support)"
 python3 - <<'PY'
 import sys
 sys.path.insert(0, "Tools/Android")
@@ -51,4 +63,5 @@ import android_microg as microg
 for package in microg.PACKAGES:
     print(microg.archive(package))
 PY
+announce "Installing Asgard"
 exec python3 Scripts/Setup/install-asgard.py "$@"

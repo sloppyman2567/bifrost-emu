@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 
 import android_super
+import download_progress
 
 ROOT = Path(__file__).resolve().parents[2]
 URL = "https://dl.google.com/android/repository/sys-img/android/arm64-v8a-35_r02.zip"
@@ -135,13 +136,19 @@ def dump(image, remote, target, max_size=64 * 1024 * 1024):
         raise ValueError(f"Cannot extract bounded Android file: {remote}")
 
 
-def copy_bytes(source, output, length):
+def copy_bytes(source, output, length, label=None):
+    """Copy `length` bytes; with a label (a download) show its progress."""
+    progress = download_progress.Progress(label, length) if label else None
     while length:
         block = source.read(min(length, 1024 * 1024))
         if not block:
             raise ValueError("Truncated Android image")
         output.write(block)
         length -= len(block)
+        if progress:
+            progress.advance(len(block))
+    if progress:
+        progress.finish()
 
 
 def image_archive(archive):
@@ -154,7 +161,7 @@ def image_archive(archive):
                 temporary = Path(stream.name)
                 try:
                     with urllib.request.urlopen(URL, timeout=60) as response:
-                        copy_bytes(response, stream, IMAGE_SIZE)
+                        copy_bytes(response, stream, IMAGE_SIZE, "Android 15 system image")
                         if response.read(1):
                             raise ValueError("Oversized Android image download")
                     stream.close()

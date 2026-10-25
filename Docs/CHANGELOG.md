@@ -14,6 +14,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### `asgard-setup` shows download progress (2026-10-24)
+
+- The setup's downloads (about 1.5 GB, 734 MiB of it the Android 15 system image) printed nothing until they were done.
+  Each now shows what it is fetching, how much and how fast: on a terminal one line updates in place
+  (`Android 15 system image  [=====>   ]  33%  8.0 MiB/24.0 MiB  6.4 MiB/s  ETA 0:02`), and in a log it prints a line per
+  ten percent after two seconds, plus a one-line summary for anything of 1 MiB or more or taking a second. Small, fast
+  files (the AOSP header archives) stay quiet. `asgard-setup` also prints a numbered heading for each of its nine steps.
+  The helper is `Tools/Android/download_progress.py`, used by the Bionic runtime, AAPT2, signing tools, system image,
+  microG and header downloads. Checked with a throttled local server on a pseudo-terminal and piped, and unit tests with
+  an injected clock; not run against the real downloads (they are 1.5 GB and the pinned files already exist here).
+
 ### Helpers that leave an app's process group no longer outlive it (2026-10-24)
 
 - A forked helper that calls `setsid` is not in the app's process group, so ending the session missed it: after a

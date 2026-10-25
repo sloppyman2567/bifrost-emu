@@ -32,6 +32,8 @@ such as "misc", "common" or "core". The current version lives in
 
 - Start with the concrete failure, trace the first wrong value and compare
   with a trusted reference. Prefer primary sources and reproducible commands.
+- Downloads in the setup tools read through `Tools/Android/download_progress.py` (progress on a terminal, sparse
+  lines in a log) so a long fetch never looks hung; a new fetcher uses it too.
 - Preserve existing uncommitted work. Keep changes scoped; work on the current
   branch unless asked otherwise. Commit related code and docs only; never push
   without explicit approval.

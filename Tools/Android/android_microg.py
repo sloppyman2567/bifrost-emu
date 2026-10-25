@@ -42,7 +42,7 @@ def archive(package, cache=ROOT / "build/microg"):
             temporary = Path(stream.name)
             try:
                 with urllib.request.urlopen(URL + name, timeout=60) as response:
-                    copy_bytes(response, stream, size)
+                    copy_bytes(response, stream, size, f"microG {name}")
                     if response.read(1):
                         raise ValueError(f"Oversized microG download: {name}")
                 stream.close()

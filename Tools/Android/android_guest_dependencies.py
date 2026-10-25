@@ -12,6 +12,8 @@ import time
 import urllib.error
 import urllib.request
 
+import download_progress
+
 ROOT = Path(__file__).resolve().parents[2]
 BIONIC_REVISION = "361ba86734fb2821a6adcfdf775db8abd04e0de0" # android-15.0.0_r1
 MEDIA_REVISION = "1863cb0ea5a9e1340f11a435618ff863e017da29" # android-15.0.0_r1
@@ -94,7 +96,7 @@ def extract(name, destination, selected=None):
             try:
                 request_url = url if not attempt else url + f"?retry={attempt}"
                 with urllib.request.urlopen(request_url, timeout=30) as response:
-                    data = response.read(4 * 1024 * 1024 + 1)
+                    data = download_progress.read(response, 4 * 1024 * 1024, name)
                 break
             except urllib.error.HTTPError as error:
                 if error.code not in (429, 500, 502, 503, 504) or attempt == 2:

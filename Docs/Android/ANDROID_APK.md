@@ -22,7 +22,10 @@ require guest ART and Android framework startup.
 ## Setup and use
 
 On Debian and Ubuntu the `bifrost-emu-asgard` package does all of the provisioning below: install it and run `asgard-setup`
-(see the README). The rest of this section is the manual route from a source checkout.
+(see the README). It prints a numbered heading for each of its nine steps, and every download shows its progress:
+on a terminal one line updates in place (`Android 15 system image  [=====>   ]  33%  8.0 MiB/24.0 MiB  6.4 MiB/s  ETA 0:02`),
+and piped into a log it prints a line per ten percent. The rest of this section is the manual route from a source
+checkout.
 
 Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
 `java` and `keytool`. The signing and manifest tools are checksum-pinned AOSP

@@ -11,6 +11,7 @@ import tempfile
 import urllib.request
 import zipfile
 
+import download_progress
 from android_media import install_bionic_links
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,7 +52,7 @@ def install(destination, archive=None):
         data = archive.read_bytes()
     else:
         with urllib.request.urlopen(URL, timeout=60) as response:
-            encoded = response.read(32 * 1024 * 1024 + 1)
+            encoded = download_progress.read(response, 32 * 1024 * 1024, "Bionic runtime")
         if len(encoded) > 32 * 1024 * 1024:
             raise ValueError("Runtime download exceeds the download bound")
         data = base64.b64decode(encoded, validate=True)

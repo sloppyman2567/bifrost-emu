@@ -33,6 +33,9 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_rootfs_install.sh    # install-rootfs.sh output runs from an installed layout
 ./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
 ./Scripts/Android/test_android_super.py        # dynamic-partition unpacker vs a synthetic image (--compare SUPER.img: vs lpunpack)
+./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), injected clock
+./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force
+./Scripts/Testing/test_window_stats.sh         # window stats modes, overlay and sensors (SDL probes open windows unless SDL_VIDEODRIVER=offscreen)
 ./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall
 ./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls, runs a packaged installer from the cache and reports a missing one
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
