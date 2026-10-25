@@ -14,6 +14,15 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### `[mem]` line: where a process's resident memory is (2026-10-25)
+
+- With `BIFROST_STATS_PERIOD=N` (and at exit with `--verbose`) each emulator process prints one `[mem]` line next to
+  the `[JIT]` ones: resident MB split into the guest's own pages (inside the guest window: what the game uses),
+  JIT code, host heap, glibc malloc arenas, host thread stacks, other anonymous memory and files, plus the thread
+  count (`System/Core/Emulator/MemoryBreakdown.cpp`, from `/proc/self/smaps`; arenas and stacks are recognized by
+  size and alignment, so they are approximate). Everything but `guest` is the emulator's. Checked on a code-heavy
+  guest and an idle-threads guest (the classes add up to the process's measured RSS).
+
 ### Idle guest threads cost 0.15 MiB instead of 1.8 MiB, and the guest sees real RAM (2026-10-25)
 
 - Every guest CPU built a 16,384-entry interpreter decode cache (1.7 MiB) when it was created, writing every entry,

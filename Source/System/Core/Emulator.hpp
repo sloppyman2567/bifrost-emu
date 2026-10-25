@@ -364,6 +364,8 @@ public:
     // Defined in Source/FrostJIT/Runtime/EmulatorBridge.cpp so the FrostJIT definition is visible.
     void jit_step(CPU& cpu);
     void print_jit_stats();
+    // One "[mem]" line: where this process's resident memory is (guest pages, JIT code, heap, ...).
+    void dump_memory_breakdown();
     void dump_prof_snapshot();
     // Periodic real-guest-throughput + block-structure reporter. Uses real
     // instructions_executed (not the run-loop dispatch counter) and prints
