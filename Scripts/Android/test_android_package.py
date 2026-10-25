@@ -793,6 +793,26 @@ class SessionResultTests(unittest.TestCase):
                     code = session.run(["sh", "-c", "echo APP_HOST_CLOSED; kill -9 $$"], stdout=log)
                 self.assertEqual((code, session.data["state"], session.data["exit_code"]), (0, "closed", 137))
 
+    def test_a_helper_that_left_the_process_group_is_ended_with_the_app(self):
+        # A forked helper that called setsid is not in the app's process group; it was left running for hours,
+        # holding a copy of the game's memory. The supervisor adopts and ends it.
+        import os
+        import signal
+        import subprocess
+        from android_sessions import Session
+        with tempfile.TemporaryDirectory(prefix="bifrost-session-test-") as temporary:
+            marker = Path(temporary) / "helper.pid"
+            script = f'setsid sh -c "echo \\$\\$ > {marker}; sleep 60; :" & sleep 1; echo done'
+            with Session(Path(temporary), "org.bifrost.fixture", 10000) as session:
+                stdout, _ = session.logs()
+                with stdout.open("w") as log:
+                    self.assertEqual(session.run(["sh", "-c", script], stdout=log), 0)
+            helper = int(marker.read_text())
+            for _ in range(100):
+                if not Path(f"/proc/{helper}").exists(): break
+                time.sleep(0.05)
+            self.assertFalse(Path(f"/proc/{helper}").exists(), "the helper outlived its app")
+
     def test_self_kill_without_host_close_fails(self):
         self.assertEqual(self.run_session("echo APP_HOST_CLOSED_LATER; kill -9 $$"), (137, "failed"))
         self.assertEqual(self.run_session("echo APP_HOST_CLOSED; exit 1"), (1, "failed"))

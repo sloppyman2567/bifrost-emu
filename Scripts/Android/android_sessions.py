@@ -23,7 +23,42 @@ def process_result(pid):
     return result.si_status if result.si_code == os.CLD_EXITED else 128 + result.si_status
 
 
-def terminate_group(child):
+def become_subreaper():
+    """Orphans of this process's descendants come to us, not to the desktop's manager, so processes an app
+    started that left its process group (a forked helper that called setsid) can be found and ended."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        pass
+
+
+def end_orphans(program):
+    """Kill and reap the children of this process that run `program`: what a closed app's group kill missed."""
+    me, found = os.getpid(), []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit(): continue
+        try:
+            stat = Path(f"/proc/{entry}/stat").read_text()
+            if int(stat[stat.rfind(")") + 2:].split()[1]) != me: continue
+            words = Path(f"/proc/{entry}/cmdline").read_bytes().split(b"\0")
+        except (OSError, ValueError, IndexError): continue
+        if words and words[0] == os.fsencode(program):
+            found.append(int(entry))
+    for pid in found:
+        try: os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+    deadline = time.monotonic() + 3
+    for pid in found:
+        while time.monotonic() < deadline:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]: break
+            except ChildProcessError: break
+            time.sleep(0.02)
+    return found
+
+
+def terminate_group(child, program=None):
     try: os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError: pass
     deadline = time.monotonic() + 5
@@ -32,6 +67,7 @@ def terminate_group(child):
     try: os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError: pass
     child.wait()
+    if program: end_orphans(program)
 
 
 def host_closed(log):
@@ -228,6 +264,7 @@ class Session:
             if self.stop.is_set():
                 code, reason = 143, "stopped"
             else:
+                become_subreaper()
                 child = subprocess.Popen(command, stdout=stdout, stderr=subprocess.STDOUT,
                                          env=env, start_new_session=True)
                 self.update(state="running", phase="App process running", pid=child.pid)
@@ -252,7 +289,7 @@ class Session:
             signal.signal(signal.SIGTERM, old_term)
             if child is not None:
                 self.update(state="stopping")
-                terminate_group(child)
+                terminate_group(child, command[0])
             self.update(state=reason, exit_code=code, ended_at=time.time())
         # A user closing the window is a normal ending: the app's own SIGKILL stays in the record, not in the status.
         return 0 if reason == "closed" else code

@@ -14,6 +14,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Helpers that leave an app's process group no longer outlive it (2026-10-24)
+
+- A forked helper that calls `setsid` is not in the app's process group, so ending the session missed it: after a
+  Subway Surfers session, seven processes (several holding a copy of the game, swapped out) were still running hours
+  later. The session supervisor now becomes a child subreaper, so such orphans come to it, and ends the emulator
+  processes among them with the app. The test fails with the old behavior. Processes already orphaned by earlier
+  sessions are not found; `asgard realm stop --force` ends those joined to a broker.
+
 ### Asgard: a broker left running by an older build is restarted; `realm stop --force` and `realm restart` (2026-10-24)
 
 - After an upgrade, a new app failed at startup with `IllegalArgumentException` in `ServiceManager.addService`: the
