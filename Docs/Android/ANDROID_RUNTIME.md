@@ -3898,8 +3898,8 @@ the host. SDL3 applies title/icon updates on its window thread. Compositor icon
 support varies; window plugins without the optional identity operations retain
 their own defaults. The native-only launcher still uses its existing identity.
 Android EGL presentations now feed the shared [window statistics](../window-stats.md)
-without passing SDL3 pointers through SDL2 APIs. The title is the default;
-the independent stats window remains opt-in.
+without passing SDL3 pointers through SDL2 APIs. The statistics are opt-in
+(title, in-window overlay and the independent stats window; see window stats).
 
 The signed managed fixture verifies three launches, persistent preferences and
 Android ID across a runtime replacement,

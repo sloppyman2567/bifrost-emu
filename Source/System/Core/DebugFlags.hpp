@@ -75,7 +75,7 @@ struct DebugFlags {
     // BIFROST_ANDROID_LOGICAL_PIXELS — A/B control: open the Android window
     // at its desktop size (compositor-upscaled, 160 dpi), not native density.
     bool android_logical_pixels = false;
-    bool window_stats_title = true;
+    bool window_stats_title = false;
     bool window_stats_window = false;
     bool window_stats_overlay = false;
     bool render_log = true;
@@ -236,9 +236,18 @@ struct DebugFlags {
         f.tier2_trace = env("BIFROST_TIER2_TRACE") || f.tier2_trace_verbose;
         if (const char* value = std::getenv("BIFROST_JIT_SUPERBLOCK_LIMIT"))
             f.jit_superblock_limit = std::clamp(std::strtoul(value, nullptr, 10), 2UL, 8UL);
-        f.window_stats_title = toggle("BIFROST_WINDOW_STATS_TITLE", toggle("BIFROST_WINDOW_STATS", true));
+        // Window stats are opt-in (BIFROST_WINDOW_STATS=1). BIFROST_WINDOW_STATS_MODE picks the layout:
+        // 1 or minimal (title statistics), 2 or normal (title and overlay, the default), 3 or overlay
+        // (overlay only). The per-display switches below override what the mode implies.
+        const bool stats = toggle("BIFROST_WINDOW_STATS", false);
+        int stats_mode = 2;
+        if (const char* value = std::getenv("BIFROST_WINDOW_STATS_MODE")) {
+            const std::string mode = value;
+            stats_mode = mode == "1" || mode == "minimal" ? 1 : mode == "3" || mode == "overlay" ? 3 : 2;
+        }
+        f.window_stats_title = toggle("BIFROST_WINDOW_STATS_TITLE", stats && stats_mode != 3);
         f.window_stats_window = toggle("BIFROST_WINDOW_STATS_WINDOW", false);
-        f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", false);
+        f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", stats && stats_mode != 1);
         f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         f.cpu_profile = env("BIFROST_PROF");

@@ -168,8 +168,9 @@ with `--rootfs`. It passes the same test suites as the built-in linker; dhewm3 (
 other games and `make verify` have not been run with it.
 
 Useful switches: `-d` traces every instruction, `--no-jit` forces the
-interpreter, `--no-window-stats` removes the FPS title, and `BIFROST_TIER2=1`
-enables experimental Tier-2 region compilation.
+interpreter, `--window-stats` shows FPS and load statistics in the title and, for Android
+apps, an in-window overlay (see [window stats](Docs/window-stats.md); `--window-stats-mode`
+picks the layout), and `BIFROST_TIER2=1` enables experimental Tier-2 region compilation.
 
 ## Running programs
 

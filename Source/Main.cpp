@@ -92,7 +92,9 @@ static void print_banner() {
         "    -q, --quiet        suppress BRK warnings (even with -d)\n"
         "    --fb-dump PATH     dump /dev/fb0 to PATH on exit (PPM)\n"
         "    --audio-dump PATH  dump /dev/dsp to PATH on exit (WAV)\n"
-        "    --window-stats    enable game-title presentation stats (default; alias --window_stats)\n"
+        "    --window-stats    show presentation stats (off by default; alias --window_stats)\n"
+        "    --window-stats-mode MODE  implies --window-stats: 1|minimal title stats, 2|normal title + in-window\n"
+        "                       overlay (default), 3|overlay in-window overlay only (Android windows)\n"
         "    --[no-]window-stats-title|window|overlay  independent stats displays\n"
         "    --no-window-stats disable all stats displays\n"
         "    --no-render-log  disable the default first-presentation log\n"
@@ -301,7 +303,7 @@ int main(int argc, char** argv) {
         } else if (a == "--print-config") {
             print_config_only = true;
         } else if (a == "--rootfs" || a == "--rootfs-profile" || a == "--jit-threshold" ||
-                   a == "--fb-dump" || a == "--audio-dump" ||
+                   a == "--window-stats-mode" || a == "--fb-dump" || a == "--audio-dump" ||
                    a == "--android-window-plugin" || a == "--android-binder-broker" ||
                    a == "--android-app-id" || a == "--android-system-uid" || a == "--asgard-service-parent") {
             if (i + 1 < argc) i++;
@@ -345,6 +347,20 @@ int main(int argc, char** argv) {
             arg_i++; continue;
         }
         bool stats_option = false;
+        if (a == "--window-stats-mode" || a.rfind("--window-stats-mode=", 0) == 0) {
+            std::string value;
+            if (a.size() > 19) value = a.substr(20);
+            else if (arg_i + 1 < argc) value = argv[++arg_i];
+            const char* mode = value == "1" || value == "minimal" ? "1" : value == "2" || value == "normal" ? "2"
+                             : value == "3" || value == "overlay" ? "3" : nullptr;
+            if (!mode) {
+                fprintf(stderr, "bifrost-emu: --window-stats-mode takes 1 (minimal), 2 (normal) or 3 (overlay)\n");
+                return 2;
+            }
+            setenv("BIFROST_WINDOW_STATS_MODE", mode, 1);
+            setenv("BIFROST_WINDOW_STATS", "1", 1);  // choosing a layout turns the stats on
+            arg_i++; continue;
+        }
         for (auto mode : {"title", "window", "overlay"}) {
             std::string flag = std::string("--window-stats-") + mode;
             std::string key = std::string("BIFROST_WINDOW_STATS_") + (std::string(mode)=="title" ? "TITLE" : std::string(mode)=="window" ? "WINDOW" : "OVERLAY");

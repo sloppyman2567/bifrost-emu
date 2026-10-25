@@ -1077,6 +1077,19 @@ void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
     if (window_open_ && window_backend_->window_info(info)) {
         auto title = arm64emu::window_stats::update_native(window_backend_.get(), info);
         if (!title.empty()) window_backend_->set_title(title.c_str());
+        // The in-window stats panel is a reserved popup layer (guest popup ids count up from 1): translucent,
+        // above every surface, and never a host input target.
+        arm64emu::window_stats::OverlayImage overlay;
+        if (!stats_overlay_unsupported_ && arm64emu::window_stats::overlay_native(window_backend_.get(), overlay)) {
+            constexpr uint32_t kStatsOverlayPopup = 0xFFFF0001u;
+            const int32_t margin = std::max(4, overlay.h / 24);
+            const int result = show_popup(kStatsOverlayPopup, margin, margin, overlay.w, overlay.h,
+                                          overlay.argb.data());
+            if (result == -ENOTSUP) {
+                stats_overlay_unsupported_ = true;
+                std::fprintf(stderr, "[window-stats] this window backend cannot draw the in-window overlay\n");
+            }
+        }
     }
     // Bound plugin work per pump, including a plugin that never reports empty.
     for (unsigned i = 0; i < 256; ++i) {

@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from android_package import PACKAGE, ROOT
-from android_settings import BACK_KEYS, NETWORKS, load as load_settings, save as save_settings
+from android_settings import BACK_KEYS, NETWORKS, STATS_MODES, load as load_settings, save as save_settings
 from android_sessions import session_log
 
 ACTIVE = ("preparing", "starting", "running", "stopping")
@@ -261,8 +261,13 @@ def settings_dialog(window, app, settings):
             tabs = QTabWidget(); layout.addWidget(tabs)
             general = QWidget(); form = QFormLayout(general)
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-            self.stats = QCheckBox("Show FPS and graphics stats in the window title")
-            self.stats.setChecked(settings.get("window_stats", True)); form.addRow("Window stats", self.stats)
+            self.stats = QCheckBox("Show FPS, load and temperatures while the game runs")
+            self.stats.setChecked(settings.get("window_stats", False)); form.addRow("Window stats", self.stats)
+            self.stats_mode = QComboBox()
+            for name, text in STATS_MODES: self.stats_mode.addItem(text, name)
+            self.stats_mode.setCurrentIndex(max(0, self.stats_mode.findData(settings.get("window_stats_mode", "normal"))))
+            self.stats_mode.setEnabled(self.stats.isChecked()); self.stats.toggled.connect(self.stats_mode.setEnabled)
+            form.addRow("Stats layout", self.stats_mode)
             self.back = QComboBox()
             for name, text in BACK_KEYS: self.back.addItem(text, name)
             self.back.setCurrentIndex(max(0, self.back.findData(settings.get("back_key", "escape"))))
@@ -338,7 +343,8 @@ def settings_dialog(window, app, settings):
             reset = buttons.addButton("Restore profile defaults", QDialogButtonBox.ButtonRole.ResetRole)
             reset.clicked.connect(self.reset_profile)
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
-            self.initial = (self.stats.isChecked(), self.back.currentData(), self.network.currentData())
+            self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
+                            self.network.currentData())
 
         def add_property(self, name="", value=""):
             row = self.properties.rowCount(); self.properties.insertRow(row)
@@ -352,14 +358,16 @@ def settings_dialog(window, app, settings):
 
         def reset_profile(self):
             self.settings = {}
-            self.stats.setChecked(True); self.back.setCurrentIndex(0); self.network.setCurrentIndex(0)
-            self.initial = (True, "escape", "auto")
+            self.stats.setChecked(False); self.stats_mode.setCurrentIndex(self.stats_mode.findData("normal"))
+            self.back.setCurrentIndex(0); self.network.setCurrentIndex(0)
+            self.initial = (False, "normal", "escape", "auto")
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):
             result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
-            for key, value, initial in zip(("window_stats", "back_key", "network"),
-                    (self.stats.isChecked(), self.back.currentData(), self.network.currentData()), self.initial):
+            for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "network"),
+                    (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
+                     self.network.currentData()), self.initial):
                 if value != initial or key in result: result[key] = value
             value = self.emulator.currentData()
             if value is not None: result["property.ro.kernel.qemu"] = value

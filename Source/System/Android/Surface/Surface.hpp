@@ -479,6 +479,7 @@ public:
     struct Slot { bool used = false; InputEvent ev; };
     Slot slots_[32];
     int32_t last_pump_w_ = -1, last_pump_h_ = -1;
+    bool stats_overlay_unsupported_ = false;  // the window backend cannot draw popup layers
 
     uint64_t alloc_event_slot_(const InputEvent& ev);  // caller holds mu_
 };

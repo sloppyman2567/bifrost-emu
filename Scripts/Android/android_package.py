@@ -855,6 +855,8 @@ def add_launch_options(parser):
     for mode in ("", "-title", "-window", "-overlay"):
         parser.add_argument("--window-stats" + mode, action=argparse.BooleanOptionalAction,
                             default=None, help="configure emulator presentation statistics")
+    parser.add_argument("--window-stats-mode", choices=("minimal", "normal", "overlay", "1", "2", "3"), default=None,
+                        help="stats layout: title only, title and in-window overlay, or overlay only (turns stats on)")
     parser.add_argument("--frames", type=int, default=0, help="NativeActivity redraw cycles; zero runs until window close")
 
 
@@ -902,7 +904,7 @@ def main():
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
     configuration.add_argument("key", nargs="?", type=android_settings.setting_key,
-                               help="window_stats, back_key, network or property.NAME")
+                               help="window_stats, window_stats_mode, back_key, network or property.NAME")
     configuration.add_argument("value", nargs="?")
     configuration.add_argument("--reset", action="store_true", help="restore the default of KEY, or of every setting")
     configuration.add_argument("--json", action="store_true")
@@ -1034,6 +1036,8 @@ def main():
             if value is not None:
                 emu_args.append(("--window-stats" if value else "--no-window-stats") +
                                 mode.replace("_", "-"))
+        if args.window_stats_mode is not None:
+            emu_args.append("--window-stats-mode=" + args.window_stats_mode)
         if args.command == "start":
             options = ["--emu", str(args.emu.resolve()), "--timeout", str(args.timeout),
                        "--frames", str(args.frames), *emu_args]

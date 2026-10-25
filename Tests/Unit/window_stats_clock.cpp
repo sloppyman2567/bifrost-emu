@@ -2,13 +2,35 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 using arm64emu::window_stats::Clock;
+// Live child processes of this one: a native window draws its own overlay and must not start the desktop
+// HUD helper (the helper is this program run again, which a test binary would take for its own main).
+static int children() {
+  int count = 0;
+  std::error_code error;
+  for (const auto &entry : std::filesystem::directory_iterator("/proc", error)) {
+    const auto name = entry.path().filename().string();
+    if (name.find_first_not_of("0123456789") != std::string::npos) continue;
+    std::ifstream stat(entry.path() / "stat");
+    std::string line;
+    std::getline(stat, line);
+    const auto close = line.rfind(')');
+    if (close == std::string::npos) continue;
+    std::istringstream rest(line.substr(close + 2));
+    char state;
+    long parent;
+    if ((rest >> state >> parent) && parent == getpid()) ++count;
+  }
+  return count;
+}
 int main() {
   setenv("BIFROST_WINDOW_STATS_TITLE", "1", 1);
   setenv("BIFROST_WINDOW_STATS_WINDOW", "0", 1);
-  setenv("BIFROST_WINDOW_STATS_OVERLAY", "0", 1);
+  setenv("BIFROST_WINDOW_STATS_OVERLAY", "1", 1);
   Clock c;
   assert(c.active_fps(0) == 0);
   c.present(1000000000);
@@ -45,7 +67,13 @@ int main() {
     break;
   }
   assert(title.find(" | VRAM ") != std::string::npos);
+  // The overlay panel for a native window is handed out once per update, only after a frame.
+  OverlayImage panel;
+  assert(overlay_native(&key, panel) && panel.w > 100 && panel.h > 60);
+  assert(panel.argb.size() == size_t(panel.w) * panel.h && !overlay_native(&key, panel));
+  assert(children() == 0);
   forget(&key);
+  assert(!overlay_native(&key, panel));
   assert(update_native(&key, info).empty());
   note_present(&key, "Android EGL");
   assert(update_native(&key, info).find("frame 1") != std::string::npos);

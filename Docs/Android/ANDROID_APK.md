@@ -206,7 +206,8 @@ mean the game process has already launched.
 
 | Setting | Values | Effect |
 |---|---|---|
-| `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` |
+| `window_stats` | `on`, `off` | `--window-stats` / `--no-window-stats` (off by default: the window shows only the app's title) |
+| `window_stats_mode` | `minimal`, `normal`, `overlay` (or `1`, `2`, `3`) | `--window-stats-mode=` while `window_stats` is on: title only, title and in-window overlay (default), or overlay only; see [window stats](../window-stats.md) |
 | `back_key` | `escape`, `backspace`, `delete`, `f1`, `f2`, `f12`, `none` | host key delivered as Back (`BIFROST_ANDROID_BACK_KEY`) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 

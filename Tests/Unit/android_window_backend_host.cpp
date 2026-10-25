@@ -1,5 +1,6 @@
 #include "System/Android/Surface/Surface.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <cerrno>
 
@@ -17,6 +18,11 @@ struct State {
   int open_width = 0, open_height = 0;
   std::vector<std::shared_ptr<State>> children;
   std::vector<frost::AndroidWindowEvent> events;  // returned by poll, in order
+  // Popup layers the manager drew (the stats overlay is one).
+  bool popups_unsupported = false;
+  std::vector<uint32_t> popup_ids;
+  int popup_x = 0, popup_y = 0, popup_w = 0, popup_h = 0;
+  bool popup_translucent = false;
 };
 class TestBackend final : public frost::AndroidWindowBackend {
 public:
@@ -65,6 +71,14 @@ public:
     state_->children.push_back(child);
     return backend;
   }
+  int show_popup(uint32_t id, int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t *argb) override {
+    if (state_->popups_unsupported) return -ENOTSUP;
+    state_->popup_ids.push_back(id);
+    state_->popup_x = x; state_->popup_y = y; state_->popup_w = w; state_->popup_h = h;
+    state_->popup_translucent = false;
+    for (int32_t i = 0; i < w * h; ++i) state_->popup_translucent |= (argb[i] >> 24) > 0 && (argb[i] >> 24) < 255;
+    return 0;
+  }
   void set_visible(bool visible) override { state_->hidden = !visible; }
   bool window_info(arm64emu::window_stats::WindowInfo &info) override {
     info.title = state_->title;
@@ -89,6 +103,9 @@ private:
     }                                                                          \
   } while (0)
 int main() {
+  // Window stats are opt-in; the default layout (mode 2) is the title and the in-window overlay.
+  setenv("BIFROST_WINDOW_STATS", "1", 1);
+  unsetenv("BIFROST_WINDOW_STATS_MODE");
   auto &manager = frost::AndroidSurfaceManager::instance();
   CHECK(manager.host_native_window() == 0);
   CHECK(!manager.install_window_backend(nullptr));
@@ -155,6 +172,12 @@ int main() {
   manager.pump_host_events(nullptr);
   CHECK(state->title.find("Android EGL") != std::string::npos);
   CHECK(state->title.find("frame 1") != std::string::npos);
+  // The stats overlay is drawn into the window as a translucent popup near its top-left corner, once per
+  // update (not on every pump), and never under a guest popup's id.
+  CHECK(state->popup_ids.size() == 1 && state->popup_ids[0] == 0xFFFF0001u);
+  CHECK(state->popup_x > 0 && state->popup_x == state->popup_y);
+  manager.pump_host_events(nullptr);
+  CHECK(state->popup_ids.size() == 1);
   CHECK(manager.set_surface_opaque(layer, true) == -EBUSY);
   CHECK(manager.set_surface_opaque(layer, false) == 0);
   manager.release(layer);
@@ -186,6 +209,38 @@ int main() {
     CHECK(local.from_surface() != 0);
   }
   CHECK(!independent->opened);
+  // The overlay on a 1280x720 window: a translucent panel near the top-left corner, redrawn once per update.
+  auto hd = std::make_shared<State>();
+  {
+    frost::AndroidSurfaceManager local(std::make_unique<TestBackend>(hd));
+    CHECK(local.set_buffers_geometry(1280, 720, 1) == 0);
+    CHECK(local.open_host_window());
+    auto surface = local.from_surface(400);
+    local.register_egl_surface(902, surface);
+    CHECK(local.present_egl_surface(902));
+    local.pump_host_events(nullptr);
+    CHECK(hd->width == 1280 && hd->height == 720);
+    CHECK(hd->popup_ids.size() == 1 && hd->popup_ids[0] == 0xFFFF0001u);
+    CHECK(hd->popup_x > 0 && hd->popup_x == hd->popup_y);
+    CHECK(hd->popup_w > 200 && hd->popup_h > 100 && hd->popup_w < hd->width / 2 && hd->popup_h < hd->height / 2);
+    CHECK(hd->popup_translucent);
+    local.pump_host_events(nullptr);
+    CHECK(hd->popup_ids.size() == 1);
+    local.destroy_egl_surface(902);
+  }
+  // A backend without popup layers is asked once, and the title statistics carry on.
+  auto no_popups = std::make_shared<State>();
+  no_popups->popups_unsupported = true;
+  {
+    frost::AndroidSurfaceManager local(std::make_unique<TestBackend>(no_popups));
+    CHECK(local.open_host_window());
+    auto surface = local.from_surface(300);
+    local.register_egl_surface(901, surface);
+    CHECK(local.present_egl_surface(901));
+    local.pump_host_events(nullptr);
+    CHECK(no_popups->title.find("Android EGL") != std::string::npos && no_popups->popup_ids.empty());
+    local.destroy_egl_surface(901);
+  }
   // On a scaled host display the window opens at its desktop size and the
   // Android display adopts the native pixel buffer and its density.
   auto scaled = std::make_shared<State>();

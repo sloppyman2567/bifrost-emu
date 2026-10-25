@@ -9,8 +9,14 @@ BACK_KEYS = (("escape", "Esc"), ("backspace", "Backspace"), ("delete", "Delete")
 # auto follows the host's default route; offline blocks all non-loopback IP traffic (BIFROST_ANDROID_OFFLINE=1) and
 # reports no network to Android.
 NETWORKS = ("auto", "offline")
-CHOICES = {"back_key": tuple(name for name, _ in BACK_KEYS), "network": NETWORKS}
-KEYS = ("window_stats", "back_key", "network")
+# Layout of the stats when window_stats is on (emulator --window-stats-mode): the window title, the in-window
+# overlay, or both.
+STATS_MODES = (("minimal", "Minimal: window title only"), ("normal", "Normal: title and overlay"),
+               ("overlay", "Overlay only"))
+STATS_MODE_NUMBERS = {"1": "minimal", "2": "normal", "3": "overlay"}
+CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
+           "back_key": tuple(name for name, _ in BACK_KEYS), "network": NETWORKS}
+KEYS = ("window_stats", "window_stats_mode", "back_key", "network")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -68,6 +74,8 @@ def parse(key, text):
         if text.lower() not in BOOLEANS:
             raise ValueError("window_stats must be on or off")
         return BOOLEANS[text.lower()]
+    if key == "window_stats_mode":
+        text = STATS_MODE_NUMBERS.get(text, text)
     if text not in CHOICES[key]:
         raise ValueError(f"{key} must be one of: {', '.join(CHOICES[key])}")
     return text
@@ -91,7 +99,11 @@ def install_properties(root, overrides):
 
 def launch_changes(settings):
     """Emulator flags and environment that a launch adds for these settings; defaults add nothing."""
-    flags = ["--window-stats" if settings["window_stats"] else "--no-window-stats"] if "window_stats" in settings else []
+    flags = []
+    if "window_stats" in settings:
+        flags.append("--window-stats" if settings["window_stats"] else "--no-window-stats")
+        if settings["window_stats"] and "window_stats_mode" in settings:
+            flags.append("--window-stats-mode=" + settings["window_stats_mode"])
     env = {}
     if "back_key" in settings:
         env["BIFROST_ANDROID_BACK_KEY"] = settings["back_key"]

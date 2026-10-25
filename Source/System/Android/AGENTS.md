@@ -67,6 +67,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   guest-writable files only through `android_google.open_regular` (no symlinks,
   regular files, bounded size) and writes into an app's request directory by
   replacing, never through, what is there: an app is untrusted. Run `test_managed_google_activity_window`.
+- The window-stats overlay (`pump_host_events`) is the window backend popup `0xFFFF0001` (guest popup ids count up
+  from 1), drawn through the locked `show_popup`: translucent, never an input target, at most four updates a second,
+  and asked once of a backend that returns `-ENOTSUP`. Test with the recording backend in
+  `Tests/Unit/android_window_backend_host.cpp`.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

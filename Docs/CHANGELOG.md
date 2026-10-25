@@ -14,6 +14,29 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Window stats are opt-in, with an in-window overlay and layout modes (2026-10-24)
+
+- Window stats were on by default and filled the window title. They are now **off**: a window shows only the game's
+  own title. `--window-stats` turns them on; `--window-stats-mode 1|2|3` (or `minimal|normal|overlay`) picks a layout
+  and turns them on: 1 the title statistics, 2 (default) title and an overlay, 3 the overlay only. Per app:
+  `window_stats` and `window_stats_mode` (`asgard.py config`, and the library's profile dialog, whose stats checkbox
+  now starts unchecked). `BIFROST_WINDOW_STATS_MODE` picks the layout in the environment without turning stats on.
+- The overlay is a small translucent panel inside the Android window's top-left corner, on Wayland and X11: the
+  emulator name and version, app title, FPS and frame time, CPU and GPU usage and temperature, VRAM, system and
+  emulator RAM, and the CPU and GPU names. It is an ARGB layer through the window backend's popup interface (reserved
+  id `0xFFFF0001`), so it needs no GL state and takes no input; it refreshes four times a second.
+- Readings come from `/proc`, hwmon, thermal zones and DRM sysfs (new `HostSensors`), once a second. Checked against
+  `sensors` and `/proc/meminfo` on one AMD CPU and GPU; Intel, ARM, thermal-zone and other-GPU layouts are tested
+  against fixture trees only, and NVIDIA's proprietary driver exposes none of these files, so it shows `--`. The
+  overlay was checked as an offscreen rendering and through a recording backend, not yet on a live Wayland or X11
+  window. SDL, GLFW and Vulkan windows of Linux guests keep the X11-only HUD (with CPU/GPU load lines added; it and
+  the stats window need a desktop session, so those lines were compiled but not run); the embedded panel is
+  Android-only. Layout numbers 1, 2, 3 follow the order minimal, normal, overlay.
+- The desktop HUD helper is the emulator run again (`/proc/self/exe --window-stats-ui`). A native window no longer
+  starts it (it draws its own overlay), and a helper never starts another (`BIFROST_WINDOW_STATS_HELPER`): a test
+  binary that linked this code once re-ran itself without end and exhausted the machine. The tests that can reach
+  it now run under a process and memory cap.
+
 ### Android: packages whose manifest has a backslash install again (2026-10-24)
 
 - Installing Melon Sandbox (an XAPK) stopped with `Invalid \escape: line 1 column 4 (char 3)`. Its manifest has

@@ -271,6 +271,49 @@ class LauncherArgumentTests(unittest.TestCase):
             run("--window-stats")
             self.assertEqual(calls[-1], ["--window-stats"])
 
+    def test_stats_layout_is_validated_and_only_applies_while_stats_are_on(self):
+        import json
+        import sys
+        from android_settings import SETTINGS, KEYS, launch_changes, load, parse, save
+        self.assertEqual(KEYS[:2], ("window_stats", "window_stats_mode"))
+        self.assertEqual([parse("window_stats_mode", x) for x in ("1", "2", "3", "minimal", "overlay")],
+                         ["minimal", "normal", "overlay", "minimal", "overlay"])
+        for bad in ("0", "loud", "", "Normal"):
+            with self.assertRaises(ValueError):
+                parse("window_stats_mode", bad)
+        # Stats are opt-in: a layout alone changes nothing, and it follows an explicit off.
+        self.assertEqual(launch_changes({"window_stats_mode": "overlay"}), ([], {}))
+        self.assertEqual(launch_changes({"window_stats": False, "window_stats_mode": "overlay"}),
+                         (["--no-window-stats"], {}))
+        self.assertEqual(launch_changes({"window_stats": True}), (["--window-stats"], {}))
+        self.assertEqual(launch_changes({"window_stats": True, "window_stats_mode": "overlay"}),
+                         (["--window-stats", "--window-stats-mode=overlay"], {}))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / SETTINGS).write_text(json.dumps({"window_stats_mode": "loud", "window_stats": True}))
+            self.assertEqual(load(root), {"window_stats": True})
+            save(root, {"window_stats": True, "window_stats_mode": "minimal"})
+            self.assertEqual(load(root), {"window_stats": True, "window_stats_mode": "minimal"})
+            state = root / "state"
+            (state / "org.bifrost.fixture").mkdir(parents=True)
+            (state / "org.bifrost.fixture/package.json").write_text("{}")
+            def config(*arguments):
+                return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                       "--state-root", str(state), "config", "org.bifrost.fixture", *arguments],
+                                      capture_output=True, text=True)
+            self.assertEqual(config("window_stats_mode", "3").returncode, 0)
+            self.assertEqual(config("window_stats_mode").stdout.strip(), "overlay")
+            self.assertEqual(config("window_stats_mode", "loud").returncode, 1)
+            # A layout on the command line replaces the saved stats choice, and reaches the emulator as one flag.
+            app = state / "org.bifrost.fixture"
+            save(app, {"window_stats": False})
+            calls = []
+            argv = ["android_package.py", "--state-root", str(state), "run", app.name, "--window-stats-mode", "2"]
+            with patch.object(package, "launch", lambda *a: calls.append(a[6]) or 0), \
+                    patch.object(sys, "argv", argv):
+                self.assertEqual(package.main(), 0)
+            self.assertEqual(calls[-1], ["--window-stats-mode=2"])
+
     def test_config_command_shows_sets_validates_and_resets(self):
         import json
         with tempfile.TemporaryDirectory() as directory:

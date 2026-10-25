@@ -1,5 +1,6 @@
 #include "System/Graphics/Display/WindowStats.hpp"
 #include "Bifrost/Version.hpp"
+#include "System/Graphics/Display/HostSensors.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include <cerrno>
 #include <chrono>
@@ -57,9 +58,10 @@ double Clock::active_fps(uint64_t now) const {
 }
 struct Packet {
   uint64_t frames{}, last_ns{}, xwindow{};
-  uint64_t ram{}, total_ram{}, vram{}, used_vram{};
+  uint64_t ram{}, total_ram{}, vram{}, used_vram{}, used_ram{};
   bool vram_known{};
   double fps{};
+  double cpu_percent{-1}, cpu_temp{-1}, gpu_percent{-1}, gpu_temp{-1};
   int x{}, y{}, w{}, h{}, visible{}, separate{}, overlay{};
   char backend[32]{};
   char cpu[512]{}, gpu[512]{};
@@ -307,12 +309,15 @@ struct State {
   uint64_t used_vram = 0, vram_sample = 0;
   bool vram_known = false;
   unsigned gpu_attempts = 0;
+  OverlayImage overlay;
+  uint64_t overlay_seq = 0, overlay_taken = 0;
   ~State() {
     if (socket >= 0)
       close(socket);
   }
 };
 static std::mutex mu;
+static HostSensors host_sensors;
 static std::map<void *, State> windows;
 static std::map<uint64_t, void *> surfaces, swapchains;
 static std::map<void *, void *> renderers;
@@ -325,6 +330,10 @@ static void start_helper(State &state) {
   if (state.helper_attempted)
     return;
   state.helper_attempted = true;
+  // The helper is this program run again. It never starts another, so a program that is not the emulator
+  // (a test binary, where /proc/self/exe ignores the option) cannot start copies of itself without end.
+  if (getenv("BIFROST_WINDOW_STATS_HELPER"))
+    return;
   int fd[2];
   if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
                  fd)) {
@@ -339,7 +348,12 @@ static void start_helper(State &state) {
   posix_spawn_file_actions_addclosefrom_np(&actions, 4);
   char exe[] = "/proc/self/exe", option[] = "--window-stats-ui", number[] = "3";
   char *argv[] = {exe, option, number, nullptr};
-  int err = posix_spawn(&state.child, exe, &actions, nullptr, argv, environ);
+  std::vector<char *> helper_environment;
+  for (char **entry = environ; entry && *entry; ++entry) helper_environment.push_back(*entry);
+  char marker[] = "BIFROST_WINDOW_STATS_HELPER=1";
+  helper_environment.push_back(marker);
+  helper_environment.push_back(nullptr);
+  int err = posix_spawn(&state.child, exe, &actions, nullptr, argv, helper_environment.data());
   posix_spawn_file_actions_destroy(&actions);
   close(fd[1]);
   if (err) {
@@ -384,6 +398,10 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
     state.vram_sample = now;
   }
   packet.used_vram = state.used_vram; packet.vram_known = state.vram_known;
+  const SensorReading &sensors = host_sensors.sample(now, state.device);
+  packet.cpu_percent = sensors.cpu_percent; packet.cpu_temp = sensors.cpu_temp;
+  packet.gpu_percent = sensors.gpu_percent; packet.gpu_temp = sensors.gpu_temp;
+  packet.used_ram = sensors.ram_known ? sensors.ram_used : 0;
   snprintf(packet.cpu, sizeof(packet.cpu), "%s", cpu.c_str());
   snprintf(packet.gpu, sizeof(packet.gpu), "%s", state.gpu.empty() ? "unavailable" : state.gpu.c_str());
   packet.frames = state.clock.frames;
@@ -396,6 +414,17 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   snprintf(packet.backend, sizeof(packet.backend), "%s", state.backend.c_str());
   if (info.title != state.decorated)
     state.title = info.title;
+  if (state.native && dbg().window_stats_overlay) {
+    OverlayStats stats;
+    stats.version = VERSION; stats.app = state.title; stats.backend = state.backend;
+    stats.gpu_name = state.gpu; stats.cpu_name = cpu;
+    stats.fps = packet.fps; stats.active = now - state.clock.last_ns <= 2000000000ULL;
+    stats.width = packet.w; stats.height = packet.h; stats.frames = packet.frames;
+    stats.sensors = sensors; stats.process_rss = packet.ram;
+    stats.vram_used = packet.used_vram; stats.vram_total = packet.vram; stats.vram_known = packet.vram_known;
+    state.overlay = render_overlay(overlay_lines(stats), overlay_scale(info.h));
+    ++state.overlay_seq;
+  }
   std::string title;
   if (dbg().window_stats_title) {
     char suffix[256];
@@ -409,7 +438,8 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
         detail::vram_text(packet.used_vram, packet.vram, packet.vram_known);
   }
   packet.separate = dbg().window_stats_window;
-  packet.overlay = dbg().window_stats_overlay;
+  // A native window draws its own overlay (overlay_native); the desktop HUD helper is for the others.
+  packet.overlay = dbg().window_stats_overlay && !state.native;
   if (packet.separate || packet.overlay) {
     start_helper(state);
     if (state.socket >= 0 &&
@@ -437,6 +467,16 @@ std::string update_native(void *key, const WindowInfo &info) {
   if (it == windows.end()) return {};
   it->second.native = true;
   return update(it->second, info, now_ns());
+}
+
+bool overlay_native(void *key, OverlayImage &image) {
+  if (!key) return false;
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = windows.find(key);
+  if (it == windows.end() || it->second.overlay_seq == it->second.overlay_taken) return false;
+  it->second.overlay_taken = it->second.overlay_seq;
+  image = it->second.overlay;
+  return true;
 }
 
 #if defined(BIFROST_USE_SDL2)
@@ -636,42 +676,17 @@ void vk_present(uint64_t chain) {
   sdl_present(window, "Vulkan");
 }
 #if defined(BIFROST_USE_SDL2)
-// Built-in 5x7 font: no guest libraries, font files or SDL_ttf dependency.
+// Built-in 5x7 font (StatsOverlay.cpp): no guest libraries, font files or SDL_ttf dependency.
 static void text(SDL_Renderer *r, const char *s, int y) {
-  static constexpr unsigned char glyphs[][5] = {
-      {62, 81, 73, 69, 62},  {0, 66, 127, 64, 0},    {66, 97, 81, 73, 70},
-      {33, 65, 69, 75, 49},  {24, 20, 18, 127, 16},  {39, 69, 69, 69, 57},
-      {60, 74, 73, 73, 48},  {1, 113, 9, 5, 3},      {54, 73, 73, 73, 54},
-      {6, 73, 73, 41, 30},   {126, 17, 17, 17, 126}, {127, 73, 73, 73, 54},
-      {62, 65, 65, 65, 34},  {127, 65, 65, 34, 28},  {127, 73, 73, 73, 65},
-      {127, 9, 9, 9, 1},     {62, 65, 73, 73, 122},  {127, 8, 8, 8, 127},
-      {0, 65, 127, 65, 0},   {32, 64, 65, 63, 1},    {127, 8, 20, 34, 65},
-      {127, 64, 64, 64, 64}, {127, 2, 12, 2, 127},   {127, 4, 8, 16, 127},
-      {62, 65, 65, 65, 62},  {127, 9, 9, 9, 6},      {62, 65, 81, 33, 94},
-      {127, 9, 25, 41, 70},  {70, 73, 73, 73, 49},   {1, 1, 127, 1, 1},
-      {63, 64, 64, 64, 63},  {31, 32, 64, 32, 31},   {63, 64, 56, 64, 63},
-      {99, 20, 8, 20, 99},   {7, 8, 112, 8, 7},      {97, 81, 73, 69, 67}};
   int x = 12;
   for (; *s && x < 880; ++s, x += 12) {
-    unsigned char c = *s;
-    if (c >= 'a' && c <= 'z')
-      c -= 32;
-    const unsigned char *g = c >= '0' && c <= '9'   ? glyphs[c - '0']
-                             : c >= 'A' && c <= 'Z' ? glyphs[10 + c - 'A']
-                                                    : nullptr;
+    const unsigned char *g = detail::glyph_columns(static_cast<unsigned char>(*s));
     for (int col = 0; col < 5; ++col)
-      for (int row = 0; row < 7; ++row) {
-        bool bit = g          ? (g[col] & (1 << row))
-                   : c == '.' ? (col == 2 && row == 6)
-                   : c == '-' ? (row == 3)
-                   : c == ':' ? (col == 2 && (row == 2 || row == 5))
-                   : c == '/' ? (row == 6 - col)
-                              : false;
-        if (bit) {
+      for (int row = 0; row < 7; ++row)
+        if (g[col] & (1 << row)) {
           SDL_Rect rect{x + col * 2, y + row * 2, 2, 2};
           SDL_RenderFillRect(r, &rect);
         }
-      }
   }
 }
 #endif
@@ -868,9 +883,21 @@ int ui_main(int fd) {
       snprintf(line, sizeof(line), "VRAM %s - EXPERIMENTAL",
                detail::vram_text(p.used_vram, p.vram, p.vram_known).c_str());
       text(renderers[i], line, y + 24);
+      auto reading = [](double value, const char *unit) {
+        char text[32];
+        if (value < 0) return std::string("--");
+        snprintf(text, sizeof(text), "%.0f%s", value, unit);
+        return std::string(text);
+      };
+      snprintf(line, sizeof(line), "CPU %s %s - GPU %s %s", reading(p.cpu_percent, "%").c_str(),
+               reading(p.cpu_temp, "C").c_str(), reading(p.gpu_percent, "%").c_str(),
+               reading(p.gpu_temp, "C").c_str());
+      text(renderers[i], line, y + 48);
+      snprintf(line, sizeof(line), "SYSTEM RAM IN USE %.0f MB", p.used_ram / 1e6);
+      text(renderers[i], line, y + 72);
       int width, height;
       SDL_GetWindowSize(windows[i], &width, &height);
-      if (height != y + 60) SDL_SetWindowSize(windows[i], width, y + 60);
+      if (height != y + 108) SDL_SetWindowSize(windows[i], width, y + 108);
       SDL_RenderPresent(renderers[i]);
     }
     SDL_Delay(100);

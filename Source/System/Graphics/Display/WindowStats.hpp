@@ -1,4 +1,5 @@
 #pragma once
+#include "System/Graphics/Display/StatsOverlay.hpp"
 #include <cstdint>
 #include <istream>
 #include <string>
@@ -36,6 +37,9 @@ struct WindowInfo {
 };
 void note_present(void *key, const char *backend);
 std::string update_native(void *key, const WindowInfo &info);
+// The stats panel for a native window when the overlay is enabled: true when `image` is newer than the
+// last one handed out (it changes at most four times a second). The window owner draws it in the window.
+bool overlay_native(void *key, OverlayImage &image);
 void forget(void *window);
 void api(const std::string &name, const uint64_t *args, uint64_t result);
 void vk_present(uint64_t swapchain);
