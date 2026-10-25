@@ -134,6 +134,44 @@ public final class FrameworkDisplayProbe {
         check(service.invoke("getState", new Object[] {trustedClient}) == null, "unregistered client retained state");
         service.invoke("unregisterClient", new Object[] {client});
     }
+    // Queries a phone with one built-in panel answers without error. Values follow
+    // DisplayManagerService (android-15.0.0_r1): no HDR output control, no preferred mode, no
+    // decoration hardware, the default mode-switching type and the first-boot natural size.
+    private static void queries(DisplayManager manager, Display display, Object remote, Class<?> iface) throws Exception {
+        check(display.getSupportedModes().length == 1 && display.getMode().getPhysicalWidth() == 480
+                && display.getMode().getPhysicalHeight() == 800, "one 480x800 mode expected");
+        check(display.getHdrCapabilities() == null && !display.isHdr() && !display.isWideColorGamut(),
+                "an SDR sRGB panel");
+        check(display.getCutout() == null && display.getRoundedCorner(0) == null, "no cutout or rounded corners");
+        Point stable = (Point) iface.getMethod("getStableDisplaySize").invoke(remote);
+        check(stable.x == 480 && stable.y == 800, "stable size is the natural size: " + stable);
+        check(iface.getMethod("getRefreshRateSwitchingType").invoke(remote)
+                .equals(DisplayManager.class.getField("SWITCHING_TYPE_WITHIN_GROUPS").get(null)),
+                "default switching type is within groups");
+        check(manager.getMatchContentFrameRateUserPreference() == DisplayManager.class
+                .getField("MATCH_CONTENT_FRAMERATE_SEAMLESSS_ONLY").getInt(null), "match-content preference");
+        check(iface.getMethod("getUserPreferredDisplayMode", int.class).invoke(remote, -1) == null
+                && iface.getMethod("getSystemPreferredDisplayMode", int.class).invoke(remote, 0) == null,
+                "no preferred display mode");
+        check(iface.getMethod("getDisplayDecorationSupport", int.class).invoke(remote, 0) == null, "no decoration hardware");
+        check(((int[]) iface.getMethod("getUserDisabledHdrTypes").invoke(remote)).length == 0
+                && ((int[]) iface.getMethod("getSupportedHdrOutputTypes").invoke(remote)).length == 0,
+                "no HDR types");
+        check((Boolean) iface.getMethod("areUserDisabledHdrTypesAllowed").invoke(remote), "disabled HDR types are allowed");
+        Class<?> conversion = Class.forName("android.hardware.display.HdrConversionMode");
+        int unsupported = conversion.getField("HDR_CONVERSION_UNSUPPORTED").getInt(null);
+        for (String name : new String[] {"getHdrConversionMode", "getHdrConversionModeSetting"}) {
+            Object mode = iface.getMethod(name).invoke(remote);
+            check((Integer) conversion.getMethod("getConversionMode").invoke(mode) == unsupported, name + " is unsupported");
+        }
+        check(!(Boolean) iface.getMethod("isMinimalPostProcessingRequested", int.class).invoke(remote, 0),
+                "no minimal post-processing request");
+        try { iface.getMethod("isMinimalPostProcessingRequested", int.class).invoke(remote, 7); throw new AssertionError("unknown display"); }
+        catch (java.lang.reflect.InvocationTargetException expected) {
+            check(expected.getCause() instanceof NullPointerException, "unknown display must be a NullPointerException");
+        }
+    }
+
     private static void run() throws Exception {
         Looper.prepareMainLooper();
         main = new Handler(Looper.getMainLooper());
@@ -206,6 +244,7 @@ public final class FrameworkDisplayProbe {
         info.getClass().getField("logicalWidth").setInt(info, 1);
         Object fresh = iface.getMethod("getDisplayInfo", int.class).invoke(remote, 0);
         check(fresh.getClass().getField("logicalWidth").getInt(fresh) == 480, "display reply aliases service state");
+        queries(manager, displays[0], remote, iface);
         int[] ids = (int[]) iface.getMethod("getDisplayIds", boolean.class).invoke(remote, false);
         ids[0] = 99;
         check(((int[]) iface.getMethod("getDisplayIds", boolean.class).invoke(remote, true))[0] == 0,
@@ -245,6 +284,11 @@ public final class FrameworkDisplayProbe {
                 await(() -> changed.get() == 1, () -> {
                     displays[0].getRealSize(size);
                     check(size.x == 800 && size.y == 600, "callback observed stale display dimensions");
+                    try {
+                        // The first size play mode gives the display is the boot state; later sizes and rotation keep it.
+                        Point stable = (Point) iface.getMethod("getStableDisplaySize").invoke(remote);
+                        check(stable.x == 480 && stable.y == 640, "stable size changed after a resize: " + stable);
+                    } catch (Exception error) { throw new RuntimeException(error); }
                     check(displays[0].getRotation() == 1, "landscape resize left stale display rotation");
                     check(windowContext.getResources().getConfiguration().screenWidthDp == 800
                             && windowContext.getResources().getConfiguration().screenHeightDp == 600,

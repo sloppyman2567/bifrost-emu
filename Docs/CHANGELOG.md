@@ -14,6 +14,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android display: the DisplayManager queries apps reach no longer throw (2026-10-25)
+
+- A probe of the display API an app sees found `DisplayManager.getMatchContentFrameRateUserPreference` and five hidden
+  queries throwing from the stand-in (`getStableDisplaySize`, the HDR getters, the user preferred mode); the other
+  six answered here follow the same AOSP code. Eleven `IDisplayManager` methods now answer as `DisplayManagerService` at `android-15.0.0_r1` does
+  on a phone with one built-in panel; the stable size is the natural size of the first host window size. Brightness,
+  virtual-display and mode-request calls stay unsupported and are named in the log. The fixed 60 Hz mode and the zero
+  vsync offset and presentation deadline are unchanged, and are not host timing.
+- `FrameworkDisplayProbe` grew to 70 checks and passes in both engines. This is not a fix for the Umamusume
+  transparency, which none of these queries explain.
+
 ### Android services: unsupported calls are named in the log (2026-10-25)
 
 - An app call that a service stand-in does not answer (an `UnsupportedOperationException` from a Java service, or a

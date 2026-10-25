@@ -16,7 +16,11 @@ final class FrameworkDisplay implements FrameworkServices.Call {
         getDisplayInfo, getDisplayIds, registerCallback, registerCallbackWithEventMask,
         getPreferredWideGamutColorSpaceId, getOverlaySupport, getWifiDisplayStatus,
         disconnectWifiDisplay, connectWifiDisplay, renameWifiDisplay, forgetWifiDisplay,
-        pauseWifiDisplay, resumeWifiDisplay, startWifiDisplayScan, stopWifiDisplayScan
+        pauseWifiDisplay, resumeWifiDisplay, startWifiDisplayScan, stopWifiDisplayScan,
+        getStableDisplaySize, getRefreshRateSwitchingType, getUserPreferredDisplayMode,
+        getSystemPreferredDisplayMode, getDisplayDecorationSupport, areUserDisabledHdrTypesAllowed,
+        getUserDisabledHdrTypes, getHdrConversionMode, getHdrConversionModeSetting,
+        getSupportedHdrOutputTypes, isMinimalPostProcessingRequested
     }
 
     @Override public String[] methods() {
@@ -33,6 +37,10 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     private int rotation;
     private int maxWidth, maxHeight; // host display holding the window; 0 until play mode sizes it
     private int densityDpi = 160; // DisplayMetrics.DENSITY_DEFAULT until play mode sizes the display
+    // DisplayManagerService records the default display's natural size at first boot and reports it
+    // for good; here the first size play mode gives the display is that boot state.
+    private int stableWidth, stableHeight;
+    private boolean stableFromHost;
     private IInterface callback;
     private long eventsMask;
     private boolean wifiScanRequested;
@@ -190,6 +198,7 @@ final class FrameworkDisplay implements FrameworkServices.Call {
         this.packages = packages;
         main = new Handler(Looper.getMainLooper());
         info = displayInfo(width = 480, height = 800, densityDpi, rotation);
+        recordStableSize();
         services.register("display", "android.hardware.display.IDisplayManager", this);
     }
 
@@ -239,6 +248,32 @@ final class FrameworkDisplay implements FrameworkServices.Call {
                     wifiScanRequested = contract == Contract.startWifiDisplayScan;
                 }
                 return null;
+            // The remaining queries are answered as DisplayManagerService (android-15.0.0_r1) does on a
+            // phone with one built-in panel: no HDR output control, no user or system preferred mode,
+            // no decoration hardware, and the default mode-switching type.
+            case getStableDisplaySize: {
+                synchronized (this) { return new android.graphics.Point(stableWidth, stableHeight); }
+            }
+            case getRefreshRateSwitchingType:
+                return constant("android.hardware.display.DisplayManager", "SWITCHING_TYPE_WITHIN_GROUPS");
+            case getUserPreferredDisplayMode:
+            case getSystemPreferredDisplayMode:
+            case getDisplayDecorationSupport:
+                return null;
+            case areUserDisabledHdrTypesAllowed: return true;
+            case getUserDisabledHdrTypes:
+            case getSupportedHdrOutputTypes:
+                return new int[0];
+            case getHdrConversionMode:
+            case getHdrConversionModeSetting:
+                // The DeviceConfig flag behind mIsHdrOutputControlEnabled is unset here (default off), and the
+                // panel advertises no HDR types: HDR_CONVERSION_MODE_UNSUPPORTED.
+                return Class.forName("android.hardware.display.HdrConversionMode").getConstructor(int.class)
+                        .newInstance(constant("android.hardware.display.HdrConversionMode", "HDR_CONVERSION_UNSUPPORTED"));
+            case isMinimalPostProcessingRequested:
+                // The logical display lookup is unchecked in AOSP, so an unknown id is a NullPointerException.
+                if (((Integer) args[0]) != 0) throw new NullPointerException("no display " + args[0]);
+                return false;
             default: throw new UnsupportedOperationException("display." + method);
         }
     }
@@ -246,6 +281,17 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     private static void enforceWifiDisplay(FrameworkPackages packages) {
         if (!packages.granted("android.permission.CONFIGURE_WIFI_DISPLAY"))
             throw new SecurityException("android.permission.CONFIGURE_WIFI_DISPLAY");
+    }
+
+    // The natural (rotation 0) size, as DisplayInfo.getNaturalWidth/Height define it.
+    private void recordStableSize() throws Exception {
+        Class<?> type = info.getClass();
+        stableWidth = (Integer) type.getMethod("getNaturalWidth").invoke(info);
+        stableHeight = (Integer) type.getMethod("getNaturalHeight").invoke(info);
+    }
+
+    private static int constant(String type, String name) throws Exception {
+        return Class.forName(type).getField(name).getInt(null);
     }
 
     private synchronized Object snapshot() throws Exception {
@@ -295,6 +341,7 @@ final class FrameworkDisplay implements FrameworkServices.Call {
             int nextRotation = (rotation & 2) | (newWidth > newHeight ? 1 : 0);
             Object next = displayInfo(newWidth, newHeight, newDensityDpi, nextRotation);
             info = next;
+            if (!stableFromHost) { stableFromHost = true; recordStableSize(); }
             width = newWidth;
             height = newHeight;
             densityDpi = newDensityDpi;

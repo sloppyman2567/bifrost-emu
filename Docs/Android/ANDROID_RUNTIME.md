@@ -2463,7 +2463,26 @@ A follow-up normal managed launch without APK tracing reached its full
 `build/android-display-control/`. This separates the successful control run from
 the failing instrumented runs; it does not prove a cause for those timeouts.
 This does not test physical hotplug, HDR/brightness events or a changing refresh
-rate. The implementation remains strict for unsupported display operations.
+rate. The implementation remains strict for unsupported display operations; each one an
+app reaches is named once in the log (`SERVICE_CALL_UNSUPPORTED display <call>`).
+
+Eleven further `IDisplayManager` queries are answered (2026-10-25), each as `DisplayManagerService`
+at `android-15.0.0_r1` does on a phone with one built-in panel (source fetched and read for each):
+`getStableDisplaySize` is the default display's natural size, recorded from the first size play mode
+gives it and unchanged by later resizes or rotation; `getRefreshRateSwitchingType` is
+`SWITCHING_TYPE_WITHIN_GROUPS` (the `DisplayModeDirector` default, which makes
+`getMatchContentFrameRateUserPreference` seamless-only); `getUserPreferredDisplayMode`,
+`getSystemPreferredDisplayMode` and `getDisplayDecorationSupport` are null;
+`getUserDisabledHdrTypes` and `getSupportedHdrOutputTypes` are empty,
+`areUserDisabledHdrTypesAllowed` is true, and both HDR conversion getters return
+`HDR_CONVERSION_UNSUPPORTED` (the `DeviceConfig` flag for HDR output control is unset here);
+`isMinimalPostProcessingRequested(0)` is false and an unknown display is a `NullPointerException`,
+as in AOSP. Brightness, virtual-display, mirroring and mode-request calls need privileged permissions or
+a compositor and stay unsupported. The display still reports one fixed 60 Hz mode with
+`appVsyncOffsetNanos` and `presentationDeadlineNanos` of 0 (the `DisplayInfo` defaults): there is no
+compositor timing to report, and the refresh rate does not follow the host monitor.
+`FrameworkDisplayProbe` checks all of this (70 checks in each engine); the stable size after a
+real host window's first size has not been observed in a live game.
 
 Signatures, event masks and per-process callback behavior were checked against
 Android 15 [DisplayManagerService](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/display/DisplayManagerService.java)
