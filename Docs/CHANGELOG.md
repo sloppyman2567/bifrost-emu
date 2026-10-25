@@ -14,6 +14,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Graphics thunks: a guard against the next untranslated array, and crash reports that name the call (2026-10-25)
+
+- `Tools/CodeGen/glxmlcheck.py` (in `make generated-check`) now fails a GL/GLES thunk row whose `gl.xml` parameter is a
+  pointer-to-pointer when the row has no policy. It reports the seven commands (ten rows) whose `void **` parameter
+  is an output pointer as PENDING instead (`glGetPointerv`, `glGetBufferPointerv`, `glGetVertexAttribPointerv` and their
+  `EXT`/`KHR`/`OES`/`NV` forms): the driver writes a pointer value into guest memory there, which is likely a host
+  address for `GL_BUFFER_MAP_POINTER`; whether any of them misbehaves has not been tested. Reverting either of
+  the string-array fixes in a copy of the spec fails the check.
+- A host fault inside a graphics thunk call now names it: `[host-fault] sig=11 … map=/usr/lib/libc.so.6+0x1b471d
+  thunk=glGetUniformIndices`. Finding that call in the Geometry Dash Lite crash took a core dump and gdb. Checked by
+  re-breaking the `glGetUniformIndices` row in a build and running `test_gles_string_arrays`; AudioThunk and DisplayThunk
+  calls are not marked, and no automated test triggers a fault (that would need a deliberately broken row).
+
 ### Graphics thunks: arrays of strings reach the driver as host pointers (2026-10-25)
 
 - A WebView ad in Geometry Dash Lite killed the whole game: Chromium's GPU thread called `glGetUniformIndices`, whose

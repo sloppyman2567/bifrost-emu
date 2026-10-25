@@ -4,6 +4,7 @@
 #include "System/Core/Emulator.hpp"
 #include "System/Core/Signals.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Graphics/Thunks/ThunkCallRecord.hpp"
 #include <csignal>
 #include <cerrno>
 #include <cstdio>
@@ -101,6 +102,12 @@ static void report_host_fault(int signo, const siginfo_t* info, const void* cont
     append(out, end, " tid=");
     append_number(out, end, static_cast<uint64_t>(::syscall(SYS_gettid)), 10);
     if (pc) append_mapping(out, end, pc);
+    // The graphics thunk this thread was inside, if any: the fault is then in the host driver or
+    // libc acting on that call's arguments, not in the emulator's own code.
+    if (const char* thunk = thunk_call::in_flight) {
+        append(out, end, " thunk=");
+        append(out, end, thunk);
+    }
     *out++ = '\n';
     (void)!::write(STDERR_FILENO, text, static_cast<size_t>(out - text));
 }

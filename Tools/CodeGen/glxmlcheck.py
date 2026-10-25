@@ -12,6 +12,15 @@ For each GL/GLES-family row we compare:
                versa. Mismatches are exactly the class of bug that bit us
                on the Vulkan side (shifted pointer masks sending raw guest
                addresses into host memcpy).
+  2b. NESTED — a pointer-to-pointer parameter (`const GLchar *const*names`)
+               is not translated by the generic 'p' rule, which only turns the
+               array's own address into a host pointer: every entry stays a
+               guest address and the host driver dereferences it. A row with
+               such a parameter must carry a policy that marshals it
+               (SHADER_SOURCE, TF_VARYINGS, STRING_ARRAY, EL_PTR_ARRAY ...);
+               a plain '-' policy is an ERROR unless the command is on the
+               NESTED_PENDING list below with the reason. (glGetUniformIndices
+               had '-' and a WebView ad's call killed Geometry Dash Lite.)
   3. DYN     — pointer positions whose gl.xml <param len=...> marks a
                dynamically-sized array (COMPSIZE(...) or a sibling param)
                but which ride the default 64 KiB bounce. Reported as WARN;
@@ -49,6 +58,21 @@ DELIBERATE = {}
 
 WARN_CAP = 40
 
+# Rows with a pointer-to-pointer parameter and the generic policy that are known
+# and not yet handled. These are OUTPUT pointers: the driver writes a pointer
+# value into guest memory, so the guest can be handed a host address (for
+# example the host mapping behind glGetBufferPointerv(GL_BUFFER_MAP_POINTER)).
+# Reported as WARN so they stay visible; a new entry here needs a reason.
+NESTED_PENDING = {
+    'glGetPointerv': 'out void**: returns a host-side pointer value',
+    'glGetPointervEXT': 'out void**: returns a host-side pointer value',
+    'glGetPointervKHR': 'out void**: returns a host-side pointer value',
+    'glGetBufferPointerv': 'out void**: GL_BUFFER_MAP_POINTER is a host mapping',
+    'glGetBufferPointervOES': 'out void**: GL_BUFFER_MAP_POINTER is a host mapping',
+    'glGetVertexAttribPointerv': 'out void**: returns the translated client array',
+    'glGetVertexAttribPointervNV': 'out void**: returns the translated client array',
+}
+
 
 def parse_glxml(path):
     """name -> list of {name, type, ptr, len}."""
@@ -70,6 +94,7 @@ def parse_glxml(path):
                 'name': n.text if n is not None else '?',
                 'type': t.text if t is not None else '',
                 'ptr': '*' in txt,
+                'depth': txt.count('*'),
                 'len': p.get('len'),
             })
         cmds[pname.text] = params
@@ -81,7 +106,7 @@ def main():
     xml_path = sys.argv[2] if len(sys.argv) > 2 else XML_DEFAULT
     reg = parse_glxml(xml_path)
 
-    errors, warns, checked, skipped = [], [], 0, []
+    errors, warns, pending, checked, skipped = [], [], [], 0, []
     with open(spec_path) as fh:
         for lineno, line in enumerate(fh, 1):
             line = line.split('#', 1)[0].strip()
@@ -97,6 +122,24 @@ def main():
             if name in DELIBERATE:
                 skipped.append((name, lineno, DELIBERATE[name]))
                 continue
+            # 2b. a nested pointer needs a policy that marshals it
+            if policy == '-' and name in reg:
+                for i, xp in enumerate(reg[name]):
+                    if xp['depth'] < 2:
+                        continue
+                    if name in NESTED_PENDING:
+                        pending.append(
+                            f"{spec_path}:{lineno}: {name}: param {i} "
+                            f"({xp['name']}) is a pointer-to-pointer with no "
+                            f"policy — known: {NESTED_PENDING[name]}")
+                    else:
+                        errors.append(
+                            f"{spec_path}:{lineno}: {name}: NESTED — param "
+                            f"{i} ({xp['name']}, {xp['type']}) is a "
+                            f"pointer-to-pointer in gl.xml but the row has "
+                            f"no policy: the generic rule translates only "
+                            f"the array's own address, so every entry stays "
+                            f"a guest address the host driver dereferences")
             if policy in OWN_MARSHALLING_POLICIES:
                 skipped.append((name, lineno,
                                 f'policy {policy} owns its marshalling'))
@@ -170,6 +213,8 @@ def main():
     print(f"checked {checked} GL/GLES rows against gl.xml")
     for s in skipped:
         print(f"  SKIP {s[0]} (line {s[1]}): {s[2]}")
+    for w in pending:  # never subject to the warning cap
+        print("PENDING " + w)
     shown = 0
     for w in warns:
         if shown >= WARN_CAP:
@@ -181,7 +226,8 @@ def main():
               f"suppressed")
     for e in errors:
         print("ERROR " + e)
-    print(f"errors={len(errors)} warnings={len(warns)} skipped={len(skipped)}")
+    print(f"errors={len(errors)} warnings={len(warns)} pending-nested={len(pending)} "
+          f"skipped={len(skipped)}")
     sys.exit(2 if errors else 0)
 
 

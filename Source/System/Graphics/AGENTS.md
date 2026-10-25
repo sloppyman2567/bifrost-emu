@@ -44,6 +44,15 @@
   the generic path: glGetUniformIndices, glCreateShaderProgramv). The array is read through
   guest memory, so a count that outruns it cannot fault the host. `gles_string_arrays` covers
   them; a new function taking an array of strings needs a row with one of these policies.
+  `glxmlcheck.py` (part of `make generated-check`) fails any GL/GLES row whose `gl.xml` parameter
+  is a pointer-to-pointer but whose policy is `-`; the output `void **` rows still on its
+  `NESTED_PENDING` list (glGetPointerv, glGetBufferPointerv, glGetVertexAttribPointerv and
+  variants) are known and reported as PENDING, and a new entry needs a reason.
+- `GraphicThunk::dispatch` marks the symbol it runs (`thunk_call::Scope`,
+  `Thunks/ThunkCallRecord.hpp`); the host-fault report in `FrostJIT/Runtime/FaultHandler.cpp` ends
+  with `thunk=<name>` when the fault happened inside a graphics thunk call, i.e. in the driver or
+  libc acting on that call's arguments. The marker holds a name pointer only (the handler
+  allocates and locks nothing); AudioThunk and DisplayThunk calls are not marked.
   Guest callback pointers require guest runners, not host function invocation.
   Stage Vulkan storage before taking pointers into it; reallocation invalidates
   those pointers. Preserve deep-marshalling bounds and layout checks.

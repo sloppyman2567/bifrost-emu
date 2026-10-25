@@ -2,6 +2,7 @@
 // integer/pointer path (bounces, state tracking, writeback, presentation).
 #include <algorithm>
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
+#include "System/Graphics/Thunks/ThunkCallRecord.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/ExtensionFilter.hpp"
 namespace arm64emu {
 // BIFROST_FRAME_TRACE: GL/EGL calls of this thread since its last swap.
@@ -100,6 +101,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
+    // A host fault below (a driver or libc reading an untranslated guest pointer) names this call.
+    thunk_call::Scope thunk_scope(entry.spec ? entry.spec->name : entry.name.c_str());
     if (dbg().frame_trace) ++frame_calls()[entry.name];
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
