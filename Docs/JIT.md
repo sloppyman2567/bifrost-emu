@@ -15,6 +15,21 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## One compact checked path per guarded access (2026-10-26)
+
+Each Tier-1 guarded scalar access carried about 122 bytes of checked path after the block, run only while
+software checks are on: the real bound, then two copies of the page check, each with a 10-byte `movabs` of the
+page-flag table, an `add`, a `movzx`, and 64-bit `and`/`cmp` with imm32. `emit_guard_page_checks` now emits one
+sequence for Tier-1 tails and Tier-2's inline path: the flag byte is read through the table's address in the
+header page (`Memory::JIT_PAGE_FLAGS_OFF`, so the tail embeds no host address), `and`/`cmp` are byte-sized, a
+crossing access repeats the same check with its last page (the second pass then sees the same page and leaves),
+and failures jump short to the fault exit that follows. About 60 bytes for a 2- to 8-byte access.
+
+Measured (one machine): `qt_test` emits 110.2 bytes per guest instruction instead of 135.7 (-19%); Umamusume's
+game process 120.7 instead of 148.1 (150 s to the title, one run each, different block counts). The benchmarks
+run at the same speed (this code runs only while checks are on); the gain is fewer instruction-cache lines and
+pages per block in large programs, which no benchmark here measures, and no game frame rate was measured.
+
 ## The bounds compare gates the software checks (2026-10-26)
 
 With the software-check flag normally clear (next section), its test was the remaining per-access cost of a

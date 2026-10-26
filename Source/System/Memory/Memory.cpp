@@ -155,6 +155,7 @@ Memory::Memory(bool start_reporter, uint64_t window_max) {
         jit_software_checks_ = new (direct_window_ + JIT_SOFTWARE_CHECKS_OFF)
             std::atomic<bool>(false);
         direct_page_flags_ = static_cast<std::atomic<uint8_t>*>(flags);
+        std::memcpy(direct_window_ + JIT_PAGE_FLAGS_OFF, &direct_page_flags_, sizeof(direct_page_flags_));
         window_size_ = size;
         for (uint64_t width = 1; width <= JIT_WINDOW_LIMIT_MAX_WIDTH; ++width) {
             const uint64_t bound = size - width + 1;  // size is at least 512 GiB

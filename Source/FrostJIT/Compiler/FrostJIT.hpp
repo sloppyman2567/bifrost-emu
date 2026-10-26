@@ -931,6 +931,15 @@ private:
     GuardState capture_guard_state() const;
     void swap_guard_state(GuardState& state);  // exchange with the live state
     void flush_deferred_guards();
+    // The checked path of a guarded scalar access: the real window bound (when
+    // `bound`), then the page flags of the first and, for an access crossing a
+    // page, the last page must equal `required` under `mask`. Passing jumps
+    // (rel32, returned for the caller to patch) go to the access; a failure falls
+    // through to the end of the sequence, where the fault exit must follow.
+    struct GuardJump { size_t offset; bool jmp; };  // jmp rel32 or jcc rel32
+    std::vector<GuardJump> emit_guard_page_checks(int effective, int temp, int page, int width,
+                                                  uint8_t required, uint8_t mask, bool bound);
+    void patch_guard_jumps(const std::vector<GuardJump>& jumps, size_t target);
     void flush_deferred_fp_steps();
     static thread_local std::atomic<FrostJIT*> fault_jit_;
     void init_fault_recovery();

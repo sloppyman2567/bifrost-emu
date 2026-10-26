@@ -14,6 +14,13 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### A fifth less generated code (2026-10-26)
+
+- The checked path of each guarded load/store (run only while software page checks are on) is one compact
+  sequence: the page-flag table's address comes from the header page instead of a 10-byte immediate, the flag
+  tests are byte-sized and both pages share one check. `qt_test` emits 19% fewer bytes per guest instruction,
+  Umamusume's game process 18% fewer (148 to 121).
+
 ### Guarded loads and stores no longer test the software-check flag (2026-10-26)
 
 - The header-page bounds table doubles as the gate: Memory writes 0 into it while some page needs software

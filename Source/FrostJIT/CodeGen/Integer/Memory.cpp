@@ -122,43 +122,15 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     // Inline (Tier-2): the open gate or a clear flag jumps over the checks.
     const size_t bypass_pages = emit_jmp_rel32_placeholder();
     patch_jcc_rel32(checked, static_cast<int32_t>(code_buf_used_ - (checked + 6)));
-    if (gated) {
-        emit_window_bound_cmp(effective, mp.width, temp, false);
-        cold.push_back(emit_jcc_rel32_placeholder(kJccAE));
-    }
-    const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
-    auto check_page = [&] {
-        emit_mov_imm64(temp, flags);
-        note_host_reloc(HostReloc::PageFlags);
-        emit_add_reg(temp, page);
-        emit_load8(temp, temp, 0);
-        emit_alu_imm(temp, 4, mask);
-        emit_alu_imm(temp, 7, required);
-        cold.push_back(emit_jcc_rel32_placeholder(5));
-    };
-    emit_mov_reg(page, effective);
-    emit_shift_imm8(page, 5, 12);
-    check_page();
-    size_t same_page = 0;
-    if (mp.width > 1) {
-        emit_mov_reg(temp, effective);
-        emit_add_reg_imm(temp, mp.width - 1);
-        emit_shift_imm8(temp, 5, 12);
-        emit_cmp_reg(temp, page);
-        same_page = emit_jcc_rel32_placeholder(4);
-        emit_mov_reg(page, temp);
-        check_page();
-    }
-    const size_t hot = emit_jmp_rel32_placeholder();
+    std::vector<GuardJump> passed = emit_guard_page_checks(effective, temp, page, mp.width,
+                                                           required, mask, gated);
+    passed.push_back({bypass_pages, true});
     const size_t cold_offset = code_buf_used_;
     for (size_t p : cold)
         patch_jcc_rel32(p, static_cast<int32_t>(cold_offset - (p + 6)));
     emit_memory_fault_exit(inst, true);
     const size_t access = code_buf_used_;
-    patch_jmp_rel32(hot, static_cast<int32_t>(access - (hot + 5)));
-    patch_jmp_rel32(bypass_pages, static_cast<int32_t>(access - (bypass_pages + 5)));
-    if (same_page)
-        patch_jcc_rel32(same_page, static_cast<int32_t>(access - (same_page + 6)));
+    patch_guard_jumps(passed, access);
     if (load) {
         // The result uses a scratch register, leaving the original address
         // and every mapped architectural value intact if the load faults.
@@ -214,40 +186,65 @@ void FrostJIT::swap_guard_state(GuardState& state) {
 // Emit each deferred guard's cold code after the block: the software page
 // checks (jumping back to the access when they pass) and the recoverable
 // fault exit, with the state captured at the access temporarily installed.
+void FrostJIT::patch_guard_jumps(const std::vector<GuardJump>& jumps, size_t target) {
+    for (const GuardJump& j : jumps) {
+        if (j.jmp) patch_jmp_rel32(j.offset, static_cast<int32_t>(target - (j.offset + 5)));
+        else patch_jcc_rel32(j.offset, static_cast<int32_t>(target - (j.offset + 6)));
+    }
+}
+std::vector<FrostJIT::GuardJump> FrostJIT::emit_guard_page_checks(int effective, int temp, int page,
+                                                                  int width, uint8_t required,
+                                                                  uint8_t mask, bool bound) {
+    std::vector<size_t> fail;  // rel8 to the end of the sequence
+    std::vector<GuardJump> passed;
+    if (bound) {
+        // A closed gate diverts every address: check the real bound first.
+        fail.push_back(emit_jcc_rel8_placeholder(
+            static_cast<uint8_t>(emit_window_bound_cmp(effective, width, temp, false))));
+    }
+    emit_mov_reg(page, effective);
+    emit_shift_imm8(page, 5, 12);
+    // check: temp = page_flags[page] through the pointer in the header page, so
+    // the tail embeds no host address. Byte-sized and/cmp; a crossing access
+    // repeats the check with its last page, which then matches and leaves.
+    const size_t check = code_buf_used_;
+    emit_load(temp, WIN_REG, Memory::JIT_PAGE_FLAGS_OFF);
+    const uint8_t index = rex(false, temp >= 8, page >= 8, temp >= 8);
+    if (index != 0x40) emit_byte(index);
+    emit_byte(0x0F); emit_byte(0xB6);  // movzx temp32, byte [temp + page]
+    if ((temp & 7) == 5) {
+        emit_byte(modrm(1, temp & 7, 4)); emit_byte(sib(0, page & 7, temp & 7)); emit_byte(0);
+    } else {
+        emit_byte(modrm(0, temp & 7, 4)); emit_byte(sib(0, page & 7, temp & 7));
+    }
+    auto alu8 = [&](int kind, uint8_t imm) {  // and/cmp temp8, imm8 (REX for spl..dil, r8b..)
+        if (temp >= 4) emit_byte(rex(false, false, false, temp >= 8));
+        emit_byte(0x80); emit_byte(modrm(3, kind, temp & 7)); emit_byte(imm);
+    };
+    alu8(4, mask);
+    alu8(7, required);
+    fail.push_back(emit_jcc_rel8_placeholder(5));  // JNE
+    if (width > 1) {
+        emit_byte(rex(true, temp >= 8, false, effective >= 8));  // lea temp, [effective + width - 1]
+        emit_byte(0x8D);
+        emit_modrm_disp(temp, effective, width - 1);
+        emit_shift_imm8(temp, 5, 12);
+        emit_cmp_reg(temp, page);
+        passed.push_back({emit_jcc_rel32_placeholder(4), false});  // JE: same page
+        emit_mov_reg(page, temp);
+        emit_byte(0xEB);  // jmp check
+        emit_byte(static_cast<uint8_t>(static_cast<int8_t>(check - (code_buf_used_ + 1))));
+    } else {
+        passed.push_back({emit_jmp_rel32_placeholder(), true});
+    }
+    for (size_t p : fail) patch_jcc_rel8(p, static_cast<int8_t>(code_buf_used_ - (p + 2)));
+    return passed;
+}
 void FrostJIT::flush_deferred_guards() {
-    const uint64_t flags = guest_memory_ ?
-        reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags()) : 0;
     for (DeferredGuard& g : deferred_guards_) {
         patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
-        if (g.gated) {
-            // A closed gate diverts every address: check the real bound first.
-            emit_window_bound_cmp(g.effective, g.width, g.temp, false);
-            g.cold.push_back(emit_jcc_rel32_placeholder(kJccAE));
-        }
-        auto check_page = [&] {
-            emit_mov_imm64(g.temp, flags);
-            note_host_reloc(HostReloc::PageFlags);
-            emit_add_reg(g.temp, g.page);
-            emit_load8(g.temp, g.temp, 0);
-            emit_alu_imm(g.temp, 4, g.mask);
-            emit_alu_imm(g.temp, 7, g.required);
-            g.cold.push_back(emit_jcc_rel32_placeholder(5));
-        };
-        emit_mov_reg(g.page, g.effective);
-        emit_shift_imm8(g.page, 5, 12);
-        check_page();
-        if (g.width > 1) {
-            emit_mov_reg(g.temp, g.effective);
-            emit_add_reg_imm(g.temp, g.width - 1);
-            emit_shift_imm8(g.temp, 5, 12);
-            emit_cmp_reg(g.temp, g.page);
-            const size_t same_page = emit_jcc_rel32_placeholder(4);
-            patch_jcc_rel32(same_page, static_cast<int32_t>(g.access - (same_page + 6)));
-            emit_mov_reg(g.page, g.temp);
-            check_page();
-        }
-        const size_t back = emit_jmp_rel32_placeholder();
-        patch_jmp_rel32(back, static_cast<int32_t>(g.access - (back + 5)));
+        patch_guard_jumps(emit_guard_page_checks(g.effective, g.temp, g.page, g.width,
+                                                 g.required, g.mask, g.gated), g.access);
         const size_t stub = code_buf_used_;
         for (size_t p : g.cold)
             patch_jcc_rel32(p, static_cast<int32_t>(stub - (p + 6)));

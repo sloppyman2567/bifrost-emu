@@ -256,6 +256,8 @@ public:
         JIT_SOFTWARE_CHECKS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
     static constexpr int32_t JIT_WINDOW_BOUNDS_OFF =
         JIT_WINDOW_LIMITS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
+    // The address of direct_page_flags_, for the checked path's flag loads.
+    static constexpr int32_t JIT_PAGE_FLAGS_OFF = JIT_WINDOW_BOUNDS_OFF - 8;
     static constexpr int32_t jit_window_limit_off(uint64_t width) {
         return JIT_WINDOW_LIMITS_OFF + 8 * static_cast<int32_t>(width - 1);
     }

@@ -16,7 +16,8 @@ State shared between them goes in `MemoryInternal.hpp`.
 - The readable page before the window holds the JIT's software-check flag and
   two per-width tables of bounds (`window_size - width + 1`): the gate
   (`JIT_WINDOW_LIMITS_OFF`, 0 while software checks are on) and the real bounds
-  (`JIT_WINDOW_BOUNDS_OFF`). Generated code reads them through the window
+  (`JIT_WINDOW_BOUNDS_OFF`), plus the address of `direct_page_flags_`
+  (`JIT_PAGE_FLAGS_OFF`). Generated code reads them through the window
   register; change the flag and gate only through `set_software_checks`, and keep
   offsets and contents in step with `window_size_`.
 - `write()` stores each 2/4/8-byte element (and 16-byte halves) with a single
