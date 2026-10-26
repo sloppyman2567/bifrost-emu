@@ -29,7 +29,9 @@ dynamic runs are not selected; missing guest fixtures and unavailable display or
 `Tests/Unit/jit_dispatch_cache_growth.elf` with the cache in a temporary directory: a recording run, a reuse
 run (over 90 % hits), verify mode (no mismatch), damaged `main.bin` and truncated segments (rejected, results
 correct), a 1 MiB budget (file bytes on disk stay within it), two concurrent writers and their merge, a codegen
-switch (separate fingerprint), a fourth build whose budget holds about two of the three existing directories
+switch (separate fingerprint), `Tests/Unit/jit_disk_cache_relocated.elf` mapping one code page from a file at
+0x10000000 and then 0x7000000000 (verify finds the record equal to a fresh compile, the high mapping reuses it;
+the previous distance-based immediate rule failed this), a fourth build whose budget holds about two of the three existing directories
 (older ones pruned, nothing it records dropped) and a group-writable cache directory (cache off, program
 unaffected). It passed 10 runs in a row. It does not cover Android apps, code-cache renewals in a game or
 network filesystems; [JIT.md](JIT.md#persistent-translation-cache-2026-10-26-experimental-off-by-default)

@@ -28,8 +28,11 @@ statistics). `Runtime/CacheRecording.cpp` records and installs; `Runtime/Persist
   (`flag_dep_table_`) before relocating the code, then publishes through `publish_translation` like a
   fresh compile (granules, back references, chaining, pending calls).
 - **Proof compile.** A recording compile logs every `emit_u64` field; emitters that embed a host address
-  declare it with `note_host_reloc` (image, JIT object, window base, page flags, MT edge cell), and PC-like
-  constants within 4 GiB of the block take their imm64 form (`wide_guest_pc`). Before publication the block
+  declare it with `note_host_reloc` (image, JIT object, window base, page flags, MT edge cell), and every
+  constant from 0x10000 to 0xFFFF_FFFF takes its imm64 form (`wide_guest_pc`): it could be a guest PC of a
+  block mapped below 4 GiB, and the choice depends on the value alone, so the same code records the same bytes
+  at any load address (an earlier rule keyed on the distance to the block made verify report thousands of
+  encoding-only mismatches across Umamusume's processes). Before publication the block
   is compiled again at guest PCs shifted by `kOracleBias` (`record_oracle_`; fetches subtract the bias,
   everything it appended is discarded). Outside the logged fields the bytes must match; each field must be a
   constant, a declared address that lies inside what it names, a guest PC (moved by the bias) or a code
@@ -64,8 +67,19 @@ mode found no mismatch. `qt_test` (7,900 blocks): about 185 ms cache off, 105 ms
 declare their helper addresses, `mincore` rejected every affected block (4,784 of 7,894 in `qt_test`) and the
 reuse run stayed correct.
 
-Not yet validated: Android apps (ART JIT code is memfd-backed and never cached; native libraries are), a game
-session that renews its code cache, and network filesystems. Host addresses embedded as 32-bit immediates or
+Umamusume (EN 1.35.2, managed Asgard session, unattended 150 s runs, 2026-10-26): the game process records
+about 400,000 blocks in its first launch and fills the 512 MiB budget (about 1.3 KB a record; later blocks are
+dropped). A second launch in verify mode found 517,000 stored records equal to fresh compiles in the game process
+and 141,000 to 190,000 in each helper process, with no mismatch. Starting from the cache, 200,000 to 390,000
+blocks per launch were installed instead of compiled, and the game reached its first Unity log 10.4 to 12.7 s
+after start (three launches; 12.2 s in the one launch without the cache, 15.2 to 15.7 s while recording), too
+few runs to state a startup gain; the recording launch reached its later
+milestones about 25 % later than a launch without the cache. Unattended runs stop at the title, which needs a
+tap, so play past it from the cache has not been checked.
+
+Not yet validated: play past Umamusume's title and other Android games from the cache (ART JIT code is
+memfd-backed and never cached; native libraries are), a game session that renews its code cache, and network
+filesystems. Host addresses embedded as 32-bit immediates or
 RIP-relative operands outside the block are not covered by the checks above: emit host addresses as imm64
 with `note_host_reloc`. Tests: `Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry
 `jit_disk_cache`).

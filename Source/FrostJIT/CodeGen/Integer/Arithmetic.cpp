@@ -101,9 +101,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         }
         case IROp::IMM:
             if (inst.dest) {
-                // A recording compile keeps PC-like constants out of the fold
-                // and rematerialization paths and emits them as imm64, the
-                // only form a relocation can patch.
+                // A recording compile keeps constants that could be guest PCs
+                // (wide_guest_pc) out of the fold and rematerialization paths
+                // and emits them as imm64, the only form a relocation can patch.
                 const bool wide = wide_guest_pc(inst.imm_value());
                 if (inst.dest > 32 && inst.dest < 4096 && !wide)
                     jit_consts_[inst.dest] = inst.imm_value();

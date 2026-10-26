@@ -1269,7 +1269,7 @@ private:
     // ── Persistent-cache recording (Runtime/CacheRecording.cpp) ─────
     // A recording compile logs every 64-bit immediate it emits; the sites
     // that embed host addresses name what they point at (note_host_reloc),
-    // and PC-like constants take their wide encoding (wide_guest_pc), so the
+    // and constants a 32-bit form could hold take imm64 (wide_guest_pc), so the
     // bytes can be relocated in a later process. A second compile of the
     // block at guest PCs shifted by compile_pc_bias_ proves which fields
     // depend on the guest address. Normal compiles emit the same bytes as
@@ -1284,7 +1284,7 @@ private:
     bool recording_ = false;
     bool record_oracle_ = false;     // the shifted proof compile: publishes nothing
     uint64_t compile_pc_bias_ = 0;   // guest PCs = fetch address + bias
-    uint64_t record_start_ = 0, record_bias_ = 0;  // recorded block and its proof-compile bias
+    uint64_t record_bias_ = 0;       // the recorded block's proof-compile bias
     size_t record_edge_mark_ = 0;    // mt_edges_ size when the compile began
     std::vector<Imm64Field> imm64_fields_;
     void note_host_reloc(HostReloc kind, uint32_t edge = 0);

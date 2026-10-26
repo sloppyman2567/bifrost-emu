@@ -3,8 +3,8 @@
 //
 // A recording compile (recording_) is an ordinary public Tier-1 compile of
 // code mapped from a file. Its 64-bit immediates are logged, the sites that
-// embed host addresses name them (note_host_reloc) and PC-like constants
-// take their imm64 form. Before publication the block is compiled a second
+// embed host addresses name them (note_host_reloc) and every constant a
+// 32-bit form could hold takes its imm64 form (wide_guest_pc). Before publication the block is compiled a second
 // time with every guest PC shifted by a page-aligned bias (record_oracle_:
 // fetches subtract the bias, nothing is published, everything it appended
 // is removed again). Outside the logged fields both compiles must emit the
@@ -148,12 +148,12 @@ void FrostJIT::note_host_reloc(HostReloc kind, uint32_t edge) {
     imm64_fields_.back().edge = edge;
 }
 bool FrostJIT::wide_guest_pc(uint64_t value) const {
-    // Within 4 GiB of the block or of its shifted copy: a PC, or a constant
-    // that only costs a longer encoding. Both compiles test the same two
-    // points, so a constant takes the same form in both and a PC (shifted
-    // with its block) does too.
-    auto near = [value](uint64_t pc) { return value - pc + (1ull << 32) <= (1ull << 33); };
-    return recording_ && value >= 0x10000 && (near(record_start_) || near(record_start_ + record_bias_));
+    // Every value a 32-bit form could hold may be a guest PC of a block mapped
+    // below 4 GiB, so all of them take the imm64 form; larger values have no
+    // shorter form. The choice depends on the value alone: the same code
+    // records the same bytes wherever a process maps it (verify compares
+    // records across processes), and a constant costs only a longer encoding.
+    return recording_ && value >= 0x10000 && value <= 0xFFFFFFFFull;
 }
 
 // ── Setup ──────────────────────────────────────────────────────────────
@@ -211,7 +211,6 @@ static uint64_t oracle_bias(uint64_t start_pc, uint64_t window) {
 bool FrostJIT::begin_recording(uint64_t start_pc) {
     Memory::CodeOrigin origin;
     if (!guest_memory_->code_origin(start_pc, origin)) return false;
-    record_start_ = start_pc;
     record_bias_ = oracle_bias(start_pc, guest_memory_->window_size());
     record_origin_.file_key = origin.file_key;
     record_origin_.file_offset = origin.file_offset;

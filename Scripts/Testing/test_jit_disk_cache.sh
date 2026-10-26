@@ -2,7 +2,9 @@
 # Persistent JIT cache (BIFROST_JIT_DISK_CACHE): a run records translations,
 # later runs at other ASLR bases reuse them with the same results, verify
 # mode finds every reused record equal to a fresh compile, damaged files and
-# a small budget degrade to compiling, concurrent writers are merged, a
+# a small budget degrade to compiling, concurrent writers are merged, the
+# same file-backed code mapped below and above 4 GiB records the same bytes
+# (verify finds no mismatch, the other address reuses it), a
 # codegen switch selects another fingerprint, a new build prunes older ones
 # without dropping what it records, and a cache directory that others can
 # write to keeps the cache off.
@@ -11,7 +13,10 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 emu=${BIFROST_EMU:-$repo/bifrost-emu}
 fixture="$repo/Tests/Unit/jit_dispatch_cache_growth.elf"
 if [[ "$emu" != /* ]]; then emu="$PWD/$emu"; fi
-if [[ ! -f "$fixture" ]]; then echo "Missing $(basename "$fixture"); build with make cross" >&2; exit 1; fi
+relocated="$repo/Tests/Unit/jit_disk_cache_relocated.elf"
+for f in "$fixture" "$relocated"; do
+    if [[ ! -f "$f" ]]; then echo "Missing $(basename "$f"); build with make setup-tests" >&2; exit 1; fi
+done
 work=$(mktemp -d /tmp/bifrost-disk-cache-test.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
 
@@ -53,15 +58,24 @@ prune_mb=$(( one_dir * 26 / 10 / 1048576 + 1 ))
 run pruned BIFROST_NO_SELFLOOP=1 BIFROST_JIT_DISK_CACHE_MB=$prune_mb
 fingerprints_after_prune=$(ls -d "$work"/cache/*/* | wc -l)
 pruned_bytes=$(file_bytes "$work/cache")
+relocated_run() {  # relocated_run LOG ADDRESS [ENV...]: the code page mapped at ADDRESS
+    local log=$1 address=$2; shift 2
+    env -u BIFROST_ROOT -u BIFROST_JIT_CACHE_APP BIFROST_JIT_DISK_CACHE_DIR="$work/relocated-cache" \
+        BIFROST_JIT_DISK_CACHE_COMPACT_DELAY=0 "$@" timeout -s KILL 60 "$emu" --verbose "$relocated" "$address" \
+        "$work/kernel.bin" > "$work/$log.log" 2>&1
+}
+relocated_run relocated_low 0x10000000 BIFROST_JIT_DISK_CACHE=verify
+relocated_run relocated_high 0x7000000000 BIFROST_JIT_DISK_CACHE=verify
+relocated_run relocated_reuse 0x7000000000 BIFROST_JIT_DISK_CACHE=1
 mkdir -m 0775 "$work/shared"
 env -u BIFROST_ROOT BIFROST_JIT_DISK_CACHE=1 BIFROST_JIT_DISK_CACHE_DIR="$work/shared" \
     timeout -s KILL 60 "$emu" --verbose "$fixture" > "$work/shared.log" 2>&1
 python3 - "$work" "$budget_bytes" "$fingerprints_after_prune" "$pruned_bytes" "$prune_mb" <<'PY'
 import pathlib,re,sys
 work=pathlib.Path(sys.argv[1])
-def stats(name):
+def stats(name,passed='jit_dispatch_cache_growth: ALL PASS'):
     log=(work/f'{name}.log').read_text()
-    assert 'jit_dispatch_cache_growth: ALL PASS' in log,(name,log[-3000:])
+    assert passed in log,(name,log[-3000:])
     line=re.findall(r'\[JIT\] disk cache: (.*)',log)
     assert line,(name,'no disk cache statistics',log[-2000:])
     return {k:int(v) for k,v in re.findall(r'(\w+)=(\d+)',line[-1])}
@@ -86,6 +100,12 @@ pruned=stats('pruned')
 assert pruned['over_budget']==0 and pruned['recorded']>1000,pruned
 assert int(sys.argv[3])<4 and int(sys.argv[4])<=int(sys.argv[5])<<20,sys.argv[3:]
 print(f"new build: older fingerprints pruned to {sys.argv[3]} directories, {pruned['recorded']} recorded, none dropped")
+moved=lambda name: stats(name,'jit_disk_cache_relocated: ALL PASS')
+low,high,again=moved('relocated_low'),moved('relocated_high'),moved('relocated_reuse')
+assert low['recorded']>100 and high['verify_mismatches']==0 and high['hits']>100,(low,high)
+assert 'differs from a fresh compile' not in (work/'relocated_high.log').read_text()
+assert again['hits']>100 and again['misses']<=10,again
+print(f"code moved from 0x10000000 to 0x7000000000: {high['hits']} records equal to fresh compiles, {again['hits']} reused")
 shared=(work/'shared.log').read_text()
 assert 'jit_dispatch_cache_growth: ALL PASS' in shared and 'disk cache: off' in shared,shared[-2000:]
 assert not list((work/'shared').rglob('*.bin')),'cache written to a group-writable directory'

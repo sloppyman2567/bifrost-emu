@@ -24,7 +24,10 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   `BIFROST_JIT_DISK_CACHE_MB` (512 per application); a new build prunes older builds' directories first. The cache
   stays off in a directory others can write to or without `flock`. The fingerprint's switch list is generated
   by the build. Measured: `qt_test` starts in about 105 ms from the cache against 185 ms without it, but the
-  recording launch takes about 287 ms. Not yet validated on Android apps or in games. `test_jit_disk_cache.sh`
+  recording launch takes about 287 ms. In Umamusume, verify mode found every reused record equal to a fresh compile
+  across the game and its helper processes (after making the imm64 choice depend on the value alone), and launches
+  from the cache install 200,000 to 390,000 blocks instead of compiling them; no startup gain is established yet and
+  play past the title from the cache is not yet checked. `test_jit_disk_cache.sh`
   covers it.
 
 ### fcntl owner, signal and lease commands: Umamusume no longer ends itself about 8 s in (2026-10-26)
