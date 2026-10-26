@@ -125,7 +125,7 @@ void Memory::enable_uffd_tracking() {
     uint64_t entry;
     if (fd < 0 || ::pread(fd, &entry, sizeof(entry), 0) != sizeof(entry)) {
         software_checks_sticky_ = true;
-        jit_software_checks_->store(true, std::memory_order_seq_cst);
+        set_software_checks(true);
     }
     if (fd >= 0) ::close(fd);
     uffd_tracking_.store(true, std::memory_order_release);
@@ -190,7 +190,7 @@ int Memory::uffd_register(uint64_t addr, uint64_t len, bool registered) {
     for (const auto& [lo, hi] : ranges) {
         if (registered && !refresh_missing_locked(lo, hi) && !software_checks_sticky_) {
             software_checks_sticky_ = true;
-            jit_software_checks_->store(true, std::memory_order_seq_cst);
+            set_software_checks(true);
         }
         for (uint64_t p = lo / PAGE_SIZE; p < hi / PAGE_SIZE; ++p) {
             const uint8_t flags = direct_page_flags_[p].load(std::memory_order_relaxed);

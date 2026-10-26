@@ -243,15 +243,24 @@ public:
     // header page in front of the reservation), so generated code tests it
     // with one `cmp byte [window_base + off], 0` through its window register.
     static constexpr int32_t JIT_SOFTWARE_CHECKS_OFF = -8;
-    // Window limits (window_size - width) for access widths 1..64 sit below
-    // the flag in the same header page, so generated code bounds-checks an
-    // address with one `cmp reg, [window_base + off]` instead of loading a
-    // 64-bit immediate into a scratch register.
+    // Two tables for access widths 1..64 sit below the flag in the same header
+    // page, so generated code bounds-checks an address with one
+    // `cmp reg, [window_base + off]` instead of loading a 64-bit immediate.
+    // A bound is the first address an access of that width must not start at
+    // (window_size - width + 1); generated code diverts with `jae`. The gate
+    // (jit_window_limit_off) holds the bound while the flag is clear and 0 while
+    // it is set, so one compare covers both and every address diverts to the
+    // checked path, which compares with the real bound (jit_window_bound_off).
     static constexpr uint64_t JIT_WINDOW_LIMIT_MAX_WIDTH = 64;
     static constexpr int32_t JIT_WINDOW_LIMITS_OFF =
         JIT_SOFTWARE_CHECKS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
+    static constexpr int32_t JIT_WINDOW_BOUNDS_OFF =
+        JIT_WINDOW_LIMITS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
     static constexpr int32_t jit_window_limit_off(uint64_t width) {
         return JIT_WINDOW_LIMITS_OFF + 8 * static_cast<int32_t>(width - 1);
+    }
+    static constexpr int32_t jit_window_bound_off(uint64_t width) {
+        return JIT_WINDOW_BOUNDS_OFF + 8 * static_cast<int32_t>(width - 1);
     }
     const std::atomic<bool>* jit_software_checks() const { return jit_software_checks_; }
     // UFFDIO_REGISTER/UNREGISTER of [addr, addr+len): the range is already
@@ -475,6 +484,8 @@ private:
     // software_check_page pages and the JIT flag (raised before the page changes,
     // cleared after the last one does).
     void set_page_flags_locked(uint64_t page, uint8_t flags);
+    // The flag and the gate table together (JIT_WINDOW_LIMITS_OFF).
+    void set_software_checks(bool on);
     // Clear MISSING on pages in [lo, hi) that have a host page-table entry:
     // native JIT code populates a discarded page without clearing the bit
     // while the flag is clear. False when /proc/self/pagemap cannot be read.

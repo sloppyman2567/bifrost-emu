@@ -8,7 +8,18 @@
  * through the guest handler, for every width and both directions. QEMU 11.1
  * reports these addresses the same way. (Lower out-of-window addresses such
  * as 2^47 are not used: QEMU reports si_addr 0 for them.)
+ *
+ * The checks run again while a userfaultfd-registered page is missing: then
+ * the header-page gate reads 0, every access takes the checked path, and that
+ * path must still compare with the real window bound.
  */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -44,12 +55,7 @@ static void expect_fault(const char* name, int faulted, uintptr_t want) {
     if (!faulted) __asm__ volatile(ins : : "r"(val), "r"(b) : "memory"); \
     expect_fault(name, faulted, (want)); } while (0)
 
-int main(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = on_segv;
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigaction(SIGSEGV, &sa, NULL);
+static void run_checks(void) {
     const uint64_t bases[] = {0xfffffffffffff000ull, 0xffffffffffffff00ull};
     for (unsigned i = 0; i < sizeof(bases) / sizeof(bases[0]); ++i) {
         const uint64_t a = bases[i];
@@ -72,6 +78,29 @@ int main(void) {
         LOAD("ldur x wrap", "ldur %0, [%1, #-8]", 0, 0xfffffffffffffff8ull);
         STORE("stur w wrap", "stur %w0, [%1, #-4]", 0, 0xfffffffffffffffcull);
     }
+}
+
+// A registered page left missing for the second pass; 0 when unavailable.
+static int missing_page(void) {
+    int fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | 1);
+    if (fd < 0) fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC);
+    struct uffdio_api api = {.api = UFFD_API, .features = UFFD_FEATURE_SIGBUS};
+    if (fd < 0 || ioctl(fd, UFFDIO_API, &api)) return 0;
+    char* page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED || madvise(page, 4096, MADV_DONTNEED)) return 0;
+    struct uffdio_register reg = {.range = {(uintptr_t)page, 4096}, .mode = UFFDIO_REGISTER_MODE_MISSING};
+    return ioctl(fd, UFFDIO_REGISTER, &reg) == 0;
+}
+
+int main(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_segv;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGSEGV, &sa, NULL);
+    run_checks();
+    if (missing_page()) run_checks();
+    else printf("jit_window_bounds: no userfaultfd, second pass skipped\n");
     if (fails) { printf("jit_window_bounds: %d of %d checks FAILED\n", fails, checks); return 1; }
     printf("jit_window_bounds: %d checks passed\n", checks);
     return 0;

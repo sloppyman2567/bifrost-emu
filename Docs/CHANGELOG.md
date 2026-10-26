@@ -14,6 +14,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Guarded loads and stores no longer test the software-check flag (2026-10-26)
+
+- The header-page bounds table doubles as the gate: Memory writes 0 into it while some page needs software
+  checks, so one `cmp`/`jae` per scalar access replaces the bounds compare plus the flag test, and the checked
+  path compares with a second table of real bounds. `bench_fib` 10%, `bench_memcpy` 6%, `bench_sort` 5% faster;
+  emitted code 0.6% larger (the cold path gained the bound compare). `jit_window_bounds` checks out-of-window
+  faults with the gate closed.
+
 ### ART apps no longer check page flags on every memory access (2026-10-26)
 
 - ART calls `userfaultfd()` when libart loads, which used to switch every guest load and store in an Android

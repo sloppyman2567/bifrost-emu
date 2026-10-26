@@ -15,6 +15,29 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## The bounds compare gates the software checks (2026-10-26)
+
+With the software-check flag normally clear (next section), its test was the remaining per-access cost of a
+guarded scalar load or store: `cmp byte [r10-8],0; jne`, 11 bytes, a load and a branch. Removing it made the
+four-access loop below 17% faster (2.74 to 2.28 ns per iteration, five runs each), so the bounds compare now does
+both jobs. The header page holds two tables of bounds (`window_size - width + 1`, the first address an access
+of that width must not start at): the gate (`Memory::jit_window_limit_off`) and the real bounds
+(`jit_window_bound_off`). `Memory::set_software_checks` writes 0 into every gate before the flag goes up and
+restores them after it comes down, so `cmp addr,[r10+gate]; jae` sends every address, 0 included, to the checked
+path while some page needs it. That path compares with the real bound (`jae` to the fault exit) before the page
+flags, then rejoins the access. An `LDAR`'s alignment check now precedes the gate because the checked path rejoins
+after it. `emit_window_bound_cmp` returns the condition: `jae` for a table, `ja` for the `emit_window_limit`
+fallback (a width without an entry, which also keeps the flag test). `emit_load_mem`/`emit_store_mem` read the
+gate too; their C slow path checks everything. Other emitters (pairs, vectors, atomics) still test the flag.
+
+Measured (one machine, against the previous commit, minimum of five alternating runs): `bench_fib` 10% faster,
+`bench_memcpy` 6%, `bench_sort` 5%, `bench_matrix` 3%; `bench_mips`, `bench_dispatch` and `qt_test` within 1%.
+Emitted code grew 0.6% (`qt_test`: 134.9 to 135.7 bytes per guest instruction): 11 hot bytes fewer per access,
+14 cold bytes more for the real-bound compare. Umamusume ran 150 s to its title with 16 collections. A hot loop
+of the same 1,220 bytes also ran about 10% slower at a different offset in its cache line, so microbenchmark
+differences of that size need several layouts. `jit_window_bounds` repeats every check while a
+userfaultfd-registered page is missing (closed gate); without the real-bound compare the emulator crashes there.
+
 ## Software page checks only while a page needs them (2026-10-26)
 
 ART calls `userfaultfd()` when libart loads (`KernelSupportsUffd` in `gUseUserfaultfd`'s static initializer,

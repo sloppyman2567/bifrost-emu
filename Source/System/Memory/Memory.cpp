@@ -157,8 +157,9 @@ Memory::Memory(bool start_reporter, uint64_t window_max) {
         direct_page_flags_ = static_cast<std::atomic<uint8_t>*>(flags);
         window_size_ = size;
         for (uint64_t width = 1; width <= JIT_WINDOW_LIMIT_MAX_WIDTH; ++width) {
-            const uint64_t limit = size - width;  // size is at least 512 GiB
-            std::memcpy(direct_window_ + jit_window_limit_off(width), &limit, sizeof(limit));
+            const uint64_t bound = size - width + 1;  // size is at least 512 GiB
+            std::memcpy(direct_window_ + jit_window_bound_off(width), &bound, sizeof(bound));
+            std::memcpy(direct_window_ + jit_window_limit_off(width), &bound, sizeof(bound));
         }
         break;
     }
@@ -294,6 +295,21 @@ bool Memory::mapping_prot_at_locked(uint64_t addr, uint8_t& prot) const {
     prot = it->second.prot & 7;
     return true;
 }
+void Memory::set_software_checks(bool on) {
+    // Raised (gates, then flag) before the first page needs it; cleared in the
+    // reverse order after the last one stopped needing it. Generated code reads
+    // a gate (scalar accesses) or the flag (other emitters) before each access.
+    auto* gates = reinterpret_cast<uint64_t*>(direct_window_ + JIT_WINDOW_LIMITS_OFF);
+    const auto* bounds = reinterpret_cast<const uint64_t*>(direct_window_ + JIT_WINDOW_BOUNDS_OFF);
+    if (on) {
+        for (uint64_t i = 0; i < JIT_WINDOW_LIMIT_MAX_WIDTH; ++i) __atomic_store_n(&gates[i], 0, __ATOMIC_RELAXED);
+        jit_software_checks_->store(true, std::memory_order_seq_cst);
+    } else {
+        jit_software_checks_->store(false, std::memory_order_release);
+        for (uint64_t i = 0; i < JIT_WINDOW_LIMIT_MAX_WIDTH; ++i)
+            __atomic_store_n(&gates[i], bounds[i], __ATOMIC_RELEASE);
+    }
+}
 void Memory::set_page_flags_locked(uint64_t page, uint8_t flags) {
     auto& slot = direct_page_flags_[page];
     const bool was = software_check_page(slot.load(std::memory_order_relaxed));
@@ -301,13 +317,13 @@ void Memory::set_page_flags_locked(uint64_t page, uint8_t flags) {
     // Raised before the page needs it; generated code reads it right before
     // each access, as it reads the page flags themselves on the checked path.
     if (now && !was && software_check_pages_.fetch_add(1, std::memory_order_relaxed) == 0) {
-        jit_software_checks_->store(true, std::memory_order_seq_cst);
+        set_software_checks(true);
         software_check_activations_.fetch_add(1, std::memory_order_relaxed);
     }
     slot.store(flags, std::memory_order_release);
     if (was && !now && software_check_pages_.fetch_sub(1, std::memory_order_relaxed) == 1 &&
         !software_checks_sticky_)
-        jit_software_checks_->store(false, std::memory_order_release);
+        set_software_checks(false);
 }
 void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                 bool combine, bool keep_uffd) {

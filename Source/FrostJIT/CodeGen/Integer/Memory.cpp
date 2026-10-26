@@ -68,23 +68,29 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     const int page = alloc_reg();
     pinned_host_regs_ |= (1u << page);
 
-    if (!emit_window_limit_cmp(effective, mp.width)) {
-        emit_window_limit(temp, mp.width);
-        emit_cmp_reg(effective, temp);
-    }
     std::vector<size_t> cold;
-    cold.push_back(emit_jcc_rel32_placeholder(7)); // JA: full-width bounds
     if (decoded.cls == InstClass::LDAR && mp.width > 1) {
         // Aligned x86 loads are atomic and acquire ordered. Leave unaligned
         // accesses on the existing interpreter path instead of allowing a
-        // native access to tear across a cache-line/page boundary.
+        // native access to tear across a cache-line/page boundary. Before the
+        // gate: the checked path rejoins at the access.
         emit_mov_reg(temp, effective);
         emit_alu_imm(temp, 4, mp.width - 1);
         cold.push_back(emit_jcc_rel32_placeholder(5));
     }
-    // Activation is sticky and visible to already compiled code. Never hoist
-    // this check out of a loop: another CPU can enable userfaultfd tracking.
-    emit_test_software_checks();
+    // The gate reads 0 while some page needs software checks, which can start
+    // while this code runs: never hoist it out of a loop. A width without a
+    // table entry compares with the window limit and tests the flag instead.
+    const int outside = emit_window_bound_cmp(effective, mp.width, temp, true);
+    const bool gated = outside == kJccAE;
+    size_t checked = 0;
+    if (gated) {
+        checked = emit_jcc_rel32_placeholder(outside);
+    } else {
+        cold.push_back(emit_jcc_rel32_placeholder(outside));
+        emit_test_software_checks();
+        checked = emit_jcc_rel32_placeholder(5);  // JNE
+    }
     const uint8_t required = Memory::GUEST_PAGE_MAPPED |
         (load ? Memory::GUEST_PROT_READ : Memory::GUEST_PROT_WRITE);
     const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
@@ -94,7 +100,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         // GPR/vector state is captured here, where both cold paths divert,
         // exactly as the inline fault exit below would see it.
         DeferredGuard guard{inst, effective, temp, page, mp.width, required, mask,
-                            0, emit_jcc_rel32_placeholder(5) /* JNE */, 0, false,
+                            0, checked, 0, false, gated,
                             std::move(cold), capture_guard_state()};
         guard.access = code_buf_used_;
         // Placeholder recovery offset: flush_deferred_guards patches the
@@ -113,7 +119,13 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         pinned_host_regs_ = saved_pins;
         return true;
     }
-    const size_t bypass_pages = emit_jcc_rel32_placeholder(4);
+    // Inline (Tier-2): the open gate or a clear flag jumps over the checks.
+    const size_t bypass_pages = emit_jmp_rel32_placeholder();
+    patch_jcc_rel32(checked, static_cast<int32_t>(code_buf_used_ - (checked + 6)));
+    if (gated) {
+        emit_window_bound_cmp(effective, mp.width, temp, false);
+        cold.push_back(emit_jcc_rel32_placeholder(kJccAE));
+    }
     const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
     auto check_page = [&] {
         emit_mov_imm64(temp, flags);
@@ -144,7 +156,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     emit_memory_fault_exit(inst, true);
     const size_t access = code_buf_used_;
     patch_jmp_rel32(hot, static_cast<int32_t>(access - (hot + 5)));
-    patch_jcc_rel32(bypass_pages, static_cast<int32_t>(access - (bypass_pages + 6)));
+    patch_jmp_rel32(bypass_pages, static_cast<int32_t>(access - (bypass_pages + 5)));
     if (same_page)
         patch_jcc_rel32(same_page, static_cast<int32_t>(access - (same_page + 6)));
     if (load) {
@@ -207,6 +219,11 @@ void FrostJIT::flush_deferred_guards() {
         reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags()) : 0;
     for (DeferredGuard& g : deferred_guards_) {
         patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
+        if (g.gated) {
+            // A closed gate diverts every address: check the real bound first.
+            emit_window_bound_cmp(g.effective, g.width, g.temp, false);
+            g.cold.push_back(emit_jcc_rel32_placeholder(kJccAE));
+        }
         auto check_page = [&] {
             emit_mov_imm64(g.temp, flags);
             note_host_reloc(HostReloc::PageFlags);

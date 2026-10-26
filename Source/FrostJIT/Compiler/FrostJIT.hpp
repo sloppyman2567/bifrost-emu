@@ -912,6 +912,7 @@ private:
         uint8_t width, required, mask;
         size_t access, sw_jump, site_index;
         bool has_site;
+        bool gated;  // sw_jump is the gate: the tail first checks the real bound
         std::vector<size_t> cold;  // jcc placeholders targeting the fault exit
         GuardState state;
     };
@@ -1342,7 +1343,13 @@ private:
     void emit_window_limit(int dst, uint64_t width);
     // cmp idx, [WIN_REG + window limit for width]; false when the width has no
     // header-page entry (the caller then uses emit_window_limit + cmp).
-    bool emit_window_limit_cmp(int idx, uint64_t width);
+    // Compare idx with the window bound of a `width`-byte access and return the
+    // jcc condition under which it must not be accessed natively: kJccAE against
+    // the header-page table (`gate`: the table that reads 0 while software checks
+    // are on, so every address diverts; else the real bound), or kJccA against
+    // the limit loaded into `scratch` for a width without an entry (never gated).
+    static constexpr int kJccA = 7, kJccAE = 3;
+    int emit_window_bound_cmp(int idx, uint64_t width, int scratch, bool gate);
     void emit_mov_reg(int dst, int src);
     void emit_load(int dst, int base, int32_t off);
     void emit_store(int base, int32_t off, int src);
