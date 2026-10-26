@@ -103,9 +103,20 @@ final class FrameworkAudioTracks {
 
     // Parses CreateTrackRequest from `data` (positioned after the interface token) and
     // writes CreateTrackResponse to `reply`, or a service-specific status_t when it refuses.
+    //
+    // The host stream is opened through the process's `libaaudio.so`. When that is Android's own
+    // library instead of the Bifrost adapter, it plays through AudioTrack and so back into
+    // createTrack on the same thread, without end until the stack overflows. A nested request on
+    // the thread is refused, which fails the outer stream open and the app's AudioTrack cleanly.
+    private static final ThreadLocal<Boolean> creating = new ThreadLocal<>();
+
     void createTrack(Parcel data, Parcel reply, long[] hostConfig) throws RemoteException {
         try {
-            createTrackUnchecked(data, reply, hostConfig);
+            if (creating.get() != null)
+                throw new Failure(NO_INIT, "createTrack re-entered from the host stream: libaaudio is not the Bifrost adapter");
+            creating.set(Boolean.TRUE);
+            try { createTrackUnchecked(data, reply, hostConfig); }
+            finally { creating.remove(); }
         } catch (Failure failure) {
             System.out.println("AUDIOTRACK_REFUSED " + failure.status + " " + failure.getMessage());
             writeFailure(reply, failure);

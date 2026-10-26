@@ -21,7 +21,9 @@
   data-callback stream per track on the managed libaaudio adapter. Keep the
   cblk layout, obtain/release/flush/stop rules and futex wakes matched to
   AOSP `AudioTrackShared` `android-15.0.0_r1`; its `_Static_assert`s pin the
-  offsets and `ManagedServiceBatch.audioTracks` checks a real client.
+  offsets and `ManagedServiceBatch.audioTracks` checks a real client. `createTrack` refuses
+  a nested request on its own thread: with Android's `libaaudio` in place of the adapter the
+  stream open loops back into it (`ManagedServiceBatch` mode `no-audio-adapter` covers this).
 - Managed OpenSL ES is the guest `Guest/Android/Adapters/opensles.c`, layered on
   the managed libaaudio adapter (its callback thread runs buffer-queue callbacks),
   not the host `AudioThunk/OpenSL.cpp` vtables. Keep its result codes and

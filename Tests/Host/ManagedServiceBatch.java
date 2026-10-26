@@ -1149,9 +1149,35 @@ public final class ManagedServiceBatch {
         check(stopped.await(10, java.util.concurrent.TimeUnit.SECONDS) && !found[0], "NSD discovery did not stop cleanly");
     }
 
+    // Without the managed libaaudio adapter (no --managed-graphics) the host stream opens through Android's
+    // own libaaudio, which plays through AudioTrack and so through createTrack again. That used to recurse
+    // until the stack overflowed and killed the process; now the AudioTrack fails to initialize.
+    private static boolean noAudioAdapter;
+    private static void audioTrackWithoutAdapter() throws Exception {
+        android.media.AudioFormat format = new android.media.AudioFormat.Builder()
+                .setSampleRate(48000).setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_STEREO).build();
+        android.media.AudioTrack track = null;
+        try {
+            track = new android.media.AudioTrack.Builder()
+                    .setAudioFormat(format).setTransferMode(android.media.AudioTrack.MODE_STREAM)
+                    .setBufferSizeInBytes(android.media.AudioTrack.getMinBufferSize(48000,
+                            android.media.AudioFormat.CHANNEL_OUT_STEREO, android.media.AudioFormat.ENCODING_PCM_16BIT) * 2)
+                    .build();
+        } catch (UnsupportedOperationException refused) { checks++; }
+        check(track == null || track.getState() != android.media.AudioTrack.STATE_INITIALIZED,
+                "an AudioTrack was created without a host stream");
+        if (track != null) track.release();
+        System.out.println("MANAGED_AUDIO_TRACK_REFUSED_OK");
+        System.out.println("MANAGED_SERVICE_BATCH_OK checks=" + checks + " mode=no-audio-adapter");
+        System.out.println("FRAMEWORK_OK");
+        System.exit(0);
+    }
+
     // A real android.media.AudioTrack plays through AudioFlinger.createTrack: the client writes
     // PCM into the shared ring and waits on its futex, and the native server consumes it.
     private static void audioTracks() throws Exception {
+        if (noAudioAdapter) { audioTrackWithoutAdapter(); return; }
         final int rate = 48000, frames = rate / 4;
         android.media.AudioFormat format = new android.media.AudioFormat.Builder()
                 .setSampleRate(rate).setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
@@ -1278,6 +1304,7 @@ public final class ManagedServiceBatch {
     }
 
     public static void main(String[] args) {
+        noAudioAdapter = args.length > 0 && args[0].equals("no-audio-adapter");
         try { run(); System.exit(0); }
         catch (Throwable error) { error.printStackTrace(); System.exit(1); }
     }

@@ -1056,6 +1056,10 @@ python3 Scripts/Android/test_android_framework.py --services \
   --probe-arg=--service-inventory --output /tmp/bifrost-service-inventory
 ```
 
+Run without `--managed-graphics` and with `--probe-arg=no-audio-adapter` the same batch checks the
+case where the process has Android's own `libaaudio.so` instead of the Bifrost adapter: the AudioTrack
+must fail to initialize, with `AUDIOTRACK_REFUSED -19 createTrack re-entered ...` in the log.
+
 The default transport is the shared broker. `--binder-mode local` isolates the
 same native Binder contracts in one process; it does not validate cross-process
 transport. The focused probe uses real NotificationManager, AudioManager,

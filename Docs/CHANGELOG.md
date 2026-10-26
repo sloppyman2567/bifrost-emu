@@ -14,6 +14,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Android audio: a missing libaaudio adapter fails the AudioTrack instead of the process (2026-10-26)
+
+- With Android's own `libaaudio.so` in the process instead of the Bifrost adapter (the batch without `--managed-graphics`),
+  `FrameworkAudioTracks.create` opened its host stream through the real library, which plays through `AudioTrack` and so
+  back into `AudioFlinger.createTrack` on the same thread: unbounded recursion that ended in a `StackOverflowError` and
+  the death of the process (run with the new mode and the old code: two overflow reports, exit -9). `createTrack` now
+  refuses a request nested on its own thread (`NO_INIT`, logged as `AUDIOTRACK_REFUSED`), which fails the stream open and
+  the app's AudioTrack creation. The normal path is unchanged (`ManagedServiceBatch`, 604 checks, JIT). It was not
+  observed in a game: shipped sessions install the adapter. `ManagedServiceBatch` argument `no-audio-adapter` is the
+  regression check.
+
 ### Android display: the DisplayManager queries apps reach no longer throw (2026-10-25)
 
 - A probe of the display API an app sees found `DisplayManager.getMatchContentFrameRateUserPreference` and five hidden
