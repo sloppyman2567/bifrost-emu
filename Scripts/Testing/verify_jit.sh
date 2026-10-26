@@ -45,6 +45,8 @@ for source in "${sources[@]}"; do
         threaded=$((threaded+1))
         continue
     fi
+    # Needs a load address and a cache directory: test_jit_disk_cache.sh runs it.
+    [[ "$name" == jit_disk_cache_relocated ]] && continue
     args=()
     limit=30
     case "$name" in
