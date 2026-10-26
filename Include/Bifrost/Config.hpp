@@ -83,6 +83,8 @@ struct Config {
     bool     jit_no_selfloop   = false;    // BIFROST_NO_SELFLOOP
     bool     jit_no_wex        = false;    // BIFROST_NO_WEX
     bool     jit_no_fma3       = false;    // BIFROST_NO_FMA3
+    std::string jit_disk_cache;           // BIFROST_JIT_DISK_CACHE: "", "1" or "verify" (experimental)
+    uint64_t jit_disk_cache_mb = 0;       // BIFROST_JIT_DISK_CACHE_MB (0: the default 512)
     // ── [fb] ─────────────────────────────────────────────────────────
     uint32_t fb_width          = 1280;
     uint32_t fb_height         = 720;

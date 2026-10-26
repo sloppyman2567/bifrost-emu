@@ -102,6 +102,7 @@ static void print_banner() {
         "    --no-jit           use interpreter only (JIT is on by default)\n"
         "    --jit              enable frostJIT (default; for compatibility)\n"
         "    --jit-threshold N  interpret for N insns then switch to JIT\n"
+        "    --jit-disk-cache[=verify]  experimental: reuse JIT translations across launches\n"
         "    --rootfs PATH      guest root for libraries and paths (BIFROST_ROOT); default: auto-found, libraries only\n"
         "    --setup-rootfs [OPTS]  build and install the guest rootfs, then exit (--system, --prefix DIR, --full, --uninstall)\n"
         "    --rootfs-profile NAME  use the installed rootfs profile NAME for libraries (see --rootfs-list)\n"
@@ -372,6 +373,10 @@ int main(int argc, char** argv) {
         if (a == "--no-render-log" || a == "--render-log") { setenv("BIFROST_RENDER_LOG",a == "--render-log" ? "1" : "0",1); arg_i++; continue; }
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
+        if (a == "--jit-disk-cache" || a == "--jit-disk-cache=verify" || a == "--no-jit-disk-cache") {
+            setenv("BIFROST_JIT_DISK_CACHE", a == "--no-jit-disk-cache" ? "0" : a == "--jit-disk-cache" ? "1" : "verify", 1);
+            arg_i++; continue;
+        }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
         if (a == "--guest-ld")              { guest_ld = true; arg_i++; continue; }
@@ -572,6 +577,12 @@ int main(int argc, char** argv) {
     cfg.fb_dump_path = absolute_host_path(cfg.fb_dump_path);
     cfg.audio_dump_path = absolute_host_path(cfg.audio_dump_path);
     cfg.validate();
+    // The persistent JIT cache reads its settings from the environment (child
+    // processes inherit them); a config file supplies what is not set there.
+    if (!cfg.jit_disk_cache.empty() && !getenv("BIFROST_JIT_DISK_CACHE"))
+        setenv("BIFROST_JIT_DISK_CACHE", cfg.jit_disk_cache.c_str(), 1);
+    if (cfg.jit_disk_cache_mb && !getenv("BIFROST_JIT_DISK_CACHE_MB"))
+        setenv("BIFROST_JIT_DISK_CACHE_MB", std::to_string(cfg.jit_disk_cache_mb).c_str(), 1);
     // --print-config: dump the resolved config and exit. Useful for
     // debugging "why isn't my config taking effect?"
     if (print_config_only) {

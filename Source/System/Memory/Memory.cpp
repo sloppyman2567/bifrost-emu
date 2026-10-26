@@ -484,6 +484,41 @@ bool Memory::range_accessible(uint64_t addr, size_t size, uint8_t access) const 
 Memory::FileBacking::~FileBacking() {
     if (fd >= 0) ::close(fd);
 }
+// FNV-1a over a path; 0 (not yet computed) and 1 (kNoStableFile) are reserved.
+static uint64_t path_hash(const std::string& path) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (unsigned char c : path) { h ^= c; h *= 0x100000001b3ULL; }
+    return h > 1 ? h : h + 2;
+}
+bool Memory::code_origin(uint64_t addr, CodeOrigin& out) const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    if (const FilePage* page = file_page_locked(addr)) {
+        const FileBacking* backing = page->backing.get();
+        if (!backing || backing->shared || backing->fd < 0) return false;
+        uint64_t key = backing->path_key.load(std::memory_order_relaxed);
+        if (key == 0) {
+            char link[32], target[4096];
+            std::snprintf(link, sizeof(link), "/proc/self/fd/%d", backing->fd);
+            const ssize_t n = ::readlink(link, target, sizeof(target) - 1);
+            const std::string path = n > 0 ? std::string(target, static_cast<size_t>(n)) : std::string();
+            const bool stable = path.size() > 1 && path[0] == '/' && path.rfind("/memfd:", 0) != 0 &&
+                path.find(" (deleted)") == std::string::npos;
+            key = stable ? path_hash(path) : kNoStableFile;
+            backing->path_key.store(key, std::memory_order_relaxed);
+        }
+        if (key == kNoStableFile) return false;
+        out.file_key = key;
+        out.file_offset = backing->file_offset + page->offset + (addr & PAGE_MASK);
+        return true;
+    }
+    auto run = image_runs_.upper_bound(addr);
+    if (run == image_runs_.begin()) return false;
+    --run;
+    if (addr >= run->second.end || !run->second.file || run->second.file->path.empty()) return false;
+    out.file_key = path_hash(run->second.file->path);
+    out.file_offset = run->second.offset + (addr - run->first);
+    return true;
+}
 const Memory::FilePage* Memory::file_page_locked(uint64_t addr) const {
     auto it = file_pages_.find(addr / PAGE_SIZE);
     return it == file_pages_.end() ? nullptr : &it->second;

@@ -91,7 +91,7 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // for the caller's cold exit out of line.
     size_t expired = emit_preempt_poll(CPU_REG, RAX);
     size_t stop;
-    if (target_pc <= INT32_MAX) {
+    if (target_pc <= INT32_MAX && !wide_guest_pc(target_pc)) {
         // cmp qword [rbx+jit_stop_pc],imm32; je cold exit
         emit_byte(0x48); emit_byte(0x81); emit_byte(0xBB);
         emit_u32(offsetof(CPU, jit_stop_pc));
@@ -616,7 +616,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // The interpreter's SVC_IMM pc-advance semantics are mirrored
             // so signal frames and the execve/rt_sigreturn pc-change check
             // stay consistent.
-            if (in_vdso(inst.arm_pc)) {
+            if (in_vdso(fetch_address(inst.arm_pc))) {
                 emit_call_vdso_clock(inst.arm_pc);
             } else {
                 emit_call_native_svc(inst.arm_pc);

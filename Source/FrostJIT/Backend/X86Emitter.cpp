@@ -52,6 +52,8 @@ void FrostJIT::emit_u32(uint32_t v) {
         code_buf_overflow_ = true;
 }
 void FrostJIT::emit_u64(uint64_t v) {
+    if (recording_)
+        imm64_fields_.push_back({static_cast<uint32_t>(code_buf_used_), v, HostReloc::None, 0});
     if (ensure_code_space(8))
         memcpy(code_buf_ + code_buf_used_, &v, 8), code_buf_used_ += 8;
     else
@@ -296,6 +298,7 @@ void FrostJIT::emit_bswap_reg(int dst) {
 }
 void FrostJIT::emit_call_abs(void* target) {
     emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(target));
+    note_host_reloc(HostReloc::Image);
     emit_byte(0xFF); emit_byte(0xD0);
 }
 void FrostJIT::emit_ret() { emit_byte(0xC3); }
@@ -706,7 +709,7 @@ extern "C" {
 // Move a 64-bit immediate into RAX. Uses the shorter mov imm32 + zext
 // form when the value fits in 32 bits, otherwise the 10-byte mov imm64.
 void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
-    if (val <= 0xFFFFFFFFULL) {
+    if (val <= 0xFFFFFFFFULL && !wide_guest_pc(val)) {
         emit_mov_imm32_zext(RAX, static_cast<uint32_t>(val));
     } else {
         emit_mov_imm64(RAX, val);

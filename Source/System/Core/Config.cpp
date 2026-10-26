@@ -126,6 +126,18 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
             if (key == "no_selfloop") { bool v; if (!parse_bool(raw_val, v)) return false; jit_no_selfloop = v; return true; }
             if (key == "no_wex")      { bool v; if (!parse_bool(raw_val, v)) return false; jit_no_wex = v; return true; }
             if (key == "no_fma3")     { bool v; if (!parse_bool(raw_val, v)) return false; jit_no_fma3 = v; return true; }
+            if (key == "disk_cache")  {
+                std::string v = raw_val; unquote(v);
+                bool b;
+                if (v == "verify") jit_disk_cache = v;
+                else if (parse_bool(v, b)) jit_disk_cache = b ? "1" : "";
+                else return false;
+                return true;
+            }
+            if (key == "disk_cache_mb") {
+                int64_t v; if (!parse_int(raw_val, v) || v < 1 || v > (1 << 20)) return false;
+                jit_disk_cache_mb = static_cast<uint64_t>(v); return true;
+            }
         }
         // [fb]
         if (section == "fb") {
@@ -262,6 +274,7 @@ void Config::apply_env() {
     env_bool("BIFROST_NO_SELFLOOP",    jit_no_selfloop);
     env_bool("BIFROST_NO_WEX",         jit_no_wex);
     env_bool("BIFROST_NO_FMA3",        jit_no_fma3);
+    env_str ("BIFROST_JIT_DISK_CACHE", jit_disk_cache);
     if (const char* v = getenv("BIFROST_JIT_THRESHOLD")) {
         int64_t n;
         if (parse_int(v, n) && n >= 0) jit_threshold = static_cast<uint64_t>(n);
@@ -292,6 +305,8 @@ void Config::dump(std::string& out) const {
     ss << "no_selfloop = " << (jit_no_selfloop ? "true" : "false") << "\n";
     ss << "no_wex      = " << (jit_no_wex      ? "true" : "false") << "\n";
     ss << "no_fma3     = " << (jit_no_fma3     ? "true" : "false") << "\n";
+    ss << "disk_cache  = " << (jit_disk_cache == "verify" ? "\"verify\"" : jit_disk_cache.empty() ? "false" : "true") << "\n";
+    if (jit_disk_cache_mb) ss << "disk_cache_mb = " << jit_disk_cache_mb << "\n";
     ss << "\n";
     ss << "[fb]\n";
     ss << "width  = " << fb_width  << "\n";

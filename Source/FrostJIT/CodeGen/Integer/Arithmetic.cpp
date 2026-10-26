@@ -101,7 +101,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         }
         case IROp::IMM:
             if (inst.dest) {
-                if (inst.dest > 32 && inst.dest < 4096)
+                // A recording compile keeps PC-like constants out of the fold
+                // and rematerialization paths and emits them as imm64, the
+                // only form a relocation can patch.
+                const bool wide = wide_guest_pc(inst.imm_value());
+                if (inst.dest > 32 && inst.dest < 4096 && !wide)
                     jit_consts_[inst.dest] = inst.imm_value();
                 // Fold lookahead: when the immediately-following op folds
                 // this constant into an x86 immediate form (dead src2), the
@@ -112,7 +116,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // sign-extension fit for the ALU class): a skipped mov whose
                 // consumer then did NOT fold would leave the vreg unmapped
                 // and the consumer's ensure_vreg would reload garbage.
-                if (cur_op_index_ < fold_ahead_kind_.size()) {
+                if (cur_op_index_ < fold_ahead_kind_.size() && !wide) {
                     uint8_t fa = fold_ahead_kind_[cur_op_index_];
                     if (fa == 1) {
                         int64_t c = static_cast<int64_t>(inst.imm_value());
@@ -123,7 +127,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     }
                 }
                 int d = alloc_reg_for(inst.dest, -1);
-                if (inst.imm_value() <= 0xFFFFFFFFULL) {
+                if (inst.imm_value() <= 0xFFFFFFFFULL && !wide) {
                     emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm_value()));
                 } else {
                     emit_mov_imm64(d, inst.imm_value());

@@ -69,15 +69,16 @@ bool FrostJIT::exit_flags_dead(uint64_t pc) {
     constexpr int kWords = jit_analysis::kNzcvScanWords;
     constexpr uint64_t kBytes = kWords * 4;
     const uint64_t window = guest_memory_->window_size();
-    if ((pc & 3) || pc > window || kBytes > window - pc) return false;
+    const uint64_t at = fetch_address(pc);  // the shifted proof compile reads the real words
+    if ((at & 3) || at > window || kBytes > window - at) return false;
     const auto* flags = guest_memory_->direct_page_flags();
     constexpr uint8_t need = Memory::GUEST_PAGE_MAPPED | Memory::GUEST_PROT_EXEC;
-    for (uint64_t p = pc / Memory::PAGE_SIZE; p <= (pc + kBytes - 1) / Memory::PAGE_SIZE; ++p) {
+    for (uint64_t p = at / Memory::PAGE_SIZE; p <= (at + kBytes - 1) / Memory::PAGE_SIZE; ++p) {
         const uint8_t f = flags[p].load(std::memory_order_acquire);
         if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return false;
     }
     uint32_t words[kWords];
-    std::memcpy(words, window_base_ + pc, sizeof words);
+    std::memcpy(words, window_base_ + at, sizeof words);
     int used = 0;
     if (!jit_analysis::nzcv_dead_in(words, kWords, used) || used <= 0) return false;
     flag_deps_scratch_.push_back({pc, std::vector<uint32_t>(words, words + used)});

@@ -170,7 +170,9 @@ other games and `make verify` have not been run with it.
 Useful switches: `-d` traces every instruction, `--no-jit` forces the
 interpreter, `--window-stats` shows FPS and load statistics in the title and, for Android
 apps, an in-window overlay (see [window stats](Docs/window-stats.md); `--window-stats-mode`
-picks the layout), and `BIFROST_TIER2=1` enables experimental Tier-2 region compilation.
+picks the layout), `BIFROST_TIER2=1` enables experimental Tier-2 region compilation, and the
+experimental `--jit-disk-cache` keeps translations in `~/.cache/bifrost/jit` so later launches start
+faster (the first launch compiles more slowly; see [the JIT guide](Docs/JIT.md#persistent-translation-cache-2026-10-26-experimental-off-by-default)).
 
 ## Running programs
 

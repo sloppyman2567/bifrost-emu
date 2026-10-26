@@ -8,6 +8,7 @@
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Syscalls/Syscalls.hpp"
+#include "FrostJIT/Runtime/PersistentCache.hpp"
 #include <mutex>
 #include <unistd.h>
 namespace arm64emu {
@@ -57,6 +58,7 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
             // reclaim the child directly, as guest _exit requires.
             if (emu.host_fork_child()) {
                 emu.debugger().exited(cpu, static_cast<int>(a0), 0, true);
+                PersistentCache::flush_all();  // _exit skips the atexit flush
                 ::_exit(static_cast<int>(a0));
             }
             // Linux exit_group terminates EVERY thread in the process, not

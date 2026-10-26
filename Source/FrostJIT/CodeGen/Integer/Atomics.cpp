@@ -55,6 +55,7 @@ bool FrostJIT::compile_llsc_native(const IRInst& inst) {
         emit_shift_imm8(RDX, 5, 32 - ExclusiveMonitor::kBucketBits); // shr rdx, 21
         emit_shift_imm8(RDX, 4, 6);                                  // shl rdx, 6
         emit_mov_imm64(R9, reinterpret_cast<uint64_t>(&g_exclusive_monitor.buckets[0]));
+        note_host_reloc(HostReloc::Image);
         emit_add_reg(R9, RDX);
     };
     auto mov_byte_cpu = [&](int32_t off, uint8_t v) {                // mov byte [rbx+off], v

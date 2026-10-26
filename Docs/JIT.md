@@ -15,6 +15,61 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Persistent translation cache (2026-10-26, experimental, off by default)
+
+`--jit-disk-cache` (`BIFROST_JIT_DISK_CACHE=1`, `[jit] disk_cache = true`) stores Tier-1 translations of
+file-backed guest code so a later launch installs them instead of compiling. `--jit-disk-cache=verify`
+compiles every block anyway and compares the fresh record with the stored one (`verify_mismatches` in the
+statistics). `Runtime/CacheRecording.cpp` records and installs; `Runtime/PersistentCache.*` stores.
+
+- **Key.** A record is found by the file the code came from (`Memory::code_origin`: a hash of the path the
+  mapping's descriptor names, plus the offset; memfd and deleted files have none) and by MT or ST mode.
+  Installing checks the guest words now at the address and the dead-NZCV successor words
+  (`flag_dep_table_`) before relocating the code, then publishes through `publish_translation` like a
+  fresh compile (granules, back references, chaining, pending calls).
+- **Proof compile.** A recording compile logs every `emit_u64` field; emitters that embed a host address
+  declare it with `note_host_reloc` (image, JIT object, window base, page flags, MT edge cell), and PC-like
+  constants within 4 GiB of the block take their imm64 form (`wide_guest_pc`). Before publication the block
+  is compiled again at guest PCs shifted by `kOracleBias` (`record_oracle_`; fetches subtract the bias,
+  everything it appended is discarded). Outside the logged fields the bytes must match; each field must be a
+  constant, a declared address that lies inside what it names, a guest PC (moved by the bias) or a code
+  address (moved by the copy's distance). Edges, fault sites, words and dependencies must agree up to the
+  bias. A constant equal in both compiles that lies in host memory (`host_address`, or a page `mincore`
+  reports mapped outside the guest window) is an undeclared address and leaves the block unrecorded.
+  Anything unexplained costs a cache entry, never a wrong translation.
+- **Off when** Tier-2, `BIFROST_JIT_VERIFY`, leaf inlining, `BIFROST_MALLOC_INTERP` or block tracing is on.
+  Blocks with direct BL call sites, inlined leaves or interpreter-only bodies are not recorded.
+- **Fingerprint.** One directory per application (`BIFROST_JIT_CACHE_APP`, set to the package by the
+  managed launcher; else the program name and a hash of its path) and per codegen fingerprint: the emulator's
+  GNU build-id, CPU features, window size, code-buffer size, chain/direct-call/W^X/FMA3/AVX2 state and the
+  value of every `BIFROST_*` switch the JIT and `DebugFlags.hpp` read. The build lists those switches from
+  the sources into `$(BUILD_DIR)/generated/JitCodegenSwitches.inc` (the Makefile's `JIT_SWITCHES` rule), so
+  a new switch cannot be left out.
+- **Storage.** `$BIFROST_JIT_DISK_CACHE_DIR`, else `$XDG_CACHE_HOME/bifrost/jit`, else `~/.cache/bifrost/jit`.
+  Each process appends checksummed records to its own `seg-<pid>-<n>.bin`, locked (`flock`) before its
+  header is written; a header-less segment is treated as abandoned only after a minute. Once segments reach
+  4 MiB or an eighth of `main.bin`, the next long-running process merges unlocked segments into a new
+  `main.bin` (sorted index read in place, `rename` over the old one) in the background, keeping the most
+  recently used records within three quarters of the budget (`BIFROST_JIT_DISK_CACHE_MB`, default 512 per
+  application). Opening the cache first removes other fingerprints' directories (older builds) down to
+  three quarters of the budget, so a new build does not drop what it records. The cache stays off when a
+  directory on the way is not the user's own or is group/world-writable, or when the filesystem has no
+  `flock`.
+
+Measurements (one machine, 2026-10-26; the root binary of that day): 18 dynamic glibc/musl, threaded and
+dlopen guest programs reused 98.9–100 % of their blocks with output identical to cache-off runs, and verify
+mode found no mismatch. `qt_test` (7,900 blocks): about 185 ms cache off, 105 ms reusing, 287 ms recording
+(the proof compile doubles compile time on the first launch and after every rebuild). `bench_sort`,
+`bench_matrix` and `bench_fib` ran at the same speed from cached code. With a build whose call sites did not
+declare their helper addresses, `mincore` rejected every affected block (4,784 of 7,894 in `qt_test`) and the
+reuse run stayed correct.
+
+Not yet validated: Android apps (ART JIT code is memfd-backed and never cached; native libraries are), a game
+session that renews its code cache, and network filesystems. Host addresses embedded as 32-bit immediates or
+RIP-relative operands outside the block are not covered by the checks above: emit host addresses as imm64
+with `note_host_reloc`. Tests: `Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry
+`jit_disk_cache`).
+
 ## Direct-call padding, probe order and the emulator pointer (2026-10-25)
 
 A review of the generated code (`BIFROST_JIT_DUMP=1`, bytes through `objdump -b binary
@@ -130,8 +185,8 @@ Measured (2026-10-25, one host; the recompile cost is the price of the bound):
   not a controlled A/B (different play, one run each; the side-by-side run with the old build was stopped),
   and whether the two renewals caused a visible hitch was not recorded. A renewal discards every block, so
   each one recompiles the working set (hundreds of thousands of blocks, seconds of compile time across the
-  threads that need them). A persistent
-  translation cache (`--jit-disk-cache`, work not yet committed when this was written) is meant to make
+  threads that need them). The persistent translation cache (`--jit-disk-cache`, see
+  [its section](#persistent-translation-cache-2026-10-26-experimental-off-by-default)) is meant to make
   that cheaper; it was run together with renewals only on the pressure fixture (correct results), not in a game.
 
 Tests: `Tests/Unit/jit_cache_generations.c` through `Scripts/Testing/test_jit_generations.sh` (1 MiB

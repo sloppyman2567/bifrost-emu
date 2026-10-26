@@ -318,6 +318,15 @@ public:
     };
     // Every guest mapping in address order, PROT_NONE reservations included.
     std::vector<MappingView> mappings_snapshot() const;
+    // The file a guest code address was mapped or loaded from, for the JIT's
+    // persistent cache: a hash of the file's path and the address's offset in
+    // it. False for anonymous memory and files without a stable path (memfd,
+    // deleted files), whose contents cannot be found again by name.
+    struct CodeOrigin {
+        uint64_t file_key = 0;
+        uint64_t file_offset = 0;
+    };
+    bool code_origin(uint64_t addr, CodeOrigin& out) const;
     // ── The reservation ───────────────────────────────────────────────
     // The JIT addresses guest memory as `[window_base + guest_addr]` after
     // checking guest_addr + width <= window_size().
@@ -392,8 +401,12 @@ private:
         int fd = -1;
         bool writable = false;
         bool shared = false;
+        // code_origin's path hash: 0 until first asked, kNoStableFile when
+        // the descriptor names no file that a later run could open again.
+        mutable std::atomic<uint64_t> path_key{0};
         ~FileBacking();
     };
+    static constexpr uint64_t kNoStableFile = 1;
     struct FilePage {
         std::shared_ptr<FileBacking> backing;
         uint64_t offset = 0;  // from the start of the original mapping

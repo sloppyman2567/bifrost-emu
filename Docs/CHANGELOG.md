@@ -14,6 +14,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Persistent JIT translation cache, experimental and off by default (2026-10-26)
+
+- `--jit-disk-cache` (`BIFROST_JIT_DISK_CACHE=1`, `[jit] disk_cache`) stores Tier-1 translations of file-backed
+  code in `~/.cache/bifrost/jit/<app>/<fingerprint>/` and installs them in later launches after checking the guest
+  words; `--jit-disk-cache=verify` compares each stored record with a fresh compile. A block is stored only when a
+  second compile at shifted guest PCs explains every difference; host addresses must be declared and lie inside what
+  they name, and an undeclared one (a constant in mapped host memory) leaves the block uncached. The budget is
+  `BIFROST_JIT_DISK_CACHE_MB` (512 per application); a new build prunes older builds' directories first. The cache
+  stays off in a directory others can write to or without `flock`. The fingerprint's switch list is generated
+  by the build. Measured: `qt_test` starts in about 105 ms from the cache against 185 ms without it, but the
+  recording launch takes about 287 ms. Not yet validated on Android apps or in games. `test_jit_disk_cache.sh`
+  covers it.
+
 ### fcntl owner, signal and lease commands: Umamusume no longer ends itself about 8 s in (2026-10-26)
 
 - `fcntl` answered `F_SETOWN`, `F_GETOWN`, `F_SETSIG`, `F_GETSIG`, `F_SETLEASE` and `F_GETLEASE` with `EINVAL`. They now

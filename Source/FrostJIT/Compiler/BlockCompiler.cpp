@@ -88,6 +88,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     static const bool no_blr_call_ = (getenv("BIFROST_NO_BLR_CALL") != nullptr);
     bl_call_disabled_ = bl_call_disabled_ || no_bl_call_;
     blr_call_disabled_ = no_blr_call_;
+    // Persistent cache (CacheRecording.cpp): reuse a translation an earlier
+    // process recorded, or record this one. The proof compile inherits its
+    // caller's recording state, which every exit restores.
+    struct RecordingScope { bool& flag; bool saved; ~RecordingScope() { flag = saved; } }
+        recording_scope{recording_, recording_};
+    if (!private_entry && !record_oracle_ && disk_cache_ready(emu)) {
+        if (auto cached = install_cached(emu, start_pc)) return cached;
+        begin_recording(start_pc);
+    }
     // W^X: toggle the code buffer to writable before emitting x86 code.
     // (No-op if W^X is disabled or the buffer is already writable.)
     make_writable();
@@ -216,7 +225,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
            !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && cur_pc >= loop_tail_end) {
-            const auto known = blocks_.find(cur_pc);
+            const auto known = blocks_.find(fetch_address(cur_pc));
             if (known != blocks_.end()) {
                 const BlockEntry& tail = known->second;
                 // A previously compiled tail can make a short loop depend
@@ -240,7 +249,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         }
         uint32_t inst;
         try {
-            inst = emu.mem().fetch_inst(cur_pc);
+            inst = emu.mem().fetch_inst(fetch_address(cur_pc));
         } catch (...) { block_profile.decode_fail++; break; }
         DecodedInst d;
         if (!decode(d, inst)) { block_profile.decode_fail++; break; }
@@ -772,7 +781,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             if (uses_window) break;
         }
         if (window_base_ && uses_window)
-            emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
+            emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_)), note_host_reloc(HostReloc::Window);
     }
     // Vector cache prologue loads MUST be emitted before block_body_start_off_
     // is recorded: self-loop re-entry jumps directly to the body start, so
@@ -1325,6 +1334,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
         }
     }
+    if (record_oracle_) {  // the shifted proof compile publishes nothing
+        if (oracle_out_) capture_compile(*oracle_out_, start_pc, block_start, entry, has_inlined_leaf);
+        prev_max_vreg_ = max_vreg_;
+        make_executable();
+        return nullptr;
+    }
     if (private_entry) {
         *private_entry = std::move(entry);
         prev_max_vreg_ = max_vreg_;
@@ -1338,6 +1353,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Verify dirty_host_regs_ invariant (active in debug or with
     // BIFROST_REGALLOC_CHECK=1 — catches regalloc maintenance bugs).
     verify_dirty_host_regs_();
+    if (recording_) finish_recording(emu, start_pc, block_start, entry, has_inlined_leaf);
     if (staging_) {
         staged_entry_ = std::move(entry);
         staged_ = staged_linked_ = true;
@@ -1375,6 +1391,7 @@ void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
         patch_pending_calls(start_pc, reinterpret_cast<const uint8_t*>(entry.fn));
 }
 void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
+    if (record_oracle_) return;
     if (!staging_) { publish_block(pc, entry); return; }
     staged_entry_ = entry;
     staged_ = true;

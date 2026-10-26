@@ -69,9 +69,9 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
         // either half repeats the first half harmlessly. They take the same
         // recoverable native path as a single LDR/STR Q.
         const bool q_pair_native = (inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16) &&
-            decode(d, guest_memory_->fetch_inst(inst.arm_pc)) && d.is_vec &&
+            decode(d, guest_memory_->fetch_inst(fetch_address(inst.arm_pc))) && d.is_vec &&
             (d.cls == InstClass::LDP || d.cls == InstClass::STP) && ((d.raw >> 30) & 3) == 2;
-        if (!q_pair_native && decode(d, guest_memory_->fetch_inst(inst.arm_pc)) &&
+        if (!q_pair_native && decode(d, guest_memory_->fetch_inst(fetch_address(inst.arm_pc))) &&
             (d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
             whole_instruction = true;
             uint64_t first_offset = d.mode == 1 ? 0 : static_cast<uint64_t>(d.disp);
@@ -121,6 +121,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
     // either populates it or raises SIGBUS (Memory::check_access).
     const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
     emit_mov_imm64(RDX, flags);
+    note_host_reloc(HostReloc::PageFlags);
     emit_add_reg(RDX, RAX);
     emit_load8(RDX, RDX, 0);
     emit_alu_imm(RDX, 4, mask); // AND
@@ -132,6 +133,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
         emit_cmp_reg(RAX, RCX);
         size_t same_page = emit_jcc_rel32_placeholder(4); // JE
         emit_mov_imm64(RDX, flags);
+        note_host_reloc(HostReloc::PageFlags);
         emit_add_reg(RDX, RCX);
         emit_load8(RAX, RDX, 0);
         emit_alu_imm(RAX, 4, mask);

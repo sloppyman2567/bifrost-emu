@@ -1,4 +1,5 @@
 // Emulator construction/teardown, the main run loop and single-stepping.
+#include "FrostJIT/Runtime/PersistentCache.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"
@@ -442,6 +443,7 @@ int Emulator::run() {
         ? group_exit_code_.load(std::memory_order_acquire) : main_cpu_.exit_code;
     if (sdl_threads_abandoned_.load(std::memory_order_acquire)) {
         fflush(nullptr);
+        PersistentCache::flush_all();  // _exit skips the atexit flush
         _exit(exit_status);
     }
     return exit_status;

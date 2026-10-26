@@ -5,6 +5,7 @@
 // and libstdc++'s node layouts, so they track what malloc holds for each
 // container without walking the heap.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/PersistentCache.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -77,5 +78,6 @@ void FrostJIT::dump_memory_stats() {
             mib(index), code_index_.size(), mib(back_refs), back_refs_.size(), mib(calls), mib(edges),
             mt_edges_.size(), mib(edge_maps), mib(tier2), mib(words), mib(retired), retired_pcs_.size(),
             mib(inline_cache_bytes_.load(std::memory_order_relaxed)));
+    if (disk_cache_) disk_cache_->dump_stats();
 }
 } // namespace arm64emu

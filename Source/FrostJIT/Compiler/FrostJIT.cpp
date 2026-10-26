@@ -1121,6 +1121,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 if (mt_cell_call) {
                     call_edge = create_chain_edge(bp.target, true, call_slot);
                     emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(&call_edge->target));
+                    note_host_reloc(HostReloc::Edge, static_cast<uint32_t>(mt_edges_.size() - 1 - record_edge_mark_));
                     emit_byte(0xFF); emit_byte(0x10);  // call qword [rax]
                 } else {
                     call_slot = emit_call_rel32_placeholder();
@@ -1138,6 +1139,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 size_t slow_off = code_buf_used_;
                 emit_sub_rsp_imm8(8);
                 emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(jit_call_helper));
+                note_host_reloc(HostReloc::Image);
                 emit_byte(0xFF); emit_byte(0xD0);  // call rax
                 emit_add_rsp_imm8(8);
                 emit_ret();

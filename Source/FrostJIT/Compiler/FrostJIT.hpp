@@ -56,6 +56,7 @@ namespace arm64emu {
 struct CPU;
 class Emulator;
 class Memory;
+class PersistentCache;
 // ── Tier-2 trace (ROADMAP #14, Phase 1 step 2) ──────────────────────────
 // A candidate tier-2 trace: a linear run of guest blocks whose IR will be
 // compiled as ONE region with ONE register allocation. Pure
@@ -1265,6 +1266,65 @@ private:
     // cap the index is rebuilt from blocks_ with unpatched slots only, so
     // no live reference is ever dropped.
     void add_back_ref(uint64_t target_pc, uint64_t src_pc);
+    // ── Persistent-cache recording (Runtime/CacheRecording.cpp) ─────
+    // A recording compile logs every 64-bit immediate it emits; the sites
+    // that embed host addresses name what they point at (note_host_reloc),
+    // and PC-like constants take their wide encoding (wide_guest_pc), so the
+    // bytes can be relocated in a later process. A second compile of the
+    // block at guest PCs shifted by compile_pc_bias_ proves which fields
+    // depend on the guest address. Normal compiles emit the same bytes as
+    // without the cache.
+    enum class HostReloc : uint8_t { None, Image, JitObject, Window, PageFlags, Edge };
+    struct Imm64Field {
+        uint32_t offset;   // code-buffer offset of the 8 immediate bytes
+        uint64_t value;
+        HostReloc kind;
+        uint32_t edge;     // index among this compile's edges (HostReloc::Edge)
+    };
+    bool recording_ = false;
+    bool record_oracle_ = false;     // the shifted proof compile: publishes nothing
+    uint64_t compile_pc_bias_ = 0;   // guest PCs = fetch address + bias
+    uint64_t record_start_ = 0, record_bias_ = 0;  // recorded block and its proof-compile bias
+    size_t record_edge_mark_ = 0;    // mt_edges_ size when the compile began
+    std::vector<Imm64Field> imm64_fields_;
+    void note_host_reloc(HostReloc kind, uint32_t edge = 0);
+    bool wide_guest_pc(uint64_t value) const;
+    uint64_t fetch_address(uint64_t guest_pc) const { return guest_pc - compile_pc_bias_; }
+    // What one recording compile produced, relative to its block start.
+    struct CompileCapture {
+        struct Edge { uint32_t slot_off, cold_off; uint64_t target_pc; bool cold_entry; };
+        bool ok = false;
+        uint64_t start_pc = 0;
+        size_t block_start = 0;
+        std::vector<uint8_t> code;
+        std::vector<Imm64Field> fields;
+        std::vector<Edge> edges;
+        std::vector<std::pair<uint32_t, uint32_t>> faults;  // site, recovery stub
+        std::vector<uint32_t> words;
+        std::vector<std::pair<uint64_t, std::vector<uint32_t>>> deps;  // dead-NZCV successor streams
+        BlockEntry entry;
+    };
+    struct BlockProfileCounts { uint64_t v[8]; };
+    PersistentCache* disk_cache_ = nullptr;
+    bool disk_cache_checked_ = false;
+    struct { uint64_t file_key = 0, file_offset = 0; } record_origin_;
+    size_t record_fault_mark_ = 0, record_flagdep_mark_ = 0, record_call_end_ = 0;
+    bool record_unrecordable_ = false;
+    CompileCapture* oracle_out_ = nullptr;
+    bool disk_cache_ready(Emulator& emu);
+    void start_record_compile();
+    bool begin_recording(uint64_t start_pc);
+    void capture_compile(CompileCapture& c, uint64_t start_pc, size_t block_start,
+                         const BlockEntry& entry, bool inlined_leaf);
+    void discard_oracle_effects(size_t edge_mark, size_t flagdep_mark);
+    int build_record(const CompileCapture& a, const CompileCapture& b, std::vector<uint8_t>& out);
+    void finish_recording(Emulator& emu, uint64_t start_pc, size_t block_start,
+                          const BlockEntry& entry, bool inlined_leaf);
+    bool verify_against_store(uint64_t start_pc, const std::vector<uint8_t>& fresh);
+    uint64_t (*install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);
+    void append_fault_site(size_t site, size_t stub);
+    BlockProfileCounts block_profile_snapshot() const;
+    void block_profile_restore(const BlockProfileCounts& counts);
     // ── x86 emitters ────────────────────────────────────────────────
     void emit_byte(uint8_t b);
     void emit_u32(uint32_t v);

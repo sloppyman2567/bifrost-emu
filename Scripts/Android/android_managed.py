@@ -1020,6 +1020,9 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     "ManagedLauncher", *installed_arguments(metadata, code)]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
+        # The persistent JIT cache (BIFROST_JIT_DISK_CACHE) keeps one directory and
+        # budget per app, shared by the session's helper processes.
+        environment.setdefault("BIFROST_JIT_CACHE_APP", metadata["package"])
         if trace_apk and trace_apk != "activity":
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"

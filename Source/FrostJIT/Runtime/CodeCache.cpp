@@ -305,6 +305,7 @@ void FrostJIT::dump_code_cache_stats() {
 // serializes every back-edge through the store buffer. Overwrites RFLAGS.
 size_t FrostJIT::emit_preempt_poll(int cpu_reg, int scratch) {
     emit_mov_imm64(scratch, reinterpret_cast<uint64_t>(&g_jit_preempt_epoch));
+    note_host_reloc(HostReloc::Image);
     if (scratch >= 8) emit_byte(0x45);
     emit_byte(0x8B); emit_byte(static_cast<uint8_t>(((scratch & 7) << 3) | (scratch & 7)));  // mov s32,[s]
     if (scratch >= 8) emit_byte(0x44);
@@ -360,6 +361,7 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
         }
     }
     emit_mov_imm64(R11, reinterpret_cast<uint64_t>(&edge->target));
+    note_host_reloc(HostReloc::Edge, static_cast<uint32_t>(mt_edges_.size() - 1 - record_edge_mark_));
     emit_byte(0x41); emit_byte(0xFF); emit_byte(0x23); // jmp qword [r11]
     for (size_t p : cold)
         patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
@@ -387,6 +389,7 @@ void FrostJIT::emit_indirect_branch_probe() {
     // Table generation must equal this JIT's live dispatch generation.
     emit_load(R11, RCX, offsetof(IblTable, generation));
     emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(&cache_generation_));
+    note_host_reloc(HostReloc::JitObject);
     emit_byte(0x4C); emit_byte(0x3B); emit_byte(0x1A);          // cmp r11,[rdx]
     cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
     // RCX = &entries[(pc >> 2) & (IBL_ENTRIES - 1)] - entries_off

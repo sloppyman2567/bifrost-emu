@@ -147,6 +147,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   prologue stores it (`emit_store_emu`) and a chain edge keeps it because the CPU is the same. Do not
   put it back in a frame slot: the 32 KiB chain-skip frame made that a page away from the rest of
   each native call's stack.
+- The persistent cache (`Runtime/CacheRecording.cpp`) reuses Tier-1 bytes in later processes. An emitter
+  that embeds a host address emits it as imm64 and calls `note_host_reloc` right after; a guest PC goes
+  through the imm64 form when `wide_guest_pc` says so; compile-time guest reads use `fetch_address`
+  (the proof compile shifts PCs). Undeclared host addresses make blocks unrecordable (they are caught,
+  not reused), so a missing declaration shows as `host-address` in `[JIT] disk cache unrecordable:`.
+  A new per-block side table needs the install path to fill it too (`install_cached`).
 - A non-thunk SVC leaves its block with `cpu.jit_svc_pc` set and C++ runs it (`run_pending_svc`, which
   clears the field first because `clone` copies the CPU). Anything else that calls a block's `fn` directly
   and then reads `cpu.pc` must run a pending SVC before executing at that pc. Thunk SVCs (`x8 == 0x1000`)

@@ -35,6 +35,9 @@ no_chain    = false       # disable lazy block chaining (debug)
 no_selfloop = false       # disable self-loop chaining (debug)
 no_wex      = false       # disable Write XOR Execute (perf vs security)
 no_fma3     = false       # force decomposed mul+add even on FMA3 hosts
+disk_cache  = false       # BIFROST_JIT_DISK_CACHE — experimental: reuse translations across
+                          # launches (true, or "verify" to compare each with a fresh compile)
+# disk_cache_mb = 512     # BIFROST_JIT_DISK_CACHE_MB — on-disk budget per application
 
 # ── Framebuffer (/dev/fb0) ────────────────────────────────────────────
 [fb]

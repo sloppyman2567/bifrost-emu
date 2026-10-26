@@ -311,6 +311,21 @@ $(SOURCE_STAMP): FORCE
 	@printf '%s\n' $(SOURCES) $(LIB_SOURCES) > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
+# The persistent JIT cache fingerprints the value of every BIFROST_* switch the
+# JIT and DebugFlags read (Source/FrostJIT/Runtime/CacheRecording.cpp). Listed
+# from the sources on every build, so a new switch cannot be missed; the file
+# is replaced only when the list changes.
+JIT_SWITCHES := $(OBJDIR)/generated/JitCodegenSwitches.inc
+$(JIT_SWITCHES): FORCE
+	@mkdir -p $(dir $@)
+	@{ grep -rhoE 'getenv\("BIFROST_[A-Z0-9_]+"' Source/FrostJIT; \
+	   grep -hoE '"BIFROST_[A-Z0-9_]+"' Source/System/Core/DebugFlags.hpp; } | \
+	  grep -oE 'BIFROST_[A-Z0-9_]+' | grep -vE '^BIFROST_JIT_(DISK_CACHE.*|CACHE_APP)$$' | \
+	  LC_ALL=C sort -u | sed 's/.*/"&",/' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+$(OBJDIR)/Source/FrostJIT/Runtime/CacheRecording.o: $(JIT_SWITCHES)
+$(OBJDIR)/Source/FrostJIT/Runtime/CacheRecording.o: private CXXFLAGS += -I$(OBJDIR)/generated
+
 # Pattern rule: compile any .cpp under Source/ or Source/Main.cpp to an object under BUILD_DIR.
 # Header dependencies are auto-tracked via -MMD -MP (see DEPS above).
 $(OBJDIR)/%.o: %.cpp

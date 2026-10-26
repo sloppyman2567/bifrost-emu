@@ -16,12 +16,24 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](Apps/vkquake.md).
 
-The fully provisioned suite was 361 runs under `run_tests.sh --strict` (2026-10-24; `jit_generations` adds one), in these categories: unit
+The fully provisioned suite was 361 runs under `run_tests.sh --strict` (2026-10-24; `jit_generations` and `jit_disk_cache` add one each), in these categories: unit
 (focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
 `Tests/Asm/`), sandbox, per-thread JIT, interactive (scripted stdin), toybox, real-world static and dynamic programs,
 dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitted by `--quick`). The runner prints
 each category's count when it starts, and `--filter REGEX` runs only the tests whose names match. Without a configured rootfs the
 dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
+
+### Persistent JIT cache (2026-10-26)
+
+`Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry `jit_disk_cache`, about 2 s) runs
+`Tests/Unit/jit_dispatch_cache_growth.elf` with the cache in a temporary directory: a recording run, a reuse
+run (over 90 % hits), verify mode (no mismatch), damaged `main.bin` and truncated segments (rejected, results
+correct), a 1 MiB budget (file bytes on disk stay within it), two concurrent writers and their merge, a codegen
+switch (separate fingerprint), a fourth build whose budget holds about two of the three existing directories
+(older ones pruned, nothing it records dropped) and a group-writable cache directory (cache off, program
+unaffected). It passed 10 runs in a row. It does not cover Android apps, code-cache renewals in a game or
+network filesystems; [JIT.md](JIT.md#persistent-translation-cache-2026-10-26-experimental-off-by-default)
+records the manual checks.
 
 ### Thread memory and the guest's RAM view (2026-10-25)
 

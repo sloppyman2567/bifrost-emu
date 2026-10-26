@@ -45,7 +45,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     // before writing either register and writes no register before a store, so
     // a fault on either half restarts the whole instruction from unchanged state.
     DecodedInst decoded;
-    if (!decode(decoded, guest_memory_->fetch_inst(inst.arm_pc))) return false;
+    if (!decode(decoded, guest_memory_->fetch_inst(fetch_address(inst.arm_pc)))) return false;
 
     memory_fault_stub_ = 0;
     clobber_flags(false, /*rdx_only=*/true);
@@ -117,6 +117,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     const uint64_t flags = reinterpret_cast<uint64_t>(guest_memory_->direct_page_flags());
     auto check_page = [&] {
         emit_mov_imm64(temp, flags);
+        note_host_reloc(HostReloc::PageFlags);
         emit_add_reg(temp, page);
         emit_load8(temp, temp, 0);
         emit_alu_imm(temp, 4, mask);
@@ -208,6 +209,7 @@ void FrostJIT::flush_deferred_guards() {
         patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
         auto check_page = [&] {
             emit_mov_imm64(g.temp, flags);
+            note_host_reloc(HostReloc::PageFlags);
             emit_add_reg(g.temp, g.page);
             emit_load8(g.temp, g.temp, 0);
             emit_alu_imm(g.temp, 4, g.mask);
