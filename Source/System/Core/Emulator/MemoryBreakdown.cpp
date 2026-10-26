@@ -63,6 +63,10 @@ void Emulator::dump_memory_breakdown() {
                  (unsigned long long)(total >> 10), (unsigned long long)(guest >> 10), (unsigned long long)(jit_code >> 10),
                  (unsigned long long)(heap >> 10), (unsigned long long)(arenas >> 10), (unsigned long long)(stacks >> 10),
                  (unsigned long long)(anon >> 10), (unsigned long long)(files >> 10), threads);
+    // Whether generated code checks page flags on every access (Memory::software_check_page).
+    const Memory::SoftwareCheckStats checks = mem_.software_check_stats();
+    std::fprintf(stderr, "[mem] software page checks: pages=%llu activations=%llu sticky=%d\n",
+                 (unsigned long long)checks.pages, (unsigned long long)checks.activations, checks.sticky ? 1 : 0);
 }
 
 } // namespace arm64emu

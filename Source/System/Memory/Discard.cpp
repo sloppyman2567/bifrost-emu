@@ -43,8 +43,8 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
         // Discarded private pages become userfaultfd-missing.
         for (uint64_t p = a / PAGE_SIZE; p < b / PAGE_SIZE; ++p) {
             if (file_pages_.count(p)) continue;
-            direct_page_flags_[p].fetch_or(GUEST_PAGE_UFFD_MISSING,
-                                           std::memory_order_release);
+            set_page_flags_locked(p, direct_page_flags_[p].load(std::memory_order_relaxed) |
+                                         GUEST_PAGE_UFFD_MISSING);
         }
     }
 }
@@ -108,6 +108,68 @@ int Memory::madvise_remove(uint64_t addr, uint64_t len) {
     return unmapped;
 }
 // ── userfaultfd ────────────────────────────────────────────────────────
+namespace {
+bool page_is_zero(const uint8_t* page) {
+    const auto* words = reinterpret_cast<const uint64_t*>(page);
+    for (size_t i = 0; i < Memory::PAGE_SIZE / sizeof(uint64_t); ++i)
+        if (words[i]) return false;
+    return true;
+}
+}  // namespace
+void Memory::enable_uffd_tracking() {
+    if (uffd_tracking_.load(std::memory_order_acquire)) return;
+    std::unique_lock<std::shared_mutex> g(mu_);
+    // Without a readable page table, registration cannot tell a populated page
+    // from a discarded one, so every access keeps the software checks.
+    const int fd = ::open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    uint64_t entry;
+    if (fd < 0 || ::pread(fd, &entry, sizeof(entry), 0) != sizeof(entry)) {
+        software_checks_sticky_ = true;
+        jit_software_checks_->store(true, std::memory_order_seq_cst);
+    }
+    if (fd >= 0) ::close(fd);
+    uffd_tracking_.store(true, std::memory_order_release);
+}
+bool Memory::refresh_missing_locked(uint64_t lo, uint64_t hi) {
+    // A guest write gives a discarded page a host page-table entry: present
+    // (bit 63) or swapped (bit 62) in /proc/self/pagemap
+    // (Documentation/admin-guide/mm/pagemap.rst). The host's own entries are
+    // not the guest's, though: a transparent huge page populates up to 511
+    // untouched neighbours (seen in Umamusume, where ART's moving space then
+    // read zeros instead of faulting). Those are all zero, so a page counts as
+    // populated only with nonzero contents; one the guest touched but left
+    // zero stays missing. /proc/self is opened per call: a descriptor kept
+    // across fork would read the parent.
+    int fd = -1;
+    constexpr uint64_t kPresentOrSwapped = 3ull << 62;
+    constexpr uint64_t kBatch = 512;
+    uint64_t entries[kBatch];
+    for (uint64_t p = lo / PAGE_SIZE; p < hi / PAGE_SIZE;) {
+        if (!(direct_page_flags_[p].load(std::memory_order_relaxed) & GUEST_PAGE_UFFD_MISSING)) {
+            ++p;
+            continue;
+        }
+        if (fd < 0 && (fd = ::open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC)) < 0) return false;
+        const uint64_t count = std::min(kBatch, hi / PAGE_SIZE - p);
+        const uint64_t host_page = reinterpret_cast<uintptr_t>(direct_window_) / PAGE_SIZE + p;
+        const ssize_t got = ::pread(fd, entries, count * sizeof(uint64_t),
+                                    static_cast<off_t>(host_page * sizeof(uint64_t)));
+        if (got != static_cast<ssize_t>(count * sizeof(uint64_t))) {
+            ::close(fd);
+            return false;
+        }
+        for (uint64_t i = 0; i < count; ++i) {
+            const uint8_t flags = direct_page_flags_[p + i].load(std::memory_order_relaxed);
+            // PAGE_MAPPED: the host page is readable (PROT_NONE pages are not).
+            if ((flags & GUEST_PAGE_UFFD_MISSING) && (flags & PAGE_MAPPED) &&
+                (entries[i] & kPresentOrSwapped) && !page_is_zero(direct_window_ + (p + i) * PAGE_SIZE))
+                set_page_flags_locked(p + i, flags & ~GUEST_PAGE_UFFD_MISSING);
+        }
+        p += count;
+    }
+    if (fd >= 0) ::close(fd);
+    return true;
+}
 int Memory::uffd_register(uint64_t addr, uint64_t len, bool registered) {
     uint64_t last;
     if (__builtin_add_overflow(addr, len, &last)) return -EINVAL;
@@ -126,14 +188,14 @@ int Memory::uffd_register(uint64_t addr, uint64_t len, bool registered) {
     }
     if (ranges.empty()) return -EINVAL;
     for (const auto& [lo, hi] : ranges) {
+        if (registered && !refresh_missing_locked(lo, hi) && !software_checks_sticky_) {
+            software_checks_sticky_ = true;
+            jit_software_checks_->store(true, std::memory_order_seq_cst);
+        }
         for (uint64_t p = lo / PAGE_SIZE; p < hi / PAGE_SIZE; ++p) {
-            if (registered)
-                direct_page_flags_[p].fetch_or(GUEST_PAGE_UFFD_REGISTERED,
-                                               std::memory_order_release);
-            else
-                direct_page_flags_[p].fetch_and(
-                    static_cast<uint8_t>(~GUEST_PAGE_UFFD_REGISTERED),
-                    std::memory_order_release);
+            const uint8_t flags = direct_page_flags_[p].load(std::memory_order_relaxed);
+            set_page_flags_locked(p, registered ? (flags | GUEST_PAGE_UFFD_REGISTERED)
+                                                : (flags & ~GUEST_PAGE_UFFD_REGISTERED));
         }
     }
     return 0;
@@ -143,8 +205,8 @@ void Memory::uffd_drop_registrations() {
     std::unique_lock<std::shared_mutex> g(mu_);
     for (const auto& [lo, vma] : vmas_)
         for (uint64_t p = lo / PAGE_SIZE; p < vma.end / PAGE_SIZE; ++p)
-            direct_page_flags_[p].fetch_and(static_cast<uint8_t>(~GUEST_PAGE_UFFD_REGISTERED),
-                                            std::memory_order_relaxed);
+            set_page_flags_locked(p, direct_page_flags_[p].load(std::memory_order_relaxed) &
+                                         ~GUEST_PAGE_UFFD_REGISTERED);
 }
 int64_t Memory::uffd_fill(uint64_t dst, const uint8_t* src, uint64_t len) {
     if (!is_valid_guest_range(dst, len)) return -ENOENT;
@@ -173,20 +235,12 @@ int64_t Memory::uffd_fill(uint64_t dst, const uint8_t* src, uint64_t len) {
         if (!(prot & GUEST_PROT_WRITE))
             (void)set_direct_prot(at, at + PAGE_SIZE, prot);
         // Release: a guard/check that sees the page present sees its bytes.
-        slot.fetch_and(static_cast<uint8_t>(~GUEST_PAGE_UFFD_MISSING),
-                       std::memory_order_release);
+        set_page_flags_locked(at / PAGE_SIZE, slot.load(std::memory_order_relaxed) &
+                                                  ~GUEST_PAGE_UFFD_MISSING);
         filled += PAGE_SIZE;
     }
     return filled;
 }
-namespace {
-bool page_is_zero(const uint8_t* page) {
-    const auto* words = reinterpret_cast<const uint64_t*>(page);
-    for (size_t i = 0; i < Memory::PAGE_SIZE / sizeof(uint64_t); ++i)
-        if (words[i]) return false;
-    return true;
-}
-}  // namespace
 int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed_addr) {
     // ART's CMC moves its heap into a from-space reservation placed anywhere.
     // Linux moves page tables, so untouched pages cost nothing on either side.
@@ -238,16 +292,15 @@ int64_t Memory::mremap_dontunmap(uint64_t old_addr, uint64_t len, uint64_t fixed
             // The moved page keeps its permissions; a missing page stays
             // missing. The new VMA is not registered (no UFFD_FEATURE_EVENT_REMAP).
             const uint8_t missing = flags[i] & GUEST_PAGE_UFFD_MISSING;
-            direct_page_flags_[page_to / PAGE_SIZE].store(
-                static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) | missing),
-                std::memory_order_release);
+            const uint8_t access = effective_page_prot(prot);
+            set_page_flags_locked(page_to / PAGE_SIZE,
+                static_cast<uint8_t>((access ? (PAGE_MAPPED | access) : 0) | missing));
             // The old range keeps its permissions and registration, now empty
             // (released below).
-            direct_page_flags_[page_from / PAGE_SIZE].store(
-                static_cast<uint8_t>((prot ? (PAGE_MAPPED | prot) : 0) |
+            set_page_flags_locked(page_from / PAGE_SIZE,
+                static_cast<uint8_t>((access ? (PAGE_MAPPED | access) : 0) |
                                      (flags[i] & GUEST_PAGE_UFFD_REGISTERED) |
-                                     (track ? GUEST_PAGE_UFFD_MISSING : 0)),
-                std::memory_order_release);
+                                     (track ? GUEST_PAGE_UFFD_MISSING : 0)));
         }
         if (raise) {
             (void)set_direct_prot(to, to + bytes, prot);

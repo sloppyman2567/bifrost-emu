@@ -15,6 +15,46 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Software page checks only while a page needs them (2026-10-26)
+
+ART calls `userfaultfd()` when libart loads (`KernelSupportsUffd` in `gUseUserfaultfd`'s static initializer,
+[mark_compact.cc](https://android.googlesource.com/platform/art/+/refs/heads/main/runtime/gc/collector/mark_compact.cc)),
+and every Umamusume process logs `Using CollectorTypeCMC GC`. That call used to set the software-check flag for
+good, so every guest load and store in an ART app took the out-of-line page check (two taken jumps, a 10-byte
+`movabs` and about a dozen instructions). A throwaway loop of four accesses per iteration ran 1.8 times slower
+with the flag set (2.7 against 4.8 ns per iteration, three runs each).
+
+The flag is now raised only while a page needs it (`Memory::software_check_page`): userfaultfd registered and
+missing, the only state whose host page admits a native access the guest must not make. Every page-flag change
+goes through `Memory::set_page_flags_locked`, which counts those pages, raises the flag before the first one
+changes and clears it after the last one. ART registers its moving and linear-alloc spaces only during a
+compaction (`KernelPreparation` to the end of `CompactionPhase`), so the flag is clear between collections.
+Generated code is unchanged.
+
+- **Execute-only pages are readable.** Linux arm64's `protection_map` (`arch/arm64/mm/mmap.c`, v6.12) maps
+  `VM_EXEC` as `PAGE_READONLY_EXEC` and switches to `PAGE_EXECONLY` only with Enhanced PAN (ARMv8.7); the
+  emulated CPU is a Cortex-A72 without it. `Memory::effective_page_prot` applies that rule, as it already did
+  for write-only pages; the VMA and `/proc/self/maps` keep `--x`. Umamusume's protector library makes 72 pages of
+  its text execute-only in every process, which had kept the flag set for good.
+- **MISSING bits are refreshed at registration.** While the flag is clear, native code populates a discarded,
+  unregistered page without clearing its MISSING bit. `UFFDIO_REGISTER` therefore clears MISSING on pages that
+  `/proc/self/pagemap` shows present or swapped *and* that hold nonzero bytes. The contents test is required:
+  a host transparent huge page populates up to 511 untouched neighbours, and trusting pagemap alone cleared
+  442 such zero pages of ART's heap in one Umamusume launch, which then read zeros instead of faulting and crashed
+  the game after its first collection. Limitation: a discarded page that the guest touches but leaves all zero,
+  then registers without discarding again, still delivers a missing fault (Linux would not). ART discards or
+  moves every range after registering it. If pagemap cannot be read, the flag stays set as before.
+- `check_access` clears an unregistered page's MISSING bit with a compare-and-swap that faults instead when a
+  registration lands meanwhile, so the count cannot drift.
+- `[mem] software page checks: pages=N activations=N sticky=0|1` (with the `[JIT]` statistics) shows the state.
+
+Measured (one machine): the loop above runs at 2.75 ns per iteration with and without a prior `userfaultfd()`
+call. Umamusume EN (unattended, 150 s and 240 s to the title): no crash; the game process reported `pages=0` at
+every 30 s sample after 14 activations (one per collection). No in-game frame rate was measured. Tests:
+`test_userfaultfd` (a page rewritten by JIT-hot code while nothing is registered stays present after
+registering; the host kernel agrees), `test_mem_guard` (a JIT-hot load from an execute-only page agrees with
+the kernel's `write()` of it).
+
 ## Persistent translation cache (2026-10-26, experimental, off by default)
 
 `--jit-disk-cache` (`BIFROST_JIT_DISK_CACHE=1`, `[jit] disk_cache = true`) stores Tier-1 translations of
@@ -1918,8 +1958,8 @@ The verifier's dominance and predecessor-edge rules match the
 Native scalar loads/stores select guard scratch registers through the allocator
 instead of discarding every caller-saved mapping on each access. Bounds,
 permissions, userfaultfd missing-page bits, and crossing-page checks remain.
-The sticky software-check flag is read on every access; another guest CPU may
-enable tracking while a block executes. The result register is separate from
+The software-check flag is read on every access; another guest CPU may raise it
+while a block executes (see [its section](#software-page-checks-only-while-a-page-needs-them-2026-10-26)). The result register is separate from
 the address, preserving inputs if the host access faults. Cold recovery commits
 pre-instruction guest state and steps the instruction before returning to the
 dispatcher. Paired instructions retain the existing whole-footprint guard;
@@ -2288,12 +2328,13 @@ Ordinary scalar loads/stores, single 16-byte vector accesses and native LSE
 atomics use host page protection instead of consulting two guest page flags on
 every access. The reservation bounds check remains: adding an arbitrary guest
 address to a host base must never wrap into unrelated host storage. A single
-sticky `Memory::jit_software_checks_` byte (at `window_base - 8`, tested as
-`cmp byte [r10-8], 0`) selects the software permission path
-after userfaultfd tracking starts or a W/X-only guest mapping is created. x86
-cannot represent those guest read restrictions, and the emulated userfaultfd
-missing bits do not change host page protection. Already compiled code observes
-the flag without invalidation. Pair and multi-register accesses, exclusive
+`Memory::jit_software_checks_` byte (at `window_base - 8`, tested as
+`cmp byte [r10-8], 0`) selects the software permission path while some page is
+userfaultfd registered and missing: the emulated missing bits do not change host
+page protection, so such a page reads zero natively. Write-only and execute-only
+pages are readable, as Linux arm64 maps them on a CPU without Enhanced PAN, so
+they need no software path. Already compiled code observes the flag without
+invalidation. Pair and multi-register accesses, exclusive
 helpers and IR without a guest PC retain the original checks.
 
 `FaultHandler.cpp` installs SIGSEGV/SIGBUS handlers once. A fault is eligible only

@@ -231,8 +231,7 @@ bool Memory::set_direct_prot(uint64_t lo, uint64_t hi, int prot) const {
     // Passing PROT_EXEC through made an execute-only guest mapping (legal
     // on AArch64, used by the Android framework) host execute-only on CPUs
     // with protection keys, so translating it SIGSEGV'd the emulator. Guest
-    // reads of such pages are still refused by check_access(); JIT inline
-    // loads rely on host protection and can read them.
+    // reads of such pages succeed, as on the emulated CPU (effective_page_prot).
     int host = PROT_NONE;
     if (prot & (PROT_READ | PROT_EXEC)) host |= PROT_READ;
     if (prot & PROT_WRITE) host |= PROT_WRITE;
@@ -295,26 +294,35 @@ bool Memory::mapping_prot_at_locked(uint64_t addr, uint8_t& prot) const {
     prot = it->second.prot & 7;
     return true;
 }
+void Memory::set_page_flags_locked(uint64_t page, uint8_t flags) {
+    auto& slot = direct_page_flags_[page];
+    const bool was = software_check_page(slot.load(std::memory_order_relaxed));
+    const bool now = software_check_page(flags);
+    // Raised before the page needs it; generated code reads it right before
+    // each access, as it reads the page flags themselves on the checked path.
+    if (now && !was && software_check_pages_.fetch_add(1, std::memory_order_relaxed) == 0) {
+        jit_software_checks_->store(true, std::memory_order_seq_cst);
+        software_check_activations_.fetch_add(1, std::memory_order_relaxed);
+    }
+    slot.store(flags, std::memory_order_release);
+    if (was && !now && software_check_pages_.fetch_sub(1, std::memory_order_relaxed) == 1 &&
+        !software_checks_sticky_)
+        jit_software_checks_->store(false, std::memory_order_release);
+}
 void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                 bool combine, bool keep_uffd) {
     if (lo >= hi) return;
-    if (prot && !(prot & GUEST_PROT_READ))
-        jit_software_checks_->store(true, std::memory_order_release);
     auto flags_for = [&](uint8_t old, uint8_t page_prot) {
         const uint8_t uffd = keep_uffd ? (old & GUEST_PAGE_UFFD_BITS) : 0;
-        // Linux arm64's protection_map makes VM_WRITE pages readable, for
-        // private and shared mappings alike. Keep the requested VMA flags
-        // below (e.g. -w-s in /proc/maps), but enforce the effective PTE access.
-        if (page_prot & GUEST_PROT_WRITE) page_prot |= GUEST_PROT_READ;
+        page_prot = effective_page_prot(page_prot);
         return static_cast<uint8_t>(page_prot ? (PAGE_MAPPED | uffd | page_prot) : uffd);
     };
     if (!combine) {
         (void)set_direct_prot(lo, hi, prot);
         if (prot) {
             for (uint64_t p = lo / PAGE_SIZE; p < hi / PAGE_SIZE; ++p)
-                direct_page_flags_[p].store(
-                    flags_for(direct_page_flags_[p].load(std::memory_order_relaxed), prot),
-                    std::memory_order_release);
+                set_page_flags_locked(
+                    p, flags_for(direct_page_flags_[p].load(std::memory_order_relaxed), prot));
         } else {
             // Only pages that had access carry flags; a PROT_NONE range costs
             // nothing for the parts that were already inaccessible.
@@ -324,9 +332,8 @@ void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                 if (!it->second.prot || it->second.end <= lo) continue;
                 const uint64_t a = std::max(lo, it->first), b = std::min(hi, it->second.end);
                 for (uint64_t p = a / PAGE_SIZE; p < b / PAGE_SIZE; ++p)
-                    direct_page_flags_[p].store(
-                        flags_for(direct_page_flags_[p].load(std::memory_order_relaxed), 0),
-                        std::memory_order_release);
+                    set_page_flags_locked(
+                        p, flags_for(direct_page_flags_[p].load(std::memory_order_relaxed), 0));
             }
         }
         erase_vma_locked(lo, hi);
@@ -341,9 +348,8 @@ void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
             uint8_t old_prot = 0;
             (void)mapping_prot_at_locked(page_addr, old_prot);
             const uint8_t next = static_cast<uint8_t>(old_prot | prot);
-            direct_page_flags_[p].store(
-                flags_for(direct_page_flags_[p].load(std::memory_order_relaxed), next),
-                std::memory_order_release);
+            set_page_flags_locked(
+                p, flags_for(direct_page_flags_[p].load(std::memory_order_relaxed), next));
             if (page_addr == lo) {
                 run_prot = next;
             } else if (next != run_prot) {
@@ -398,7 +404,7 @@ void Memory::clear_mapping_locked(uint64_t lo, uint64_t hi) {
         // userfaultfd exists; otherwise those pages carry no flags.
         if (it->second.prot || track)
             for (uint64_t p = a / PAGE_SIZE; p < b / PAGE_SIZE; ++p)
-                direct_page_flags_[p].store(0, std::memory_order_release);
+                set_page_flags_locked(p, 0);
         (void)set_direct_prot(a, b, PROT_NONE);
         // Above the low region, munmap returns the memory to the host. Low
         // pages stay resident and are zeroed on reuse (see memory.h).
@@ -465,10 +471,20 @@ void Memory::check_access(uint64_t addr, size_t size, uint8_t access) const {
                 fault.uffd = true;
                 throw fault;
             }
-            // Unregistered: Linux supplies a zero page; ours is zeroed.
-            direct_page_flags_[p].fetch_and(
-                static_cast<uint8_t>(~GUEST_PAGE_UFFD_MISSING),
-                std::memory_order_acq_rel);
+            // Unregistered: Linux supplies a zero page; ours is zeroed. This runs
+            // without mu_: a registration that lands meanwhile makes it a fault,
+            // and the bit must not be cleared under it (set_page_flags_locked
+            // counts that page).
+            while (!direct_page_flags_[p].compare_exchange_weak(
+                       flags, static_cast<uint8_t>(flags & ~GUEST_PAGE_UFFD_MISSING),
+                       std::memory_order_acq_rel)) {
+                if (!(flags & GUEST_PAGE_UFFD_MISSING)) break;
+                if (flags & GUEST_PAGE_UFFD_REGISTERED) {
+                    UnmappedMemory fault(at, write);
+                    fault.uffd = true;
+                    throw fault;
+                }
+            }
         }
     }
 }

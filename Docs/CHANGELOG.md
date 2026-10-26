@@ -14,6 +14,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### ART apps no longer check page flags on every memory access (2026-10-26)
+
+- ART calls `userfaultfd()` when libart loads, which used to switch every guest load and store in an Android
+  app to the software page check for the rest of the process (1.8x slower on a load/store loop). The flag is
+  now set only while a userfaultfd-registered page is missing, which for ART means during a compaction.
+  Registration refreshes stale MISSING bits from `/proc/self/pagemap` plus page contents (host transparent
+  huge pages populate untouched pages), and execute-only pages are readable, as Linux arm64 maps them on a CPU
+  without Enhanced PAN (the emulated Cortex-A72). Umamusume ran 150 s and 240 s to its title with the flag
+  clear between collections; no in-game frame rate was measured. `[mem] software page checks:` reports the
+  state. Regressions in `test_userfaultfd` and `test_mem_guard`.
+
 ### Persistent JIT translation cache, experimental and off by default (2026-10-26)
 
 - `--jit-disk-cache` (`BIFROST_JIT_DISK_CACHE=1`, `[jit] disk_cache`) stores Tier-1 translations of file-backed

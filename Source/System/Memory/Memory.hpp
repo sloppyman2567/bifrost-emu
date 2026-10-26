@@ -56,8 +56,9 @@ public:
     static constexpr uint8_t GUEST_PAGE_MAPPED = 0x80;
     // userfaultfd (SIGBUS mode) per-page state in direct_page_flags_.
     // MISSING: no content since MADV_DONTNEED or an MREMAP_DONTUNMAP move
-    // (tracked once a userfaultfd exists); the JIT memory guard rejects it,
-    // so first touch reaches check_access. REGISTERED: covered by a
+    // (tracked once a userfaultfd exists). Exact on registered pages; native JIT
+    // code may populate an unregistered one without clearing it, so registering
+    // refreshes the bit from the host page table. REGISTERED: covered by a
     // UFFDIO_REGISTER_MODE_MISSING range. Touching MISSING|REGISTERED is
     // SIGBUS BUS_ADRERR; touching an unregistered MISSING page populates it.
     static constexpr uint8_t GUEST_PAGE_UFFD_MISSING = 0x10;
@@ -219,12 +220,25 @@ public:
     // ── userfaultfd (SIGBUS mode) ─────────────────────────────────────
     // Missing-page tracking starts with the first userfaultfd and stays on.
     // The state lives in direct_page_flags_ for every guest page.
-    void enable_uffd_tracking() {
-        jit_software_checks_->store(true, std::memory_order_release);
-        uffd_tracking_.store(true, std::memory_order_release);
+    void enable_uffd_tracking();
+    // For the periodic statistics: pages that need software checks now, how
+    // often the flag went on, and whether it is sticky.
+    struct SoftwareCheckStats {
+        uint64_t pages = 0, activations = 0;
+        bool sticky = false;
+    };
+    SoftwareCheckStats software_check_stats() const {
+        return {software_check_pages_.load(std::memory_order_relaxed),
+                software_check_activations_.load(std::memory_order_relaxed),
+                software_checks_sticky_.load(std::memory_order_relaxed)};
     }
-    // Sticky fallback for state the host MMU cannot represent exactly:
-    // userfaultfd-missing pages and readable host aliases of guest W/X-only pages.
+    // Set while some page's host protection admits a native access the guest
+    // must not make (software_check_page): a userfaultfd registered missing
+    // page, whose host page reads zero. The JIT then checks page flags on
+    // every access. ART calls
+    // userfaultfd when libart loads but has registered missing pages only
+    // while a compaction runs, so the flag is normally clear. Sticky instead
+    // when /proc/self/pagemap is unreadable (refresh_missing_locked).
     // It lives at JIT_SOFTWARE_CHECKS_OFF below direct_window() (a readable
     // header page in front of the reservation), so generated code tests it
     // with one `cmp byte [window_base + off], 0` through its window register.
@@ -441,6 +455,33 @@ private:
     std::map<uint64_t, uint64_t> free_ranges_;
     std::atomic<bool> uffd_tracking_{false};
     std::atomic<bool>* jit_software_checks_ = nullptr;  // in the header page
+    // The access a page with VMA permissions `prot` grants, as Linux arm64's
+    // protection_map (arch/arm64/mm/mmap.c) sets its PTE: VM_WRITE and VM_EXEC
+    // pages are readable, private and shared alike. Execute-only needs Enhanced
+    // PAN (ARMv8.7), which the emulated Cortex-A72 lacks. The VMA keeps the
+    // requested flags (-w-s or --xp in /proc/self/maps).
+    static constexpr uint8_t effective_page_prot(uint8_t prot) {
+        return (prot & (GUEST_PROT_WRITE | GUEST_PROT_EXEC))
+            ? static_cast<uint8_t>(prot | GUEST_PROT_READ) : prot;
+    }
+    // A page native JIT code must not access through host protection alone:
+    // userfaultfd registered and missing (its host page reads zero). Every other
+    // mapped page's host protection grants exactly its guest access.
+    static constexpr bool software_check_page(uint8_t flags) {
+        return (flags & PAGE_MAPPED) &&
+               (flags & GUEST_PAGE_UFFD_BITS) == GUEST_PAGE_UFFD_BITS;
+    }
+    // Every page-flag change under mu_ goes through here, keeping the count of
+    // software_check_page pages and the JIT flag (raised before the page changes,
+    // cleared after the last one does).
+    void set_page_flags_locked(uint64_t page, uint8_t flags);
+    // Clear MISSING on pages in [lo, hi) that have a host page-table entry:
+    // native JIT code populates a discarded page without clearing the bit
+    // while the flag is clear. False when /proc/self/pagemap cannot be read.
+    bool refresh_missing_locked(uint64_t lo, uint64_t hi);
+    // Written under mu_; atomic for software_check_stats.
+    std::atomic<uint64_t> software_check_pages_{0}, software_check_activations_{0};
+    std::atomic<bool> software_checks_sticky_{false};
     // Allocation cursors: the low heap from MMAP_BASE_MIN (randomized), and
     // above the low region once it is full or for Android's large maps.
     uint64_t mmap_next_ = 0;

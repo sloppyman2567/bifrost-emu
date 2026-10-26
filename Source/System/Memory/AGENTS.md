@@ -13,8 +13,8 @@ State shared between them goes in `MemoryInternal.hpp`.
   broker's per-endpoint mirrors use `BINDER_REALM_WINDOW_SIZE` (512 GiB, a
   Android 15 GKI's 39-bit address space): one broker process holds up to 128 mirrors,
   and full-size windows exhaust the host's 47-bit user space after eight.
-- The readable page before the window holds the JIT's sticky software-check
-  flag and per-width window limits (`JIT_WINDOW_LIMITS_OFF`); generated code
+- The readable page before the window holds the JIT's software-check flag
+  and per-width window limits (`JIT_WINDOW_LIMITS_OFF`); generated code
   reads both through the window register, so keep their offsets and contents
   in step with `window_size_`.
 - `write()` stores each 2/4/8-byte element (and 16-byte halves) with a single
@@ -40,7 +40,13 @@ State shared between them goes in `MemoryInternal.hpp`.
 - userfaultfd SIGBUS mode supports ART's CMC GC. Preserve MISSING/REGISTERED
   bits, missing-page JIT guards, registration lifetime and precise retry state.
   DONTUNMAP moves sparse contents without touching every page of ART's large
-  pools; keep its RSS regression and native-kernel comparison. Change host
+  pools; keep its RSS regression and native-kernel comparison. Change page flags
+  only through `set_page_flags_locked` (it keeps the software-check count and
+  flag), and keep `software_check_page` limited to pages whose host protection
+  admits a wrong native access. MISSING is exact only on registered pages:
+  registration refreshes it from pagemap plus page contents (host THP populates
+  untouched pages). Page access follows arm64's `protection_map` without Enhanced
+  PAN (`effective_page_prot`): write or execute implies read. Change host
   protection once per run of equal permissions, not per page; page flags and
   userfaultfd bits stay per page.
 - Android leaves guest page zero unmapped for implicit null checks. Linux

@@ -123,6 +123,10 @@ __attribute__((noinline)) static long sum_pages(const volatile char *p) {
     return sum;
 }
 
+__attribute__((noinline)) static void fill_pages(volatile char *p, char value) {
+    for (int i = 0; i < PAGES; i++) p[i * page + 8] = value;
+}
+
 static long rss_pages(void) {
     long size = 0, resident = -1;
     FILE *statm = fopen("/proc/self/statm", "r");
@@ -445,6 +449,26 @@ int main(void) {
         }
     }
 #endif
+    CHECK(ioctl(uffd, UFFDIO_UNREGISTER, &(struct uffdio_range){
+        .start = (uintptr_t)heap, .len = PAGES * page}) == 0);
+    // A discarded page that JIT-hot code rewrites while nothing is registered
+    // has a page-table entry again: registering it must not make it missing.
+    char *source = mmap(NULL, PAGES * page, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    heap = mmap(NULL, PAGES * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(source != MAP_FAILED && heap != MAP_FAILED);
+    from = source;
+    for (int r = 0; r < 20000; r++) fill_pages(source, 1);
+    CHECK(madvise(heap, PAGES * page, MADV_DONTNEED) == 0);
+    fill_pages(heap, 5);
+    reg = (struct uffdio_register){.range = {.start = (uintptr_t)heap, .len = PAGES * page},
+                                   .mode = UFFDIO_REGISTER_MODE_MISSING};
+    CHECK(ioctl(uffd, UFFDIO_REGISTER, &reg) == 0);
+    prior_faults = faults;
+    CHECK(sum_pages(heap) == 5 * PAGES && faults == prior_faults);
+    copy = (struct uffdio_copy){.dst = (uintptr_t)heap, .src = (uintptr_t)source, .len = page};
+    errno = 0;
+    CHECK(ioctl(uffd, UFFDIO_COPY, &copy) == -1 && errno == EEXIST);
     CHECK(ioctl(uffd, UFFDIO_UNREGISTER, &(struct uffdio_range){
         .start = (uintptr_t)heap, .len = PAGES * page}) == 0);
     CHECK(bad_faults == 0);

@@ -11,6 +11,11 @@
 //      it zeroed every page above the start, including libc's text.
 //   4. Above-the-4GiB-window MAP_FIXED map/write/read/unmap cycles run
 //      sequentially across several regions (sparse pages_ path).
+//   5. A JIT-hot load from an execute-only page faults exactly when the
+//      kernel refuses to read it (write() to a pipe fails with EFAULT). Linux
+//      arm64 maps PROT_EXEC readable without Enhanced PAN, as on the emulated
+//      Cortex-A72, so both succeed; x86 hosts with protection keys refuse both
+//      (SEGV_PKUERR), arm64 with Enhanced PAN too (SEGV_ACCERR).
 //
 // Build: make setup-tests
 // Run:   ./bifrost-emu Tests/Unit/test_mem_guard.elf
@@ -24,6 +29,8 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <setjmp.h>
+#include <signal.h>
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -102,6 +109,55 @@ static int test_high_fixed_rw(void) {
     return 0;
 }
 
+// 5. Execute-only reads, cold and JIT-hot.
+static sigjmp_buf xonly_jump;
+static volatile uintptr_t xonly_addr;
+static volatile int xonly_code;
+static void on_xonly_fault(int sig, siginfo_t* info, void* context) {
+    (void)sig; (void)context;
+    xonly_addr = (uintptr_t)info->si_addr;
+    xonly_code = info->si_code;
+    siglongjmp(xonly_jump, 1);
+}
+__attribute__((noinline)) static long load_word(const volatile long* p) { return *p; }
+#ifndef SEGV_PKUERR
+#define SEGV_PKUERR 4
+#endif
+// 1: faulted with SEGV_ACCERR/SEGV_PKUERR at p, 0: read `want`, -1: anything else.
+static int xonly_read(const volatile long* p, long want) {
+    xonly_addr = 0;
+    if (sigsetjmp(xonly_jump, 1))
+        return xonly_addr == (uintptr_t)p &&
+               (xonly_code == SEGV_ACCERR || xonly_code == SEGV_PKUERR) ? 1 : -1;
+    return load_word(p) == want ? 0 : -1;
+}
+static int test_exec_only_read(void) {
+    long* page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) return -1;
+    page[3] = 42;
+    long warm = 0;
+    for (int i = 0; i < 20000; i++) warm += load_word(&page[3]);
+    if (warm != 42L * 20000) return -2;
+    struct sigaction sa = {.sa_sigaction = on_xonly_fault, .sa_flags = SA_SIGINFO}, old;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, &old)) return -3;
+    int result = 0, fds[2];
+    if (pipe(fds) || mprotect(page, 4096, PROT_EXEC)) result = -4;
+    errno = 0;
+    const int refused = !result && write(fds[1], &page[3], sizeof(long)) < 0 && errno == EFAULT;
+    for (int i = 0; !result && i < 100; i++)
+        if (xonly_read(&page[3], 42) != refused) result = -5;
+    close(fds[0]);
+    close(fds[1]);
+    // Readable again: the same hot load succeeds.
+    if (!result && (mprotect(page, 4096, PROT_READ) || xonly_read(&page[3], 42) != 0))
+        result = -7;
+    sigaction(SIGSEGV, &old, NULL);
+    munmap(page, 4096);
+    return result;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);   // progress visible even on crash
     printf("=== memory guard test ===\n");
@@ -113,8 +169,10 @@ int main(void) {
     printf("madvise huge: %s\n", r3 == 0 ? "ok" : "bad");
     int r4 = test_high_fixed_rw();
     printf("high fixed rw: %s\n", r4 == 0 ? "ok" : "bad");
-    if (r1 || r2 || r3 || r4) {
-        printf("FAIL (%d %d %d %d)\n", r1, r2, r3, r4);
+    int r5 = test_exec_only_read();
+    printf("exec-only read: %s\n", r5 == 0 ? "ok" : "bad");
+    if (r1 || r2 || r3 || r4 || r5) {
+        printf("FAIL (%d %d %d %d %d)\n", r1, r2, r3, r4, r5);
         return 1;
     }
     printf("mem guard: ALL PASS\n");

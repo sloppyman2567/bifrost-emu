@@ -101,9 +101,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   MT edge orders its checks before the reconcile for the same reason.
 - Use actual reservation bounds via the shared window-limit helpers
   (`emit_window_limit_cmp` reads the header-page table through `WIN_REG`;
-  `emit_window_limit` where `WIN_REG` is not the window base). Missing-page
-  tracking and W/X-only mappings can enable sticky software guards while already
-  compiled code executes; preserve their runtime observation.
+  `emit_window_limit` where `WIN_REG` is not the window base). The software-check
+  flag goes on and off while compiled code executes (userfaultfd registered missing
+  pages, `Memory::software_check_page`); test it at every access, never hoist it.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
   locking, invalidation generations and target revocation for Tier-1/Tier-2.
