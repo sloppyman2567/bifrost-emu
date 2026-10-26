@@ -14,6 +14,35 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### fcntl owner, signal and lease commands: Umamusume no longer ends itself about 8 s in (2026-10-26)
+
+- `fcntl` answered `F_SETOWN`, `F_GETOWN`, `F_SETSIG`, `F_GETSIG`, `F_SETLEASE` and `F_GETLEASE` with `EINVAL`. They now
+  follow Linux `fs/fcntl.c` and `fs/locks.c` (v6.12): the owner (`Node::async_owner`) and signal belong to the open
+  file description, so a `dup()` shares them; `F_SETOWN` of a pid or group that does not exist is `ESRCH`, `INT_MIN` is
+  `EINVAL`, a group reads back negative, and `F_SETSIG` takes 0 to 64. `F_SETLEASE` works on regular files, procfs
+  ones included (the memory file of `/proc/<pid>/mem`), and is `EINVAL` on pipes, sockets and directories; releasing a lease
+  that is not held is `EAGAIN`; `F_GETLEASE` reads it back (`F_UNLCK` when none). `test_fcntl_owner` covers it
+  natively, in the emulator and with `--no-jit`, and fails on the previous binary.
+- Limits: nothing is delivered. Leases are recorded and never broken, because the emulator sees no other opener, and a
+  read lease conflicts only with this description's own write mode (Linux counts every opener). The owner-permission
+  check (`EACCES` for a file the caller does not own) is not made. Kernels from 6.15 refuse leases on procfs files
+  (`simple_nosetlease`; the 7.2.8 host does), so `test_fcntl_owner` accepts that refusal natively and requires the
+  older behaviour of the Android kernels only when run with the `emu` argument.
+- **Why Umamusume ended itself.** The anti-tamper code (lib__4e06__.so unpacks it into anonymous memory) forks a helper
+  that inherits the descriptor of `/proc/<app pid>/mem`, which the app opened just before. The helper calls
+  `fcntl(fd, F_SETOWN, app pid)`, `F_SETSIG(SIGIO)` and `F_SETLEASE(F_WRLCK)` on it (a lease whose break signal would
+  report anyone opening the file) and takes any failure as a detection: by the disassembly the first reported event
+  is stored, ends the helper and becomes its exit status (event 142, `0x8e`), and the app ends itself with status 0, or is killed (137),
+  about 8 s in. With the commands implemented, the helper no longer exits 142 and the app ran for the whole 90 s of the
+  test, loading its WebView and services; no crash, abort or tombstone was logged.
+- Checked against sources: the kernel behaviour above (fetched `fs/fcntl.c` and `fs/locks.c`) and, on the host kernel, the
+  results of the same calls in a native program. Observed in the emulator only: the call sequence and its `EINVAL`
+  (syscall trace), the exit status 142, the layout of the helper's result record (decoded from memory dumps of the
+  helper), and that the app survives 90 s. Not established: that the game is playable past the title, that the lease
+  step was the only check (the later helpers it forks were not examined), or the meaning of the helper's other event
+  ids. The `stat("/proc")` / `stat("/proc/%d")` pair seen in the helper's trace is a `realpath` of the unformatted
+  template that fails the same way on Linux; it is not the cause.
+
 ### Android audio: a missing libaaudio adapter fails the AudioTrack instead of the process (2026-10-26)
 
 - With Android's own `libaaudio.so` in the process instead of the Bifrost adapter (the batch without `--managed-graphics`),
@@ -442,7 +471,7 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
   it starts forking helpers; with them fixed its self-destruct helper (SIGKILL, exit 137) no longer runs and the app instead exits
   with status 0 about 8 s in, after a forked child that stats `/proc` and `/proc/%d` exits with code 142. `test_proc_mem_pagemap`
   passes natively and in the emulator and fails on the previous binary.
-- **Umamusume still does not run (unresolved).** Its anti-tamper code forks a helper, which forks a monitor that kills the helper,
+- **Umamusume still does not run (fixed 2026-10-26, see the fcntl entry above).** Its anti-tamper code forks a helper, which forks a monitor that kills the helper,
   waits for it to vanish with `kill(helper, 0)`, reads `/proc/<own pid>/stat` and then kills the app. That self-destruct sequence
   only completed after `4dfec242` made `kill(pid, 0)` honest (restoring the old behaviour once let the game run; it was reverted
   because it hangs every `kill -0` polling loop). The status, orphan, `stat` and memory-file fixes above changed the outcome from

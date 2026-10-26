@@ -19,6 +19,7 @@
 // same Node (shared ownership).
 #pragma once
 #include "Bifrost/Types.hpp"
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -120,6 +121,14 @@ public:
     virtual ssize_t getdents(uint64_t /*off*/, void* /*buf*/, size_t /*n*/) {
         return -ENOTDIR;
     }
+    // fcntl F_SETOWN/F_SETSIG state of this open file description: dup()ed descriptors share it. `owner` is
+    // the pid that would receive SIGIO (negative: that process group), 0 for none; `sig` the signal sent
+    // instead of SIGIO (0 = SIGIO). Nothing is delivered: the emulator raises no async I/O signals.
+    std::atomic<int32_t> async_owner{0};
+    std::atomic<int32_t> async_sig{0};
+    // fcntl F_SETLEASE state: F_RDLCK (0), F_WRLCK (1) or F_UNLCK (2, none). Recorded and read back, never
+    // broken: the emulator cannot see another opener, so no break signal is sent.
+    std::atomic<int32_t> lease{2};
 private:
     uint64_t proc_inode_ = 0;
 };

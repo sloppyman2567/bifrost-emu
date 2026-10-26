@@ -57,6 +57,10 @@
   per process, changed only in that table, never on the host. RLIMIT_NOFILE is enforced by `FdTable`
   (EMFILE). `kill(pid, 0)` asks the host for any pid but the caller's own (ESRCH/EPERM).
   `test_rlimit` and `test_signal_semantics` cover them.
+- fcntl owner, signal and lease state (`F_SETOWN`/`F_SETSIG`/`F_SETLEASE`, `Node::async_owner`/`async_sig`/`lease`) belongs
+  to the open file description, so dup()ed descriptors share it. Nothing is delivered and leases are never broken: do not
+  forward these commands to the host fd, whose lease break would raise SIGIO against the emulator itself.
+  `test_fcntl_owner` covers it (the `emu` argument selects the pre-6.15 procfs lease behaviour).
 - FD_CLOEXEC is per guest descriptor (`FdTable::set_cloexec`): set it wherever a creating call takes
   O_CLOEXEC-style flags, never forward F_SETFD to the shared host fd.
 - A syscall that delivers a signal to its own caller (`kill` of self, `tgkill`, `tkill`)

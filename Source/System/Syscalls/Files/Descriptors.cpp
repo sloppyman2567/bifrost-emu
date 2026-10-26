@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
@@ -30,6 +31,14 @@
 #include <sys/uio.h>
 #include <unistd.h>
 namespace arm64emu {
+// fcntl F_SETOWN/F_GETOWN owner: a pid, or a process group when negative. The caller's own process and group
+// exist even where the PID-1 model hides the host ids; anything else is asked of the host (EPERM still exists).
+static bool fcntl_owner_exists(Emulator& emu, int32_t who) {
+    const auto ids = emu.vfs().process_ids();
+    const int p = who < 0 ? -who : who;
+    if (p == ids.pid || p == static_cast<int>(::getpid()) || (who < 0 && p == ids.pgid)) return true;
+    return ::kill(who, 0) == 0 || errno == EPERM;
+}
 int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -614,6 +623,52 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                     return 0;
                 }
+                case F_SETOWN: {  // 8 — Linux f_setown: INT_MIN is invalid, a pid or group that does not exist is ESRCH
+                    const int32_t who = static_cast<int32_t>(a2);
+                    if (who == INT32_MIN) { ret_err(EINVAL); return 0; }
+                    if (who != 0 && !fcntl_owner_exists(emu, who)) { ret_err(ESRCH); return 0; }
+                    node->async_owner = who;
+                    ret_host(0);
+                    return 0;
+                }
+                case F_GETOWN: {  // 9 — the owner while it exists (a group as a negative number), else 0
+                    const int32_t who = node->async_owner;
+                    ret_host(static_cast<int64_t>(who != 0 && fcntl_owner_exists(emu, who) ? who : 0));
+                    return 0;
+                }
+                case F_SETSIG: {  // 10 — Linux valid_signal(): 0 (plain SIGIO) through 64
+                    const int32_t sig = static_cast<int32_t>(a2);
+                    if (sig < 0 || sig > MAX_SIGNAL) { ret_err(EINVAL); return 0; }
+                    node->async_sig = sig;
+                    ret_host(0);
+                    return 0;
+                }
+                case F_GETSIG:  // 11
+                    ret_host(static_cast<int64_t>(node->async_sig.load()));
+                    return 0;
+                case F_SETLEASE: {  // 1024 — Linux vfs_setlease: regular files only (procfs ones too below kernel 6.15)
+                    struct stat st{};
+                    if (node->fstat(&st) != 0 || !S_ISREG(st.st_mode)) { ret_err(EINVAL); return 0; }
+                    const int type = static_cast<int>(a2);
+                    if (type == F_UNLCK) {
+                        // Removing a lease the file does not hold is EAGAIN, as in generic_delete_lease.
+                        if (node->lease.exchange(F_UNLCK) == F_UNLCK) { ret_err(EAGAIN); return 0; }
+                        ret_host(0);
+                        return 0;
+                    }
+                    if (type != F_RDLCK && type != F_WRLCK) { ret_err(EINVAL); return 0; }
+                    // A read lease conflicts with a writer; only this description's own mode is visible.
+                    if (type == F_RDLCK && hfd >= 0 && (::fcntl(hfd, F_GETFL) & O_ACCMODE) != O_RDONLY) {
+                        ret_err(EAGAIN);
+                        return 0;
+                    }
+                    node->lease = type;
+                    ret_host(0);
+                    return 0;
+                }
+                case F_GETLEASE:  // 1025 — the lease this description holds, else F_UNLCK
+                    ret_host(static_cast<int64_t>(node->lease.load()));
+                    return 0;
                 case F_ADD_SEALS: // 1033, integer bitmask (not a guest pointer)
                 case F_GET_SEALS: { // 1034
                     if (hfd < 0) { ret_err(EINVAL); return 0; }

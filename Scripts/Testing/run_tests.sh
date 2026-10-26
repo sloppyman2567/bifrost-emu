@@ -421,6 +421,8 @@ UNIT_TESTS=(
     "test_proc_rewind|Tests/Unit/test_proc_rewind.elf||10|ALL PASS"
     # POSIX record locks marshal guest flock input and GETLK output.
     "test_fcntl_lock|Tests/Unit/test_fcntl_lock.elf||10|ALL PASS"
+    # fcntl owner, signal and lease commands; owner and signal are shared through dup().
+    "test_fcntl_owner|Tests/Unit/test_fcntl_owner.elf emu||10|test_fcntl_owner: ALL PASS"
     # Linux argv/env string layout, live /proc/self/cmdline (setArgV0 and
     # setproctitle rewrites, also after execve), /proc/<getpid()> == self.
     "test_proc_cmdline|Tests/Unit/test_proc_cmdline.elf||10|ALL PASS"
