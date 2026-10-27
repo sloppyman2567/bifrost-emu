@@ -15,6 +15,26 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Smaller fault exits and one frame return per block (2026-10-26)
+
+Every guarded access also carries a recoverable fault exit, and every Tier-1 exit its own 13-byte frame return
+(`mov rsp,rbp; pop x6; ret`). Three changes:
+
+- `jit_fault_step` returns `cpu->pc`, so the exit no longer reloads it (7 bytes), and reads `block_pc` only under
+  `BIFROST_FAULT_TRACE`, so the 10-byte start-PC immediate is emitted only then.
+- The fault exit aligns its call with `push rax` instead of `pushf`/`popf`: NZCV was committed before the access
+  (`clobber_flags` in `compile_guarded_mem`), and the frame return's `mov rsp,rbp` drops the push. POPF is 37
+  macro-ops on Zen 3 (Agner Fog's instruction tables) and runs on every interpreter-stepped access.
+- A fault exit jumps to a frame return already emitted in its compile unit (`emit_frame_return(true)`,
+  `frame_return_off_`, reset with the block or region and by `rewind_codegen`; `jmp rel8` when it reaches). The
+  jump stays inside the block, so cached blocks stay relocatable. Block exits keep their own: they return to the
+  dispatcher whenever their chain slot is unpatched, and sharing theirs too made `bench_dispatch` 10% slower
+  (2.30 to 2.56 s, seven alternating runs) for 1.4 bytes per instruction more.
+
+`qt_test`: 110.2 to 98.6 bytes per guest instruction; Umamusume's game process 120.7 to 107.0 (that run shared
+block exits' returns as well, so the shipped figure is slightly higher). `bench_dispatch`, `bench_fib`,
+`bench_sort` and `qt_test` within 1%.
+
 ## One compact checked path per guarded access (2026-10-26)
 
 Each Tier-1 guarded scalar access carried about 122 bytes of checked path after the block, run only while

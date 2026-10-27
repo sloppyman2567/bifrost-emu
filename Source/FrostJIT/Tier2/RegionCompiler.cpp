@@ -95,6 +95,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
     chain_entry_off_ = 0;
+    frame_return_off_ = SIZE_MAX;
     num_stack_slots_ = 0;
     vec_cache_reset();
     // Select one register layout for the complete fused path. Internal edges

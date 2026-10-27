@@ -236,10 +236,7 @@ void FrostJIT::emit_taken_path_epilogue() {
         if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_);
         else emit_slot_nop5();
         // Cold exit (only reached when the slot above is unpatched).
-        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
-        emit_pop(R15); emit_pop(R14); emit_pop(R13);
-        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-        emit_ret();
+        emit_frame_return(false);
     } else {
         // Default layout (original): restore the callee-saved regs FIRST,
         // then the slot is a bare `ret` + 4 NOPs. When patched, the jmp

@@ -14,6 +14,13 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Smaller memory fault exits (2026-10-26)
+
+- A guarded access's fault exit no longer reloads the PC (`jit_fault_step` returns it), loads the block PC only
+  for `BIFROST_FAULT_TRACE`, aligns its call with one `push` instead of `pushf`/`popf`, and jumps to a frame
+  return already emitted in the block. `qt_test` emits 98.6 bytes per guest instruction instead of 110.2. Block
+  exits keep their own frame return: sharing it made the dispatch benchmark 10% slower.
+
 ### A fifth less generated code (2026-10-26)
 
 - The checked path of each guarded load/store (run only while software page checks are on) is one compact

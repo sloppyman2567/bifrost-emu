@@ -210,6 +210,7 @@ void FrostJIT::rewind_codegen(size_t offset) {
         purge(direct_call_sites_, [](const std::pair<size_t, size_t>& s) { return s.first; });
         call_site_end_ = offset;
     }
+    if (frame_return_off_ != SIZE_MAX && frame_return_off_ >= offset) frame_return_off_ = SIZE_MAX;
     code_buf_used_ = offset;
 }
 
@@ -245,7 +246,7 @@ bool FrostJIT::redirect_memory_fault(int signo, void* raw_info, void* context) {
     return false;
 }
 
-extern "C" void jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc) {
+extern "C" uint64_t jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc) {
     const int signo = pending_signo.exchange(0, std::memory_order_relaxed);
     if (signo && dbg().fault_trace)
         fprintf(stderr, "[jit-fault] tid=%d host-signal=%d guest-pc=0x%llx addr=0x%llx\n",
@@ -266,5 +267,6 @@ extern "C" void jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc) {
         // and allow an access repaired concurrently with the host fault.
         jit_interp_step(emu, cpu);
     }
+    return cpu->pc;
 }
 } // namespace arm64emu

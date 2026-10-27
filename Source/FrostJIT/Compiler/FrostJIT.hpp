@@ -115,7 +115,8 @@ extern "C" void jit_fp_interp_step(Emulator* emu, CPU* cpu);
 // BIFROST_FAULT_TRACE memory-guard exit: jit_interp_step with the block's
 // start pc recorded for the [fault] line (InterpreterBridge.cpp).
 extern "C" void jit_guard_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
-extern "C" void jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
+// Returns cpu->pc. block_pc is read only under BIFROST_FAULT_TRACE.
+extern "C" uint64_t jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
 // BIFROST_BLOCK_TRACE prologue hook: logs one block entry (InterpreterBridge.cpp).
 extern "C" void jit_trace_block_entry(CPU* cpu, uint64_t block_pc, uint64_t fwd);
 extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
@@ -1402,6 +1403,13 @@ private:
     void emit_lzcnt_reg(int dst, int src);
     void emit_bswap_reg(int dst);
     void emit_call_abs(void* target);
+    // `mov rsp, rbp; pop x6; ret`. Block exits (`cold == false`) keep their own:
+    // they return to the dispatcher whenever their slot is unpatched, and a jump
+    // there cost dispatch-heavy code 10%. A fault exit jumps to one already
+    // emitted in its compile unit (inside the block, so cached code stays
+    // relocatable).
+    void emit_frame_return(bool cold);
+    size_t frame_return_off_ = SIZE_MAX;
     void emit_ret();
     void emit_nop();
     void emit_slot_nop5();  // kSlotNop5

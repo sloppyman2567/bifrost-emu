@@ -133,6 +133,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     flag_deps_scratch_.clear();
     flag_store_skipped_ = false;
     chain_entry_off_ = 0;
+    frame_return_off_ = SIZE_MAX;
     num_stack_slots_ = 0;
     vec_cache_reset();
     regalloc_stats_reset();
@@ -1161,10 +1162,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // the indirect-branch table instead of returning to the dispatcher.
         if (indirect_exit_ && !dbg().no_chain) emit_indirect_branch_probe();
         // Cold exit (only reached when the slot above is unpatched).
-        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
-        emit_pop(R15); emit_pop(R14); emit_pop(R13);
-        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-        emit_ret();
+        emit_frame_return(false);
     } else {
         // ── Chain-capable epilogue (original layout) ────────────────
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp

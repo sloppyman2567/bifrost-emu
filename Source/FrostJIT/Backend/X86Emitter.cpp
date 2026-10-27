@@ -301,6 +301,20 @@ void FrostJIT::emit_call_abs(void* target) {
     note_host_reloc(HostReloc::Image);
     emit_byte(0xFF); emit_byte(0xD0);
 }
+void FrostJIT::emit_frame_return(bool cold) {
+    if (cold && frame_return_off_ != SIZE_MAX) {
+        const int64_t rel8 = static_cast<int64_t>(frame_return_off_) - static_cast<int64_t>(code_buf_used_ + 2);
+        if (rel8 >= -128) { emit_byte(0xEB); emit_byte(static_cast<uint8_t>(rel8)); return; }
+        const size_t jump = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(jump, static_cast<int32_t>(frame_return_off_ - (jump + 5)));
+        return;
+    }
+    if (frame_return_off_ == SIZE_MAX) frame_return_off_ = code_buf_used_;
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+    emit_pop(R15); emit_pop(R14); emit_pop(R13);
+    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+    emit_ret();
+}
 void FrostJIT::emit_ret() { emit_byte(0xC3); }
 void FrostJIT::emit_nop() { emit_byte(0x90); }
 // One decoded instruction instead of five single-byte NOPs on every

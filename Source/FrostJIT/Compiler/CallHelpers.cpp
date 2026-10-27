@@ -171,19 +171,22 @@ void FrostJIT::emit_memory_fault_exit(const IRInst& inst, bool recoverable) {
     emit_load_emu(RDI);
     emit_mov_reg(RSI, CPU_REG);
     if (recoverable) {
-        emit_mov_imm64(RDX, current_start_pc_);
-        emit_call_aligned(&jit_fault_step, 0);
-    } else if (dbg().fault_trace) {
-        emit_mov_imm64(RDX, current_start_pc_);
-        emit_call_aligned(&jit_guard_step, 0);
+        // The helper returns cpu.pc and reads block_pc only for fault tracing.
+        // NZCV was committed before the access, so the host flags are dead: one
+        // push aligns the call, and the epilogue's `mov rsp, rbp` drops it.
+        if (dbg().fault_trace) emit_mov_imm64(RDX, current_start_pc_);
+        emit_push(RAX);
+        emit_call_abs(reinterpret_cast<void*>(&jit_fault_step));
     } else {
-        emit_call_aligned(&jit_interp_step, 0);
+        if (dbg().fault_trace) {
+            emit_mov_imm64(RDX, current_start_pc_);
+            emit_call_aligned(&jit_guard_step, 0);
+        } else {
+            emit_call_aligned(&jit_interp_step, 0);
+        }
+        emit_load(RAX, CPU_REG, PC_OFF);
     }
-    emit_load(RAX, CPU_REG, PC_OFF);
-    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
-    emit_pop(R15); emit_pop(R14); emit_pop(R13);
-    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-    emit_ret();
+    emit_frame_return(true);
 }
 // XMM0 holds a tentative packed FP result; architectural inputs are intact.
 // A rare ARM-semantic step preserves all live GPRs and reloads pinned vectors.

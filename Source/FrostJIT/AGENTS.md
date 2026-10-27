@@ -131,6 +131,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   runtime but must leave compile-time vector validity and dirtiness unchanged.
   Tier-2 keeps inline guards. W-form fusion is Tier-1-only and must scope its
   encoding width to the ALU operation, preserving operand setup and lazy NZCV.
+- Fault exits jump to a frame return already emitted in their compile unit
+  (`emit_frame_return(true)`); block exits keep their own (a jump on the
+  dispatcher-return path cost 10%). Reset `frame_return_off_` wherever a block or
+  region compile starts (`rewind_codegen` drops it); never jump to another unit's.
 - Restore the complete ST chain-skip slot through `write_unpatched_slot`;
   its unpatched form is `kSlotNop5`. MT revokes data cells, never instructions.
 - Per-block bookkeeping is the JIT's largest heap cost (~700k blocks per Android app;
