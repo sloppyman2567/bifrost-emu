@@ -208,8 +208,11 @@ void FrostJIT::emit_taken_path_epilogue() {
     flush_arch_vregs_keep();
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_tier2_edge_profile(true);
-    emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
-    emit_load_emu(RSI); // rsi = emu
+    // RDI/RSI only for the ordinary layout's fn targets (see the block epilogue).
+    if (!chain_skip_enabled()) {
+        emit_mov_reg(RDI, CPU_REG);
+        emit_load_emu(RSI);
+    }
     // ── Taken-path chain slot ──
     // 5 bytes reserved at the end of the taken path. Under chain-skip the
     // slot is 5 NOPs followed by the cold exit (`mov rsp,rbp; pop×6; ret`),

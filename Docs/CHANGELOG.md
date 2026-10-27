@@ -14,6 +14,12 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### Block exits drop two dead register loads (2026-10-26)
+
+- Under chain-skip (the default) no chain target reads RDI/RSI, so exits no longer load them; the MT chain slot,
+  the indirect-branch probe and the Tier-2 trial wrapper address the CPU through RBX. `qt_test` emits 95.2 bytes
+  per guest instruction instead of 98.6.
+
 ### Smaller memory fault exits (2026-10-26)
 
 - A guarded access's fault exit no longer reloads the PC (`jit_fault_step` returns it), loads the block PC only

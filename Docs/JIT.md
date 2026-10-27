@@ -15,6 +15,21 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](TESTS.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Chain-skip exits no longer load RDI/RSI (2026-10-26)
+
+Every Tier-1 exit loaded `mov rdi, rbx; mov rsi, [rbx+jit_emu]` (10 bytes) for its chain target. Under chain-skip
+no target reads them: blocks, cache-installed blocks and regions enter past their prologue's `mov rbx, rdi` and
+emulator store, and so do IBL hits. The readers were the code between the exit and its target, which now
+addresses the CPU through RBX like everything else: the MT chain slot (`jit_stop_pc`, the preemption poll, the ST
+budget) and the indirect-branch probe. The Tier-2 trial chain wrapper also switched to RBX; its cold tail sets
+RDI/RSI itself before it jumps to the full region entry, and its quota tail reads the PC through RBX before the
+pops restore the caller's RBX. Exits still load both in the ordinary frame layout (`BIFROST_NO_CHAIN_SKIP=1`),
+whose slots jump to `fn`, and Tier-2 region exits keep theirs (cold-entry edges target `fn`).
+
+`qt_test`: 98.6 to 95.2 bytes per guest instruction. `bench_dispatch` ran in 1.90 s against 2.31 s (seven
+alternating runs), but it varied between 1.95 and 2.30 s across today's builds with layout alone, so the size of
+that gain is uncertain; `bench_fib` and `bench_sort` within about 2%.
+
 ## Smaller fault exits and one frame return per block (2026-10-26)
 
 Every guarded access also carries a recoverable fault exit, and every Tier-1 exit its own 13-byte frame return

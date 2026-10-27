@@ -150,6 +150,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   addresses its members. A helper that generated code calls finds its instance with
   `FrostJIT::running(emu)`, never `emu.jit()`, and a loop that dispatches blocks must follow the current
   instance (`jit_call_helper` retargets). Never block for long inside generated frames: that pins a generation.
+- Under chain-skip, Tier-1 exits leave RDI/RSI undefined: every chain target must enter past its
+  prologue's `mov rbx, rdi` and emulator store (`chain_entry`), and code on the way (MT chain slot, IBL
+  probe, the Tier-2 trial chain wrapper) addresses the CPU through RBX. A new chain target or edge stub
+  that needs RDI/RSI must load them itself, as the trial wrapper's cold tail does before entering `fn`.
 - Generated code reads the `Emulator*` from `CPU::jit_emu` (`emit_load_emu`); every block and region
   prologue stores it (`emit_store_emu`) and a chain edge keeps it because the CPU is the same. Do not
   put it back in a frame slot: the 32 KiB chain-skip frame made that a page away from the rest of

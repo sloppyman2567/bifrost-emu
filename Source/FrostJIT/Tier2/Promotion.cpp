@@ -269,17 +269,21 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
             region_entry.fn = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(code_buf_ + wrapper);
             if (chain_skip_enabled()) {
+                // Chain edges arrive with RBX = cpu and nothing in RDI/RSI.
                 const size_t chain_wrapper = code_buf_used_;
                 emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(trial_ptr));
-                emit_byte(0x48); emit_byte(0x39); emit_byte(0x97);
+                emit_byte(0x48); emit_byte(0x39); emit_byte(0x93);  // cmp [rbx+trial],rdx
                 emit_u32(offsetof(CPU, jit_tier2_trial));
                 const size_t cold_chain = emit_jcc_rel32_placeholder(5);
-                emit_byte(0x83); emit_byte(0xAF);
+                emit_byte(0x83); emit_byte(0xAB);  // sub dword [rbx+remaining],1
                 emit_u32(offsetof(CPU, jit_tier2_trial_remaining)); emit_byte(1);
                 const size_t chain_quota = emit_jcc_rel32_placeholder(4);
-                emit_load(R11, RDI, offsetof(CPU, jit_tier2_trial_chain_fn));
+                emit_load(R11, CPU_REG, offsetof(CPU, jit_tier2_trial_chain_fn));
                 emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
+                // The full entry below reads its arguments, as from the dispatcher.
                 const size_t cold_chain_tail = code_buf_used_;
+                emit_mov_reg(RDI, CPU_REG);
+                emit_load_emu(RSI);
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
@@ -287,10 +291,11 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 patch_jmp_rel32(jump, static_cast<int32_t>(wrapper - (jump + 5)));
                 // Quota also needs the root-frame unwind; emit a separate tail.
                 const size_t quota_tail = code_buf_used_;
+                emit_load(RAX, CPU_REG, PC_OFF);  // before the pops restore RBX
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-                emit_load(RAX, RDI, PC_OFF); emit_ret();
+                emit_ret();
                 patch_jcc_rel32(cold_chain, static_cast<int32_t>(cold_chain_tail - (cold_chain + 6)));
                 patch_jcc_rel32(chain_quota, static_cast<int32_t>(quota_tail - (chain_quota + 6)));
                 region_entry.chain_entry = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(code_buf_ + chain_wrapper);

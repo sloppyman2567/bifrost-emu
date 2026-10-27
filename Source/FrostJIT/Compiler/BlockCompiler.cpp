@@ -1138,10 +1138,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // slot — R14 is a free vreg register now).
     // When the block returns (unchained `ret`), clobbering RDI/RSI is
     // fine — they're caller-saved and the dispatcher doesn't read them
-    // after the call. When the block is chained, the next prologue sees
-    // the correct RDI=cpu / RSI=emu.
-    emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx
-    emit_load_emu(RSI);  // rsi = emu (from the frame slot; R14 is a free vreg reg now)
+    // after the call. Under chain-skip nothing reads them: every chain
+    // target (block, region, trial wrapper, IBL hit) enters past its
+    // prologue's `mov rbx, rdi` and the emulator store, and the MT slot and
+    // IBL probe address the CPU through RBX. Only the ordinary layout's
+    // slots jump to fn, whose prologue reads RDI=cpu / RSI=emu.
     size_t chain_patch_off;
     if (chain_skip_enabled()) {
         // ── Chain-skip epilogue ─────────────────────────────────────
@@ -1165,6 +1166,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         emit_frame_return(false);
     } else {
         // ── Chain-capable epilogue (original layout) ────────────────
+        emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx
+        emit_load_emu(RSI);
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);

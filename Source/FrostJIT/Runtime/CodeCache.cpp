@@ -346,16 +346,16 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     const bool backward = target_pc <= current_start_pc_;
     std::vector<size_t> cold;
     if (backward) {
-        // cmp rax,[rdi+jit_stop_pc]; je cold exit
-        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);
+        // cmp rax,[rbx+jit_stop_pc]; je cold exit
+        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
         emit_u32(offsetof(CPU, jit_stop_pc));
         cold.push_back(emit_jcc_rel32_placeholder(0x4));
         if (preempt_by_epoch()) {
             // Epoch moved since the dispatcher's grant: return for signals and exits.
-            cold.push_back(emit_preempt_poll(RDI, R11));
+            cold.push_back(emit_preempt_poll(CPU_REG, R11));
         } else {
-            // sub dword [rdi+jit_chain_budget],1; jbe cold exit (also handles zero).
-            emit_byte(0x83); emit_byte(0xAF);
+            // sub dword [rbx+jit_chain_budget],1; jbe cold exit (also handles zero).
+            emit_byte(0x83); emit_byte(0xAB);
             emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
             cold.push_back(emit_jcc_rel32_placeholder(0x6));
         }
@@ -370,8 +370,8 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     return off;
 }
 // Indirect-branch fast path for a chain-skip BR/BLR/RET exit. Entered with
-// RAX = guest target (already stored to cpu.pc), RDI = cpu, RSI = emu and
-// every vreg/flag committed; RCX, RDX and R11 are free. Falls through to the
+// RAX = guest target (already stored to cpu.pc) and every vreg/flag committed;
+// RBX = cpu as everywhere, and RCX, RDX and R11 are free. Falls through to the
 // caller's cold exit (dispatcher return) on any miss. Immutable code that
 // reads only data, so it is valid in ST and MT publication alike.
 void FrostJIT::emit_indirect_branch_probe() {
@@ -379,11 +379,11 @@ void FrostJIT::emit_indirect_branch_probe() {
     std::vector<size_t> cold;
     // Inside a nested jit_call_helper or a native BL callee the return PC must reach
     // that caller, so every probe misses there: test it before the table work.
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);          // cmp qword [rdi+depth],0
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xBB);          // cmp qword [rbx+depth],0
     emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
     cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
     // RCX = this thread's table; none bound (trial, foreign entry) → cold.
-    emit_load(RCX, RDI, offsetof(CPU, jit_ibl_table));
+    emit_load(RCX, CPU_REG, offsetof(CPU, jit_ibl_table));
     emit_test_reg(RCX, RCX);
     cold.push_back(emit_jcc_rel32_placeholder(0x4));             // jz
     // Table generation must equal this JIT's live dispatch generation.
@@ -402,15 +402,15 @@ void FrostJIT::emit_indirect_branch_probe() {
     emit_u32(static_cast<uint32_t>(entries_off + offsetof(IblEntry, pc)));
     cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
     // Host-managed return boundary (SDL thread sentinel) → dispatcher.
-    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x87);          // cmp rax,[rdi+stop]
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);          // cmp rax,[rbx+stop]
     emit_u32(offsetof(CPU, jit_stop_pc));
     cold.push_back(emit_jcc_rel32_placeholder(0x4));             // je
     // Return to dispatch (signals, exit) regularly: the shared 256-edge budget
     // in ST, the read-only preemption epoch once MT code is published.
     if (preempt_by_epoch()) {
-        cold.push_back(emit_preempt_poll(RDI, R11));
+        cold.push_back(emit_preempt_poll(CPU_REG, R11));
     } else {
-        emit_byte(0x83); emit_byte(0xAF);                        // sub dword [rdi+budget],1
+        emit_byte(0x83); emit_byte(0xAB);                        // sub dword [rbx+budget],1
         emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
         cold.push_back(emit_jcc_rel32_placeholder(0x6));         // jbe
     }
