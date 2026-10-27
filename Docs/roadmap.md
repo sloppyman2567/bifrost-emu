@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress; the current pre-release is 2.0.0-alpha.2. Updated
-October 24, 2026. Except for checkpoints explicitly marked implemented below,
+Status: in progress; the current pre-release is 2.0.0-alpha.3. Updated
+October 27, 2026. Except for checkpoints explicitly marked implemented below,
 these are development targets, not compatibility guarantees or a release date.
 
 v2.0 aims to run selected ARM64 Android games through an integrated Android
@@ -9,7 +9,7 @@ runtime, improve sustained Linux game performance, and make input reliable
 across mouse, keyboard, touch and gamepads. Correctness remains the gate for
 every optimization. Existing Linux applications must keep working.
 
-## Progress at a glance (2026-10-24)
+## Progress at a glance (2026-10-27)
 
 Statuses are what the changelog and app pages record; none of them is a
 compatibility guarantee. "Done" means the contract is implemented and checked
@@ -18,8 +18,8 @@ as the linked section says, not that every app using it works.
 | Milestone | State | Done so far | Still open |
 |---|---|---|---|
 | 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout and descriptive file names; Asgard Android runtime on the pinned Android 15 framework; SpongeBob playable | Goals below |
-| 2.0.0-alpha.2 (2026-10-21) | Cut; its goals are partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. Since then: lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
-| 2.0.0-alpha.3 | Not started as a milestone | Partial: WebView renders; desktop text input reaches native editors | WebView pointer/focus/scroll, HTTP intent routing, ads with test creatives, video |
+| 2.0.0-alpha.2 (2026-10-21) | Released; its goals were partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
+| 2.0.0-alpha.3 (2026-10-27) | Cut; its WebView, media and ad scope is mostly open | Since alpha.2: lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package. Partial: WebView renders; desktop text input reaches native editors | WebView pointer/focus/scroll, HTTP intent routing, ads with test creatives, video |
 | 2.0.0-beta.1 | Not started | Library cards, per-game settings, clear-data/uninstall | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
 
 Known blockers, by cause:
@@ -37,7 +37,8 @@ Known blockers, by cause:
 ## Next release priorities
 
 These are proposed scopes for the next pre-releases, not announced release dates.
-The runtime is 2.0.0-alpha.2. The October 14
+The runtime is 2.0.0-alpha.3. Neither scope below is complete in it; unmet items
+carry to the next pre-release. The October 14
 [SpongeBob screenshots](Apps/spongebob.md#screenshots-2026-10-14) show cooking,
 the lobby, Help Center and a level-14 pause menu; the
 [Azur Lane screenshots](Apps/azur-lane.md#screenshots-2026-10-14) show loading
@@ -392,13 +393,15 @@ login scene before assigning a cause to its repeated UI stutters.
    the existing publication/invalidation protocol.
 
 CoreMark target: at least **10,000 reported iterations/s** with valid CRCs and
-the benchmark's minimum ten-second duration. The latest final three-run median
-is 9,893.87 reported iterations/s for 110,000 iterations after a warmup, about
-1.1% below that throughput target. Keep reported benchmark throughput separate
-from process wall time. The remaining target is not a game-FPS prediction.
+the benchmark's minimum ten-second duration. The target is met on the measured
+host: the October 27 three-run median is 13,156 reported iterations/s for
+160,000 iterations after a warmup ([method and limits](JIT.md#coremark-checkpoint-2026-10-27)).
+Keep reported benchmark throughput separate from process wall time. This is
+not a game-FPS prediction.
 
 The proposed **26% of native** milestone assumes a native reference near
-38,460 iterations/s. Confirm that reference with matched source, seeds,
+38,460 iterations/s, which has not been confirmed or remeasured (13,156 would be
+about 34% of it). Confirm that reference with matched source, seeds,
 workload, thread count and documented compiler/host settings. Native and guest
 runs may require different iteration counts to satisfy the ten-second rule;
 compare normalized throughput, not their total wall times. This percentage

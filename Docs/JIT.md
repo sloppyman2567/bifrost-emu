@@ -3149,10 +3149,10 @@ short-lived execution cost and retained private code; validate application
 benchmarks as well as local trial decisions. Codegen/retirement oracles select candidates
 deterministically through a test friend; the separate timing oracle uses real
 controlled CPU work to verify both acceptance and rejection, without fake
-clock values. CoreMark comparisons use a fixed 110,000 iterations
-(`Scripts/Bench/run_benchmarks.py`, crcfinal 0x33ff, checked against QEMU) and
-labelled CRC/validation checks; 60,000 iterations now finish below CoreMark's
-ten-second minimum. Auto-calibrated iteration counts cannot be compared by
+clock values. CoreMark comparisons use a fixed 160,000 iterations
+(`Scripts/Bench/run_benchmarks.py`, crcfinal 0xa14c, checked against QEMU) and
+labelled CRC/validation checks; the earlier 110,000 and 60,000 iterations now
+finish below CoreMark's ten-second minimum. Auto-calibrated iteration counts cannot be compared by
 wall time. Counters expose measured pairs, keeps and rejections.
 
 Automatic compilation stops after 32 MiB of emitted region, private sampling
@@ -3208,3 +3208,29 @@ checking fixed arithmetic results, retraining and immutable published MT code
 in ordinary and chain-skip modes. The same harness places a region exit target
 on the next page, rewrites that target, and verifies the new result while the
 region itself stays cached.
+
+## CoreMark checkpoint (2026-10-27)
+
+`Tests/Unit/coremark.elf` (GCC 15.2.0, `-O2 -static -O3`, an ignored guest fixture) run as
+`coremark.elf 0 0 0 160000` on a Ryzen 7 5800X3D desktop. Each binary had one warmup and three measured
+runs, interleaved. Every run printed the expected CRCs (`crclist` 0xe714, `crcmatrix` 0x1fd7, `crcstate`
+0x8e3a, `crcfinal` 0xa14c) and no "Must execute for at least 10 secs" error.
+
+The runner's old fixed count of 110,000 iterations took 8.4 s on the current build, which CoreMark reports as
+an invalid run, so the count is now 160,000 (about 12 s on bifrost-emu, 20 s on QEMU). `crcfinal` depends on
+the count; 0xa14c at 160,000 was taken from QEMU 11.1.1 and bifrost-emu matches it.
+
+| Build | Runs (iterations/s) | Median |
+|---|---|---|
+| bifrost-emu 2.0.0-alpha.3, shipped SDL/GL build | 13,146 / 13,156 / 13,209 | 13,156 |
+| same source (HEAD 02475878), headless build | 12,981 / 13,180 / 12,767 | 12,981 |
+| 2.0.0-alpha.2 release commit (556557b0), headless build | 12,364 / 12,332 / 12,187 | 12,332 |
+| QEMU 11.1.1 user mode | 7,182 / 7,817 / 7,710 | 7,710 |
+
+The two headless builds came from `git archive` of the commit, built with `USE_SDL2=0 USE_SDL3=0
+USE_THUNK_GL=0 USE_MEDIA=0` in a temporary directory, so the alpha.2 to alpha.3 comparison (+5.3%, 12,332 to
+12,981) changes only the source. The shipped build differs from the headless one in host-library support,
+not in the JIT. Limits: one host, one benchmark, a desktop that was not isolated (the first runs followed a
+compile, and QEMU's own runs spread 9%), so a few percent is noise. The earlier October 14 figure (9,893.87
+at 110,000 iterations) was not remeasured on its binary, and this comparison does not attribute the change
+since then to particular commits. CoreMark does not predict game frame rates.

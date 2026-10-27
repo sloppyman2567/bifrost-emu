@@ -8,11 +8,29 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [2.0.0-alpha.2] — Android compatibility and runtime fixes (2026-10-21)
+## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code (2026-10-27)
 
-**2.0.0-alpha.2** collects the changes made after 2.0.0-alpha.1 (2026-10-12): Android service
-contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
-[v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
+**2.0.0-alpha.3** collects the changes made after 2.0.0-alpha.2 (2026-10-21): installable Asgard and rootfs,
+`bifrost-emu app.apk`, a Debian package, guest `ptrace` and pseudo terminals, fork/exec and memory fixes, less
+generated JIT code, an experimental persistent JIT cache, the window stats overlay and more Android service
+contracts. The [v2.0 goals](roadmap.md) remain in progress; the WebView, media and ad scope planned for this
+milestone is not complete. Older version labels below are historical records.
+
+### Release validation and a CoreMark runner fix (2026-10-27)
+
+- The version is 2.0.0-alpha.3 in `Version.hpp`, the Makefile, the sample config, the Debian package and manual
+  pages, the generated rootfs `os-release`, the C API comment and the stats-overlay test.
+- `Scripts/Bench/run_benchmarks.py` ran CoreMark for 110,000 iterations, which the current build finishes in 8.4 s,
+  under CoreMark's ten-second minimum (the program prints "Must execute for at least 10 secs"). It now runs
+  160,000 iterations with `crcfinal` 0xa14c, the value QEMU 11.1.1 prints for that count.
+- Measured medians (three interleaved runs, all CRCs valid): 13,156 iterations/s for the shipped build, 12,981
+  for the same source built headless, 12,332 for the alpha.2 release commit built headless, 7,710 for QEMU 11.1.1.
+  Method and limits: [JIT.md](JIT.md#coremark-checkpoint-2026-10-27). The `bench_*` table in the README was
+  rerun the same day.
+- `run_tests.sh --strict`: 375/375 with the JIT, 360/360 with `--no-jit` (15 JIT-only tests are not selected
+  there). `make verify`: 100 differential fixtures and 10 threaded oracle runs. `make generated-check` passed.
+  Not run: `Scripts/Testing/test_window_stats.sh`, the Android package suites (`make test-android-*`), the
+  `USE_SDL2=0` headless test suite and `make debug`.
 
 ### A clearer stats overlay (2026-10-27)
 
@@ -925,6 +943,12 @@ procfs `d_type` constants are not changed.
 - `BIFROST_NO_SHARED_FUTEX=1` turns the host-futex path off for A/B tests. `make all` no longer fails to refresh
   the root `bifrost-emu` while a broker has it open (copy, then rename), which had left it stale.
 - `media.metrics` is a stub service; native `LogItem::record()` no longer waits 5 s, twice, per track.
+
+## [2.0.0-alpha.2] — Android compatibility and runtime fixes (2026-10-21)
+
+**2.0.0-alpha.2** collects the changes made after 2.0.0-alpha.1 (2026-10-12): Android service
+contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
+[v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
 ### Toasts, NsdManager and Settings intents (2026-10-21)
 

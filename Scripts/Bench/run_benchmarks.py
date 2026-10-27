@@ -31,9 +31,9 @@ BENCHES = {
     "coremark": ("Tests/Unit/coremark.elf", None, None),
 }
 # Fixed iteration count: must stay above CoreMark's 10-second minimum.
-# crcfinal depends on it (0x33ff at 110000, checked against QEMU).
-COREMARK_ITERATIONS = "110000"
-COREMARK_CRC = ("0xe714", "0x1fd7", "0x8e3a", "0x33ff")
+# crcfinal depends on it (0xa14c at 160000, checked against QEMU).
+COREMARK_ITERATIONS = "160000"
+COREMARK_CRC = ("0xe714", "0x1fd7", "0x8e3a", "0xa14c")
 
 
 def sha256_file(path: Path) -> str:

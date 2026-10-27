@@ -231,6 +231,11 @@ namespace arm64emu {
 //   toasts, Settings intents, AppOps), JIT code-shape statistics, window
 //   scaling and memory fixes; see CHANGELOG.md. The v2.0 goals in
 //   Docs/roadmap.md are still not complete.
-constexpr const char* VERSION  = "2.0.0-alpha.2";
+// 2.0.0-alpha.3 (2026-10-27): installable rootfs and Asgard, `bifrost-emu
+//   app.apk`, guest ptrace and pseudo terminals, fork/exec and memory fixes,
+//   a less code-heavy Tier-1 JIT, the window stats overlay and a persistent
+//   (experimental) JIT cache; see CHANGELOG.md. The v2.0 goals in
+//   Docs/roadmap.md are still not complete.
+constexpr const char* VERSION  = "2.0.0-alpha.3";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu
