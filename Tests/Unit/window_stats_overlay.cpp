@@ -17,10 +17,16 @@ static void put(const fs::path &path, const std::string &text) {
   std::ofstream(path) << text;
 }
 static bool near(double a, double b) { return std::fabs(a - b) < 0.01; }
+// One text line per panel line; a tab marks where the runs flush with the right edge begin.
 static std::string flat(const std::vector<OverlayLine> &lines) {
   std::string text;
   for (const auto &line : lines) {
-    for (const auto &run : line) text += run.text;
+    bool right = false;
+    for (const auto &run : line) {
+      if (run.right && !right) text += '\t';
+      right |= run.right;
+      text += run.text;
+    }
     text += '\n';
   }
   return text;
@@ -157,7 +163,11 @@ int main() {
   assert(detail::short_gpu_name("AMD Radeon RX 7600 (radeonsi, navi33, LLVM 21.1.4, DRM 3.64)") == "AMD Radeon RX 7600");
   assert(detail::short_gpu_name("NVIDIA GeForce RTX 3060/PCIe/SSE2") == "NVIDIA GeForce RTX 3060");
   assert(detail::short_gpu_name("llvmpipe (LLVM 20.1.2, 256 bits)") == "llvmpipe");
-  assert(detail::overlay_text("Pok\xC3\xA9mon \xC2\xB0 \xE2\x82\xAC x") == "POK?MON \xC2\xB0 ? X");
+  // Case kept; accents dropped; dashes and quotes as ASCII; the degree sign, middle dot and ellipsis drawn.
+  assert(detail::overlay_text("Pok\xC3\xA9mon \xC2\xB0 \xE2\x82\xAC x\x01") == "Pokemon \xC2\xB0 ? x ");
+  assert(detail::overlay_text("A \xE2\x80\x94 \xE2\x80\x9C" "b\xE2\x80\x9D \xC2\xB7 \xE2\x80\xA6 \xE3\x82\xA6") ==
+         "A - \"b\" \xC2\xB7 \xE2\x80\xA6 ?");
+  assert(detail::glyph_columns('g')[0] & 0x100 && !(detail::glyph_columns('G')[0] & 0x180));  // descenders
   OverlayStats stats;
   stats.version = "2.0.0-alpha.2"; stats.app = "Subway Surfers"; stats.backend = "Android EGL";
   stats.fps = 60; stats.active = true; stats.width = 1440; stats.height = 1384; stats.frames = 123456;
@@ -168,26 +178,35 @@ int main() {
   stats.vram_known = true;
   stats.cpu_name = "AMD Ryzen 7 5800X3D 8-Core Processor";
   stats.gpu_name = "AMD Radeon RX 7600 (radeonsi, navi33)";
-  // A row is a 4-character label, a 4-character percentage, a space, an 8-cell meter, two spaces and a detail.
+  // A row is a 4-character label, a 4-character percentage, a space, an 8-cell meter and a detail at the right edge.
   const auto row = [](const char *label, const char *percent, const std::string &detail) {
-    return std::string("\n") + label + percent + std::string(11, ' ') + detail + "\n";
+    return std::string("\n") + label + percent + std::string(9, ' ') + "\t" + detail + "\n";
   };
   const std::string deg = "\xC2\xB0" "C";
   const auto text = flat(overlay_lines(stats));
-  assert(text.find("BIFROST-EMU 2.0.0-ALPHA.2\nSUBWAY SURFERS\n60 FPS  16.7 MS  ANDROID EGL\n\n") == 0);
+  assert(text.find("BIFROST-EMU\t2.0.0-alpha.2\nSubway Surfers\n60 FPS  16.7 ms\tAndroid EGL\n\n") == 0);
+  assert(overlay_lines(stats)[2][0].size == 2);  // the frame rate is the big figure
   assert(text.find(row("CPU ", " 34%", "72" + deg)) != std::string::npos);
   assert(text.find(row("GPU ", " 58%", "64" + deg)) != std::string::npos);
   assert(text.find(row("VRAM", " 15%", "1.2/8.2 GB")) != std::string::npos);
   assert(text.find(row("RAM ", " 39%", "12.3/31.3 GB")) != std::string::npos);
-  assert(text.find("\n\nEMU 13% CPU  2.1 GB\nAMD RADEON RX 7600\n") != std::string::npos);
+  assert(text.find("\n\nEmulator 13% CPU \xC2\xB7 2.1 GB\nAMD Radeon RX 7600\n") != std::string::npos);
+  {
+    // A long title is cut to the panel's 31 characters with an ellipsis; one with nothing printable is left out.
+    OverlayStats named = stats;
+    named.app = "The Quite Unreasonably Long Game Title Of Doom";
+    assert(flat(overlay_lines(named)).find("\nThe Quite Unreasonably Long Ga\xE2\x80\xA6\n") != std::string::npos);
+    named.app = "\xE3\x82\xA6\xE3\x83\x9E\xE5\xA8\x98";
+    assert(overlay_lines(named).size() == overlay_lines(stats).size() - 1);
+  }
   stats.active = false; stats.sensors = SensorReading{}; stats.vram_known = false; stats.app.clear();
   stats.process_rss = 0; stats.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)";
   const auto idle = flat(overlay_lines(stats));
-  assert(idle.find("\nIDLE  ANDROID EGL\n") != std::string::npos);
+  assert(idle.find("\nIDLE\tAndroid EGL\n") != std::string::npos);
   assert(idle.find(row("CPU ", " --%", "--" + deg)) != std::string::npos);
   assert(idle.find(row("VRAM", " --%", "--")) != std::string::npos);
   assert(idle.find(row("RAM ", " --%", "--")) != std::string::npos);
-  assert(idle.find("\n\nEMU --% CPU  --\nLLVMPIPE\n") != std::string::npos);
+  assert(idle.find("\n\nEmulator --% CPU \xC2\xB7 --\nllvmpipe\n") != std::string::npos);
   // A meter row draws a bar (the track plus a fill in the colour for its load), not glyphs.
   {
     stats.sensors.cpu_percent = 50; stats.sensors.gpu_percent = 96;
@@ -205,14 +224,25 @@ int main() {
   assert(overlay_scale(720) == 2 && overlay_scale(1384) == 2 && overlay_scale(2160) == 3 && overlay_scale(99999) == 5);
   const std::vector<OverlayLine> lines = {{{"AB", 0xFFFFFFFF}}, {{"C", 0xFF00FF00}}};
   const auto image = render_overlay(lines, 2);
-  assert(image.w == 2 * 12 - 2 + 16 && image.h == 2 * 18 - 4 + 12 && image.argb.size() == size_t(image.w) * image.h);
+  assert(image.w == 2 * 12 - 2 + 20 && image.h == 2 * 20 - 6 + 16 && image.argb.size() == size_t(image.w) * image.h);
   assert(image.argb[0] == 0 && image.argb[image.w - 1] == 0 && image.argb.back() == 0);  // rounded corners
   const uint32_t panel = image.argb[size_t(image.h / 2) * image.w + image.w - 2];
   assert((panel >> 24) > 0x40 && (panel >> 24) < 0xE0);  // translucent, not clear and not solid
   bool white = false, green = false;
   for (auto pixel : image.argb) { white |= pixel == 0xFFFFFFFF; green |= pixel == 0xFF00FF00; }
   assert(white && green);
-  // Unknown and lower-case characters still draw: no out-of-range glyph access.
-  assert(render_overlay({{{"a~\xC3\xA9\x01", 0xFFFFFFFF}}}, 1).w == 4 * 6 - 1 + 8);
+  // Unknown characters still draw: no out-of-range glyph access.
+  assert(render_overlay({{{"a~\xC3\xA9\x01", 0xFFFFFFFF}}}, 1).w == 4 * 6 - 1 + 10);
+  {
+    // A right run ends at the right padding; a double-size run makes its line taller by one capital height.
+    OverlayRun b{"B", 0xFF00FF00};
+    b.right = true;
+    const auto split = render_overlay({{{"A", 0xFFFFFFFF}, b}}, 1);
+    assert(split.w == 6 + 12 + 6 - 1 + 10);
+    for (int y = 4; y < 4 + 7; ++y) assert(split.argb[size_t(y) * split.w + split.w - 5 - 5] == 0xFF00FF00);
+    OverlayRun big{"8", 0xFFFFFFFF};
+    big.size = 2;
+    assert(render_overlay({{big}}, 1).h == render_overlay({{{"8", 0xFFFFFFFF}}}, 1).h + 7);
+  }
   return 0;
 }

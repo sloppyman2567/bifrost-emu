@@ -14,6 +14,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 contracts, toasts, window scaling, memory and JIT measurements, and their tests. The
 [v2.0 goals](roadmap.md) remain in progress; older version labels below are historical records.
 
+### A clearer stats overlay (2026-10-27)
+
+- The overlay panel has lower case (with descenders), a double-size frame rate, right-aligned details, more line
+  spacing and an 85% opaque body with an outline and anti-aliased corners, so dim text stays legible over bright
+  scenes. Accented Latin titles print without accents instead of `?`, long names end in an ellipsis, and a title
+  the font cannot show is left out. The X11 desktop HUD for Linux guests now draws the same panel instead of its
+  own text block.
+
 ### Block exits drop two dead register loads (2026-10-26)
 
 - Under chain-skip (the default) no chain target reads RDI/RSI, so exits no longer load them; the MT chain slot,

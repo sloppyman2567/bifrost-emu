@@ -65,7 +65,26 @@ struct Packet {
   int x{}, y{}, w{}, h{}, visible{}, separate{}, overlay{};
   char backend[32]{};
   char cpu[512]{}, gpu[512]{};
+  // The rest of the panel's figures (StatsOverlay), so the desktop HUD shows what a native window draws.
+  double process_percent{-1};
+  uint64_t panel_vram_used{}, panel_vram_total{};
+  bool panel_vram_known{}, ram_known{};
+  char app[160]{}, panel_gpu[160]{};
 };
+
+static OverlayStats overlay_stats(const Packet &p, bool active) {
+  OverlayStats stats;
+  stats.version = VERSION; stats.app = p.app; stats.backend = p.backend; stats.gpu_name = p.panel_gpu;
+  stats.fps = p.fps; stats.active = active;
+  stats.width = p.w; stats.height = p.h; stats.frames = p.frames;
+  stats.sensors.cpu_percent = p.cpu_percent; stats.sensors.cpu_temp = p.cpu_temp;
+  stats.sensors.gpu_percent = p.gpu_percent; stats.sensors.gpu_temp = p.gpu_temp;
+  stats.sensors.process_percent = p.process_percent;
+  stats.sensors.ram_known = p.ram_known; stats.sensors.ram_used = p.used_ram; stats.sensors.ram_total = p.total_ram;
+  stats.process_rss = p.ram;
+  stats.vram_known = p.panel_vram_known; stats.vram_used = p.panel_vram_used; stats.vram_total = p.panel_vram_total;
+  return stats;
+}
 
 detail::DrmClient detail::read_drm_client(std::istream &input) {
   DrmClient result;
@@ -428,6 +447,13 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   packet.cpu_percent = sensors.cpu_percent; packet.cpu_temp = sensors.cpu_temp;
   packet.gpu_percent = sensors.gpu_percent; packet.gpu_temp = sensors.gpu_temp;
   packet.used_ram = sensors.ram_known ? sensors.ram_used : 0;
+  packet.ram_known = sensors.ram_known; packet.process_percent = sensors.process_percent;
+  // The GPU's own counters cover the whole machine, as other monitors show; else this process's share.
+  packet.panel_vram_known = sensors.vram_known || packet.vram_known;
+  packet.panel_vram_used = sensors.vram_known ? sensors.vram_used : packet.used_vram;
+  packet.panel_vram_total = sensors.vram_known ? sensors.vram_total : packet.vram;
+  snprintf(packet.panel_gpu, sizeof(packet.panel_gpu), "%s",
+           state.gpu.empty() ? sensors.gpu_driver.c_str() : state.gpu.c_str());
   snprintf(packet.cpu, sizeof(packet.cpu), "%s", cpu.c_str());
   snprintf(packet.gpu, sizeof(packet.gpu), "%s", state.gpu.empty() ? "unavailable" : state.gpu.c_str());
   packet.frames = state.clock.frames;
@@ -440,18 +466,10 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   snprintf(packet.backend, sizeof(packet.backend), "%s", state.backend.c_str());
   if (info.title != state.decorated)
     state.title = info.title;
+  snprintf(packet.app, sizeof(packet.app), "%s", state.title.c_str());
   if (state.native && dbg().window_stats_overlay) {
-    OverlayStats stats;
-    stats.version = VERSION; stats.app = state.title; stats.backend = state.backend;
-    stats.gpu_name = state.gpu.empty() ? sensors.gpu_driver : state.gpu; stats.cpu_name = cpu;
-    stats.fps = packet.fps; stats.active = now - state.clock.last_ns <= 2000000000ULL;
-    stats.width = packet.w; stats.height = packet.h; stats.frames = packet.frames;
-    stats.sensors = sensors; stats.process_rss = packet.ram;
-    // The GPU's own counters cover the whole machine, as other monitors show; else this process's share.
-    stats.vram_known = sensors.vram_known || packet.vram_known;
-    stats.vram_used = sensors.vram_known ? sensors.vram_used : packet.used_vram;
-    stats.vram_total = sensors.vram_known ? sensors.vram_total : packet.vram;
-    state.overlay = render_overlay(overlay_lines(stats), overlay_scale(info.h));
+    state.overlay = render_overlay(overlay_lines(overlay_stats(packet, now - state.clock.last_ns <= 2000000000ULL)),
+                                   overlay_scale(info.h));
     ++state.overlay_seq;
   }
   std::string title;
@@ -709,14 +727,46 @@ void vk_present(uint64_t chain) {
 static void text(SDL_Renderer *r, const char *s, int y) {
   int x = 12;
   for (; *s && x < 880; ++s, x += 12) {
-    const unsigned char *g = detail::glyph_columns(static_cast<unsigned char>(*s));
+    const uint16_t *g = detail::glyph_columns(static_cast<unsigned char>(*s));
     for (int col = 0; col < 5; ++col)
-      for (int row = 0; row < 7; ++row)
+      for (int row = 0; row < 9; ++row)
         if (g[col] & (1 << row)) {
           SDL_Rect rect{x + col * 2, y + row * 2, 2, 2};
           SDL_RenderFillRect(r, &rect);
         }
   }
+}
+using Shape = void (*)(Display *, unsigned long, int, int, int, void *, int, int, int);
+// The desktop HUD shows the in-window panel. An X11 window has no alpha channel, so the panel is composed over a
+// dark base and, given an X11 display, the window's bounding shape trims the rounded corners.
+static void draw_hud(SDL_Window *window, SDL_Renderer *renderer, const OverlayImage &image, Display *display,
+                     unsigned long xid, Shape shape) {
+  int width = 0, height = 0;
+  SDL_GetWindowSize(window, &width, &height);
+  if (width != image.w || height != image.h) SDL_SetWindowSize(window, image.w, image.h);
+  if (display && shape) {
+    std::vector<XRectangle> rows;  // one span per row: the pixels at least half covered
+    for (int y = 0; y < image.h; ++y) {
+      const uint32_t *row = &image.argb[static_cast<size_t>(y) * image.w];
+      int first = 0, last = image.w;
+      while (first < last && (row[first] >> 24) < 0x80) ++first;
+      while (last > first && (row[last - 1] >> 24) < 0x80) --last;
+      if (first < last)
+        rows.push_back({static_cast<short>(first), static_cast<short>(y), static_cast<unsigned short>(last - first), 1});
+    }
+    shape(display, xid, 0, 0, 0, rows.data(), static_cast<int>(rows.size()), 0, 0);  // ShapeBounding, ShapeSet
+  }
+  SDL_SetRenderDrawColor(renderer, 0x0B, 0x0F, 0x16, 255);
+  SDL_RenderClear(renderer);
+  SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormatFrom(const_cast<uint32_t *>(image.argb.data()), image.w,
+                                                            image.h, 32, image.w * 4, SDL_PIXELFORMAT_ARGB8888);
+  if (SDL_Texture *texture = surface ? SDL_CreateTextureFromSurface(renderer, surface) : nullptr) {
+    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+    SDL_DestroyTexture(texture);
+  }
+  SDL_FreeSurface(surface);
+  SDL_RenderPresent(renderer);
 }
 #endif
 int ui_main(int fd) {
@@ -745,8 +795,6 @@ int ui_main(int fd) {
   SDL_Renderer *renderers[2]{};
   void *xlib = dlopen("libX11.so.6", RTLD_LAZY);
   void *xext = dlopen("libXext.so.6", RTLD_LAZY);
-  using Shape =
-      void (*)(Display *, unsigned long, int, int, int, void *, int, int, int);
   auto shape =
       xext ? reinterpret_cast<Shape>(dlsym(xext, "XShapeCombineRectangles"))
            : nullptr;
@@ -874,14 +922,18 @@ int ui_main(int fd) {
           SDL_ShowWindow(windows[i]);
         else
           SDL_HideWindow(windows[i]);
+        const bool active = now_ns() - p.last_ns <= 2000000000ULL;
+        draw_hud(windows[i], renderers[i], render_overlay(overlay_lines(overlay_stats(p, active)), overlay_scale(p.h)),
+                 info.info.x11.display, info.info.x11.window, shape);
         // Mapping/reconfiguring a window can restore SDL's input shape.
-        // Reassert the empty region after positioning and showing it.
+        // Reassert the empty region after positioning, showing and resizing it.
         shape(info.info.x11.display, info.info.x11.window, 2, 0, 0, nullptr, 0,
               0, 0);
         using Flush = int (*)(Display *);
         auto flush = reinterpret_cast<Flush>(dlsym(xlib, "XFlush"));
         if (flush)
           flush(info.info.x11.display);
+        continue;
       }
       const bool active = now_ns() - p.last_ns <= 2000000000ULL;
       char line[192];

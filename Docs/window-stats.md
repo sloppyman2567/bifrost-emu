@@ -87,17 +87,22 @@ the window on both Wayland and X11. It uses the window backend's popup layer (th
 reserved id `0xFFFF0001`): software-rendered ARGB pixels in a separate layer above every surface that never takes
 host input. Nothing is drawn through the guest's GL or Vulkan state, and nothing is added to its framebuffer.
 It refreshes at most four times a second and scales its 5x7 built-in font with the window height (2x up to
-about 1440p, 3x at 4K). It shows, from top to bottom:
+about 1440p, 3x at 4K). The panel is about 85 percent opaque with a thin outline and anti-aliased rounded corners.
+It shows, from top to bottom:
 
-- `BIFROST-EMU` and the version, the app's own title, and FPS and frame time with the presentation backend
-  (`IDLE` after two seconds without a frame);
-- aligned `CPU`, `GPU`, `VRAM` and `RAM` rows, each with a percentage, a meter and a detail (a temperature, or
-  used/total memory); meters and numbers turn amber from 80 percent and red from 95, temperatures at 80 and 90
-  degrees Celsius;
-- a dim footer: `EMU`, this process's CPU share and resident memory, and the shortened GPU name (`llvmpipe`
+- `BIFROST-EMU` with the version at the right edge, then the app's own title;
+- the frame rate as a double-size figure, then `FPS`, the frame time and, at the right edge, the presentation
+  backend (a large `IDLE` after two seconds without a frame);
+- aligned `CPU`, `GPU`, `VRAM` and `RAM` rows, each with a percentage, a meter and, at the right edge, a detail
+  (a temperature, or used/total memory); meters and numbers turn amber from 80 percent and red from 95,
+  temperatures at 80 and 90 degrees Celsius;
+- a dim footer: `Emulator`, this process's CPU share and resident memory, and the shortened GPU name (`llvmpipe`
   identifies a software renderer).
 
-Values that cannot be read show `--` with an empty meter. A window plugin without popup layers logs once and keeps
+Text keeps its case: the font has lower case with descenders. Accented Latin letters print without the accent
+(`Pokémon` as `Pokemon`), dashes and curly quotes as their ASCII forms, and other characters as `?`. A title or
+GPU name longer than 31 characters ends in an ellipsis, and a title with nothing the font can show (all CJK, say)
+is left out. Values that cannot be read show `--` with an empty meter. A window plugin without popup layers logs once and keeps
 the title statistics.
 
 Readings come from generic Linux interfaces, sampled once a second, with no vendor tools or libraries:
@@ -122,12 +127,13 @@ integrated GPU usually has no temperature of its own. NVIDIA's proprietary drive
 hwmon, so it shows `--` (reading it needs NVML, which is not implemented). Software renderers have no GPU device.
 
 **Other windows** (SDL, GLFW, Vulkan and framebuffer windows of Linux guests) do not get the embedded panel. For
-them `--window-stats-overlay` is a desktop HUD in a separate process, positioned over the game client area and
-**not drawn into the guest framebuffer**. It requires an X11 game window and XShape input regions to remain
+them `--window-stats-overlay` is a desktop HUD in a separate process that shows the same panel, positioned over
+the game client area and **not drawn into the guest framebuffer**. An X11 window has no alpha channel, so the
+HUD draws the panel over a dark base and trims its corners with the window's XShape bounding region. It requires an X11 game window and XShape input regions to remain
 click-through. SDL overlays hide when the game loses focus. Native Wayland positioning is not supported: the
 emulator reports that limitation and the independent stats window remains available. For X11 testing on a Wayland
 desktop, `SDL_VIDEODRIVER=x11` selects XWayland for an SDL game. Fullscreen compositor stacking and game capture
-behavior are compositor-specific; framebuffer dumps do not include the HUD. The HUD and the stats window also show
+behavior are compositor-specific; framebuffer dumps do not include the HUD. The separate stats window also shows
 CPU and GPU load and temperature.
 
 Presentation hooks cover SDL OpenGL, SDL renderers/surfaces, GLFW OpenGL, the

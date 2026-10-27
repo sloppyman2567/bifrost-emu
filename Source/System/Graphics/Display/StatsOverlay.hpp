@@ -25,8 +25,10 @@ struct OverlayStats {
 struct OverlayRun {
   std::string text;
   uint32_t color;
-  double meter = -1;  // 0..1: a usage bar as wide as `text` (spaces) instead of glyphs
-  bool rule = false;  // a thin divider across the panel instead of text
+  double meter = -1;   // 0..1: a usage bar as wide as `text` (spaces) instead of glyphs
+  bool rule = false;   // a thin divider across the panel instead of text
+  int size = 1;        // glyph multiplier; runs of one line share a baseline
+  bool right = false;  // this run and the ones after it sit flush with the panel's right edge
 };
 using OverlayLine = std::vector<OverlayRun>;
 std::vector<OverlayLine> overlay_lines(const OverlayStats &stats);
@@ -34,12 +36,14 @@ std::vector<OverlayLine> overlay_lines(const OverlayStats &stats);
 int overlay_scale(int window_height);
 OverlayImage render_overlay(const std::vector<OverlayLine> &lines, int scale);
 namespace detail {
-// The five column bytes of a glyph (bit 0 is the top row); lower case maps to upper, unknown bytes to '?'.
-const uint8_t *glyph_columns(unsigned char c);
+// The five columns of a glyph: bit 0 is the top row, capitals fill rows 0..6 and descenders reach row 8.
+// Printable ASCII has its own glyph; other bytes draw as '?'.
+const uint16_t *glyph_columns(unsigned char c);
 // "AMD Ryzen 7 5800X3D 8-Core Processor" -> "AMD Ryzen 7 5800X3D"; "Radeon RX 7600 (radeonsi, ...)" -> "Radeon RX 7600".
 std::string short_cpu_name(const std::string &name);
 std::string short_gpu_name(const std::string &name);
-// Text as the overlay prints it: upper case, UTF-8 degree sign kept, other non-ASCII as '?'.
+// Text as the overlay prints it: printable ASCII and the UTF-8 degree sign, middle dot and ellipsis kept, control
+// characters as spaces, other non-ASCII as '?'.
 std::string overlay_text(const std::string &text);
 }  // namespace detail
 }  // namespace arm64emu::window_stats
