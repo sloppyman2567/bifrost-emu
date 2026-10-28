@@ -318,11 +318,14 @@ surface recreation and lifecycle transitions without leaks or stale handles.
 ## Doom 3 performance and frame pacing
 
 Target sustained improvement at 3440×1440 on a documented reference host.
-The recorded baseline supports long gameplay and occasional 60 FPS scenes,
-but demanding gameplay still falls to a few FPS. Aim first for sustained
-5 FPS in the previously difficult underground route, then raise the floor
-and pursue 60 FPS or more in representative scenes where host resources
-permit. Cutscene FPS alone is not the acceptance criterion.
+The maintainer reports (2026-10-28, current build, not an instrumented
+measurement) that most of the early game holds about 60 FPS and demanding scenes
+run at about 20–30 FPS. That supersedes the October 5 report of 1–5 FPS in the
+spider-robot encounter and its 5 FPS goal, which predate many JIT changes. Measure
+first: matched-scene frame times (median, p95/p99) for the early game and the
+previously difficult encounter on a documented host. Then raise the
+demanding-scene floor toward the 60 FPS the early game already holds, where host
+resources permit. Cutscene FPS alone is not the acceptance criterion.
 
 - Fix profiler attribution for every guest thread and after code-cache
   growth. Separate translated execution, dispatch, native helpers, thunks,

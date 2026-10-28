@@ -11,6 +11,15 @@ cause has not been localized and no SSA on/off comparison has been captured;
 the JIT changes do not establish a stability fix. The measured CoreMark results,
 SSA coverage and verification limits are recorded in [JIT.md](../JIT.md#optimization-checkpoint-2026-10-11).
 
+### Current frame rate report (2026-10-28)
+
+The maintainer reports that the current build holds about 60 FPS through most of
+the early game and runs demanding scenes at about 20–30 FPS. This is an
+observation, not an instrumented frame-time series, and no resolution, host or
+scene was recorded with it. It supersedes the October 5 figures below (mostly
+25+ FPS, 1–5 FPS in the spider-robot encounter), which were taken on an older
+build.
+
 ### Previous gameplay checkpoint (2026-10-05)
 
 Use the default tier-1 JIT with MT chaining. Tier-2 is now opt-in via
