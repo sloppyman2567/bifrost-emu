@@ -2880,16 +2880,16 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("MANAGED_DIALOG_ACTIVITY_FOCUS false", text[:regained], text[-30000:])
         self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)
         self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
-        # The Activity window (its action bar) drew on the GPU; the dialogs,
-        # the PopupWindow and the unaccelerated Engine Activity reached the
-        # host as software layers, at framework-computed frames. All but the
-        # leaked one, which dies asynchronously at exit, were removed.
-        self.assertEqual(text.count("APP_WINDOW_GPU"), 1, text[-30000:])
+        # Windows whose ViewRootImpl has a ThreadedRenderer draw on the GPU, as on Android (a software canvas refuses the
+        # hardware bitmaps an image loader hands out): the Activity window, the dialog and the PopupWindow, at
+        # framework-computed frames. The toast and the unaccelerated Engine Activity and its dialogs reached the host as
+        # software layers. All but the leaked window, which dies asynchronously at exit, were removed.
+        self.assertEqual(text.count("APP_WINDOW_GPU"), 3, text[-30000:])
+        self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[40,60\]\[280,140\] opaque=\w+ text=Popup window")
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
-        self.assertEqual(len(shown), 7, text[-30000:])
+        self.assertEqual(len(shown), 5, text[-30000:])
         self.assertIn("type=2005 title=Toast", text)
         self.assertNotIn("APP_TOAST_FAILED", text)
-        self.assertEqual(shown[1][1], "[40,60][280,140]")
         removed = {line.split()[1] for line in text.splitlines() if line.startswith("APP_POPUP_REMOVED")}
         self.assertLessEqual({"1", "2", "3", "4", "5", "6"}, removed, text[-30000:])
 

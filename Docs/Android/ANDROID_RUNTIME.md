@@ -357,8 +357,11 @@ the C++-linkage `eglBeginFrame` every frame; the EGL adapter now exports it.
 `egl_set_cache_filename` and `egl_get_init_count` still resolve to the real
 libEGL.
 
-Limits: dialogs, popup menus and dim layers remain software layers above all
-surfaces, so a dialog under a later Activity would cover it. Whether WebView
+Limits: a window without a ThreadedRenderer (unaccelerated, or owned by another thread) and a toast remain software
+layers above all surfaces, so such a dialog under a later Activity would cover it. Dialogs and popup menus whose
+ViewRootImpl has a renderer draw on the GPU like Activity windows (2026-10-28: a software canvas throws "Software
+rendering doesn't support hardware bitmaps" for the bitmaps an image loader hands out, which ended YouTube when it opened
+a popup menu). Whether WebView
 takes its GPU (draw functor) path in the game is not yet observed.
 AHardwareBuffer import for TextureView/video is described under the EGL adapter.
 

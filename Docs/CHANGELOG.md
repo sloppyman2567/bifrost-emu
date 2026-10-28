@@ -10,6 +10,13 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Dialogs and popup menus draw on the GPU (2026-10-28)
+
+- YouTube exited when a popup menu drew an image: `IllegalArgumentException: Software rendering doesn't support hardware
+  bitmaps`. Only base application windows used their ThreadedRenderer; dialogs and popup menus were drawn on a software
+  canvas, which refuses the hardware bitmaps an image loader (Glide) hands out. Every window whose ViewRootImpl has a
+  renderer now draws on the GPU, as on Android. See [the runtime guide](Android/ANDROID_RUNTIME.md).
+
 ### Video frames convert on the host, off the main thread (2026-10-28)
 
 - Profiling YouTube on a 3440x1440 monitor: a video layer's YUV to ARGB conversion took 237 to 763 ms a frame in Java

@@ -433,7 +433,9 @@ final class FrameworkWindows {
             Rect dirty = takeDirty(popup);
             Object attachInfo = hiddenField(viewRoot, "mAttachInfo");
             Object renderer = attachInfo == null ? null : hiddenField(attachInfo, "mThreadedRenderer");
-            if (renderer != null && popup.attrs.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION) {
+            // Any window whose ViewRootImpl made a ThreadedRenderer (FLAG_HARDWARE_ACCELERATED) is drawn on the GPU, as on
+            // Android: a software canvas refuses the hardware bitmaps an image loader hands out (YouTube's popup menus).
+            if (renderer != null) {
                 drawHardware(popup, root, viewRoot, attachInfo, renderer, w, h, !dirty.isEmpty() || root.isDirty());
                 continue;
             }
