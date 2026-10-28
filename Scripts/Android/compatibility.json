@@ -78,6 +78,13 @@
       "checked": "2026-10-21",
       "evidence": "Reaches its 1440x1384 Unity window and surface; FMOD's AudioTrack output now initializes (no AudioTrack errors in a 75 s run). Whether the sound is audible, and gameplay, were not confirmed by a person.",
       "notes": ["Play Games sign-in does not complete: GamesResolutionActivity starts microG's GamesSignInActivity and the result is 'response=none'."]
+    },
+    "com.kiloo.subwaysurf": {
+      "name": "Subway Surfers",
+      "tested_version": "3.70.3",
+      "status": "playable",
+      "checked": "2026-10-27",
+      "evidence": "The maintainer reports it is playable (APKPure 3.70.3 build); no screenshots or further detail are recorded."
     }
   }
 }
