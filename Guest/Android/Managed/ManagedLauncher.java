@@ -1282,15 +1282,18 @@ public final class ManagedLauncher {
         int width = 0, height = 0;
         boolean fixedWindow = false;
         if (play) {
-            boolean landscape = Arrays.asList(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
-                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
-                    ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
-                    ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE)
+            // Only an Activity that asks for portrait opens a portrait window. One with no preference (Roblox's
+            // splash, YouTube) gets the desktop's landscape shape: a game then turns it with its own request, and
+            // a portrait window cut to the work area is a narrow phone nobody asked for.
+            boolean portrait = Arrays.asList(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT,
+                    ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT,
+                    ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT)
                     .contains(activity.screenOrientation);
             // The window opens at 1280x720 desktop units; on a scaled host
             // display its native buffer has more pixels at a higher density.
             loadActivityLibrary();
-            int error = openWindow(landscape ? 1280 : 720, landscape ? 720 : 1280);
+            int error = openWindow(portrait ? 720 : 1280, portrait ? 1280 : 720);
             if (error != 0) throw new IllegalStateException("host window: " + error);
             long[] metrics = new long[3];
             error = windowMetrics(metrics);

@@ -10,6 +10,15 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Window shape: Roblox no longer opens near-square (2026-10-28)
+
+- Roblox's window was a near-square 1440x1384 that the app then froze (it is not resizable): its splash declares no
+  orientation, so a portrait 720x1280 window was requested and KWin clamped its height to the work area. A new window is
+  now asked again for the requested shape at the largest size that fits, apps with no orientation open landscape, and a
+  fixed-size app's rotation takes its panel's other shape (landscape 1230x692, portrait 389x692 desktop units on a 1440p
+  panel) instead of swapping clamped pixels. Roblox's lobby surface matches its 2460x1384 window. A maximized 21:9 window
+  letterboxes the 16:9 panel. See [Window shape](Android/ANDROID_RUNTIME.md). A landscape game was not run.
+
 ### Foreground services and notification posting (2026-10-28)
 
 - YouTube played a video and a tap on pause ended the session: the playback service calls `Service.stopForeground`,

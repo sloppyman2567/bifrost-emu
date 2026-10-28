@@ -883,7 +883,13 @@ int AndroidSurfaceManager::set_window_orientation(int32_t axis) {
     std::lock_guard<std::mutex> lock(surface_mu_);
     int error = window_backend_->set_orientation(axis);
     if (error) return error;
-    if (axis && ((axis == 2) != (width_ > height_))) {
+    // The rotated window is not the old one swapped: a fixed-size app turns into its panel's other shape, fitted to
+    // the desktop, so the backend reports the size it ended up with.
+    int32_t pixel_w = 0, pixel_h = 0;
+    if (axis && window_backend_->pixel_size(pixel_w, pixel_h) && pixel_w > 0 && pixel_h > 0) {
+        width_ = natural_width_ = pixel_w;
+        height_ = natural_height_ = pixel_h;
+    } else if (axis && ((axis == 2) != (width_ > height_))) {
         std::swap(width_, height_);
         std::swap(natural_width_, natural_height_);
     }

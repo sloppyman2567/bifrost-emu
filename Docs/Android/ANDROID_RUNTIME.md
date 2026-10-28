@@ -2631,8 +2631,10 @@ SDL window through private window operation 23 (0 releases the constraint,
 1 selects portrait, 2 landscape). `BEHIND` inherits the next Activity's request.
 The launcher publishes display rotation, bounds, resources and configuration
 changes through the existing resize path, including reverse rotations without
-a size change. Fixed-size apps retain their virtual panel dimensions with axes
-swapped; the desktop compositor can scale the portrait window to fit.
+a size change. A fixed-size app's rotated window has its virtual panel's shape (the size the window
+opened at, in desktop units), limited by the work area the open-time clamp revealed (see Window shape
+below); the panel keeps those pixel dimensions whatever size the user gives the window, and the fit
+letterboxes it uniformly.
 Sensor/user axis requests retain the current reverse direction; physical sensor
 rotation and Activity recreation are not implemented by this path.
 
@@ -2816,10 +2818,34 @@ X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
 that never redraws (no rendering SurfaceView) can keep stale dialog pixels
 after removal.
 
+### Window shape (2026-10-28)
+
+Roblox opened as a near-square 1440x1384 window and stayed that way. Its splash Activity declares no orientation, so
+the launcher asked for a 720x1280 portrait window; the compositor (KWin) clamps a new window to the work area, so the
+height became 692 desktop units and the width stayed 720. Roblox is not resizable, so `fixWindow` froze that shape,
+Roblox classified the device as a tablet and turned to landscape, and a rotation swapped the clamped pixels. On a
+3440x1440 monitor the engine's surface then did not match the window, and a maximized window showed it cut off with
+black at the side. Observed with a probe of the real backend on this KWin/Wayland desktop (not on other compositors):
+
+- `SdlAndroidWindowBackend::open` asks again, after the compositor's first configure, for the largest window of the
+  requested shape that fits (`fit_new_window`), and remembers the clamped dimension as the work area limit. A later
+  `SetWindowSize` by the app is honored beyond that limit (a 1280x720 request on a 692 high work area gave exactly
+  1280x720), so only the open is fitted.
+- An Activity opens portrait only when its manifest asks for portrait; otherwise the window is landscape.
+- `set_orientation` for a fixed-size app turns the panel to its other shape (1280x720 or 720x1280 units, shrunk to the
+  work area limit, so landscape is 1230x692 and portrait 389x692 here), and `set_window_orientation` reports the size
+  the backend ended with instead of assuming a swap. The panel's pixel dimensions do not follow the window: a
+  maximized 21:9 window shows the 16:9 panel pillarboxed by the fit (`g_fit`), never cut off.
+
+`make test-android-sdl-backend` covers the clamp and the rotations with a fake SDL3 whose
+`BIFROST_TEST_SDL_WORK_AREA` clamps new windows. Roblox's menu surface now matches its window (2460x1384); a game
+in landscape was not run.
+
 ### Native-density play windows (2026-10-12)
 
-Play mode opens the host window at 1280x720 desktop units (720x1280 for
-portrait Activities), then reads its native pixel size and density through
+Play mode opens the host window at 1280x720 desktop units (720x1280 only for an
+Activity that asks for portrait; one with no orientation, such as Roblox's splash
+or YouTube, opens landscape), then reads its native pixel size and density through
 private op 11 (`windowMetrics`). On a 2x display the Android display is
 2560x1440 at 320 dpi; density is `160 × pixels per desktop unit`. Before the
 Application and Activity contexts exist, the launcher publishes these metrics to

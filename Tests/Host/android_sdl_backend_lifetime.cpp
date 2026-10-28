@@ -151,6 +151,36 @@ int main() {
   unsetenv("BIFROST_TEST_SDL_ASPECT_FAIL");
   CHECK(first->set_orientation(0) == 0);
   first.reset();
+  // A compositor that clamps a new window to its work area must not change the shape the app asked for: a phone
+  // window of 720x1280 desktop units on a 720x692 area is 389x692, not a near-square a fixed-size app keeps forever.
+  setenv("BIFROST_TEST_SDL_WORK_AREA", "720x692", 1);
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("clamped portrait", 720, 1280) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 778 && pixel_h == 1384);
+  first.reset();
+  setenv("BIFROST_TEST_SDL_WORK_AREA", "1720x692", 1);
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("clamped landscape", 1280, 720) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 2460 && pixel_h == 1384);
+  first.reset();
+  // A fixed-size app is the virtual panel: rotating it gives the panel's shape fitted to the work area, not its
+  // clamped pixels swapped (Roblox opens in a menu, then turns the window to landscape for a game).
+  setenv("BIFROST_TEST_SDL_WORK_AREA", "1720x692", 1);
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("panel", 1280, 720) == 0);
+  CHECK(first->set_fixed_size(2460, 1384) == 0);
+  CHECK(first->set_orientation(1) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 778 && pixel_h == 1384);
+  CHECK(first->set_orientation(2) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 2460 && pixel_h == 1384);
+  first.reset();
+  // A window that fits is untouched.
+  setenv("BIFROST_TEST_SDL_WORK_AREA", "3440x1440", 1);
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("fits", 1280, 720) == 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 2560 && pixel_h == 1440);
+  first.reset();
+  unsetenv("BIFROST_TEST_SDL_WORK_AREA");
   // Resizable apps rotate native pixels too and can release the constraint.
   first = frost::make_sdl_android_window_backend();
   CHECK(first->open("resizable orientation", 800, 600) == 0);

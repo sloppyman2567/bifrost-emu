@@ -40,7 +40,7 @@ namespace {
   X(SetStringProperty) X(SetNumberProperty) X(SetBooleanProperty) \
   X(DestroyWindow) X(GetWindowProperties) X(HideWindow) X(ShowWindow) X(RaiseWindow) X(RestoreWindow) \
   X(GetPointerProperty) X(GetNumberProperty) X(SetWindowSize) \
-  X(GetWindowSize) X(GetWindowSizeInPixels) X(GetWindowID) X(PollEvent) \
+  X(GetWindowSize) X(GetWindowSizeInPixels) X(SyncWindow) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
   X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
@@ -678,6 +678,16 @@ public:
     int32_t h = fixed_h_ ? fixed_h_ : height_;
     const float previous = fixed_w_ || orientation_axis_ ? float(w) / float(h) : 0.0f;
     if (axis && ((axis == 2) != (w > h))) std::swap(w, h);
+    // A fixed-size app is the virtual panel: rotated, it has the panel's own shape (the size it opened at, in desktop
+    // units) limited by the work area the open clamp revealed, not the current pixels swapped (which shrink with
+    // every rotation) and not whatever size the user gave the window (the fit letterboxes the panel into that).
+    if (axis && fixed_w_ && panel_long_ > 0) {
+      const double ratio = ratio_->load();
+      const double panel_w = axis == 2 ? panel_long_ : panel_short_, panel_h = axis == 2 ? panel_short_ : panel_long_;
+      const double shrink = std::min({1.0, area_w_ / panel_w, area_h_ / panel_h});
+      w = std::max<int32_t>(1, int32_t(std::lround(std::lround(panel_w * shrink) * ratio)));
+      h = std::max<int32_t>(1, int32_t(std::lround(std::lround(panel_h * shrink) * ratio)));
+    }
     // Preserve the virtual panel's aspect when the compositor fits a rotated
     // window onto a shorter desktop. Releasing a resizable app restores free resizing.
     const float aspect = axis || fixed_w_ ? float(w) / float(h) : 0.0f;
@@ -688,7 +698,11 @@ public:
       sdl_.SetWindowAspectRatio(window_, previous, previous);
       return error;
     }
-    if (fixed_w_) { fixed_w_ = w; fixed_h_ = h; }
+    if (fixed_w_) {
+      fixed_w_ = w; fixed_h_ = h;
+      int32_t pixel_w, pixel_h;
+      update_ratio(pixel_w, pixel_h);  // refit the layers to the new panel
+    }
     orientation_axis_ = axis;
     return 0;
 #else
@@ -778,6 +792,8 @@ public:
     sdl_.DestroyProperties(props);
     if (!window_) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window creation"); }
     if (!update_ratio(width_, height_)) { close(); return fail("window size query"); }
+    panel_long_ = std::max(width, height); panel_short_ = std::min(width, height);
+    if (fit_new_window(width, height)) update_ratio(width_, height_);
     return 0;
 #else
     return -ENOSYS;
@@ -1225,6 +1241,26 @@ private:
     return -EIO;
   }
   // Read the window's pixel size and refresh the ratio its layers scale by.
+  // A compositor keeps a new window inside the desktop's work area, clamping one dimension and changing the shape
+  // the app was opened for: a 720x1280 phone window became 720x692, and a fixed-size app kept that near-square
+  // window for good (Roblox, Subway Surfers). The clamp also tells us the work area's limit in that dimension
+  // (`area_*_`, desktop units; later resizes by the app are honored beyond it). Ask again for the largest window
+  // of the requested shape that fits. A compositor that scaled both dimensions alike, or ignores the request,
+  // leaves it as it is. True when the window was resized (the caller refreshes the pixel size).
+  bool fit_new_window(int32_t width, int32_t height) {
+    sdl_.SyncWindow(window_);
+    int logical_w = 0, logical_h = 0;
+    if (!sdl_.GetWindowSize(window_, &logical_w, &logical_h) || logical_w <= 0 || logical_h <= 0 ||
+        (logical_w >= width && logical_h >= height))
+      return false;
+    if (logical_w < width) area_w_ = logical_w;
+    if (logical_h < height) area_h_ = logical_h;
+    const double fit = std::min(double(logical_w) / width, double(logical_h) / height);
+    const int fit_w = std::max(1, int(std::lround(width * fit))), fit_h = std::max(1, int(std::lround(height * fit)));
+    if ((fit_w == logical_w && fit_h == logical_h) || !sdl_.SetWindowSize(window_, fit_w, fit_h)) return false;
+    sdl_.SyncWindow(window_);
+    return true;
+  }
   bool update_ratio(int32_t &pixel_w, int32_t &pixel_h) {
     int logical_w = 0, logical_h = 0;
     pixel_w = pixel_h = 0;
@@ -1400,6 +1436,8 @@ private:
   WaylandBackdrop backdrop_;
   PixelRatio ratio_ = std::make_shared<std::atomic<double>>(1.0);
   int32_t fixed_w_ = 0, fixed_h_ = 0;  // set_fixed_size
+  int32_t panel_long_ = 0, panel_short_ = 0;  // open()'s size in desktop units
+  int32_t area_w_ = INT32_MAX, area_h_ = INT32_MAX;  // work area limits learned from the open clamp
   int32_t orientation_axis_ = 0;
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;

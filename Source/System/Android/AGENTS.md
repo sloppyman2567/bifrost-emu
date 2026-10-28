@@ -165,6 +165,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   A service declared by a `Contract` enum lists its methods in `methods()`, so grepping for a quoted name misses
   it. A call that needs a model, not a stub, is `ISurfaceComposer.createConnection` (the SurfaceControl layers); do not
   answer it with an empty success.
+- A new host window is fitted once at `open` (`fit_new_window`: the compositor clamps it to the work area and changes
+  its shape; the clamp is the work area limit). A fixed-size app's rotation takes the panel's shape within that limit
+  and keeps its pixel dimensions whatever the user does to the window; never derive them from the window. Apps
+  declaring no orientation open landscape. `make test-android-sdl-backend` covers it.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

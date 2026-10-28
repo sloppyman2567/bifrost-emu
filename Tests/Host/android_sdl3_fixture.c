@@ -74,6 +74,15 @@ void SDL_DestroyCursor(SDL_Cursor *cursor) {
 bool SDL_ShowCursor(void) { record("cursor-show"); return true; }
 bool SDL_HideCursor(void) { record("cursor-hide"); return true; }
 static int requested_width, requested_height;
+/* A compositor keeps a window inside the desktop's work area (e.g. below a panel). */
+static void clamp_to_work_area(int *width, int *height) {
+    const char *area = getenv("BIFROST_TEST_SDL_WORK_AREA");
+    int area_w = 0, area_h = 0;
+    if (area && sscanf(area, "%dx%d", &area_w, &area_h) == 2) {
+        if (*width > area_w) *width = area_w;
+        if (*height > area_h) *height = area_h;
+    }
+}
 static bool external_context, high_density;
 SDL_PropertiesID SDL_CreateProperties(void) { external_context = high_density = false; return 100; }
 void SDL_DestroyProperties(SDL_PropertiesID props) { (void)props; }
@@ -100,6 +109,7 @@ SDL_Window *SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
     for (unsigned i = 0; i < 16; ++i) if (!windows[i]) {
         struct fake_window *w = calloc(1, sizeof(*w));
         if (!w) return NULL;
+        clamp_to_work_area(&width, &height);
         w->width = width; w->height = height; w->scale = high_density ? 2 : 1;
         w->id = i + 1; windows[i] = w;
         record("window-create"); return (SDL_Window *)w;
@@ -126,6 +136,7 @@ bool SDL_SetWindowSize(SDL_Window *window, int width, int height) {
     struct fake_window *w = (struct fake_window *)window;
     w->width = width; w->height = height; record("host-resize"); return true;
 }
+bool SDL_SyncWindow(SDL_Window *window) { (void)window; return true; }
 bool SDL_SetWindowAspectRatio(SDL_Window *window, float minimum, float maximum) {
     (void)window; (void)minimum; (void)maximum;
     return getenv("BIFROST_TEST_SDL_ASPECT_FAIL") == NULL;
