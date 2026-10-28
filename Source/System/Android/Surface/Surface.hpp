@@ -169,6 +169,9 @@ public:
     bool install_window_backend(std::unique_ptr<AndroidWindowBackend> backend);
     const char* window_backend_name() const { return window_backend_->name(); }
     int set_task_visible(bool visible);
+    // The pointer shape over the window (a BIFROST_WINDOW_CURSOR_* value), sent when the app's view
+    // under the mouse resolves a different pointer icon.
+    int set_cursor(int cursor);
 
     // ── NativeActivity lifecycle (v2) ──────────────────────────────────
     // ANativeActivityCallbacks slots (MODERN NDK layout — the first five

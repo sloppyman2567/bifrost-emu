@@ -45,7 +45,8 @@ namespace {
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
   X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
   X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
-  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState)
+  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState) \
+  X(CreateSystemCursor) X(SetCursor) X(DestroyCursor) X(ShowCursor) X(HideCursor)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -579,6 +580,24 @@ private:
   std::unique_ptr<X11Pixels> pixels_;
 };
 #endif
+#if defined(BIFROST_USE_SDL3)
+// The SDL system cursor nearest each BIFROST_WINDOW_CURSOR_* shape (HIDDEN has none).
+SDL_SystemCursor system_cursor(int cursor) {
+  switch (cursor) {
+  case BIFROST_WINDOW_CURSOR_TEXT: return SDL_SYSTEM_CURSOR_TEXT;
+  case BIFROST_WINDOW_CURSOR_POINTER: return SDL_SYSTEM_CURSOR_POINTER;
+  case BIFROST_WINDOW_CURSOR_WAIT: return SDL_SYSTEM_CURSOR_WAIT;
+  case BIFROST_WINDOW_CURSOR_CROSSHAIR: return SDL_SYSTEM_CURSOR_CROSSHAIR;
+  case BIFROST_WINDOW_CURSOR_MOVE: return SDL_SYSTEM_CURSOR_MOVE;
+  case BIFROST_WINDOW_CURSOR_NOT_ALLOWED: return SDL_SYSTEM_CURSOR_NOT_ALLOWED;
+  case BIFROST_WINDOW_CURSOR_EW_RESIZE: return SDL_SYSTEM_CURSOR_EW_RESIZE;
+  case BIFROST_WINDOW_CURSOR_NS_RESIZE: return SDL_SYSTEM_CURSOR_NS_RESIZE;
+  case BIFROST_WINDOW_CURSOR_NESW_RESIZE: return SDL_SYSTEM_CURSOR_NESW_RESIZE;
+  case BIFROST_WINDOW_CURSOR_NWSE_RESIZE: return SDL_SYSTEM_CURSOR_NWSE_RESIZE;
+  default: return SDL_SYSTEM_CURSOR_DEFAULT;
+  }
+}
+#endif
 class SdlAndroidWindowBackend final : public AndroidWindowBackend {
 public:
   int set_task_visible(bool visible) override {
@@ -591,6 +610,29 @@ public:
     return 0;
 #else
     (void)visible;
+    return -ENOTSUP;
+#endif
+  }
+  int set_cursor(int cursor) override {
+#if defined(BIFROST_USE_SDL3)
+    if (cursor < 0 || cursor >= BIFROST_WINDOW_CURSOR_COUNT) return -EINVAL;
+    if (!window_) return -ENODEV;
+    if (cursor == BIFROST_WINDOW_CURSOR_HIDDEN) {
+      if (!sdl_.HideCursor()) return fail("HideCursor");
+      cursor_hidden_ = true;
+      return 0;
+    }
+    SDL_Cursor *&shape = cursors_[cursor];
+    if (!shape) {
+      shape = sdl_.CreateSystemCursor(system_cursor(cursor));
+      if (!shape) return fail("CreateSystemCursor");
+    }
+    if (!sdl_.SetCursor(shape)) return fail("SetCursor");
+    if (cursor_hidden_ && !sdl_.ShowCursor()) return fail("ShowCursor");
+    cursor_hidden_ = false;
+    return 0;
+#else
+    (void)cursor;
     return -ENOTSUP;
 #endif
   }
@@ -750,6 +792,14 @@ public:
     gestures_ = {};
     pending_.clear();
     if (window_) {
+      // Leave the pointer as the desktop had it, and free the cursors before SDL quits (quitting
+      // frees SDL's own list, so a later DestroyCursor would be a second free).
+      if (cursor_hidden_) sdl_.ShowCursor();
+      cursor_hidden_ = false;
+      for (SDL_Cursor *&shape : cursors_) {
+        if (shape) sdl_.DestroyCursor(shape);
+        shape = nullptr;
+      }
       sdl_.DestroyWindow(window_);
       window_ = nullptr;
       sdl_.QuitSubSystem(SDL_INIT_VIDEO);
@@ -1341,6 +1391,8 @@ private:
   }
   Sdl3 sdl_;
   SDL_Window *window_ = nullptr;
+  SDL_Cursor *cursors_[BIFROST_WINDOW_CURSOR_COUNT] = {};  // created on first use, by set_cursor
+  bool cursor_hidden_ = false;
   std::unique_ptr<WlEglFns> wl_fns_;
   void *wl_window_ = nullptr;
   AndroidWindowBinding binding_;

@@ -1812,6 +1812,26 @@ rules of libinput's `KeyCharacterMap` parser into `FrameworkKeyLayout.java`
 writes the native parcel the framework reads. `BIFROST_TEXT_SCRIPT` pushes
 scripted key and text events into the window's SDL queue for tests.
 
+### Pointer icons (2026-10-28)
+
+On Android, `ViewRootImpl` resolves the pointer icon for mouse events
+(`ViewPostImeInputStage.maybeUpdatePointerIcon`, then `updatePointerIcon`: `mView.onResolvePointerIcon(event,
+pointerIndex)`, the default arrow when that returns null, reported only when the icon changes; read from
+`android-15.0.0_r1`). Host input here bypasses those stages, so after each `ACTION_HOVER_MOVE` that no popup window
+took, the launcher resolves the icon against the Activity's decor view itself (`FrameworkCursors.hover`, on a copy
+of the event with `SOURCE_MOUSE`, the source `ViewRootImpl` requires) and shows the nearest host system cursor (syscall 0x100E op 24,
+[plugin `set_cursor`](ANDROID_WINDOW_PLUGINS.md#pointer-shapes-2026-10-28)). `TYPE_NULL` hides the pointer; hand,
+text, wait, crosshair, cell, grab and scroll, no-drop and the resize arrows map to their SDL counterparts; the
+rest (context menu, help, alias, copy, zoom) and an unmapped type show the arrow.
+
+Limits: only hover updates the shape, because a touchscreen never hovers while the mouse can (a mouse drag keeps the
+shape from before the button went down); an app's own bitmap cursor (`TYPE_CUSTOM`) shows the arrow; the shape is not
+reset when the pointer leaves the window or another Activity opens. The first failure (a host without the callback, a
+refused shape, a framework error) turns the feature off and logs `APP_CURSOR_UNAVAILABLE` once. `ManagedServiceBatch`
+checks the mapping and the send-on-change behaviour through a real `View` and `PointerIcon`s
+(`MANAGED_CURSORS_OK`); the SDL3 backend is checked against a fake SDL3 that logs each cursor call. Not checked: a
+game that sets a pointer icon, or a live window.
+
 ### Input methods (October 11, 2026)
 
 `FrameworkInputMethod` publishes the process-local `input_method` service using

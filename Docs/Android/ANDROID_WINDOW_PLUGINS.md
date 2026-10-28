@@ -167,6 +167,18 @@ layers (`create_surface`), so a managed Activity's window cannot be created
 through a loadable module. `BIFROST_TEXT_SCRIPT` pushes scripted key and text
 events into the built-in backend's SDL queue for tests.
 
+### Pointer shapes (2026-10-28)
+
+V2 descriptors may append `set_cursor(instance, cursor)`, the last optional callback. `cursor` is a
+`bifrost_android_window_cursor` value: the default arrow, hidden, text, pointer (hand), wait, crosshair, move,
+not-allowed, and the four resize directions. Any other value is `-EINVAL` before it reaches a plugin, and a plugin
+without the callback reports `-ENOTSUP` and keeps loading. The host sends a shape only when it changes. The
+SDL3 backend maps each shape to the nearest SDL system cursor (`SDL_CreateSystemCursor`, made on first use and
+reused), hides the pointer with `SDL_HideCursor` and shows it again for the next shape; closing the window shows
+a hidden pointer again and frees its cursors before SDL quits. An app's own bitmap cursor is not part of the
+interface. The managed launcher's side is in
+[pointer icons](ANDROID_RUNTIME.md#pointer-icons-2026-10-28).
+
 ## Validation and reproduction
 
 Completed checks:

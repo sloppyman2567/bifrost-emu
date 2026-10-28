@@ -44,6 +44,15 @@ int main(int argc, char **argv) {
     CHECK(manager.set_task_visible(false) == 0);
     CHECK(manager.set_task_visible(true) == 0);
     CHECK(contents(log).find("task-hide\ntask-show\n") != std::string::npos);
+    CHECK(manager.set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == 0);
+    CHECK(manager.set_cursor(BIFROST_WINDOW_CURSOR_HIDDEN) == 0);
+    CHECK(contents(log).find("cursor 3\ncursor 1\n") != std::string::npos);
+    // An unknown shape never reaches the plugin; a plugin's refusal comes back as its errno.
+    CHECK(manager.set_cursor(-1) == -EINVAL && manager.set_cursor(BIFROST_WINDOW_CURSOR_COUNT) == -EINVAL);
+    CHECK(contents(log).find("cursor -1") == std::string::npos && contents(log).find("cursor 12") == std::string::npos);
+    mode("cursor-fail");
+    CHECK(manager.set_cursor(BIFROST_WINDOW_CURSOR_TEXT) == -EIO);
+    mode("");
     CHECK(manager.host_native_window() == (uint64_t(800) << 32 | 600));
     CHECK(manager.native_display() != nullptr);
     mode("resize-fail");
@@ -99,7 +108,7 @@ int main(int argc, char **argv) {
     CHECK(!manager.install_window_backend(frost::make_sdl_android_window_backend()));
     // Destructor must close the owned window while the DSO is resident.
   }
-  CHECK(contents(log) == "create\nopen\ntask-hide\ntask-show\nclose\ndestroy\nunload\n");
+  CHECK(contents(log) == "create\nopen\ntask-hide\ntask-show\ncursor 3\ncursor 1\nclose\ndestroy\nunload\n");
   // Poll has its own positive-success contract; poison is discarded.
   auto polling = frost::load_android_window_backend(argv[1], error);
   CHECK(polling);
@@ -178,6 +187,12 @@ int main(int argc, char **argv) {
       CHECK(texting->poll_text(payload) == -EPROTO && payload.length == 0);
       CHECK(texting->set_text_input(false, 0, 0, 0, 0) == 0);
     }
+    // A plugin from before set_cursor still loads and everything else works.
+    mode("no-cursor");
+    auto no_cursor = frost::load_android_window_backend(argv[1], error);
+    CHECK(no_cursor && no_cursor->set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == -ENOTSUP);
+    CHECK(no_cursor->set_task_visible(true) == 0);
+    CHECK(no_cursor->set_cursor(-1) == -EINVAL);
     mode("text-input-fail");
     CHECK(texting->set_text_input(true, 0, 0, 1, 1) == -ENOTSUP);
     mode("no-text");
@@ -190,6 +205,7 @@ int main(int argc, char **argv) {
   auto old = frost::load_android_window_backend(argv[1], error);
   CHECK(old && error.empty());
   CHECK(old->set_task_visible(false) == -ENOTSUP);
+  CHECK(old->set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == -ENOTSUP);
   std::ofstream(log, std::ios::trunc).close();
   CHECK(old->show_popup(1, 0, 0, 1, 1, pixels) == -ENOTSUP);
   old->remove_popup(1);

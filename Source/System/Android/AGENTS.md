@@ -140,6 +140,15 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `Tools/Android/generate-key-layout.py`; regenerate `FrameworkKeyLayout.java`,
   never edit it, or text fields stop honoring Backspace. Run
   `ActivityProbe$InputMethodProbe` and `test_managed_text_input`.
+- Pointer icons: host input bypasses `ViewRootImpl`'s input stages, so after each mouse hover the launcher asks the
+  Activity's view tree (`View.onResolvePointerIcon`, as `ViewRootImpl.updatePointerIcon` does) and `FrameworkCursors`
+  sends the nearest `BIFROST_WINDOW_CURSOR_*` shape (op 24) only when it changes. Hover is the trigger because a
+  touchscreen never hovers; a button-held drag keeps the last shape. `set_cursor` is an append-only optional plugin
+  field (`-ENOTSUP` without it); the SDL3 backend maps shapes to SDL system cursors, frees them before SDL quits and
+  shows a hidden pointer again on close. A failure stops the feature and logs `APP_CURSOR_UNAVAILABLE` once; it must
+  never break input delivery. An app's own bitmap cursor is not carried. Keep `FrameworkCursors`, the C enum and
+  the SDL mapping together; `MANAGED_CURSORS_OK` (`ManagedServiceBatch`), `make test-android-sdl-backend` and
+  `make test-android-window-plugin` cover it.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

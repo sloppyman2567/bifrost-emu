@@ -170,6 +170,12 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_setTaskVisible(JNIEnv *env, jclass t
     return (jint)bifrost_window(22, visible != JNI_FALSE, 0);
 }
 
+// The pointer shape over the window (op 24): a BIFROST_WINDOW_CURSOR_* value.
+JNIEXPORT jint JNICALL Java_ManagedLauncher_setCursor(JNIEnv *env, jclass type, jint cursor) {
+    (void)env; (void)type;
+    return (jint)bifrost_window(24, cursor, 0);
+}
+
 JNIEXPORT jint JNICALL Java_ActivityProbe_pollWindow(JNIEnv *env, jclass type, jlongArray out) {
     (void)type;
     uint64_t data[55];

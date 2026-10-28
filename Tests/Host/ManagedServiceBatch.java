@@ -25,6 +25,9 @@ import android.os.Looper;
 import android.os.Parcel;
 import android.os.PowerManager;
 import android.os.Process;
+import android.view.MotionEvent;
+import android.view.PointerIcon;
+import android.view.View;
 import java.io.File;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -310,6 +313,54 @@ public final class ManagedServiceBatch {
         alarm.cancel(manifestSender);
         first.cancel(); mutable.cancel(); manifestSender.cancel(); activitySender.cancel();
         check(PendingIntent.getBroadcast(context, 1, base, immutable | PendingIntent.FLAG_NO_CREATE) == null, "cancelled sender remains in registry");
+    }
+    // FrameworkCursors: PointerIcon types to host cursors, and what a mouse hover sends to the host
+    // (through a real View and real PointerIcons: only a changed shape is sent, a refusal is contained).
+    private static void cursors(Context context) {
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_NULL) == FrameworkCursors.HIDDEN, "TYPE_NULL is not hidden");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_ARROW) == FrameworkCursors.DEFAULT, "arrow is not the default cursor");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_HAND) == FrameworkCursors.POINTER, "hand is not the pointer");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_TEXT) == FrameworkCursors.TEXT
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_VERTICAL_TEXT) == FrameworkCursors.TEXT, "text cursors");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_WAIT) == FrameworkCursors.WAIT, "wait cursor");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_CROSSHAIR) == FrameworkCursors.CROSSHAIR
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_CELL) == FrameworkCursors.CROSSHAIR, "crosshair cursors");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_ALL_SCROLL) == FrameworkCursors.MOVE
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_GRAB) == FrameworkCursors.MOVE
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_GRABBING) == FrameworkCursors.MOVE, "move cursors");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_NO_DROP) == FrameworkCursors.NOT_ALLOWED, "no-drop cursor");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW) == FrameworkCursors.EW_RESIZE
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_VERTICAL_DOUBLE_ARROW) == FrameworkCursors.NS_RESIZE
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_TOP_RIGHT_DIAGONAL_DOUBLE_ARROW) == FrameworkCursors.NESW_RESIZE
+                && FrameworkCursors.hostCursor(PointerIcon.TYPE_TOP_LEFT_DIAGONAL_DOUBLE_ARROW) == FrameworkCursors.NWSE_RESIZE,
+                "resize cursors");
+        check(FrameworkCursors.hostCursor(PointerIcon.TYPE_HELP) == FrameworkCursors.DEFAULT
+                && FrameworkCursors.hostCursor(-1) == FrameworkCursors.DEFAULT, "unmapped types fall back to the arrow");
+        List<Integer> sent = new ArrayList<>();
+        FrameworkCursors shown = new FrameworkCursors(shape -> { sent.add(shape); return 0; });
+        View view = new View(context);
+        MotionEvent hover = MotionEvent.obtain(0, 0, MotionEvent.ACTION_HOVER_MOVE, 5f, 5f, 0);
+        shown.hover(() -> view, hover);
+        check(sent.isEmpty(), "a view with no pointer icon changed the host's arrow");
+        view.setPointerIcon(PointerIcon.getSystemIcon(context, PointerIcon.TYPE_HAND));
+        shown.hover(() -> view, hover); shown.hover(() -> view, hover);
+        check(sent.equals(Arrays.asList(FrameworkCursors.POINTER)), "hand was not sent exactly once: " + sent);
+        view.setPointerIcon(PointerIcon.getSystemIcon(context, PointerIcon.TYPE_NULL));
+        shown.hover(() -> view, hover);
+        check(sent.equals(Arrays.asList(FrameworkCursors.POINTER, FrameworkCursors.HIDDEN)), "hidden pointer was not sent: " + sent);
+        view.setPointerIcon(null);
+        shown.hover(() -> view, hover);
+        check(sent.equals(Arrays.asList(FrameworkCursors.POINTER, FrameworkCursors.HIDDEN, FrameworkCursors.DEFAULT)),
+                "clearing the icon did not restore the arrow: " + sent);
+        shown.hover(() -> null, hover);  // no decor view yet
+        // A host that refuses a shape turns the feature off for good, without throwing into input delivery.
+        List<Integer> refused = new ArrayList<>();
+        FrameworkCursors refusing = new FrameworkCursors(shape -> { refused.add(shape); return -95; });
+        view.setPointerIcon(PointerIcon.getSystemIcon(context, PointerIcon.TYPE_HAND));
+        refusing.hover(() -> view, hover); refusing.hover(() -> view, hover);
+        check(refused.size() == 1, "a refused cursor was retried: " + refused);
+        hover.recycle();
+        System.out.println("MANAGED_CURSORS_OK");
     }
     private static void check(boolean value, String message) {
         if (!value) throw new AssertionError(message);
@@ -1275,6 +1326,7 @@ public final class ManagedServiceBatch {
         new Thread(() -> {
         try {
         usersAndIdle(context);
+        cursors(context);
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);

@@ -541,6 +541,9 @@ Use cold/warm A/B measurements to verify that cache changes reduce stutters.
   and trackpad pinch zoom, Shift+wheel pans and a middle-button drag moves two
   synthetic fingers (October 25; unit and fake-SDL3 checks, not yet tried on a
   live window).
+- Pointer icons (October 28): an app's `PointerIcon` (hand, text, resize, hidden) changes the host cursor on
+  mouse hover ([pointer icons](Android/ANDROID_RUNTIME.md#pointer-icons-2026-10-28)). An app's own bitmap
+  cursor shows the arrow; no game that sets an icon has been tried.
 - Test keyboard layout, held/released buttons, text input and pause/menu
   transitions without stuck keys or duplicated events.
 

@@ -45,6 +45,9 @@ public:
   virtual int poll_text(AndroidWindowText &text) { text = {}; return 0; }
   virtual void set_visible(bool) {}
   virtual int set_task_visible(bool) { return -ENOTSUP; }
+  // The pointer shape over the window, a BIFROST_WINDOW_CURSOR_* value (-EINVAL for any other).
+  // The host calls it only when the shape changes.
+  virtual int set_cursor(int) { return -ENOTSUP; }
   virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
   // An open window's buffer size in host pixels. open() takes the window's
   // size in desktop coordinates; on a scaled display the two differ.

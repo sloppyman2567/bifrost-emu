@@ -63,10 +63,14 @@ int32_t set_task_visible(void *instance, uint32_t visible) {
   try { return static_cast<AndroidWindowBackend *>(instance)->set_task_visible(visible != 0); }
   catch (...) { return -EIO; }
 }
+int32_t set_cursor(void *instance, int32_t cursor) {
+  try { return static_cast<AndroidWindowBackend *>(instance)->set_cursor(cursor); }
+  catch (...) { return -EIO; }
+}
 const bifrost_android_window_plugin_v2 api = {
     BIFROST_ANDROID_WINDOW_ABI_V2, sizeof(api), "sdl3-egl-plugin",
     create, destroy, open, close, resize, binding, poll, show_popup, remove_popup,
-    set_text_input, poll_text, set_task_visible};
+    set_text_input, poll_text, set_task_visible, set_cursor};
 }
 extern "C" __attribute__((visibility("default")))
 const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {

@@ -175,16 +175,27 @@ static int32_t set_task_visible(void *instance, uint32_t visible) {
     record(visible ? "task-show" : "task-hide");
     return 0;
 }
+static int32_t set_cursor(void *instance, int32_t cursor) {
+    (void)instance;
+    if (cursor < 0 || cursor >= BIFROST_WINDOW_CURSOR_COUNT) return -EINVAL;
+    if (mode("cursor-fail")) return -EIO;
+    char line[32];
+    snprintf(line, sizeof(line), "cursor %d", cursor);
+    record(line);
+    return 0;
+}
 const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(uint32_t host_abi) {
     static bifrost_android_window_plugin_v2 api;
     if (host_abi != BIFROST_ANDROID_WINDOW_ABI_V2 || mode("null-api")) return NULL;
     api = (bifrost_android_window_plugin_v2){2, sizeof(api), "c-fixture",
         create, destroy, open_window, close_window, resize, binding, poll_window,
-        show_popup, remove_popup, set_text_input, poll_text, set_task_visible};
+        show_popup, remove_popup, set_text_input, poll_text, set_task_visible, set_cursor};
     // A descriptor from before the optional popup callbacks were appended.
     if (mode("old-size")) api.struct_size = BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE;
     // Popups but no text input (before those callbacks were appended).
     if (mode("no-text")) api.struct_size = offsetof(bifrost_android_window_plugin_v2, set_text_input);
+    // Everything but the pointer shape (before set_cursor was appended).
+    if (mode("no-cursor")) api.struct_size = offsetof(bifrost_android_window_plugin_v2, set_cursor);
     if (mode("bad-version")) api.abi_version = 99;
     if (mode("legacy-version")) api.abi_version = 1;
     if (mode("bad-size")) api.struct_size = 8;

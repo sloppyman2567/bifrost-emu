@@ -126,6 +126,7 @@ public final class ManagedLauncher {
     private static final FrameworkLocation location = new FrameworkLocation(packages);
     private static final FrameworkUsers users = new FrameworkUsers(packages);
     private static final FrameworkDeviceIdle deviceIdle = new FrameworkDeviceIdle(packages);
+    private static final FrameworkCursors cursors = new FrameworkCursors(ManagedLauncher::setCursor);
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
@@ -133,6 +134,8 @@ public final class ManagedLauncher {
     // Op 20: starts or stops the host's text input; the rectangle anchors its composition.
     private static native int setTextInput(boolean active, int x, int y, int width, int height);
     static native int setTaskVisible(boolean visible);
+    // Op 24: the pointer shape over the window, a BIFROST_WINDOW_CURSOR_* value.
+    private static native int setCursor(int cursor);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
     private static native int fixWindow(int width, int height); // non-resizable app: scale the host window to fit
     private static native int orientWindow(int axis);
@@ -1486,7 +1489,11 @@ public final class ManagedLauncher {
             MotionEvent event = MotionEvent.obtain(e[11] / ms, e[12] / ms, (int) e[4], count,
                     properties, coords, 0, 0, 1f, 1f, (int) e[6], 0, (int) e[5], 0);
             if ((e[5] & InputDevice.SOURCE_CLASS_POINTER) != 0) {
-                if (!windows.dispatchPointer(event)) activity.dispatchTouchEvent(event);
+                if (!windows.dispatchPointer(event)) {
+                    activity.dispatchTouchEvent(event);
+                    if (event.getActionMasked() == MotionEvent.ACTION_HOVER_MOVE)
+                        cursors.hover(() -> activity.getWindow().peekDecorView(), event);
+                }
             } else {
                 activity.dispatchGenericMotionEvent(event);
             }

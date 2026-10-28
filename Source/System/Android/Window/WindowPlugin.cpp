@@ -46,6 +46,13 @@ public:
       return -ENOTSUP;
     return status(api_.set_task_visible(instance_, visible ? 1u : 0u));
   }
+  int set_cursor(int cursor) override {
+    if (cursor < 0 || cursor >= BIFROST_WINDOW_CURSOR_COUNT) return -EINVAL;
+    if (api_.struct_size < offsetof(bifrost_android_window_plugin_v2, set_cursor)
+                              + sizeof(api_.set_cursor) || !api_.set_cursor)
+      return -ENOTSUP;
+    return status(api_.set_cursor(instance_, cursor));
+  }
   int create() {
     int result = status(api_.create(&instance_));
     created_ = result == 0 && instance_ != nullptr;

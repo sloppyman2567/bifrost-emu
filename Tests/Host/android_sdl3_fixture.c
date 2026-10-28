@@ -49,6 +49,30 @@ bool SDL_InitSubSystem(SDL_InitFlags flags) { (void)flags; record("video-init");
 void SDL_QuitSubSystem(SDL_InitFlags flags) { (void)flags; record("video-quit"); }
 bool SDL_SetHint(const char *name, const char *value) { (void)name; (void)value; return true; }
 const char *SDL_GetError(void) { return "injected SDL3 failure"; }
+/* System cursors: each call is logged with the SDL cursor id, so a test sees exactly what the backend asked for. */
+struct fake_cursor { int id; };
+SDL_Cursor *SDL_CreateSystemCursor(SDL_SystemCursor id) {
+    char line[48];
+    struct fake_cursor *cursor = malloc(sizeof(*cursor));
+    cursor->id = (int)id;
+    snprintf(line, sizeof(line), "cursor-create %d", cursor->id);
+    record(line);
+    return (SDL_Cursor *)cursor;
+}
+bool SDL_SetCursor(SDL_Cursor *cursor) {
+    char line[48];
+    snprintf(line, sizeof(line), "cursor-set %d", ((struct fake_cursor *)cursor)->id);
+    record(line);
+    return true;
+}
+void SDL_DestroyCursor(SDL_Cursor *cursor) {
+    char line[48];
+    snprintf(line, sizeof(line), "cursor-destroy %d", ((struct fake_cursor *)cursor)->id);
+    record(line);
+    free(cursor);
+}
+bool SDL_ShowCursor(void) { record("cursor-show"); return true; }
+bool SDL_HideCursor(void) { record("cursor-hide"); return true; }
 static int requested_width, requested_height;
 static bool external_context, high_density;
 SDL_PropertiesID SDL_CreateProperties(void) { external_context = high_density = false; return 100; }

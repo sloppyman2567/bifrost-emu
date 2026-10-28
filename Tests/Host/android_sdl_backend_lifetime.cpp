@@ -1,4 +1,6 @@
 #include "System/Android/Window/WindowBackend.hpp"
+#include "Bifrost/AndroidWindowPlugin.h"
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -158,6 +160,31 @@ int main() {
   CHECK(first->resize(1600, 1200, true) == 0);
   CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
   first.reset();
+  // Pointer shapes: system cursors made on first use and reused, hiding and showing, and every
+  // cursor freed (and the pointer shown again) before SDL quits.
+  {
+    const std::string pointer = std::to_string(SDL_SYSTEM_CURSOR_POINTER), text = std::to_string(SDL_SYSTEM_CURSOR_TEXT);
+    auto shapes = frost::make_sdl_android_window_backend();
+    CHECK(shapes->set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == -ENODEV);  // no window yet
+    CHECK(shapes->open("cursors", 800, 600) == 0);
+    std::ofstream(log, std::ios::trunc).close();
+    CHECK(shapes->set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == 0);
+    CHECK(shapes->set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == 0);  // reused, not created again
+    CHECK(shapes->set_cursor(BIFROST_WINDOW_CURSOR_HIDDEN) == 0);
+    CHECK(shapes->set_cursor(BIFROST_WINDOW_CURSOR_TEXT) == 0);     // shown again
+    CHECK(shapes->set_cursor(-1) == -EINVAL && shapes->set_cursor(BIFROST_WINDOW_CURSOR_COUNT) == -EINVAL);
+    shapes.reset();
+    CHECK(contents(log) == "cursor-create " + pointer + "\ncursor-set " + pointer + "\ncursor-set " + pointer +
+                           "\ncursor-hide\ncursor-create " + text + "\ncursor-set " + text + "\ncursor-show\n"
+                           "cursor-destroy " + text + "\ncursor-destroy " + pointer + "\nwindow-destroy\nvideo-quit\n");
+    // Closing while hidden leaves the pointer visible, with no cursor of ours to free.
+    auto hidden = frost::make_sdl_android_window_backend();
+    CHECK(hidden->open("hidden", 800, 600) == 0);
+    std::ofstream(log, std::ios::trunc).close();
+    CHECK(hidden->set_cursor(BIFROST_WINDOW_CURSOR_HIDDEN) == 0);
+    hidden.reset();
+    CHECK(contents(log) == "cursor-hide\ncursor-show\nwindow-destroy\nvideo-quit\n");
+  }
   for (int i = 0; i < 256; ++i) {
     first = frost::make_sdl_android_window_backend();
     CHECK(first->open("stress", 800, 600) == 0 && first->binding().window);

@@ -10,6 +10,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Android windows follow an app's pointer icon (2026-10-28)
+
+- An Android app's `PointerIcon` (hand over a link, text beam over an editor, resize arrows, a hidden pointer) now
+  changes the host cursor; before, every window showed the desktop's default cursor and a game that hid its pointer
+  still showed one. Host input bypasses `ViewRootImpl`, which normally resolves the icon, so after a mouse hover the
+  launcher asks the Activity's view tree (`View.onResolvePointerIcon`) and sends the nearest of twelve shapes to the
+  window (`FrameworkCursors`, syscall op 24, optional plugin callback `set_cursor`). The SDL3 backend uses SDL system
+  cursors. Only hover updates it, an app's own bitmap cursor shows the arrow, and the first failure turns the feature
+  off with `APP_CURSOR_UNAVAILABLE`; see [pointer icons](Android/ANDROID_RUNTIME.md#pointer-icons-2026-10-28).
+- Checked: the SDL3 backend against a fake SDL3 (create, reuse, hide, show, free before quit), the plugin host and its
+  fixture (valid, out-of-range, refused, absent callback), and the Java mapping and send-on-change through a real
+  `View` in `ManagedServiceBatch`. Not checked: a game that sets a pointer icon, or a live window.
+
 ### Roblox's vertex shaders compile on Mesa (2026-10-27)
 
 - 29 of the 925 shaders in Roblox's `shaders_glsles3.pack` (grass, smooth terrain, mesh vertex shaders) failed on Mesa with

@@ -26,6 +26,23 @@ enum bifrost_android_window_text_kind {
     BIFROST_WINDOW_TEXT_COMPOSING = 2 /* the composition in progress; empty clears it */
 };
 #define BIFROST_WINDOW_TEXT_MAX 255u
+/* Pointer shapes for set_cursor: the nearest of the host toolkit's own system
+ * cursors; an app's own bitmap cursor is not carried. */
+enum bifrost_android_window_cursor {
+    BIFROST_WINDOW_CURSOR_DEFAULT = 0, /* the arrow */
+    BIFROST_WINDOW_CURSOR_HIDDEN = 1,
+    BIFROST_WINDOW_CURSOR_TEXT = 2,
+    BIFROST_WINDOW_CURSOR_POINTER = 3, /* the hand over a link */
+    BIFROST_WINDOW_CURSOR_WAIT = 4,
+    BIFROST_WINDOW_CURSOR_CROSSHAIR = 5,
+    BIFROST_WINDOW_CURSOR_MOVE = 6,
+    BIFROST_WINDOW_CURSOR_NOT_ALLOWED = 7,
+    BIFROST_WINDOW_CURSOR_EW_RESIZE = 8,
+    BIFROST_WINDOW_CURSOR_NS_RESIZE = 9,
+    BIFROST_WINDOW_CURSOR_NESW_RESIZE = 10,
+    BIFROST_WINDOW_CURSOR_NWSE_RESIZE = 11,
+    BIFROST_WINDOW_CURSOR_COUNT = 12
+};
 typedef struct bifrost_android_window_text_v2 {
     uint32_t kind;   /* bifrost_android_window_text_kind */
     uint32_t length; /* UTF-8 bytes in utf8, at most BIFROST_WINDOW_TEXT_MAX */
@@ -84,6 +101,10 @@ typedef struct bifrost_android_window_plugin_v2 {
     /* Optional task visibility. 0=success, negative errno=failure. Hiding
      * preserves the window and its surfaces; showing may request focus. */
     int32_t (*set_task_visible)(void *instance, uint32_t visible);
+    /* Optional. The pointer shape over the window's surfaces, a
+     * bifrost_android_window_cursor value (anything else is -EINVAL). The host
+     * sends it only when the shape changes. 0=success, negative errno=failure. */
+    int32_t (*set_cursor)(void *instance, int32_t cursor);
 } bifrost_android_window_plugin_v2;
 /* Smallest valid v2 descriptor: every required callback, no optional ones. */
 #define BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE \
