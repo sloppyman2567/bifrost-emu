@@ -25,7 +25,7 @@ public:
     int host_fd() const override { return fd_; }
     // fcntl F_SETFL updates our cached flags_ — used by the syscall
     // layer to honor O_NONBLOCK on stdio.
-    void set_flags(int new_flags) { flags_ = new_flags; }
+    void set_flags(int new_flags) override { flags_ = new_flags; }
 private:
     int fd_;     // 0, 1, or 2
     int flags_;

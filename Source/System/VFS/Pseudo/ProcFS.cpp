@@ -641,7 +641,7 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
     // garbage (230961:11:19) because it read a non-existent file.
     // Format: "uptime_seconds idle_seconds\n"
     if (path == "/proc/uptime") {
-        return serve_lazy([this]() -> std::string {
+        return serve_lazy([]() -> std::string {
             struct sysinfo si;
             memset(&si, 0, sizeof(si));
             ::sysinfo(&si);
@@ -659,7 +659,7 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
     // toybox `uptime` and `top` read /proc/loadavg for load averages.
     // Format: "1min 5min 15min running/total last_pid\n"
     if (path == "/proc/loadavg") {
-        return serve_lazy([this]() -> std::string {
+        return serve_lazy([]() -> std::string {
             struct sysinfo si;
             memset(&si, 0, sizeof(si));
             ::sysinfo(&si);
