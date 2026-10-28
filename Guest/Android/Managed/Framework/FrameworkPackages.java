@@ -233,6 +233,28 @@ final class FrameworkPackages {
         return pkg.signingInfo == null ? null : pkg.signingInfo.getApkContentsSigners();
     }
 
+    // The manifest's <receiver> intent filters, parsed once per package from its archive (and splits).
+    private Map<ComponentName, List<IntentFilter>> receiverFilters(PackageInfo pkg) throws Exception {
+        Map<ComponentName, List<IntentFilter>> filters = receiverFilters.get(pkg.packageName);
+        if (filters != null) return filters;
+        java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
+        if (!base.isFile()) return java.util.Collections.emptyMap();
+        java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
+                && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
+        filters = FrameworkParseCache.filters(archive, "receivers", () -> {
+            Map<ComponentName, List<IntentFilter>> found = new java.util.HashMap<>();
+            for (Object receiver : (List<?>) invoke(parseArchive(archive), "getReceivers")) {
+                List<IntentFilter> entries = new ArrayList<>();
+                for (Object entry : (List<?>) invoke(receiver, "getIntents"))
+                    entries.add(new IntentFilter((IntentFilter) invoke(entry, "getIntentFilter")));
+                found.put(new ComponentName(pkg.packageName, (String) invoke(receiver, "getName")), entries);
+            }
+            return java.util.Collections.singletonMap("receivers", found);
+        }).get("receivers");
+        receiverFilters.put(pkg.packageName, filters);
+        return filters;
+    }
+
     List<ActivityInfo> receivers(Intent intent, String type, int user) throws Exception {
         if (user != 0) throw new SecurityException("Foreign broadcast user");
         List<ActivityInfo> results = new ArrayList<>();
@@ -245,24 +267,7 @@ final class FrameworkPackages {
                     results.add(copy(info, ActivityInfo.CREATOR));
             return results;
         }
-        Map<ComponentName, List<IntentFilter>> filters = receiverFilters.get(pkg.packageName);
-        if (filters == null) {
-            filters = new java.util.HashMap<>();
-            java.io.File base = new java.io.File(pkg.applicationInfo.sourceDir);
-            java.io.File archive = pkg.applicationInfo.splitSourceDirs != null
-                    && pkg.applicationInfo.splitSourceDirs.length != 0 ? base.getParentFile() : base;
-            filters = FrameworkParseCache.filters(archive, "receivers", () -> {
-                Map<ComponentName, List<IntentFilter>> found = new java.util.HashMap<>();
-                for (Object receiver : (List<?>) invoke(parseArchive(archive), "getReceivers")) {
-                    List<IntentFilter> entries = new ArrayList<>();
-                    for (Object entry : (List<?>) invoke(receiver, "getIntents"))
-                        entries.add(new IntentFilter((IntentFilter) invoke(entry, "getIntentFilter")));
-                    found.put(new ComponentName(pkg.packageName, (String) invoke(receiver, "getName")), entries);
-                }
-                return java.util.Collections.singletonMap("receivers", found);
-            }).get("receivers");
-            receiverFilters.put(pkg.packageName, filters);
-        }
+        Map<ComponentName, List<IntentFilter>> filters = receiverFilters(pkg);
         for (ActivityInfo info : pkg.receivers) {
             ComponentName name = new ComponentName(pkg.packageName, info.name);
             if (!componentMatches(info, 0, user)) continue;
@@ -340,8 +345,12 @@ final class FrameworkPackages {
                     return resolveActivity((Intent) a[0], (String) a[1], ((Number) a[2]).longValue(), (Integer) a[3]);
                 case "queryIntentActivities":
                     return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
-                            .newInstance(queryActivities((Intent) a[0], (String) a[1],
-                                    ((Number) a[2]).longValue(), (Integer) a[3]));
+                            .newInstance(queryActivityComponents((Intent) a[0], (String) a[1],
+                                    ((Number) a[2]).longValue(), (Integer) a[3], false));
+                case "queryIntentReceivers":
+                    return Class.forName("android.content.pm.ParceledListSlice").getConstructor(List.class)
+                            .newInstance(queryActivityComponents((Intent) a[0], (String) a[1],
+                                    ((Number) a[2]).longValue(), (Integer) a[3], true));
                 case "getApplicationEnabledSetting":
                     return applicationEnabledSetting((String) a[0], (Integer) a[1]);
                 // (packageName, includeSplits, optional, required, trustedInstallers, listener, userId)
@@ -918,18 +927,25 @@ final class FrameworkPackages {
         throw new UnsupportedOperationException("package.resolveIntent: ResolverActivity for " + intent);
     }
 
+    private List<android.content.pm.ResolveInfo> queryActivities(Intent original, String type, long flags, int userId)
+            throws Exception {
+        return queryActivityComponents(original, type, flags, userId, false);
+    }
+
     // ComputerEngine.queryIntentActivitiesInternal: an explicit component, or
     // every enabled activity whose filters match (only CATEGORY_DEFAULT
     // filters with MATCH_DEFAULT_ONLY, as ActivityIntentResolver), restricted
-    // to the Intent's package and ordered like queryServices.
-    private List<android.content.pm.ResolveInfo> queryActivities(Intent original, String type, long flags, int userId)
-            throws Exception {
+    // to the Intent's package and ordered like queryServices. `receivers` runs the same query over the
+    // manifest's <receiver> elements for queryIntentReceivers (PackageManager.queryBroadcastReceivers),
+    // modelled on the activity query: same matching, ordering and flags.
+    private List<android.content.pm.ResolveInfo> queryActivityComponents(Intent original, String type, long flags,
+            int userId, boolean receivers) throws Exception {
         Intent intent = original.getComponent() == null && original.getSelector() != null
                 ? original.getSelector() : original;
         List<android.content.pm.ResolveInfo> results = new ArrayList<>();
         if (intent.getComponent() != null) {
             PackageInfo owner = findPackage(intent.getComponent().getPackageName(), flags, userId);
-            ActivityInfo info = owner == null ? null : activityInfo(intent.getComponent(), flags, userId, owner.activities);
+            ActivityInfo info = owner == null ? null : activityInfo(intent.getComponent(), flags, userId, receivers ? owner.receivers : owner.activities);
             if (info != null) {
                 android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
                 result.activityInfo = info;
@@ -948,9 +964,10 @@ final class FrameworkPackages {
         }
         boolean defaultOnly = (flags & PackageManager.MATCH_DEFAULT_ONLY) != 0;
         for (PackageInfo pkg : candidates) {
-            if (pkg.activities == null || findPackage(pkg.packageName, flags, userId) == null) continue;
-            Map<ComponentName, List<IntentFilter>> filters = activityFilters(pkg);
-            for (ActivityInfo info : pkg.activities) {
+            final ActivityInfo[] components = receivers ? pkg.receivers : pkg.activities;
+            if (components == null || findPackage(pkg.packageName, flags, userId) == null) continue;
+            Map<ComponentName, List<IntentFilter>> filters = receivers ? receiverFilters(pkg) : activityFilters(pkg);
+            for (ActivityInfo info : components) {
                 if (!componentMatches(info, flags, userId)) continue;
                 ComponentName component = new ComponentName(pkg.packageName, info.name);
                 android.content.pm.ResolveInfo best = null;
@@ -961,7 +978,7 @@ final class FrameworkPackages {
                             intent.getCategories(), "BifrostPackageResolver");
                     if (match < 0) continue;
                     android.content.pm.ResolveInfo result = new android.content.pm.ResolveInfo();
-                    result.activityInfo = activityInfo(component, flags, userId, pkg.activities);
+                    result.activityInfo = activityInfo(component, flags, userId, components);
                     result.priority = filter.getPriority();
                     result.match = match;
                     result.isDefault = isDefault;

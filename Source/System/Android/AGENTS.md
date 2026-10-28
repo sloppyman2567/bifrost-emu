@@ -149,6 +149,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   never break input delivery. An app's own bitmap cursor is not carried. Keep `FrameworkCursors`, the C enum and
   the SDL mapping together; `MANAGED_CURSORS_OK` (`ManagedServiceBatch`), `make test-android-sdl-backend` and
   `make test-android-window-plugin` cover it.
+- Framework stub gaps: rank the `SERVICE_CALL_UNSUPPORTED <service> <call>` lines (once per process; sessions before
+  2026-10-25 show an `UnsupportedOperationException` instead) across every app's `managed/sessions/*/stdout*.log`
+  and implement the most common small call from its AOSP source, with a check in `ManagedServiceBatch` (both engines).
+  A service declared by a `Contract` enum lists its methods in `methods()`, so grepping for a quoted name misses
+  it. Calls that need a model, not a stub, are `ISurfaceComposer.createConnection` (the SurfaceControl layers) and
+  foreground services; do not answer them with an empty success.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are
   the pixel size of the host display holding it (op 12), never smaller than

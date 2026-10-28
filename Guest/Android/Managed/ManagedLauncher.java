@@ -972,6 +972,7 @@ public final class ManagedLauncher {
                 case "bindServiceInstance": return serviceRuntime.bind(a, true);
                 case "unbindService": return serviceRuntime.unbind(a[0]);
                 case "peekService": return serviceRuntime.peek((Intent) a[0], (String) a[2]);
+                case "getServices": return serviceRuntime.running((Integer) a[0]);  // (maxNum, flags)
                 case "publishService": serviceRuntime.publish((IBinder) a[0], (Intent) a[1], (IBinder) a[2]); return null;
                 case "unbindFinished": serviceRuntime.unbindFinished((IBinder) a[0], (Intent) a[1], (Boolean) a[2]); return null;
                 case "serviceDoneExecuting": serviceRuntime.done((IBinder) a[0], (Integer) a[1], (Intent) a[4]); return null;

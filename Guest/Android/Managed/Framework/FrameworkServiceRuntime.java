@@ -13,6 +13,8 @@ import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
+import android.os.Process;
+import android.os.SystemClock;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -59,6 +61,7 @@ final class FrameworkServiceRuntime {
         final ComponentName name;
         final Map<Intent.FilterComparison, Binding> bindings = new LinkedHashMap<>();
         boolean created, started, stopping;
+        long activeSince, lastActivity;  // SystemClock.elapsedRealtime(): first made active, last started or bound
         int lastStartId;
         String instance;
         FrameworkProcessRuntime.Child child;
@@ -189,6 +192,7 @@ final class FrameworkServiceRuntime {
                 record.token, record.info, compat.getField("DEFAULT_COMPATIBILITY_INFO").get(null),
                 processState);
         record.created = true;
+        record.activeSince = record.lastActivity = SystemClock.elapsedRealtime();
         for (Binding binding : record.bindings.values()) requestBinding(binding, false);
     }
 
@@ -212,6 +216,7 @@ final class FrameworkServiceRuntime {
             throw new UnsupportedOperationException("Foreground-service notification/deadline support is not implemented");
         Record record = record(info);
         record.started = true;
+        record.lastActivity = SystemClock.elapsedRealtime();
         if (++record.lastStartId <= 0) record.lastStartId = 1;
         create(record);
         Class<?> argsType = Class.forName("android.app.ServiceStartArgs");
@@ -320,6 +325,7 @@ final class FrameworkServiceRuntime {
                 if (connection.owner != identity.child) throw new SecurityException("Foreign service connection");
         Connection connection = new Connection(binding, a[4], flags, identity);
         binding.clients.add(connection);
+        record.lastActivity = SystemClock.elapsedRealtime();
         connections.computeIfAbsent(connection.client.asBinder(), unused -> new ArrayList<>()).add(connection);
         if ((flags & Context.BIND_AUTO_CREATE) != 0) create(record);
         if (binding.received) {
@@ -548,6 +554,29 @@ final class FrameworkServiceRuntime {
     synchronized void whenIdle(Runnable callback) {
         idle = callback;
         notifyIdle();
+    }
+
+    // ActivityManager.getRunningServices, which for an app without GET_TASKS reports only the services of
+    // its own uid (ActiveServices.getRunningServiceInfoLocked): every created service of this app, started or
+    // only bound, up to maxNum. A service in a child process carries that process's pid.
+    synchronized List<ActivityManager.RunningServiceInfo> running(int maxNum) {
+        List<ActivityManager.RunningServiceInfo> result = new ArrayList<>();
+        for (Record record : tokens.values()) {
+            if (result.size() >= maxNum) break;
+            if (!record.created || record.stopping || record.info.applicationInfo.uid != application.uid) continue;
+            ActivityManager.RunningServiceInfo info = new ActivityManager.RunningServiceInfo();
+            info.service = record.name;
+            info.uid = record.info.applicationInfo.uid;
+            info.pid = record.child != null ? record.child.pid : Process.myPid();
+            info.process = record.info.processName;
+            info.started = record.started;
+            info.flags = record.started ? ActivityManager.RunningServiceInfo.FLAG_STARTED : 0;
+            for (Binding binding : record.bindings.values()) info.clientCount += binding.clients.size();
+            info.activeSince = record.activeSince;
+            info.lastActivityTime = record.lastActivity;
+            result.add(info);
+        }
+        return result;
     }
 
     private boolean active() {

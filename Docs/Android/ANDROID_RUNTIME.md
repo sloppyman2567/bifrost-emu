@@ -394,6 +394,11 @@ processes, under its own UIDs:
   (`ComputerEngine.queryIntentServicesInternal`: package restriction, priority
   order), as `ActiveServices.retrieveServiceLocked` does. Provider and service
   filters come from one archive parse per package.
+- `queryIntentReceivers` (`PackageManager.queryBroadcastReceivers`) resolves an explicit component, or every
+  enabled `<receiver>` whose filters match, restricted to the Intent's package, with the activity query's
+  matching, `MATCH_DEFAULT_ONLY` and ordering (modelled on it, not read from `ComputerEngine`). Receiver
+  filters share the one parse the broadcast path uses; only the installed package and the packages already
+  loaded as system or peer packages are searched.
 - A child hosting another package receives the session app as a peer
   package (`FrameworkPackages.installPeer`): microG checks its callers by uid,
   name, requested permissions and grants.
@@ -1299,7 +1304,9 @@ server classes, for one app, user 0 and the default device:
 | `account` | Android 15's `AccountManagerService` for one user over a shared JSON store; authenticators are bound and run as the system. See [Google accounts](#google-accounts-and-sign-in-2026-10-20). |
 | `media_session` | No sessions (`FrameworkMediaSessions`): `dispatchMediaKeyEvent` is accepted and reaches nobody, as `MediaSessionService` with no session or receiver; other methods are unsupported. WebView forwards unhandled keys here, and without the service Chromium aborted the process. |
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
-| `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). |
+| `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). `notifyProviderInheritance` (what the framework calls when an app's process starts, as `AppWidgetServiceImpl` in android-15.0.0_r1): a null array or entry ends the call, each package must be the caller's own, and the provider lookup finds none, so nothing is recorded. |
+| `notification` zen mode | `getZenMode` is 0 (Do Not Disturb off, `Settings.Global.ZEN_MODE_OFF`), so `NotificationManager.getCurrentInterruptionFilter` is `INTERRUPTION_FILTER_ALL`; it takes no package and needs no permission. Policy and rule changes stay unsupported. |
+| `activity` running services | `getServices` (`ActivityManager.getRunningServices`) reports the app's own created services, started or only bound, with pid, process, `FLAG_STARTED`, client count and activity times, up to `maxNum`: what an app without `GET_TASKS` sees (`ActiveServices.getRunningServiceInfoLocked`). Foreground state is never reported because foreground services are unsupported. Only the main process is answered; a call from a child process is not routed. |
 | camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |
 | `servicediscovery` | `NsdManager` (`FrameworkNsd`) on a network with no mDNS responder: `connect` returns the connector, `discoverServices`/`stopDiscovery` and `stopResolution` report started/stopped, no service is ever found, and `resolveService`, `registerService` and `unregisterService` fail with `FAILURE_INTERNAL_ERROR`. Uptodown dereferenced the null manager in `onActivityCreated`. Checked in `ManagedServiceBatch` (JIT only); the NSD classes are relocated by mainline, so types come from reflection. |
 | `telephony.registry` | No modem (`getActiveModemCount()` 0): `listenWithEventList` records or removes listeners and never notifies. It keeps TelephonyRegistry's package check, `checkListenerPermission` (location, phone-state, precise, emergency and privileged event sets) and 50-listener limit (`FrameworkTelephony`). |

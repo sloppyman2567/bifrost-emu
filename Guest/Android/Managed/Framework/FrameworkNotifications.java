@@ -41,7 +41,8 @@ final class FrameworkNotifications implements FrameworkServices.Call {
         getAppActiveNotifications,
         enqueueTextToast,
         enqueueToast,
-        cancelToast
+        cancelToast,
+        getZenMode
     }
 
     @Override public String[] methods() {
@@ -234,6 +235,9 @@ final class FrameworkNotifications implements FrameworkServices.Call {
         Contract contract;
         try { contract = Contract.valueOf(method); }
         catch (IllegalArgumentException unknown) { throw new UnsupportedOperationException("notification." + method); }
+        // NotificationManager.getCurrentInterruptionFilter: Do Not Disturb is off, as on a fresh device
+        // (Settings.Global.ZEN_MODE_OFF); it takes no package and needs no permission.
+        if (contract == Contract.getZenMode) return 0;
         // These are app APIs. Administrative ForPackage/listener operations
         // remain unavailable; POST_NOTIFICATIONS never gates channel creation.
         PackageInfo pkg = owner((String) a[0]);

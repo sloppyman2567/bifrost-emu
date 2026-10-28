@@ -210,6 +210,10 @@ isolated replies.
   Since October 25 a call a stand-in does not answer is named once per process
   in the session log (`SERVICE_CALL_UNSUPPORTED <service> <call>`), and eleven
   `IDisplayManager` methods answer as Android 15 does on a one-panel phone.
+  Ranking those lines across 606 recorded sessions (17 apps) found four small gaps, answered on October 28:
+  `queryIntentReceivers`, `getZenMode`, `notifyProviderInheritance` and `getServices`. The largest still
+  unanswered is `ISurfaceComposer.createConnection` (60 sessions, 5 apps), which needs the SurfaceControl layer
+  model; foreground services are the other known gap.
 - Toasts queue, show for 2 s or 3.5 s and cancel (Azur Lane's sign-in failure
   no longer exits). Still open: background-toast policy and toast animations.
 - `NsdManager` constructs and discovery runs but finds nothing: the host has

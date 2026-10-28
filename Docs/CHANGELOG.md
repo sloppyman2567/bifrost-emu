@@ -10,6 +10,24 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Four more framework calls apps make are answered (2026-10-28)
+
+- Found by ranking `SERVICE_CALL_UNSUPPORTED` lines across all 606 recorded sessions of 17 apps (the report exists
+  since 2026-10-25, so the list is short): `queryIntentReceivers` (Magic Tiles, Umamusume; 29 sessions),
+  `notification.getZenMode` (Geometry Jump Lite), `appwidget.notifyProviderInheritance` (Roblox) and
+  `activity.getServices` (Magic Tiles). `PackageManager.queryBroadcastReceivers` resolves manifest receivers like
+  the activity query (one query, now shared); `getZenMode` reports Do Not Disturb off; `notifyProviderInheritance`
+  validates its packages as `AppWidgetServiceImpl` does and records nothing; `getRunningServices` reports the
+  app's own created services from the service runtime, with pid, process, started flag, client count and
+  times, instead of throwing, so the common "is my service running?" scan gets a true answer.
+- Checked in `ManagedServiceBatch` through the real managers (629 checks, JIT): an explicit and a non-matching
+  receiver query, the interruption filter, the inheritance cases (null, own package, foreign package), and the
+  batch's own started `ProbeService` appearing with its uid, pid, process and flags. Not checked: an app that
+  uses them, a receiver query that matches a manifest filter (the batch package has no `<receiver>` filters),
+  `getRunningServices` from a child process (not routed), and a foreground service (still unsupported).
+- Not added, and why: `ISurfaceComposer` transaction 3, `createConnection()` (5 apps, 60 sessions), hands libgui an
+  `ISurfaceComposerClient`; answering it means the SurfaceControl layer model, not a stub.
+
 ### Android windows follow an app's pointer icon (2026-10-28)
 
 - An Android app's `PointerIcon` (hand over a link, text beam over an editor, resize arrows, a hidden pointer) now

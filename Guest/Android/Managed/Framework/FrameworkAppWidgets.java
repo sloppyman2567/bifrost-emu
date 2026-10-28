@@ -10,7 +10,7 @@ import android.os.Process;
 import java.util.Objects;
 
 final class FrameworkAppWidgets implements FrameworkServices.Call {
-    private enum Contract { getAppWidgetIds, getInstalledProvidersForProfile }
+    private enum Contract { getAppWidgetIds, getInstalledProvidersForProfile, notifyProviderInheritance }
 
     @Override public String[] methods() {
         Contract[] values = Contract.values();
@@ -51,6 +51,18 @@ final class FrameworkAppWidgets implements FrameworkServices.Call {
                 enforceCallFromPackage((String) a[2]);
                 return Class.forName("android.content.pm.ParceledListSlice")
                         .getConstructor(java.util.List.class).newInstance(new java.util.ArrayList<Object>());
+            }
+            // AppWidgetServiceImpl.notifyProviderInheritance (android-15.0.0_r1): a null array or null
+            // entry ends the call, each package must be the caller's own, then the provider lookup finds
+            // none here (no provider is modelled), which ends the walk. Nothing is recorded.
+            case notifyProviderInheritance: {
+                ComponentName[] components = (ComponentName[]) a[0];
+                if (components == null) return null;
+                for (ComponentName component : components) {
+                    if (component == null) return null;
+                    enforceCallFromPackage(component.getPackageName());
+                }
+                return null;
             }
             default: throw new UnsupportedOperationException("appwidget." + method);
         }

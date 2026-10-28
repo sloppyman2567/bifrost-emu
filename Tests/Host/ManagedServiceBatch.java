@@ -288,6 +288,7 @@ public final class ManagedServiceBatch {
         Intent service = new Intent().setComponent(new ComponentName(NAME, ProbeService.class.getName())).putExtra("service", 11);
         PendingIntent.getService(context, 6, service, immutable).send();
         check(serviceDelivery.await(5, TimeUnit.SECONDS) && serviceIntent.getIntExtra("service", 0) == 11, "service sender delivery failed");
+        runningServices(context);
         try { PendingIntent.getForegroundService(context, 7, service, immutable).send(); throw new AssertionError("Foreground service silently accepted"); }
         catch (UnsupportedOperationException expected) { checks++; }
         resultDelivery = new CountDownLatch(1);
@@ -362,6 +363,35 @@ public final class ManagedServiceBatch {
         hover.recycle();
         System.out.println("MANAGED_CURSORS_OK");
     }
+    // PackageManager.queryBroadcastReceivers (IPackageManager.queryIntentReceivers): an explicit component of
+    // the batch package, an implicit intent no manifest filter matches, and components that do not exist.
+    private static void receivers(Context context) {
+        android.content.pm.PackageManager pm = context.getPackageManager();
+        ComponentName probe = new ComponentName(NAME, ProbeReceiver.class.getName());
+        List<android.content.pm.ResolveInfo> found = pm.queryBroadcastReceivers(new Intent(NAME + ".MANIFEST").setComponent(probe), 0);
+        check(found.size() == 1 && found.get(0).activityInfo != null
+                && found.get(0).activityInfo.name.equals(ProbeReceiver.class.getName())
+                && found.get(0).activityInfo.packageName.equals(NAME), "explicit receiver query: " + found);
+        check(pm.queryBroadcastReceivers(new Intent("org.bifrost.none"), 0).isEmpty(), "implicit receiver query matched");
+        check(pm.queryBroadcastReceivers(new Intent("org.bifrost.none").setPackage(NAME), 0).isEmpty(),
+                "package-restricted receiver query matched");
+        check(pm.queryBroadcastReceivers(new Intent("org.bifrost.none").setPackage("org.bifrost.absent"), 0).isEmpty(),
+                "receiver query in an absent package matched");
+        check(pm.queryBroadcastReceivers(new Intent().setComponent(new ComponentName(NAME, "Missing")), 0).isEmpty(),
+                "a missing receiver component was found");
+    }
+    // ActivityManager.getRunningServices for a plain app: the app's own created services, up to maxNum.
+    private static void runningServices(Context context) {
+        android.app.ActivityManager manager = context.getSystemService(android.app.ActivityManager.class);
+        ComponentName probe = new ComponentName(NAME, ProbeService.class.getName());
+        android.app.ActivityManager.RunningServiceInfo found = null;
+        for (android.app.ActivityManager.RunningServiceInfo info : manager.getRunningServices(20))
+            if (info.service.equals(probe)) found = info;
+        check(found != null && found.started && found.uid == Process.myUid() && found.pid == Process.myPid()
+                && found.process.equals(NAME) && (found.flags & android.app.ActivityManager.RunningServiceInfo.FLAG_STARTED) != 0
+                && found.activeSince > 0 && found.lastActivityTime >= found.activeSince, "running service not reported");
+        check(manager.getRunningServices(0).isEmpty(), "maxNum 0 returned services");
+    }
     private static void check(boolean value, String message) {
         if (!value) throw new AssertionError(message);
         checks++;
@@ -409,6 +439,8 @@ public final class ManagedServiceBatch {
 
     private static void notifications(Context context, FrameworkPackages packages) throws Exception {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
+        check(manager.getCurrentInterruptionFilter() == NotificationManager.INTERRUPTION_FILTER_ALL,
+                "Do Not Disturb is not off (getZenMode)");
         NotificationChannelGroup group = new NotificationChannelGroup("games", "Games");
         manager.createNotificationChannelGroup(group);
         NotificationChannel channel = new NotificationChannel("rewards", "Rewards", NotificationManager.IMPORTANCE_HIGH);
@@ -1048,6 +1080,14 @@ public final class ManagedServiceBatch {
         check(slice != null && ((java.util.List<?>) slice.getClass().getMethod("getList").invoke(slice)).isEmpty(), "provider list for the own profile");
         check(invoke(widgets, "getInstalledProvidersForProfile", 1, 10, NAME) == null, "provider list for a disabled profile");
         denied(() -> invoke(widgets, "getInstalledProvidersForProfile", 1, 0, "org.bifrost.absent"));
+        // notifyProviderInheritance: a null array or entry ends the call, the own package has no provider to
+        // mark, and a foreign package is refused before any lookup.
+        invoke(widgets, "notifyProviderInheritance", (Object) null);
+        invoke(widgets, "notifyProviderInheritance", (Object) new ComponentName[] {new ComponentName(NAME, "Provider")});
+        invoke(widgets, "notifyProviderInheritance", (Object) new ComponentName[] {null, new ComponentName("org.bifrost.absent", "P")});
+        denied(() -> invoke(widgets, "notifyProviderInheritance",
+                (Object) new ComponentName[] {new ComponentName("org.bifrost.absent", "P")}));
+        checks++;
     }
 
     private static void battery(Context context) throws Exception {
@@ -1327,6 +1367,7 @@ public final class ManagedServiceBatch {
         try {
         usersAndIdle(context);
         cursors(context);
+        receivers(context);
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
