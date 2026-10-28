@@ -10,6 +10,18 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Foreground services and notification posting (2026-10-28)
+
+- YouTube played a video and a tap on pause ended the session: the playback service calls `Service.stopForeground`,
+  `activity.setServiceForeground` was unsupported and nothing caught the exception (exit 1). Foreground services are now
+  modelled on `ActiveServices.setServiceForegroundInnerLocked` (android-15.0.0_r1): `startForegroundService`,
+  `startForeground` with the manifest-type and permission checks of the framework's own type policy, `stopForeground`
+  (a no-op on a service that is not foreground), `getForegroundServiceType`, `FLAG_FOREGROUND` in
+  `getRunningServices`, for services in the app and in child processes. Their notification, and an app's own, go to an
+  in-memory store (`enqueueNotificationWithTag`, `cancelNotificationWithTag`, `getAppActiveNotifications`) that drops posts
+  as `NotificationManagerService` does. Nothing is shown on the host yet. See
+  [Foreground services](Android/ANDROID_RUNTIME.md).
+
 ### MediaSession: an app can create and publish its own sessions (2026-10-28)
 
 - YouTube's home screen drew, and a tap then ended the session: the app creates an `android.media.session.MediaSession`

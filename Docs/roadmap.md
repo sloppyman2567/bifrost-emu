@@ -216,7 +216,7 @@ isolated replies.
   Ranking those lines across 606 recorded sessions (17 apps) found four small gaps, answered on October 28:
   `queryIntentReceivers`, `getZenMode`, `notifyProviderInheritance` and `getServices`. The largest still
   unanswered is `ISurfaceComposer.createConnection` (60 sessions, 5 apps), which needs the SurfaceControl layer
-  model; foreground services are the other known gap.
+  model.
 - Toasts queue, show for 2 s or 3.5 s and cancel (Azur Lane's sign-in failure
   no longer exits). Still open: background-toast policy and toast animations.
 - `NsdManager` constructs and discovery runs but finds nothing: the host has
@@ -224,8 +224,8 @@ isolated replies.
   host backend.
 - Settings screens do not exist: `android.settings.*` intents are declined, so
   an app's all-files-access request cannot be granted from its dialog.
-- Connect notification posting, interaction and PendingIntent delivery, then
-  foreground-service notification/deadline behavior and lifecycle policy.
+- Show posted notifications on the host and deliver their taps, then the
+  foreground-service start deadline, background-start restrictions and time limits.
 - Extend current PendingIntent/receiver/alarm/job behavior toward scoped
   process-restart and cross-app delivery. Current sender records and alarms
   do not survive process exit or restart stopped applications.

@@ -1,6 +1,8 @@
 // Session counterpart of ActiveServices. ActivityThread owns all Service
 // instances and lifecycle callbacks; this class owns tokens, starts and bindings.
 import android.app.ActivityManager;
+import android.app.Notification;
+import android.app.Service;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -8,6 +10,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Binder;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.IInterface;
@@ -38,6 +41,8 @@ final class FrameworkServiceRuntime {
     private Object applicationThread;
     private ApplicationInfo application;
     private Handler main;
+    private Object systemContext;
+    private FrameworkNotifications notifications;
     private Runnable idle;
     private boolean shuttingDown;
     private long bindSequence;
@@ -61,6 +66,9 @@ final class FrameworkServiceRuntime {
         final ComponentName name;
         final Map<Intent.FilterComparison, Binding> bindings = new LinkedHashMap<>();
         boolean created, started, stopping;
+        // startForegroundService() awaits startForeground(); foreground state per ServiceRecord.isForeground
+        boolean fgRequired, foreground;
+        int foregroundId, foregroundType;
         long activeSince, lastActivity;  // SystemClock.elapsedRealtime(): first made active, last started or bound
         int lastStartId;
         String instance;
@@ -94,6 +102,7 @@ final class FrameworkServiceRuntime {
     }
 
     void remote(FrameworkProcessRuntime.Remote remote) { this.remote = remote; }
+    void notifications(FrameworkNotifications notifications) { this.notifications = notifications; }
     FrameworkProcessRuntime processes() { return processes; }
 
     synchronized void attach(Object thread, ApplicationInfo application) throws Exception {
@@ -101,6 +110,7 @@ final class FrameworkServiceRuntime {
         java.lang.reflect.Method method = thread.getClass().getDeclaredMethod("getApplicationThread");
         method.setAccessible(true);
         applicationThread = method.invoke(thread);
+        systemContext = thread.getClass().getMethod("getSystemContext").invoke(thread);
         caller = new Caller(applicationThread, application.uid, application.packageName, null);
         main = new Handler(Looper.getMainLooper());
         processState = ActivityManager.class.getField("PROCESS_STATE_IMPORTANT_FOREGROUND").getInt(null);
@@ -212,9 +222,10 @@ final class FrameworkServiceRuntime {
         Intent intent = copy((Intent) a[1]);
         ServiceInfo info = resolve(identity, a[0], intent, (String) a[2], (String) a[4], (Integer) a[6]);
         if (info == null) return null;
-        if ((Boolean) a[3])
-            throw new UnsupportedOperationException("Foreground-service notification/deadline support is not implemented");
         Record record = record(info);
+        // ActiveServices.startServiceLocked: the service owes a startForeground() (the 10 s deadline that crashes
+        // the app when it does not is not modelled).
+        if ((Boolean) a[3]) record.fgRequired = true;
         record.started = true;
         record.lastActivity = SystemClock.elapsedRealtime();
         if (++record.lastStartId <= 0) record.lastStartId = 1;
@@ -244,6 +255,121 @@ final class FrameworkServiceRuntime {
         record.started = false;
         stopIfUnused(record);
         return 1;
+    }
+
+    // ActiveServices.setServiceForegroundLocked: id != 0 is startForeground, id 0 is stopForeground(flags). A call
+    // for a service that is gone, or foreign to the caller's process, does nothing or is refused as stopSelf is.
+    synchronized void setForeground(ComponentName name, IBinder token, int id, Notification notification, int flags,
+            int type) throws Exception {
+        if (remote != null) { remote.setForeground(name, token, id, notification, flags, type); return; }
+        setForeground(name, token, id, notification, flags, type, null);
+    }
+
+    synchronized int foregroundType(ComponentName name, IBinder token) throws Exception {
+        if (remote != null) return remote.foregroundType(name, token);
+        return foregroundType(name, token, null);
+    }
+
+    private int foregroundType(ComponentName name, IBinder token, FrameworkProcessRuntime.Child owner) {
+        Record record = tokens.get(token);
+        if (record != null && record.child != owner) throw new SecurityException("Foreign service token");
+        return record == null || !record.name.equals(name) ? ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE : record.foregroundType;
+    }
+
+    private void setForeground(ComponentName name, IBinder token, int id, Notification notification, int flags, int type,
+            FrameworkProcessRuntime.Child owner) throws Exception {
+        Record record = tokens.get(token);
+        if (record != null && record.child != owner) throw new SecurityException("Foreign service token");
+        if (record == null || record.stopping || !record.name.equals(name)) return;
+        ServiceInfo info = record.info;
+        if (id != 0) {
+            if (notification == null) throw new IllegalArgumentException("null notification");
+            if (info.applicationInfo.targetSdkVersion >= Build.VERSION_CODES.P && packages.checkPermission(
+                    "android.permission.FOREGROUND_SERVICE", info.applicationInfo.uid, Context.DEVICE_ID_DEFAULT)
+                    != PackageManager.PERMISSION_GRANTED)
+                throw new SecurityException("Permission Denial: startForeground from uid=" + info.applicationInfo.uid
+                        + " requires android.permission.FOREGROUND_SERVICE");
+            int manifestType = info.getForegroundServiceType();
+            if (type == ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST) type = manifestType;
+            if ((type & manifestType) != type)
+                throw new IllegalArgumentException("foregroundServiceType " + String.format("0x%08X", type)
+                        + " is not a subset of foregroundServiceType attribute " + String.format("0x%08X", manifestType)
+                        + " in service element of manifest file");
+            // A short service combined with other types is a regular foreground service.
+            if ((type & ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE) != 0
+                    && type != ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
+                type &= ~ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE;
+            // The short service's 3 minute timeout and onTimeout callback are not modelled.
+            if (type == ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE && !record.started)
+                throw new android.app.StartForegroundCalledOnStoppedServiceException(
+                        "startForeground(SHORT_SERVICE) called on a service that's not started.");
+            validateType(record, type);
+            record.fgRequired = false;
+            if (record.foregroundId != 0 && record.foregroundId != id) releaseNotification(record);
+            record.foregroundId = id;
+            record.foregroundType = type;
+            record.foreground = true;
+            notifications.postForeground(info.packageName, id, notification);
+        } else if (record.foreground) {
+            if ((flags & Service.STOP_FOREGROUND_REMOVE) != 0) releaseNotification(record);
+            else if (info.applicationInfo.targetSdkVersion >= Build.VERSION_CODES.LOLLIPOP && record.foregroundId != 0) {
+                // The notification stays (until the service stops) but is no longer a foreground service's.
+                notifications.detachForeground(info.packageName, record.foregroundId);
+                if ((flags & Service.STOP_FOREGROUND_DETACH) != 0) record.foregroundId = 0;
+            }
+            record.foreground = false;
+            record.foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE;
+        }
+    }
+
+    // ActiveServices.cancelForegroundNotificationLocked: another foreground service of the app with the same id
+    // still owns the notification.
+    private void releaseNotification(Record record) {
+        int id = record.foregroundId;
+        if (id == 0) return;
+        record.foregroundId = 0;
+        for (Record other : tokens.values())
+            if (other != record && other.foreground && other.foregroundId == id
+                    && other.info.packageName.equals(record.info.packageName)) return;
+        notifications.cancelForeground(record.info.packageName, id);
+    }
+
+    // ActiveServices.validateForegroundServiceType with the framework's own default policy: each type needs its
+    // permissions (FOREGROUND_SERVICE_MEDIA_PLAYBACK, ...), and a service targeting Android 14 needs a type. The
+    // app is always the foreground one, so while-in-use permissions are allowed.
+    private void validateType(Record record, int type) throws Exception {
+        Class<?> policyClass = Class.forName("android.app.ForegroundServiceTypePolicy");
+        Object policy = policyClass.getMethod("getDefaultPolicy").invoke(null);
+        int none = ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE, special = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
+        if (type == none) { validateType(record, policy, none, none); return; }
+        // Types of a later release come with specialUse, or are invalid.
+        int fallback = (type & special) != 0 ? special : none;
+        for (int rest = type, one = Integer.highestOneBit(rest); one != 0; rest &= ~one, one = Integer.highestOneBit(rest))
+            validateType(record, policy, one, fallback);
+    }
+
+    private void validateType(Record record, Object policy, int type, int fallback) throws Exception {
+        Class<?> policyClass = Class.forName("android.app.ForegroundServiceTypePolicy");
+        Class<?> infoClass = Class.forName("android.app.ForegroundServiceTypePolicy$ForegroundServiceTypePolicyInfo");
+        Object info = policyClass.getMethod("getForegroundServiceTypePolicyInfo", int.class, int.class)
+                .invoke(policy, type, fallback);
+        ServiceInfo service = record.info;
+        int pid = record.child != null ? record.child.pid : Process.myPid();
+        int code = (Integer) policyClass.getMethod("checkForegroundServiceTypePolicy", Context.class, String.class,
+                int.class, int.class, boolean.class, infoClass).invoke(policy, systemContext, service.packageName,
+                service.applicationInfo.uid, pid, true, info);
+        Class<?> base = policyClass;
+        String label = (String) ServiceInfo.class.getMethod("foregroundServiceTypeToLabel", int.class).invoke(null, type);
+        String where = " callerApp=" + record.name.flattenToShortString() + " targetSDK=" + service.applicationInfo.targetSdkVersion;
+        if (code == base.getField("FGS_TYPE_POLICY_CHECK_DISABLED").getInt(null)) {
+            if (type == ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE)
+                throw new android.app.MissingForegroundServiceTypeException("Starting FGS without a type " + where);
+            throw new android.app.InvalidForegroundServiceTypeException("Starting FGS with type " + label + where
+                    + " has been prohibited");
+        }
+        if (code == base.getField("FGS_TYPE_POLICY_CHECK_PERMISSION_DENIED_ENFORCED").getInt(null))
+            throw new SecurityException("Starting FGS with type " + label + where + " requires permissions: "
+                    + infoClass.getMethod("toPermissionString").invoke(info));
     }
 
     synchronized boolean stopSelf(ComponentName name, IBinder token, int startId) throws Exception {
@@ -471,6 +597,9 @@ final class FrameworkServiceRuntime {
     private void destroy(Record record) throws Exception {
         if (record.stopping) return;
         record.stopping = true;
+        record.fgRequired = record.foreground = false;
+        record.foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE;
+        releaseNotification(record);
         if (record.instance == null) names.remove(record.name);
         else instances.values().remove(record);
         for (Binding binding : record.bindings.values()) {
@@ -493,6 +622,9 @@ final class FrameworkServiceRuntime {
         for (Record record : new ArrayList<>(tokens.values())) {
             if (record.child != child) continue;
             record.created = false; record.child = null;
+            record.fgRequired = record.foreground = false;
+            record.foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE;
+            releaseNotification(record);
             for (Binding binding : record.bindings.values()) {
                 binding.requested = binding.received = binding.hasBound = false;
                 binding.binder = null;
@@ -547,6 +679,18 @@ final class FrameworkServiceRuntime {
                 boolean result = stopSelf(name, token, data.readInt(), child);
                 reply.writeNoException(); reply.writeBoolean(result); return;
             }
+            case FrameworkProcessRuntime.SERVICE_FOREGROUND: {
+                ComponentName name = data.readTypedObject(ComponentName.CREATOR); IBinder token = data.readStrongBinder();
+                int id = data.readInt(); Notification notification = data.readTypedObject(Notification.CREATOR);
+                int flags = data.readInt(), type = data.readInt();
+                setForeground(name, token, id, notification, flags, type, child);
+                reply.writeNoException(); return;
+            }
+            case FrameworkProcessRuntime.SERVICE_FOREGROUND_TYPE: {
+                ComponentName name = data.readTypedObject(ComponentName.CREATOR); IBinder token = data.readStrongBinder();
+                int result = foregroundType(name, token, child);
+                reply.writeNoException(); reply.writeInt(result); return;
+            }
             default: throw new IllegalArgumentException("Unknown service operation");
         }
     }
@@ -570,7 +714,9 @@ final class FrameworkServiceRuntime {
             info.pid = record.child != null ? record.child.pid : Process.myPid();
             info.process = record.info.processName;
             info.started = record.started;
-            info.flags = record.started ? ActivityManager.RunningServiceInfo.FLAG_STARTED : 0;
+            info.foreground = record.foreground;
+            info.flags = (record.started ? ActivityManager.RunningServiceInfo.FLAG_STARTED : 0)
+                    | (record.foreground ? ActivityManager.RunningServiceInfo.FLAG_FOREGROUND : 0);
             for (Binding binding : record.bindings.values()) info.clientCount += binding.clients.size();
             info.activeSince = record.activeSince;
             info.lastActivityTime = record.lastActivity;

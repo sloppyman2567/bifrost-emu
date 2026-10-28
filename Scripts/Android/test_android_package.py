@@ -2169,6 +2169,9 @@ class PackageTests(unittest.TestCase):
                 component += f'<service android:name="{activity}${service}" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleDisabled" android:enabled="false" android:exported="false"/>'
             component += f'<service android:name="{activity}$LifecycleRemote" android:process=":remote" android:exported="false"/>'
+            component += (f'<service android:name="{activity}$Foreground" android:foregroundServiceType="mediaPlayback" android:exported="false"/>'
+                          f'<service android:name="{activity}$ForegroundRemote" android:process=":remote" '
+                          'android:foregroundServiceType="mediaPlayback" android:exported="false"/>')
             component += (f'<receiver android:name="{activity}$RemoteReceiver" android:process=":remote" android:exported="false">'
                           '<intent-filter><action android:name="org.bifrost.fixture.REMOTE_RECEIVER"/></intent-filter></receiver>')
             component += f'<service android:name="{activity}$Jobs" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false"/>'
@@ -2227,7 +2230,10 @@ class PackageTests(unittest.TestCase):
                           '<action android:name="org.bifrost.fixture.FILES"/></intent-filter></provider>')
         required = ' android:isSplitRequired="true"' if not split else ""
         application_class = f' android:name="{activity}$App"' if managed is True and not split else ""
-        job_permission = '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>' if managed == "ManagedServices" else ""
+        job_permission = ('<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>'
+                          '<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>'
+                          '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>'
+                          if managed == "ManagedServices" else "")
         if managed == "ManagedPlayServices":
             # microG's GServicesProvider checks that its caller requests this.
             job_permission = '<uses-permission android:name="com.google.android.providers.gsf.permission.READ_GSERVICES"/>'
@@ -2611,6 +2617,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn("SERVICE_EXECUTION_OK", text)
         self.assertIn("JOB_SCHEDULER_OK", text)
         self.assertIn("SERVICE_PROCESS_OK", text)
+        self.assertIn("FOREGROUND_SERVICE_OK Foreground", text)
+        self.assertIn("FOREGROUND_SERVICE_OK ForegroundRemote", text)
         self.assertIn("REMOTE_RECEIVER_OK", text)
         self.assertNotRegex(text, r"thread \d+: exception:|FATAL EXCEPTION|AssertionError")
         markers = ("SERVICE_EXECUTION_OK", "SERVICE_FIXTURE Activity destroyed",

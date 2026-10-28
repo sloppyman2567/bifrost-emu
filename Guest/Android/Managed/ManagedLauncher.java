@@ -780,6 +780,7 @@ public final class ManagedLauncher {
         });
         power.install(services);
         notifications.install(services);
+        serviceRuntime.notifications(notifications);
         permissions.install(services);
         uiMode.install(services);
         battery.install(services);
@@ -969,6 +970,12 @@ public final class ManagedLauncher {
                 case "stopService": return serviceRuntime.stop(a);
                 case "stopServiceToken": return serviceRuntime.stopSelf(
                         (android.content.ComponentName) a[0], (IBinder) a[1], (Integer) a[2]);
+                case "setServiceForeground":
+                    serviceRuntime.setForeground((android.content.ComponentName) a[0], (IBinder) a[1], (Integer) a[2],
+                            (android.app.Notification) a[3], (Integer) a[4], (Integer) a[5]);
+                    return null;
+                case "getForegroundServiceType":
+                    return serviceRuntime.foregroundType((android.content.ComponentName) a[0], (IBinder) a[1]);
                 case "bindService": return serviceRuntime.bind(a, false);
                 case "bindServiceInstance": return serviceRuntime.bind(a, true);
                 case "unbindService": return serviceRuntime.unbind(a[0]);

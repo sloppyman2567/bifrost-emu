@@ -28,7 +28,8 @@ final class FrameworkProcessRuntime {
     private static final int BOOTSTRAP = 1, READY = 2, PUBLISH = 3, DONE = 4, UNBIND = 5, PROVIDERS = 6,
             ACQUIRE = 7, REF = 8, PROVIDER_DIED = 9;
     static final int SERVICE_START = 10, SERVICE_STOP = 11, SERVICE_BIND = 12,
-            SERVICE_UNBIND = 13, SERVICE_PEEK = 14, SERVICE_STOP_SELF = 15;
+            SERVICE_UNBIND = 13, SERVICE_PEEK = 14, SERVICE_STOP_SELF = 15, SERVICE_FOREGROUND = 16,
+            SERVICE_FOREGROUND_TYPE = 17;
     // Provisioned system packages a child receives as parsed snapshots when
     // the parent has already parsed them (ManagedLauncher.installMicroG).
     static final String[] SHARED_SYSTEM_PACKAGES = {"com.google.android.gms", "com.android.vending"};
@@ -199,7 +200,8 @@ final class FrameworkProcessRuntime {
                         }
                         case PROVIDER_DIED: content.unstableProviderDied(data.readStrongBinder()); break;
                         case SERVICE_START: case SERVICE_STOP: case SERVICE_BIND:
-                        case SERVICE_UNBIND: case SERVICE_PEEK: case SERVICE_STOP_SELF:
+                        case SERVICE_UNBIND: case SERVICE_PEEK: case SERVICE_STOP_SELF: case SERVICE_FOREGROUND:
+                        case SERVICE_FOREGROUND_TYPE:
                             services.fromChild(child, code, data, reply); return true;
                         default: return false;
                     }
@@ -404,6 +406,17 @@ final class FrameworkProcessRuntime {
             Parcel data = request(); data.writeTypedObject(name, 0); data.writeStrongBinder(token); data.writeInt(startId);
             Parcel reply = call(SERVICE_STOP_SELF, data);
             try { return reply.readBoolean(); } finally { reply.recycle(); }
+        }
+        void setForeground(android.content.ComponentName name, IBinder token, int id, android.app.Notification notification,
+                int flags, int type) throws Exception {
+            Parcel data = request(); data.writeTypedObject(name, 0); data.writeStrongBinder(token); data.writeInt(id);
+            data.writeTypedObject(notification, 0); data.writeInt(flags); data.writeInt(type);
+            call(SERVICE_FOREGROUND, data).recycle();
+        }
+        int foregroundType(android.content.ComponentName name, IBinder token) throws Exception {
+            Parcel data = request(); data.writeTypedObject(name, 0); data.writeStrongBinder(token);
+            Parcel reply = call(SERVICE_FOREGROUND_TYPE, data);
+            try { return reply.readInt(); } finally { reply.recycle(); }
         }
         void done(IBinder token, int type, Intent intent) throws Exception {
             Parcel data = request(); data.writeStrongBinder(token); data.writeInt(type);

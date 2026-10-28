@@ -138,6 +138,45 @@ public final class ManagedServices extends Activity {
             } catch (java.io.IOException error) { throw new IllegalStateException(error); }
         }
     }
+    /** startForeground/stopForeground, driven by the "op" extra; results go to a file a child process can share. */
+    public static class Foreground extends Service {
+        private void report(String line) {
+            try (java.io.FileWriter out = new java.io.FileWriter(new java.io.File(getFilesDir(), "fgs-result"), true)) {
+                out.write(line + "\n");
+            } catch (java.io.IOException error) { throw new AssertionError(error); }
+        }
+        private android.app.Notification notification() {
+            return new android.app.Notification.Builder(this, "fgs").setSmallIcon(android.R.drawable.ic_media_play)
+                    .setContentTitle("fgs").build();
+        }
+        @Override public int onStartCommand(Intent intent, int flags, int id) {
+            String op = intent.getStringExtra("op");
+            try {
+                switch (op) {
+                    // A service that never became foreground: AOSP ignores it (YouTube does this on pause).
+                    case "stray": stopForeground(Service.STOP_FOREGROUND_REMOVE); report("stray ok"); break;
+                    case "start":
+                        startForeground(7, notification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                        report("start type=" + getForegroundServiceType()); break;
+                    case "badtype":
+                        try {
+                            startForeground(8, notification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
+                            report("badtype accepted");
+                        } catch (IllegalArgumentException expected) { report("badtype iae"); }
+                        break;
+                    case "detach":
+                        stopForeground(Service.STOP_FOREGROUND_DETACH); report("detach type=" + getForegroundServiceType()); break;
+                    case "remove":
+                        startForeground(7, notification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                        stopForeground(Service.STOP_FOREGROUND_REMOVE); report("remove type=" + getForegroundServiceType()); break;
+                    default: report("unknown op " + op);
+                }
+            } catch (RuntimeException error) { report(op + " " + error); }
+            return START_NOT_STICKY;
+        }
+        @Override public IBinder onBind(Intent intent) { return null; }
+    }
+    public static final class ForegroundRemote extends Foreground {}
     public static final class LifecycleRemote extends Service {
         @Override public IBinder onBind(Intent intent) {
             return new Binder() {
@@ -243,11 +282,81 @@ public final class ManagedServices extends Activity {
                     getContentResolver().notifyChange(android.net.Uri.withAppendedPath(uri, "1"), null, 0);
                     await(() -> Jobs.triggers == 1 && scheduler.getPendingJob(14) == null, () -> {
                         System.out.println("JOB_SCHEDULER_OK restart=" + second + " checks=" + checks);
-                        remoteCheck();
+                        foreground(Foreground.class, () -> foreground(ForegroundRemote.class, this::remoteCheck));
                     });
                 }, 1100);
             });
         });
+    }
+    private static String foregroundResult(java.io.File file) {
+        try { return file.isFile() ? new String(java.nio.file.Files.readAllBytes(file.toPath())) : ""; }
+        catch (java.io.IOException error) { throw new AssertionError(error); }
+    }
+    private static android.service.notification.StatusBarNotification posted(android.app.NotificationManager manager, int id) {
+        for (android.service.notification.StatusBarNotification value : manager.getActiveNotifications())
+            if (value.getId() == id) return value;
+        return null;
+    }
+    // Foreground services (ActiveServices.setServiceForegroundLocked) and the notification they post, for a service in
+    // this process and for one in a child process (:remote), which reaches the session over the service socket.
+    private void foreground(Class<? extends Service> cls, Runnable next) {
+        android.app.NotificationManager manager = getSystemService(android.app.NotificationManager.class);
+        manager.createNotificationChannel(new android.app.NotificationChannel("fgs", "Foreground",
+                android.app.NotificationManager.IMPORTANCE_LOW));
+        if (cls == Foreground.class) {
+            // Android 13+: an app without POST_NOTIFICATIONS (a runtime permission, denied here) has its own posts
+            // blocked, without an error. Only a foreground service's notification is exempt.
+            check(!manager.areNotificationsEnabled(), "notifications enabled without POST_NOTIFICATIONS");
+            manager.notify(9, new android.app.Notification.Builder(this, "fgs")
+                    .setSmallIcon(android.R.drawable.ic_media_play).build());
+            check(posted(manager, 9) == null, "a blocked app's notification was posted");
+        }
+        java.io.File result = new java.io.File(getFilesDir(), "fgs-result");
+        result.delete();
+        startService(intent(cls).putExtra("op", "stray"));
+        await(() -> foregroundResult(result).contains("stray ok"), () -> {
+            check(startForegroundService(intent(cls).putExtra("op", "start")) != null, "startForegroundService failed");
+            await(() -> foregroundResult(result).contains("start type="), () -> {
+                check(foregroundResult(result).contains("start type="
+                        + android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK),
+                        "getForegroundServiceType after startForeground: " + foregroundResult(result));
+                android.service.notification.StatusBarNotification shown = posted(manager, 7);
+                check(shown != null && (shown.getNotification().flags & android.app.Notification.FLAG_FOREGROUND_SERVICE) != 0,
+                        "foreground service notification not posted");
+                boolean listed = false;
+                for (android.app.ActivityManager.RunningServiceInfo info
+                        : ((android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE)).getRunningServices(100))
+                    if (info.service.getClassName().equals(cls.getName()))
+                        listed = info.foreground && (info.flags & android.app.ActivityManager.RunningServiceInfo.FLAG_FOREGROUND) != 0;
+                check(listed, "running service is not reported foreground");
+                manager.cancel(7);
+                check(posted(manager, 7) != null, "an app cancelled a foreground service's notification");
+                startService(intent(cls).putExtra("op", "badtype"));
+                await(() -> foregroundResult(result).contains("badtype "), () -> {
+                    check(foregroundResult(result).contains("badtype iae"), "a type missing from the manifest was accepted: "
+                            + foregroundResult(result));
+                    startService(intent(cls).putExtra("op", "detach"));
+                    await(() -> foregroundResult(result).contains("detach type="), () -> {
+                        check(foregroundResult(result).contains("detach type=0"), "type survived stopForeground");
+                        android.service.notification.StatusBarNotification detached = posted(manager, 7);
+                        check(detached != null && (detached.getNotification().flags
+                                & android.app.Notification.FLAG_FOREGROUND_SERVICE) == 0,
+                                "detached notification vanished or kept its foreground flag");
+                        manager.cancel(7);
+                        check(posted(manager, 7) == null, "a detached notification could not be cancelled");
+                        startService(intent(cls).putExtra("op", "remove"));
+                        await(() -> foregroundResult(result).contains("remove type="), () -> {
+                            check(foregroundResult(result).contains("remove type=0") && posted(manager, 7) == null,
+                                    "STOP_FOREGROUND_REMOVE left the notification: " + foregroundResult(result));
+                            check(!foregroundResult(result).contains("Exception"), "foreground op threw: " + foregroundResult(result));
+                            stopService(intent(cls));
+                            System.out.println("FOREGROUND_SERVICE_OK " + cls.getSimpleName());
+                            next.run();
+                        }, 60000);
+                    }, 60000);
+                }, 60000);
+            }, 60000);
+        }, 60000);
     }
     private void remoteCheck() {
         Client remote = new Client();
@@ -317,10 +426,6 @@ public final class ManagedServices extends Activity {
                 "missing service started");
         check(startService(intent(Lifecycle.class).setClassName(getPackageName(), Lifecycle.class.getName() + "Disabled")) == null,
                 "disabled service started");
-        try {
-            startForegroundService(intent(Lifecycle.class));
-            throw new AssertionError("unsupported foreground service reported success");
-        } catch (UnsupportedOperationException expected) { checks++; }
         Intent start = intent(Lifecycle.class).putExtra("value", 1);
         check(startService(start).getClassName().equals(Lifecycle.class.getName()), "start result incorrect");
         start.putExtra("value", 99);

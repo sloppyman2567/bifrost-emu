@@ -1,24 +1,31 @@
 // App-owned Android 15 notification channels/groups. Keep deleted channels:
 // recreating an id restores its settings instead of resetting user choices.
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationChannelGroup;
 import android.app.NotificationManager;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.Process;
+import android.os.UserHandle;
+import android.service.notification.StatusBarNotification;
 import android.util.AtomicFile;
+import android.util.Log;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileLock;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 final class FrameworkNotifications implements FrameworkServices.Call {
     private enum Contract {
@@ -37,6 +44,7 @@ final class FrameworkNotifications implements FrameworkServices.Call {
         getNotificationChannelGroups,
         deleteNotificationChannelGroup,
         cancelAllNotifications,
+        enqueueNotificationWithTag,
         cancelNotificationWithTag,
         getAppActiveNotifications,
         enqueueTextToast,
@@ -57,6 +65,10 @@ final class FrameworkNotifications implements FrameworkServices.Call {
     private final Map<String, NotificationChannelGroup> groups = new LinkedHashMap<>();
     private static final int MAGIC = 0x41534e32, MAX_BYTES = 8 * 1024 * 1024;
     private final FrameworkToasts toasts = new FrameworkToasts();
+    // Posted notifications of this process, by pkg|id|tag. Delivery to the desktop is unsupported, so they are only
+    // listed (getAppActiveNotifications) and cancelled. `foreground` holds the keys a foreground service owns.
+    private final Map<String, StatusBarNotification> posted = new LinkedHashMap<>();
+    private final Set<String> foreground = new HashSet<>();
     private String delegate;
     private int delegateUid = -1;
     // FileChannel.lock does not wait for overlapping locks held by another
@@ -259,12 +271,19 @@ final class FrameworkNotifications implements FrameworkServices.Call {
             owner((String) a[1]); user((Integer) a[2]);
             if (!pkg.packageName.equals(a[1])) throw new SecurityException("Foreign notification package");
         }
-        // Nothing is ever posted here (desktop delivery is unsupported), so
-        // cancellation finds no notification and the active list is empty.
         switch (contract) {
-            case cancelAllNotifications: user((Integer) a[1]); return null;
-            case cancelNotificationWithTag: owner((String) a[1]); user((Integer) a[4]); return null;
-            case getAppActiveNotifications: user((Integer) a[1]); return slice(new ArrayList<Object>());
+            case cancelAllNotifications: user((Integer) a[1]); cancelAll(pkg.packageName); return null;
+            case cancelNotificationWithTag:
+                owner((String) a[1]); user((Integer) a[4]);
+                cancel(pkg.packageName, (String) a[2], (Integer) a[3]);
+                return null;
+            case getAppActiveNotifications: {
+                user((Integer) a[1]);
+                List<StatusBarNotification> active = new ArrayList<>();
+                for (StatusBarNotification value : posted.values())
+                    if (value.getPackageName().equals(pkg.packageName)) active.add(copy(value, StatusBarNotification.CREATOR));
+                return slice(active);
+            }
             // NotificationManagerService queues a toast from the caller's own
             // package for SystemUI; FrameworkToasts shows it in this process.
             case enqueueTextToast:
@@ -281,15 +300,8 @@ final class FrameworkNotifications implements FrameworkServices.Call {
                 return null;
             default: break;
         }
-        File directory = new File(pkg.applicationInfo.dataDir, ".asgard-notifications");
-        if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("Notification storage unavailable");
-        // Service children can open the same app's metadata. Reload under a
-        // cross-process lock, then atomically publish changes.
-        synchronized (STORE_LOCK) {
-            try (RandomAccessFile lock = new RandomAccessFile(new File(directory, "lock"), "rw");
-                    FileLock held = lock.getChannel().lock()) {
-                AtomicFile file = new AtomicFile(new File(directory, "channels"));
-                read(file);
+        final PackageInfo owner = pkg;
+        return withStore(owner, file -> {
                 switch (contract) {
                     case setNotificationDelegate: {
                         String requested = (String) a[1];
@@ -311,6 +323,11 @@ final class FrameworkNotifications implements FrameworkServices.Call {
                     case createNotificationChannelGroups:
                         for (Object value : list(a[1])) create((NotificationChannelGroup) value);
                         write(file); return null;
+                    case enqueueNotificationWithTag:
+                        user((Integer) a[5]);
+                        if (!owner.packageName.equals(a[1])) throw new SecurityException("Foreign notification package");
+                        post(owner, (String) a[2], (Integer) a[3], (Notification) a[4], false);
+                        return null;
                     case getNotificationChannel: return channel((String) a[3]);
                     case getConversationNotificationChannel: {
                         String parent = (String) a[3], conversation = (String) a[5];
@@ -341,7 +358,93 @@ final class FrameworkNotifications implements FrameworkServices.Call {
                     }
                     default: throw new UnsupportedOperationException("notification." + method);
                 }
+        });
+    }
+
+    private interface StoreBody { Object run(AtomicFile file) throws Exception; }
+
+    // Service children open the same app's metadata. Reload under a cross-process lock, then atomically publish
+    // changes.
+    private Object withStore(PackageInfo pkg, StoreBody body) throws Exception {
+        File directory = new File(pkg.applicationInfo.dataDir, ".asgard-notifications");
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("Notification storage unavailable");
+        synchronized (STORE_LOCK) {
+            try (RandomAccessFile lock = new RandomAccessFile(new File(directory, "lock"), "rw");
+                    FileLock held = lock.getChannel().lock()) {
+                AtomicFile file = new AtomicFile(new File(directory, "channels"));
+                read(file);
+                return body.run(file);
             }
         }
+    }
+
+    private static String key(String packageName, String tag, int id) { return packageName + "|" + id + "|" + tag; }
+
+    // NotificationManagerService.enqueueNotificationInternal for one user: a missing channel (target O+ has no
+    // implicit one), a blocked channel, or notifications turned off for a non-foreground-service post drop the
+    // notification without an error, as NMS does. Must run inside withStore (the channels are loaded).
+    private boolean post(PackageInfo pkg, String tag, int id, Notification supplied, boolean byForegroundService)
+            throws Exception {
+        Notification notification = copy(Objects.requireNonNull(supplied, "null not allowed: notification"),
+                Notification.CREATOR);
+        String key = key(pkg.packageName, tag, id);
+        // fixNotification: only a service's own notification keeps FLAG_FOREGROUND_SERVICE (the flag is stripped
+        // when ActiveServices reports NOT_FOREGROUND_SERVICE), and such a notification is not auto-cancelled.
+        if (byForegroundService) notification.flags |= Notification.FLAG_FOREGROUND_SERVICE;
+        else if (!foreground.contains(key)) notification.flags &= ~Notification.FLAG_FOREGROUND_SERVICE;
+        if ((notification.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0)
+            notification.flags &= ~Notification.FLAG_AUTO_CANCEL;
+        String channelId = notification.getChannelId();
+        NotificationChannel channel = channelId != null ? channel(channelId)
+                : pkg.applicationInfo.targetSdkVersion < Build.VERSION_CODES.O
+                        ? new NotificationChannel("miscellaneous", "Miscellaneous", NotificationManager.IMPORTANCE_DEFAULT) : null;
+        if (channel == null) {
+            Log.e("FrameworkNotifications", "No Channel found for pkg=" + pkg.packageName + ", channelId=" + channelId
+                    + ", id=" + id + ", tag=" + tag);
+            return false;
+        }
+        boolean enabled = packages.checkPermission("android.permission.POST_NOTIFICATIONS", pkg.applicationInfo.uid,
+                android.content.Context.DEVICE_ID_DEFAULT) == PackageManager.PERMISSION_GRANTED
+                || (notification.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0;
+        if (!enabled || channel.getImportance() == NotificationManager.IMPORTANCE_NONE) return false;
+        posted.put(key, new StatusBarNotification(pkg.packageName, pkg.packageName, id, tag, pkg.applicationInfo.uid,
+                Process.myPid(), 0, notification, (UserHandle) UserHandle.class.getMethod("of", int.class).invoke(null, Process.myUid() / 100000), System.currentTimeMillis()));
+        return true;
+    }
+
+    // NMS refuses to let an app cancel a foreground service's notification (FLAG_FOREGROUND_SERVICE).
+    private void cancel(String packageName, String tag, int id) {
+        String key = key(packageName, tag, id);
+        StatusBarNotification value = posted.get(key);
+        if (value != null && (value.getNotification().flags & Notification.FLAG_FOREGROUND_SERVICE) == 0) posted.remove(key);
+    }
+
+    private void cancelAll(String packageName) {
+        posted.values().removeIf(value -> value.getPackageName().equals(packageName)
+                && (value.getNotification().flags & Notification.FLAG_FOREGROUND_SERVICE) == 0);
+    }
+
+    // ActiveServices -> NMS for a foreground service's notification (id != 0, no tag). Returns whether it is
+    // showing; a notification NMS drops (no channel) does not stop the service from being foreground.
+    synchronized boolean postForeground(String packageName, int id, Notification notification) throws Exception {
+        PackageInfo pkg = Objects.requireNonNull(packages.processPackage(packageName), "service package");
+        foreground.add(key(packageName, null, id));
+        return (Boolean) withStore(pkg, file -> post(pkg, null, id, notification, true));
+    }
+
+    // cancelForegroundNotificationLocked: the service stopped, or stopped being foreground with STOP_FOREGROUND_REMOVE.
+    synchronized void cancelForeground(String packageName, int id) {
+        String key = key(packageName, null, id);
+        foreground.remove(key);
+        posted.remove(key);
+    }
+
+    // stopForeground() without REMOVE: the notification stays, but is no longer a foreground service's, so the
+    // user (and the app) can dismiss it.
+    synchronized void detachForeground(String packageName, int id) {
+        String key = key(packageName, null, id);
+        foreground.remove(key);
+        StatusBarNotification value = posted.get(key);
+        if (value != null) value.getNotification().flags &= ~Notification.FLAG_FOREGROUND_SERVICE;
     }
 }

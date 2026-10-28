@@ -289,8 +289,10 @@ public final class ManagedServiceBatch {
         PendingIntent.getService(context, 6, service, immutable).send();
         check(serviceDelivery.await(5, TimeUnit.SECONDS) && serviceIntent.getIntExtra("service", 0) == 11, "service sender delivery failed");
         runningServices(context);
-        try { PendingIntent.getForegroundService(context, 7, service, immutable).send(); throw new AssertionError("Foreground service silently accepted"); }
-        catch (UnsupportedOperationException expected) { checks++; }
+        // startForegroundService sends are delivered like any start; the startForeground() they owe is the service's.
+        serviceDelivery = new CountDownLatch(1);
+        PendingIntent.getForegroundService(context, 7, service, immutable).send();
+        check(serviceDelivery.await(5, TimeUnit.SECONDS), "foreground service sender delivery failed");
         resultDelivery = new CountDownLatch(1);
         Object resultSender = invoke(activity, "getIntentSenderWithFeature", 3, NAME, null, token, null, 17, new Intent[] {new Intent("result")}, null, immutable, null, 0);
         check((Integer) invoke(activity, "sendIntentSender", null, resultSender, null, 23, null, null, null, null, null) == 0

@@ -1306,7 +1306,7 @@ server classes, for one app, user 0 and the default device:
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
 | `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). `notifyProviderInheritance` (what the framework calls when an app's process starts, as `AppWidgetServiceImpl` in android-15.0.0_r1): a null array or entry ends the call, each package must be the caller's own, and the provider lookup finds none, so nothing is recorded. |
 | `notification` zen mode | `getZenMode` is 0 (Do Not Disturb off, `Settings.Global.ZEN_MODE_OFF`), so `NotificationManager.getCurrentInterruptionFilter` is `INTERRUPTION_FILTER_ALL`; it takes no package and needs no permission. Policy and rule changes stay unsupported. |
-| `activity` running services | `getServices` (`ActivityManager.getRunningServices`) reports the app's own created services, started or only bound, with pid, process, `FLAG_STARTED`, client count and activity times, up to `maxNum`: what an app without `GET_TASKS` sees (`ActiveServices.getRunningServiceInfoLocked`). Foreground state is never reported because foreground services are unsupported. Only the main process is answered; a call from a child process is not routed. |
+| `activity` running services | `getServices` (`ActivityManager.getRunningServices`) reports the app's own created services, started or only bound, with pid, process, `FLAG_STARTED`, client count and activity times, up to `maxNum`: what an app without `GET_TASKS` sees (`ActiveServices.getRunningServiceInfoLocked`). `FLAG_FOREGROUND` and `foreground` follow `setServiceForeground` (see Foreground services). Only the main process is answered; a call from a child process is not routed. |
 | camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |
 | `servicediscovery` | `NsdManager` (`FrameworkNsd`) on a network with no mDNS responder: `connect` returns the connector, `discoverServices`/`stopDiscovery` and `stopResolution` report started/stopped, no service is ever found, and `resolveService`, `registerService` and `unregisterService` fail with `FAILURE_INTERNAL_ERROR`. Uptodown dereferenced the null manager in `onActivityCreated`. Checked in `ManagedServiceBatch` (JIT only); the NSD classes are relocated by mainline, so types come from reflection. |
 | `telephony.registry` | No modem (`getActiveModemCount()` 0): `listenWithEventList` records or removes listeners and never notifies. It keeps TelephonyRegistry's package check, `checkListenerPermission` (location, phone-state, precise, emergency and privileged event sets) and 50-listener limit (`FrameworkTelephony`). |
@@ -1380,7 +1380,7 @@ unsupported/disabled standby permits the queries. These follow
 and
 [LowPowerStandbyController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/power/LowPowerStandbyController.java).
 They do not alter host suspend policy or implement Doze, exemption scheduling,
-foreground services or notification posting. These are local Java service-cache
+foreground-service policy or notification delivery. These are local Java service-cache
 contracts; see [runtime checks](../archive/TESTS-history.md#user-and-idle-policy-queries-2026-10-14).
 
 ### Settings, PendingIntents and broadcasts (2026-10-13)
@@ -1449,7 +1449,7 @@ app-op policies, sticky app broadcasts, receivers in other processes and
 cross-app delivery are unsupported. There is no broadcast timeout/ANR policy.
 Sender records and alarms live in the current process; they do not survive
 process exit or implement system-server background/wakeup policies.
-Notifications still have no posting/interaction implementation; supporting
+Notifications are posted and listed in memory but never shown, so supporting
 PendingIntent tokens does not make notification taps available.
 
 ### Software Gralloc5 (2026-10-13)
@@ -2310,8 +2310,8 @@ in [the test guide](../archive/TESTS-history.md#child-service-routing-2026-10-23
 
 The real APK service gate checks a different PID, the same ordinary app UID,
 and a synchronous Binder round trip, in addition to local lifecycle behavior.
-The isolated WebView handshake is still incomplete. This profile rejects
-foreground-service requests (notification/deadline support is absent) and
+The isolated WebView handshake is still incomplete. This profile does not model
+the foreground-service start deadline (see Foreground services) or
 installed-package intent-filter resolution. Unknown explicit components and
 packages return absent results. It does not implement sticky
 restart/redelivery after process death, arbitrary cross-app Services beyond the
@@ -2869,13 +2869,56 @@ and [PermissionHelper](https://android.googlesource.com/platform/frameworks/base
 a foreign package gets `SecurityException`, and the answer is the package's
 `POST_NOTIFICATIONS` grant. This profile grants no runtime permissions, so it
 reports false, as on a device where the user has not allowed notifications.
-Posting, channels and listeners still throw.
+Posting is described under Foreground services and notifications below; listeners still throw.
 
 Without the service, `NotificationManager.areNotificationsEnabled()` threw
 inside SpongeBob's `NotificationSettings` helper on every game state change.
 Unity surfaced the exception in the game's state-change event, which then
 skipped `MainHudHandler` re-enabling the main HUD after Settings closed: the
 scene kept drawing without its buttons. The user confirmed the HUD now stays.
+
+### Foreground services and notification posting (2026-10-28)
+
+YouTube's playback service calls `Service.stopForeground` when playback pauses. `activity.setServiceForeground` was
+unsupported, the `UnsupportedOperationException` went up through the touch dispatch and the app exited with status 1.
+`FrameworkServiceRuntime` now keeps the foreground state of each service record and follows
+[ActiveServices.setServiceForegroundInnerLocked](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/am/ActiveServices.java)
+(read from android-15.0.0_r1):
+
+- `startForegroundService` is accepted and marks the record as owing `startForeground` (`fgRequired`).
+- `startForeground(id, notification, type)`: `id != 0` needs a notification (`IllegalArgumentException` otherwise),
+  `FOREGROUND_SERVICE` for an app targeting Android 9+, a type that is a subset of the manifest's
+  (`FOREGROUND_SERVICE_TYPE_MANIFEST` means the manifest type; a short service combined with other types is a regular
+  one; a short service must be started). The framework's own `ForegroundServiceTypePolicy` (default policy,
+  while-in-use permissions allowed because the app is the foreground app) then checks each type's permissions
+  (`FOREGROUND_SERVICE_MEDIA_PLAYBACK`, ...) and raises `MissingForegroundServiceTypeException`,
+  `InvalidForegroundServiceTypeException` or `SecurityException` as `validateForegroundServiceType` does.
+- `stopForeground(flags)` on a service that is not foreground does nothing (the YouTube case). On one that is,
+  `STOP_FOREGROUND_REMOVE` cancels the notification; otherwise, for an app targeting Android 5+, it stays (until the
+  service stops) without its foreground flag, and `STOP_FOREGROUND_DETACH` forgets it. `getForegroundServiceType`
+  returns the current type (0 after stop). A service that stops, or whose child process dies, releases its notification
+  unless another foreground service of the app shares its id.
+- Calls from a service in a child process travel over the service socket (`SERVICE_FOREGROUND`,
+  `SERVICE_FOREGROUND_TYPE`) to the session's runtime, which refuses another process's token as `stopSelf` does.
+
+The foreground service's notification goes to `FrameworkNotifications`, which now also implements
+`enqueueNotificationWithTag`, `cancelNotificationWithTag`, `cancelAllNotifications` and `getAppActiveNotifications` over an
+in-memory store of this process's `StatusBarNotification`s, following
+[NotificationManagerService.enqueueNotificationInternal](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/notification/NotificationManagerService.java):
+a post to a channel the app never created (an app targeting Android 8+ has no implicit one), to a channel with
+`IMPORTANCE_NONE`, or by an app without `POST_NOTIFICATIONS` that is not a foreground service, is dropped without an
+error; only a foreground service's own notification keeps `FLAG_FOREGROUND_SERVICE` (and loses `FLAG_AUTO_CANCEL`); an
+app cannot cancel a notification that carries the flag. This profile grants no runtime permissions, so an app's own
+`notify()` is blocked, as on a device where the user has not allowed notifications.
+
+Not modelled (checked against the source only): the 10 s deadline after which an app that did not call `startForeground`
+after `startForegroundService` is crashed, background-start restrictions, the `OP_START_FOREGROUND` app op, the short
+service's 3 minute timeout and `onTimeout`, foreground service time limits, the deferred display of a foreground
+service's notification, delivery to the host (nothing is shown, so no taps), and `getRunningServices` from a child
+process. The notification store is per process: a notification an app posts from a child process is listed only there,
+while a foreground service's notification is always the session's. `ManagedServices` (`foreground`: a service in the app
+process and one in `:remote`, with the stray `stopForeground`, a type missing from the manifest, detach and remove) and
+`ManagedServiceBatch` (a `getForegroundService` `PendingIntent`) check it; both observed, not verified on a device.
 
 ### App ops and missing content providers (2026-10-12)
 
