@@ -19,7 +19,7 @@ as the linked section says, not that every app using it works.
 |---|---|---|---|
 | 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout and descriptive file names; Asgard Android runtime on the pinned Android 15 framework; SpongeBob playable | Goals below |
 | 2.0.0-alpha.2 (2026-10-21) | Released; its goals were partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
-| 2.0.0-alpha.3 (2026-10-27) | Cut; its WebView, media and ad scope is mostly open | Since alpha.2: lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package. Partial: WebView renders; desktop text input reaches native editors | WebView pointer/focus/scroll, HTTP intent routing, ads with test creatives, video |
+| 2.0.0-alpha.3 (2026-10-27) | Cut; its WebView, media and ad scope is mostly open | Since alpha.2: lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package; `fcntl` owner, signal and lease commands, so Umamusume's anti-tamper helper no longer ends the app about 8 s in (play past the title is unchecked); a full JIT code cache is replaced and idle threads cost less memory; Subway Surfers 3.70.3 recorded playable (the maintainer's report, no capture). Partial: WebView renders; desktop text input reaches native editors; http(s) and Play Store links open in the host browser after a recent input | WebView pointer/focus/scroll, return/deep-link delivery, ads with test creatives, video |
 | 2.0.0-beta.1 | Not started | Library cards, per-game settings, clear-data/uninstall | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
 
 Known blockers, by cause:
@@ -76,8 +76,12 @@ title's instantaneous FPS is not the acceptance measurement.
   (`CursorAnchorInfo`), clipboard exchange and an on-screen keyboard are not
   done. Help Center rendering is visible now; complete browser/editor
   interaction still needs its own tests.
-- Complete external HTTP/HTTPS intent routing and supported return/deep-link
-  delivery, with app lifecycle and failed-browser handling.
+- Plain http(s) and Play Store `ACTION_VIEW` links already open in the host
+  browser within 5 s of an input
+  ([web links](Android/ANDROID_RUNTIME.md#web-links-and-play-store-links-2026-10-20)).
+  Still open: supported return/deep-link delivery, Custom Tabs, verified App
+  Links and the other implicit intents, with app lifecycle and failed-browser
+  handling.
 - Trace SpongeBob's stuck Kidoz ad from the null read and incorrect layout size.
   Extend Surface/media lifecycle, reconfiguration, audio synchronization and
   renderer-process handling for the path the SDK actually uses.
@@ -203,6 +207,9 @@ isolated replies.
 
 - Complete related services through real state, ownership, creation and
   cleanup; keep unsupported methods explicit and improve coverage reporting.
+  Since October 25 a call a stand-in does not answer is named once per process
+  in the session log (`SERVICE_CALL_UNSUPPORTED <service> <call>`), and eleven
+  `IDisplayManager` methods answer as Android 15 does on a one-panel phone.
 - Toasts queue, show for 2 s or 3.5 s and cancel (Azur Lane's sign-in failure
   no longer exits). Still open: background-toast policy and toast animations.
 - `NsdManager` constructs and discovery runs but finds nothing: the host has
@@ -263,6 +270,11 @@ video-ad playback or full lifecycle/recreation behavior.
   and native EGL into aliased surfaces remain unestablished.
 - Expand graphics ABI and extension coverage based on complete dependency
   audits and reproducible failures rather than one missing import at a time.
+  The GL/GLES thunk registry now has a `make generated-check` guard
+  (`Tools/CodeGen/glxmlcheck.py`) that fails a pointer-to-pointer parameter
+  without a translation policy; string arrays and `glGet*Pointerv` queries are
+  fixed (a Geometry Dash Lite WebView ad had crashed in `glGetUniformIndices`).
+  Nested arrays in Vulkan were not examined.
 - Mobile GLSL on desktop drivers: Roblox's 3D material and terrain vertex
   shaders (`DefaultUnified*VS`, grass, smooth terrain) fail on Mesa with
   "could not implicitly convert operands to arithmetic operator". Mobile
@@ -281,14 +293,19 @@ video-ad playback or full lifecycle/recreation behavior.
   the rendered texture size with the app's request before blaming filtering.
 - Memory: one game (Hungry Shark World, observed October 21) used about
   4.3 GiB PSS over three processes (main 2.7 GiB, `oxed_process0` 1.1 GiB, Play
-  Store 0.4 GiB) while the host swapped about 2 GiB. In the main process 910
-  MiB resident is the 1 GiB FrostJIT code buffer (`CODE_BUF_SIZE`), backed by
-  transparent huge pages here (`AnonHugePages` 927 MiB); 1.39 GiB is small
-  anonymous mappings. Battle Cats showed about 2.35 GiB RSS in its main process.
-  How much of the code buffer is real code, and what the anonymous memory is,
-  are unmeasured; read the exit-time `[JIT]` stats and per-mapping PSS first.
-  The window title's VRAM figure for Battle Cats (about 205-257 MiB of 8573)
-  has not been checked against the driver.
+  Store 0.4 GiB) while the host swapped about 2 GiB; 910 MiB of the main
+  process was the 1 GiB FrostJIT code buffer. Battle Cats measured 5.25 GiB PSS
+  over five runtimes (October 24: mostly JIT code, about 1.4 GB, and live host
+  heap). Since then: smaller per-block metadata, small per-thread caches, no
+  Play Store billing runtime, a 512 MiB default code budget whose full cache is
+  replaced, idle guest threads at 0.15 MiB instead of 1.8 MiB, and a `[mem]`
+  line that splits resident memory by class. Battle Cats then peaked at 4.41 GiB
+  and Melon Playground held 3.87 GB against 4.70 GB (runs of different length,
+  indicative only; the 363-thread saving is calculated, not measured in the
+  game). Still open: JIT code size, the game's remaining non-JIT heap (about
+  500 MiB in Battle Cats), why the WebView service stays alive, and a
+  controlled before/after run. The window title's VRAM figure for Battle Cats
+  (about 205-257 MiB of 8573) has not been checked against the driver.
 
 Acceptance: rendered gameplay with working audio and input survives repeated
 surface recreation and lifecycle transitions without leaks or stale handles.
@@ -343,10 +360,23 @@ The Android probe also exposed and regression-tested a dead-code compaction
 reserve-accounting underflow. See [implementation](JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
 and [validation](archive/TESTS-history.md#tier-1-hot-path-code-reduction-2026-10-14).
 
+Implemented memory-access checkpoint (October 26): the bounds table doubles as
+the software-check gate, so a scalar access tests one compare instead of a bounds
+compare plus a flag test; the checked path is one compact sequence; fault exits
+no longer reload the PC or save flags and share a frame return; chain-skip exits
+no longer load RDI/RSI. `qt_test` emits 95.2 bytes per guest instruction
+(110.2 before the fault-exit change, 98.6 after it), and `bench_fib`,
+`bench_memcpy` and `bench_sort` ran 10%, 6% and 5% faster at the gate step. ART
+apps no longer run every access through the software check because of
+`userfaultfd` (1.8x on a load/store loop). See
+[JIT.md](JIT.md#software-page-checks-only-while-a-page-needs-them-2026-10-26).
+In-game frame times were not measured.
+
 Next, prioritize sampled codegen paths rather than emitted size alone:
 
 - Streamline paired-memory guards while preserving whole-instruction footprint
-  checks, precise faults and register/writeback ordering.
+  checks, precise faults and register/writeback ordering. Scalar accesses have
+  the compact path above; pairs still use the whole-footprint guard.
 - Retain useful SIMD values when a block exceeds the current all-or-nothing
   cache limits; model helper clobbers, aliases and NaN recovery explicitly.
 - Model forwarding barriers sufficiently to optimize safe segments around
@@ -425,8 +455,11 @@ Implemented MT publication checkpoint: atomic target cells enable chaining
 and Tier-2 promotion without rewriting published instructions. MT regions fuse
 loop iterations and use revocable back-edges with bounded dispatch leases.
 Concurrent invalidation and both frame layouts have independent oracle checks.
-Code and metadata remain unrecycled; quiescent reclamation and loop-carried
-MT region optimization remain future work. Gameplay FPS gains need measurement.
+Individual blocks' code and metadata are still not recycled. Since October 25 a
+full cache (512 MiB default) is replaced as a whole and a reaper frees the old
+one once no thread can run it; the price is recompiling code that does not fit.
+Per-block reclamation and loop-carried MT region optimization remain future
+work. Gameplay FPS gains need measurement.
 
 Implemented helper checkpoint: batch nested-call statistics at outer returns
 and remove redundant BL/BLR host-flag saves and BL return-PC writes. The
@@ -448,28 +481,40 @@ correctness coverage.
   across cache maintenance and `mprotect`; MT compiles under the shared table
   lock. Remaining: per-thread cache counters, eviction and fallback decisions.
 - Measure gameplay compile bursts with those counters before choosing between
-  a background compiler (interpret first, publish asynchronously) and a
-  persistent warm-up list keyed by file identity, offset and code contents.
+  a background compiler (interpret first, publish asynchronously) and extending
+  the experimental persistent cache below.
   Retranslation after the one-time ST-to-MT purge is a separate startup cost.
   Distinguish JIT warm-up from shader compilation, asset loading and ordinary
   CPU caches.
-- Improve cache capacity management and hot-block retention without
-  unbounded memory growth or unsafe eviction of executing code.
+- Improve hot-block retention without unbounded memory growth or unsafe
+  eviction of executing code. Whole-cache replacement bounds memory now, but it
+  discards hot blocks along with cold ones.
 - Move glibc programs to the real guest `ld-linux-aarch64.so.1` instead of the
   native dynamic linker, as `--android-runtime` already does for Bionic's
   `linker64`. The experimental `--guest-ld` mode passes the dynamic test
   suites and loads thunked libraries through in-memory stubs. Doom 3 ran 120 s
   under it (2026-10-24, with the thread TLS and `__libc_single_threaded` fixes for
-  emulator-created threads); other games, `make verify` and cold-start measurements
-  remain before it can become the default. The native linker imitates ld.so internals (`link_map`,
+  emulator-created threads), dhewm3 ran 120 s with a `games` rootfs profile,
+  and neverball survived 40 s in two of three runs (the third was closed
+  cleanly); supertux2 does not start there (its `libcurl-gnutls` wants glibc
+  2.43) and crashes under the built-in linker too. Other games, musl threads,
+  `make verify` and cold-start measurements remain before it can become the
+  default. The native linker imitates ld.so internals (`link_map`,
   `_rtld_global_ro` hooks, main-executable initializer ownership) and breaks
   when glibc changes; a legacy-start program ran every constructor twice until
   October 20. Needs a replacement for the thunk `dlopen`/`dlsym` interception,
   and cold-start measurements (Doom 3, large dynamic apps) against the native
   linker; the persistent translation cache below is its expected mitigation.
-- Evaluate persistent translated-code caching with executable identity,
-  guest code contents, emulator version, host ISA features, options and
-  relocations in its compatibility rules. Never reuse stale code blindly.
+- Persistent translated-code caching exists as an experiment (`--jit-disk-cache`,
+  off by default, October 26): its fingerprint covers executable identity, guest
+  words, emulator version, host ISA features, options and relocations, and a
+  block is stored only when a second compile at shifted PCs explains every
+  difference. In Umamusume, verify mode found every reused record equal to a
+  fresh compile and launches installed 200,000 to 390,000 blocks from the cache.
+  No startup gain is established (`qt_test` 105 ms from the cache against 185 ms
+  without, but the recording launch takes 287 ms) and play past the title from
+  the cache is unchecked. Before it can default on: a measured gain on a game,
+  play from the cache, other hosts. Never reuse stale code blindly.
 - Evaluate shader/pipeline cache reuse and measured prewarming separately
   from the CPU translation cache.
 
@@ -487,7 +532,10 @@ Use cold/warm A/B measurements to verify that cache changes reduce stutters.
 - Add reliable gamepad discovery, hotplug, mappings, dead zones, triggers,
   rumble and per-game profiles, with consistent event ordering and latency.
 - Bridge Android touch/multitouch, key codes, controller events and input
-  queues; keep optional desktop-to-touch mappings configurable.
+  queues; keep optional desktop-to-touch mappings configurable. The mouse wheel
+  and trackpad pinch zoom, Shift+wheel pans and a middle-button drag moves two
+  synthetic fingers (October 25; unit and fake-SDL3 checks, not yet tried on a
+  live window).
 - Test keyboard layout, held/released buttons, text input and pause/menu
   transitions without stuck keys or duplicated events.
 
@@ -496,22 +544,30 @@ supported desktop modes and Android lifecycle transitions.
 
 ## WebView text input and external webpages
 
-Current boundary: WebView construction and local bitmap rendering are tested,
-but the input-method service models no installed IME. Physical key events are
-forwarded directly; committed text/composition and wheel events are missing,
-and full ViewRoot input stages/focus arbitration are incomplete. Activity starts
-also reject implicit intents, including ordinary external browser links.
+Current boundary: WebView construction and local bitmap rendering are tested.
+An editor with a live `InputConnection` receives desktop text and composition
+([host text input](Android/ANDROID_RUNTIME.md#host-text-input-2026-10-20)), and
+plain http(s) and Play Store links open in the host browser within 5 s of an
+input ([web links](Android/ANDROID_RUNTIME.md#web-links-and-play-store-links-2026-10-20)).
+The input-method service still models no installed IME, there is no on-screen
+keyboard, and the composition is anchored at the bottom of the window. The
+mouse wheel zooms and pans touch apps through synthetic two-finger gestures
+(2026-10-25); its effect on a WebView page is unchecked. Full ViewRoot input
+stages/focus arbitration are incomplete, and every other implicit intent is
+declined.
 
 1. Reproduce clicks, focus, dragging and scrolling on an attached real WebView
    page, then the failing app. Missing IME alone does not explain broken clicks.
-2. Connect desktop text input to the focused Android InputConnection: Unicode,
-   composition, selection, deletion, paste and editor actions, with connection
-   cleanup on focus changes and app/Activity exit. Preserve window-plugin ABI
-   compatibility. An on-screen keyboard is a later option.
-3. Resolve manifest intents consistently across PackageManager queries and
-   Activity starts, then route eligible HTTP/HTTPS ACTION_VIEW requests through
-   the desktop default browser using a validated host URI interface. Preserve
-   explicit component/package restrictions and embedded WebViews.
+2. Desktop text input reaches the focused InputConnection (done for native
+   editors). Remaining: Chromium editors in a WebView, selection, paste and
+   editor actions, caret-anchored candidate windows (`CursorAnchorInfo`),
+   clipboard exchange, and connection cleanup on focus changes and app/Activity
+   exit. Preserve window-plugin ABI compatibility. An on-screen keyboard is a
+   later option.
+3. Eligible HTTP/HTTPS `ACTION_VIEW` requests already go through the validated
+   `open_url` interface to the desktop default browser. Remaining: resolve
+   manifest intents consistently across PackageManager queries and Activity
+   starts, keeping explicit component/package restrictions and embedded WebViews.
 4. Deliver supported browser callbacks/deep links through the correct app and
    onNewIntent/lifecycle path. Browser launch, Custom Tabs, verified App Links
    and Google Play Services authentication have separate contracts; launching
