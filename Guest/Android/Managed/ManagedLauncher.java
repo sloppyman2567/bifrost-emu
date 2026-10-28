@@ -1544,6 +1544,48 @@ public final class ManagedLauncher {
         System.out.println("APP_WINDOW_CLOSED");
     }
 
+    // APP_VIEW_DUMP on demand: while the file /data/local/tmp/bifrost-dump-views exists (the app's own root), one dump of every
+    // visible ImageView in the Activities' windows (id, size, place, drawable class and intrinsic size, scale, the density and
+    // screen size its Resources see), then the file is removed. For icons that draw at unexpected sizes.
+    private static long viewDumpMs;
+    private static void dumpViews(Iterable<Activity> all) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - viewDumpMs < 500) return;
+        viewDumpMs = now;
+        java.io.File request = new java.io.File("/data/local/tmp/bifrost-dump-views");
+        if (!request.exists()) return;
+        request.delete();
+        int lines = 0;
+        for (Activity activity : all) {
+            java.util.ArrayDeque<View> pending = new java.util.ArrayDeque<>();
+            pending.add(activity.getWindow().getDecorView());
+            while (!pending.isEmpty() && lines < 400) {
+                View view = pending.poll();
+                if (view instanceof android.view.ViewGroup) {
+                    android.view.ViewGroup group = (android.view.ViewGroup) view;
+                    for (int i = 0; i < group.getChildCount(); i++) pending.add(group.getChildAt(i));
+                }
+                if (!(view instanceof android.widget.ImageView) || view.getVisibility() != View.VISIBLE || view.getWidth() <= 0) continue;
+                android.graphics.drawable.Drawable drawable = ((android.widget.ImageView) view).getDrawable();
+                String id;
+                try { id = view.getId() == View.NO_ID ? "-" : view.getResources().getResourceEntryName(view.getId()); }
+                catch (RuntimeException unnamed) { id = "?"; }
+                int[] location = new int[2];
+                view.getLocationInWindow(location);
+                Configuration configuration = view.getResources().getConfiguration();
+                System.out.println("APP_VIEW_DUMP " + view.getClass().getSimpleName() + " id=" + id + " " + view.getWidth() + "x"
+                        + view.getHeight() + "@" + location[0] + "," + location[1] + " scale=" + view.getScaleX() + "," + view.getScaleY()
+                        + " drawable=" + (drawable == null ? "null" : drawable.getClass().getSimpleName() + " "
+                        + drawable.getIntrinsicWidth() + "x" + drawable.getIntrinsicHeight() + " bounds=" + drawable.getBounds().flattenToString())
+                        + " scaleType=" + ((android.widget.ImageView) view).getScaleType() + " dpi=" + configuration.densityDpi
+                        + " dm=" + view.getResources().getDisplayMetrics().densityDpi + " w=" + configuration.screenWidthDp + "dp sw="
+                        + configuration.smallestScreenWidthDp + "dp");
+                lines++;
+            }
+        }
+        System.out.println("APP_VIEW_DUMP_END " + lines);
+    }
+
     private static final java.util.Map<View, String> webViewReports = new java.util.WeakHashMap<>();
     private static long webViewTraceMs;
 
@@ -1712,6 +1754,7 @@ public final class ManagedLauncher {
                     activities.update();
                     activities.pollTask();
                     traceWebViews(activities.all());
+                    dumpViews(activities.all());
                     windows.render();
                 } catch (Exception error) {
                     error.printStackTrace();

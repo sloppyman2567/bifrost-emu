@@ -2867,6 +2867,15 @@ Measured on this machine (scalar, one thread): 15.7 ms for 2408x1355 unscaled, 1
 reference (planar and semi-planar chroma, padded rows, crop scaling, regions, matrices, ranges, refusals); the end-to-end
 CPU video path has no fixture and was checked on YouTube only.
 
+### View dump on demand (2026-10-28)
+
+Icons that draw at inconsistent sizes need the views' own numbers. While the file `data/local/tmp/bifrost-dump-views`
+exists in the app's managed root (`<state>/<package>/managed/rootfs/`), the play loop (checked twice a second) writes
+one `APP_VIEW_DUMP` line per visible `ImageView` of the Activities' windows (up to 400): view class, id name, size,
+place in the window, scale, the drawable's class, intrinsic size and bounds, the scale type, and the density
+(`Configuration.densityDpi` and `DisplayMetrics.densityDpi`) and screen width/smallest width in dp its Resources see,
+then `APP_VIEW_DUMP_END <count>`, and removes the file. Create the file with `touch` while the app runs.
+
 ### Window shape (2026-10-28)
 
 Roblox opened as a near-square 1440x1384 window and stayed that way. Its splash Activity declares no orientation, so
