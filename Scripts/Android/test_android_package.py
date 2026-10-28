@@ -1967,6 +1967,19 @@ class CompatibilityTests(unittest.TestCase):
             self.assertIn("child-age", run("com.tiltingpoint.spongebob").stdout)
             self.assertEqual(run("../x").returncode, 1)
 
+    def test_compat_command_reads_the_package_from_an_apk_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aapt2 = root / "aapt2"
+            aapt2.write_text("#!/bin/sh\necho \"package: name='com.tiltingpoint.spongebob' versionCode='1'\"\n")
+            aapt2.chmod(0o755)
+            (root / "game.apk").write_bytes(b"")
+            run = lambda path: subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                               "--state-root", str(root), "compat", path, "--aapt2", str(aapt2)],
+                                              capture_output=True, text=True)
+            self.assertIn("com.tiltingpoint.spongebob  playable", run(str(root / "game.apk")).stdout)
+            self.assertEqual(run(str(root / "missing.apk")).returncode, 1)
+
 
 class OfflineSocketTests(unittest.TestCase):
     """The emulator's offline policy, with a guest program (Tests/Unit/net_offline.c)."""

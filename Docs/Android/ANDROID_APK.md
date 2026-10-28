@@ -245,6 +245,7 @@ to the shared realm broker.
 ```bash
 python3 Scripts/Android/asgard.py compat                         # installed and recorded apps
 python3 Scripts/Android/asgard.py compat com.example.package     # status, evidence and known issues
+python3 Scripts/Android/asgard.py compat game.apk                # the same, for the package an .apk declares
 ```
 
 `Scripts/Android/compatibility.json` records what has actually been observed

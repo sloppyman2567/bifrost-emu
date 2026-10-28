@@ -752,9 +752,18 @@ def clear_data(state, package):
                     (root / relative).mkdir(parents=True, exist_ok=True)
 
 
+def apk_package_name(path, aapt2):
+    """The package name an APK declares, so `compat` also takes the file that `install` takes."""
+    if not Path(aapt2).is_file():
+        raise ValueError("AAPT2 is missing; run python3 Tools/Android/fetch-aapt2.py or give a package name")
+    return preflight.badging_fields(preflight.run([str(aapt2), "dump", "badging", str(path)]))["package"]["name"]
+
+
 def compatibility_report(args):
     import android_compat
     data = android_compat.load()
+    if args.package and args.package.lower().endswith(".apk") and Path(args.package).is_file():
+        args.package = apk_package_name(args.package, args.aapt2)
     if args.package:
         if not PACKAGE.fullmatch(args.package):
             raise ValueError("Invalid package name")
@@ -899,7 +908,8 @@ def main():
             command.add_argument("--lines", type=int, default=80)
             command.add_argument("--logd", action="store_true")
     compatibility = commands.add_parser("compat", help="show the documented compatibility status of tested apps")
-    compatibility.add_argument("package", nargs="?")
+    compatibility.add_argument("package", nargs="?", help="package name, or an .apk file to read it from")
+    compatibility.add_argument("--aapt2", type=Path, default=ROOT / "Tools/android-tools/aapt2")
     compatibility.add_argument("--json", action="store_true")
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
