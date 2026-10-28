@@ -10,6 +10,13 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Bitmaps get the display's density (2026-10-28)
+
+- YouTube's like, dislike and comment icons drew at half size: bitmaps created without a density got 160 (the unset
+  `ro.sf.lcd_density` default) on a 320 dpi window, and the app's image drawable scales by density. The launcher now
+  sets `Bitmap`'s default density to the window's, as `ActivityThread` does. See
+  [the runtime guide](Android/ANDROID_RUNTIME.md).
+
 ### Hardware bitmaps keep their pixels: images load (2026-10-28)
 
 - No image loaded in YouTube (thumbnails and avatars were gray boxes) and nothing was logged. Image loaders produce

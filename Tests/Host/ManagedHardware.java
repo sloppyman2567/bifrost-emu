@@ -124,11 +124,33 @@ public final class ManagedHardware extends Activity {
             android.graphics.Bitmap source = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888);
             source.eraseColor(Color.rgb(30, 160, 220));
             android.graphics.Bitmap hardware = source.copy(android.graphics.Bitmap.Config.HARDWARE, false);
+            // A bitmap made without a density carries the display's, as ActivityThread.updateDefaultDensity sets it.
+            System.out.println("MANAGED_HARDWARE_DENSITY bitmap=" + source.getDensity() + " display="
+                    + getResources().getDisplayMetrics().densityDpi);
             System.out.println("MANAGED_HARDWARE_BITMAP created=" + (hardware != null)
                     + (hardware == null ? "" : " config=" + hardware.getConfig()));
             android.graphics.Bitmap back = hardware == null ? null : hardware.copy(android.graphics.Bitmap.Config.ARGB_8888, false);
             int value = back == null ? 0 : back.getPixel(32, 32);
             System.out.println("MANAGED_HARDWARE_TEXTURE_HWBITMAP " + Color.red(value) + "," + Color.green(value) + "," + Color.blue(value));
+            // Many hardware bitmaps of different sizes and colours must not disturb each other: each is read back only
+            // after all of them were made (texture names are reused between uploads).
+            int wrong = 0;
+            android.graphics.Bitmap[] made = new android.graphics.Bitmap[24];
+            int[] colors = new int[made.length];
+            for (int i = 0; i < made.length; i++) {
+                int size = 16 + 8 * (i % 5);
+                colors[i] = Color.rgb(10 + 9 * i, 250 - 8 * i, (37 * i) % 256);
+                android.graphics.Bitmap each = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888);
+                each.eraseColor(colors[i]);
+                made[i] = each.copy(android.graphics.Bitmap.Config.HARDWARE, false);
+            }
+            for (int i = 0; i < made.length; i++) {
+                android.graphics.Bitmap readback = made[i].copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+                int sample = readback.getPixel(readback.getWidth() / 2, readback.getHeight() / 2);
+                if (Math.abs(Color.red(sample) - Color.red(colors[i])) > 2 || Math.abs(Color.green(sample) - Color.green(colors[i])) > 2
+                        || Math.abs(Color.blue(sample) - Color.blue(colors[i])) > 2) wrong++;
+            }
+            System.out.println("MANAGED_HARDWARE_BITMAPS_INTACT wrong=" + wrong + " of " + made.length);
             finish();
             return;
         }

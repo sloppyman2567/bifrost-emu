@@ -2867,6 +2867,16 @@ Measured on this machine (scalar, one thread): 15.7 ms for 2408x1355 unscaled, 1
 reference (planar and semi-planar chroma, padded rows, crop scaling, regions, matrices, ranges, refusals); the end-to-end
 CPU video path has no fixture and was checked on YouTube only.
 
+### Default bitmap density (2026-10-28)
+
+`APP_VIEW_DUMP` showed YouTube's like, dislike, comment and bookmark icons as software `ARGB_8888` bitmaps with
+`density=160` next to `HARDWARE` ones with `density=320`; its image drawable scales a bitmap by its density, so the
+density-160 ones drew at half size on the 320 dpi window. `Bitmap`'s default density is `DisplayMetrics.DENSITY_DEVICE`
+(the `ro.sf.lcd_density` property, unset here, so 160) until `ActivityThread.updateDefaultDensity` calls
+`Bitmap.setDefaultDensity(densityDpi)`. The launcher now makes that call with the window's density when it publishes
+the metrics (`ManagedHardware` checks a new bitmap's density equals the display's; it was 160 against 320 before). The
+density is not updated if the window moves to a display with another scale.
+
 ### View dump on demand (2026-10-28)
 
 Icons that draw at inconsistent sizes need the views' own numbers. While the file `data/local/tmp/bifrost-dump-views`

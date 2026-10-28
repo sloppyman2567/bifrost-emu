@@ -3019,6 +3019,9 @@ class PackageTests(unittest.TestCase):
         self.assertTrue(hardware, text[-30000:])
         for actual, expected in zip(map(int, hardware.groups()), (30, 160, 220)):
             self.assertLessEqual(abs(actual - expected), 3, hardware.group(0))
+        self.assertIn("MANAGED_HARDWARE_BITMAPS_INTACT wrong=0 of 24", text)
+        density = re.search(r"MANAGED_HARDWARE_DENSITY bitmap=(\d+) display=(\d+)", text)
+        self.assertTrue(density and density.group(1) == density.group(2), density and density.group(0))
 
     def test_managed_play_services_available(self):
         # Google's own client check accepts the provisioned microG packages:

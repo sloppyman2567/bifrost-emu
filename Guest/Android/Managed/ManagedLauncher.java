@@ -1313,6 +1313,10 @@ public final class ManagedLauncher {
             width = (int) metrics[0];
             height = (int) metrics[1];
             displays.setMetrics(width, height, (int) metrics[2]);
+            // ActivityThread.updateDefaultDensity: bitmaps an app creates or decodes without a density carry the display's.
+            // Without it they get DisplayMetrics.DENSITY_DEVICE (ro.sf.lcd_density, unset here: 160) and an image drawable that
+            // scales by density draws them at half size on a 320 dpi window (YouTube's like, dislike and comment icons).
+            Class.forName("android.graphics.Bitmap").getMethod("setDefaultDensity", int.class).invoke(null, (int) metrics[2]);
             // resizeableActivity=false: Android keeps such an app's window at its size and scales it
             // (size compatibility mode) instead of resizing it, so a maximized host window must not
             // grow the app's surface (the game would keep drawing its first, smaller scene in a corner).
