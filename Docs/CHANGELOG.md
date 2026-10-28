@@ -10,6 +10,35 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### YouTube gets past native library loading; two exports an app can fail to load without (2026-10-28)
+
+- Tried the YouTube 21.42.247 APKMirror bundle from Downloads (`asgard.py install` accepts it: 35 signed APKs, 37
+  ARM64 libraries). Its first run ended in `Application.onCreate` with `UnsatisfiedLinkError: cannot locate symbol
+  "ASurfaceControl_createFromWindow" referenced by libgoogle3.so`. Bionic binds an app library's imports at
+  `dlopen`, so one missing export fails the whole library even if it is never called. The managed `libandroid.so`
+  deliberately leaves window-handle functions out of its forwarders, and nothing provided this one. It is now a
+  wrapper in `surface.c`: NULL for a host window handle (creation failed, as the NDK allows), the image's own
+  function for a framework Surface (also NULL while `ISurfaceComposer.createConnection` is not served).
+- The next symbol was `glGetUniformBlockIndex`, and an audit of every core ES 2.0-3.2 command in gl.xml against the
+  GLES rows found a second: `glTexImage3D` (every 3D texture upload). Neither had a GLES row, so the Android
+  `libGLESv2.so` never exported them, and any app importing them failed to load. Cause: `glcoverage.py` skipped
+  `glGetUniformBlockIndex` because gl.xml gives its `const GLchar *` the length `COMPSIZE()`, which it read as a
+  bulk pixel buffer (the skip was printed and unnoticed), and `glTexImage3D` had no ES size entry. Both are fixed
+  in the generator, and `glxmlcheck.py` now fails any core ES command without a GLES row (`make generated-check`).
+  `test_android_adapter_exports.py` checks the built libraries; it fails on the previous Roblox-era libraries with
+  exactly these three exports missing.
+- Result: YouTube's native libraries load; the Application is created and the Activity attached (`APP_ACTIVITY_ATTACHED`,
+  never `APP_ACTIVITY_CREATED`). It then ends with
+  `NoClassDefFoundError: Failed resolution of Laqrn;` and `Lasga;`. Both classes are defined in `base.apk`'s
+  `classes2.dex` (checked by parsing the dex class definitions, not by string search) yet the app's class loader
+  cannot find them, ART reporting a plain `ClassNotFoundException`. The cause is not found. It is not a missing
+  split (the classes are defined in the base APK), and no `WarningContextClassLoader` warning was logged; why that
+  class loader cannot see `classes2.dex` needs a look at the loader at run time. Other multi-dex apps start.
+  `SERVICE_CALL_UNSUPPORTED activity_task getDeviceConfigurationInfo` is logged just before and is a small gap
+  of its own (`ActivityManager.getDeviceConfigurationInfo`). YouTube is not recorded in the compatibility file:
+  none of its statuses fits an unexplained crash. Not checked: whether a real Google-signed install behaves
+  the same, and any playback.
+
 ### Four more framework calls apps make are answered (2026-10-28)
 
 - Found by ranking `SERVICE_CALL_UNSUPPORTED` lines across all 606 recorded sessions of 17 apps (the report exists

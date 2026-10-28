@@ -63,6 +63,12 @@
   log and `glGetShaderSource` are the app's. A shader the driver accepts is never changed. It is the only
   rewrite: other implicit conversions still fail as they did. `gles_uint_index` and `make
   test-shader-index-conversion` cover it.
+- The Android `libGLESv2.so` exports exactly the GLES rows, and Bionic binds an app library's imports at `dlopen`,
+  so one missing core function fails the whole library (YouTube's `libgoogle3.so`: `glGetUniformBlockIndex`,
+  `glTexImage3D`). Every core ES 2.0-3.2 command needs a GLES row: `glxmlcheck.py` fails a missing one (CORE-ES;
+  `glReadPixels` is the one exception, appended by `build-android-adapters.py`), and `glcoverage.py` generates
+  them, skipping only commands whose pointer has a computed bulk size (a `const GLchar *` with `COMPSIZE()` is a
+  string, not a bulk buffer). `Scripts/Android/test_android_adapter_exports.py` checks the built library.
 - `GraphicThunk::dispatch` marks the symbol it runs (`thunk_call::Scope`,
   `Thunks/ThunkCallRecord.hpp`); the host-fault report in `FrostJIT/Runtime/FaultHandler.cpp` ends
   with `thunk=<name>` when the fault happened inside a graphics thunk call, i.e. in the driver or

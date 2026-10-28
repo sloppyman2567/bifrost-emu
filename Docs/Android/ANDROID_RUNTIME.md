@@ -1704,6 +1704,12 @@ generated forwarder resolved through `re_android.so`. Azur Lane's CRIWARE
 `libcri_ware_unity.so` needed `AAsset_seek`. Window-handle functions
 (`ANativeWindow_*`, `ASurfaceControl_createFromWindow`) keep their thunked or
 wrapped behaviour; `ANativeWindow_toSurface` remains unexported.
+`ASurfaceControl_createFromWindow` had no wrapper at all, so YouTube's `libgoogle3.so` failed to load (Bionic
+binds imports at `dlopen`, whether or not the function is ever called). It is now a wrapper in
+`surface.c`: a Bifrost host window handle has no SurfaceFlinger layer behind it and returns NULL (creation
+failed, which the NDK allows); a framework Surface goes to the image's library, which also returns NULL while
+`ISurfaceComposer.createConnection` is not served. `test_android_adapter_exports.py` checks the built
+libraries.
 
 Unix `sendmsg`/`recvmsg` SCM_RIGHTS now translate guest descriptors into referenced
 host descriptors and register newly received descriptors in the guest table.

@@ -29,6 +29,10 @@ Known blockers, by cause:
   does not bypass or forge either.
 - **Needs Google Play services:** SpongeBob's adult-age path stalls at 73%, and
   Hungry Shark World's Play Games sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
+- **Unexplained:** YouTube 21.42.247 loads its native libraries, creates its Application and attaches its Activity, then
+  ends with `NoClassDefFoundError` for classes that exist in `base.apk`'s `classes2.dex`
+  ([details](CHANGELOG.md#youtube-gets-past-native-library-loading-two-exports-an-app-can-fail-to-load-without-2026-10-28)).
+  The cause is not found. `getDeviceConfigurationInfo` is also unanswered.
 - **Architecture:** Bifrost runs AArch64 only, so an APK that ships only
   `armeabi-v7a` or `x86` libraries (Angry Birds Space) cannot start.
 - **Platform gaps still listed below:** no Settings screens, no host mDNS,

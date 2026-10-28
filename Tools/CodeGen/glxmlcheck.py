@@ -21,6 +21,12 @@ For each GL/GLES-family row we compare:
                a plain '-' policy is an ERROR unless the command is on the
                NESTED_PENDING list below with the reason. (glGetUniformIndices
                had '-' and a WebView ad's call killed Geometry Dash Lite.)
+  2c. CORE-ES — every command of an OpenGL ES 2.0 to 3.2 core feature needs a GLES
+               row: the Android libGLESv2.so exports exactly the GLES rows, and
+               an app library that imports a missing core function fails to
+               load (Bionic binds at dlopen). glTexImage3D and glGetUniformBlockIndex
+               had only GL rows, so YouTube's libgoogle3.so could not load.
+               CORE_ES_EXCEPTIONS lists the commands exported another way.
   3. DYN     — pointer positions whose gl.xml <param len=...> marks a
                dynamically-sized array (COMPSIZE(...) or a sibling param)
                but which ride the default 64 KiB bounce. Reported as WARN;
@@ -66,6 +72,26 @@ NESTED_PENDING = {
 }
 
 
+# Core ES commands with no GLES row, command -> where they come from instead.
+CORE_ES_EXCEPTIONS = {
+    'glReadPixels': 'Tools/Android/build-android-adapters.py appends it to libGLESv2.so; the Android shim '
+                    'resolver routes it to the GL readback implementation',
+}
+
+
+def core_es_commands(path):
+    """Commands of every gles2-api feature (core ES 2.0 through 3.2): name -> feature number."""
+    root = ET.parse(path).getroot()
+    found = {}
+    for feature in root.iter('feature'):
+        if 'gles2' not in (feature.get('api') or '').split(','):
+            continue
+        for require in feature.iter('require'):
+            for command in require.iter('command'):
+                found.setdefault(command.get('name'), feature.get('number'))
+    return found
+
+
 def parse_glxml(path):
     """name -> list of {name, type, ptr, len}."""
     root = ET.parse(path).getroot()
@@ -99,6 +125,7 @@ def main():
     reg = parse_glxml(xml_path)
 
     errors, warns, pending, checked, skipped = [], [], [], 0, []
+    gles_rows = set()
     with open(spec_path) as fh:
         for lineno, line in enumerate(fh, 1):
             line = line.split('#', 1)[0].strip()
@@ -111,6 +138,8 @@ def main():
             ret, policy, size = toks[-3], toks[-2], toks[-1]
             if lib not in ('GL', 'GLES'):
                 continue
+            if lib == 'GLES':
+                gles_rows.add(name)
             if name in DELIBERATE:
                 skipped.append((name, lineno, DELIBERATE[name]))
                 continue
@@ -202,6 +231,14 @@ def main():
                         f"({xp['name']}, len={xp['len']}) is dynamically "
                         f"sized but rides the default bounce")
 
+    # 2c. every core ES command needs a GLES row (the Android libGLESv2 exports exactly those)
+    core = core_es_commands(xml_path)
+    for name, number in sorted(core.items(), key=lambda item: (item[1], item[0])):
+        if name not in gles_rows and name not in CORE_ES_EXCEPTIONS:
+            errors.append(f"{spec_path}: {name}: CORE-ES — a core OpenGL ES {number} command with no GLES row, "
+                          f"so the Android libGLESv2.so does not export it and an app library importing it "
+                          f"fails to load")
+    print(f"checked {len(core)} core ES commands ({len(CORE_ES_EXCEPTIONS)} exported another way)")
     print(f"checked {checked} GL/GLES rows against gl.xml")
     for s in skipped:
         print(f"  SKIP {s[0]} (line {s[1]}): {s[2]}")

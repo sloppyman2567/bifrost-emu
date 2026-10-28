@@ -1940,6 +1940,7 @@ glGetTexParameterIuiv      GLES   iip           -     -              -
 glGetTexParameterfv        GLES   iip           -     -              -     
 glGetTexParameteriv        GLES   iip           -     -              -     
 glGetTransformFeedbackVarying GLES   iiipppp       -     -              -     
+glGetUniformBlockIndex     GLES   ip            -     -              -     
 glGetUniformfv             GLES   iip           -     -              -     
 glGetUniformuiv            GLES   iip           -     -              -     
 glGetVertexAttribIiv       GLES   iip           -     -              -     
@@ -2023,6 +2024,7 @@ glSamplerParameteriv       GLES   iip           -     -              -
 glShaderBinary             GLES   ipipi         -     -              -     
 glTexBuffer                GLES   iii           -     -              -     
 glTexBufferRange           GLES   iiiii         -     -              -     
+glTexImage3D               GLES   iiiiiiiiiz    -     -              TEX3D 
 glTexParameterIiv          GLES   iip           -     -              -     
 glTexParameterIuiv         GLES   iip           -     -              -     
 glTexParameterfv           GLES   iip           -     -              -     

@@ -33,6 +33,7 @@ SPECIAL_SIZES = {
     'glTexImage1D':         ('iiiiiiiz',   'TEXIMAGE1D'),
     'glTexSubImage1D':      ('iiiiiiz',    'TEXSUBIMAGE1D'),
     'glTexSubImage3D':      ('iiiiiiiiiiz','TEXSUBIMAGE3D'),
+    'glTexImage3D':         ('iiiiiiiiiz', 'TEX3D'),   # core ES 3.0; the GL row is hand-written
     'glPolygonStipple':     ('z',          'STIPPLE'),
     'glGetPolygonStipple':  ('z',          'STIPPLE'),
 }
@@ -116,8 +117,12 @@ def classify(name, cmd):
             has_int_scalar = True
     if has_byval_d and has_int_scalar:
         return None, '-', 'mixed int+double by value'
+    # gl.xml gives a NUL-terminated string (`const GLchar *name`) len="COMPSIZE()": that is not a bulk
+    # buffer, the default pointer bounce handles it. (glGetUniformBlockIndex was skipped for this, so the
+    # Android libGLESv2 never exported a core ES 3.0 function.)
     lens = [p.get('len') or '' for p, t in zip(ps, txts)
-            if '*' in t]
+            if '*' in t and not (p.get('len') == 'COMPSIZE()' and (p.find('ptype') is not None
+                                                                    and p.find('ptype').text == 'GLchar'))]
     if any(('width' in l or 'height' in l or 'depth' in l or l == 'COMPSIZE()')
            for l in lens):
         # The seven bulk-pixel paths have hand-derived SizeKinds — emit

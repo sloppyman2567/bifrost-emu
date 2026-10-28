@@ -121,6 +121,15 @@ int name(void *window) { \
 }
 WINDOW_SIZE(ANativeWindow_getWidth)
 WINDOW_SIZE(ANativeWindow_getHeight)
+// An app library that imports this symbol fails to load without it (Bionic binds at dlopen), even if it never
+// creates one. A host window handle has no SurfaceFlinger layer behind it: creation fails, as the NDK allows
+// (NULL). A framework Surface goes to the image's library, which also returns NULL while the compositor
+// connection (ISurfaceComposer.createConnection) is not served.
+void *ASurfaceControl_createFromWindow(void *parent, const char *debug_name) {
+    if (!parent || shim(parent)) return NULL;
+    void *(*call)(void *, const char *) = bifrost_platform_symbol("ASurfaceControl_createFromWindow");
+    return call ? call(parent, debug_name) : NULL;
+}
 int ANativeWindow_setBuffersGeometry(void *window, int w, int h, int format) {
     extern int thunk_ANativeWindow_setBuffersGeometry(void *, int, int, int);
     if (shim(window)) return thunk_ANativeWindow_setBuffersGeometry(window,w,h,format);
