@@ -361,7 +361,9 @@ Limits: a window without a ThreadedRenderer (unaccelerated, or owned by another 
 layers above all surfaces, so such a dialog under a later Activity would cover it. Dialogs and popup menus whose
 ViewRootImpl has a renderer draw on the GPU like Activity windows (2026-10-28: a software canvas throws "Software
 rendering doesn't support hardware bitmaps" for the bitmaps an image loader hands out, which ended YouTube when it opened
-a popup menu). Whether WebView
+a popup menu). A GPU window with `FLAG_DIM_BEHIND` keeps its dim in a display-sized layer created just before its own
+layer, so the dim stacks directly below it (the software dim layer always stacks above every GPU layer and dimmed the
+dialog itself); `APP_WINDOW_GPU` carries `dim=alpha` for such a window. Whether WebView
 takes its GPU (draw functor) path in the game is not yet observed.
 AHardwareBuffer import for TextureView/video is described under the EGL adapter.
 

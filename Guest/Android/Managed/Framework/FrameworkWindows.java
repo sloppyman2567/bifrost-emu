@@ -61,6 +61,10 @@ final class FrameworkWindows {
         // ThreadedRenderer draws into, instead of `bitmap`.
         FrameworkSurfaces.Layer layer;
         Object renderer;
+        // FLAG_DIM_BEHIND for such a window: a layer created just before `layer`, so it stacks directly below it (the
+        // software dim layer always stacks above every surface layer, dimming the window itself).
+        FrameworkSurfaces.Layer dimLayer;
+        int dimLayerAlpha;
         // Windows created on another thread draw on its Looper (drawForeign):
         // `drawing` hands `bitmap` and `pixels` between the threads, and
         // `removed` (guarded by FrameworkWindows) stops host layers from
@@ -425,14 +429,16 @@ final class FrameworkWindows {
                 }
                 continue;
             }
-            if (dim(popup)) restackAbove(stack, index);
+            Object attachInfo = hiddenField(viewRoot, "mAttachInfo");
+            Object renderer = attachInfo == null ? null : hiddenField(attachInfo, "mThreadedRenderer");
+            // A GPU window keeps its dim in its own layer (drawHardware); the software dim layer is for software windows.
+            if (renderer == null) { if (dim(popup)) restackAbove(stack, index); }
+            else hideDim(popup);
             // ViewRootImpl accumulates invalidations in mDirty and clears it
             // only when it draws itself, which it never does without a valid
             // Surface: redraw that region of the retained bitmap, as its
             // software path does (a full window when moved or resized).
             Rect dirty = takeDirty(popup);
-            Object attachInfo = hiddenField(viewRoot, "mAttachInfo");
-            Object renderer = attachInfo == null ? null : hiddenField(attachInfo, "mThreadedRenderer");
             // Any window whose ViewRootImpl made a ThreadedRenderer (FLAG_HARDWARE_ACCELERATED) is drawn on the GPU, as on
             // Android: a software canvas refuses the hardware bitmaps an image loader hands out (YouTube's popup menus).
             if (renderer != null) {
@@ -577,9 +583,20 @@ final class FrameworkWindows {
             int w, int h, boolean dirty) throws Exception {
         if (popup.onHost) { removePopup(popup.id); popup.onHost = false; }
         boolean created = false;
+        boolean dimmed = (popup.attrs.flags & WindowManager.LayoutParams.FLAG_DIM_BEHIND) != 0;
+        int alpha = Math.round(Math.max(0f, Math.min(1f, popup.attrs.dimAmount)) * 255);
+        // The dim changed (or went away): rebuild, so the dim stays directly below the window.
+        if (popup.layer != null && (dimmed != (popup.dimLayer != null) || (dimmed && alpha != popup.dimLayerAlpha))) releaseLayer(popup);
         if (popup.layer == null || popup.layer.width != w || popup.layer.height != h || popup.renderer != renderer) {
             releaseLayer(popup);
             WindowManager.LayoutParams attrs = popup.attrs;
+            if (dimmed) {
+                Rect display = displays.bounds();
+                popup.dimLayer = surfaces.createLayer(display.width(), display.height(), false);
+                surfaces.positionLayer(popup.dimLayer, 0, 0);
+                surfaces.fillLayer(popup.dimLayer, alpha << 24);
+                popup.dimLayerAlpha = alpha;
+            }
             Rect insets = (Rect) hiddenField(attrs, "surfaceInsets");
             boolean opaque = attrs.format == android.graphics.PixelFormat.OPAQUE
                     && insets.left == 0 && insets.top == 0 && insets.right == 0 && insets.bottom == 0;
@@ -598,12 +615,14 @@ final class FrameworkWindows {
             StringBuilder text = new StringBuilder();
             collectText(root, text);
             System.out.println("APP_WINDOW_GPU " + popup.id + " " + popup.frame.toShortString()
-                    + " opaque=" + popup.layer.opaque + (text.length() > 0 ? " text=" + text : ""));
+                    + " opaque=" + popup.layer.opaque + (popup.dimLayer != null ? " dim=" + popup.dimLayerAlpha : "")
+                    + (text.length() > 0 ? " text=" + text : ""));
             popup.announced = true;
         }
     }
 
     private void releaseLayer(Popup popup) {
+        if (popup.dimLayer != null) { surfaces.releaseLayer(popup.dimLayer); popup.dimLayer = null; }
         if (popup.layer == null) return;
         surfaces.releaseLayer(popup.layer);
         popup.layer = null;

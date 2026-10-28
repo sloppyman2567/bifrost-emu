@@ -201,8 +201,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   preparation (released with `bifrost_surface_release`) and its host EGL
   surfaces. Never mirror app `ANativeWindow` references to it, because HWUI
   releases its windows through libnativewindow. A window that has a renderer (dialogs and popup menus
-  included) draws on the GPU, never in software: a software canvas refuses hardware bitmaps. Unaccelerated windows, toasts
-  and dim layers stay software popup layers above every surface. Only a window's
+  included) draws on the GPU, never in software: a software canvas refuses hardware bitmaps. A GPU window's dim is its own layer created just below it (`Popup.dimLayer`), never the software
+  dim layer, which stacks above every GPU layer. Unaccelerated windows and toasts stay software popup layers above every
+  surface. Only a window's
   `ViewRootImpl.mThread` may touch its views: windows owned by other threads
   (Unity's `UnityMain` dialogs) draw, take input and get SurfaceHolder
   callbacks on that Looper (`drawForeign`, `onOwner`, `updateSurfaces`);

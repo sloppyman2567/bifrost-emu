@@ -117,6 +117,14 @@ final class FrameworkSurfaces {
         return new Layer(reader, window, width, height, opaque);
     }
 
+    // A layer of one translucent colour (a dim layer), presented as pixels.
+    void fillLayer(Layer layer, int argb) {
+        int[] pixels = new int[layer.width * layer.height];
+        java.util.Arrays.fill(pixels, argb);
+        int result = present(layer.window, 0, 0, layer.width, layer.height, pixels);
+        if (result != 0 && result != -11) throw new IllegalStateException("window layer fill: " + result);
+    }
+
     void positionLayer(Layer layer, int x, int y) {
         if (layer.x == x && layer.y == y) return;
         int result = geometry(layer.window, x, y, layer.width, layer.height);

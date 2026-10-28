@@ -2886,6 +2886,9 @@ class PackageTests(unittest.TestCase):
         # software layers. All but the leaked window, which dies asynchronously at exit, were removed.
         self.assertEqual(text.count("APP_WINDOW_GPU"), 3, text[-30000:])
         self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[40,60\]\[280,140\] opaque=\w+ text=Popup window")
+        # The dialog dims what is behind it in a layer of its own directly below its window: the software dim layer
+        # stacks above every GPU layer and would dim the dialog itself.
+        self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[\d+,\d+\]\[\d+,\d+\] opaque=\w+ dim=[1-9]\d* text=Bifrost dialog")
         shown = [line.split()[1:] for line in text.splitlines() if line.startswith("APP_POPUP_SHOWN")]
         self.assertEqual(len(shown), 5, text[-30000:])
         self.assertIn("type=2005 title=Toast", text)
