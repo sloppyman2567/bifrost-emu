@@ -44,6 +44,8 @@ private:
     void bind(uint32_t target, uint64_t image, bool renderbuffer);
     // glTexSubImage2D into a texture whose storage is one of these images: the pixels also go to the buffer's memory.
     void capture_upload(CPU& cpu, Memory& mem);
+    void forget_textures(CPU& cpu, Memory& mem);  // glDeleteTextures
+    void forget_bound_texture();                 // glTexImage2D on the bound texture
     // Converts to tightly packed RGBA8 in `out`: one scratch buffer shared by every image, not a copy per image.
     void convert(Buffer& buffer, std::vector<uint8_t>& out);
 

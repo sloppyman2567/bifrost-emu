@@ -170,6 +170,10 @@ std::optional<int64_t> AndroidBufferImages::dispatch(CPU& cpu, const SymbolEntry
     if (name == "glTexSubImage2D" && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0 && cpu.regs[6] == kRgba &&
             cpu.regs[7] == kUnsignedByte)
         capture_upload(cpu, mem);  // the call itself still goes to the host
+    // A texture name that is deleted, or re-specified with glTexImage2D, no longer shares the image's storage; a later
+    // upload into a reused name must not reach the buffer.
+    if (name == "glDeleteTextures") forget_textures(cpu, mem);
+    if (name == "glTexImage2D" && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0) forget_bound_texture();
     bool texture = name == "glEGLImageTargetTexture2DOES";
     if ((texture || name == "glEGLImageTargetRenderbufferStorageOES") && (cpu.regs[1] & kImageTag) == kImageTag) {
         bind(static_cast<uint32_t>(cpu.regs[0]), cpu.regs[1], !texture);
@@ -334,6 +338,33 @@ void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffe
     call(c.image);
 }
 
+void AndroidBufferImages::forget_textures(CPU& cpu, Memory& mem) {
+    if (!host().usable) return;
+    void* context = host().get_current_context();
+    const int64_t count = static_cast<int64_t>(cpu.regs[0]);
+    if (!context || count <= 0 || count > 1024) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    auto names = textures_.find(reinterpret_cast<uint64_t>(context));
+    if (names == textures_.end()) return;
+    try {
+        for (int64_t i = 0; i < count; ++i) names->second.erase(mem.load<uint32_t>(cpu.regs[1] + static_cast<uint64_t>(i) * 4));
+    } catch (const EmuError&) {
+    }
+}
+
+void AndroidBufferImages::forget_bound_texture() {
+    const HostFns& f = host();
+    if (!f.usable) return;
+    void* context = f.get_current_context();
+    if (!context) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    auto names = textures_.find(reinterpret_cast<uint64_t>(context));
+    if (names == textures_.end()) return;
+    int bound = 0;
+    f.get_integer(kTextureBinding2D, &bound);
+    names->second.erase(static_cast<uint32_t>(bound));
+}
+
 // glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels) while the bound texture is the app's
 // view of an RGBA8 image: copy the rectangle from guest memory into the buffer, honouring the unpack row length,
 // alignment and skips. Anything else (a pixel unpack buffer, another format, a read-only mapping) is left to the host.
@@ -354,7 +385,8 @@ void AndroidBufferImages::capture_upload(CPU& cpu, Memory& mem) {
     Buffer& b = found->second;
     const int64_t x = static_cast<int64_t>(cpu.regs[2]), y = static_cast<int64_t>(cpu.regs[3]);
     const int64_t w = static_cast<int64_t>(cpu.regs[4]), h = static_cast<int64_t>(cpu.regs[5]);
-    if (!b.writable || b.format != 1 || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > b.width || y + h > b.height) return;
+    // HWUI uploads the whole bitmap; anything smaller (an atlas update on a reused name) is not a hardware bitmap upload.
+    if (!b.writable || b.format != 1 || x != 0 || y != 0 || w != b.width || h != b.height) return;
     const char* version = reinterpret_cast<const char*>(f.get_string(kVersion));
     const bool es3 = version && !std::strstr(version, "OpenGL ES 2") && !std::strstr(version, "OpenGL ES-C");
     int alignment = 4, row_length = 0, skip_rows = 0, skip_pixels = 0, buffer = 0;
