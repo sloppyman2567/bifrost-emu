@@ -1573,11 +1573,25 @@ public final class ManagedLauncher {
                 int[] location = new int[2];
                 view.getLocationInWindow(location);
                 Configuration configuration = view.getResources().getConfiguration();
+                // A custom drawable of an unknown class: the Bitmap it holds (an app's own image drawable), if any.
+                String bitmap = "";
+                if (drawable != null && !drawable.getClass().getName().startsWith("android.")) {
+                    for (java.lang.reflect.Field field : drawable.getClass().getDeclaredFields()) {
+                        if (field.getType() != android.graphics.Bitmap.class) continue;
+                        try {
+                            field.setAccessible(true);
+                            android.graphics.Bitmap held = (android.graphics.Bitmap) field.get(drawable);
+                            if (held != null) bitmap = " bitmap=" + held.getWidth() + "x" + held.getHeight() + " " + held.getConfig()
+                                    + " density=" + held.getDensity();
+                        } catch (ReflectiveOperationException | RuntimeException unreadable) { bitmap = " bitmap=?"; }
+                        break;
+                    }
+                }
                 System.out.println("APP_VIEW_DUMP " + view.getClass().getSimpleName() + " id=" + id + " " + view.getWidth() + "x"
                         + view.getHeight() + "@" + location[0] + "," + location[1] + " scale=" + view.getScaleX() + "," + view.getScaleY()
                         + " drawable=" + (drawable == null ? "null" : drawable.getClass().getSimpleName() + " "
                         + drawable.getIntrinsicWidth() + "x" + drawable.getIntrinsicHeight() + " bounds=" + drawable.getBounds().flattenToString())
-                        + " scaleType=" + ((android.widget.ImageView) view).getScaleType() + " dpi=" + configuration.densityDpi
+                        + bitmap + " scaleType=" + ((android.widget.ImageView) view).getScaleType() + " dpi=" + configuration.densityDpi
                         + " dm=" + view.getResources().getDisplayMetrics().densityDpi + " w=" + configuration.screenWidthDp + "dp sw="
                         + configuration.smallestScreenWidthDp + "dp");
                 lines++;
