@@ -2824,6 +2824,22 @@ X11 without a 32-bit ARGB visual, translucent edges blend on black; a parent
 that never redraws (no rendering SurfaceView) can keep stale dialog pixels
 after removal.
 
+### SurfaceView layers are clipped to what shows (2026-10-28)
+
+YouTube's Shorts pager scrolled vertical videos through a landscape window: each video's SurfaceView became a host
+layer at its full size, so videos bled over the UI and each other (a Roblox clip and a marble-machine clip drawn
+across the page), and a video scaled to the window's width (a 9:16 clip is about 4400 px tall at 2460 px wide) was
+refused by the 4096 px limit of the geometry call, which ended the process with `IllegalStateException: Surface
+geometry: -22`. `FrameworkSurfaces` now takes each SurfaceView's visible rectangle (`getGlobalVisibleRect`: clipped by
+every ancestor and the window, as SurfaceView's own window crop is) and, for a video layer (frames through the
+ImageReader), converts and presents only that part at its offset; a view scrolled out shows a transparent pixel.
+Conversion cost follows what shows, and the 4096 px limit applies to the visible region, which a window bounds. The
+geometry call accepts up to 16384 like the other host surface limits. `APP_SURFACE` carries `clip=l,t,r,b` when the
+view is clipped (`test_managed_view_window_and_surface_lifecycle`). Not done: a SurfaceView that renders with a native
+window (GL, as a game does) is positioned whole and not cropped, since that needs a viewport source crop of its EGL
+buffer; and a paused video that is scrolled keeps its last frame stretched until the next frame arrives. Video frames
+are still converted from YUV to ARGB by the CPU in Java, which is the cost behind YouTube's stalls on large videos.
+
 ### Window shape (2026-10-28)
 
 Roblox opened as a near-square 1440x1384 window and stayed that way. Its splash Activity declares no orientation, so

@@ -213,7 +213,7 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 try {
                     int64_t record[5]; emu.mem().read(cpu.regs[1], record, sizeof(record));
                     if (record[1] < -65536 || record[1] > 65536 || record[2] < -65536 || record[2] > 65536 ||
-                            record[3] <= 0 || record[3] > 4096 || record[4] <= 0 || record[4] > 4096) {
+                            record[3] <= 0 || record[3] > 16384 || record[4] <= 0 || record[4] > 16384) {
                         ret_host(-EINVAL); return 0;
                     }
                     ret_host(manager.surface_geometry(manager.surface_handle(record[0]),

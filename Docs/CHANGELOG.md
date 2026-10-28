@@ -10,6 +10,13 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### SurfaceView layers are clipped; large surfaces no longer end the app (2026-10-28)
+
+- Scrolling YouTube's Shorts drew whole videos over the UI and killed the process (`Surface geometry: -22`, a layer
+  taller than 4096 px). A video layer is now clipped to the part of its view that shows and only that part is
+  converted and presented; the geometry call takes sizes up to 16384. GL SurfaceViews are still positioned whole. See
+  [the runtime guide](Android/ANDROID_RUNTIME.md).
+
 ### Battery follows the host; usage and network stats services (2026-10-28)
 
 - Battery: the guest now sees the host's `/sys/class/power_supply` (read-only), and `FrameworkBattery` reports the

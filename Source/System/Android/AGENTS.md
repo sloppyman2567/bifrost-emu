@@ -111,6 +111,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `netstats` (`FrameworkUsageStats`, `FrameworkNetworkStats`) keep no history or traffic: empty results, the services'
   permission gates, never invented counters. `batteryFromSupplies` and `usageAndNetworkStats` in `ManagedServiceBatch`
   cover them.
+- A video SurfaceView layer is clipped to its view's visible rectangle (`FrameworkSurfaces.visibleClip`): convert and
+  present only that part, show a transparent pixel when none shows, and keep host limits on the visible region, never on
+  the view's full size. `test_managed_view_window_and_surface_lifecycle` checks the clip.
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the

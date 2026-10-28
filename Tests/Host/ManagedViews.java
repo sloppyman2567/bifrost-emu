@@ -58,7 +58,10 @@ public final class ManagedViews extends Activity {
             }
         });
         // Below the button in drawing order: the button stays over the surface.
-        content.addView(surface, 0, new FrameLayout.LayoutParams(400, 300));
+        // Scrolled 100 px above the window: only its lower 200 rows show (the host layer is clipped to them).
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(400, 300);
+        params.topMargin = -100;
+        content.addView(surface, 0, params);
         main.postDelayed(() -> surface.setVisibility(View.INVISIBLE), 800);
         main.postDelayed(() -> surface.setVisibility(View.VISIBLE), 1600);
         main.postDelayed(() -> content.removeView(surface), 2400);

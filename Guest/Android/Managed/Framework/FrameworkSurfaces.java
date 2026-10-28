@@ -48,6 +48,10 @@ final class FrameworkSurfaces {
         final ImageReader reader;
         int width, height, format;  // guarded by FrameworkSurfaces
         int x = Integer.MIN_VALUE, y = Integer.MIN_VALUE;
+        // The part of the view that shows, in view pixels (getGlobalVisibleRect: clipped by every ancestor and the
+        // window); empty when scrolled out. Frames convert and present only this part.
+        int clipLeft, clipTop, clipRight, clipBottom;
+        boolean cpu;  // frames arrive through the ImageReader (a video), not a native window
         boolean closed;
         Entry(SurfaceView view, Object owner, long window, ImageReader reader) {
             this.view = view; this.owner = owner; this.window = window; this.reader = reader;
@@ -179,12 +183,14 @@ final class FrameworkSurfaces {
             int format = REQUESTED_FORMAT.getInt(view);
             int width = view.getWidth(), height = view.getHeight();
             int[] location = new int[2]; view.getLocationInWindow(location);
+            int[] clip = visibleClip(view, location, width, height);
             Entry entry;
             boolean changed;
             synchronized (this) {
                 entry = entries.get(view);
                 changed = entry == null || entry.width != width || entry.height != height || entry.format != format;
-                if (!changed && entry.x == location[0] && entry.y == location[1])
+                if (!changed && entry.x == location[0] && entry.y == location[1] && entry.clipLeft == clip[0]
+                        && entry.clipTop == clip[1] && entry.clipRight == clip[2] && entry.clipBottom == clip[3])
                     continue;
             }
             ((android.graphics.Rect) SURFACE_FRAME.get(view)).set(0, 0, width, height);
@@ -219,7 +225,8 @@ final class FrameworkSurfaces {
                 entry.height = height;
                 entry.format = format;
                 entry.x = location[0]; entry.y = location[1];
-                int positioned = geometry(entry.window, entry.x, entry.y, width, height);
+                entry.clipLeft = clip[0]; entry.clipTop = clip[1]; entry.clipRight = clip[2]; entry.clipBottom = clip[3];
+                int positioned = entry.cpu ? placeVisible(entry) : geometry(entry.window, entry.x, entry.y, width, height);
                 if (positioned != 0) throw new IllegalStateException("Surface geometry: " + positioned);
             }
             SurfaceHolder holder = view.getHolder();
@@ -231,17 +238,40 @@ final class FrameworkSurfaces {
             // SurfaceView's hole (SurfaceView.performDrawFinished).
             if (created && !DRAW_FINISHED.getBoolean(view)) DRAW_FINISHED_METHOD.invoke(view);
             System.out.println("APP_SURFACE " + view.getClass().getName() + " " + width + "x" + height
-                    + " at " + location[0] + "," + location[1] + " format=" + format);
+                    + " at " + location[0] + "," + location[1] + " format=" + format
+                    + (clip[0] == 0 && clip[1] == 0 && clip[2] == width && clip[3] == height
+                            ? "" : " clip=" + clip[0] + "," + clip[1] + "," + clip[2] + "," + clip[3]));
         }
+    }
+
+    // The visible part of a SurfaceView in its own pixels: all of it when nothing clips it, none when it is scrolled out
+    // (SurfaceView hands SurfaceFlinger the same clip as the window crop).
+    private static int[] visibleClip(View view, int[] location, int width, int height) {
+        Rect visible = new Rect();
+        if (!view.getGlobalVisibleRect(visible)) return new int[4];
+        int left = Math.max(0, visible.left - location[0]), top = Math.max(0, visible.top - location[1]);
+        int right = Math.min(width, visible.right - location[0]), bottom = Math.min(height, visible.bottom - location[1]);
+        return right <= left || bottom <= top ? new int[4] : new int[] {left, top, right, bottom};
+    }
+
+    // A video layer holds the last visible part it was given, at its place; nothing visible shows a transparent pixel.
+    private int placeVisible(Entry entry) {
+        int w = entry.clipRight - entry.clipLeft, h = entry.clipBottom - entry.clipTop;
+        if (w <= 0 || h <= 0) return present(entry.window, 0, 0, 1, 1, new int[1]);
+        return geometry(entry.window, entry.x + entry.clipLeft, entry.y + entry.clipTop, w, h);
     }
 
     private static int clamp(double value) { return Math.max(0, Math.min(255, (int)Math.round(value))); }
 
     // CpuConsumer has already waited for the producer's acquire fence before
     // exposing planes. Closing the Image returns its buffer even on failure.
-    private static int[] pixels(Image image, int width, int height) {
+    // Only the visible region [left,right) x [top,bottom) of the width x height layer is converted, so a video far
+    // larger than the window (a Short scaled to fit a wide window) costs what shows.
+    private static int[] pixels(Image image, int width, int height, int left, int top, int right, int bottom) {
         Rect crop = image.getCropRect();
-        if (crop.width() <= 0 || crop.height() <= 0 || width <= 0 || height <= 0 || width > 4096 || height > 4096)
+        int regionWidth = right - left, regionHeight = bottom - top;
+        if (crop.width() <= 0 || crop.height() <= 0 || width <= 0 || height <= 0 || regionWidth <= 0 || regionHeight <= 0
+                || regionWidth > 4096 || regionHeight > 4096)
             throw new IllegalArgumentException("Surface image dimensions");
         Image.Plane[] planes = image.getPlanes();
         if (image.getFormat() != ImageFormat.YUV_420_888 || planes.length != 3)
@@ -257,8 +287,8 @@ final class FrameworkSurfaces {
             throw new UnsupportedOperationException("Surface color standard: " + standard);
         boolean full = ((dataspace >> 27) & 7) == 1;
         ByteBuffer[] bytes = {planes[0].getBuffer(), planes[1].getBuffer(), planes[2].getBuffer()};
-        int[] out = new int[width * height];
-        for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
+        int[] out = new int[regionWidth * regionHeight];
+        for (int y = top; y < bottom; y++) for (int x = left; x < right; x++) {
             int sx = crop.left + (int)((long)x * crop.width() / width);
             int sy = crop.top + (int)((long)y * crop.height() / height);
             int yy = bytes[0].get(bytes[0].position() + sy * planes[0].getRowStride() + sx * planes[0].getPixelStride()) & 255;
@@ -270,7 +300,7 @@ final class FrameworkSurfaces {
             int b = clamp(luminance + 2 * (1 - kb) * cb);
             int g = clamp(luminance - 2 * kb * (1 - kb) / (1 - kr - kb) * cb
                     - 2 * kr * (1 - kr) / (1 - kr - kb) * cr);
-            out[y * width + x] = 0xff000000 | (r << 16) | (g << 8) | b;
+            out[(y - top) * regionWidth + (x - left)] = 0xff000000 | (r << 16) | (g << 8) | b;
         }
         return out;
     }
@@ -281,8 +311,11 @@ final class FrameworkSurfaces {
         if (entry.closed) return;
         try (Image image = entry.reader.acquireLatestImage()) {
             if (image == null) return;
-            int result = present(entry.window, entry.x, entry.y, entry.width, entry.height,
-                                 pixels(image, entry.width, entry.height));
+            entry.cpu = true;
+            int w = entry.clipRight - entry.clipLeft, h = entry.clipBottom - entry.clipTop;
+            if (w <= 0 || h <= 0) return;  // scrolled out: the layer shows nothing
+            int result = present(entry.window, entry.x + entry.clipLeft, entry.y + entry.clipTop, w, h,
+                                 pixels(image, entry.width, entry.height, entry.clipLeft, entry.clipTop, entry.clipRight, entry.clipBottom));
             if (result != 0 && result != -11) throw new IllegalStateException("Surface presentation: " + result);
         }
     }

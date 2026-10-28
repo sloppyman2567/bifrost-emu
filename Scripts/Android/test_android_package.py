@@ -2915,6 +2915,8 @@ class PackageTests(unittest.TestCase):
         for marker in markers:
             position = text.index(marker, position) + len(marker)
         self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[0,0\]\[\d+,\d+\] opaque=\w+ text=Overlay button")
+        # The SurfaceView sits 100 px above the window: its host layer is clipped to the visible 200 rows.
+        self.assertRegex(text, r"APP_SURFACE android.view.SurfaceView 400x300 at \d+,-100 format=\d+ clip=0,100,400,300")
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_CREATED"), 2)
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
         # A legacy view animation ends: the window's draw time advances with each draw.
