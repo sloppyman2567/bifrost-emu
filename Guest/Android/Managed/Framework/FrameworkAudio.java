@@ -30,6 +30,8 @@ final class FrameworkAudio implements FrameworkServices.Call {
         getStreamMaxVolume,
         getStreamMinVolume,
         getMode,
+        registerModeDispatcher,
+        unregisterModeDispatcher,
         getRingerModeExternal,
         isVolumeFixed,
         isSpeakerphoneOn,
@@ -233,6 +235,27 @@ final class FrameworkAudio implements FrameworkServices.Call {
     // names one. No playback configurations are reported and the route never
     // changes, so addLoudnessCodecInfo's initial update is the only one.
     private final Map<IBinder, IInterface> loudnessDispatchers = new HashMap<>();
+    private final Map<IBinder, IInterface> modeDispatchers = new HashMap<>();
+
+    // RemoteCallbackList.register/unregister: a dispatcher is kept once, until it is unregistered or its process dies.
+    private static void register(Map<IBinder, IInterface> dispatchers, Object callback) {
+        IInterface dispatcher = (IInterface) Objects.requireNonNull(callback, "dispatcher");
+        IBinder token = dispatcher.asBinder();
+        synchronized (dispatchers) {
+            if (dispatchers.containsKey(token)) return;
+            try {
+                token.linkToDeath(() -> {
+                    synchronized (dispatchers) { dispatchers.remove(token); }
+                }, 0);
+            } catch (RemoteException dead) { return; }
+            dispatchers.put(token, dispatcher);
+        }
+    }
+
+    private static void unregister(Map<IBinder, IInterface> dispatchers, Object callback) {
+        IBinder token = ((IInterface) Objects.requireNonNull(callback, "dispatcher")).asBinder();
+        synchronized (dispatchers) { dispatchers.remove(token); }
+    }
     private final Map<Integer, Set<Object>> loudnessSessions = new HashMap<>();
     private ExecutorService loudnessUpdates;
 
@@ -342,25 +365,12 @@ final class FrameworkAudio implements FrameworkServices.Call {
                 // Return a fresh snapshot, as the real Binder reply does.
                 return Class.forName("android.media.AudioRoutesInfo").getConstructor().newInstance();
             }
-            case registerLoudnessCodecUpdatesDispatcher: {
-                IInterface dispatcher = (IInterface) Objects.requireNonNull(a[0], "dispatcher");
-                IBinder token = dispatcher.asBinder();
-                synchronized (loudnessDispatchers) {
-                    if (loudnessDispatchers.containsKey(token)) return null;
-                    try {
-                        token.linkToDeath(() -> {
-                            synchronized (loudnessDispatchers) { loudnessDispatchers.remove(token); }
-                        }, 0);
-                    } catch (RemoteException dead) { return null; }
-                    loudnessDispatchers.put(token, dispatcher);
-                }
-                return null;
-            }
-            case unregisterLoudnessCodecUpdatesDispatcher:
-                synchronized (loudnessDispatchers) {
-                    loudnessDispatchers.remove(((IInterface) Objects.requireNonNull(a[0], "dispatcher")).asBinder());
-                }
-                return null;
+            case registerLoudnessCodecUpdatesDispatcher: register(loudnessDispatchers, a[0]); return null;
+            case unregisterLoudnessCodecUpdatesDispatcher: unregister(loudnessDispatchers, a[0]); return null;
+            // AudioService keeps the listeners in a RemoteCallbackList and calls them when the mode changes. The
+            // mode is always MODE_NORMAL here (getMode), so nothing is ever dispatched.
+            case registerModeDispatcher: register(modeDispatchers, a[0]); return null;
+            case unregisterModeDispatcher: unregister(modeDispatchers, a[0]); return null;
             case startLoudnessCodecUpdates:
                 synchronized (loudnessSessions) { loudnessSessions.putIfAbsent((Integer) a[0], new HashSet<>()); }
                 return null;

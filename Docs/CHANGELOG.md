@@ -10,6 +10,28 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### MediaSession: an app can create and publish its own sessions (2026-10-28)
+
+- YouTube's home screen drew, and a tap then ended the session: the app creates an `android.media.session.MediaSession`
+  and `media_session.createSession` was unsupported, so `new MediaSession(...)` threw and nothing caught it (exit 1). The
+  `media_session` stand-in only accepted media keys. It now keeps real sessions (`FrameworkMediaSessions`, modelled on
+  `MediaSessionRecord` and its `SessionStub`/`ControllerStub`, read from android-15.0.0_r1): an `ISession` and its
+  `ISessionController` per session, the state the app publishes, controller callbacks delivered in order on one thread
+  as the platform's handler does, a playing position that moves on with the clock, and a controller's transport
+  commands, `sendCommand` and media buttons forwarded to the app's `ISessionCallback`. See
+  [the service table](Android/ANDROID_RUNTIME.md).
+- The next call YouTube made after the session was created, `audio.registerModeDispatcher` (`AudioManager.addOnModeChangedListener`),
+  was also unsupported and was also uncaught. It is accepted like the loudness dispatcher (one shared register/unregister
+  helper now): a listener is kept until removed or its process dies, and never called, because the audio mode is always
+  `MODE_NORMAL` here.
+- Checked in `ManagedServiceBatch` (660 checks, JIT and interpreter) through the real `MediaSession`, `MediaController`
+  and `VolumeProvider`: metadata, paused and playing state with the moving position, a two-item queue and its title,
+  extras and rating type, local and remote volume info, six commands reaching the session callback in order (play,
+  skip, seek, a custom action, a rating, a media button), the global-priority flag refused, destruction telling a
+  controller (and one registered later), and the 100-session-per-uid limit (checked against `MediaSessionService.createSessionInternal`) with a slot freed by `release()`. Not checked: YouTube
+  itself with the fix (the tap that crashed it), playback, other packages' sessions, media key routing to a session,
+  and the platform's content-URI grant check on metadata art (not applied: nothing is shared across apps here).
+
 ### YouTube gets past native library loading; two exports an app can fail to load without (2026-10-28)
 
 - Tried the YouTube 21.42.247 APKMirror bundle from Downloads (`asgard.py install` accepts it: 35 signed APKs, 37

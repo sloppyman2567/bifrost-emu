@@ -429,6 +429,113 @@ public final class ManagedServiceBatch {
         for (File file : directory.listFiles()) file.delete();
         directory.delete();
     }
+    // AudioManager.addOnModeChangedListener (registerModeDispatcher): accepted, removable and re-addable; the mode is
+    // always MODE_NORMAL, so the listener is never called.
+    private static void audioMode(Context context) {
+        android.media.AudioManager audio = context.getSystemService(android.media.AudioManager.class);
+        android.media.AudioManager.OnModeChangedListener listener = mode -> { throw new AssertionError("the audio mode never changes"); };
+        audio.addOnModeChangedListener(Runnable::run, listener);
+        check(audio.getMode() == android.media.AudioManager.MODE_NORMAL, "audio mode");
+        audio.removeOnModeChangedListener(listener);
+        audio.addOnModeChangedListener(Runnable::run, listener);
+        audio.removeOnModeChangedListener(listener);
+    }
+    // The media_session service through the real MediaSession, MediaController and VolumeProvider: the state an app
+    // publishes reaches its controller (and the controller's callbacks), a controller's transport commands reach the
+    // app's callback, the volume model, queue, destruction and the per-package session limit.
+    private static void mediaSessions(Context context) throws Exception {
+        android.os.HandlerThread thread = new android.os.HandlerThread("media-session-test");
+        thread.start();
+        android.os.Handler handler = new android.os.Handler(thread.getLooper());
+        android.media.session.MediaSession session = new android.media.session.MediaSession(context, "bifrost-test");
+        android.media.session.MediaController controller = session.getController();
+        check(controller.getPackageName().equals(NAME) && "bifrost-test".equals(controller.getTag()),
+                "controller identity: " + controller.getPackageName() + "/" + controller.getTag());
+        CountDownLatch metadataChanged = new CountDownLatch(1), stateChanged = new CountDownLatch(1),
+                queueChanged = new CountDownLatch(1), destroyed = new CountDownLatch(1), volumeChanged = new CountDownLatch(1);
+        controller.registerCallback(new android.media.session.MediaController.Callback() {
+            @Override public void onMetadataChanged(android.media.MediaMetadata metadata) { metadataChanged.countDown(); }
+            @Override public void onPlaybackStateChanged(android.media.session.PlaybackState state) { stateChanged.countDown(); }
+            @Override public void onQueueChanged(List<android.media.session.MediaSession.QueueItem> queue) { queueChanged.countDown(); }
+            @Override public void onAudioInfoChanged(android.media.session.MediaController.PlaybackInfo info) { volumeChanged.countDown(); }
+            @Override public void onSessionDestroyed() { destroyed.countDown(); }
+        }, handler);
+        // Transport commands and media buttons reach the session's callback.
+        List<String> received = java.util.Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch commands = new CountDownLatch(6);
+        session.setCallback(new android.media.session.MediaSession.Callback() {
+            @Override public void onPlay() { received.add("play"); commands.countDown(); }
+            @Override public void onSkipToQueueItem(long id) { received.add("skip " + id); commands.countDown(); }
+            @Override public void onSeekTo(long position) { received.add("seek " + position); commands.countDown(); }
+            @Override public void onCustomAction(String action, Bundle extras) {
+                received.add("custom " + action + " " + extras.getInt("n")); commands.countDown(); }
+            @Override public boolean onMediaButtonEvent(Intent button) {
+                received.add("button " + ((android.view.KeyEvent) button.getParcelableExtra(Intent.EXTRA_KEY_EVENT)).getKeyCode());
+                commands.countDown(); return true; }
+            @Override public void onSetRating(android.media.Rating rating) { received.add("rating " + rating.getStarRating()); commands.countDown(); }
+        }, handler);
+        session.setActive(true);
+        session.setMetadata(new android.media.MediaMetadata.Builder().putString(android.media.MediaMetadata.METADATA_KEY_TITLE, "Song").build());
+        check(metadataChanged.await(5, TimeUnit.SECONDS) && "Song".equals(controller.getMetadata().getString(android.media.MediaMetadata.METADATA_KEY_TITLE)),
+                "metadata did not reach the controller");
+        session.setPlaybackState(new android.media.session.PlaybackState.Builder()
+                .setState(android.media.session.PlaybackState.STATE_PAUSED, 1000, 1f).build());
+        check(stateChanged.await(5, TimeUnit.SECONDS) && controller.getPlaybackState().getState() == android.media.session.PlaybackState.STATE_PAUSED
+                && controller.getPlaybackState().getPosition() == 1000, "a paused state keeps its position");
+        session.setPlaybackState(new android.media.session.PlaybackState.Builder()
+                .setState(android.media.session.PlaybackState.STATE_PLAYING, 1000, 1f, android.os.SystemClock.elapsedRealtime()).build());
+        Thread.sleep(300);
+        long moved = controller.getPlaybackState().getPosition();
+        check(moved >= 1250 && moved < 3000, "a playing position moves on with the clock: " + moved);
+        List<android.media.session.MediaSession.QueueItem> queue = new ArrayList<>();
+        for (int i = 0; i < 2; i++) queue.add(new android.media.session.MediaSession.QueueItem(
+                new android.media.MediaDescription.Builder().setMediaId("m" + i).setTitle("T" + i).build(), 7 + i));
+        session.setQueue(queue);
+        session.setQueueTitle("Up next");
+        check(queueChanged.await(5, TimeUnit.SECONDS) && controller.getQueue().size() == 2
+                && controller.getQueue().get(1).getQueueId() == 8 && "Up next".contentEquals(controller.getQueueTitle()), "the queue did not round trip");
+        Bundle extras = new Bundle(); extras.putString("k", "v");
+        session.setExtras(extras);
+        session.setRatingType(android.media.Rating.RATING_5_STARS);
+        check("v".equals(controller.getExtras().getString("k")) && controller.getRatingType() == android.media.Rating.RATING_5_STARS, "extras and rating type");
+        // Volume: local playback follows the system stream, remote playback is the app's own.
+        android.media.session.MediaController.PlaybackInfo local = controller.getPlaybackInfo();
+        check(local.getPlaybackType() == android.media.session.MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL && local.getMaxVolume() > 0,
+                "local playback info");
+        session.setPlaybackToRemote(new android.media.VolumeProvider(android.media.VolumeProvider.VOLUME_CONTROL_ABSOLUTE, 20, 5) {});
+        check(volumeChanged.await(5, TimeUnit.SECONDS) && controller.getPlaybackInfo().getPlaybackType()
+                == android.media.session.MediaController.PlaybackInfo.PLAYBACK_TYPE_REMOTE && controller.getPlaybackInfo().getMaxVolume() == 20
+                && controller.getPlaybackInfo().getCurrentVolume() == 5, "remote playback info");
+        // A controller's commands reach the session callback, in order, with the right arguments.
+        android.media.session.MediaController.TransportControls controls = controller.getTransportControls();
+        controls.play(); controls.skipToQueueItem(8); controls.seekTo(4000);
+        Bundle action = new Bundle(); action.putInt("n", 3);
+        controls.sendCustomAction("boost", action);
+        controls.setRating(android.media.Rating.newStarRating(android.media.Rating.RATING_5_STARS, 4f));
+        check(controller.dispatchMediaButtonEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE)),
+                "a media button the session accepts");
+        check(commands.await(5, TimeUnit.SECONDS) && received.equals(Arrays.asList("play", "skip 8", "seek 4000", "custom boost 3", "rating 4.0", "button 127")),
+                "commands reached the session callback: " + received);
+        // Platform limits.
+        denied(() -> session.setFlags(1 << 16));  // FLAG_EXCLUSIVE_GLOBAL_PRIORITY needs MODIFY_PHONE_STATE
+        // Destruction tells the controllers, and a controller that registers later is told at once.
+        session.release();
+        check(destroyed.await(5, TimeUnit.SECONDS), "the controller was not told of the destroyed session");
+        CountDownLatch late = new CountDownLatch(1);
+        new android.media.session.MediaController(context, session.getSessionToken()).registerCallback(
+                new android.media.session.MediaController.Callback() { @Override public void onSessionDestroyed() { late.countDown(); } }, handler);
+        check(late.await(5, TimeUnit.SECONDS), "a controller registered on a destroyed session was not told");
+        // One package may hold 100 sessions; releasing one frees a slot.
+        List<android.media.session.MediaSession> many = new ArrayList<>();
+        for (int i = 0; i < 100; i++) many.add(new android.media.session.MediaSession(context, "many-" + i));
+        try { new android.media.session.MediaSession(context, "one-too-many"); throw new AssertionError("session limit not enforced"); }
+        catch (RuntimeException expected) { checks++; }
+        many.get(0).release();
+        new android.media.session.MediaSession(context, "after-release").release();
+        for (android.media.session.MediaSession each : many) each.release();
+        thread.quitSafely();
+        System.out.println("MANAGED_MEDIA_SESSIONS_OK");
+    }
     // ActivityManager.getDeviceConfigurationInfo (ATMS.getDeviceConfigurationInfo): a touchscreen device with no
     // physical keyboard or navigation, hence no input features, and the property ro.opengles.version (ES 3.0).
     private static void deviceConfiguration(Context context) {
@@ -1430,6 +1537,8 @@ public final class ManagedServiceBatch {
         receivers(context);
         sharedLibraries();
         deviceConfiguration(context);
+        audioMode(context);
+        mediaSessions(context);
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
