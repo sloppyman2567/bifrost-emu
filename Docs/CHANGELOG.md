@@ -10,6 +10,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Hardware bitmaps keep their pixels: images load (2026-10-28)
+
+- No image loaded in YouTube (thumbnails and avatars were gray boxes) and nothing was logged. Image loaders produce
+  `Bitmap.Config.HARDWARE` bitmaps; HWUI uploads their pixels into the bitmap's gralloc buffer through an EGL image, and
+  this runtime's image was a read-only snapshot, so the pixels went to a host texture only and the bitmap read back as
+  zeros. The upload is now also copied into the buffer. `ManagedHardware` copies a bitmap to `HARDWARE` and back and checks
+  the pixel. See [the runtime guide](Android/ANDROID_RUNTIME.md).
+
 ### Dialogs and popup menus draw on the GPU (2026-10-28)
 
 - YouTube exited when a popup menu drew an image: `IllegalArgumentException: Software rendering doesn't support hardware

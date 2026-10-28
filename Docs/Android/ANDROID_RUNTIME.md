@@ -1763,7 +1763,18 @@ limited range unless the dataspace says full. FP16, 1010102, R8 and protected
 buffers are refused (`EGL_BAD_PARAMETER`, reason under `BIFROST_THUNK_TRACE`).
 `glEGLImageTargetRenderbufferStorageOES` uses the same host image. The image is a copy refreshed at
 bind time, not a live alias: a consumer that samples a rebound buffer
-without rebinding it sees the previous upload. Symbol coverage is not
+without rebinding it sees the previous upload.
+
+Writes into the image reach the buffer for one case: HWUI's hardware-bitmap upload (`EGLUploader`: bind the
+buffer's image to a texture, `glTexSubImage2D` the bitmap's pixels, destroy the image). Before this the pixels only
+went to the host texture, so every `Bitmap.Config.HARDWARE` bitmap (what Glide and other image loaders produce) read
+back as zeros and YouTube's thumbnails and avatars were empty boxes, with nothing in the log. The thunk now also
+copies a `glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels)` into the buffer's memory
+(`AndroidBufferImages::capture_upload`) when the bound texture is the app's view of an RGBA8 image, honouring the unpack
+alignment, row length and skips; the call still goes to the host too. The buffer is mapped read/write when its memfd
+allows. Not covered: other formats (F16, 565), a pixel unpack buffer, other ways a GPU writes into such a buffer
+(rendering into a framebuffer attached to the image, `glCopyTexSubImage2D`), and `ManagedHardware` checks only a solid
+`ARGB_8888` bitmap copied to `HARDWARE` and back. Symbol coverage is not
 EGL conformance. The host-GPU `ActivityProbe$EglProbe` passes registration,
 duplicate/invalid-argument errors, proc-address identity, platform selection,
 clock and terminate/reinitialize checks (`ANDROID_EGL_CONTRACT_OK`). Generated

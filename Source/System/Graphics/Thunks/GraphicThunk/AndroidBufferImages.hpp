@@ -34,6 +34,7 @@ private:
     };
     struct Buffer {
         const uint8_t* mapping = nullptr;
+        uint8_t* writable = nullptr;  // the same mapping when the buffer could be mapped read/write
         size_t size = 0;
         int32_t width = 0, height = 0, stride = 0, format = 0;
         std::unordered_map<uint64_t, ContextImage> contexts;
@@ -41,10 +42,14 @@ private:
     uint64_t create(Memory& mem, uint64_t buffer, uint64_t attribs, bool wide);
     bool destroy(uint64_t image);
     void bind(uint32_t target, uint64_t image, bool renderbuffer);
+    // glTexSubImage2D into a texture whose storage is one of these images: the pixels also go to the buffer's memory.
+    void capture_upload(CPU& cpu, Memory& mem);
     // Converts to tightly packed RGBA8 in `out`: one scratch buffer shared by every image, not a copy per image.
     void convert(Buffer& buffer, std::vector<uint8_t>& out);
 
     std::mutex mu_;
+    // Per context, the texture names (as the app sees them) bound to an image, to find the buffer an upload targets.
+    std::unordered_map<uint64_t, std::unordered_map<uint32_t, uint64_t>> textures_;
     std::unordered_map<uint64_t, Buffer> buffers_;  // keyed by guest image handle
     std::vector<uint8_t> scratch_;
     // Textures of images destroyed while another context (or none) was current: they can only be deleted

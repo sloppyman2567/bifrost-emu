@@ -3014,6 +3014,11 @@ class PackageTests(unittest.TestCase):
         # ImageWriter's YUV frames are JFIF: full-range BT.601.
         for actual, expected in zip(map(int, yuv.groups()), (238, 14, 14)):
             self.assertLessEqual(abs(actual - expected), 3, yuv.group(0))
+        # A HARDWARE bitmap drawn by a GPU canvas keeps its pixels (image loaders produce these).
+        hardware = re.search(r"MANAGED_HARDWARE_TEXTURE_HWBITMAP (\d+),(\d+),(\d+)", text)
+        self.assertTrue(hardware, text[-30000:])
+        for actual, expected in zip(map(int, hardware.groups()), (30, 160, 220)):
+            self.assertLessEqual(abs(actual - expected), 3, hardware.group(0))
 
     def test_managed_play_services_available(self):
         # Google's own client check accepts the provisioned microG packages:

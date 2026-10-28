@@ -119,7 +119,19 @@ public final class ManagedHardware extends Activity {
         }
         if (textureStep == 2) {
             System.out.println("MANAGED_HARDWARE_TEXTURE_YUV " + rgb);
+            // A HARDWARE bitmap (an AHardwareBuffer, as image loaders such as Glide produce) read back through HWUI's
+            // GL import: YouTube's thumbnails are such bitmaps, and they showed as empty boxes.
+            android.graphics.Bitmap source = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888);
+            source.eraseColor(Color.rgb(30, 160, 220));
+            android.graphics.Bitmap hardware = source.copy(android.graphics.Bitmap.Config.HARDWARE, false);
+            System.out.println("MANAGED_HARDWARE_BITMAP created=" + (hardware != null)
+                    + (hardware == null ? "" : " config=" + hardware.getConfig()));
+            android.graphics.Bitmap back = hardware == null ? null : hardware.copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+            int value = back == null ? 0 : back.getPixel(32, 32);
+            System.out.println("MANAGED_HARDWARE_TEXTURE_HWBITMAP " + Color.red(value) + "," + Color.green(value) + "," + Color.blue(value));
             finish();
+            return;
         }
+
     }
 }

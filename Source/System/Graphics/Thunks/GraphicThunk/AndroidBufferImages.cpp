@@ -165,6 +165,11 @@ std::optional<int64_t> AndroidBufferImages::dispatch(CPU& cpu, const SymbolEntry
         cpu.regs[0] = destroy(cpu.regs[1]);  // EGL_FALSE (EGL_BAD_PARAMETER) when unknown
         return 0;
     }
+    // HWUI makes a hardware bitmap by uploading into a texture whose storage is the bitmap's gralloc buffer: the
+    // host image is a copy refreshed from the buffer at bind time, so the pixels also have to reach the buffer.
+    if (name == "glTexSubImage2D" && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0 && cpu.regs[6] == kRgba &&
+            cpu.regs[7] == kUnsignedByte)
+        capture_upload(cpu, mem);  // the call itself still goes to the host
     bool texture = name == "glEGLImageTargetTexture2DOES";
     if ((texture || name == "glEGLImageTargetRenderbufferStorageOES") && (cpu.regs[1] & kImageTag) == kImageTag) {
         bind(static_cast<uint32_t>(cpu.regs[0]), cpu.regs[1], !texture);
@@ -213,12 +218,19 @@ uint64_t AndroidBufferImages::create(Memory& mem, uint64_t buffer, uint64_t attr
     struct stat st{};
     if (fd < 0) return reject("guest fd has no host descriptor");
     if (fstat(fd, &st) || static_cast<uint64_t>(st.st_size) < size) return reject("allocation smaller than its descriptor");
-    void* mapping = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    // Read/write when the memfd allows it: a GL upload into the image is copied to the buffer (capture_upload).
+    bool read_write = true;
+    void* mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) {
+        read_write = false;
+        mapping = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    }
     if (mapping == MAP_FAILED) return reject("mmap failed");
     std::lock_guard<std::mutex> lock(mu_);
     uint64_t image = kImageTag | ++next_;
     Buffer& b = buffers_[image];
     b.mapping = static_cast<const uint8_t*>(mapping);
+    b.writable = read_write ? static_cast<uint8_t*>(mapping) : nullptr;
     b.size = size;
     b.width = info[BF_WIDTH]; b.height = info[BF_HEIGHT];
     b.stride = info[BF_STRIDE]; b.format = info[BF_FORMAT];
@@ -241,6 +253,8 @@ bool AndroidBufferImages::destroy(uint64_t image) {
     }
     munmap(const_cast<uint8_t*>(it->second.mapping), it->second.size);
     buffers_.erase(it);
+    for (auto& [context, names] : textures_)
+        for (auto texture = names.begin(); texture != names.end();) texture = texture->second == image ? names.erase(texture) : std::next(texture);
     return true;
 }
 
@@ -254,6 +268,7 @@ void AndroidBufferImages::forget_context(uint64_t context) {
         buffer.contexts.erase(it);
     }
     stale_textures_.erase(context);  // its texture names went with it
+    textures_.erase(context);
 }
 
 void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffer) {
@@ -271,6 +286,11 @@ void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffe
         return;
     }
     Buffer& b = it->second;
+    if (!renderbuffer && target == kTexture2D) {
+        int bound = 0;
+        f.get_integer(kTextureBinding2D, &bound);
+        if (bound) textures_[reinterpret_cast<uint64_t>(context)][static_cast<uint32_t>(bound)] = image;
+    }
     // Free textures of images destroyed elsewhere while this context was not current.
     if (auto stale = stale_textures_.find(reinterpret_cast<uint64_t>(context)); stale != stale_textures_.end()) {
         f.delete_textures(static_cast<int>(stale->second.size()), stale->second.data());
@@ -312,6 +332,54 @@ void AndroidBufferImages::bind(uint32_t target, uint64_t image, bool renderbuffe
                                  reinterpret_cast<void*>(static_cast<uintptr_t>(c.texture)), attribs);
     }
     call(c.image);
+}
+
+// glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels) while the bound texture is the app's
+// view of an RGBA8 image: copy the rectangle from guest memory into the buffer, honouring the unpack row length,
+// alignment and skips. Anything else (a pixel unpack buffer, another format, a read-only mapping) is left to the host.
+void AndroidBufferImages::capture_upload(CPU& cpu, Memory& mem) {
+    const HostFns& f = host();
+    if (!f.usable) return;
+    void* context = f.get_current_context();
+    if (!context) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    auto names = textures_.find(reinterpret_cast<uint64_t>(context));
+    if (names == textures_.end()) return;
+    int bound = 0;
+    f.get_integer(kTextureBinding2D, &bound);
+    auto named = names->second.find(static_cast<uint32_t>(bound));
+    if (named == names->second.end()) return;
+    auto found = buffers_.find(named->second);
+    if (found == buffers_.end()) return;
+    Buffer& b = found->second;
+    const int64_t x = static_cast<int64_t>(cpu.regs[2]), y = static_cast<int64_t>(cpu.regs[3]);
+    const int64_t w = static_cast<int64_t>(cpu.regs[4]), h = static_cast<int64_t>(cpu.regs[5]);
+    if (!b.writable || b.format != 1 || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > b.width || y + h > b.height) return;
+    const char* version = reinterpret_cast<const char*>(f.get_string(kVersion));
+    const bool es3 = version && !std::strstr(version, "OpenGL ES 2") && !std::strstr(version, "OpenGL ES-C");
+    int alignment = 4, row_length = 0, skip_rows = 0, skip_pixels = 0, buffer = 0;
+    f.get_integer(kUnpackAlignment, &alignment);
+    if (es3) {
+        f.get_integer(kUnpackBufferBinding, &buffer);
+        f.get_integer(kUnpackRowLength, &row_length);
+        f.get_integer(kUnpackSkipRows, &skip_rows);
+        f.get_integer(kUnpackSkipPixels, &skip_pixels);
+    }
+    if (buffer || alignment < 1 || alignment > 8) return;  // the pixels are in a host buffer object
+    try {
+        const uint64_t pixels = mem.load<uint64_t>(cpu.sp);  // the ninth argument is on the stack
+        if (!pixels) return;
+        const int64_t row_bytes = static_cast<int64_t>(row_length > 0 ? row_length : w) * 4;
+        const int64_t pitch = (row_bytes + alignment - 1) / alignment * alignment;
+        const uint64_t start = pixels + static_cast<uint64_t>(skip_rows) * pitch + static_cast<uint64_t>(skip_pixels) * 4;
+        for (int64_t row = 0; row < h; ++row) {
+            const size_t offset = BF_GRALLOC_OFFSET + (static_cast<size_t>(y + row) * b.stride + x) * 4;
+            if (offset + static_cast<size_t>(w) * 4 > b.size) return;
+            mem.read(start + static_cast<uint64_t>(row) * pitch, b.writable + offset, static_cast<size_t>(w) * 4);
+        }
+    } catch (const EmuError&) {
+        // An unreadable source is the host call's error to report.
+    }
 }
 
 // Linear gralloc pixels (after the metadata page) to tightly packed RGBA8.
