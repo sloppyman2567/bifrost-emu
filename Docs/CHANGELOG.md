@@ -8,6 +8,27 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
+## [Unreleased]
+
+### Roblox's vertex shaders compile on Mesa (2026-10-27)
+
+- 29 of the 925 shaders in Roblox's `shaders_glsles3.pack` (grass, smooth terrain, mesh vertex shaders) failed on Mesa with
+  "could not implicitly convert operands to arithmetic operator", and Roblox logged `failed to create shader GrassVSUnified`.
+  Extracting every `#version 300 es` source from the installed pack and compiling it on the host (Mesa 26.2.3, headless EGL)
+  reproduced exactly 29 failures, all in one pattern: SPIRV-Cross indexes a flattened uniform array with a `uint` scaled by an
+  `int` literal, `CB3[(_500 & 63u) * 1 + 0]`. GLSL ES 3.00 has no implicit int to uint conversion; mobile drivers accept it.
+- Not fixable by exposing `GL_EXT_shader_implicit_conversions`: the extension needs ES 3.1 (Khronos registry; Mesa answers
+  "unsupported in vertex shader" for a `300 es` shader), and a `310 es` vertex shader does not link with a `300 es` fragment
+  shader ("all shaders must use same shading language version", tested on Mesa). Instead `glCompileShader` has a new policy,
+  `COMPILE_SHADER`: an ES 3.x source the driver rejects is compiled once more with the operand of each `[E * N + M]` index
+  wrapped in `int()` (`ShaderIndexConversion`). If that fails too, the app's own source is restored and compiled, so the
+  app sees its own status and log. A shader the driver accepts is never changed.
+- Checked: all 29 compile on Mesa with the rewrite (host tool, not the game); `gles_uint_index` fails on the previous binary
+  (3 failures) and passes now; `make test-shader-index-conversion` (it caught `#version 300   es` with extra spaces); the
+  `gles_*` group passes; `make generated-check` has no errors; the headless build has no warnings. Not checked: Roblox itself
+  with the fix, whether the shaders render correctly (compile success only), other drivers, and any shader that fails for a
+  different implicit conversion. `glCreateShaderProgramv` and program binaries do not take the retry.
+
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code (2026-10-27)
 
 **2.0.0-alpha.3** collects the changes made after 2.0.0-alpha.2 (2026-10-21): installable Asgard and rootfs,

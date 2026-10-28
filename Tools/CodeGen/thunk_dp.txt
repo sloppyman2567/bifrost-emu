@@ -30,6 +30,8 @@
 #             -              default generic path
 #             SDL_SURFACE    bridge guest surfaces, formats, palettes and pixels
 #             SHADER_SOURCE  glShaderSource nested string-array marshalling
+#             COMPILE_SHADER glCompileShader: if the driver rejects an ES 3.x source, retry once with
+#                            the uint array indices wrapped in int() (ShaderIndexConversion)
 #             STRING_ARRAY   arg2 is a `const char* const*` of `arg1` guest C strings
 #                            (glGetUniformIndices, glCreateShaderProgramv): rebuilt as
 #                            host string pointers, then the generic call and writeback
@@ -179,7 +181,7 @@ glClientActiveTexture     GL     i             -     -              -
 glMultiTexCoord2f         GL     iff           -     -              -   # target,s,t
 glCreateShader            GL     i             -     -              -
 glShaderSource            GL     iipp          -     SHADER_SOURCE  -   # arg2/3: strings/lens
-glCompileShader           GL     i             -     -              -
+glCompileShader           GL     i             -     COMPILE_SHADER -
 glDeleteShader            GL     i             -     -              -
 glCreateProgram           GL     -             -     -              -
 glAttachShader            GL     ii            -     -              -
@@ -359,7 +361,7 @@ glPolygonOffset           GLES   ff            -     -              -
 glPixelStorei             GLES   ii            -     -              -
 glCreateShader            GLES   i             -     -              -
 glShaderSource            GLES   iipp          -     SHADER_SOURCE  -
-glCompileShader           GLES   i             -     -              -
+glCompileShader           GLES   i             -     COMPILE_SHADER -
 glDeleteShader            GLES   i             -     -              -
 glCreateProgram           GLES   -             -     -              -
 glAttachShader            GLES   ii            -     -              -

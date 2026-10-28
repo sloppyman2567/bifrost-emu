@@ -588,7 +588,7 @@ generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlvie
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli
+	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
 	$(MAKE) verify
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
@@ -603,7 +603,7 @@ ci: setup-tests generated-check $(TARGET)
 check-all: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli
+	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
@@ -659,6 +659,12 @@ test-android-wheel-gestures:
 	@mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) Tests/Unit/android_wheel_gestures.cpp Source/System/Android/Window/WheelGestures.cpp -o $(OBJDIR)/android_wheel_gestures
 	./$(OBJDIR)/android_wheel_gestures
+
+.PHONY: test-shader-index-conversion
+test-shader-index-conversion:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Unit/shader_index_conversion.cpp Source/System/Graphics/Thunks/GraphicThunk/ShaderIndexConversion.cpp -o $(OBJDIR)/shader_index_conversion
+	./$(OBJDIR)/shader_index_conversion
 
 .PHONY: test-android-goldfish-media
 test-android-goldfish-media: $(LIB)

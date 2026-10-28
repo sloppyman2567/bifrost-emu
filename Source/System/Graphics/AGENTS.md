@@ -55,6 +55,14 @@
   guest address (the host address inside the window that aliases guest memory, less the window
   base; a byte offset into a bound buffer stays). A client array that was bounced rather than
   aliased has no guest address to recover. `gles_pointer_queries` covers it.
+- `glCompileShader` has policy `COMPILE_SHADER`. The `SHADER_SOURCE` handler keeps an ES 3.x source
+  (`#version 3x0 es`) in `es_shader_sources`, keyed by the calling context's tracker and the shader name, and
+  the compile removes it. If the driver rejects the source, `ShaderIndexConversion` wraps the operand of each
+  `[E * N + M]` index in `int()` (Mesa refuses SPIRV-Cross's `uint * 1 + 0`; mobile drivers accept it) and the
+  shader is compiled once more; if that fails too, the app's own source is put back and compiled, so status,
+  log and `glGetShaderSource` are the app's. A shader the driver accepts is never changed. It is the only
+  rewrite: other implicit conversions still fail as they did. `gles_uint_index` and `make
+  test-shader-index-conversion` cover it.
 - `GraphicThunk::dispatch` marks the symbol it runs (`thunk_call::Scope`,
   `Thunks/ThunkCallRecord.hpp`); the host-fault report in `FrostJIT/Runtime/FaultHandler.cpp` ends
   with `thunk=<name>` when the fault happened inside a graphics thunk call, i.e. in the driver or

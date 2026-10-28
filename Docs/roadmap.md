@@ -275,15 +275,20 @@ video-ad playback or full lifecycle/recreation behavior.
   without a translation policy; string arrays and `glGet*Pointerv` queries are
   fixed (a Geometry Dash Lite WebView ad had crashed in `glGetUniformIndices`).
   Nested arrays in Vulkan were not examined.
-- Mobile GLSL on desktop drivers: Roblox's 3D material and terrain vertex
-  shaders (`DefaultUnified*VS`, grass, smooth terrain) fail on Mesa with
-  "could not implicitly convert operands to arithmetic operator". Mobile
-  drivers accept implicit int/float conversions that GLSL ES 3.x forbids
-  without `GL_EXT_shader_implicit_conversions`. First capture the failing
-  sources and compare with the ES spec and that extension; then choose
-  between exposing the extension through the host driver and a bounded
-  source rewrite before compilation, checked against Mesa on the captured
-  shaders.
+- Mobile GLSL on desktop drivers: fixed in the thunk, not yet seen in the game.
+  The failing Roblox vertex shaders (29 of the 925 in `shaders_glsles3.pack`:
+  grass, smooth terrain, mesh) index a flattened uniform array with a `uint`
+  scaled by an `int` literal (`CB3[(_500 & 63u) * 1 + 0]`, SPIRV-Cross output).
+  GLSL ES 3.00 has no implicit int to uint conversion, so Mesa rejects it and
+  mobile drivers accept it. `GL_EXT_shader_implicit_conversions` cannot be
+  exposed instead: it needs ES 3.1, Mesa refuses it in a `300 es` shader, and
+  moving one shader to `310 es` fails to link with its `300 es` partner. After
+  a driver rejects an ES 3.x source, `glCompileShader` retries it once with the
+  index operand wrapped in `int()`
+  ([ShaderIndexConversion](../Source/System/Graphics/AGENTS.md)). All 29 compile
+  on Mesa 26.2.3 with the rewrite; a run of Roblox on it, and shaders outside
+  this one pattern, are unchecked. Programs built by `glCreateShaderProgramv`
+  or from binaries do not take the retry.
 
 - Window scaling (observed October 21, 3440x1440 monitor): fixed in `4e41f771`
   (October 21; seen working October 27). The Battle Cats surface and its WebView pages no longer sit in a

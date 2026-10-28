@@ -131,6 +131,11 @@ struct GraphicThunkImpl {
     // sync/UNMAP/wake sites already do. Separate from mu so registry
     // paths never interact with per-call state.
     std::mutex state_mu;
+    // ES 3.x shader source between glShaderSource and glCompileShader, keyed by (the calling
+    // context's tracker, shader name), so a source the driver rejects can be retried with
+    // ShaderIndexConversion's rewrite. Guarded by state_mu; an entry leaves at the compile, and the
+    // map is cleared if shaders are sourced and never compiled.
+    std::map<std::pair<uint64_t, uint32_t>, std::string> es_shader_sources;
     // GL state tracker for consistent query results, for GL made current
     // outside EGL (SDL/GLFW windows).
     std::unique_ptr<GLStateTracker> gl_state_tracker_;

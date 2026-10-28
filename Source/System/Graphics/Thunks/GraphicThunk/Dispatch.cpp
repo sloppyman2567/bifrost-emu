@@ -4,7 +4,41 @@
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
 #include "System/Graphics/Thunks/ThunkCallRecord.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/ExtensionFilter.hpp"
+#include "System/Graphics/Thunks/GraphicThunk/ShaderIndexConversion.hpp"
 namespace arm64emu {
+// glCompileShader on an ES 3.x source the driver rejected: compile once more with the uint array
+// indices wrapped in int() (Mesa refuses `uint * 1 + 0`, mobile drivers accept it). If that still
+// fails the shader gets the app's own source back and is compiled again, so its status, info log and
+// glGetShaderSource are what the app would see without the retry.
+static void retry_compile_with_index_fix(void* compile_fn, uint32_t shader, const std::string& source) {
+    using Compile = void (*)(uint64_t);
+    using Source = void (*)(unsigned, int, const char* const*, const int*);
+    using GetIv = void (*)(unsigned, unsigned, int*);
+    static const auto set_source = reinterpret_cast<Source>(dlsym(RTLD_DEFAULT, "glShaderSource"));
+    static const auto get_iv = reinterpret_cast<GetIv>(dlsym(RTLD_DEFAULT, "glGetShaderiv"));
+    constexpr unsigned kCompileStatus = 0x8B81;
+    if (!set_source || !get_iv) return;
+    int ok = 1;
+    get_iv(shader, kCompileStatus, &ok);
+    if (ok) return;
+    const std::string fixed = shader_fix::wrap_scaled_index_operands(source);
+    if (fixed.empty()) return;
+    auto compile_text = [&](const std::string& text) {
+        const char* p = text.c_str();
+        const int len = static_cast<int>(text.size());
+        set_source(shader, 1, &p, &len);
+        reinterpret_cast<Compile>(compile_fn)(shader);
+        int status = 0;
+        get_iv(shader, kCompileStatus, &status);
+        return status != 0;
+    };
+    const bool fixed_ok = compile_text(fixed);
+    if (dbg().thunk_trace)
+        fprintf(stderr, "[thunk] compileShader: shader=%u rejected, uint index rewrite %s\n", shader,
+                fixed_ok ? "compiled" : "did not help");
+    if (!fixed_ok) compile_text(source);
+}
+
 // BIFROST_FRAME_TRACE: GL/EGL calls of this thread since its last swap.
 static std::map<std::string, unsigned>& frame_calls() {
     thread_local std::map<std::string, unsigned> calls;
@@ -1325,6 +1359,44 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         reinterpret_cast<Fn>(entry.host_fn)(
             args[0], count, host_strs,
             args[3] ? reinterpret_cast<const int*>(args[3]) : nullptr);
+        // Keep an ES 3.x source until glCompileShader, which may have to retry it (see
+        // retry_compile_with_index_fix). Other sources are not copied.
+        const size_t head_len = (count > 0 && host_strs[0])
+            ? ((lens && lens[0] >= 0) ? std::min<size_t>(lens[0], 512) : strnlen(host_strs[0], 512)) : 0;
+        if (head_len && shader_fix::is_es3_source({host_strs[0], head_len})) {
+            constexpr size_t kMaxSource = 4u << 20;
+            std::string text;
+            for (int i = 0; i < count && text.size() <= kMaxSource; i++) {
+                if (!host_strs[i]) continue;
+                const size_t n = (lens && lens[i] >= 0) ? static_cast<size_t>(lens[i]) : strlen(host_strs[i]);
+                text.append(host_strs[i], n);
+            }
+            if (text.size() <= kMaxSource) {
+                std::lock_guard<std::mutex> lock(impl_->state_mu);
+                if (impl_->es_shader_sources.size() >= 4096) impl_->es_shader_sources.clear();
+                impl_->es_shader_sources[{reinterpret_cast<uint64_t>(impl_->tracker()),
+                                          static_cast<uint32_t>(args[0])}] = std::move(text);
+            }
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
+    // glCompileShader(shader): compile, and retry an ES 3.x source the driver rejected.
+    if (entry.spec && entry.spec->policy == thunk::Policy::COMPILE_SHADER && entry.host_fn) {
+        const std::pair<uint64_t, uint32_t> key{reinterpret_cast<uint64_t>(impl_->tracker()),
+                                                static_cast<uint32_t>(args[0])};
+        std::string source;
+        {
+            std::lock_guard<std::mutex> lock(impl_->state_mu);
+            const auto it = impl_->es_shader_sources.find(key);
+            if (it != impl_->es_shader_sources.end()) {
+                source = std::move(it->second);
+                impl_->es_shader_sources.erase(it);
+            }
+        }
+        reinterpret_cast<void (*)(uint64_t)>(entry.host_fn)(args[0]);
+        if (!source.empty()) retry_compile_with_index_fix(entry.host_fn, key.second, source);
         cpu.regs[0] = 0;
         return 0;
     }

@@ -653,6 +653,10 @@ INTEGRATION_TESTS=(
     # callback) give the guest its own value, not the driver's host address. Needs host EGL + GLES 3;
     # exit 77 = skip.
     "gles_pointer_queries|Tests/Apps/test_gles_pointer_queries.elf||30|ALL PASS"
+    # An ES 3.00 array index `(uint_expr) * 1 + 0` (SPIRV-Cross, Roblox) compiles on a driver that
+    # rejects implicit int -> uint conversion: glCompileShader retries it with the operand wrapped in
+    # int(). A shader with a real error still fails. Needs host EGL + GLES 3; exit 77 = skip.
+    "gles_uint_index|Tests/Apps/test_gles_uint_index.elf||30|ALL PASS"
     # ES extension queries agree after filtering, hidden extensions stay
     # hidden, common extensions' entry points resolve and alias rows run.
     # Needs host EGL + GLES 3; exit 77 = skip.
