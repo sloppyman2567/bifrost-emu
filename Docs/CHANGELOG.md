@@ -10,6 +10,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### A system-wide Asgard install is readable by its users (2026-10-28)
+
+- `bifrost-emu app.xapk` failed with `Permission denied: .../asgard/build/android-framework/rootfs/bifrost-framework.json`
+  after `sudo make install-asgard`. Upgrading a framework or ART manifest's inventory rewrote it through a 0600 temporary
+  file, and the installer copied that mode, so root's copy was unreadable for anyone else. The rewritten manifests and
+  downloaded microG archives are now 0644, and `install-asgard.py` gives every installed file `a+rX` without group or
+  other write; re-running it repairs an existing install. See [the APK guide](Android/ANDROID_APK.md).
+
 ### Bitmaps get the display's density (2026-10-28)
 
 - YouTube's like, dislike and comment icons drew at half size: bitmaps created without a density got 160 (the unset

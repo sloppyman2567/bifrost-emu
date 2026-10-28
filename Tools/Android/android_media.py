@@ -80,6 +80,9 @@ def update_inventory(metadata, manifest, files):
             try:
                 stream.write(json.dumps(metadata, indent=2) + "\n")
                 stream.close()
+                # NamedTemporaryFile is 0600; keep a fresh provision's mode so other
+                # users of a shared (installed) runtime can still verify it.
+                temporary.chmod(0o644)
                 temporary.replace(manifest)
             finally:
                 temporary.unlink(missing_ok=True)

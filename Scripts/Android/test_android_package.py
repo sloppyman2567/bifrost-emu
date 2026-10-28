@@ -125,6 +125,7 @@ class BionicCompatibilityTests(unittest.TestCase):
                                                 'system/bin/sh': android_framework.shell_inventory(),
                                                 **android_framework.shared_library_inventory()})
                 manifest = (root / "bifrost-framework.json").read_bytes()
+                self.assertEqual((root / "bifrost-framework.json").stat().st_mode & 0o777, 0o644)
                 self.assertEqual(android_framework.install(root, root / "unused"), after)
                 self.assertEqual((root / "bifrost-framework.json").read_bytes(), manifest)
             for name in BIONIC_LINKS:

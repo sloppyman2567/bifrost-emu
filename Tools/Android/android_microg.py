@@ -48,6 +48,7 @@ def archive(package, cache=ROOT / "build/microg"):
                 stream.close()
                 if digest(temporary) != sha256:
                     raise ValueError(f"microG SHA-256 mismatch: {name}")
+                temporary.chmod(0o644)  # NamedTemporaryFile is 0600; installs share this file
                 temporary.replace(path)
             finally:
                 temporary.unlink(missing_ok=True)

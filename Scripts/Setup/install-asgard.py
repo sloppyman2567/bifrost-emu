@@ -74,6 +74,13 @@ def sha256(path):
     return value.hexdigest()
 
 
+def installed_mode(mode):
+    """Readable by everyone who runs the install, writable only by its owner: a system install
+    copies a user's checkout, where generated files can be private to that user (0600)."""
+    mode = stat.S_IMODE(mode) & ~0o022
+    return mode | 0o444 | (0o111 if mode & stat.S_IXUSR else 0)
+
+
 def ignored(name, patterns):
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 
@@ -110,7 +117,7 @@ def differs(relative, info, destination, verify):
     if stat.S_ISLNK(info.st_mode):
         return not stat.S_ISLNK(installed.st_mode) or os.readlink(target) != os.readlink(ROOT / relative)
     if not stat.S_ISREG(installed.st_mode) or installed.st_size != info.st_size \
-            or stat.S_IMODE(installed.st_mode) != stat.S_IMODE(info.st_mode):
+            or stat.S_IMODE(installed.st_mode) != installed_mode(info.st_mode):
         return True
     if installed.st_mtime_ns != info.st_mtime_ns:
         return True
@@ -160,6 +167,7 @@ def replace_file(relative, info, destination):
             temporary.symlink_to(os.readlink(source))
         else:
             shutil.copy2(source, temporary)
+            temporary.chmod(installed_mode(info.st_mode))
         if target.is_dir() and not target.is_symlink():
             remove(target)
         os.replace(temporary, target)
@@ -214,7 +222,7 @@ def sync(destination, plan, verify, dry_run):
     for relative, info in sorted(plan.items(), key=lambda item: len(item[0].parts), reverse=True):
         if stat.S_ISDIR(info.st_mode):
             (destination / relative).mkdir(parents=True, exist_ok=True)
-            (destination / relative).chmod(stat.S_IMODE(info.st_mode))
+            (destination / relative).chmod(installed_mode(info.st_mode))
     return len(changed), len(stale)
 
 

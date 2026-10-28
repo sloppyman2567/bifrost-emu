@@ -83,8 +83,10 @@ build-only sources are not installed. Re-running updates in place: a file is cop
 modification time, mode or link target differs (`--verify` also compares contents, which finds a
 same-size edit), each replaced atomically so a running session keeps the file it opened, and files
 the checkout no longer has are removed. The `.asgard-install` marker records `complete: false` while
-a run is in progress, so an interrupted run is reported and finished by the next one. Updating an
-install that root owns needs root. First installs use `cp --reflink=auto`, so they are near-instant
+a run is in progress, so an interrupted run is reported and finished by the next one. Installed
+files are readable by everyone and writable only by their owner (`a+rX`, `go-w`), whatever mode the
+checkout gave them, so a `sudo` install also works for other users. Updating an install that root
+owns needs root. First installs use `cp --reflink=auto`, so they are near-instant
 on filesystems that can share blocks and a plain copy elsewhere.
 
 An installed Asgard cannot write into its own tree, so app state (installed apps, saves, settings)

@@ -68,6 +68,25 @@ class AsgardInstallTests(unittest.TestCase):
         self.assertIn("share/bifrost/asgard/Scripts/Android/asgard.py", wrapper.read_text())
         self.assertFalse(list(self.prefix.rglob(".*.new.*")))                     # no temporary files left
 
+    def test_installed_files_are_readable_by_everyone_and_writable_only_by_the_owner(self):
+        private = self.checkout / "build/android-framework/rootfs/bifrost-framework.json"
+        private.write_text("{}")
+        private.chmod(0o600)                       # an inventory rewritten through a temporary file
+        tool = self.checkout / "Tools/android-tools/aapt2"
+        tool.chmod(0o700)
+        shared = self.checkout / "build/microg/gms.apk"
+        shared.chmod(0o666)
+        self.run_installer()
+        mode = lambda name: stat.S_IMODE((self.tree / name).stat().st_mode)
+        self.assertEqual(mode("build/android-framework/rootfs/bifrost-framework.json"), 0o644)
+        self.assertEqual(mode("Tools/android-tools/aapt2"), 0o755)
+        self.assertEqual(mode("build/microg/gms.apk"), 0o644)
+        self.assertIn("0 to copy", self.run_installer())
+        installed = self.tree / "build/android-framework/rootfs/bifrost-framework.json"
+        installed.chmod(0o600)                     # an install made before modes were normalized
+        self.assertIn("1 to copy", self.run_installer())
+        self.assertEqual(mode("build/android-framework/rootfs/bifrost-framework.json"), 0o644)
+
     def test_an_unchanged_install_copies_nothing(self):
         self.run_installer()
         self.assertIn("0 to copy", self.run_installer())
