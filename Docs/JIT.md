@@ -2534,6 +2534,14 @@ shared compiles, retries and contended table/compiler lock wait) and
 `[JIT] invalidate (calls/retired/kept):` per reason. Recompiles include the
 one-time purge when a second CPU starts.
 
+With `BIFROST_TIER2=1` and a second vCPU, `[JIT] block-runs (counted blocks=N) 0:.. 1:.. 2:..
+3-4:.. 5-9:.. 10-99:.. 100+:..` buckets the entries of every block that carries a
+multithreaded hot counter (conditional-branch or size-limited heads without a call, SVC
+or BR). It shows how many compiled blocks run once or twice, for judging a compile
+threshold. A counter stops at `BIFROST_TIER2_HITS` (default 1000), restarts from 0 on a
+profile retry, and outlives its invalidated block until the cache is replaced; the line
+is absent otherwise, and skipped while a compile holds the compiler lock.
+
 `jit_cache_invalidation.elf churn` warms 32,768 executable functions, times
 4,096 data-page protection changes, then rewrites one function 4,096 times with
 IC maintenance (a guest JIT publishing onto a page with live code) and checks
