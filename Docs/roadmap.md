@@ -273,15 +273,10 @@ video-ad playback or full lifecycle/recreation behavior.
   source rewrite before compilation, checked against Mesa on the captured
   shaders.
 
-- Window scaling (observed October 21, 3440x1440 monitor, 2560x1384 window):
-  The Battle Cats game surface fills only the left part of a 3440x1384 window
-  with a black bar on the right, Roblox shows the same and some content lands
-  small in the top-left corner (Battle Cats' Change Account page, which is a
-  WebView drawn inside the app window). Other games fill the window. Map the
-  app's logical size, density and the host window/layer geometry explicitly
-  (viewport, scissor, surface size reported to the app versus window size),
-  then check that every game fills the window at resize and fullscreen. The
-  cause is not yet found; do not assume WebView density without a readback.
+- Window scaling (observed October 21, 3440x1440 monitor): fixed in `4e41f771`
+  (October 21; seen working October 27). The Battle Cats surface and its WebView pages no longer sit in a
+  corner on black; see [the changelog](CHANGELOG.md#non-resizable-apps-keep-their-size-and-are-scaled-to-the-window-2026-10-21).
+  Roblox's black bar was not rechecked separately, and X11 layers are not fitted.
 - Low-resolution Roblox textures at desktop resolutions are unexplained. Compare
   the rendered texture size with the app's request before blaming filtering.
 - Memory: one game (Hungry Shark World, observed October 21) used about

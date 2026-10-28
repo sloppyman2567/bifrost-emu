@@ -1013,7 +1013,7 @@ contracts, toasts, window scaling, memory and JIT measurements, and their tests.
 
 ### Non-resizable apps keep their size and are scaled to the window (2026-10-21)
 
-- Fix (not yet confirmed on the game by a run): Battle Cats declares
+- Fix (`4e41f771`; seen working on the game 2026-10-27): Battle Cats declares
   `resizeableActivity=false`. Android never resizes such an app: it keeps its
   window size and scales it. Bifrost instead grew the SurfaceView to the maximized
   host window (3440x1384) while the game kept drawing its first 1920x1038 scene,
