@@ -27,17 +27,36 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
   in the generator, and `glxmlcheck.py` now fails any core ES command without a GLES row (`make generated-check`).
   `test_android_adapter_exports.py` checks the built libraries; it fails on the previous Roblox-era libraries with
   exactly these three exports missing.
-- Result: YouTube's native libraries load; the Application is created and the Activity attached (`APP_ACTIVITY_ATTACHED`,
-  never `APP_ACTIVITY_CREATED`). It then ends with
-  `NoClassDefFoundError: Failed resolution of Laqrn;` and `Lasga;`. Both classes are defined in `base.apk`'s
-  `classes2.dex` (checked by parsing the dex class definitions, not by string search) yet the app's class loader
-  cannot find them, ART reporting a plain `ClassNotFoundException`. The cause is not found. It is not a missing
-  split (the classes are defined in the base APK), and no `WarningContextClassLoader` warning was logged; why that
-  class loader cannot see `classes2.dex` needs a look at the loader at run time. Other multi-dex apps start.
-  `SERVICE_CALL_UNSUPPORTED activity_task getDeviceConfigurationInfo` is logged just before and is a small gap
-  of its own (`ActivityManager.getDeviceConfigurationInfo`). YouTube is not recorded in the compatibility file:
-  none of its statuses fits an unexplained crash. Not checked: whether a real Google-signed install behaves
-  the same, and any playback.
+- Cause of the class loading failure, found by loading the failing classes in the live loader: `asga` and `aqrn`
+  extend `org.apache.http.protocol.HttpRequestHandler`, the Apache HTTP legacy library that Android 9 removed from
+  the boot classpath. YouTube declares `<uses-library org.apache.http.legacy required="false">`, and the platform
+  puts a declared library's jar in the app's class loader. Bifrost had no shared libraries at all: the image's
+  `/system/etc/permissions` was not provisioned and nothing resolved `<uses-library>`.
+- Fix, in three layers. Provisioning (`android_framework.py`): the image's five `<library>` declarations
+  (`org.apache.http.legacy`, `android.test.base/mock/runner`, `javax.obex`) and their jars are added with pinned
+  digests, to a fresh runtime and, like the shell, to an existing one in place (1,053 to 1,063 files; the next
+  `asgard run` does it). They are read-only, because ART refuses dex a process could write ("Writable dex file ...
+  is not allowed"), and every managed root is checked on reuse. Runtime (`FrameworkSharedLibraries`): reads the
+  declarations and resolves an app's `<uses-library>` entries as PackageManagerService does, including adding
+  `org.apache.http.legacy` for apps targeting API below 28 (`OrgApacheHttpLegacyUpdater`, android-15.0.0_r1),
+  recording `SharedLibraryInfo` objects in `ApplicationInfo.sharedLibraryInfos`: Android 15's `LoadedApk.makePaths`
+  keeps only `.apk` entries of `sharedLibraryFiles`, so the jar had to arrive as a library loader. A required library the
+  image lacks is logged and the app still starts (the platform would refuse the install).
+- Then `ActivityManager.getDeviceConfigurationInfo` (`activity_task`) was the next wall, thrown into YouTube's startup. It
+  is answered from the global configuration as `ActivityTaskManagerService` does (touchscreen, keyboard, navigation,
+  the input features they imply, `ro.opengles.version`). That configuration now describes the device's input: a
+  finger touchscreen, no physical keyboard, no navigation device, as WMS derives from the input devices; the platform
+  defaults left all three undefined for every app. `ro.opengles.version` is 3.0 (196608), the floor the managed graphics
+  need, with 3.1 and 3.2 hosts still reporting their real version through `glGetString`.
+- Result: YouTube loads, creates its Application and Activity and shows its home screen (the maintainer's
+  screenshot: search bar, Home, Shorts, Subscriptions and You tabs). A tap then ends the session: the app creates an
+  `android.media.session.MediaSession` and the `media_session` stand-in does not implement `createSession`, so the
+  exception is uncaught (exit 1). That needs a MediaSession service, not a stub; YouTube is recorded as `title`.
+- Checked: 645 `ManagedServiceBatch` checks in both engines (the resolver against fixture declarations, the recorded
+  `SharedLibraryInfo` objects, the device configuration), the provisioning tests (install from the image, idempotence,
+  tampered and mismatched files, read-only), and Subway Surfers still starting, drawing and showing an ad Activity after
+  the configuration change (one run, not played). Not checked: an app other than YouTube that needs a library, the
+  system packages (GmsCore, microG), which do not get libraries resolved yet, and playback.
 
 ### Four more framework calls apps make are answered (2026-10-28)
 

@@ -152,7 +152,31 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     private static Configuration globalConfiguration() {
         Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
         config.uiMode = FrameworkUiMode.CONFIGURATION_UI_MODE;
+        // WMS derives these from the input devices' sources. The host window delivers a mouse and touch as fingers,
+        // and the desktop keyboard is the virtual one: a touchscreen, and no physical keyboard or navigation device,
+        // as on a phone. (The platform defaults leave all three undefined.)
+        config.touchscreen = Configuration.TOUCHSCREEN_FINGER;
+        config.keyboard = Configuration.KEYBOARD_NOKEYS;
+        config.navigation = Configuration.NAVIGATION_NONAV;
         return config;
+    }
+
+    // ActivityTaskManagerService.getDeviceConfigurationInfo (android-15.0.0_r1): the global configuration's
+    // touchscreen, keyboard and navigation, the input features those imply, and the property ro.opengles.version
+    // (ConfigurationInfo.GL_ES_VERSION_UNDEFINED, 0, when it is not set).
+    synchronized android.content.pm.ConfigurationInfo deviceConfigurationInfo() throws Exception {
+        Configuration global = globalConfiguration();
+        android.content.pm.ConfigurationInfo info = new android.content.pm.ConfigurationInfo();
+        info.reqTouchScreen = global.touchscreen;
+        info.reqKeyboardType = global.keyboard;
+        info.reqNavigation = global.navigation;
+        if (global.navigation == Configuration.NAVIGATION_DPAD || global.navigation == Configuration.NAVIGATION_TRACKBALL)
+            info.reqInputFeatures |= android.content.pm.ConfigurationInfo.INPUT_FEATURE_FIVE_WAY_NAV;
+        if (global.keyboard != Configuration.KEYBOARD_UNDEFINED && global.keyboard != Configuration.KEYBOARD_NOKEYS)
+            info.reqInputFeatures |= android.content.pm.ConfigurationInfo.INPUT_FEATURE_HARD_KEYBOARD;
+        info.reqGlEsVersion = (Integer) Class.forName("android.os.SystemProperties")
+                .getMethod("getInt", String.class, int.class).invoke(null, "ro.opengles.version", 0);
+        return info;
     }
 
     // TaskFragment rounds pixel sizes to dp as (int) (px / density + 0.5f).

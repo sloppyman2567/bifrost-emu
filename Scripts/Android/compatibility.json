@@ -85,6 +85,14 @@
       "status": "playable",
       "checked": "2026-10-27",
       "evidence": "The maintainer reports it is playable (APKPure 3.70.3 build); no screenshots or further detail are recorded."
+    },
+    "com.google.android.youtube": {
+      "name": "YouTube",
+      "tested_version": "21.42.247",
+      "status": "title",
+      "checked": "2026-10-28",
+      "evidence": "The maintainer's screenshot shows the home screen in the window: the logo, search bar and the Home, Shorts, Subscriptions and You tabs. A tap then ended the session: the app creates an android.media.session.MediaSession and the media_session stand-in does not implement createSession (uncaught, exit 1). No playback was seen.",
+      "notes": ["Needs a MediaSession service (media_session.createSession); the signed-in feed and playback are untested."]
     }
   }
 }

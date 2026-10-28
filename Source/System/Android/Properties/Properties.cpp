@@ -216,6 +216,10 @@ std::map<std::string, std::string> load_android_properties(const std::string& ro
         // the service (CameraUtils::isCameraServiceDisabled) and list no
         // cameras, instead of polling for media.camera forever.
         {"config.disable_cameraservice", "true"},
+        // The OpenGL ES version the device reports (major << 16 | minor): ActivityManager.getDeviceConfigurationInfo
+        // .reqGlEsVersion and app checks read it. The managed graphics need a host GLES 3 context, so 3.0 is the
+        // floor that always holds; a 3.1 or 3.2 host still reports its real version through glGetString.
+        {"ro.opengles.version", "196608"},
     };
     for (const auto& [key, value] : kDefaults) props.emplace(key, value);
     return props;

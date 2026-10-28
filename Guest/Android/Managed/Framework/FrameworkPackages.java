@@ -53,8 +53,40 @@ final class FrameworkPackages {
         return protectedBroadcasts.contains(action);
     }
 
+    private FrameworkSharedLibraries sharedLibraries;
+
+    // PackageManagerService resolves the manifest's <uses-library> entries against the system's shared libraries at
+    // install time and records them in the ApplicationInfo (FrameworkSharedLibraries.apply); LoadedApk then builds
+    // a class loader for each. A package whose manifest cannot be read keeps what it had (none).
+    private void applySharedLibraries(PackageInfo pkg) {
+        ApplicationInfo app = pkg.applicationInfo;
+        java.io.File base = new java.io.File(app.sourceDir == null ? "" : app.sourceDir);
+        if (!base.isFile()) return;
+        java.io.File archive = app.splitSourceDirs != null && app.splitSourceDirs.length != 0
+                ? base.getParentFile() : base;
+        try {
+            List<String> required = FrameworkParseCache.strings(archive, "uses-libraries",
+                    () -> libraryNames(archive, "getUsesLibraries"));
+            List<String> optional = FrameworkParseCache.strings(archive, "uses-optional-libraries",
+                    () -> libraryNames(archive, "getUsesOptionalLibraries"));
+            synchronized (this) {
+                if (sharedLibraries == null) sharedLibraries = FrameworkSharedLibraries.system();
+                FrameworkSharedLibraries.apply(app, sharedLibraries.resolve(app.targetSdkVersion, required, optional));
+            }
+        } catch (Exception error) {
+            System.out.println("APP_SHARED_LIBRARIES_UNAVAILABLE " + pkg.packageName + ": " + error);
+        }
+    }
+
+    private List<String> libraryNames(java.io.File archive, String getter) throws Exception {
+        List<String> names = new ArrayList<>();
+        for (Object name : (List<?>) invoke(parseArchive(archive), getter)) names.add((String) name);
+        return names;
+    }
+
     void install(Context system, PackageInfo pkg) {
         installPermissions(system, pkg);
+        applySharedLibraries(pkg);
         installed = copy(pkg, PackageInfo.CREATOR);
         componentStates.clear();
         providerFilters.remove(pkg.packageName);

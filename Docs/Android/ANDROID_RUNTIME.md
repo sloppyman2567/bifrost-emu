@@ -1825,6 +1825,26 @@ rules of libinput's `KeyCharacterMap` parser into `FrameworkKeyLayout.java`
 writes the native parcel the framework reads. `BIFROST_TEXT_SCRIPT` pushes
 scripted key and text events into the window's SDL queue for tests.
 
+### Shared libraries and the device configuration (2026-10-28)
+
+Shared libraries (`<uses-library>`): the image's `/system/etc/permissions/*.xml` declare each as `<library name file>`.
+Provisioning adds the five that name a jar in `/system/framework` (`org.apache.http.legacy`, `android.test.base`,
+`android.test.mock`, `android.test.runner`, `javax.obex`) with pinned digests, read-only (`protect_shared_libraries`, run
+on every reused managed root; ART rejects writable dex). `FrameworkSharedLibraries` reads the declarations (a library
+whose file is absent is ignored; `min-device-sdk` and `on-bootclasspath-*` are not read) and `FrameworkPackages.install`
+resolves the manifest's required then optional libraries from a cached parse, adding `org.apache.http.legacy` for an
+app targeting API below 28 unless it is declared. The result is recorded as `SharedLibraryInfo` objects (built-in, path set,
+version undefined, declared by `android`) in `ApplicationInfo.sharedLibraryInfos`, and as paths in `sharedLibraryFiles`:
+`LoadedApk.makePaths` keeps only `.apk` entries of the latter, so a jar library reaches the app only as a library class
+loader built from the former. A required library the image lacks is logged (`APP_SHARED_LIBRARY_MISSING`) and the app
+still starts. Not done: system packages (GmsCore, microG) get no libraries resolved, and system native libraries
+(`uses-native-library`) are not provided.
+
+The global configuration (`FrameworkDisplay.globalConfiguration`) now carries what WMS derives from the input devices: a
+finger touchscreen, no physical keyboard and no navigation device. `getDeviceConfigurationInfo` reads it as
+`ActivityTaskManagerService` does (input features follow the keyboard and navigation), with `ro.opengles.version` from the
+property store (3.0, 196608).
+
 ### Pointer icons (2026-10-28)
 
 On Android, `ViewRootImpl` resolves the pointer icon for mouse events

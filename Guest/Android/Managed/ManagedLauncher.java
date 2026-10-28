@@ -907,6 +907,7 @@ public final class ManagedLauncher {
                         method.equals("registerScreenCaptureObserver"));
                 return null;
             }
+            if (method.equals("getDeviceConfigurationInfo")) return displays.deviceConfigurationInfo();
             throw unsupported("activity_task", method);
         });
         Object provider = services.register("bifrost.settings", "android.content.IContentProvider",

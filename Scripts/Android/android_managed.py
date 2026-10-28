@@ -53,7 +53,8 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkPendingIntents.java", "Framework/FrameworkUsers.java",
                     "Framework/FrameworkDeviceIdle.java", "Framework/FrameworkMediaRouter.java",
                     "Framework/FrameworkTelephony.java", "Framework/FrameworkPackageChecksums.java",
-                    "Framework/FrameworkAppWidgets.java", "Framework/FrameworkCursors.java")
+                    "Framework/FrameworkAppWidgets.java", "Framework/FrameworkCursors.java",
+                    "Framework/FrameworkSharedLibraries.java")
 
 
 def add_trace_arguments(parser):
@@ -906,6 +907,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
                 if not valid: raise ValueError("Modified managed runtime file: " + relative)
             backup = managed / "previous-rootfs"
             if backup.exists(): remove_runtime(backup)
+            android_framework.protect_shared_libraries(root)
             ensure_app_data(root, metadata["package"])
             return root, environment
     backup = managed / "previous-rootfs"

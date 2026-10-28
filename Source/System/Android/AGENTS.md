@@ -149,6 +149,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   never break input delivery. An app's own bitmap cursor is not carried. Keep `FrameworkCursors`, the C enum and
   the SDL mapping together; `MANAGED_CURSORS_OK` (`ManagedServiceBatch`), `make test-android-sdl-backend` and
   `make test-android-window-plugin` cover it.
+- Shared libraries: the jars come from the pinned image (`SHARED_LIBRARIES` digests in `android_framework.py`, added in
+  place to an existing runtime like the shell) and must stay read-only in every managed root, or ART refuses them. An
+  app's `<uses-library>` is resolved in `FrameworkSharedLibraries` into `sharedLibraryInfos`; setting `sharedLibraryFiles`
+  alone does nothing for a jar in Android 15. When a class "cannot be found" though it is in the APK, load it in the live
+  class loader before theorizing: its real missing dependency is in the exception (`Class.forName(name, true, loader)`).
 - Framework stub gaps: rank the `SERVICE_CALL_UNSUPPORTED <service> <call>` lines (once per process; sessions before
   2026-10-25 show an `UnsupportedOperationException` instead) across every app's `managed/sessions/*/stdout*.log`
   and implement the most common small call from its AOSP source, with a check in `ManagedServiceBatch` (both engines).

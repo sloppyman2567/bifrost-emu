@@ -51,6 +51,42 @@ def play_services_basement(work):
     return jar
 
 
+class SharedLibraryProvisioningTests(unittest.TestCase):
+    def test_shared_libraries_install_from_the_image_and_are_verified(self):
+        import android_framework
+        files = {"/system/etc/permissions/fixture.lib.xml": b"<permissions/>", "/system/framework/fixture.lib.jar": b"jar bytes"}
+        pins = {"fixture.lib": (hashlib.sha256(files["/system/etc/permissions/fixture.lib.xml"]).hexdigest(),
+                                hashlib.sha256(files["/system/framework/fixture.lib.jar"]).hexdigest())}
+        def dump(image, remote, target, max_size=0):
+            target.write_bytes(files[remote])
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(android_framework.SHARED_LIBRARIES, pins, clear=True), \
+                patch("android_framework.dump", side_effect=dump), \
+                patch("android_framework.image_archive"), \
+                patch("android_framework.extract_system", return_value=(Path("image"), None)) as extract:
+            root = Path(directory)
+            android_framework.install_shared_libraries(root)
+            self.assertEqual((root / "system/framework/fixture.lib.jar").read_bytes(), b"jar bytes")
+            self.assertEqual((root / "system/etc/permissions/fixture.lib.xml").read_bytes(), b"<permissions/>")
+            self.assertEqual(android_framework.shared_library_inventory().keys(),
+                             {"system/etc/permissions/fixture.lib.xml", "system/framework/fixture.lib.jar"})
+            self.assertEqual((root / "system/framework/fixture.lib.jar").stat().st_mode & 0o777, 0o444)  # ART rejects writable dex
+            (root / "system/framework/fixture.lib.jar").chmod(0o644)
+            android_framework.install_shared_libraries(root)       # verified and made read-only again, not extracted again
+            self.assertEqual((root / "system/framework/fixture.lib.jar").stat().st_mode & 0o777, 0o444)
+            self.assertEqual(extract.call_count, 1)
+            (root / "system/framework/fixture.lib.jar").chmod(0o644)
+            (root / "system/framework/fixture.lib.jar").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "Modified shared library file"):
+                android_framework.install_shared_libraries(root)
+            with self.assertRaisesRegex(ValueError, "Modified shared library file"):
+                android_framework.without_shared_libraries({"system/framework/fixture.lib.jar": {"sha256": "x", "executable": False}})
+            files["/system/framework/fixture.lib.jar"] = b"other image"
+            (root / "system/framework/fixture.lib.jar").unlink()
+            with self.assertRaisesRegex(ValueError, "differs from the pinned image"):
+                android_framework.install_shared_libraries(root)
+
+
 class BionicCompatibilityTests(unittest.TestCase):
     def setUp(self):
         shell = b'fixture shell'
@@ -59,7 +95,8 @@ class BionicCompatibilityTests(unittest.TestCase):
             target = root / 'system/bin/sh'; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(shell); target.chmod(0o755)
         for setting in (patch('android_framework.SHELL_SHA256', hashlib.sha256(shell).hexdigest()),
-                        patch('android_framework.install_shell', side_effect=install)):
+                        patch('android_framework.install_shell', side_effect=install),
+                        patch('android_framework.install_shared_libraries')):
             setting.start()
             self.addCleanup(setting.stop)
     def make_root(self, root):
@@ -85,7 +122,8 @@ class BionicCompatibilityTests(unittest.TestCase):
             with patch("android_codecs.fingerprint", return_value="fixture"):
                 after = android_framework.install(root, root / "unused")
                 self.assertEqual(after["files"], {**before["files"], **BIONIC_LINKS,
-                                                'system/bin/sh': android_framework.shell_inventory()})
+                                                'system/bin/sh': android_framework.shell_inventory(),
+                                                **android_framework.shared_library_inventory()})
                 manifest = (root / "bifrost-framework.json").read_bytes()
                 self.assertEqual(android_framework.install(root, root / "unused"), after)
                 self.assertEqual((root / "bifrost-framework.json").read_bytes(), manifest)

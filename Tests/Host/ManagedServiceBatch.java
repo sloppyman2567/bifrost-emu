@@ -380,6 +380,66 @@ public final class ManagedServiceBatch {
         check(pm.queryBroadcastReceivers(new Intent().setComponent(new ComponentName(NAME, "Missing")), 0).isEmpty(),
                 "a missing receiver component was found");
     }
+    // FrameworkSharedLibraries against fixture <library> declarations: SystemConfig's name order and "file must
+    // exist", PackageManagerService's resolution (required before optional, org.apache.http.legacy added below API
+    // 28 unless already declared), and the SharedLibraryInfo objects LoadedApk builds the libraries' loaders from.
+    private static void sharedLibraries() throws Exception {
+        File directory = new File("/data/local/tmp/shared-libraries-test");
+        for (File old : directory.listFiles() == null ? new File[0] : directory.listFiles()) old.delete();
+        directory.mkdirs();
+        String http = new File(directory, "http.jar").getPath(), other = new File(directory, "other.jar").getPath();
+        for (String jar : new String[] {http, other}) java.nio.file.Files.write(new File(jar).toPath(), new byte[] {1});
+        java.nio.file.Files.write(new File(directory, "a.xml").toPath(), ("<permissions>"
+                + "<library name=\"org.apache.http.legacy\" file=\"" + http + "\"/>"
+                + "<library name=\"fixture.ghost\" file=\"" + directory + "/absent.jar\"/></permissions>").getBytes());
+        java.nio.file.Files.write(new File(directory, "b.xml").toPath(), ("<permissions>"
+                + "<library name=\"fixture.other\" file=\"" + other + "\"/>"
+                + "<library name=\"org.apache.http.legacy\" file=\"" + other + "\"/></permissions>").getBytes());
+        java.nio.file.Files.write(new File(directory, "c.xml").toPath(), "<permissions><library".getBytes());  // malformed
+        FrameworkSharedLibraries libraries = new FrameworkSharedLibraries(directory);
+        check(libraries.has("org.apache.http.legacy") && libraries.has("fixture.other") && !libraries.has("fixture.ghost"),
+                "declared libraries: a library whose file is absent must be ignored");
+        List<String> none = new ArrayList<>(), apache = Arrays.asList("org.apache.http.legacy");
+        check(new ArrayList<>(libraries.resolve(35, none, apache).values()).equals(Arrays.asList(http)),
+                "the first declaration of a library (a.xml) must win: " + libraries.resolve(35, none, apache));
+        check(libraries.resolve(35, none, none).isEmpty(), "an app targeting API 35 gets no library it did not ask for");
+        check(libraries.resolve(28, none, none).isEmpty(), "API 28 does not get the Apache HTTP legacy library");
+        check(libraries.resolve(27, none, none).keySet().equals(new java.util.HashSet<>(apache)),
+                "an app targeting API 27 gets org.apache.http.legacy");
+        check(libraries.resolve(27, none, apache).size() == 1, "org.apache.http.legacy was added though declared optional");
+        check(libraries.resolve(27, apache, none).size() == 1, "org.apache.http.legacy was added though declared required");
+        check(new ArrayList<>(libraries.resolve(35, Arrays.asList("fixture.other"), apache).keySet())
+                .equals(Arrays.asList("fixture.other", "org.apache.http.legacy")), "required libraries must come first");
+        check(libraries.resolve(35, Arrays.asList("fixture.ghost"), none).isEmpty(), "an unavailable required library");
+        check(!new FrameworkSharedLibraries(new File("/data/local/tmp/absent-directory")).has("fixture.other"),
+                "a missing permissions directory");
+        android.content.pm.ApplicationInfo app = new android.content.pm.ApplicationInfo();
+        FrameworkSharedLibraries.apply(app, libraries.resolve(35, Arrays.asList("fixture.other"), apache));
+        check(Arrays.equals(app.sharedLibraryFiles, new String[] {other, http}), "sharedLibraryFiles: " + Arrays.toString(app.sharedLibraryFiles));
+        List<?> infos = (List<?>) android.content.pm.ApplicationInfo.class.getField("sharedLibraryInfos").get(app);
+        check(infos != null && infos.size() == 2, "one SharedLibraryInfo per library");
+        android.content.pm.SharedLibraryInfo first = (android.content.pm.SharedLibraryInfo) infos.get(0);
+        check(first.getName().equals("fixture.other") && first.getType() == android.content.pm.SharedLibraryInfo.TYPE_BUILTIN
+                && first.getVersion() == -1 && other.equals(first.getClass().getMethod("getPath").invoke(first))
+                && ((List<?>) first.getClass().getMethod("getAllCodePaths").invoke(first)).equals(Arrays.asList(other)),
+                "a built-in SharedLibraryInfo (name, type, undefined version, the jar as its path)");
+        FrameworkSharedLibraries.apply(app, new java.util.LinkedHashMap<>());
+        check(app.sharedLibraryFiles == null && android.content.pm.ApplicationInfo.class.getField("sharedLibraryInfos").get(app) == null,
+                "no libraries must clear both fields");
+        for (File file : directory.listFiles()) file.delete();
+        directory.delete();
+    }
+    // ActivityManager.getDeviceConfigurationInfo (ATMS.getDeviceConfigurationInfo): a touchscreen device with no
+    // physical keyboard or navigation, hence no input features, and the property ro.opengles.version (ES 3.0).
+    private static void deviceConfiguration(Context context) {
+        android.content.pm.ConfigurationInfo info = context.getSystemService(android.app.ActivityManager.class)
+                .getDeviceConfigurationInfo();
+        check(info.reqTouchScreen == android.content.res.Configuration.TOUCHSCREEN_FINGER
+                && info.reqKeyboardType == android.content.res.Configuration.KEYBOARD_NOKEYS
+                && info.reqNavigation == android.content.res.Configuration.NAVIGATION_NONAV
+                && info.reqInputFeatures == 0, "device configuration: " + info);
+        check(info.reqGlEsVersion == 0x30000 && info.getGlEsVersion().equals("3.0"), "reqGlEsVersion: " + info.reqGlEsVersion);
+    }
     // ActivityManager.getRunningServices for a plain app: the app's own created services, up to maxNum.
     private static void runningServices(Context context) {
         android.app.ActivityManager manager = context.getSystemService(android.app.ActivityManager.class);
@@ -1368,6 +1428,8 @@ public final class ManagedServiceBatch {
         usersAndIdle(context);
         cursors(context);
         receivers(context);
+        sharedLibraries();
+        deviceConfiguration(context);
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);

@@ -33,8 +33,53 @@ def shell_inventory():
     return {"sha256": SHELL_SHA256, "executable": True}
 
 
+# The image's shared libraries: SystemConfig's <library> declarations that name a jar in /system/framework, which an
+# app's <uses-library> resolves against (FrameworkSharedLibraries). name -> (sha256 of
+# /system/etc/permissions/NAME.xml, sha256 of /system/framework/NAME.jar). org.apache.http.legacy left the boot
+# classpath in Android 9, so an app that still uses those classes needs it in its class loader.
+SHARED_LIBRARIES = {
+    "android.test.base": (
+        "449eb0b5787d87d8abfaf3a3d00b6b7c908c043ccb9c8120c231ca2fbc7722bc",
+        "6c4df7f402fae4c63c93790ecacb79d6a54a8e543b292ee8295924b70d9c0012"),
+    "android.test.mock": (
+        "58303c4148747f0cdbb6d45445d55fbdf93b99818403ef71ddaf3c79ef29c964",
+        "5b23884fd8581ec4cf08e9ad35fdf046d662231aaf7cfb9aa8aaaba74572eb15"),
+    "android.test.runner": (
+        "c388d758b7405b8dcbaafd459a57c9f5b403f0bb3227028842e8453c9d21cdee",
+        "b5bf3f9335d60df0623ccd6f88670f0a66b538286414c53954414dbd100f968f"),
+    "javax.obex": (
+        "81c400bb23b9345d46a7c51b011bdfcfdeafbd6b60d4c0f2caafcff644f06916",
+        "055b47904a31bed68367148e9d8b9ca88d16b905583e74be2303c6f2721bac58"),
+    "org.apache.http.legacy": (
+        "708e3464888f4211456eea7b80d9a6f134628e47c2b8a92a850277cbdee123d2",
+        "15a6318ddff7ec126d79ceb08ff7f41c8c20b40310b958fbc6112e4dfaa38aec"),
+}
+
+
+def shared_library_files():
+    """Install path -> (image path, pinned sha256) of every shared library file."""
+    files = {}
+    for name, (xml, jar) in SHARED_LIBRARIES.items():
+        files[f"system/etc/permissions/{name}.xml"] = (f"/system/etc/permissions/{name}.xml", xml)
+        files[f"system/framework/{name}.jar"] = (f"/system/framework/{name}.jar", jar)
+    return files
+
+
+def shared_library_inventory():
+    return {name: {"sha256": sha256, "executable": False} for name, (_, sha256) in shared_library_files().items()}
+
+
+def without_shared_libraries(files):
+    """Validate the shared library files and leave the image pin (the files are added after it)."""
+    result = dict(files)
+    for name, expected in shared_library_inventory().items():
+        if name in result and result.pop(name) != expected:
+            raise ValueError(f"Modified shared library file: {name}")
+    return result
+
+
 def without_shell(files):
-    files = without_bionic_links(files)
+    files = without_shared_libraries(without_bionic_links(files))
     if "system/bin/sh" in files and files.pop("system/bin/sh") != shell_inventory():
         raise ValueError("Modified Android shell")
     return files
@@ -54,6 +99,42 @@ def install_shell(root, archive=None, system=None):
         if digest(shell) != SHELL_SHA256: raise ValueError("Android shell differs from pinned image")
         shell.chmod(0o755)
         shutil.copy2(shell, target)
+def protect_shared_libraries(root):
+    """Make the shared library files read-only. ART refuses dex a process could write ("Writable dex file ... is not
+    allowed", as for the WebView APK), and every managed root is its own copy, so this runs on each one."""
+    for name in shared_library_files():
+        path = root / name
+        if path.is_file() and not path.is_symlink() and path.stat().st_mode & 0o222:
+            path.chmod(0o444)
+
+
+def install_shared_libraries(root, archive=None, system=None):
+    """Add the image's shared library declarations and jars to a runtime, verified against the pins."""
+    wanted = shared_library_files()
+    missing = []
+    for name, (_, pin) in wanted.items():
+        target = root / name
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or not target.is_file() or digest(target) != pin:
+                raise ValueError(f"Modified shared library file: {name}")
+        else:
+            missing.append(name)
+    if not missing:
+        protect_shared_libraries(root)
+        return
+    with tempfile.TemporaryDirectory(prefix=".android-libraries-") as directory:
+        work = Path(directory)
+        if system is None: system, _ = extract_system(image_archive(archive), work)
+        for name in missing:
+            image_path, pin = wanted[name]
+            staged = work / Path(name).name
+            dump(system, image_path, staged)
+            if digest(staged) != pin: raise ValueError(f"{image_path} differs from the pinned image")
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged, root / name)
+    protect_shared_libraries(root)
+
+
 BOOT_IMAGE = re.compile(r"boot[A-Za-z0-9_-]*\.(art|oat|vdex)")
 
 
@@ -207,8 +288,10 @@ def install(destination, art_root, archive=None):
             raise ValueError("Codec adapters changed; provision a fresh framework directory")
         install_bionic_links(destination)
         install_shell(destination, archive)
+        install_shared_libraries(destination, archive)
         return update_inventory(metadata, manifest, {**metadata["files"], **BIONIC_LINKS,
-                                                     "system/bin/sh": shell_inventory()})
+                                                     "system/bin/sh": shell_inventory(),
+                                                     **shared_library_inventory()})
     android_art.install(art_root)  # verifies the pinned ART layer
     archive = image_archive(archive)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -219,6 +302,7 @@ def install(destination, art_root, archive=None):
         (root / "bifrost-art.json").unlink()
         system, _ = extract_system(archive, work)
         install_shell(root, system=system)
+        install_shared_libraries(root, system=system)
         for name, target in boot_image_entries(system):
             path = root / f"system/framework/arm64/{name}"
             if target is None:
