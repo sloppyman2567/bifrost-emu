@@ -301,6 +301,28 @@ JNIEXPORT jint JNICALL Java_FrameworkSurfaces_present(JNIEnv *env, jclass type, 
     (*env)->ReleasePrimitiveArrayCritical(env, pixels, argb, JNI_ABORT);
     return result;
 }
+// A video frame: the image's three planes (direct buffers) go to the host, which converts the visible region of the
+// layer to ARGB and presents it (op 25). One call per frame, no pixel array crosses the guest.
+JNIEXPORT jint JNICALL Java_FrameworkSurfaces_presentYuv(JNIEnv *env, jclass type, jlong window, jint x, jint y,
+        jint width, jint height, jint layerWidth, jint layerHeight, jint left, jint top,
+        jint cropLeft, jint cropTop, jint cropWidth, jint cropHeight, jobject yPlane, jobject uPlane, jobject vPlane,
+        jint yRow, jint uRow, jint vRow, jint yPixel, jint uPixel, jint vPixel, jint matrix, jint fullRange) {
+    (void)type;
+    jobject planes[3] = {yPlane, uPlane, vPlane};
+    int64_t addresses[3], sizes[3];
+    for (int i = 0; i < 3; ++i) {
+        if (!planes[i]) return -22;
+        char *base = (*env)->GetDirectBufferAddress(env, planes[i]);
+        jlong capacity = (*env)->GetDirectBufferCapacity(env, planes[i]);
+        if (!base || capacity <= 0) return -22;
+        addresses[i] = (intptr_t)base;
+        sizes[i] = capacity;
+    }
+    int64_t record[27] = {window, x, y, width, height, layerWidth, layerHeight, left, top,
+            cropLeft, cropTop, cropWidth, cropHeight, addresses[0], addresses[1], addresses[2],
+            sizes[0], sizes[1], sizes[2], yRow, uRow, vRow, yPixel, uPixel, vPixel, matrix, fullRange};
+    return (jint)bifrost_window(25, (long)record, 0);
+}
 JNIEXPORT jint JNICALL Java_FrameworkSurfaces_geometry(JNIEnv *env, jclass type, jlong window,
         jint x, jint y, jint width, jint height) {
     (void)env; (void)type;

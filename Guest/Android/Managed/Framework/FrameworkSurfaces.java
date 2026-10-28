@@ -71,10 +71,24 @@ final class FrameworkSurfaces {
     private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
     private boolean stopped;  // ViewRootImpl.setWindowStopped: no surface is created again
     private static native int present(long window, int x, int y, int width, int height, int[] argb);
+    // Op 25: the visible region of a width x height layer from a YUV_420_888 image's planes, converted by the host.
+    private static native int presentYuv(long window, int x, int y, int width, int height, int layerWidth, int layerHeight,
+            int left, int top, int cropLeft, int cropTop, int cropWidth, int cropHeight, ByteBuffer yPlane, ByteBuffer uPlane,
+            ByteBuffer vPlane, int yRow, int uRow, int vRow, int yPixel, int uPixel, int vPixel, int matrix, int fullRange);
     private static native int geometry(long window, int x, int y, int width, int height);
 
     FrameworkSurfaces(Host host) {
         this.host = host;
+    }
+
+    private Handler frameHandler;
+    private synchronized Handler frames() {
+        if (frameHandler == null) {
+            android.os.HandlerThread thread = new android.os.HandlerThread("SurfaceFrames");
+            thread.start();
+            frameHandler = new Handler(thread.getLooper());
+        }
+        return frameHandler;
     }
 
     // A framework window's own host layer: HWUI's ThreadedRenderer draws the
@@ -218,7 +232,8 @@ final class FrameworkSurfaces {
                     entries.put(view, entry);
                 }
                 final Entry consumer = entry;
-                reader.setOnImageAvailableListener(available -> consume(consumer), new Handler(Looper.getMainLooper()));
+                // Video frames are handled off the main Looper: even a large frame must not hold up the app's UI.
+                reader.setOnImageAvailableListener(available -> consume(consumer), frames());
             }
             synchronized (this) {
                 entry.width = width;
@@ -261,13 +276,13 @@ final class FrameworkSurfaces {
         return geometry(entry.window, entry.x + entry.clipLeft, entry.y + entry.clipTop, w, h);
     }
 
-    private static int clamp(double value) { return Math.max(0, Math.min(255, (int)Math.round(value))); }
 
     // CpuConsumer has already waited for the producer's acquire fence before
     // exposing planes. Closing the Image returns its buffer even on failure.
-    // Only the visible region [left,right) x [top,bottom) of the width x height layer is converted, so a video far
-    // larger than the window (a Short scaled to fit a wide window) costs what shows.
-    private static int[] pixels(Image image, int width, int height, int left, int top, int right, int bottom) {
+    // Presents the visible region [left,right) x [top,bottom) of the width x height layer from the image: the host
+    // converts only that region, so a video far larger than the window costs what shows.
+    private static int present(long window, int x, int y, Image image, int width, int height, int left, int top, int right,
+            int bottom) {
         Rect crop = image.getCropRect();
         int regionWidth = right - left, regionHeight = bottom - top;
         if (crop.width() <= 0 || crop.height() <= 0 || width <= 0 || height <= 0 || regionWidth <= 0 || regionHeight <= 0
@@ -281,43 +296,55 @@ final class FrameworkSurfaces {
         catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
         int standard = (dataspace >> 16) & 63, transfer = (dataspace >> 22) & 31;
         if (transfer == 6 || transfer == 7) throw new UnsupportedOperationException("HDR Surface output");
-        double kr = standard == 1 ? .2126 : standard == 6 ? .2627 : .299;
-        double kb = standard == 1 ? .0722 : standard == 6 ? .0593 : .114;
         if (standard != 0 && standard != 1 && standard != 2 && standard != 4 && standard != 6)
             throw new UnsupportedOperationException("Surface color standard: " + standard);
+        // BT.709 (1) and BT.2020 (6) have their own weights; everything else the SDK reports is BT.601.
+        int matrix = standard == 1 ? 1 : standard == 6 ? 2 : 0;
         boolean full = ((dataspace >> 27) & 7) == 1;
         ByteBuffer[] bytes = {planes[0].getBuffer(), planes[1].getBuffer(), planes[2].getBuffer()};
-        int[] out = new int[regionWidth * regionHeight];
-        for (int y = top; y < bottom; y++) for (int x = left; x < right; x++) {
-            int sx = crop.left + (int)((long)x * crop.width() / width);
-            int sy = crop.top + (int)((long)y * crop.height() / height);
-            int yy = bytes[0].get(bytes[0].position() + sy * planes[0].getRowStride() + sx * planes[0].getPixelStride()) & 255;
-            int u = bytes[1].get(bytes[1].position() + (sy / 2) * planes[1].getRowStride() + (sx / 2) * planes[1].getPixelStride()) & 255;
-            int v = bytes[2].get(bytes[2].position() + (sy / 2) * planes[2].getRowStride() + (sx / 2) * planes[2].getPixelStride()) & 255;
-            double luminance = full ? yy : (yy - 16) * (255.0 / 219);
-            double cb = (u - 128) * (full ? 1 : 255.0 / 224), cr = (v - 128) * (full ? 1 : 255.0 / 224);
-            int r = clamp(luminance + 2 * (1 - kr) * cr);
-            int b = clamp(luminance + 2 * (1 - kb) * cb);
-            int g = clamp(luminance - 2 * kb * (1 - kb) / (1 - kr - kb) * cb
-                    - 2 * kr * (1 - kr) / (1 - kr - kb) * cr);
-            out[(y - top) * regionWidth + (x - left)] = 0xff000000 | (r << 16) | (g << 8) | b;
-        }
-        return out;
+        for (ByteBuffer buffer : bytes)
+            if (!buffer.isDirect() || buffer.position() != 0) throw new UnsupportedOperationException("Surface image planes are not direct buffers");
+        return presentYuv(window, x, y, regionWidth, regionHeight, width, height, left, top, crop.left, crop.top,
+                crop.width(), crop.height(), bytes[0], bytes[1], bytes[2], planes[0].getRowStride(), planes[1].getRowStride(),
+                planes[2].getRowStride(), planes[0].getPixelStride(), planes[1].getPixelStride(), planes[2].getPixelStride(),
+                matrix, full ? 1 : 0);
     }
 
-    // Main Looper. The view's position comes from its last update, made on
+    // The frame thread. The view's position comes from its last update, made on
     // the window's own thread.
     private synchronized void consume(Entry entry) {
         if (entry.closed) return;
+        long start = System.nanoTime();
         try (Image image = entry.reader.acquireLatestImage()) {
             if (image == null) return;
             entry.cpu = true;
             int w = entry.clipRight - entry.clipLeft, h = entry.clipBottom - entry.clipTop;
             if (w <= 0 || h <= 0) return;  // scrolled out: the layer shows nothing
-            int result = present(entry.window, entry.x + entry.clipLeft, entry.y + entry.clipTop, w, h,
-                                 pixels(image, entry.width, entry.height, entry.clipLeft, entry.clipTop, entry.clipRight, entry.clipBottom));
+            long acquired = System.nanoTime();
+            int result = present(entry.window, entry.x + entry.clipLeft, entry.y + entry.clipTop, image, entry.width,
+                    entry.height, entry.clipLeft, entry.clipTop, entry.clipRight, entry.clipBottom);
+            long presented = System.nanoTime();
             if (result != 0 && result != -11) throw new IllegalStateException("Surface presentation: " + result);
+            note(acquired - start, presented - acquired, (long) w * h);
         }
+    }
+
+    // One APP_SURFACE_FRAMES line per 10 s while video frames are shown: how many, how long each stage took on average
+    // (acquire the image, then convert on the host and present) and the pixels per frame. Main-thread time spent
+    // here is time the app does not draw.
+    private long statsSince, statsFrames, statsAcquire, statsPresent, statsPixels;
+    private void note(long acquire, long present, long pixels) {
+        long now = System.nanoTime();
+        if (statsSince == 0) statsSince = now;
+        statsFrames++; statsAcquire += acquire; statsPresent += present; statsPixels += pixels;
+        if (now - statsSince < 10_000_000_000L) return;
+        double seconds = (now - statsSince) / 1e9;
+        System.out.println(String.format(java.util.Locale.ROOT,
+                "APP_SURFACE_FRAMES frames=%d fps=%.1f acquire_ms=%.2f present_ms=%.2f pixels=%d busy=%.0f%%",
+                statsFrames, statsFrames / seconds, statsAcquire / 1e6 / statsFrames,
+                statsPresent / 1e6 / statsFrames, statsPixels / statsFrames,
+                100.0 * (statsAcquire + statsPresent) / (now - statsSince)));
+        statsSince = now; statsFrames = statsAcquire = statsPresent = statsPixels = 0;
     }
 
     // A window's SurfaceViews in drawing order, as SurfaceView decides

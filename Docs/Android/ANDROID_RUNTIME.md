@@ -2837,8 +2837,19 @@ Conversion cost follows what shows, and the 4096 px limit applies to the visible
 geometry call accepts up to 16384 like the other host surface limits. `APP_SURFACE` carries `clip=l,t,r,b` when the
 view is clipped (`test_managed_view_window_and_surface_lifecycle`). Not done: a SurfaceView that renders with a native
 window (GL, as a game does) is positioned whole and not cropped, since that needs a viewport source crop of its EGL
-buffer; and a paused video that is scrolled keeps its last frame stretched until the next frame arrives. Video frames
-are still converted from YUV to ARGB by the CPU in Java, which is the cost behind YouTube's stalls on large videos.
+buffer; and a paused video that is scrolled keeps its last frame stretched until the next frame arrives. 
+A frame's YUV to ARGB conversion used to run per pixel in Java on the main Looper: a 3.3 Mpixel video layer took
+763 ms a frame (1.3 fps, the main thread 104% busy), so on a wide window YouTube's UI starved, search worked but its
+results stayed gray, and a Shorts feed hit the stall watcher. `APP_SURFACE_FRAMES` (one line per 10 s while frames
+flow: frames, fps, acquire and present milliseconds per frame, pixels, busy share) came from that profile. The
+conversion is now host code (`Source/System/Android/Surface/Yuv420.cpp`, syscall 0x100E op 25): the managed side passes the
+image's three direct planes with strides, crop, matrix and range, and the host reads them in place and converts only the
+visible region, with fixed-point BT.601/709/2020 weights in limited or full range and nearest-sample scaling.
+Measured on this machine (scalar, one thread): 15.7 ms for 2408x1355 unscaled, 17.3 ms for 1920x1080 scaled to 2408x1355,
+18.2 ms for the visible 2460x1384 of a 1080x1920 Short scaled to a 2460x4373 layer. Frames are handled on their own
+`SurfaceFrames` thread, off the main Looper. `make test-android-yuv420` checks the converter against a floating-point
+reference (planar and semi-planar chroma, padded rows, crop scaling, regions, matrices, ranges, refusals); the end-to-end
+CPU video path has no fixture and was checked on YouTube only.
 
 ### Window shape (2026-10-28)
 

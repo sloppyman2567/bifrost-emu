@@ -10,6 +10,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Video frames convert on the host, off the main thread (2026-10-28)
+
+- Profiling YouTube on a 3440x1440 monitor: a video layer's YUV to ARGB conversion took 237 to 763 ms a frame in Java
+  on the main Looper (1.3 fps, main thread 104% busy), so the UI starved and a search's video page stayed gray. The
+  conversion is host code now (about 16 ms a frame at the same sizes, visible region only) and frames are handled on
+  their own thread. `APP_SURFACE_FRAMES` reports the per-frame cost while video plays. See
+  [the runtime guide](Android/ANDROID_RUNTIME.md).
+
 ### SurfaceView layers are clipped; large surfaces no longer end the app (2026-10-28)
 
 - Scrolling YouTube's Shorts drew whole videos over the UI and killed the process (`Surface geometry: -22`, a layer

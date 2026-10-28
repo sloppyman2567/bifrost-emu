@@ -10,6 +10,7 @@
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/Audio/Audio.hpp"
 #include "System/Android/Surface/Surface.hpp"
+#include "System/Android/Surface/Yuv420.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <climits>
@@ -256,6 +257,39 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
             else if (cpu.regs[0] == 24) { // Managed pointer shape: a BIFROST_WINDOW_CURSOR_* value.
                 if (cpu.regs[1] > INT32_MAX) ret_host(-EINVAL);
                 else ret_host(manager.set_cursor(static_cast<int>(cpu.regs[1])));
+            }
+            else if (cpu.regs[0] == 25) { // Acquired YUV_420_888 image: convert the visible region to ARGB and present it.
+                try {
+                    int64_t r[27]; emu.mem().read(cpu.regs[1], r, sizeof(r));
+                    // window, x, y, region w/h, layer w/h, region left/top, crop l/t/w/h, plane addresses, sizes,
+                    // row strides, pixel strides, matrix, full range.
+                    const int64_t w = r[3], h = r[4];
+                    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || r[5] <= 0 || r[5] > 16384 || r[6] <= 0 || r[6] > 16384 ||
+                            r[1] < -65536 || r[1] > 65536 || r[2] < -65536 || r[2] > 65536 || r[25] < 0 || r[25] > 2) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    uint64_t handle = manager.surface_handle(r[0]);
+                    if (!handle) { ret_host(-ENODEV); return 0; }
+                    arm64emu::android::Yuv420Source source;
+                    arm64emu::android::Yuv420Plane* planes[3] = {&source.y, &source.u, &source.v};
+                    for (int i = 0; i < 3; ++i) {
+                        const int64_t size = r[16 + i];
+                        if (size <= 0 || size > (1LL << 30)) { ret_host(-EINVAL); return 0; }
+                        const uint8_t* host = emu.mem().guest_to_host_ptr(static_cast<uint64_t>(r[13 + i]), Memory::GUEST_PROT_READ,
+                                                                          static_cast<size_t>(size));
+                        if (!host) { ret_host(-EFAULT); return 0; }
+                        planes[i]->data = host; planes[i]->size = static_cast<size_t>(size);
+                        planes[i]->row_stride = r[19 + i]; planes[i]->pixel_stride = r[22 + i];
+                    }
+                    source.crop_left = r[9]; source.crop_top = r[10]; source.crop_width = r[11]; source.crop_height = r[12];
+                    static thread_local std::vector<uint32_t> argb;
+                    argb.resize(static_cast<size_t>(w * h));
+                    const int converted = arm64emu::android::yuv420_to_argb(
+                            source, {r[5], r[6], r[7], r[8], w, h}, static_cast<arm64emu::android::YuvMatrix>(r[25]), r[26] != 0,
+                            argb.data());
+                    if (converted) { ret_host(converted); return 0; }
+                    ret_host(manager.present_pixels(handle, r[1], r[2], w, h, argb.data()));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
             }
             else ret_host(-EINVAL);
             return 0;

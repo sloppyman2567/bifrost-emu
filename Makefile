@@ -588,7 +588,7 @@ generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlvie
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
+	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
 	$(MAKE) verify
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
@@ -603,7 +603,7 @@ ci: setup-tests generated-check $(TARGET)
 check-all: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
+	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
@@ -648,6 +648,11 @@ test-audio-frame-counters:
 	@mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) Tests/Host/audio_frame_counters.cpp Source/System/Audio/Audio.cpp -o $(OBJDIR)/audio_frame_counters $(LDFLAGS)
 	./$(OBJDIR)/audio_frame_counters
+
+.PHONY: test-android-yuv420
+test-android-yuv420: $(LIB)
+	$(CXX) $(CXXFLAGS) Tests/Unit/android_yuv420_host.cpp $(LIB) -o $(OBJDIR)/android_yuv420_host $(LDFLAGS)
+	./$(OBJDIR)/android_yuv420_host
 
 .PHONY: test-android-window-backend
 test-android-window-backend: $(LIB)
