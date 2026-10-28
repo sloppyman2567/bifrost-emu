@@ -347,7 +347,6 @@ int main(int argc, char** argv) {
             for (auto key : {"BIFROST_WINDOW_STATS", "BIFROST_WINDOW_STATS_TITLE", "BIFROST_WINDOW_STATS_WINDOW", "BIFROST_WINDOW_STATS_OVERLAY"}) setenv(key,"0",1);
             arg_i++; continue;
         }
-        bool stats_option = false;
         if (a == "--window-stats-mode" || a.rfind("--window-stats-mode=", 0) == 0) {
             std::string value;
             if (a.size() > 19) value = a.substr(20);
@@ -362,6 +361,7 @@ int main(int argc, char** argv) {
             setenv("BIFROST_WINDOW_STATS", "1", 1);  // choosing a layout turns the stats on
             arg_i++; continue;
         }
+        bool stats_option = false;
         for (auto mode : {"title", "window", "overlay"}) {
             std::string flag = std::string("--window-stats-") + mode;
             std::string key = std::string("BIFROST_WINDOW_STATS_") + (std::string(mode)=="title" ? "TITLE" : std::string(mode)=="window" ? "WINDOW" : "OVERLAY");
