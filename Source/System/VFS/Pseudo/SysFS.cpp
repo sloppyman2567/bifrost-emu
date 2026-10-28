@@ -14,6 +14,11 @@
 //     /present, cpuN/cpu_capacity and cpuN/cpufreq/
 //     cpuinfo_max_freq (strings in libunity.so).
 //
+// /sys/class/power_supply is the one part that mirrors the HOST: Android's battery model (healthd) reads the
+// machine's own supplies (battery, mains, USB). Entries are re-read at every open/stat, names and attributes
+// are validated (no path separators, no dot names), only regular files are served, read-only and capped at
+// 4 KiB. A host without power supplies has an empty directory.
+//
 // Served from MemfdNode/DirNode like procfs, always
 // synthetic — a rootfs has no /sys, and a host /sys would
 // report the HOST's core count and contradict
@@ -26,7 +31,11 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 namespace arm64emu::yggdrasil {
 namespace {
@@ -41,13 +50,80 @@ struct SysfsNode {
     std::string content;                       // regular files
     std::vector<DirNode::Entry> entries;     // directories
 };
-bool classify_sysfs(const std::string& path, SysfsNode* out) {
-    // /sys → devices
-    if (path == "/sys" || path == "/sys/") {
+// ── Host power supplies ────────────────────────────────────
+constexpr const char kSupplyRoot[] = "/sys/class/power_supply";
+constexpr size_t kMaxAttribute = 4096;
+bool safe_sysfs_name(const std::string& name) {
+    if (name.empty() || name.size() > 64 || name[0] == '.') return false;
+    for (char c : name) {
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        c == '_' || c == '.' || c == '-' || c == ':';
+        if (!ok) return false;
+    }
+    return true;
+}
+// Names in a host directory: directories (supplies are symlinks to them) or regular files.
+bool host_entries(const std::string& dir, bool want_files, std::vector<DirNode::Entry>* out) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return false;
+    while (dirent* e = readdir(d)) {
+        const std::string name = e->d_name;
+        if (!safe_sysfs_name(name)) continue;
+        if (want_files ? e->d_type == DT_REG : (e->d_type == DT_DIR || e->d_type == DT_LNK))
+            out->push_back({name, want_files ? 0x1 /*DT_REG*/ : 0x4 /*DT_DIR*/});
+    }
+    closedir(d);
+    return true;
+}
+bool host_attribute(const std::string& supply, const std::string& attr, std::string* out) {
+    const std::string path = std::string(kSupplyRoot) + "/" + supply + "/" + attr;
+    int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    struct stat st;
+    char buf[kMaxAttribute];
+    ssize_t n = -1;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n < 0) return false;
+    out->assign(buf, static_cast<size_t>(n));
+    return true;
+}
+bool classify_power_supply(const std::string& path, SysfsNode* out) {
+    const std::string root = kSupplyRoot;
+    if (path.compare(0, root.size(), root) != 0) return false;
+    std::string rest = path.substr(root.size());
+    if (!rest.empty() && rest.back() == '/') rest.pop_back();
+    if (rest.empty()) {
         out->is_dir = true;
-        out->entries = {{"devices", 0x4 /*DT_DIR*/}};
+        host_entries(root, false, &out->entries);  // none when the host has no supplies
         return true;
     }
+    if (rest[0] != '/') return false;
+    rest = rest.substr(1);
+    const size_t slash = rest.find('/');
+    const std::string supply = rest.substr(0, slash);
+    if (!safe_sysfs_name(supply)) return false;
+    if (slash == std::string::npos) {
+        out->is_dir = true;
+        return host_entries(root + "/" + supply, true, &out->entries);
+    }
+    const std::string attr = rest.substr(slash + 1);
+    return safe_sysfs_name(attr) && host_attribute(supply, attr, &out->content);
+}
+bool classify_sysfs(const std::string& path, SysfsNode* out) {
+    // /sys → devices, class
+    if (path == "/sys" || path == "/sys/") {
+        out->is_dir = true;
+        out->entries = {{"class", 0x4 /*DT_DIR*/}, {"devices", 0x4 /*DT_DIR*/}};
+        return true;
+    }
+    if (path == "/sys/class" || path == "/sys/class/") {
+        out->is_dir = true;
+        out->entries = {{"power_supply", 0x4 /*DT_DIR*/}};
+        return true;
+    }
+    if (path.compare(0, 23, "/sys/class/power_supply") == 0)
+        return classify_power_supply(path, out);
     if (path == "/sys/devices" || path == "/sys/devices/") {
         out->is_dir = true;
         out->entries = {{"system", 0x4 /*DT_DIR*/}};
@@ -132,6 +208,11 @@ std::unique_ptr<Node> Yggdrasil::open_sysfs(const std::string& path,
     SysfsNode node;
     if (!classify_sysfs(path, &node)) {
         *err_out = 0;
+        return nullptr;
+    }
+    // The host's power supply attributes are not the guest's to change.
+    if (path.compare(0, 23, "/sys/class/power_supply") == 0 && (flags & O_ACCMODE) != O_RDONLY) {
+        *err_out = node.is_dir ? -EISDIR : -EACCES;
         return nullptr;
     }
     if (node.is_dir)

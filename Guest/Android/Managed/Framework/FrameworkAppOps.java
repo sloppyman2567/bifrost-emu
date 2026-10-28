@@ -274,6 +274,11 @@ final class FrameworkAppOps {
         });
     }
 
+    // An in-process service reading an op's mode for its caller (AppOpsManager.checkOpNoThrow's answer).
+    int mode(int code, int uid, String packageName) {
+        return checkOperation(code, uid, packageName, null, 0, false);
+    }
+
     private Object call(String method, Object[] a) throws Exception {
         Contract contract;
         try { contract = Contract.valueOf(method); }

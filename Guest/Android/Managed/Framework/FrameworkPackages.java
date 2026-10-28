@@ -228,6 +228,15 @@ final class FrameworkPackages {
         return pkg == null ? null : copy(pkg, PackageInfo.CREATOR);
     }
 
+    // Names of the known (installed, system and peer) packages, as the package manager lists them.
+    List<String> visiblePackageNames() {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        if (installed != null) names.add(installed.packageName);
+        names.addAll(systemPackages.keySet());
+        names.addAll(peers.keySet());
+        return new ArrayList<>(names);
+    }
+
     // Uid of a known (installed, system or peer) package, or -1 when it does not exist.
     int packageUid(String name) {
         PackageInfo pkg = known(name);

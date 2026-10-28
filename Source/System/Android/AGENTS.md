@@ -106,6 +106,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   session's foreground services share across processes. Keep `ActiveServices` order (permission, type, policy, then
   state), and `stopForeground` on a non-foreground service a no-op. `ManagedServices` `foreground` checks both
   processes; the runtime guide lists what is not modelled.
+- Battery state is the host's: `FrameworkBattery` reads `/sys/class/power_supply` (served read-only by the VFS) like
+  healthd and broadcasts changes like BatteryService; a host without a battery is a full one on AC. `usagestats` and
+  `netstats` (`FrameworkUsageStats`, `FrameworkNetworkStats`) keep no history or traffic: empty results, the services'
+  permission gates, never invented counters. `batteryFromSupplies` and `usageAndNetworkStats` in `ManagedServiceBatch`
+  cover them.
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the

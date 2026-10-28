@@ -16,6 +16,10 @@
 //   - getdents64 on /sys/devices/system/cpu: 3 files + 8 cpu dirs
 //   - sched_getaffinity(0, ...): 8 CPUs (unchanged behavior)
 //
+// /sys/class/power_supply mirrors the host's supplies (Android's battery model reads it). The assertions hold on any
+// host, with or without a battery: /sys/class lists power_supply, the directory opens (empty on a desktop), each
+// supply's regular attributes read, none can be opened for writing (EACCES), and dot or traversal names do not exist.
+//
 // Plain C. Emulator-only: the assertions describe the
 // synthetic tree (8 CPUs), not the host machine's real
 // /sys, so there is no native run to compare with.
@@ -153,6 +157,38 @@ int main(void) {
                "1024\n");
     check_file("/sys/devices/system/cpu/cpu7/cpufreq/cpuinfo_max_freq",
                "1800000\n");
+
+    // 6. Host power supplies.
+    DIR* cls = opendir("/sys/class");
+    int found = 0;
+    if (cls) {
+        for (struct dirent* e; (e = readdir(cls));)
+            if (!strcmp(e->d_name, "power_supply")) found = 1;
+        closedir(cls);
+    }
+    check(found, "/sys/class lists power_supply");
+    DIR* supplies = opendir("/sys/class/power_supply");
+    check(supplies != NULL, "/sys/class/power_supply opens");
+    int supply_count = 0, attr_failures = 0;
+    if (supplies) {
+        for (struct dirent* e; (e = readdir(supplies));) {
+            if (e->d_name[0] == '.') continue;
+            supply_count++;
+            char path[300];
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/type", e->d_name);
+            char buf[64];
+            int tfd = open(path, O_RDONLY);
+            ssize_t n = tfd >= 0 ? read(tfd, buf, sizeof buf) : -1;
+            if (tfd >= 0) close(tfd);
+            if (n <= 0 || buf[n - 1] != '\n') attr_failures++;
+            if (open(path, O_WRONLY) >= 0 || errno != EACCES) attr_failures++;
+        }
+        closedir(supplies);
+    }
+    snprintf(what, sizeof what, "%d supplies: type readable, not writable (%d failures)", supply_count, attr_failures);
+    check(attr_failures == 0, what);
+    check(open("/sys/class/power_supply/.x/type", O_RDONLY) < 0, "a dot name is not a supply");
+    check(open("/sys/class/power_supply/no such/type", O_RDONLY) < 0, "an unsafe name is not a supply");
 
     if (failures) {
         printf("%d FAILED\n", failures);

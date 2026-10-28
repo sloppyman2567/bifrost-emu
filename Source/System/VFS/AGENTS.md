@@ -58,6 +58,8 @@
 - `/dev/random` and `/dev/urandom` use host entropy, not deterministic counters.
   Synthetic `/sys` CPU topology shares the emulator's configured guest CPU count
   with sysconf/getcpu/affinity interfaces; do not hardcode the developer's host.
+  `/sys/class/power_supply` is the exception that mirrors the host (read-only, validated names, regular files, 4 KiB
+  cap): Android's battery model reads it; `test_sysfs_cpu` covers it.
 - Node ioctls marshal fixed-layout structs through guest Memory
   (`Nodes/TerminalIoctls.hpp`, `Nodes/InterfaceIoctls.hpp`); never hand a guest
   pointer to a host ioctl. Unknown requests stay `-ENOTTY`.

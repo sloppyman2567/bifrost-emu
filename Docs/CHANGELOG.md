@@ -10,6 +10,18 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Battery follows the host; usage and network stats services (2026-10-28)
+
+- Battery: the guest now sees the host's `/sys/class/power_supply` (read-only), and `FrameworkBattery` reports the
+  machine's real battery, status, charger and plug type, re-read every 30 s with Android's transition broadcasts
+  (`ACTION_BATTERY_CHANGED`, power connected/disconnected, low/okay). A host without a battery (a desktop) is a full
+  battery on AC mains instead of "absent, unknown status". See [Battery](Android/ANDROID_RUNTIME.md).
+- YouTube resumed after a permission result and crashed with a `NullPointerException` in a constructor: the app asks
+  for `NetworkStatsManager` (`netstats`) and `UsageStatsManager` (`usagestats`), which were not published, so
+  `getSystemService` returned null. Both exist now, modelled on the Android 15 services for one app: standby bucket
+  ACTIVE, empty history and traffic, the services' permission gates and argument checks, and
+  `TrafficStats.UNSUPPORTED` for kernel counters. `batterystats.takeUidSnapshot` no longer throws.
+
 ### Window shape: Roblox no longer opens near-square (2026-10-28)
 
 - Roblox's window was a near-square 1440x1384 that the app then froze (it is not resizable): its splash declares no

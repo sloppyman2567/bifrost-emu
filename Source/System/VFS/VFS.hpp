@@ -7,7 +7,8 @@
 //   1. ProcFS    — /proc/self/{exe,cmdline,maps,status,auxv,environ},
 //                  /proc/{meminfo,cpuinfo,version}, /proc/sys/kernel/osrelease
 //   2. SysFS     — /sys/devices/system/cpu/* (synthetic CPU
-//                  topology, all served from kGuestCpuCount)
+//                  topology, all served from kGuestCpuCount) and
+//                  /sys/class/power_supply/* (the host's supplies, read-only)
 //   3. DevFS     — /dev/{null,zero,urandom,random,tty,fb0,stdin,stdout,stderr,
 //                  dsp,snd,ptmx,pts/*}
 //   4. PathRemap — BIFROST_ROOT sandbox (if set)

@@ -1296,7 +1296,9 @@ server classes, for one app, user 0 and the default device:
 |---|---|
 | `uimode` | Normal UI mode, night mode off and locked, contrast 0 (`config_defaultNightMode`, `config_lockDayNightMode`). Process, Activity and bind configurations carry `uiMode` 0x11. Per-app dark mode throws: it needs a configuration change. |
 | `permissionmgr`, `permission_checker` | Delegate to the install-time grants (normal permissions granted, runtime permissions denied), retained framework-res/app permission definitions, no user rationale, no policy revocation, Android 15's 24 `platform.xml` split permissions, attribution registration. Proxy chains through other uids are hard-denied. |
-| `batteryproperties`, `batterystats` | healthd's no-battery AC profile: absent battery, AC plugged, unknown status, level/capacity 100, unknown charge/current, not charging. `registerReceiver` returns the sticky `ACTION_BATTERY_CHANGED` intent and delivers it to a new receiver. A host laptop battery is not reflected. |
+| `batteryproperties`, `batterystats` | The host's own battery, read from `/sys/class/power_supply` through the VFS (see Battery below). A host without a battery is a full one on AC mains: present, 100%, `FULL`, `GOOD`, plugged AC, 4200 mV, 25.0 C, Li-ion. `registerReceiver` returns the sticky `ACTION_BATTERY_CHANGED` intent. `takeUidSnapshot(s)` gives the uid's health stat layout with no measurements. |
+| `usagestats` | `UsageStatsService.BinderService` for one app: every known package is in the ACTIVE standby bucket (`isAppInactive` false, no minimum bucket), queries without `PACKAGE_USAGE_STATS` return null/empty as the service does, history is empty, `reportUsageStart/Stop` keep the service's per-activity token rules, and calls that change system tracking (`setAppInactive`, `setAppStandbyBucket(s)`, observers, `reportUserInteraction`, chooser selections) need the system permission an app never holds (`SecurityException`; `UnsupportedOperationException` for a holder). |
+| `netstats` | `NetworkStatsService` and its sessions for one app: argument and permission checks as the service has them (package must match the uid, wifi network keys need fine location, another uid's tagged history is refused, network-stack calls are `SecurityException`), usage callbacks register with the 2 MiB minimum threshold and never fire. There is no per-UID traffic accounting: summaries, histories and snapshots are empty, `getMobileIfaces` is empty, and the kernel counters (`getUidStats`, `getIfaceStats`, `getTotalStats`) answer `TrafficStats.UNSUPPORTED`. |
 | `vibrator_manager` | No vibrators; `VIBRATE` is enforced and accepted vibrations are ignored. |
 | `trust` and `window` keyguard calls | No credential and never locked; `DISABLE_KEYGUARD` gates keyguard locks, `exitKeyguardSecurely` succeeds. |
 | `clipboard` | In-process clipboard with copied `ClipData`, one-hour auto-clear and listeners; reads need the play window's focus. Not shared with the host desktop. |
@@ -2945,6 +2947,29 @@ process. The notification store is per process: a notification an app posts from
 while a foreground service's notification is always the session's. `ManagedServices` (`foreground`: a service in the app
 process and one in `:remote`, with the stray `stopForeground`, a type missing from the manifest, detach and remove) and
 `ManagedServiceBatch` (a `getForegroundService` `PendingIntent`) check it; both observed, not verified on a device.
+
+### Battery (2026-10-28)
+
+`FrameworkBattery` is BatteryService and healthd for the machine the emulator runs on. The VFS serves
+`/sys/class/power_supply` from the host (`SysFS.cpp`: names and attributes validated, regular files only, read-only
+(`EACCES` on write), 4 KiB cap, re-read at every open; an empty directory on a host with no supplies). The state
+follows [BatteryMonitor](https://android.googlesource.com/platform/system/core/+/refs/tags/android-15.0.0_r1/healthd/BatteryMonitor_v1.cpp)
+(android-15.0.0_r1): the first system battery (a `scope` of `Device`, a mouse or headset, is not the device's) gives
+presence, capacity (or charge/energy now over full), status, health, voltage, temperature, technology, cycle count,
+charge counter and current; every online charger of type `UPS`/`Mains`/`USB_*` (AC), `USB`/`USB_PD_DRP` (USB),
+`Wireless` or `Dock` sets its plug bit. `BatteryManager` properties come from the same files (charge counter, current
+now/average, remaining energy from `energy_now`, capacity, status; an attribute the battery lacks is not found). A host
+with no battery is a full one on AC mains.
+
+The state is re-read every 30 s while the session runs. A change broadcasts as
+[BatteryService.processValuesLocked](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/BatteryService.java)
+does: `ACTION_BATTERY_CHANGED` with a new sequence number, `ACTION_POWER_CONNECTED`/`DISCONNECTED` when the plug
+changes, `ACTION_BATTERY_LOW` at 15% unplugged and `ACTION_BATTERY_OKAY` at 20% or when plugged. Broadcasts reach this
+process's registered receivers only. Not modelled: critical-level and over-temperature shutdown, charging policy, time
+estimates (`computeBatteryTimeRemaining` is -1), health dates and state of health, and uevent-driven updates (the poll
+is the only trigger). Checked: `ManagedServiceBatch` (`batteryFromSupplies` runs the model against a fake tree: battery
+plus mains plus a peripheral, unplug at 14%, replug at 25%, and an empty tree), and `test_sysfs_cpu` for the VFS; this
+desktop host has no battery, so the VFS attribute reads and the write refusal are not exercised on real supplies.
 
 ### App ops and missing content providers (2026-10-12)
 

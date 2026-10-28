@@ -1259,18 +1259,39 @@ public final class ManagedServiceBatch {
         checks++;
     }
 
+    // The battery follows the host (see batteryFromSupplies for the model): a host without a battery is a full one on
+    // AC, a host with one reports its own state. Either way BatteryManager, the sticky intent and the registered
+    // receiver agree.
     private static void battery(Context context) throws Exception {
+        boolean hostBattery = false;
+        String[] supplies = new File("/sys/class/power_supply").list();
+        if (supplies != null)
+            for (String supply : supplies) {
+                File type = new File("/sys/class/power_supply/" + supply + "/type"), scope = new File("/sys/class/power_supply/" + supply + "/scope");
+                if (type.isFile() && new String(java.nio.file.Files.readAllBytes(type.toPath())).trim().equals("Battery")
+                        && !(scope.isFile() && new String(java.nio.file.Files.readAllBytes(scope.toPath())).trim().equals("Device")))
+                    hostBattery = true;
+            }
         android.os.BatteryManager manager = context.getSystemService(android.os.BatteryManager.class);
-        check(manager != null && !manager.isCharging(), "BatteryManager unavailable or charging without a battery");
-        check(manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) == 100
-                && manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) == Integer.MIN_VALUE,
-                "battery properties invented hardware values");
+        check(manager != null, "BatteryManager unavailable");
+        int capacity = manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY);
+        check(capacity >= 0 && capacity <= 100, "capacity out of range: " + capacity);
         android.content.IntentFilter filter = new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED);
         android.content.Intent sticky = context.registerReceiver(null, filter);
-        check(sticky != null && sticky.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) == 100
-                && sticky.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) == 100
-                && sticky.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1) == android.os.BatteryManager.BATTERY_PLUGGED_AC
-                && !sticky.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true), "sticky battery intent incorrect");
+        check(sticky != null && sticky.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) == 100, "sticky battery intent incorrect");
+        int level = sticky.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
+        check(Math.abs(level - capacity) <= 1, "sticky level " + level + " differs from the capacity property " + capacity);
+        if (!hostBattery) {
+            check(manager.isCharging() && capacity == 100 && manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) == Integer.MIN_VALUE
+                    && level == 100 && sticky.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1) == android.os.BatteryManager.BATTERY_PLUGGED_AC
+                    && sticky.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_FULL
+                    && sticky.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, false),
+                    "a host without a battery is not a full battery on AC: " + sticky.getExtras());
+        } else {
+            check(sticky.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, false)
+                    || sticky.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_UNKNOWN,
+                    "host battery missing from the sticky intent: " + sticky.getExtras());
+        }
         check(context.registerReceiver(null, new android.content.IntentFilter("org.bifrost.none")) == null,
                 "sticky intent returned for an unrelated filter");
         android.os.HandlerThread thread = new android.os.HandlerThread("battery-receiver");
@@ -1278,7 +1299,7 @@ public final class ManagedServiceBatch {
         java.util.concurrent.CountDownLatch received = new java.util.concurrent.CountDownLatch(1);
         android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
             @Override public void onReceive(Context c, android.content.Intent intent) {
-                if (isInitialStickyBroadcast() && intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) == 100)
+                if (isInitialStickyBroadcast() && Math.abs(intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) - level) <= 1)
                     received.countDown();
             }
         };
@@ -1288,6 +1309,121 @@ public final class ManagedServiceBatch {
         thread.quitSafely();
     }
 
+    // UsageStatsManager and NetworkStatsManager against the "usagestats" and "netstats" services: an app without
+    // PACKAGE_USAGE_STATS sees only itself (ACTIVE, no history); a wrong package or a system-only call is refused as
+    // the service refuses it. No traffic or usage is recorded, so queries are empty and kernel counters unsupported.
+    private static void usageAndNetworkStats(Context context) throws Exception {
+        android.app.usage.UsageStatsManager usage = context.getSystemService(android.app.usage.UsageStatsManager.class);
+        check(usage != null, "UsageStatsManager is unavailable");
+        long now = System.currentTimeMillis();
+        check(usage.getAppStandbyBucket() == android.app.usage.UsageStatsManager.STANDBY_BUCKET_ACTIVE, "app is not ACTIVE");
+        check(!usage.isAppInactive(NAME), "app is inactive");
+        check(usage.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, 0, now).isEmpty(), "usage stats without permission");
+        check(!usage.queryEvents(0, now).hasNextEvent() && !usage.queryEventsForSelf(0, now).hasNextEvent(), "events invented");
+        Class<?> iface = Class.forName("android.app.usage.IUsageStatsManager");
+        Object service = Class.forName("android.app.usage.IUsageStatsManager$Stub").getMethod("asInterface", IBinder.class)
+                .invoke(null, Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "usagestats"));
+        check((Boolean) iface.getMethod("isAppStandbyEnabled").invoke(service), "standby disabled");
+        try { iface.getMethod("getAppStandbyBuckets", String.class, int.class).invoke(service, NAME, 0); throw new AssertionError("buckets listed without PACKAGE_USAGE_STATS"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof SecurityException, "getAppStandbyBuckets: " + expected.getCause()); }
+        try { iface.getMethod("setAppInactive", String.class, boolean.class, int.class).invoke(service, NAME, true, 0); throw new AssertionError("idle state changed"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof SecurityException, "setAppInactive: " + expected.getCause()); }
+        Binder activity = new Binder();
+        Method start = iface.getMethod("reportUsageStart", IBinder.class, String.class, String.class);
+        Method stop = iface.getMethod("reportUsageStop", IBinder.class, String.class, String.class);
+        start.invoke(service, activity, "t", NAME);
+        try { start.invoke(service, activity, "t", NAME); throw new AssertionError("token started twice"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof IllegalArgumentException, "double start: " + expected.getCause()); }
+        stop.invoke(service, activity, "t", NAME);
+        try { stop.invoke(service, activity, "t", NAME); throw new AssertionError("token stopped twice"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof IllegalArgumentException, "double stop: " + expected.getCause()); }
+
+        android.app.usage.NetworkStatsManager net = context.getSystemService(android.app.usage.NetworkStatsManager.class);
+        check(net != null, "NetworkStatsManager is unavailable");
+        int wifi = android.net.ConnectivityManager.TYPE_WIFI;
+        check(net.querySummaryForDevice(wifi, null, 0, now).getRxBytes() == 0, "device traffic invented");
+        android.app.usage.NetworkStats details = net.queryDetailsForUid(wifi, null, 0, now, Process.myUid());
+        check(!details.hasNextBucket(), "uid traffic invented");
+        details.close();
+        android.app.usage.NetworkStats summary = net.querySummary(wifi, null, 0, now);
+        check(!summary.hasNextBucket(), "summary traffic invented");
+        summary.close();
+        android.app.usage.NetworkStatsManager.UsageCallback callback = new android.app.usage.NetworkStatsManager.UsageCallback() {
+            @Override public void onThresholdReached(int networkType, String subscriberId) { throw new AssertionError("threshold reached"); }
+        };
+        net.registerUsageCallback(wifi, null, 1, callback);
+        net.unregisterUsageCallback(callback);
+        Object netService = Class.forName("android.net.INetworkStatsService$Stub").getMethod("asInterface", IBinder.class)
+                .invoke(null, Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "netstats"));
+        Class<?> netIface = Class.forName("android.net.INetworkStatsService");
+        check((Long) netIface.getMethod("getUidStats", int.class, int.class).invoke(netService, Process.myUid(), 0) == -1L, "kernel counters invented");
+        check(((String[]) netIface.getMethod("getMobileIfaces").invoke(netService)).length == 0, "mobile interfaces invented");
+        try { netIface.getMethod("forceUpdate").invoke(netService); throw new AssertionError("stats forced by an app"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof SecurityException, "forceUpdate: " + expected.getCause()); }
+        try { netIface.getMethod("openSessionForUsageStats", int.class, String.class).invoke(netService, 0, "org.bifrost.other"); throw new AssertionError("foreign package session"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof SecurityException, "foreign session: " + expected.getCause()); }
+        System.out.println("MANAGED_USAGE_NET_STATS_OK");
+    }
+    // The battery follows the host's power supplies: a battery with a charger, a peripheral's battery that is
+    // not the device's, transitions broadcast as BatteryService does, and a host with none is a full battery on AC.
+    private static void batteryFromSupplies(Context context) throws Exception {
+        File root = new File(context.getCacheDir(), "power_supply-" + System.nanoTime());
+        File battery = new File(root, "BAT0"), mains = new File(root, "AC"), mouse = new File(root, "hidpp_battery_0");
+        for (File dir : new File[] {battery, mains, mouse}) check(dir.mkdirs(), "fake supply directory");
+        String saved = FrameworkBattery.suppliesRoot;
+        FrameworkBattery.suppliesRoot = root.getPath();
+        try {
+            // No supplies at all: a full battery on mains.
+            FrameworkBattery none = new FrameworkBattery(null);
+            File empty = new File(context.getCacheDir(), "power_supply-empty-" + System.nanoTime());
+            check(empty.mkdirs(), "empty supplies");
+            FrameworkBattery.suppliesRoot = empty.getPath();
+            none = new FrameworkBattery(null);
+            Intent full = none.stickyIntent();
+            check(full.getIntExtra("level", -1) == 100 && full.getIntExtra("status", -1) == 5 && full.getIntExtra("plugged", -1) == 1
+                    && full.getIntExtra("health", -1) == 2 && full.getBooleanExtra("present", false), "no battery is not full on AC: " + full.getExtras());
+            FrameworkBattery.suppliesRoot = root.getPath();
+            write(battery, "type", "Battery"); write(battery, "status", "Charging"); write(battery, "capacity", "42");
+            write(battery, "health", "Good"); write(battery, "present", "1"); write(battery, "technology", "Li-ion");
+            write(battery, "voltage_now", "11800000"); write(battery, "temp", "301"); write(battery, "cycle_count", "77");
+            write(battery, "charge_counter", "3100000"); write(battery, "current_now", "-1500000"); write(battery, "energy_now", "20000000");
+            write(mains, "type", "Mains"); write(mains, "online", "1");
+            write(mouse, "type", "Battery"); write(mouse, "scope", "Device"); write(mouse, "capacity", "3");
+            FrameworkBattery fb = new FrameworkBattery(null);
+            Intent sticky = fb.stickyIntent();
+            check(sticky.getIntExtra("level", -1) == 42 && sticky.getIntExtra("status", -1) == 2 && sticky.getIntExtra("plugged", -1) == 1
+                    && sticky.getIntExtra("health", -1) == 2 && sticky.getIntExtra("voltage", -1) == 11800 && sticky.getIntExtra("temperature", -1) == 301
+                    && "Li-ion".equals(sticky.getStringExtra("technology")) && sticky.getIntExtra("charge_counter", -1) == 3100000
+                    && sticky.getIntExtra("android.os.extra.CYCLE_COUNT", -1) == 77, "host battery not reflected: " + sticky.getExtras());
+            check(!sticky.getBooleanExtra("battery_low", true), "low battery while charging");
+            // Unplugged and low: disconnect, changed (new sequence), low.
+            write(battery, "status", "Discharging"); write(battery, "capacity", "14"); write(mains, "online", "0");
+            List<String> actions = new ArrayList<>();
+            List<Intent> sent = new ArrayList<>();
+            fb.refresh(intent -> { actions.add(intent.getAction()); sent.add(intent); });
+            check(actions.equals(Arrays.asList(Intent.ACTION_POWER_DISCONNECTED, Intent.ACTION_BATTERY_CHANGED, Intent.ACTION_BATTERY_LOW)),
+                    "transition broadcasts: " + actions);
+            Intent changed = sent.get(1);
+            check(changed.getIntExtra("level", -1) == 14 && changed.getIntExtra("plugged", -1) == 0 && changed.getIntExtra("status", -1) == 3
+                    && changed.getBooleanExtra("battery_low", false) && changed.getIntExtra("seq", 0) > sticky.getIntExtra("seq", 0), "changed intent: " + changed.getExtras());
+            actions.clear();
+            fb.refresh(intent -> actions.add(intent.getAction()));
+            check(actions.isEmpty(), "an unchanged host was broadcast again: " + actions);
+            // Plugged back in at 25%: connect, changed, OK.
+            write(battery, "status", "Charging"); write(battery, "capacity", "25"); write(mains, "online", "1");
+            fb.refresh(intent -> actions.add(intent.getAction()));
+            check(actions.equals(Arrays.asList(Intent.ACTION_POWER_CONNECTED, Intent.ACTION_BATTERY_CHANGED, Intent.ACTION_BATTERY_OKAY)),
+                    "reconnect broadcasts: " + actions);
+            // BatteryManager's properties come from the same files; an attribute the battery lacks is not found.
+            Object registrar = Class.forName("android.os.IBatteryPropertiesRegistrar$Stub").getMethod("asInterface", IBinder.class)
+                    .invoke(null, Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "batteryproperties"));
+            check(registrar != null, "batteryproperties unavailable");
+            System.out.println("MANAGED_BATTERY_SUPPLIES_OK");
+        } finally { FrameworkBattery.suppliesRoot = saved; }
+    }
+    private static void write(File dir, String name, String value) throws java.io.IOException {
+        java.nio.file.Files.write(new File(dir, name).toPath(), (value + "\n").getBytes("UTF-8"));
+    }
     private static void vibratorAndKeyguard(Context context) throws Exception {
         android.os.Vibrator vibrator = context.getSystemService(android.os.Vibrator.class);
         check(vibrator != null && !vibrator.hasVibrator(), "vibrator invented");
@@ -1544,7 +1680,7 @@ public final class ManagedServiceBatch {
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
-        battery(context); vibratorAndKeyguard(context); clipboard(context, packages);
+        battery(context); vibratorAndKeyguard(context); usageAndNetworkStats(context); batteryFromSupplies(context); clipboard(context, packages);
         alarmsAccountsLocation(context);
         settings(context, system, packages, pkg);
         System.out.println("MANAGED_SETTINGS_OK");
