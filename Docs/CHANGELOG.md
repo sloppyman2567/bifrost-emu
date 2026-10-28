@@ -21,6 +21,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
   `getSystemService` returned null. Both exist now, modelled on the Android 15 services for one app: standby bucket
   ACTIVE, empty history and traffic, the services' permission gates and argument checks, and
   `TrafficStats.UNSUPPORTED` for kernel counters. `batterystats.takeUidSnapshot` no longer throws.
+- Also published, as YouTube looked them up at start: `media_metrics`, `locale`, `legacy_permission` and `auth`
+  (see the service table in [the runtime guide](Android/ANDROID_RUNTIME.md)).
 
 ### Window shape: Roblox no longer opens near-square (2026-10-28)
 

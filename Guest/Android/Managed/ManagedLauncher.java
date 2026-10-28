@@ -120,6 +120,10 @@ public final class ManagedLauncher {
     private static final FrameworkVibrator vibrator = new FrameworkVibrator(packages);
     private static final FrameworkUsageStats usageStats = new FrameworkUsageStats(packages, appOps);
     private static final FrameworkNetworkStats networkStats = new FrameworkNetworkStats(packages);
+    private static final FrameworkMediaMetrics mediaMetricsManager = new FrameworkMediaMetrics();
+    private static final FrameworkLocales locales = new FrameworkLocales(packages);
+    private static final FrameworkLegacyPermissions legacyPermissions = new FrameworkLegacyPermissions(packages, appOps);
+    private static final FrameworkAuth auth = new FrameworkAuth(packages, appOps);
     private static final FrameworkKeyguard keyguard = new FrameworkKeyguard(packages);
     private static final FrameworkClipboard clipboard = new FrameworkClipboard(packages, () -> windowOpen);
     private static final FrameworkAppWidgets appWidgets = new FrameworkAppWidgets(packages);
@@ -790,6 +794,10 @@ public final class ManagedLauncher {
         vibrator.install(services);
         usageStats.install(services);
         networkStats.install(services);
+        mediaMetricsManager.install(services);
+        locales.install(services);
+        legacyPermissions.install(services);
+        auth.install(services);
         keyguard.install(services);
         clipboard.install(services);
         alarms.install(services);

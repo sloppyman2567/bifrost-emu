@@ -1424,6 +1424,45 @@ public final class ManagedServiceBatch {
     private static void write(File dir, String name, String value) throws java.io.IOException {
         java.nio.file.Files.write(new File(dir, name).toPath(), (value + "\n").getBytes("UTF-8"));
     }
+    // The device services YouTube looked up at start: media_metrics (session ids, reports dropped), locale (app
+    // locales read back; a change is refused), legacy_permission (device identifiers denied to an app) and auth (no
+    // biometric sensors, no screen lock), each as the Android 15 service answers an app.
+    private static void mediaLocaleLegacyAuth(Context context) throws Exception {
+        android.media.metrics.MediaMetricsManager metrics = context.getSystemService(android.media.metrics.MediaMetricsManager.class);
+        check(metrics != null, "MediaMetricsManager is unavailable");
+        android.media.metrics.PlaybackSession first = metrics.createPlaybackSession(), second = metrics.createPlaybackSession();
+        String id = first.getSessionId().getStringId();
+        check(id.length() == 16 && !id.equals(second.getSessionId().getStringId()) && id.matches("[A-Za-z0-9_-]+"), "session ids: " + id);
+        first.reportPlaybackStateEvent(new android.media.metrics.PlaybackStateEvent.Builder().setState(android.media.metrics.PlaybackStateEvent.STATE_PLAYING).build());
+        first.close(); second.close();
+
+        android.app.LocaleManager locales = context.getSystemService(android.app.LocaleManager.class);
+        check(locales != null && locales.getApplicationLocales().isEmpty() && locales.getSystemLocales().size() > 0, "locale manager");
+        locales.setApplicationLocales(android.os.LocaleList.getEmptyLocaleList());
+        try { locales.setApplicationLocales(android.os.LocaleList.forLanguageTags("fr")); throw new AssertionError("app locale applied silently"); }
+        catch (UnsupportedOperationException expected) { checks++; }
+
+        Class<?> legacy = Class.forName("android.permission.ILegacyPermissionManager");
+        Object service = Class.forName("android.permission.ILegacyPermissionManager$Stub").getMethod("asInterface", IBinder.class)
+                .invoke(null, Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "legacy_permission"));
+        Method identifier = legacy.getMethod("checkDeviceIdentifierAccess", String.class, String.class, String.class, int.class, int.class);
+        check((Integer) identifier.invoke(service, NAME, "test", null, Process.myPid(), Process.myUid()) == -1, "device identifier access granted to an app");
+        try { identifier.invoke(service, NAME, "test", null, Process.myPid(), Process.myUid() + 1); throw new AssertionError("another uid checked"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof SecurityException, "foreign uid: " + expected.getCause()); }
+        try { legacy.getMethod("grantDefaultPermissionsToCarrierServiceApp", String.class, int.class).invoke(service, NAME, 0); throw new AssertionError("default grants by an app"); }
+        catch (InvocationTargetException expected) { check(expected.getCause() instanceof SecurityException, "default grant: " + expected.getCause()); }
+
+        android.hardware.biometrics.BiometricManager biometrics = context.getSystemService(android.hardware.biometrics.BiometricManager.class);
+        check(biometrics != null, "BiometricManager is unavailable");
+        boolean permitted = context.checkSelfPermission("android.permission.USE_BIOMETRIC") == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        try {
+            int strong = biometrics.canAuthenticate(android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG);
+            int credential = biometrics.canAuthenticate(android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL);
+            check(permitted && strong == android.hardware.biometrics.BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE
+                    && credential == android.hardware.biometrics.BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED, "canAuthenticate " + strong + "/" + credential);
+        } catch (SecurityException refused) { check(!permitted && refused.getMessage().contains("USE_BIOMETRIC"), "canAuthenticate: " + refused); }
+        System.out.println("MANAGED_MEDIA_LOCALE_LEGACY_AUTH_OK permitted=" + permitted);
+    }
     private static void vibratorAndKeyguard(Context context) throws Exception {
         android.os.Vibrator vibrator = context.getSystemService(android.os.Vibrator.class);
         check(vibrator != null && !vibrator.hasVibrator(), "vibrator invented");
@@ -1680,7 +1719,7 @@ public final class ManagedServiceBatch {
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
-        battery(context); vibratorAndKeyguard(context); usageAndNetworkStats(context); batteryFromSupplies(context); clipboard(context, packages);
+        battery(context); vibratorAndKeyguard(context); usageAndNetworkStats(context); mediaLocaleLegacyAuth(context); batteryFromSupplies(context); clipboard(context, packages);
         alarmsAccountsLocation(context);
         settings(context, system, packages, pkg);
         System.out.println("MANAGED_SETTINGS_OK");

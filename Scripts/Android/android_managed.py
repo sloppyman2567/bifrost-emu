@@ -54,7 +54,8 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkDeviceIdle.java", "Framework/FrameworkMediaRouter.java",
                     "Framework/FrameworkTelephony.java", "Framework/FrameworkPackageChecksums.java",
                     "Framework/FrameworkAppWidgets.java", "Framework/FrameworkCursors.java",
-                    "Framework/FrameworkUsageStats.java", "Framework/FrameworkNetworkStats.java", "Framework/FrameworkSharedLibraries.java")
+                    "Framework/FrameworkUsageStats.java", "Framework/FrameworkNetworkStats.java", "Framework/FrameworkMediaMetrics.java",
+                    "Framework/FrameworkLocales.java", "Framework/FrameworkLegacyPermissions.java", "Framework/FrameworkAuth.java", "Framework/FrameworkSharedLibraries.java")
 
 
 def add_trace_arguments(parser):
