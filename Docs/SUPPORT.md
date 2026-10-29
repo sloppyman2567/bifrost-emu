@@ -29,11 +29,12 @@ callbacks, surfaces and small exact-frame codec probes in both engines.
 
 Per-app results are recorded in `Scripts/Android/compatibility.json` (shown by
 `asgard compat`), each with the version and date it was checked. A person played
-SpongeBob: Krusty Cook-Off and Subway Surfers (the latter on the maintainer's
-report, with no capture). Azur Lane reaches its title and login screen. Hungry
-Shark World, Hungry Shark Evolution, The Battle Cats, Uptodown and Umamusume
-start and run a bounded session. Roblox and TrickCal are blocked by the app
-itself ending the session. These are single checks, not compatibility
+SpongeBob: Krusty Cook-Off; Azur Lane, The Battle Cats, Umamusume Global,
+Subway Surfers and Geometry Dash Lite are playable on the maintainer's report,
+with no capture. YouTube shows its home screen. Hungry Shark World, Hungry
+Shark Evolution and Uptodown start and run a bounded session. Roblox, TrickCal
+and Umamusume JP are blocked by the app itself (Umamusume JP at a device
+integrity check when it connects). These are single checks, not compatibility
 guarantees, and gameplay is confirmed only where the file says `playable`.
 
 Play services come from microG, so behaviour that needs real Google services

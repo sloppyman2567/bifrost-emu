@@ -10,6 +10,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Compatibility records from the maintainer's reports (2026-10-29)
+
+- `compatibility.json`, the README table, the support page and the roadmap now record Azur Lane 9.3.7, The Battle Cats
+  15.6.1, Umamusume Global 1.35.2, Subway Surfers 3.70.3 (ads work) and Geometry Dash Lite 2.2.148 (ads somewhat
+  stable) as playable on the maintainer's report, with no captures. Umamusume JP 2.32.0 is blocked: it stops at a
+  device integrity check when it connects. YouTube 21.42.247 gets a README row, and its entry no longer lists the
+  MediaSession blocker fixed on October 28. See [Azur Lane](Apps/azur-lane.md).
+
 ### A system-wide Asgard install is readable by its users (2026-10-28)
 
 - `bifrost-emu app.xapk` failed with `Permission denied: .../asgard/build/android-framework/rootfs/bifrost-framework.json`

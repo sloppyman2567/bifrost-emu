@@ -22,12 +22,11 @@
     "com.YoStarEN.AzurLane": {
       "name": "Azur Lane",
       "tested_version": "9.3.7",
-      "status": "title",
-      "checked": "2026-10-14",
-      "evidence": "Screenshots of the loading and title/login screens; gameplay and completed sign-in are unverified.",
+      "status": "playable",
+      "checked": "2026-10-29",
+      "evidence": "The maintainer reports it is playable; no gameplay screenshots or session details are recorded. Earlier screenshots (2026-10-14) show the loading and title/login screens.",
       "notes": [
-        "The Google sign-in failure path can exit the app (unsupported toast enqueue).",
-        "Repeated UI delays at the login scene; WebView interaction is unverified."
+        "UI delays at the login scene were reported on 2026-10-14 and have not been re-checked."
       ],
       "page": "Docs/Apps/azur-lane.md"
     },
@@ -60,10 +59,11 @@
     },
     "jp.co.ponos.battlecatsen": {
       "name": "The Battle Cats",
-      "status": "runs",
-      "checked": "2026-10-21",
-      "evidence": "A bounded run (about 100 s) reached its 2560x1384 window and game surface and loaded its resource packs without a fatal error; title screen and gameplay were not confirmed by a person.",
-      "notes": ["The first ad load blocks the main thread for about 7 s waiting on the Play services Dynamite provider.", "The surface fills only part of a wider window (see the roadmap's window-scaling item)."]
+      "tested_version": "15.6.1",
+      "status": "playable",
+      "checked": "2026-10-29",
+      "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded. The version is the installed package's.",
+      "notes": ["On 2026-10-21 the first ad load blocked the main thread for about 7 s waiting on the Play services Dynamite provider; not re-checked."]
     },
     "com.uptodown": {
       "name": "Uptodown",
@@ -74,25 +74,41 @@
     },
     "jp.co.cygames.umamusume": {
       "name": "Umamusume Pretty Derby (JP)",
-      "status": "runs",
-      "checked": "2026-10-21",
-      "evidence": "Reaches its 1440x1384 Unity window and surface; FMOD's AudioTrack output now initializes (no AudioTrack errors in a 75 s run). Whether the sound is audible, and gameplay, were not confirmed by a person.",
-      "notes": ["Play Games sign-in does not complete: GamesResolutionActivity starts microG's GamesSignInActivity and the result is 'response=none'."]
+      "tested_version": "2.32.0",
+      "status": "blocked",
+      "checked": "2026-10-29",
+      "evidence": "The maintainer reports the game stops at a device integrity check when it connects to its servers. It reaches its Unity window and surface first.",
+      "notes": ["Needs a device that passes the game's integrity check; Bifrost does not bypass or forge it.", "On 2026-10-21 Play Games sign-in did not complete: microG's GamesSignInActivity returned 'response=none'."]
+    },
+    "com.cygames.umamusume": {
+      "name": "Umamusume: Pretty Derby (Global)",
+      "tested_version": "1.35.2",
+      "status": "playable",
+      "checked": "2026-10-29",
+      "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded."
     },
     "com.kiloo.subwaysurf": {
       "name": "Subway Surfers",
       "tested_version": "3.70.3",
       "status": "playable",
-      "checked": "2026-10-27",
-      "evidence": "The maintainer reports it is playable (APKPure 3.70.3 build); no screenshots or further detail are recorded."
+      "checked": "2026-10-29",
+      "evidence": "The maintainer reports it is playable and its ads work (APKPure 3.70.3 build); no screenshots or further detail are recorded."
+    },
+    "com.robtopx.geometryjumplite": {
+      "name": "Geometry Dash Lite",
+      "tested_version": "2.2.148",
+      "status": "playable",
+      "checked": "2026-10-29",
+      "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded.",
+      "notes": ["Ads are only somewhat stable in the maintainer's report; which ads fail, and how, is not recorded."]
     },
     "com.google.android.youtube": {
       "name": "YouTube",
       "tested_version": "21.42.247",
       "status": "title",
       "checked": "2026-10-28",
-      "evidence": "The maintainer's screenshot shows the home screen in the window: the logo, search bar and the Home, Shorts, Subscriptions and You tabs. A tap then ended the session: the app creates an android.media.session.MediaSession and the media_session stand-in does not implement createSession (uncaught, exit 1). No playback was seen.",
-      "notes": ["Needs a MediaSession service (media_session.createSession); the signed-in feed and playback are untested."]
+      "evidence": "The maintainer's screenshot shows the home screen (logo, search bar and the Home, Shorts, Subscriptions and You tabs). Later sessions that day searched and played video while its frame conversion was profiled. The maintainer has not reported it as playable.",
+      "notes": ["Shorts in a landscape window and the signed-in feed are not confirmed."]
     }
   }
 }

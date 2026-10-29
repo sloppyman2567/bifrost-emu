@@ -47,14 +47,19 @@ Existing binaries need no cross-compiler and no QEMU.
 
 ## What runs
 
-Statuses come from the linked pages; "user-confirmed" means the user played it
-on Bifrost, not that every feature has an automated test.
+Statuses come from the linked pages and `Scripts/Android/compatibility.json`;
+"user-confirmed" and "user-reported" mean the user played it on Bifrost, not
+that every feature has an automated test or a recorded capture.
 
 | Program | Kind | Status |
 |---|---|---|
 | [SpongeBob – Krusty Cook-Off 5.12.0](Docs/Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, outfits and menus at native resolution. Child-age path; the adult path waits on Google Play services. |
-| [Azur Lane](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | Loading and title/login screens visibly captured. UI stutters and platform/input gaps remain; gameplay and completed sign-in are unverified. |
-| The Battle Cats | Android | Runs to its game window and loads its resources; title and gameplay are not confirmed. The first ad load waits about 7 s. |
+| [Azur Lane 9.3.7](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | User-reported playable (2026-10-29). Loading and title/login screens captured earlier; no gameplay capture. |
+| The Battle Cats 15.6.1 | Android | User-reported playable (2026-10-29). |
+| Umamusume: Pretty Derby | Android, Unity | Global 1.35.2: user-reported playable (2026-10-29). JP 2.32.0: blocked by the game's device integrity check when it connects. |
+| Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
+| Geometry Dash Lite 2.2.148 | Android, Cocos2d-x | User-reported playable (2026-10-29); ads only somewhat stable. |
+| YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
 | Hungry Shark Evolution, Hungry Shark World | Android | Run sessions to their windows; gameplay is not confirmed. Hungry Shark World's Play Games sign-in does not complete. |
 | Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
 | Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |

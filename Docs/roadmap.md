@@ -25,13 +25,11 @@ as the linked section says, not that every app using it works.
 Known blockers, by cause:
 
 - **Needs real Google attestation or a real device:** Roblox joins servers and
-  is then disconnected (reason 304); TrickCal's own anti-cheat ends it. Bifrost
-  does not bypass or forge either.
+  is then disconnected (reason 304); TrickCal's own anti-cheat ends it;
+  Umamusume JP 2.32.0 stops at its device integrity check when it connects (the
+  user's report). Bifrost does not bypass or forge any of them.
 - **Needs Google Play services:** SpongeBob's adult-age path stalls at 73%, and
   Hungry Shark World's Play Games sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
-- **Needs a MediaSession service:** YouTube 21.42.247 shows its home screen, then a tap ends the session: the app
-  creates an `android.media.session.MediaSession` and `media_session.createSession` is unsupported
-  ([details](CHANGELOG.md#youtube-gets-past-native-library-loading-two-exports-an-app-can-fail-to-load-without-2026-10-28)).
 - **Architecture:** Bifrost runs AArch64 only, so an APK that ships only
   `armeabi-v7a` or `x86` libraries (Angry Birds Space) cannot start.
 - **Platform gaps still listed below:** no Settings screens, no host mDNS,
@@ -132,9 +130,10 @@ backend combinations. [APK setup and boundaries](Android/ANDROID_APK.md) documen
 the exact scope. Implemented managed checkpoints now include the pinned Android
 15 ART/framework, APK Activity creation, resources, JNI, WindowManager-owned
 Activity windows and a shared Binder realm. SpongeBob has user-confirmed cooking
-levels and menus; Azur Lane's loading and title/login UI are visibly captured.
-Those checkpoints do not establish arbitrary APK compatibility or sustained
-Azur Lane gameplay.
+levels and menus; Azur Lane, The Battle Cats, Umamusume Global, Subway Surfers
+and Geometry Dash Lite are user-reported playable without captures (see
+`Scripts/Android/compatibility.json`). Those checkpoints do not establish
+arbitrary APK compatibility.
 
 - Expand the pinned Android 15/API-35 baseline with documented runtime
   provenance and limits instead of claiming every Android release works.
