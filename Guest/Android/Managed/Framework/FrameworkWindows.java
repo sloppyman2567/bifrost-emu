@@ -187,13 +187,22 @@ final class FrameworkWindows {
         Popup popup = find(((IInterface) a[0]).asBinder());
         if (popup == null) throw new IllegalArgumentException("relayout of unknown window");
         Rect display = displays.bounds();
+        boolean focusChanged;
         synchronized (this) {
+            int before = popup.visibility;
+            int flags = popup.attrs.flags;
             if (a[1] != null) popup.attrs.copyFrom((WindowManager.LayoutParams) a[1]);
             popup.requestedWidth = (Integer) a[2];
             popup.requestedHeight = (Integer) a[3];
             popup.visibility = (Integer) a[4];
             layout(popup, display);
+            // WindowManagerService recomputes focus whenever a window's
+            // visibility or focusability changes: a base window that
+            // becomes visible after the window covering it was removed
+            // (an Activity resuming under an ad) takes focus back then.
+            focusChanged = before != popup.visibility || flags != popup.attrs.flags;
         }
+        if (focusChanged) updateFocus();
         View root = root(popup);
         Configuration config = root != null ? root.getResources().getConfiguration() : null;
         for (int i = 5; i < a.length; i++) fill(a[i], popup.frame, display, config);

@@ -2876,7 +2876,8 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(text.count("MANAGED_DIALOG_ENGINE_SURFACE_DESTROYED"), 2, text[-30000:])
         # The dialog shown from onResume holds focus before the Activity's
         # window exists, so the Activity first gains focus when the dialog
-        # goes; the non-focusable PopupWindow leaves it focused.
+        # goes, and, its decor being invisible by then, when it is visible again;
+        # the non-focusable PopupWindow leaves it focused.
         regained = text.index("MANAGED_DIALOG_ACTIVITY_FOCUS true")
         self.assertNotIn("MANAGED_DIALOG_ACTIVITY_FOCUS false", text[:regained], text[-30000:])
         self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)

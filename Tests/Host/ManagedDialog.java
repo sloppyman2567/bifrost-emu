@@ -11,6 +11,7 @@ import android.os.HandlerThread;
 import android.view.Gravity;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.PopupWindow;
 import android.widget.Toast;
@@ -46,11 +47,16 @@ public final class ManagedDialog extends Activity {
         dialog.setOnDismissListener(d -> {
             System.out.println("MANAGED_DIALOG_DISMISSED");
             dialogDone = true;
+            // Nothing was focusable when the dialog went; the window gets
+            // focus when it becomes visible again (an Activity resuming
+            // under a closed ad).
+            getWindow().getDecorView().setVisibility(View.VISIBLE);
             main.postDelayed(this::showPopupWindow, 300);
         });
         dialog.show();
         // Leave time for the launcher to lay out and draw the window, then
         // press the button through the dialog's own view tree.
+        main.postDelayed(() -> getWindow().getDecorView().setVisibility(View.INVISIBLE), 1000);
         main.postDelayed(() -> {
             if (!dialog.getWindow().getDecorView().isAttachedToWindow()
                     || dialog.getWindow().getDecorView().getWidth() == 0)

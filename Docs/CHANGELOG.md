@@ -10,6 +10,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### A window that becomes visible takes focus back (2026-10-30)
+
+- After an ad closed, Geometry Dash Lite stayed black: its game window never got `onWindowFocusChanged(true)`.
+  The ad took focus, the game's window was marked invisible while its Activity stopped, and when the ad went the
+  game window was still invisible, so nothing was focused. Its "visible again" `relayout` then did not recompute
+  focus, which was only done when a window was added or removed. `FrameworkWindows.relayout` now recomputes focus
+  when a window's visibility or flags change, as WindowManagerService does. `test_managed_dialog_and_popup_windows`
+  covers it: the Activity's decor is invisible when the first dialog goes and the window must gain focus when it is
+  visible again; the test fails without the fix. This follows the code and the order of events in the log; the
+  game's own handling of window focus was not decompiled, and the game itself was not rerun.
+
 ### Compatibility records from the maintainer's reports (2026-10-29)
 
 - `compatibility.json`, the README table, the support page and the roadmap now record Azur Lane 9.3.7, The Battle Cats
