@@ -140,6 +140,9 @@ public final class ManagedLauncher {
     // Op 20: starts or stops the host's text input; the rectangle anchors its composition.
     private static native int setTextInput(boolean active, int x, int y, int width, int height);
     static native int setTaskVisible(boolean visible);
+
+    // An Activity stopped or visible again: its dialogs and popups follow.
+    static void appVisible(IBinder token, boolean visible) throws Exception { windows.appVisible(token, visible); }
     // Op 24: the pointer shape over the window, a BIFROST_WINDOW_CURSOR_* value.
     private static native int setCursor(int cursor);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi

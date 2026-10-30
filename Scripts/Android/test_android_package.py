@@ -3219,6 +3219,15 @@ class PackageTests(unittest.TestCase):
         layer = text.index("text=Close second")
         self.assertLess(text.index("MANAGED_ACTIVITIES_SECOND_RESUMED"), layer)
         self.assertLess(layer, text.index("MANAGED_ACTIVITIES_SECOND_CLICKED"))
+        # The root's dialog is a window of the stopped Activity: it gives up focus when the root stops, takes none
+        # while the second window is not focusable (that window's flag change is a relayout), and has it back with
+        # the root. Without the stop, it would take focus from the second window.
+        stopped_at = text.index("MANAGED_ACTIVITIES_ROOT_STOPPED")
+        clicked = text.index("MANAGED_ACTIVITIES_SECOND_CLICKED")
+        covered = text[stopped_at:clicked]
+        self.assertNotIn("MANAGED_ACTIVITIES_DIALOG_FOCUS true", covered, text[-30000:])
+        self.assertIn("MANAGED_ACTIVITIES_SECOND_FOCUS false", covered, text[-30000:])
+        self.assertIn("MANAGED_ACTIVITIES_DIALOG_FOCUS true", text[clicked:text.index("MANAGED_ACTIVITIES_SECOND_BACK")], text[-30000:])
         # Started for a result: the caller is reported. The window covers
         # the display, and its button text reached the host layer.
         self.assertIn("caller=ComponentInfo{org.bifrost.fixture/org.bifrost.fixture.ManagedActivities}", text)

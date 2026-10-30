@@ -125,8 +125,10 @@ public final class ManagedDialog extends Activity {
         // A SurfaceView in an engine-thread window: its SurfaceHolder
         // callbacks run on that thread, and surfaceDestroyed still sees a
         // valid Surface. The "removed" window is dismissed; the "stopped"
-        // one, on the root Activity, is still up when the app closes, which
-        // stops it on its own Looper before the root closes its windows.
+        // one, on the root Activity once this one has finished and the root
+        // is visible again (a stopped Activity's windows are not), is still
+        // up when the app closes, which stops it on its own Looper before the
+        // root closes its windows.
         private void showVideo(Activity context, String label) {
             SurfaceView video = new SurfaceView(context);
             Dialog dialog = new Dialog(context);
@@ -134,12 +136,9 @@ public final class ManagedDialog extends Activity {
                 @Override public void surfaceCreated(SurfaceHolder holder) {
                     System.out.println("MANAGED_DIALOG_ENGINE_SURFACE_CREATED " + label + " "
                             + Thread.currentThread().getName());
-                    // The task ends with its last Activity: finish the Engine on top
-                    // first, then the root.
-                    if (context == root) root.main.postDelayed(() -> {
-                        finish();
-                        root.main.postDelayed(root::finish, 500);
-                    }, 500);
+                    // The task ends with its last Activity: the Engine on top
+                    // finished first, then the root.
+                    if (context == root) root.main.postDelayed(root::finish, 500);
                     else engine.postDelayed(dialog::dismiss, 300);
                 }
                 @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
@@ -151,7 +150,10 @@ public final class ManagedDialog extends Activity {
                             + Thread.currentThread().getName() + " valid=" + holder.getSurface().isValid());
                 }
             });
-            if (context != root) dialog.setOnDismissListener(d -> engine.postDelayed(() -> showVideo(root, "stopped"), 300));
+            if (context != root) dialog.setOnDismissListener(d -> {
+                root.main.post(this::finish);
+                engine.postDelayed(() -> showVideo(root, "stopped"), 800);
+            });
             dialog.setContentView(video, new ViewGroup.LayoutParams(320, 180));
             dialog.show();
         }

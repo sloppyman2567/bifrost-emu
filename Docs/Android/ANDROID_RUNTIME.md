@@ -2778,8 +2778,13 @@ containing them or to a modal window (a multi-pointer gesture stays with the
 window its first pointer chose; touches are not split across windows), windows with `FLAG_WATCH_OUTSIDE_TOUCH`
 receive `ACTION_OUTSIDE`, and keys go to the topmost focusable window (the
 back key cancels dialogs). Exactly one window has focus, recomputed when a window is
-added or removed and when a relayout changes its visibility or flags; a window that never
-had it gets no `onWindowFocusChanged(false)`, as under WindowManagerService.
+added or removed, when a relayout changes its visibility or flags and when an Activity
+stops or is visible again; a window that never had it gets no
+`onWindowFocusChanged(false)`, as under WindowManagerService. A stopped Activity's
+dialogs and popups (sub-windows follow their parent) are not visible, focusable or
+touchable, and have no host layer, as `WindowState.canReceiveKeys` and
+`isVisibleRequestedOrAdding` require a visible Activity; a window added to a stopped
+Activity stays hidden until it restarts.
 The log records `APP_POPUP_ADDED`, `APP_POPUP_SHOWN <id> <frame>
 visible=<non-transparent pixels> text=<visible text>` (once per window),
 `APP_POPUP_HIDDEN <id> transparent` when a shown window becomes fully

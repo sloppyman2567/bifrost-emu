@@ -412,6 +412,7 @@ final class FrameworkActivities {
 
     // ActivityThread.updateVisibility: the server's visibility of the decor.
     private static void setVisible(Activity activity, boolean show) throws Exception {
+        ManagedLauncher.appVisible((IBinder) method(Activity.class, "getActivityToken").invoke(activity), show);
         Field decorField = Activity.class.getDeclaredField("mDecor");
         decorField.setAccessible(true);
         View decor = (View) decorField.get(activity);
@@ -593,8 +594,10 @@ final class FrameworkActivities {
         Object global = Class.forName("android.view.WindowManagerGlobal").getMethod("getInstance").invoke(null);
         Method closeAll = global.getClass().getMethod("closeAll", IBinder.class, String.class, String.class);
         String name = activity.getClass().getName();
+        IBinder token = (IBinder) method(Activity.class, "getActivityToken").invoke(activity);
         if (decorToken != null) closeAll.invoke(global, decorToken, name, "Activity");
-        closeAll.invoke(global, method(Activity.class, "getActivityToken").invoke(activity), name, "Activity");
+        closeAll.invoke(global, token, name, "Activity");
+        ManagedLauncher.appVisible(token, true);  // forget the stopped state with the Activity
     }
 
     // handleDestroyActivity cleans up a ContextImpl base context only: apps

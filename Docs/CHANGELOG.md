@@ -12,6 +12,15 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ### A window that becomes visible takes focus back (2026-10-30)
 
+- The dialogs and popups of a stopped Activity were still shown, touchable and focusable: only its decor was hidden.
+  `FrameworkActivities` now tells `FrameworkWindows` when an Activity stops or is visible again, and its windows
+  follow, as under WindowManagerService (`WindowState.canReceiveKeys` needs a visible Activity). Hidden windows give
+  up their host layers and focus, so a stopped root's dialog no longer takes focus or draws over the Activity on top.
+  `test_managed_activity_stack` gives the root a dialog and a covering window that is not focusable, and fails
+  without the hook. The `ManagedDialog` fixture used to show a dialog on a stopped root; it now waits for the root.
+  Checked against AOSP 15 `WindowState`, `Activity` and `ActivityThread`; whether it changes any game's behaviour
+  is untested.
+
 - After an ad closed, Geometry Dash Lite stayed black: its game window never got `onWindowFocusChanged(true)`.
   The ad took focus, the game's window was marked invisible while its Activity stopped, and when the ad went the
   game window was still invisible, so nothing was focused. Its "visible again" `relayout` then did not recompute

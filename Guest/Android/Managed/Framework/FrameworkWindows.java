@@ -21,7 +21,9 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 final class FrameworkWindows {
     private static native int showPopup(int id, int x, int y, int width, int height, int[] argb);
@@ -84,6 +86,7 @@ final class FrameworkWindows {
     private Object session;
     private int nextId;
     private Popup touchTarget;
+    private final Set<IBinder> stoppedApps = new HashSet<>();  // tokens of stopped Activities
     private boolean stopped;
     private List<Long> stacked = new ArrayList<>();  // host surface order last applied
 
@@ -305,8 +308,32 @@ final class FrameworkWindows {
         return ((WeakReference<?>) ancestor.get(popup.window)).get();
     }
 
-    private static boolean focusable(Popup popup) {
-        return popup.visibility == View.VISIBLE
+    // WindowState.isVisibleRequestedOrAdding: a window is not visible while its
+    // Activity is stopped, dialogs and popups included (sub-windows follow
+    // their parent), whatever its own view visibility.
+    private synchronized boolean visible(Popup popup) {
+        if (popup.visibility != View.VISIBLE) return false;
+        IBinder token = popup.attrs.token;
+        for (int depth = 0; token != null && depth < 8; depth++) {
+            if (stoppedApps.contains(token)) return false;
+            Popup parent = find(token);
+            token = parent != null ? parent.attrs.token : null;
+        }
+        return true;
+    }
+
+    // ActivityThread.updateVisibility on the server's side: the Activity's
+    // windows lose focus, input and their host layers when it stops, and get
+    // them back when it is visible again.
+    void appVisible(IBinder token, boolean visible) throws Exception {
+        synchronized (this) {
+            if (visible) stoppedApps.remove(token); else stoppedApps.add(token);
+        }
+        updateFocus();
+    }
+
+    private boolean focusable(Popup popup) {
+        return visible(popup)
                 && (popup.attrs.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0;
     }
 
@@ -390,7 +417,7 @@ final class FrameworkWindows {
             View root = root(popup);
             Object viewRoot = viewRoot(popup);
             int w = popup.frame.width(), h = popup.frame.height();
-            boolean showing = popup.visibility == View.VISIBLE && root != null && w > 0 && h > 0
+            boolean showing = visible(popup) && root != null && w > 0 && h > 0
                     && root.getWidth() > 0 && root.getHeight() > 0;
             if (!showing) {
                 if (viewRoot == null || owned(viewRoot)) surfaces.update(popup, null, false);
@@ -770,7 +797,7 @@ final class FrameworkWindows {
             synchronized (this) { stack = new ArrayList<>(popups); }
             for (int i = stack.size() - 1; i >= 0; i--) {
                 Popup popup = stack.get(i);
-                if (popup.visibility != View.VISIBLE) continue;
+                if (!visible(popup)) continue;
                 int flags = popup.attrs.flags;
                 if ((flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) continue;
                 boolean inside = popup.frame.contains((int) event.getX(), (int) event.getY());
@@ -794,7 +821,7 @@ final class FrameworkWindows {
         synchronized (this) {
             for (int i = popups.size() - 1; i >= 0; i--) {
                 Popup popup = popups.get(i);
-                if (popup.visibility == View.VISIBLE
+                if (visible(popup)
                         && popup.frame.contains((int) event.getX(), (int) event.getY())) return popup;
             }
         }

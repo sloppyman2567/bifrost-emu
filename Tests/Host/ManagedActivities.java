@@ -1,6 +1,7 @@
 package org.bifrost.fixture;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.IntentSender;
@@ -12,6 +13,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.view.SurfaceView;
 import android.widget.Button;
+import android.widget.TextView;
 import java.util.Arrays;
 import java.util.List;
 
@@ -30,6 +32,17 @@ public final class ManagedActivities extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         setContentView(new SurfaceView(this));
+        // A window of the root's own: it goes with the root when another Activity covers it.
+        Dialog dialog = new Dialog(this) {
+            @Override public void onWindowFocusChanged(boolean focused) {
+                super.onWindowFocusChanged(focused);
+                System.out.println("MANAGED_ACTIVITIES_DIALOG_FOCUS " + focused);
+            }
+        };
+        TextView text = new TextView(this);
+        text.setText("Root dialog");
+        dialog.setContentView(text);
+        dialog.show();
     }
 
     @Override public void onResume() {
@@ -37,7 +50,9 @@ public final class ManagedActivities extends Activity {
         System.out.println("MANAGED_ACTIVITIES_ROOT_RESUMED returned=" + returned);
         if (returned == 1) {
             // Second round: translucent, closed with the Back key instead of a button.
-            startActivityForResult(new Intent(this, Translucent.class).putExtra("back", true), 43);
+            // Time for the root's dialog to report the focus it regained before the next round takes it.
+            main.postDelayed(() -> startActivityForResult(
+                    new Intent(this, Translucent.class).putExtra("back", true), 43), 500);
             return;
         }
         if (returned == 2) {
@@ -194,7 +209,15 @@ public final class ManagedActivities extends Activity {
                     System.out.println("MANAGED_ACTIVITIES_SECOND_BACK");
                     return;
                 }
-                ((android.view.ViewGroup) decor.findViewById(android.R.id.content)).getChildAt(0).performClick();
+                Runnable click = () -> ((android.view.ViewGroup) decor.findViewById(android.R.id.content))
+                        .getChildAt(0).performClick();
+                if (getIntent().hasExtra("value")) {
+                    // Nothing focusable is left above the stopped root: its dialog must not take focus.
+                    getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+                    main.postDelayed(click, 500);
+                } else {
+                    click.run();
+                }
             }, 1500);
         }
 
