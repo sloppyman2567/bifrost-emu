@@ -36,6 +36,7 @@ public final class ManagedDialog extends Activity {
 
     @Override public void onResume() {
         super.onResume();
+        System.out.println("MANAGED_DIALOG_ROOT_RESUMED");
         if (dialogDone) return;
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Bifrost dialog")
@@ -73,17 +74,40 @@ public final class ManagedDialog extends Activity {
         popup.setOnDismissListener(() -> {
             System.out.println("MANAGED_DIALOG_POPUP_DISMISSED");
             // A text toast is a TYPE_TOAST window of the framework layout; it
-            // is gone after LENGTH_SHORT (2 s) and the next step waits for it.
-            Toast.makeText(this, "Bifrost toast", Toast.LENGTH_SHORT).show();
+            // is up for LENGTH_LONG (3.5 s).
+            Toast.makeText(this, "Bifrost toast", Toast.LENGTH_LONG).show();
             System.out.println("MANAGED_DIALOG_TOAST_REQUESTED");
+            // While the toast is up, windows added after it still stack below it (a dialog, and the next Activity's
+            // window), and a PopupWindow of the Activity's window below the dialogs added after that window.
+            main.postDelayed(this::showStackedWindows, 1000);
             main.postDelayed(() -> {
-                System.out.println("MANAGED_DIALOG_TOAST_WAITED");
+                System.out.println("MANAGED_DIALOG_ENGINE_START");
                 startActivity(new Intent(this, Engine.class));
-            }, 3000);
+            }, 2500);
         });
         popup.showAtLocation(getWindow().getDecorView(), Gravity.TOP | Gravity.START, 40, 60);
         System.out.println("MANAGED_DIALOG_POPUP_SHOWN");
         main.postDelayed(popup::dismiss, 1000);
+    }
+
+    private void showStackedWindows() {
+        System.out.println("MANAGED_DIALOG_STACK_BEGIN");
+        Dialog stacked = new Dialog(this);
+        TextView text = new TextView(this);
+        text.setText("Stacked dialog");
+        stacked.setContentView(text);
+        stacked.show();
+        main.postDelayed(() -> {
+            TextView panel = new TextView(this);
+            panel.setText("Stacked popup");
+            PopupWindow popup = new PopupWindow(panel, 200, 60);
+            popup.showAtLocation(getWindow().getDecorView(), Gravity.BOTTOM | Gravity.START, 0, 0);
+            main.postDelayed(() -> {
+                popup.dismiss();
+                stacked.dismiss();
+                System.out.println("MANAGED_DIALOG_STACK_END");
+            }, 300);
+        }, 300);
     }
 
     @Override public void onDestroy() { super.onDestroy(); System.out.println("MANAGED_DIALOG_DESTROYED"); }
@@ -125,10 +149,8 @@ public final class ManagedDialog extends Activity {
         // A SurfaceView in an engine-thread window: its SurfaceHolder
         // callbacks run on that thread, and surfaceDestroyed still sees a
         // valid Surface. The "removed" window is dismissed; the "stopped"
-        // one, on the root Activity once this one has finished and the root
-        // is visible again (a stopped Activity's windows are not), is still
-        // up when the app closes, which stops it on its own Looper before the
-        // root closes its windows.
+        // one, on the root Activity, is still up when the app closes, which
+        // stops it on its own Looper before the root closes its windows.
         private void showVideo(Activity context, String label) {
             SurfaceView video = new SurfaceView(context);
             Dialog dialog = new Dialog(context);
@@ -137,7 +159,7 @@ public final class ManagedDialog extends Activity {
                     System.out.println("MANAGED_DIALOG_ENGINE_SURFACE_CREATED " + label + " "
                             + Thread.currentThread().getName());
                     // The task ends with its last Activity: the Engine on top
-                    // finished first, then the root.
+                    // finished first (a stopped root shows no window), then the root.
                     if (context == root) root.main.postDelayed(root::finish, 500);
                     else engine.postDelayed(dialog::dismiss, 300);
                 }
@@ -150,9 +172,11 @@ public final class ManagedDialog extends Activity {
                             + Thread.currentThread().getName() + " valid=" + holder.getSurface().isValid());
                 }
             });
+            // The root is stopped under this Activity: its dialog is added to a stopped Activity and gets
+            // its surface once this one has finished and the root is visible again.
             if (context != root) dialog.setOnDismissListener(d -> {
-                root.main.post(this::finish);
-                engine.postDelayed(() -> showVideo(root, "stopped"), 800);
+                engine.postDelayed(() -> showVideo(root, "stopped"), 300);
+                root.main.postDelayed(this::finish, 1000);
             });
             dialog.setContentView(video, new ViewGroup.LayoutParams(320, 180));
             dialog.show();

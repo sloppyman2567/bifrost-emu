@@ -17,9 +17,21 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
   follow, as under WindowManagerService (`WindowState.canReceiveKeys` needs a visible Activity). Hidden windows give
   up their host layers and focus, so a stopped root's dialog no longer takes focus or draws over the Activity on top.
   `test_managed_activity_stack` gives the root a dialog and a covering window that is not focusable, and fails
-  without the hook. The `ManagedDialog` fixture used to show a dialog on a stopped root; it now waits for the root.
-  Checked against AOSP 15 `WindowState`, `Activity` and `ActivityThread`; whether it changes any game's behaviour
-  is untested.
+  without the hook. Checked against AOSP 15 `WindowState`, `Activity` and `ActivityThread`; whether it changes any
+  game's behaviour is untested.
+- A window added to a stopped Activity now gets no `ADD_FLAG_APP_VISIBLE` (WindowManagerService sets it only for a
+  client-visible Activity), and `FrameworkWindows` sends `IWindow.dispatchAppVisibility` to its views when the
+  Activity stops or restarts, as `WindowState.sendAppVisibilityToClients` does, so ViewRootImpl hides and shows them.
+  `test_managed_dialog_and_popup_windows` adds a SurfaceView dialog to the stopped root under the Engine Activity,
+  which gets its surface only after the root is visible again; without the dispatch it never does.
+- Windows stack as under WindowManagerService instead of in add order: by layer
+  (`WindowManagerPolicy.getWindowLayerFromTypeLw`: toasts above application windows, then overlays and input
+  methods), an Activity's windows together in the order of its first window (a dialog added late to a covered
+  Activity stays below the Activity on top), its base window below its dialogs, and sub-windows inside their
+  parent's subtree by sub-layer (`getSubWindowLayerFromTypeLw`: a PopupWindow of an Activity's window is below the
+  dialogs added after that window). `APP_POPUP_ADDED` now ends with `stack=<ids, bottom to top>`. The same test shows
+  a dialog, a PopupWindow and the next Activity's window under a toast that is still up, and fails without the
+  layering or without the sort.
 
 - After an ad closed, Geometry Dash Lite stayed black: its game window never got `onWindowFocusChanged(true)`.
   The ad took focus, the game's window was marked invisible while its Activity stopped, and when the ad went the

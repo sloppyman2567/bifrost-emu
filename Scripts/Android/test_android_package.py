@@ -2852,7 +2852,8 @@ class PackageTests(unittest.TestCase):
                    "MANAGED_DIALOG_POPUP_DISMISSED",
                    # A text toast gets a TYPE_TOAST window (2005) and is removed.
                    "MANAGED_DIALOG_TOAST_REQUESTED", "APP_TOAST_SHOWN Bifrost toast",
-                   "MANAGED_DIALOG_TOAST_WAITED",
+                   "MANAGED_DIALOG_STACK_BEGIN", "MANAGED_DIALOG_STACK_END",
+                   "MANAGED_DIALOG_ENGINE_START",
                    # A dialog created on an engine Looper thread draws there
                    # (ViewRootImpl.checkThread) and its click runs there.
                    "text=Engine dialog", "MANAGED_DIALOG_ENGINE_POSITIVE FixtureEngine",
@@ -2882,11 +2883,32 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("MANAGED_DIALOG_ACTIVITY_FOCUS false", text[:regained], text[-30000:])
         self.assertLess(text.index("MANAGED_DIALOG_POSITIVE"), regained)
         self.assertLess(regained, text.index("MANAGED_DIALOG_POPUP_SHOWN"))
+        # Window layers (WindowManagerPolicy.getWindowLayerFromTypeLw): a dialog added while the toast is up stacks
+        # below it, and a PopupWindow of the Activity's window below the dialog added before it (a sub-window stacks
+        # within its parent's subtree).
+        segment = text[text.index("MANAGED_DIALOG_STACK_BEGIN"):text.index("MANAGED_DIALOG_STACK_END")]
+        added = re.findall(r"APP_POPUP_ADDED (\d+) type=(\d+) title=.* stack=([\d,]+)", segment)
+        self.assertEqual([each[1] for each in added], ["2", "1000"], segment)
+        toast = re.search(r"APP_POPUP_ADDED (\d+) type=2005", text).group(1)
+        dialog_stack, popup_stack = added[0][2].split(","), added[1][2].split(",")
+        self.assertLess(dialog_stack.index(added[0][0]), dialog_stack.index(toast), segment)
+        self.assertLess(popup_stack.index(added[1][0]), popup_stack.index(added[0][0]), segment)
+        self.assertLess(popup_stack.index(added[1][0]), popup_stack.index(toast), segment)
+        # The next Activity's window, added while the toast is still up, stacks below the toast as well.
+        engine = re.search(r"APP_POPUP_ADDED (\d+) type=1 title=.* stack=([\d,]+)",
+                           text[text.index("MANAGED_DIALOG_ENGINE_START"):])
+        engine_stack = engine.group(2).split(",")
+        self.assertLess(engine_stack.index(engine.group(1)), engine_stack.index(toast), engine.group(0))
+        # The dialog added to the stopped root (under the Engine Activity) is not visible, and gets its surface only
+        # once the root is visible again (ADD_FLAG_APP_VISIBLE is dispatched later).
+        resumed = [match.start() for match in re.finditer("MANAGED_DIALOG_ROOT_RESUMED", text)]
+        self.assertEqual(len(resumed), 2, text[-30000:])
+        self.assertGreater(text.index("MANAGED_DIALOG_ENGINE_SURFACE_CREATED stopped"), resumed[1], text[-30000:])
         # Windows whose ViewRootImpl has a ThreadedRenderer draw on the GPU, as on Android (a software canvas refuses the
-        # hardware bitmaps an image loader hands out): the Activity window, the dialog and the PopupWindow, at
-        # framework-computed frames. The toast and the unaccelerated Engine Activity and its dialogs reached the host as
+        # hardware bitmaps an image loader hands out): the Activity window, the dialog, the PopupWindow and the stacking
+        # test's dialog and PopupWindow, at framework-computed frames. The toast and the unaccelerated Engine Activity and its dialogs reached the host as
         # software layers. All but the leaked window, which dies asynchronously at exit, were removed.
-        self.assertEqual(text.count("APP_WINDOW_GPU"), 3, text[-30000:])
+        self.assertEqual(text.count("APP_WINDOW_GPU"), 5, text[-30000:])
         self.assertRegex(text, r"APP_WINDOW_GPU \d+ \[40,60\]\[280,140\] opaque=\w+ text=Popup window")
         # The dialog dims what is behind it in a layer of its own directly below its window: the software dim layer
         # stacks above every GPU layer and would dim the dialog itself.

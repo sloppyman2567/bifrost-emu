@@ -33,6 +33,12 @@ final class FrameworkWindows {
     private static final int ADD_FLAG_APP_VISIBLE = 0x2;
     private static final int DIM = 0x40000000;  // host layer id of a window's dim layer
     private static final Class<?> CHANNEL = channelType();
+    private static final Method DISPATCH_APP_VISIBILITY = windowMethod("dispatchAppVisibility", boolean.class);
+
+    private static Method windowMethod(String name, Class<?>... types) {
+        try { return Class.forName("android.view.IWindow").getMethod(name, types); }
+        catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
 
     private static Class<?> channelType() {
         try { return Class.forName("android.view.InputChannel"); }
@@ -53,6 +59,9 @@ final class FrameworkWindows {
         Bitmap bitmap;
         int[] pixels;
         boolean focused;
+        boolean clientVisible = true;  // what the window's ViewRootImpl was told (dispatchAppVisibility)
+        Popup parent;  // a sub-window's window; null otherwise
+        long group;  // windows sharing a token stack together; the id of the first of them
         boolean onHost;  // a host layer shows `shown`; blank windows have none
         boolean announced;  // APP_POPUP_SHOWN logged
         // Set by each traversal (ViewTreeObserver pre-draw), when SurfaceView
@@ -148,15 +157,14 @@ final class FrameworkWindows {
             popup.attrs = new WindowManager.LayoutParams();
             popup.attrs.copyFrom((WindowManager.LayoutParams) a[1]);
             popup.visibility = (Integer) a[2];
-            // WindowManager stacks an Activity's base window below the
-            // dialogs and panels sharing its token, whatever the add order
-            // (a dialog shown from onResume is added first).
-            int index = popups.size();
-            if (popup.attrs.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION
-                    && popup.attrs.token != null)
-                for (int i = 0; i < popups.size(); i++)
-                    if (popups.get(i).attrs.token == popup.attrs.token) { index = i; break; }
-            popups.add(index, popup);
+            popup.group = popup.id;
+            for (Popup other : popups) {
+                if (popup.attrs.token != null && other.attrs.token == popup.attrs.token) popup.group = other.group;
+                if (isSubWindow(popup.attrs.type) && other.token == popup.attrs.token) popup.parent = other;
+            }
+            popups.add(popup);
+            popups.sort(Z_ORDER);
+            popup.clientVisible = activityVisible(popup);
         }
         for (Object out : a) {
             if (CHANNEL.isInstance(out)) {
@@ -175,10 +183,80 @@ final class FrameworkWindows {
                 ((Rect) out).set(displays.bounds());  // parent: the full-screen activity
             }
         }
+        StringBuilder stack = new StringBuilder();
+        synchronized (this) { for (Popup each : popups) stack.append(stack.length() > 0 ? "," : "").append(each.id); }
         System.out.println("APP_POPUP_ADDED " + popup.id + " type=" + popup.attrs.type
-                + " title=" + popup.attrs.getTitle());
+                + " title=" + popup.attrs.getTitle() + " stack=" + stack);  // bottom to top
         updateFocus();
-        return ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE;
+        // WindowManagerService: the flag is set unless the window's Activity is stopped; it is dispatched when that changes.
+        return ADD_FLAG_IN_TOUCH_MODE | (popup.clientVisible ? ADD_FLAG_APP_VISIBLE : 0);
+    }
+
+    // Window layers, from WindowManagerPolicy.getWindowLayerFromTypeLw: the types an app can add, application
+    // windows in one layer, others above them; unknown types as in the policy.
+    private static int typeLayer(int type) {
+        if (type >= WindowManager.LayoutParams.FIRST_APPLICATION_WINDOW
+                && type <= WindowManager.LayoutParams.LAST_APPLICATION_WINDOW) return 2;
+        if (isSubWindow(type)) return 2;  // a sub-window whose parent is gone
+        switch (type) {
+            case WindowManager.LayoutParams.TYPE_PHONE:
+            case 2037: return 3;  // TYPE_PRESENTATION
+            case WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG: return 6;
+            case WindowManager.LayoutParams.TYPE_TOAST: return 7;
+            case WindowManager.LayoutParams.TYPE_PRIORITY_PHONE: return 8;
+            case WindowManager.LayoutParams.TYPE_SYSTEM_ALERT:
+            case WindowManager.LayoutParams.TYPE_SYSTEM_ERROR: return 9;
+            case WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY: return 10;
+            case WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY: return 11;
+            case WindowManager.LayoutParams.TYPE_INPUT_METHOD: return 13;
+            case WindowManager.LayoutParams.TYPE_INPUT_METHOD_DIALOG: return 14;
+            default: return 3;
+        }
+    }
+
+    // WindowManagerPolicy.getSubWindowLayerFromTypeLw: below (negative) or above the parent window.
+    private static int subLayer(int type) {
+        switch (type) {
+            case 1003: return -2;  // TYPE_APPLICATION_MEDIA
+            case 1004: return -1;  // TYPE_APPLICATION_MEDIA_OVERLAY
+            case 1005: return 2;   // TYPE_APPLICATION_SUB_PANEL
+            case 1006: return 3;   // TYPE_APPLICATION_ABOVE_SUB_PANEL
+            default: return 1;     // TYPE_APPLICATION_PANEL, TYPE_APPLICATION_ATTACHED_DIALOG
+        }
+    }
+
+    // Bottom to top. Roots stack by layer, then by token (an Activity's windows stay together, in the order of its
+    // first window), then by add order, except that an Activity's base window is below the dialogs sharing its token
+    // whatever the add order (a dialog shown from onResume is added first). Sub-windows stack within their parent's
+    // subtree by sub-layer; equal sub-layers below the parent stack newest first (WindowState.sWindowSubLayerComparator).
+    private static final java.util.Comparator<Popup> Z_ORDER = (a, b) -> {
+        if (a == b) return 0;
+        List<Popup> up = chain(a), vp = chain(b);
+        Popup ra = up.get(0), rb = vp.get(0);
+        if (ra != rb) {
+            if (typeLayer(ra.attrs.type) != typeLayer(rb.attrs.type))
+                return Integer.compare(typeLayer(ra.attrs.type), typeLayer(rb.attrs.type));
+            if (ra.group != rb.group) return Long.compare(ra.group, rb.group);
+            return Long.compare(member(ra), member(rb));
+        }
+        int k = 1;
+        while (k < up.size() && k < vp.size() && up.get(k) == vp.get(k)) k++;
+        if (k == up.size()) return subLayer(vp.get(k).attrs.type) < 0 ? 1 : -1;  // a is the ancestor
+        if (k == vp.size()) return subLayer(up.get(k).attrs.type) < 0 ? -1 : 1;
+        int sa = subLayer(up.get(k).attrs.type), sb = subLayer(vp.get(k).attrs.type);
+        if (sa != sb) return Integer.compare(sa, sb);
+        return sa < 0 ? Long.compare(vp.get(k).id, up.get(k).id) : Long.compare(up.get(k).id, vp.get(k).id);
+    };
+
+    private static long member(Popup root) {
+        return root.attrs.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION && root.attrs.token != null
+                ? Long.MIN_VALUE : root.id;
+    }
+
+    private static List<Popup> chain(Popup popup) {
+        List<Popup> up = new ArrayList<>();
+        for (Popup each = popup; each != null; each = each.parent) up.add(0, each);
+        return up;
     }
 
     private static boolean isSubWindow(int type) {
@@ -312,13 +390,13 @@ final class FrameworkWindows {
     // Activity is stopped, dialogs and popups included (sub-windows follow
     // their parent), whatever its own view visibility.
     private synchronized boolean visible(Popup popup) {
-        if (popup.visibility != View.VISIBLE) return false;
-        IBinder token = popup.attrs.token;
-        for (int depth = 0; token != null && depth < 8; depth++) {
-            if (stoppedApps.contains(token)) return false;
-            Popup parent = find(token);
-            token = parent != null ? parent.attrs.token : null;
-        }
+        return popup.visibility == View.VISIBLE && activityVisible(popup);
+    }
+
+    // ActivityRecord.isClientVisible for the window's Activity.
+    private synchronized boolean activityVisible(Popup popup) {
+        for (Popup each = popup; each != null; each = each.parent)
+            if (each.attrs.token != null && stoppedApps.contains(each.attrs.token)) return false;
         return true;
     }
 
@@ -326,9 +404,17 @@ final class FrameworkWindows {
     // windows lose focus, input and their host layers when it stops, and get
     // them back when it is visible again.
     void appVisible(IBinder token, boolean visible) throws Exception {
+        List<Popup> changed = new ArrayList<>();
         synchronized (this) {
             if (visible) stoppedApps.remove(token); else stoppedApps.add(token);
+            for (Popup popup : popups) {
+                boolean now = activityVisible(popup);
+                if (popup.clientVisible != now) { popup.clientVisible = now; changed.add(popup); }
+            }
         }
+        // WindowState.sendAppVisibilityToClients: ViewRootImpl hides the window's views while the app is not visible.
+        for (Popup popup : changed)
+            DISPATCH_APP_VISIBILITY.invoke(popup.window, popup.clientVisible);
         updateFocus();
     }
 

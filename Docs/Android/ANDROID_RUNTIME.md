@@ -2784,8 +2784,13 @@ stops or is visible again; a window that never had it gets no
 dialogs and popups (sub-windows follow their parent) are not visible, focusable or
 touchable, and have no host layer, as `WindowState.canReceiveKeys` and
 `isVisibleRequestedOrAdding` require a visible Activity; a window added to a stopped
-Activity stays hidden until it restarts.
-The log records `APP_POPUP_ADDED`, `APP_POPUP_SHOWN <id> <frame>
+Activity is added without `ADD_FLAG_APP_VISIBLE`, and its views are told
+(`dispatchAppVisibility`) when the Activity restarts. Windows stack by type layer
+(`WindowManagerPolicy.getWindowLayerFromTypeLw`: application windows, then toasts, overlays
+and input methods), an Activity's windows together in the order of its first window with
+its base window lowest, and sub-windows within their parent's subtree by sub-layer, not
+in add order; types the policy does not know take its default layer.
+The log records `APP_POPUP_ADDED <id> type= title= stack=<window ids, bottom to top>`, `APP_POPUP_SHOWN <id> <frame>
 visible=<non-transparent pixels> text=<visible text>` (once per window),
 `APP_POPUP_HIDDEN <id> transparent` when a shown window becomes fully
 transparent, and `APP_POPUP_REMOVED` for every window, Activity windows
