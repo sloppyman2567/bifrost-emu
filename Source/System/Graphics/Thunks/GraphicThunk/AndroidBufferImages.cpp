@@ -4,6 +4,7 @@
 // image's source) and OES_EGL_image(_external) (binding it to a texture).
 #include "System/Graphics/Thunks/GraphicThunk/AndroidBufferImages.hpp"
 #include "System/Android/Surface/Surface.hpp"
+#include "System/Android/Surface/Yuv420.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Graphics/Thunks/ThunkCommon.hpp"
@@ -11,7 +12,6 @@
 #include "Bifrost/AndroidGralloc.h"
 #include "Bifrost/Types.hpp"
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -114,7 +114,6 @@ uint64_t reject(const char* reason) {
     return 0;
 }
 
-uint8_t clamp(int value) { return static_cast<uint8_t>(std::clamp(value, 0, 255)); }
 
 // Saves and restores the unpack/texture state a texture upload touches, so
 // the app's context (and GLStateTracker's view of it) is unchanged.
@@ -416,42 +415,34 @@ void AndroidBufferImages::capture_upload(CPU& cpu, Memory& mem) {
 
 // Linear gralloc pixels (after the metadata page) to tightly packed RGBA8.
 // YUV420 is planar Y, V, U with 2x2 chroma (gralloc_mapper.c planes()); its
-// matrix and range follow the buffer's dataspace, as FrameworkSurfaces does.
-void AndroidBufferImages::convert(Buffer& b, std::vector<uint8_t>& scratch) {
+// matrix and range follow the buffer's dataspace, and the shared converter
+// (Yuv420.cpp, SIMD where the host has it) is the one FrameworkSurfaces uses.
+void AndroidBufferImages::convert(Buffer& b, std::vector<uint32_t>& scratch) {
     const uint8_t* pixels = b.mapping + BF_GRALLOC_OFFSET;
     const int w = b.width, h = b.height, stride = b.stride;
-    scratch.resize(size_t(w) * h * 4);
-    uint8_t* out = scratch.data();
+    scratch.resize(size_t(w) * h);
+    uint8_t* out = reinterpret_cast<uint8_t*>(scratch.data());
     if (b.format == 35 || b.format == 0x32315659) {
         const int32_t space = dataspace(b.mapping);
         const int standard = (space >> 16) & 63;
+        const android::YuvMatrix matrix = standard == 1 ? android::YuvMatrix::Bt709
+                                          : (standard == 6 || standard == 7) ? android::YuvMatrix::Bt2020
+                                                                             : android::YuvMatrix::Bt601;
         const bool full = ((space >> 27) & 7) == 1;
-        const double kr = standard == 1 ? .2126 : (standard == 6 || standard == 7) ? .2627 : .299;
-        const double kb = standard == 1 ? .0722 : (standard == 6 || standard == 7) ? .0593 : .114;
-        const double kg = 1 - kr - kb, cs = full ? 1 : 255.0 / 224;
-        const int ys = static_cast<int>(std::lround((full ? 1 : 255.0 / 219) * 65536)), yo = full ? 0 : 16;
-        const int rv = static_cast<int>(std::lround(2 * (1 - kr) * cs * 65536));
-        const int gu = static_cast<int>(std::lround(-2 * kb * (1 - kb) / kg * cs * 65536));
-        const int gv = static_cast<int>(std::lround(-2 * kr * (1 - kr) / kg * cs * 65536));
-        const int bu = static_cast<int>(std::lround(2 * (1 - kb) * cs * 65536));
-        const int cstride = ((stride / 2) + 15) & ~15;
-        const uint8_t* yp = pixels;
-        const uint8_t* vp = pixels + size_t(stride) * h;
-        const uint8_t* up = vp + size_t(cstride) * (h / 2);
-        for (int y = 0; y < h; ++y) {
-            const uint8_t* yr = yp + size_t(y) * stride;
-            const uint8_t* ur = up + size_t(y / 2) * cstride;
-            const uint8_t* vr = vp + size_t(y / 2) * cstride;
-            uint8_t* o = out + size_t(y) * w * 4;
-            for (int x = 0; x < w; ++x) {
-                const int luma = (yr[x] - yo) * ys + 32768, u = ur[x / 2] - 128, v = vr[x / 2] - 128;
-                o[0] = clamp((luma + rv * v) >> 16);
-                o[1] = clamp((luma + gu * u + gv * v) >> 16);
-                o[2] = clamp((luma + bu * u) >> 16);
-                o[3] = 255;
-                o += 4;
-            }
-        }
+        const int64_t cstride = ((stride / 2) + 15) & ~15;
+        const size_t available = b.size > BF_GRALLOC_OFFSET ? b.size - BF_GRALLOC_OFFSET : 0;
+        const size_t v_offset = size_t(stride) * h, u_offset = v_offset + size_t(cstride) * (h / 2);
+        android::Yuv420Source source;
+        source.y = {pixels, std::min(available, v_offset), stride, 1};
+        source.v = {pixels + std::min(available, v_offset), available - std::min(available, v_offset), cstride, 1};
+        source.u = {pixels + std::min(available, u_offset), available - std::min(available, u_offset), cstride, 1};
+        source.crop_width = w;
+        source.crop_height = h;
+        android::Yuv420Options options;
+        options.order = android::YuvOrder::Rgba;
+        // A buffer smaller than its own geometry is refused, not read past: opaque black.
+        if (android::yuv420_to_argb(source, {w, h, 0, 0, w, h}, matrix, full, scratch.data(), options) != 0)
+            std::fill(scratch.begin(), scratch.end(), 0xFF000000u);
         return;
     }
     const int bpp = bf_gralloc_bpp(b.format);

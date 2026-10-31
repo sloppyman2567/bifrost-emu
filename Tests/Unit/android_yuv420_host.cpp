@@ -4,12 +4,18 @@
 // on random planes: planar and semi-planar chroma (pixel stride 1 and 2), padded rows, a crop scaled to a larger and a
 // smaller layer, a region inside the layer, all three matrices and both ranges. Fixed-point rounding may differ from
 // the reference by a couple of levels. Out-of-range geometry must be refused, never read past a plane.
+//
+// The SIMD kernel must match the scalar definition bit for bit (sizes that are not a multiple of its 16-pixel block,
+// odd start columns, padded and semi-planar chroma, scaled rows, both byte orders), and must never load past a
+// plane: each plane here ends exactly at an unmapped guard page, so a stray wide load faults instead of passing.
 #include "System/Android/Surface/Yuv420.hpp"
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <random>
+#include <sys/mman.h>
 #include <vector>
 
 using namespace arm64emu::android;
@@ -39,6 +45,86 @@ static int worst(uint32_t a, uint32_t b) {
     int w = 0;
     for (int shift = 0; shift < 24; shift += 8) w = std::max(w, std::abs(int((a >> shift) & 255) - int((b >> shift) & 255)));
     return w;
+}
+
+// A byte plane whose last byte is the last byte before an inaccessible page.
+struct GuardedPlane {
+    uint8_t* base = nullptr;
+    size_t map_size = 0;
+    uint8_t* data = nullptr;
+    size_t size = 0;
+    GuardedPlane(size_t bytes, std::mt19937& rng) : size(bytes) {
+        const size_t page = 4096, pages = (bytes + page - 1) / page + 1;
+        map_size = (pages + 1) * page;
+        base = static_cast<uint8_t*>(mmap(nullptr, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        if (base == MAP_FAILED) { std::printf("mmap failed\n"); std::exit(2); }
+        mprotect(base + pages * page, page, PROT_NONE);
+        data = base + pages * page - bytes;
+        for (size_t i = 0; i < bytes; ++i) data[i] = static_cast<uint8_t>(rng());
+    }
+    ~GuardedPlane() { munmap(base, map_size); }
+    GuardedPlane(const GuardedPlane&) = delete;
+    GuardedPlane& operator=(const GuardedPlane&) = delete;
+};
+
+static void kernel_equals_scalar() {
+    std::mt19937 rng(11);
+    int compared = 0;
+    for (int chroma_stride : {1, 2})
+        for (int padding : {0, 6})
+            for (int64_t width : {1, 2, 15, 16, 17, 31, 33, 64, 100})
+                for (int64_t height : {2, 5}) {
+                    const int64_t y_row = width + padding, c_cols = (width + 1) / 2, c_rows = (height + 1) / 2;
+                    const int64_t c_row = c_cols * chroma_stride + padding;
+                    // Tight planes: exactly up to the last sample the geometry reaches.
+                    GuardedPlane yp(static_cast<size_t>((height - 1) * y_row + width), rng);
+                    GuardedPlane up(static_cast<size_t>((c_rows - 1) * c_row + (c_cols - 1) * chroma_stride + 1), rng);
+                    GuardedPlane vp(up.size, rng);
+                    Yuv420Source s;
+                    s.y = {yp.data, yp.size, y_row, 1};
+                    s.u = {up.data, up.size, c_row, chroma_stride};
+                    s.v = {vp.data, vp.size, c_row, chroma_stride};
+                    struct Case { int64_t cl, cw, lw, left, w; };
+                    std::vector<Case> cases;
+                    cases.reserve(5);
+                    cases.push_back({0, width, width, 0, width});                              // whole, unscaled
+                    if (width >= 4) cases.push_back({1, width - 1, width - 1, 0, width - 1}); // odd start column
+                    if (width >= 5) cases.push_back({1, width - 2, width - 2, 1, width - 3}); // odd start, region
+                    cases.push_back({0, width, width * 2 + 3, 1, width});                      // scaled up, region
+                    if (width >= 4) cases.push_back({0, width, width / 2, 0, width / 2});      // scaled down
+                    for (const Case& c : cases)
+                        for (YuvMatrix matrix : {YuvMatrix::Bt601, YuvMatrix::Bt709, YuvMatrix::Bt2020})
+                            for (bool full : {false, true})
+                                for (YuvOrder order : {YuvOrder::Argb, YuvOrder::Rgba}) {
+                                    s.crop_left = c.cl; s.crop_top = 0; s.crop_width = c.cw; s.crop_height = height;
+                                    const Yuv420Region region{c.lw, height, c.left, 0, c.w, height};
+                                    std::vector<uint32_t> fast(static_cast<size_t>(c.w * height), 0xDEADBEEF), plain = fast;
+                                    Yuv420Options a, b;
+                                    a.order = b.order = order;
+                                    b.scalar_only = true;
+                                    CHECK(yuv420_to_argb(s, region, matrix, full, fast.data(), a) == 0);
+                                    CHECK(yuv420_to_argb(s, region, matrix, full, plain.data(), b) == 0);
+                                    CHECK(fast == plain);
+                                    ++compared;
+                                    if (order == YuvOrder::Rgba) {  // R and B swapped against the ARGB form
+                                        std::vector<uint32_t> argb(plain.size());
+                                        Yuv420Options c2; c2.scalar_only = true;
+                                        CHECK(yuv420_to_argb(s, region, matrix, full, argb.data(), c2) == 0);
+                                        bool swapped = true;
+                                        for (size_t i = 0; i < argb.size(); ++i) {
+                                            const uint32_t v = argb[i];
+                                            swapped &= plain[i] == ((v & 0xFF00FF00u) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF));
+                                        }
+                                        CHECK(swapped);
+                                    }
+                                }
+                }
+#if defined(__x86_64__) && defined(__GNUC__)
+    std::printf("android_yuv420_host: %d kernel/scalar comparisons, AVX2 %s\n", compared,
+                __builtin_cpu_supports("avx2") ? "present (kernel exercised)" : "absent (scalar only)");
+#else
+    std::printf("android_yuv420_host: %d kernel/scalar comparisons, scalar only\n", compared);
+#endif
 }
 
 int main() {
@@ -91,6 +177,7 @@ int main() {
         Yuv420Source small = s; small.y.size = 10;
         CHECK(yuv420_to_argb(small, {width, height, 0, 0, width, height}, YuvMatrix::Bt601, true, sink.data()) == -EINVAL);
     }
+    kernel_equals_scalar();
     if (failures) { std::printf("android_yuv420_host: %d failures\n", failures); return 1; }
     std::printf("android_yuv420_host: checks passed\n");
     return 0;

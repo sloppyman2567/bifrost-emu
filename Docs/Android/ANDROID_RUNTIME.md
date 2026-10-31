@@ -1758,8 +1758,10 @@ Guest handles are tagged values, never host pointers.
 
 Formats are RGBA/RGBX/BGRA 8888, RGB888, RGB565 and YUV 4:2:0 (gralloc's
 planar Y, V, U). YUV converts on the CPU with the buffer's dataspace matrix
-and range, as `FrameworkSurfaces` does: BT.709, BT.2020, otherwise BT.601;
-limited range unless the dataspace says full. FP16, 1010102, R8 and protected
+and range through the converter `FrameworkSurfaces` uses (`Surface/Yuv420.cpp`, with
+an AVX2 kernel where the host has it): BT.709, BT.2020, otherwise BT.601;
+limited range unless the dataspace says full. A buffer smaller than its own
+geometry is refused and shows opaque black, never read past. FP16, 1010102, R8 and protected
 buffers are refused (`EGL_BAD_PARAMETER`, reason under `BIFROST_THUNK_TRACE`).
 `glEGLImageTargetRenderbufferStorageOES` uses the same host image. The image is a copy refreshed at
 bind time, not a live alias: a consumer that samples a rebound buffer
@@ -2877,6 +2879,22 @@ Measured on this machine (scalar, one thread): 15.7 ms for 2408x1355 unscaled, 1
 `SurfaceFrames` thread, off the main Looper. `make test-android-yuv420` checks the converter against a floating-point
 reference (planar and semi-planar chroma, padded rows, crop scaling, regions, matrices, ranges, refusals); the end-to-end
 CPU video path has no fixture and was checked on YouTube only.
+
+### YUV conversion kernel (2026-10-31)
+
+A TextureView's YUV frames converted through a second, scalar copy of this maths in `AndroidBufferImages::convert`, on
+HWUI's render thread at every `glEGLImageTargetTexture2DOES` (the bind has to leave the frame's pixels in the texture).
+Both callers now use `yuv420_to_argb` (`YuvOrder::Rgba` for the GL upload). Its AVX2 kernel (selected at run time with
+`__builtin_cpu_supports("avx2")`, which includes the OS's YMM state; other hosts run the scalar definition) converts 16
+pixels at a time for rows that are unscaled across with luma at stride 1 and chroma planar or semi-planar (stride 1 or
+2); odd start columns and the tail go through the scalar pixel function, and no wide load goes past a plane's `size`.
+Scaled rows gather their samples into a staging row (scalar) and then use the same kernel. The kernel is bit-identical
+to the scalar code, which stays as the definition. Measured on a Ryzen 7 5800X3D, one thread, random planes (a
+micro-benchmark, not a game): 1920x1080 planar 9.1 to 0.66 ms, NV12-style chroma 10.0 to 0.68 ms, 3840x2160 39.9 to
+2.6 ms (4.7 to 0.32 ns a pixel); 1920x1080 scaled to 2408x1355 13.8 to 4.6 ms, where the scalar gather is most of what
+is left. The TextureView path's limited-range output moved by at most 2 levels (its old code folded the range scaling
+into the coefficients; full range is unchanged). The conversion stays on the render thread: at about 0.7 ms for 1080p
+there is nothing to hide, and the bind must return with the frame uploaded.
 
 ### Default bitmap density (2026-10-28)
 

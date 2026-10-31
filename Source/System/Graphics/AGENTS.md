@@ -30,7 +30,8 @@
   restore every unpack/texture binding touched so the tracker's view holds.
   RGBA8 buffers upload straight from the mapping (GL_UNPACK_ROW_LENGTH for the
   gralloc stride, reset afterwards); other formats convert into one scratch
-  shared by all images, never a copy per image. A texture can only be deleted
+  shared by all images, never a copy per image. YUV 4:2:0 converts through
+  `Android/Surface/Yuv420.cpp` (shared with SurfaceView, SIMD where the host has it). A texture can only be deleted
   in its own context, so one left by an image destroyed elsewhere waits in
   `stale_textures_` for that context's next bind.
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);

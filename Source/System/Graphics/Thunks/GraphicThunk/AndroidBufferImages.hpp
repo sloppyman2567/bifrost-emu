@@ -47,13 +47,13 @@ private:
     void forget_textures(CPU& cpu, Memory& mem);  // glDeleteTextures
     void forget_bound_texture();                 // glTexImage2D on the bound texture
     // Converts to tightly packed RGBA8 in `out`: one scratch buffer shared by every image, not a copy per image.
-    void convert(Buffer& buffer, std::vector<uint8_t>& out);
+    void convert(Buffer& buffer, std::vector<uint32_t>& out);
 
     std::mutex mu_;
     // Per context, the texture names (as the app sees them) bound to an image, to find the buffer an upload targets.
     std::unordered_map<uint64_t, std::unordered_map<uint32_t, uint64_t>> textures_;
     std::unordered_map<uint64_t, Buffer> buffers_;  // keyed by guest image handle
-    std::vector<uint8_t> scratch_;
+    std::vector<uint32_t> scratch_;  // RGBA8 pixels
     // Textures of images destroyed while another context (or none) was current: they can only be deleted
     // in their own context, so they wait for its next bind. Keyed by host context.
     std::unordered_map<uint64_t, std::vector<uint32_t>> stale_textures_;

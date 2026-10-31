@@ -10,6 +10,24 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### YUV video frames convert 14 times faster (2026-10-31)
+
+- A TextureView's video (YUV 4:2:0 gralloc buffers) was converted to RGBA by a scalar loop, on HWUI's render thread, at
+  every `glEGLImageTargetTexture2DOES`: 9 to 10 ms for a 1080p frame and 40 ms for 4K (4.7 ns a pixel), more than a
+  frame at 60 fps. It duplicated the SurfaceView converter's maths. Both now share `yuv420_to_argb` (`Yuv420.cpp`) with a
+  runtime-gated AVX2 kernel, bit-identical to the scalar definition that remains the fallback: 1080p 0.66 ms, 4K 2.6 ms
+  (0.32 ns a pixel); semi-planar (NV12-style) chroma, odd crops and a padded or tight plane end are handled. A SurfaceView
+  layer scaled to a larger size gains 3 times (13.8 to 4.6 ms; the scalar sample gather is most of the rest).
+- Limited-range TextureView pixels move by at most 2 levels of 255 (the old code folded the range scaling into the
+  coefficients; full range is identical). A gralloc YUV buffer smaller than its geometry was read past; it is now refused
+  and shows opaque black.
+- Checked: `make test-android-yuv420` compares the kernel with the scalar code on 3,744 layouts (sizes around the 16-pixel
+  block, odd columns, padded and semi-planar chroma, scaled, regions, both byte orders, planes ending at an unmapped
+  guard page; removing the kernel's chroma bounds check makes it fault), the full JIT strict suite and the Android
+  fixtures `test_managed_hardware_canvas` (an ImageWriter YUV frame read back through a TextureView), the SurfaceView
+  lifecycle and the dialog/popup windows. Micro-benchmark numbers only: the frame-time gain in YouTube is not measured,
+  hosts without AVX2 are covered by the forced-scalar comparison, not a run on such a machine.
+
 ### A window that becomes visible takes focus back (2026-10-30)
 
 - The dialogs and popups of a stopped Activity were still shown, touchable and focusable: only its decor was hidden.
