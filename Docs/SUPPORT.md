@@ -10,12 +10,12 @@ passing a focused test is not a claim of complete Linux ABI compatibility.
 |---|---|---|
 | Host | Linux x86_64; pull-request CI builds on Ubuntu 24.04 | Other Linux distributions are not release-gated. Non-Linux and ARM hosts are unsupported. |
 | Host compilers | CI builds with GCC and clang on Ubuntu 24.04. On 2026-11-01 the strict quick unit suite with the JIT passed 183 of 183 with GCC 13.3 and clang 18.1 on Ubuntu 24.04, GCC 14.2 on Ubuntu 25.04, and the local GCC 16.2 | Other compilers and versions, and libc++, are untested. clang reports about 540 warnings GCC does not, almost all `struct`/`class` tag mismatches and unused generated constants. |
-| Other distributions | The Ubuntu 24.04 and 25.04 runs above were headless builds in a chroot on this machine's kernel. A manual Ubuntu 25.10 run (2026-10-24; GCC 15.2, SDL 3.2.20, ffmpeg 7.1) compiled the source, installed the packages and ran `--setup-rootfs` and `asgard-setup` | No Fedora, Arch, Debian stable, openSUSE or musl-host run, and no run on another kernel. Graphics, audio and Android were not part of the 2026-11-01 runs. Android games on other distributions were reported second-hand, and Hungry Shark World's black screen on an Ubuntu VM is undiagnosed. |
+| Other distributions | The Ubuntu 24.04 and 25.04 runs above were headless builds in a chroot on this machine's kernel. A manual Ubuntu 25.10 run (2026-10-24; GCC 15.2, SDL 3.2.20, ffmpeg 7.1) compiled the source, installed the packages and ran `--setup-rootfs` and `asgard-setup` | No Fedora, Arch, Debian stable, openSUSE or musl-host run, and no run on another kernel. Graphics and audio were part of one 2026-11-01 run only, the CI full-suite job in an Ubuntu 24.04 chroot with Mesa's software drivers and no display, GPU or sound; Android was not. Android games on other distributions were reported second-hand, and Hungry Shark World's black screen on an Ubuntu VM is undiagnosed. |
 | Guest | Linux AArch64 LP64 ELF applications | AArch32 and full-system/kernel emulation are unsupported. |
 | Static libc | musl-linked guest tests via the bundled AArch64 cross toolchain in `make check-all` | This covers the registered fixtures, not every musl version or Linux syscall. |
 | Dynamic libc | glibc and musl loader paths exercised by the provisioned full suite; glibc dynamic smoke tests run in PR CI | A guest rootfs must provide the matching AArch64 loader and libraries. Host x86_64 libraries are never guest code. |
 | JIT/interpreter | Focused guest regressions run in both modes; JIT differential runs use `make verify` | JIT verification has documented limits for calls, syscalls, and memory side effects. Keep output checks in guest tests. |
-| SDL/GL/Vulkan | Optional SDL2/GL host build; thunk tests run when the host display and driver are available | Headless CI skips display-dependent tests with exit 77. A skip is not evidence that a graphics path works. |
+| SDL/GL/Vulkan | Optional SDL2/GL host build; thunk tests run when the host display and driver are available | CI has no display: most GL and Vulkan tests run on SDL's offscreen driver and Mesa's software drivers, while the GLES/EGL, Wayland, Android surface and SDL Vulkan surface tests skip with exit 77. A skip is not evidence that a graphics path works, and software drivers say nothing about a real GPU. |
 | Host CPU features | Runtime-gated x86 SIMD paths with fallbacks. `test_host_cpu_models.sh` runs JIT fixtures on emulated Sandy Bridge, Nehalem, Penryn, Conroe and qemu64 CPUs. On 2026-11-01 those models had no failure beyond `-cpu max` in the unit suite (QEMU 11.1; 192 pass, and 43 fail on every model because of qemu-user) | Emulated only: nothing ran on real old hardware. LZCNT without BMI1 (AMD K10, early Bulldozer) is not testable because QEMU 11.1 runs LZCNT as BSR there. AVX-512 hosts are not covered. A CPU without LAHF in 64-bit mode (the earliest x86-64 models) is unsupported. |
 
 ## Android scope and v2.0 plans
@@ -55,8 +55,9 @@ and the [roadmap](roadmap.md) for open items and the known blockers by cause.
   and interpreter modes, runs JIT differential checks, tests the host APIs,
   and exercises dynamically linked glibc fixtures against an AArch64 sysroot.
 - A weekly or manually triggered job runs the provisioned full suite with
-  strict fixture requirements. The separately downloadable iperf3/coreutils
-  bundle is reported as an explicit skip when absent.
+  strict fixture requirements, on a host with no display, GPU or sound. The
+  separately downloadable iperf3/coreutils bundle and `xwayland_wire`, which
+  needs X11 in the rootfs, are reported as explicit skips when absent.
 - `make ci` runs the local guest-correctness gate. The GitHub workflow also
   builds both host feature configurations. `make check-all` provisions and
   runs the full local suite.

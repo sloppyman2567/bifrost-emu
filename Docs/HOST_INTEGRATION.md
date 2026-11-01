@@ -19,6 +19,9 @@ host range (`SDL_PollEvent`). Trampolines end with `ret` after `svc`.
 dlopen of libGL/libSDL2 uses the thunk when the on-disk `.so` is not
 AArch64 (so host x86_64 libs are never executed as guest code).
 
+A host without a sound device behaves like a silent one: audio streams drain
+in real time, so a guest neither hangs on `/dev/dsp` nor runs unpaced.
+
 Modern GL is covered: `glMapBuffer`/`glMapBufferRange` map the host
 buffer and give the guest a guest-window bounce of the same range, copied
 into the host mapping on flush, on unmap and, for persistent-coherent
