@@ -293,6 +293,19 @@ void FrostJIT::emit_neg_reg(int dst) {
 void FrostJIT::emit_lzcnt_reg(int dst, int src) {
     emit_byte(0xF3); emit_byte(rex(true,dst>=8,false,src>=8)); emit_byte(0x0F); emit_byte(0xBD); emit_byte(modrm(3,dst&7,src&7));
 }
+// Leading zeros of a 64-bit register, in place; clobbers RFLAGS. Without
+// ABM, F3 0F BD runs as BSR, so spell that out: BSR sets ZF and leaves the
+// destination undefined for zero. 127 ^ 63 = 64, and n ^ 63 = 63 - n for 0..63.
+void FrostJIT::emit_clz64_reg(int reg) {
+    if (has_lzcnt()) {
+        emit_lzcnt_reg(reg, reg);
+        return;
+    }
+    emit_byte(rex(true,reg>=8,false,reg>=8)); emit_byte(0x0F); emit_byte(0xBD); emit_byte(modrm(3,reg&7,reg&7));
+    emit_byte(0x75); emit_byte(0x07);  // jnz over the 7-byte mov
+    emit_byte(rex(true,false,false,reg>=8)); emit_byte(0xC7); emit_byte(modrm(3,0,reg&7)); emit_u32(127);
+    emit_byte(rex(true,false,false,reg>=8)); emit_byte(0x83); emit_byte(modrm(3,6,reg&7)); emit_byte(63);
+}
 void FrostJIT::emit_bswap_reg(int dst) {
     emit_byte(rex(true,false,false,dst>=8)); emit_byte(0x0F); emit_byte(0xC8 + (dst&7));
 }

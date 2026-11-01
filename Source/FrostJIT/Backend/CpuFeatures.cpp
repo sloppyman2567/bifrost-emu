@@ -93,6 +93,13 @@ CpuFeatures detect_cpu_features() {
             }
         }
     }
+    // LZCNT is part of ABM (CPUID.80000001H:ECX[5]), separate from BMI1 and
+    // older than leaf 7: AMD K10 has it without leaf 7.
+    unsigned int e2a=0, e2b=0, e2c=0, e2d=0;
+    if (__get_cpuid(0x80000001, &e2a, &e2b, &e2c, &e2d)) {
+        const uint32_t ecx_lzcnt = 1u << 5;
+        f.lzcnt = (e2c & ecx_lzcnt) != 0;
+    }
     // CPUID leaf 7 subleaf 0: AVX2/BMI1/BMI2/AVX-512.
     // __cpuid_count() is a macro that expands to inline asm — it does
     // NOT return a value indicating whether the leaf is supported.
@@ -135,13 +142,6 @@ CpuFeatures detect_cpu_features() {
         // AVX2 requires AVX + YMM state (already checked for f.avx).
         bool avx_ok = f.avx;  // AVX implies YMM-enabled XCR0
         f.avx2 = avx_ok && (b & ebx_avx2) != 0;
-        // LZCNT is part of ABM (CPUID.80000001H:ECX[5]) — separate from
-        // BMI1. Check via extended CPUID leaf 0x80000001.
-        unsigned int e2a=0, e2b=0, e2c=0, e2d=0;
-        if (__get_cpuid(0x80000001, &e2a, &e2b, &e2c, &e2d)) {
-            const uint32_t ecx_lzcnt = 1u << 5;
-            f.lzcnt = (e2c & ecx_lzcnt) != 0;
-        }
         // AVX-512 requires OS support for the OPMASK/ZMM state.
         if (f.avx) {
             bool zmm_enabled = (xcr0 & (XCR0_OPMASK | XCR0_ZMM_HI256 |

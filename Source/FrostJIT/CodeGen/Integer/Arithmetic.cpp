@@ -499,14 +499,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::CLZ: {
-            // lzcnt (F3 0F BD) decodes as BSF on hosts without ABM —
-            // and BSF leaves dest unchanged on zero input instead of
-            // returning the full width. Fall back to the interpreter on
-            // such hosts (same runtime-guard pattern as FRINT's SSE4.1).
-            if (!has_lzcnt()) {
-                emit_call_interp(inst.arm_pc, false);
-                return 0;
-            }
             // lzcnt rax, rax overwrites RAX, destroying
             // src1's cached value. If src1 is a scratch vreg holding a snapshot
             // of an arch reg (from LOAD_REG), later readers would reload from
@@ -528,8 +520,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 if (d >= 8) emit_byte(0x45);
                 emit_byte(0x89); emit_byte(modrm(3, d & 7, d & 7));
             }
-            emit_lzcnt_reg(d, d);  // lzcnt d, d (in-place on d)
-            // For 32-bit CLZ: x86 LZCNT counts 64-bit leading zeros.
+            emit_clz64_reg(d);
+            // For 32-bit CLZ: the count covers 64 bits.
             // ARM 32-bit CLZ should only count the lower 32 bits.
             // Subtract 32 to account for the upper 32 zero bits.
             if (inst.clz_params().bits == 32) {

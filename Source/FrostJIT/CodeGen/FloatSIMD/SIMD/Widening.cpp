@@ -33,7 +33,8 @@ static void build_pair_masks(int esize, bool q,
 bool FrostJIT::compile_simd_widening_(const IRInst& inst) {
     switch (inst.op) {
         case IROp::SIMD_PAIRMIN: {
-            if (vec_cache_active_) {
+            // Every size separates the pairs with pshufb (SSSE3).
+            if (vec_cache_active_ || !has_ssse3()) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }

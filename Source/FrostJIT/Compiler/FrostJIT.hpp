@@ -220,10 +220,9 @@ public:
     // runtime-guard pattern as has_sse41() — pcmpgtq would SIGILL on
     // pre-Westmere hosts without the check.
     bool has_sse42() const { return cpu_features_.sse42; }
-    // LZCNT gating (native CLZ codegen): F3 0F BD decodes as BSF on
-    // hosts without ABM/LZCNT — BSF leaves the dest UNCHANGED on zero
-    // input instead of returning the operand width, silently corrupting
-    // clz-of-zero. Same runtime-guard pattern as has_sse41().
+    // LZCNT (native CLZ codegen): F3 0F BD runs as BSR on hosts without
+    // ABM, which returns a bit index and is undefined for zero;
+    // emit_clz64_reg uses BSR explicitly there.
     bool has_lzcnt() const { return cpu_features_.lzcnt; }
     // crypto instruction set detection.
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
@@ -1401,6 +1400,7 @@ private:
     void emit_not_reg(int dst);
     void emit_neg_reg(int dst);
     void emit_lzcnt_reg(int dst, int src);
+    void emit_clz64_reg(int reg);
     void emit_bswap_reg(int dst);
     void emit_call_abs(void* target);
     // `mov rsp, rbp; pop x6; ret`. Block exits (`cold == false`) keep their own:

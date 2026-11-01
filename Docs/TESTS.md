@@ -91,6 +91,7 @@ make test-android-wheel-gestures               # wheel/pinch/middle-drag as two-
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
 ./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
+./Scripts/Testing/test_host_cpu_models.sh   # JIT fixtures on older x86-64 CPUs under qemu-x86_64; exit 77 if it cannot run
 ./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update and removal (fake checkout)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec
 ./Scripts/Testing/test_late_tls_pthread.sh  # existing/new threads, reuse, pointer/alignment/weak cases
