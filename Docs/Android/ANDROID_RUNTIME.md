@@ -280,6 +280,8 @@ broadcasts and its `:ui` Activities, started from an app, are untested. Account 
 
 ### Google accounts and sign-in (2026-10-20)
 
+Experimental: some apps and Google services may not work with it.
+
 `account` is no longer a stub. `FrameworkAccounts` follows Android 15's
 [AccountManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/accounts/AccountManagerService.java)
 for one user: authenticators are the services declaring

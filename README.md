@@ -235,7 +235,8 @@ python3 Scripts/Android/asgard.py run /path/to/package.apkm   # installs, then r
 python3 Scripts/Android/asgard.py realm status        # inspect the shared realm
 python3 Scripts/Android/asgard.py config org.example.package network offline   # per-app settings, applied at every start
 python3 Scripts/Android/asgard.py clear-data org.example.package   # reset saves; `uninstall` removes the app
-python3 Scripts/Android/asgard.py google sign-in       # microG's Google sign-in window (accounts shared by every app)
+python3 Scripts/Android/asgard.py launcher             # the desktop app library: install, play, settings, last session
+python3 Scripts/Android/asgard.py google sign-in       # experimental: microG's Google sign-in window (accounts shared by every app)
 ```
 
 Native `NativeActivity` libraries can also run directly with

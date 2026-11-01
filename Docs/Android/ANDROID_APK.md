@@ -170,7 +170,7 @@ from the library.
   Symlinks inside the data are removed, never followed, and a symlinked parent
   directory aborts the command.
 
-The library window offers both as "Clear data…" and "Uninstall…" in a app's
+The library window offers both as "Clear data…" and "Uninstall…" in an app's
 settings, disabled while the app runs.
 
 ## Per-app settings
@@ -186,7 +186,7 @@ start of that app, from the CLI (`start`, `run`) and the library window alike.
 Changes take effect at the next start. A setting you never chose is not stored,
 so it keeps following the emulator's default.
 
-A app's settings in the launcher are its compatibility profile. General
+An app's settings in the launcher are its compatibility profile. General
 contains window stats, Back key, network mode, the current bundled Android API,
 a button to open the app environment folder, and "Clear data…" and "Uninstall…".
 Compatibility contains an
@@ -274,7 +274,7 @@ Each card shows a rounded icon tile, the label, version and install date, and on
 the latest session ("Played Today 13:08", "Running for 25 min", or in red what went wrong, such as "Crashed in native
 code"), with Play/Stop, per-app settings and last-session buttons. Colors come from the desktop
 palette and the icons are drawn by the launcher, so the look does not depend on an icon
-theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; a app
+theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; an app
 without an icon gets a tile in one of ten fixed colors with its initial. Cards stretch
 between 208 and 280 px to fill the row, and the column count follows the viewport width.
 A running or starting app carries a status chip and its Play button becomes a red Stop.
@@ -286,7 +286,7 @@ label or package ID, and Sort offers Name or Recently played. Dropping `.apk`, `
 `.apks` or `.xapk` files anywhere on the window installs them one at a time (the Install
 button accepts several files too), and a failure in one does not stop the rest. The window
 size and sort order are remembered (Qt settings, `Asgard/Library`). The library refreshes every 1.5 s
-while the window is focused or a app is running, every 10 s otherwise, and not at all while
+while the window is focused or an app is running, every 10 s otherwise, and not at all while
 it is minimized; it refreshes at once when the window is activated. Package IDs, library
 paths, interpreter launch and Java call tracing are grouped under Developer.
 
@@ -321,7 +321,7 @@ Google's embedded sign-in page; the password goes to Google, not to Asgard),
 settings stay per app. A completed login needs real credentials and has not
 been observed here. See the
 [runtime guide](ANDROID_RUNTIME.md#google-accounts-and-sign-in-2026-10-20) for
-the account service and its limits. When a app itself starts a Google
+the account service and its limits. When an app itself starts a Google
 screen (a Google Sign-In button, `AccountManager.addAccount`), it opens in the
 same kind of separate window and returns to the app; the library window then
 says which app asked, and the dialog's hint names it.

@@ -151,7 +151,7 @@ TILE_COLORS = ("#d4574e", "#d9822b", "#b8962e", "#3f9e57", "#2f9d95", "#3a85c8",
 
 
 def tile_color(label):
-    """A stable color per app, for the tile of a app without an icon."""
+    """A stable color per app, for the tile of an app without an icon."""
     return TILE_COLORS[int(hashlib.sha256(label.encode()).hexdigest()[:4], 16) % len(TILE_COLORS)]
 
 

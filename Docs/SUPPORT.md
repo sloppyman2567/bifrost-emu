@@ -39,7 +39,7 @@ and Umamusume JP are blocked by the app itself (Umamusume JP at a device
 integrity check when it connects). These are single checks, not compatibility
 guarantees, and gameplay is confirmed only where the file says `playable`.
 
-Play services come from microG, so behaviour that needs real Google services
+Google account support is experimental. Play services come from microG, so behaviour that needs real Google services
 (device attestation, a Play Games profile, an adult-age check) is unavailable.
 An Android Vulkan HAL, Settings screens, host mDNS, HDR and arbitrary APK
 compatibility are not provided or claimed. An APK that ships only 32-bit
