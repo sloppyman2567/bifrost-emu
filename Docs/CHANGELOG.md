@@ -8,8 +8,6 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [Unreleased]
-
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
 ### Documentation (2026-11-01)
