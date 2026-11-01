@@ -36,6 +36,7 @@ namespace arm64emu {
 Emulator::Emulator(uint64_t guest_window_max) : mem_(true, guest_window_max),
     debugger_(std::make_unique<GuestDebugger>(*this)) {}
 Emulator::~Emulator() {
+    timers_.stop();  // its thread queues signals on the CPUs torn down below
     debugger_->shutdown();
     // Clear the active-emu pointer so host signal handlers don't
     // dereference freed memory. Without this, a signal arriving after

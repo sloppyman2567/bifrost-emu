@@ -140,7 +140,7 @@ adjustment -10000. Counts are bounded to 4096. Following API 35's
 `platform.xml`, only root, system, media (1013) and cameraserver (1047) may
 query OOM scores. The host service uses platform stability; with stability
 0, Java `getService` failed. Only UID 1013 may register
-`media.resource_manager`, and only UID 1046 may register a Codec2
+`media.resource_manager`, only UID 1040 may register `media.extractor`, and only UID 1046 may register a Codec2
 component store. Media decoding and Surface contracts are described in
 [the runtime guide](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
 

@@ -14,6 +14,7 @@
 #include "Bifrost/Types.hpp"
 #include "Bifrost/Version.hpp"
 #include "System/Core/CPU.hpp"
+#include "System/Core/Emulator/GuestTimers.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Signals.hpp"
 #include "System/Graphics/Display/Graphics.hpp"
@@ -219,6 +220,9 @@ public:
     // the process until a thread unblocks it or sigwaits for it. Returns true
     // when a handler frame was set up on `current`.
     bool send_process_signal(CPU& current, int signo);
+    // A POSIX timer's expiry, from its service thread. Returns the overrun it left on the queued signal.
+    int send_timer_signal(const GuestTimers::Event& event, int id, int overrun);
+    GuestTimers& timers() { return timers_; }
     // Process-wide pending set (Linux signal->shared_pending), bit signo-1.
     uint64_t shared_sigpending() const {
         return shared_sigpending_.load(std::memory_order_acquire);
@@ -579,6 +583,7 @@ private:
         std::atomic<bool> finished{false};
     };
     std::vector<std::shared_ptr<GuestThread>> threads_;
+    GuestTimers timers_{*this};
     std::mutex threads_mu_;
     std::atomic<int> next_tid_{2};
     std::atomic<int> alive_threads_{0};

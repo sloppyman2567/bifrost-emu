@@ -389,7 +389,7 @@ int main(int argc, char** argv) {
         if (a == "--android-system-uid") {
             if (arg_i + 1 >= argc) return 2;
             const std::string value = argv[arg_i + 1];
-            if (value != "1000" && value != "1013" && value != "1046" && value != "1047") {
+            if (value != "1000" && value != "1013" && value != "1040" && value != "1046" && value != "1047") {
                 fprintf(stderr, "Asgard: unsupported system-service UID\n"); return 2;
             }
             android_app_id = std::stoul(value); android_app_id_set = true;

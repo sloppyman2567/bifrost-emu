@@ -235,6 +235,8 @@ public:
         int      sender_pid = 0;
         uint32_t sender_uid = 0;
         int      child_status = 0;
+        int      timer_id = -1;       // SI_TIMER: the POSIX timer, whose si_value is fault_addr
+        int      timer_overrun = 0;
     };
     static constexpr size_t PENDING_QUEUE_CAP = 64;
     std::mutex              pending_mu;
@@ -254,6 +256,28 @@ public:
         pending_queue[t % PENDING_QUEUE_CAP] = PendingSig{signo, si_code, fault_addr, sender_pid, sender_uid, child_status};
         pending_tail.store(t + 1, std::memory_order_release);
         return true;
+    }
+    bool push_pending(const PendingSig& signal) {
+        std::lock_guard<std::mutex> lock(pending_mu);
+        const size_t t = pending_tail.load(std::memory_order_relaxed);
+        if (t - pending_head.load(std::memory_order_acquire) >= PENDING_QUEUE_CAP) return false;
+        pending_queue[t % PENDING_QUEUE_CAP] = signal;
+        pending_tail.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    // A POSIX timer keeps one signal queued: a later expiry raises that signal's overrun, by itself and `missed`.
+    // Returns the new overrun, or -1 when the timer has no signal queued here.
+    int merge_timer_overrun(int timer_id, int missed) {
+        std::lock_guard<std::mutex> lock(pending_mu);
+        const size_t end = pending_tail.load(std::memory_order_relaxed);
+        for (size_t i = pending_head.load(std::memory_order_acquire); i != end; ++i) {
+            PendingSig& queued = pending_queue[i % PENDING_QUEUE_CAP];
+            if (queued.timer_id != timer_id) continue;
+            const int64_t total = int64_t(queued.timer_overrun) + 1 + missed;
+            queued.timer_overrun = total > INT32_MAX ? INT32_MAX : static_cast<int>(total);
+            return queued.timer_overrun;
+        }
+        return -1;
     }
     // Consumer (this CPU's run loop) — pops one deliverable signal.
     // A synchronous sigwait consumer may also dequeue blocked members

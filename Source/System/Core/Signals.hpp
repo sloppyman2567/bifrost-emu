@@ -113,6 +113,7 @@ constexpr uint64_t SA_NOCLDSTOP_EMU = 0x00000001;
 // siginfo_t si_code values (subset).
 constexpr int SI_USER_EMU     = 0;
 constexpr int SI_KERNEL_EMU   = 0x80;
+constexpr int SI_TIMER_EMU    = -2;
 constexpr int SEGV_MAPERR_EMU = 1;
 constexpr int SEGV_ACCERR_EMU = 2;
 constexpr int ILL_ILLOPC_EMU  = 1;

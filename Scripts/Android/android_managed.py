@@ -395,8 +395,9 @@ def install_managed_graphics(root, adapters):
     lib64 = root / "system/lib64"
     names = ("libandroid.so", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so", "libGLESv3.so", "libaaudio.so",
              "libOpenSLES.so")
-    if {p.name for p in adapters.glob("*.so")} != set(names) | {"mapper.bifrost.so"}:
+    if {p.name for p in adapters.glob("*.so")} != set(names) | {"mapper.bifrost.so", BINDER_ATTACH}:
         raise ValueError("Unexpected managed graphics adapters")
+    shutil.copyfile(adapters / BINDER_ATTACH, lib64 / BINDER_ATTACH)
     for adapter in (adapters / name for name in names):
         real = lib64 / adapter.name
         moved = lib64 / ("re_" + adapter.name[3:])
@@ -414,6 +415,10 @@ def install_managed_graphics(root, adapters):
     text = re.sub(r"^(namespace.default.search.paths = .*)$", r"\1:/vendor/lib64/hw", text, flags=re.M)
     text = re.sub(r"^(namespace.default.permitted.paths = .*)$", r"\1:/vendor", text, flags=re.M)
     config.write_text(text)
+
+
+# Preloaded into app processes (not the image's tools): attaches native threads that reach an in-process Java service.
+BINDER_ATTACH = "libbifrost-binder-attach.so"
 
 
 class LogdReceiver:
@@ -879,7 +884,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     adapter_names = ["libbifrost-activity.so", "managed/am"] + [
         "managed/" + name for name in ("libandroid.so", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so",
                                       "libGLESv3.so", "libaaudio.so", "libOpenSLES.so",
-                                      "mapper.bifrost.so")]
+                                      "mapper.bifrost.so", BINDER_ATTACH)]
     for name in adapter_names:
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)
@@ -997,6 +1002,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                       ROOT / "build/android-adapters", dex, media_mask)
         guest_env = dict(guest_env, **network.result())
         guest_env["PATH"] = "/system/bin:/apex/com.android.runtime/bin"
+        session_preload = {"LD_PRELOAD": "/system/lib64/" + BINDER_ATTACH}
     # A system app (microG) has no installed base.apk to compile; ART's JIT runs it.
     if not metadata.get("system"):
         process_session.update(phase="Optimizing Android app code")
@@ -1033,7 +1039,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         if trace_apk and trace_apk != "activity":
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"
-        environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())
+        environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in {**guest_env, **session_preload}.items())
         log_path, logd_path = process_session.logs()
         print(f"Launching {metadata['package']} (log: {log_path})", flush=True)
         # A socket pathname can remain after a killed host process. No other

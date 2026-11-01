@@ -30,6 +30,15 @@
       ],
       "page": "Docs/Apps/azur-lane.md"
     },
+    "com.mobge.Oddmar": {
+      "name": "Oddmar",
+      "status": "runs",
+      "checked": "2026-11-01",
+      "evidence": "The maintainer reports it gets past the black screen after its splash video; a 75 s session reached its next video without an abort. Gameplay is not confirmed.",
+      "notes": [
+        "Needs media.extractor, POSIX timers and the Java Binder attach preload."
+      ]
+    },
     "com.ubisoft.hungrysharkworld": {
       "name": "Hungry Shark World",
       "status": "runs",

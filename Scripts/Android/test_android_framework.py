@@ -78,6 +78,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"
         guest_env = dict(metadata["environment"], **host_network_environment())
+        if managed_graphics and not os.environ.get("BIFROST_TEST_NO_BINDER_ATTACH"):
+            guest_env["LD_PRELOAD"] = "/system/lib64/libbifrost-binder-attach.so"
         if mode == "qemu":
             # QEMU's AT_EXECFN carries the host-prefixed path; map it to the
             # same linker section in this temporary copy only.
@@ -146,7 +148,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         if main_class == "ActivityProbe$NativeLooperProbe":
             markers += ("ANDROID_JAVA_NATIVE_LOOPER_OK",)
         if main_class == "ActivityProbe$NativeChoreographerProbe":
-            markers += ("ANDROID_NATIVE_CHOREOGRAPHER_OK",)
+            markers += ("ANDROID_NATIVE_CHOREOGRAPHER_OK", "ANDROID_NATIVE_JAVA_BINDER_OK")
         if main_class == "ActivityProbe$GrallocProbe":
             markers += ("ANDROID_GRALLOC_OK",)
             if probe_args and probe_args[0] != "0":

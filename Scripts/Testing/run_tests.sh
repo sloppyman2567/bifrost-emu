@@ -384,6 +384,8 @@ UNIT_TESTS=(
     "test_thread_fault_signal|Tests/Unit/test_thread_fault_signal.elf||20|ALL PASS"
     # rt_sigtimedwait blocks/dequeues instead of always returning EAGAIN.
     "test_sigtimedwait|Tests/Unit/test_sigtimedwait.elf||20|15/15 checks passed"
+    # timer_create and friends: delivery, overruns, errno, fork and execve, as a native kernel run.
+    "test_posix_timers|Tests/Unit/test_posix_timers.elf||30|ALL PASS"
     # FUTEX_CMP_REQUEUE takes nr_requeue from the timeout slot, not val3.
     "test_futex_requeue|Tests/Unit/test_futex_requeue.elf||15|4/4 checks passed"
     # fork() with live guest threads: the child must not inherit joinable

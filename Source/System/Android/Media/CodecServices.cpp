@@ -24,15 +24,17 @@ struct CodecServices::Impl {
         const char* role;
         const char* name;
         const char* uid;
+        const char* program;
         pid_t pid = -1;
         unsigned restarts = 0;
         int last_exit = 0;
         Clock::time_point started{}, retry{};
     };
-    std::array<Service, 3> services{{
-        {"resource", "media.resource_manager", "1013"},
-        {"host", "android.hardware.media.c2.IComponentStore/default", "1046"},
-        {"software", "android.hardware.media.c2.IComponentStore/software", "1046"}}};
+    std::array<Service, 4> services{{
+        {"resource", "media.resource_manager", "1013", "/system/bin/bifrost-media-resource"},
+        {"extractor", "media.extractor", "1040", "/system/bin/mediaextractor"},
+        {"host", "android.hardware.media.c2.IComponentStore/default", "1046", "/apex/com.android.media.swcodec/bin/mediaswcodec"},
+        {"software", "android.hardware.media.c2.IComponentStore/software", "1046", "/apex/com.android.media.swcodec/bin/mediaswcodec"}}};
     std::string socket, root, executable, host_capabilities;
     std::shared_ptr<BinderDomain> domain;
     unsigned mask;
@@ -56,12 +58,12 @@ struct CodecServices::Impl {
             cleanup();
         });
     }
+    // Without the extractor only an app's video fails: it reports its state but never holds back the realm.
+    static bool required(const Service& service) { return std::string(service.role) != "extractor"; }
     int spawn(Service& service) {
         std::vector<std::string> arguments{executable, "--asgard-service-parent", std::to_string(::getpid()),
             "--android-runtime", "--android-services", "--android-system-uid", service.uid,
-            "--android-binder-broker", socket, "--rootfs", root,
-            std::string(service.role) == "resource" ? "/system/bin/bifrost-media-resource"
-                : "/apex/com.android.media.swcodec/bin/mediaswcodec"};
+            "--android-binder-broker", socket, "--rootfs", root, service.program};
         std::vector<std::string> environment;
         for (char** entry = environ; *entry; ++entry)
             if (std::strncmp(*entry, "BIFROST_GUEST_ENV=", 18) &&
@@ -157,7 +159,7 @@ struct CodecServices::Impl {
     bool ready_locked() {
         if (stopped.load() || worker_failed) return false;
         for (const auto& service : services) {
-            if (!mask && std::string(service.role) == "host") continue;
+            if (!required(service) || (!mask && std::string(service.role) == "host")) continue;
             if (service.pid <= 0 || !registered(service)) return false;
         }
         return true;
@@ -180,7 +182,7 @@ std::string CodecServices::status() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     bool failed = impl_->worker_failed;
     for (const auto& service : impl_->services)
-        if (service.pid <= 0 && service.restarts >= 4) failed = true;
+        if (Impl::required(service) && service.pid <= 0 && service.restarts >= 4) failed = true;
     std::string out = "{\"state\":\"" + std::string(impl_->ready_locked() ? "ready" :
         impl_->stopped.load() ? "stopped" : failed ? "failed" : "starting") + "\",\"routing_mask\":" + std::to_string(impl_->mask)
         + ",\"host\":" + impl_->host_capabilities + ",\"services\":[";

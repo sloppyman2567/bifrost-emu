@@ -312,6 +312,7 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     options.apply_relocations = !emu.android_runtime_;
     auto info = ElfLoader::load(mem_, elf_data, options);
     uint64_t exec_entry = info.entry;
+    emu.timers().clear();  // execve destroys the POSIX timers
     if (!emu.android_runtime_) {
         // The point of no return: descriptors marked FD_CLOEXEC close, and /proc/self/exe and
         // /proc/self/maps name the new program (a multi-call redirect keeps the running one).

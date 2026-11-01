@@ -132,6 +132,14 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `make test-android-goldfish-media`. Keep `--media-capabilities` limited to
   what it decodes. Do not report codec, Surface or playback readiness from
   64x64 probes.
+- `media.extractor` is the image's real `mediaextractor`, run by the broker as UID 1040 (`CodecServices`), its files
+  pinned in `MEDIA_EXTRACTOR` (`android_framework.py`) and added in place. It aborts without its seccomp policy, which is
+  installed; `prctl(PR_SET_SECCOMP)` accepts and ignores the filter, so it never reaches the host. It is not `required`:
+  without it only video fails, and realm status reports it.
+- Java-hosted native services run on the caller's thread, unlike a device's Binder pool, so a native thread reaching one
+  would abort in `JavaBBinder::onTransact`. `libbifrost-binder-attach.so`, preloaded into app processes and hidden from
+  their environment, interposes `BBinder::transact` to attach such a thread. It does not cover
+  `JavaBBinder::getInterfaceDescriptor` on an unattached thread. `ActivityProbe$NativeChoreographerProbe` covers it.
 - Input events keep `System.nanoTime()` (CLOCK_MONOTONIC) nanoseconds, as
   the NDK `AKeyEvent`/`AMotionEvent` time getters return them; the managed
   launcher converts to framework milliseconds. Window plugins report

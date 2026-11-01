@@ -372,6 +372,12 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
         signo == BIFROST_SIGTRAP) {
         memcpy(buf + 16, &fault_addr, 8);
     }
+    if (queued && si_code == SI_TIMER_EMU) {
+        // _timer: si_timerid, si_overrun, si_value.
+        memcpy(buf + 16, &queued->timer_id, 4);
+        memcpy(buf + 20, &queued->timer_overrun, 4);
+        memcpy(buf + 24, &queued->fault_addr, 8);
+    }
     if (queued && queued->sender_pid) {
         memcpy(buf + 16, &queued->sender_pid, 4);
         memcpy(buf + 20, &queued->sender_uid, 4);
@@ -1134,7 +1140,7 @@ bool Emulator::drain_pending_signals(CPU& cpu) {
         if (sig.signo >= 1 && sig.signo <= 64 &&
             SignalTable::is_blocked(cpu, sig.signo)) {
             // Re-push and stop.
-            cpu.push_pending(sig.signo, sig.si_code, sig.fault_addr, sig.sender_pid, sig.sender_uid, sig.child_status);
+            cpu.push_pending(sig);
             break;
         }
         struct QueuedInfoScope {

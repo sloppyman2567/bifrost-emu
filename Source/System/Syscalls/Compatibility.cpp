@@ -287,8 +287,7 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
         // getitimer/setitimer (102/103) are widely used by signal-based
         // profilers and SIGALRM-based timers. We forward to the host.
         // timer_create/gettime/getoverrun/settime/delete (107-111) are
-        // POSIX per-thread timers; we stub them to -ENOSYS (glibc falls
-        // back to setitimer when timer_create fails).
+        // GuestTimers: POSIX per-process timers on host timerfds.
         case 102: { // getitimer(which, curr_value)
             if (a1 == 0) { ret_err(EFAULT); return 0; }
             struct itimerval v{};
@@ -334,10 +333,73 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-        // POSIX per-thread timers — return -ENOSYS so glibc falls back
-        // to setitimer-based SIGEV_SIGNAL timers.
-        case 107: case 108: case 109: case 110: case 111: {
-            ret_host(static_cast<int64_t>(-ENOSYS));
+        case 107: { // timer_create(clockid, sevp, timerid)
+            GuestTimers::Event event;
+            try {
+                if (a1) {
+                    // struct sigevent: sigev_value, sigev_signo, sigev_notify, then sigev_notify_thread_id.
+                    event.value = mem_.load<uint64_t>(a1);
+                    event.signo = static_cast<int>(mem_.load<uint32_t>(a1 + 8));
+                    event.notify = static_cast<int>(mem_.load<uint32_t>(a1 + 12));
+                    event.tid = static_cast<int>(mem_.load<uint32_t>(a1 + 16));
+                } else {
+                    event.signo = BIFROST_SIGALRM;
+                    event.value_is_id = true;
+                }
+            } catch (...) { ret_err(EFAULT); return 0; }
+            int id = 0;
+            const int result = emu.timers().create(static_cast<int>(a0), event, id);
+            if (result < 0) { ret_err(-result); return 0; }
+            try { mem_.store<uint32_t>(a2, static_cast<uint32_t>(id)); }
+            catch (...) { emu.timers().remove(id); ret_err(EFAULT); return 0; }
+            ret_host(0);
+            return 0;
+        }
+        case 108: { // timer_gettime(timerid, curr_value)
+            itimerspec value{};
+            const int result = emu.timers().get(static_cast<int>(a0), value);
+            if (result < 0) { ret_err(-result); return 0; }
+            try {
+                mem_.store<int64_t>(a1, value.it_interval.tv_sec);
+                mem_.store<int64_t>(a1 + 8, value.it_interval.tv_nsec);
+                mem_.store<int64_t>(a1 + 16, value.it_value.tv_sec);
+                mem_.store<int64_t>(a1 + 24, value.it_value.tv_nsec);
+            } catch (...) { ret_err(EFAULT); return 0; }
+            ret_host(0);
+            return 0;
+        }
+        case 109: { // timer_getoverrun(timerid)
+            const int result = emu.timers().overrun(static_cast<int>(a0));
+            if (result < 0) { ret_err(-result); return 0; }
+            ret_host(result);
+            return 0;
+        }
+        case 110: { // timer_settime(timerid, flags, new_value, old_value)
+            if (a2 == 0) { ret_err(EINVAL); return 0; }
+            itimerspec value{}, old{};
+            try {
+                value.it_interval.tv_sec = mem_.load<int64_t>(a2);
+                value.it_interval.tv_nsec = mem_.load<int64_t>(a2 + 8);
+                value.it_value.tv_sec = mem_.load<int64_t>(a2 + 16);
+                value.it_value.tv_nsec = mem_.load<int64_t>(a2 + 24);
+            } catch (...) { ret_err(EFAULT); return 0; }
+            const int result = emu.timers().set(static_cast<int>(a0), static_cast<int>(a1), value, old);
+            if (result < 0) { ret_err(-result); return 0; }
+            if (a3) {
+                try {
+                    mem_.store<int64_t>(a3, old.it_interval.tv_sec);
+                    mem_.store<int64_t>(a3 + 8, old.it_interval.tv_nsec);
+                    mem_.store<int64_t>(a3 + 16, old.it_value.tv_sec);
+                    mem_.store<int64_t>(a3 + 24, old.it_value.tv_nsec);
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(0);
+            return 0;
+        }
+        case 111: { // timer_delete(timerid)
+            const int result = emu.timers().remove(static_cast<int>(a0));
+            if (result < 0) { ret_err(-result); return 0; }
+            ret_host(0);
             return 0;
         }
         // clock_settime — we're not authorized to change the host clock;

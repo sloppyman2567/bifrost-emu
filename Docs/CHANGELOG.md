@@ -10,6 +10,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Video through Android's media extractor (2026-11-01)
+
+- **`media.extractor`:** the image's real daemon now runs in the realm. Without it `AMediaExtractor` and `MediaExtractor`
+  could not open a file, and Oddmar stayed on a black screen waiting for its splash video. It now gets past that screen
+  (user report) and went on to its next video in a 75 s session. Gameplay has not been confirmed.
+- **POSIX timers:** `timer_create` and friends were `ENOSYS`, which aborted that daemon on its first request. They are
+  now implemented on host timerfds for every guest (`test_posix_timers`, which also passes on a native kernel).
+- **Java Binder abort:** a native thread reaching a Java-hosted service in its own process aborted with `env null. Attach
+  JVM?`, which ended Oddmar when the splash video finished. A preloaded library now attaches such threads. Firefox
+  reports the same message; it has not been re-tested.
+
 ### Window stats: session RAM (2026-11-01)
 
 - The `RAM` title field and the overlay's `Emulator` figure counted only the windowed process's `VmRSS`. They now show

@@ -891,10 +891,11 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     std::unique_lock<std::mutex> threads_lock(threads_mu_, std::defer_lock);
     std::unique_lock<std::mutex> sdl_threads_lock(sdl_threads_mu_, std::defer_lock);
     std::unique_lock<std::mutex> descriptors_lock(fds_.mutex_for_fork(), std::defer_lock);
+    std::unique_lock<std::mutex> timers_lock(timers_.mutex_for_fork(), std::defer_lock);
     std::unique_lock<std::shared_mutex> memory_lock(mem_.mutex_for_fork(), std::defer_lock);
     const auto release_all = [&] {
         for (auto* lock : {&memory_lock}) if (lock->owns_lock()) lock->unlock();
-        for (auto* lock : {&descriptors_lock, &sdl_threads_lock, &threads_lock, &comm_lock})
+        for (auto* lock : {&timers_lock, &descriptors_lock, &sdl_threads_lock, &threads_lock, &comm_lock})
             if (lock->owns_lock()) lock->unlock();
         for (auto& lock : futex_locks) if (lock.owns_lock()) lock.unlock();
     };
@@ -902,7 +903,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         bool held = comm_lock.try_lock();
         for (size_t i = 0; held && i < FUTEX_SHARDS; ++i) held = futex_locks[i].try_lock();
         held = held && threads_lock.try_lock() && sdl_threads_lock.try_lock() && descriptors_lock.try_lock() &&
-               memory_lock.try_lock();
+               timers_lock.try_lock() && memory_lock.try_lock();
         if (!held) release_all();
         return held;
     };
@@ -949,6 +950,12 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         }
     }
     if (descriptors_lock.owns_lock()) descriptors_lock.unlock();
+    if (child_pid == 0) {
+        (void)timers_lock.release();  // after_fork_child makes a fresh lock
+        timers_.after_fork_child();
+    } else if (timers_lock.owns_lock()) {
+        timers_lock.unlock();
+    }
     for (auto& lock : futex_locks) lock.unlock();
     if (child_pid > 0) {
         if (sdl_threads_lock.owns_lock()) sdl_threads_lock.unlock();

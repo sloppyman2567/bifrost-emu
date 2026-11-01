@@ -124,7 +124,8 @@ class BionicCompatibilityTests(unittest.TestCase):
                 after = android_framework.install(root, root / "unused")
                 self.assertEqual(after["files"], {**before["files"], **BIONIC_LINKS,
                                                 'system/bin/sh': android_framework.shell_inventory(),
-                                                **android_framework.shared_library_inventory()})
+                                                **android_framework.shared_library_inventory(),
+                                                **android_framework.media_extractor_inventory()})
                 manifest = (root / "bifrost-framework.json").read_bytes()
                 self.assertEqual((root / "bifrost-framework.json").stat().st_mode & 0o777, 0o644)
                 self.assertEqual(android_framework.install(root, root / "unused"), after)
@@ -1157,7 +1158,8 @@ class SettingsIdentityTests(unittest.TestCase):
             (framework / "vendor/etc/media_codecs.xml").write_text('<MediaCodecs/>')
             names = ("libbifrost-activity.so", "managed/am", "managed/libandroid.so", "managed/libEGL.so",
                      "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so",
-                     "managed/libaaudio.so", "managed/libOpenSLES.so", "managed/mapper.bifrost.so")
+                     "managed/libaaudio.so", "managed/libOpenSLES.so", "managed/mapper.bifrost.so",
+                     "managed/libbifrost-binder-attach.so")
             files = {}
             for name in names:
                 path = adapters / name

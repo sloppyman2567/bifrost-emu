@@ -1127,7 +1127,7 @@ unverified.
 
 Apps use Android's real MediaCodec/Codec2 stack. Compressed packets are
 decoded on the host; there are no Java or JNI codec substitutes.
-`media.player` and `media.extractor` are still not supplied.
+`media.player` is still not supplied; `media.extractor` is the image's real daemon.
 
 - **Provisioning.** Framework schema 8 (`Tools/Android/android_codecs.py`)
   extracts the SDK image's real media.swcodec APEX, Goldfish Codec2 vendor
@@ -1138,8 +1138,9 @@ decoded on the host; there are no Java or JNI codec substitutes.
   software store stays `/software`.
 - **Realm ownership.** The Binder broker owns the services
   (`Source/System/Android/Media/CodecServices.cpp`), independently of any
-  app: `media.resource_manager` as UID 1013 and both component stores as
-  UID 1046, from a cloned root with their own logs. A service counts as
+  app: `media.resource_manager` as UID 1013, `media.extractor` as UID 1040 and
+  both component stores as UID 1046, from a cloned root with their own logs.
+  Realm readiness does not wait for the extractor, whose failure costs only video. A service counts as
   ready only when the registered endpoint belongs to its spawned PID. A
   child that does not register within 30 s is killed. Restarts back off
   (250 ms × count) and give up after four consecutive failures. Broker
@@ -2032,6 +2033,11 @@ checks their initially detached state, and requires three increasing frame
 timestamps on each owner before joining it. With the old adapter this path
 reproduced the Java Binder fatal check; the repaired adapter passes in JIT.
 Run with `--services --managed-graphics` and the current launcher DEX.
+
+Later callers hit the same abort from other native threads (Oddmar when its splash video ended; Firefox reports the
+same message, not re-tested). Every managed app process now preloads `libbifrost-binder-attach.so`, which interposes
+`BBinder::transact` and attaches an unattached thread under the same rules. The same probe transacts on a Java Binder
+through the NDK's `AIBinder` from two fresh pthreads. Without the preload it reproduces the abort (exit 127).
 
 The next GPU-enabled run reached rendering and a user-confirmed splash/loading
 screen, then crashed in the image's `libnativewindow.so` at

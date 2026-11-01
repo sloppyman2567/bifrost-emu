@@ -235,6 +235,13 @@ def build(runtime, output):
                                  str(bionic / "libc.so"), "-o", str(managed / "mapper.bifrost.so")],
                        check=True)
         names.append("managed/mapper.bifrost.so")
+        # Preloaded into app processes: see its header.
+        subprocess.run(common + ["-std=c2x", "-mno-outline-atomics", "-fPIC", "-shared",
+                                 "-Wl,-soname,libbifrost-binder-attach.so", "-Wl,--no-as-needed",
+                                 str(ROOT / "Guest/Android/Adapters/binder_attach.c"),
+                                 str(bionic / "libc.so"), str(bionic / "libdl.so"),
+                                 "-o", str(managed / "libbifrost-binder-attach.so")], check=True)
+        names.append("managed/libbifrost-binder-attach.so")
         subprocess.run(common + ["-fPIE", "-pie", "-Wl,--dynamic-linker=/system/bin/linker64",
                                  str(ROOT / "Tests/Unit/android_bionic_start.S"),
                                  str(ROOT / "Guest/Android/Launchers/am.c"), str(bionic / "libc.so"),

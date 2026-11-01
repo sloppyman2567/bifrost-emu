@@ -78,6 +78,64 @@ JNIEXPORT jint JNICALL Java_ActivityProbe_00024NativeLooperProbe_nativeFrames(JN
     return 1;
 }
 
+// An unattached pthread transacting on a Java Binder in this process, as native code reaches the launcher's Java-hosted
+// services (the NDK's AIBinder ends in the same JavaBBinder::onTransact). libbifrost-binder-attach.so must attach it, or
+// that aborts the process.
+struct native_java_binder_probe {
+    JavaVM *vm;
+    void *binder;
+    int result;
+    int32_t (*prepare)(void *, void **);
+    int32_t (*transact)(void *, uint32_t, void **, void **, uint32_t);
+    void (*delete_parcel)(void *);
+};
+static void *native_java_binder_worker(void *data) {
+    struct native_java_binder_probe *probe = data;
+    JNIEnv *env;
+    if ((*probe->vm)->GetEnv(probe->vm, (void **)&env, JNI_VERSION_1_6) != JNI_EDETACHED) { probe->result = -1; return NULL; }
+    void *request = NULL, *reply = NULL;
+    if (probe->prepare(probe->binder, &request)) { probe->result = -2; return NULL; }
+    const int32_t status = probe->transact(probe->binder, 1, &request, &reply, 0);  // FIRST_CALL_TRANSACTION
+    if (reply) probe->delete_parcel(reply);
+    if (status) { probe->result = -3; return NULL; }
+    probe->result = (*probe->vm)->GetEnv(probe->vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK ? 1 : -4;
+    return NULL;
+}
+static void *native_java_binder_create(void *arguments) { return arguments; }
+static void native_java_binder_destroy(void *data) { (void)data; }
+static int32_t native_java_binder_transact(void *binder, uint32_t code, const void *in, void *out) {
+    (void)binder; (void)code; (void)in; (void)out;
+    return 0;
+}
+JNIEXPORT jint JNICALL Java_ActivityProbe_00024NativeLooperProbe_nativeJavaBinder(JNIEnv *env, jclass type, jobject binder) {
+    (void)type;
+    struct native_java_binder_probe probe = {0};
+    if ((*env)->GetJavaVM(env, &probe.vm) != JNI_OK) return -6;
+    void *ndk = dlopen("libbinder_ndk.so", RTLD_NOW);
+    if (!ndk) return -7;
+    void *(*from_java)(JNIEnv *, jobject) = dlsym(ndk, "AIBinder_fromJavaBinder");
+    void *(*define)(const char *, void *(*)(void *), void (*)(void *),
+                    int32_t (*)(void *, uint32_t, const void *, void *)) = dlsym(ndk, "AIBinder_Class_define");
+    bool (*associate)(void *, const void *) = dlsym(ndk, "AIBinder_associateClass");
+    probe.prepare = dlsym(ndk, "AIBinder_prepareTransaction");
+    probe.transact = dlsym(ndk, "AIBinder_transact");
+    probe.delete_parcel = dlsym(ndk, "AParcel_delete");
+    if (!from_java || !define || !associate || !probe.prepare || !probe.transact || !probe.delete_parcel) return -8;
+    // This thread is attached: associating a class asks the Java object for its descriptor.
+    probe.binder = from_java(env, binder);
+    const void *binder_class = define("org.bifrost.probe", native_java_binder_create, native_java_binder_destroy,
+                                      native_java_binder_transact);
+    if (!probe.binder || !binder_class || !associate(probe.binder, binder_class)) return -9;
+    // Two threads: ART aborts at thread exit if the first was left attached.
+    for (int i = 0; i < 2; ++i) {
+        pthread_t worker;
+        probe.result = 0;
+        if (pthread_create(&worker, NULL, native_java_binder_worker, &probe) || pthread_join(worker, NULL)) return -10;
+        if (probe.result != 1) return probe.result;
+    }
+    return 1;
+}
+
 struct native_looper_registration { ALooper *looper; int fd, result; };
 static int native_looper_ready(int fd, int events, void *data) {
     struct native_looper_registration *registration = data;

@@ -58,7 +58,7 @@ fault ends it.
 `rt_sigaction` may query SIGKILL/SIGSTOP; only installing a new disposition
 is forbidden. After host fork, private futex queues start empty and copied host
 waiter objects must not be destroyed. `Emulator::fork_guest` must hold every lock the child, or the guest code it
-runs, uses (comm table, futex shards, thread lists, guest descriptor table, guest memory index) across the host
+runs, uses (comm table, futex shards, thread lists, guest descriptor table, POSIX timers, guest memory index) across the host
 `fork()`, taken all-or-none so no lock is waited for while another is held. Plain mutexes are then unlocked in the
 child, but a read/write lock copies its queue of waiting writers and must be re-initialized there
 (`Memory::reset_mutex_in_fork_child`); the child also drops the inherited JIT. Add any new process-wide lock that

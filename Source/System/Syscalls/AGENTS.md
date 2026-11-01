@@ -68,6 +68,11 @@
   x0 = signo. Write the result (`ret_host(0)`) BEFORE `deliver_signal` / `send_process_signal`
   and never touch x0 afterwards, or the handler sees signal 0 and the call returns its first
   argument. `test_signal_semantics` (`test_self_signal`) covers it.
+- POSIX timers (107-111) are `GuestTimers` (`Core/Emulator/`): one host timerfd per timer, so arming, absolute times,
+  intervals and expiry counts are the kernel's, and a service thread queues each expiry (`Emulator::send_timer_signal`).
+  A timer keeps one signal queued; later expiries raise its overrun. A forked child inherits none and `execve` destroys
+  them. CPU-time clocks return ENOTSUP. A signal every thread blocks goes to the process-wide set, which keeps no
+  timer details. `test_posix_timers` passes on a native kernel too; qemu-aarch64 is not a reference (it rewrites ids).
 - `rt_sigtimedwait` really blocks for its requested bounded wait; futex requeue
   reads its count from the correct ABI slot. Preserve the relevant regressions.
 - A futex word in a writable MAP_SHARED file mapping (`Memory::shared_futex_word`:

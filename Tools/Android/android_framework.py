@@ -56,6 +56,70 @@ SHARED_LIBRARIES = {
 }
 
 
+# The image's real media.extractor daemon, which the broker runs (CodecServices), with the libraries it cannot find in
+# its linker section (the codec APEX's private copies are out of its scope). The extractor plugins are already in the
+# runtime. The daemon aborts without its seccomp policy, read from the media APEX; the image's /system/etc copies are
+# byte-identical to it. Bifrost's prctl(PR_SET_SECCOMP) accepts the filter without applying it, so it never reaches the host.
+# install path -> (image path, sha256, executable).
+SECCOMP_POLICIES = "apex/com.android.media/etc/seccomp_policy/"
+MEDIA_EXTRACTOR = {
+    "system/bin/mediaextractor": ("/system/bin/mediaextractor",
+        "f1b816b4c0c1c54429f858555904d7fe864e00093726afe5221eda5483250a83", True),
+    "system/lib64/libmediaextractorservice.so": ("/system/lib64/libmediaextractorservice.so",
+        "d2a604f454489a6780eb6c23434895d7f681304d2a5875a5df475ca449bb1bd4", False),
+    "system/lib64/libavservices_minijail.so": ("/system/lib64/libavservices_minijail.so",
+        "3f8284594d2390bb1c162b3a33694e0eb0888af18c9d2ff76c34ec53e09e674a", False),
+    "system/lib64/libminijail.so": ("/system/lib64/libminijail.so",
+        "1ea86c7fd2fa8e7da2c73f947b56f273e61a913dc4588dee94024ef23caa69da", False),
+    "system/lib64/libcap.so": ("/system/lib64/libcap.so",
+        "7373f3c9a3e6f1abeca35847939ff77743f0969737c7a343dacf5ba74422397a", False),
+    SECCOMP_POLICIES + "mediaextractor.policy": ("/system/etc/seccomp_policy/mediaextractor.policy",
+        "6cbaa21237b8664cdec18cb7a13e7103abfbf5094e9ad10c877f31a2ce8b0398", False),
+    SECCOMP_POLICIES + "crash_dump.arm64.policy": ("/system/etc/seccomp_policy/crash_dump.arm64.policy",
+        "0a356099c4378c4f9b6fde87d5d728dd6c6a637f338636a3615b9c815bc953da", False),
+    SECCOMP_POLICIES + "code_coverage.arm64.policy": ("/system/etc/seccomp_policy/code_coverage.arm64.policy",
+        "a78bd4d8339b5096d6e5e2c912e45834f87010e84c70c9ddac5c2d1e6e7f94aa", False),
+}
+
+
+def media_extractor_inventory():
+    return {name: {"sha256": sha256, "executable": executable} for name, (_, sha256, executable) in MEDIA_EXTRACTOR.items()}
+
+
+def without_media_extractor(files):
+    """Validate the daemon's files and leave the image pin (they are added after it)."""
+    result = dict(files)
+    for name, expected in media_extractor_inventory().items():
+        if name in result and result.pop(name) != expected:
+            raise ValueError(f"Modified media extractor file: {name}")
+    return result
+
+
+def install_media_extractor(root, archive=None, system=None):
+    """Add the daemon to a runtime, verified against the pins, in place like the shell and shared libraries."""
+    missing = []
+    for name, (_, pin, _executable) in MEDIA_EXTRACTOR.items():
+        target = root / name
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or not target.is_file() or digest(target) != pin:
+                raise ValueError(f"Modified media extractor file: {name}")
+        else:
+            missing.append(name)
+    if not missing:
+        return
+    with tempfile.TemporaryDirectory(prefix=".android-extractor-") as directory:
+        work = Path(directory)
+        if system is None: system, _ = extract_system(image_archive(archive), work)
+        for name in missing:
+            image_path, pin, executable = MEDIA_EXTRACTOR[name]
+            staged = work / Path(name).name
+            dump(system, image_path, staged)
+            if digest(staged) != pin: raise ValueError(f"{image_path} differs from the pinned image")
+            staged.chmod(0o755 if executable else 0o644)
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged, root / name)
+
+
 def shared_library_files():
     """Install path -> (image path, pinned sha256) of every shared library file."""
     files = {}
@@ -79,7 +143,7 @@ def without_shared_libraries(files):
 
 
 def without_shell(files):
-    files = without_shared_libraries(without_bionic_links(files))
+    files = without_media_extractor(without_shared_libraries(without_bionic_links(files)))
     if "system/bin/sh" in files and files.pop("system/bin/sh") != shell_inventory():
         raise ValueError("Modified Android shell")
     return files
@@ -289,9 +353,11 @@ def install(destination, art_root, archive=None):
         install_bionic_links(destination)
         install_shell(destination, archive)
         install_shared_libraries(destination, archive)
+        install_media_extractor(destination, archive)
         return update_inventory(metadata, manifest, {**metadata["files"], **BIONIC_LINKS,
                                                      "system/bin/sh": shell_inventory(),
-                                                     **shared_library_inventory()})
+                                                     **shared_library_inventory(),
+                                                     **media_extractor_inventory()})
     android_art.install(art_root)  # verifies the pinned ART layer
     archive = image_archive(archive)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -303,6 +369,7 @@ def install(destination, art_root, archive=None):
         system, _ = extract_system(archive, work)
         install_shell(root, system=system)
         install_shared_libraries(root, system=system)
+        install_media_extractor(root, system=system)
         for name, target in boot_image_entries(system):
             path = root / f"system/framework/arm64/{name}"
             if target is None:

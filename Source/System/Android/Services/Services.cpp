@@ -122,6 +122,7 @@ int BinderNode::service_transaction(const bf_binder_transaction &tx, Memory &mem
                     if (name == ALLOCATOR || name == "processinfo")
                         throw std::invalid_argument("realm service cannot be replaced");
                     if ((name == "media.resource_manager" && sender_uid_ != 1013) ||
+                        (name == "media.extractor" && sender_uid_ != 1040) ||
                         (name.rfind("android.hardware.media.c2.IComponentStore/", 0) == 0 && sender_uid_ != 1046))
                         throw std::invalid_argument("wrong media-service UID");
                     uint64_t offset = input.position();

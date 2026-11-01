@@ -68,10 +68,23 @@ public final class ActivityProbe {
         private static native long arm();
         private static native int finish(long registration);
         private static native int nativeFrames();
+        private static native int nativeJavaBinder(android.os.Binder binder);
         static void checkNativeFrames() {
             int result = nativeFrames();
             if (result != 1) throw new AssertionError("native Choreographer worker: " + result);
             System.out.println("ANDROID_NATIVE_CHOREOGRAPHER_OK");
+            int[] transactions = new int[1];
+            android.os.Binder binder = new android.os.Binder() {
+                @Override protected boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) {
+                    transactions[0]++;
+                    return code == 1;
+                }
+            };
+            binder.attachInterface(null, "org.bifrost.probe");
+            result = nativeJavaBinder(binder);
+            if (result != 1 || transactions[0] != 2)
+                throw new AssertionError("native Java Binder worker: " + result + ", " + transactions[0] + " transactions");
+            System.out.println("ANDROID_NATIVE_JAVA_BINDER_OK");
         }
         private static void check(android.os.Handler handler, Runnable next) {
             long registration = arm();
