@@ -7,6 +7,9 @@
   AAudio callbacks run on the Bionic adapter's own pthread, preserving Bionic TLS;
   the host pump skips streams claimed by that guest thread. Bounded callback
   waits must allow group exit to complete.
+- With no host device (SDL could not open one, or a headless build) `Audio` drains unpaused streams at the device rate, like
+  a silent device (`drain_without_device_locked_`), so writers neither hang nor run unpaced. A device takes over
+  through the mixer; both credit frames with `consume_frames_locked_`. `audio_test` covers it on a host without sound.
 - `AudioThunk/AudioThunk.cpp` owns export registration; the Android adapter builder
   reads its AAudio export list. Keep that tooling in sync when moving registration.
   AAudio validation, defaults and state rules follow AOSP libaaudio

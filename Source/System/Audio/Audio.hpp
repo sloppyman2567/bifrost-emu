@@ -17,6 +17,7 @@
 //      automated tests.
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -115,6 +116,12 @@ private:
         struct FrameBatch { uint64_t input, output, consumed = 0, credited = 0; };
         std::deque<FrameBatch> frame_batches;
     };
+    // Removes n frames the output has taken from a stream, crediting them to its read counter.
+    void consume_frames_locked_(Stream& s, size_t n);
+    // With no host device nothing pulls the streams: drain them at the device rate, as a silent device would.
+    void drain_without_device_locked_();
+    std::chrono::steady_clock::time_point drained_until_{};
+    bool drain_started_ = false;
     bool opened_ = false;               // physical device open
     uint32_t sample_rate_ = 44100;
     uint8_t channels_ = 2;

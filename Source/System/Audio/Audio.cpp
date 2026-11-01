@@ -151,6 +151,7 @@ bool Audio::open_device_locked_() {
     return true;
 }
 void Audio::close_device_locked_() {
+    drain_started_ = false;
 #if defined(BIFROST_USE_SDL2)
     close_sdl2_();
 #endif
@@ -213,12 +214,14 @@ void Audio::stream_clear(int id) {
 size_t Audio::stream_queued_frames(int id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = streams_.find(id);
+    drain_without_device_locked_();
     return it == streams_.end() ? 0 : (it->second.tail - it->second.head);
 }
 bool Audio::stream_buffer_info(int id, uint32_t rate, size_t& queued, size_t& capacity) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = streams_.find(id);
     if (it == streams_.end() || !sample_rate_ || !rate) return false;
+    drain_without_device_locked_();
     const auto& s = it->second;
     // Round queued input frames up, so callers never over-report free space.
     queued = ((s.tail - s.head) * static_cast<uint64_t>(rate) + sample_rate_ - 1) / sample_rate_;
@@ -229,6 +232,7 @@ bool Audio::stream_frame_counters(int id, uint64_t& written, uint64_t& read) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = streams_.find(id);
     if (it == streams_.end()) return false;
+    drain_without_device_locked_();
     written = it->second.frames_written;
     read = it->second.frames_read;
     return true;
@@ -292,6 +296,7 @@ ssize_t Audio::push_frames_locked_(Stream& s, uint32_t fmt, uint32_t rate,
     const uint8_t fsz = pcm_fmt_size(fmt);
     if (!fsz || !ch || !rate) return -1;
     const size_t frame_sz_in = static_cast<size_t>(fsz) * ch;
+    drain_without_device_locked_();
     // PARTIAL acceptance: take as many whole INPUT frames as fit in the
     // ring after conversion (guests may push multi-second buffers in one
     // write — all-or-nothing would deadlock a write-retry loop).
@@ -463,19 +468,7 @@ void Audio::mixer_callback_(void* userdata, uint8_t* stream, int len) {
                     (unsigned long long)((s.tail-s.head)*1000ull/self->sample_rate_),
                     (unsigned long long)(n*1000ull/self->sample_rate_),
                     (unsigned long long)(s.cap_frames*1000ull/self->sample_rate_));
-        s.head += n;
-        size_t remaining = n;
-        while (remaining && !s.frame_batches.empty()) {
-            auto& batch = s.frame_batches.front();
-            uint64_t take = std::min<uint64_t>(remaining, batch.output - batch.consumed);
-            batch.consumed += take;
-            remaining -= take;
-            uint64_t credit = batch.consumed == batch.output ? batch.input :
-                static_cast<uint64_t>((static_cast<__uint128_t>(batch.consumed) * batch.input) / batch.output);
-            s.frames_read += credit - batch.credited;
-            batch.credited = credit;
-            if (batch.consumed == batch.output) s.frame_batches.pop_front();
-        }
+        self->consume_frames_locked_(s, n);
     }
     // Convert + clip into the output stream.
     size_t oi = 0;
@@ -484,6 +477,41 @@ void Audio::mixer_callback_(void* userdata, uint8_t* stream, int len) {
             store_sample(dfz, stream + oi, mix[f * dch + c]);
             oi += dfz;
         }
+    }
+}
+void Audio::consume_frames_locked_(Stream& s, size_t n) {
+    s.head += n;
+    size_t remaining = n;
+    while (remaining && !s.frame_batches.empty()) {
+        auto& batch = s.frame_batches.front();
+        uint64_t take = std::min<uint64_t>(remaining, batch.output - batch.consumed);
+        batch.consumed += take;
+        remaining -= take;
+        uint64_t credit = batch.consumed == batch.output ? batch.input :
+            static_cast<uint64_t>((static_cast<__uint128_t>(batch.consumed) * batch.input) / batch.output);
+        s.frames_read += credit - batch.credited;
+        batch.credited = credit;
+        if (batch.consumed == batch.output) s.frame_batches.pop_front();
+    }
+}
+void Audio::drain_without_device_locked_() {
+    if (!opened_) return;
+#if defined(BIFROST_USE_SDL2)
+    if (sdl_audio_dev_) return;
+#endif
+    const auto now = std::chrono::steady_clock::now();
+    if (!drain_started_) {
+        drain_started_ = true;
+        drained_until_ = now;
+        return;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(now - drained_until_).count();
+    const uint64_t frames = static_cast<__uint128_t>(elapsed) * sample_rate_ / 1000000000u;
+    if (!frames) return;
+    drained_until_ += std::chrono::nanoseconds(static_cast<uint64_t>(static_cast<__uint128_t>(frames) * 1000000000u / sample_rate_));
+    for (auto& [id, s] : streams_) {
+        (void)id;
+        if (!s.paused) consume_frames_locked_(s, std::min<uint64_t>(s.tail - s.head, frames));
     }
 }
 // ── SDL2 backend ─────────────────────────────────────────────
