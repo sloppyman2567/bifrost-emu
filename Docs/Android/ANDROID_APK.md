@@ -513,7 +513,7 @@ and 21 ARM64 libraries. The normal APK runner now launches
 `com.clevertap.unity.CleverTapOverrideActivity` through ManagedLauncher.
 Its SurfaceView path provides a window and input; this remains a bounded
 framework profile rather than a complete Android system. A separate
-[installed-app framework probe](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07)
+[installed-app framework probe](../archive/ANDROID_RUNTIME-history.md#installed-app-creation-checkpoint-2026-10-07)
 now reaches the real launcher's `onCreate`, including IL2CPP JNI startup, in
 both engines. It exits after creation and does not draw or accept input.
 Installation is not game-play compatibility evidence. The earlier native probe

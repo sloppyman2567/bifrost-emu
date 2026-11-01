@@ -309,7 +309,7 @@ headless JIT also pass the AArch64 register and stepping checks. This does not
 test every instruction under single stepping, native ARM register validation,
 cross-process executable-code patching, or every signal/job-control ordering.
 Unsupported ptrace contracts are listed in the
-[runtime continuation](../Android/ANDROID_RUNTIME.md#guest-ptrace-continuation-2026-10-22).
+[runtime continuation](ANDROID_RUNTIME-history.md#guest-ptrace-continuation-2026-10-22).
 
 The selected process/signal/futex/procfs runner gate passes 14/14 in both engines;
 the filesystem confinement selection passes 2/2 in both engines. SDL and
@@ -359,7 +359,7 @@ This covers startup block contents and reopening procfs; it excludes
 PR_SET_MM relocation and concurrent edits while reading an already-open fd.
 The real Global client now passes its formerly failing module-2 initialization
 but aborts at module `0x60` after its `ro.kernel.qemu` check rejects `"1"`;
-see [the runtime trace](../Android/ANDROID_RUNTIME.md#global-umamusume-after-the-null-call-fix-2026-10-22).
+see [the runtime trace](ANDROID_RUNTIME-history.md#global-umamusume-after-the-null-call-fix-2026-10-22).
 
 ## Signal queries and fork-child lifetime (2026-10-22)
 
@@ -376,7 +376,7 @@ The existing process/signal/futex/exit selection passes 10/10 in each engine:
 'signal|sigtimedwait|sigreturn|fork|futex|exit_blocked|thread_fault|proc_exe'`,
 also with `--no-jit`. SDL and headless `all lib` builds pass. Global Umamusume
 now reaps its child and exits 127 itself after requesting HOME; startup and
-gameplay remain unconfirmed. See [the traced path](../Android/ANDROID_RUNTIME.md#global-umamusume-after-the-null-call-fix-2026-10-22).
+gameplay remain unconfirmed. See [the traced path](ANDROID_RUNTIME-history.md#global-umamusume-after-the-null-call-fix-2026-10-22).
 These tests exclude arbitrary host-library fork locks and successful shell/AM
 execution; the runtime does not yet provision `/system/bin/sh`.
 
@@ -1028,7 +1028,7 @@ CoreMark pairs at 110,000 iterations validate all five CRCs, with median
 scores 9,971.897/9,911.696 iterations/s. Five measured zstd compression
 pairs on a deterministic 16 MiB input take median process CPU
 177.342/179.026 ms; each decompression round trip matches SHA-256. Compile
-time and measurement limits are in the [JIT guide](../JIT.md#allocation-costs-mixed-fp-and-region-layouts-2026-10-16).
+time and measurement limits are in the [JIT guide](JIT-history.md#allocation-costs-mixed-fp-and-region-layouts-2026-10-16).
 Temporary harnesses, logs, binaries and JSON results remain under `/tmp`.
 Actual gameplay and hitch reduction on this executable are not established.
 
@@ -1069,7 +1069,7 @@ A temporary harness executes the actual 31-instruction Unity block from the
 SpongeBob capture. Its complete vector outputs, architectural NZCV and written
 memory match QEMU and the interpreter before and after the change. Internal
 JIT `pstate` bit 27 is excluded from the architectural NZCV comparison. The
-[JIT guide](../JIT.md#cached-integer-simd-2026-10-15) records generated-code and
+[JIT guide](JIT-history.md#cached-integer-simd-2026-10-15) records generated-code and
 timing results with their scope. The already-running SpongeBob session was
 preserved on its original executable; hat-change latency on the new binary
 has not been measured.
@@ -1101,7 +1101,7 @@ broader SIMD/FP/fault selection passes 41/41 with IR and scalar allocator
 validation. `make verify TARGET=build/release-sdl1-gl1/bifrost-emu` passes
 87 differential fixtures and seven threaded result oracles, and
 `make generated-check` passes. Independent QEMU runs validate both temporary
-pressure benchmarks; [JIT.md](../JIT.md#tier-1-vector-allocation-under-pressure-2026-10-15)
+pressure benchmarks; [JIT.md](JIT-history.md#tier-1-vector-allocation-under-pressure-2026-10-15)
 records the FMA gain and the remaining FADD regression explicitly.
 The final strict suite passes 326/326 in JIT and 317/317 in the interpreter
 with nine expected skips. SDL/GL executable/library and separate headless
@@ -1149,7 +1149,7 @@ The SDL/GL executable/library and separate headless executable/library build;
 pass (87 differential fixtures and seven threaded oracle runs). The broader
 SIMD/FP/memory-recovery selection passes 42/42 in JIT and 41/41 in the
 interpreter with one JIT-only skip. Synthetic performance observations and
-their bounds are recorded in [JIT.md](../JIT.md#inline-pixel-conversion-helpers-2026-10-15).
+their bounds are recorded in [JIT.md](JIT-history.md#inline-pixel-conversion-helpers-2026-10-15).
 The full strict JIT suite also passes 326/326, including its real-world
 binaries and dynamic-linker checks; the complete interpreter suite was not
 repeated for this change.
@@ -1267,7 +1267,7 @@ also passes both polynomial fixtures, including interpreter CRC execution.
 
 The live Azur Lane captures use the installed game, GPU access, boundary traces
 and per-process fallback inventories. The final profile has 9,451 samples with
-zero loss; see [JIT measurement limits](../JIT.md#azur-lane-polynomial-instructions-2026-10-15).
+zero loss; see [JIT measurement limits](JIT-history.md#azur-lane-polynomial-instructions-2026-10-15).
 The native profiling launch used the installed managed root with a temporary
 read-only launcher DEX and a native host DNS bridge, without the normal Python
 session/process supervisor. Cross-process WebView behavior is therefore outside
@@ -1331,7 +1331,7 @@ this bounded check.
 
 ## Tier-1 hot-path code reduction (2026-10-14)
 
-The codegen/dispatch batch described in [JIT.md](../JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
+The codegen/dispatch batch described in [JIT.md](JIT-history.md#tier-1-hot-path-code-reduction-2026-10-14)
 passed the following checks with host-device access:
 
 - SDL/GL executable/library and separate headless executable/library builds;
@@ -2709,7 +2709,7 @@ The installed SpongeBob 5.11.5 app probe reaches `APP_CLASSLOADER_OK`,
 zero in both engines (26.2 s JIT, 79.5 s interpreter in the reviewed runs).
 The real launcher is `com.clevertap.unity.CleverTapOverrideActivity`; logs also
 show native `libmain.so` loading and IL2CPP `JNI_OnLoad`. No readiness-property
-override is needed after the fix. See [the runnable command and bounds](../Android/ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07).
+override is needed after the fix. See [the runnable command and bounds](ANDROID_RUNTIME-history.md#installed-app-creation-checkpoint-2026-10-07).
 
 The original first fatal call was the strict local Activity controller's
 `getRequestedOrientation`. Its manifest initialization and request tracking
@@ -3777,7 +3777,7 @@ in `/tmp`; no inventory program was added to the repository.
 
 ActivityProbe's native-registry sensor service reports the sensorless virtual
 device using Android 15's ISensorServer protocol. The source contract is linked
-in [ANDROID_RUNTIME.md](../Android/ANDROID_RUNTIME.md#native-sensor-service-profile-2026-10-07).
+in [ANDROID_RUNTIME.md](ANDROID_RUNTIME-history.md#native-sensor-service-profile-2026-10-07).
 Observed checks cover all six supported transaction replies (exactly one raw
 32-bit zero), a non-default device id, unsupported event-connection rejection,
 bad-token/extra-argument rejection, and real framework JNI/libsensor queries

@@ -112,7 +112,7 @@ labels below are historical records.
 - SDL controllers initialize on first input poll, joystick read or controller
   query, avoiding device enumeration during construction for programs that
   never use input. Already-connected and later hot-plugged devices retain
-  the existing event path. See [validation and limits](../TESTS.md#indirect-branches-watchdogs-and-lazy-controllers-2026-10-12).
+  the existing event path. See [validation and limits](TESTS-history.md#indirect-branches-watchdogs-and-lazy-controllers-2026-10-12).
 
 ### Yggdrasil sandbox and path syscall fixes (2026-10-12)
 
@@ -174,7 +174,7 @@ labels below are historical records.
   stages its DEX read-only: API 35 ART rejects writable DEX files for the app
   UID that Android-runtime guests use, which had failed the fixture since app
   identities were added. See
-  [the validation record](../TESTS.md#200-alpha1-layout-names-and-splits-2026-10-12).
+  [the validation record](TESTS-history.md#200-alpha1-layout-names-and-splits-2026-10-12).
 
 ### Bounded multithreaded JIT loops (2026-10-11)
 
@@ -188,7 +188,7 @@ labels below are historical records.
   throughput rises 6.4x; a flag-heavy loop is unchanged. These are loop results,
   not game-performance claims. Four-worker zstd passes native round-trip validation.
 - Full JIT, differential/SSA, MT/Tier-2 and expanded immutable-publication oracles
-  pass. See [validation and timing limits](../TESTS.md#bounded-mt-self-loops-2026-10-11).
+  pass. See [validation and timing limits](TESTS-history.md#bounded-mt-self-loops-2026-10-11).
 
 ### JIT flag-arithmetic spills (2026-10-11)
 
@@ -202,7 +202,7 @@ labels below are historical records.
   dynamic traffic or gameplay measurement. Guards and block limits are unchanged.
 - Extended `jit_same_operand` covers live inputs, both destination aliases and
   NZCV. Full JIT, differential/SSA and Tier-2 checks pass; see
-  [the validation record](../TESTS.md#flag-arithmetic-register-pressure-2026-10-11).
+  [the validation record](TESTS-history.md#flag-arithmetic-register-pressure-2026-10-11).
 
 ### Source layout and contributor guidance (2026-10-11)
 
@@ -228,7 +228,7 @@ labels below are historical records.
   preserving their runtime policies and repairing pre-existing coverage drift.
 - Clean GPU/headless builds, full JIT/interpreter suites, generated checks,
   differential/SSA, host API and managed Android contracts pass. See
-  [the validation bounds](../TESTS.md#subsystem-layout-and-source-splits-2026-10-11).
+  [the validation bounds](TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11).
 
 ### JIT native-code reduction (2026-10-11)
 

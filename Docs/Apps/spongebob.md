@@ -77,7 +77,7 @@ fallback profile diffed across one equip (`BIFROST_FALLBACK_PROFILE` with
 `%p`, per process) listed the instructions the repack interpreted. Run against
 QEMU, vector `FCVTL` (half to single, `0x0E217800`) returned garbage: only the
 single-to-double form was implemented. Related half-precision and NaN defects
-were fixed with it; see [the JIT guide](../JIT.md#half-precision-conversions-and-arm-nan-results-2026-10-12).
+were fixed with it; see [the JIT guide](../archive/JIT-history.md#half-precision-conversions-and-arm-nan-results-2026-10-12).
 The user confirmed the character, portrait and lobby draw correctly afterwards.
 Native-density rendering was ruled out first with `BIFROST_ANDROID_LOGICAL_PIXELS=1`.
 

@@ -9,7 +9,7 @@ reported a noticeable gameplay improvement, followed by intermittent freezes.
 This is a live user observation, not a matched-scene benchmark. The freeze's
 cause has not been localized and no SSA on/off comparison has been captured;
 the JIT changes do not establish a stability fix. The measured CoreMark results,
-SSA coverage and verification limits are recorded in [JIT.md](../JIT.md#optimization-checkpoint-2026-10-11).
+SSA coverage and verification limits are recorded in [JIT.md](../archive/JIT-history.md#optimization-checkpoint-2026-10-11).
 
 ### Current frame rate report (2026-10-28)
 

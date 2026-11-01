@@ -166,7 +166,7 @@ aligned data, offsets and scatter buffers.
 
 The opt-in service-manager subset below supports named native endpoints. Full
 Android servicemanager/framework compatibility remains incomplete. The separate
-[SpongeBob Activity creation probe](ANDROID_RUNTIME.md#installed-app-creation-checkpoint-2026-10-07)
+[SpongeBob Activity creation probe](../archive/ANDROID_RUNTIME-history.md#installed-app-creation-checkpoint-2026-10-07)
 passes through `onCreate`; it does not exercise playable window attachment.
 
 ## Native service-manager subset

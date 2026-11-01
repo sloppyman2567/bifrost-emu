@@ -15,6 +15,8 @@ interpreter, Linux syscalls/VFS, dynamic linking and host graphics/audio adapter
 - [System guidance](Source/System/AGENTS.md): memory, loader, syscalls, VFS,
   Android and host integration. Narrower guides live beside those subsystems.
 - [Guest rootfs](Docs/ROOTFS.md): discovery order, installing and the install layout.
+- `Docs/archive/`: dated history moved out of the guides and changelog; not required reading. Keep guides on how things
+  work now, and move a checkpoint there once it stops describing current behaviour.
 - [Android runtime](Docs/Android/ANDROID_RUNTIME.md), [Binder](Docs/Android/ANDROID_BINDER.md),
   [APK tooling](Docs/Android/ANDROID_APK.md), [tests](Docs/TESTS.md).
 

@@ -299,7 +299,7 @@ video-ad playback or full lifecycle/recreation behavior.
 
 - Window scaling (observed October 21, 3440x1440 monitor): fixed in `4e41f771`
   (October 21; seen working October 27). The Battle Cats surface and its WebView pages no longer sit in a
-  corner on black; see [the changelog](CHANGELOG.md#non-resizable-apps-keep-their-size-and-are-scaled-to-the-window-2026-10-21).
+  corner on black; see [the changelog](archive/CHANGELOG-2.0.0-alpha.2.md#non-resizable-apps-keep-their-size-and-are-scaled-to-the-window-2026-10-21).
   Roblox's black bar was not rechecked separately, and X11 layers are not fitted.
 - Low-resolution Roblox textures at desktop resolutions are unexplained. Compare
   the rendered texture size with the app's request before blaming filtering.
@@ -372,7 +372,7 @@ architectural-only exit spills, complete chain-slot restoration and bounded
 known-entry loop growth reduce emitted work. Final interleaved CoreMark medians
 improve from 9,049.03 to 9,893.87 iterations/s (9.3%), with every CRC checked.
 The Android probe also exposed and regression-tested a dead-code compaction
-reserve-accounting underflow. See [implementation](JIT.md#tier-1-hot-path-code-reduction-2026-10-14)
+reserve-accounting underflow. See [implementation](archive/JIT-history.md#tier-1-hot-path-code-reduction-2026-10-14)
 and [validation](archive/TESTS-history.md#tier-1-hot-path-code-reduction-2026-10-14).
 
 Implemented memory-access checkpoint (October 26): the bounds table doubles as

@@ -36,7 +36,7 @@ Unity's `MediaRouter` construction. The no-adapter Wi-Fi display contract and
 connected local audio/router services now let that constructor complete;
 the follow-up trace contains successful calls and no framework-service throws.
 Byte PMULL and CRC instruction fallbacks were also removed from FrostJIT;
-see the [implementation and measurement limits](../JIT.md#azur-lane-polynomial-instructions-2026-10-15).
+see the [implementation and measurement limits](../archive/JIT-history.md#azur-lane-polynomial-instructions-2026-10-15).
 The bounded runs and CPU profiles do not establish a matched before/after FPS
 improvement.
 
@@ -49,6 +49,6 @@ improvement.
 - Capture the fight itself and resize evidence; WebView pointer, focus and scroll
   interaction are still partial (see the roadmap).
 
-See the [runtime checkpoint](../Android/ANDROID_RUNTIME.md#azur-lane-interaction-checkpoint-2026-10-14),
-[generated-code audit](../JIT.md#azur-lane-generated-code-audit-2026-10-14)
+See the [runtime checkpoint](../archive/ANDROID_RUNTIME-history.md#azur-lane-interaction-checkpoint-2026-10-14),
+[generated-code audit](../archive/JIT-history.md#azur-lane-generated-code-audit-2026-10-14)
 and [next-release priorities](../roadmap.md#next-release-priorities).
