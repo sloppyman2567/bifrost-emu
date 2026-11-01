@@ -19,7 +19,7 @@ as the linked section says, not that every app using it works.
 |---|---|---|---|
 | 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout and descriptive file names; Asgard Android runtime on the pinned Android 15 framework; SpongeBob playable | Goals below |
 | 2.0.0-alpha.2 (2026-10-21) | Released; its goals were partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
-| 2.0.0-alpha.3 (2026-11-01) | Released; its WebView, media and ad scope is mostly open | Since alpha.2: `media.extractor` and POSIX timers, so video opens through Android's media stack; a fix for the Java Binder abort on native threads; session-wide window stats; lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package; `fcntl` owner, signal and lease commands, so Umamusume's anti-tamper helper no longer ends the app about 8 s in (play past the title is unchecked); a full JIT code cache is replaced and idle threads cost less memory; Subway Surfers 3.70.3 recorded playable (the maintainer's report, no capture). Partial: WebView renders; desktop text input reaches native editors; http(s) and Play Store links open in the host browser after a recent input | WebView pointer/focus/scroll, return/deep-link delivery, ads with test creatives, video |
+| 2.0.0-alpha.3 (2026-11-01) | Released; its WebView, media and ad scope is mostly open | Since alpha.2: `media.extractor` and POSIX timers, so video opens through Android's media stack; a fix for the Java Binder abort on native threads; session-wide window stats; lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package; `fcntl` owner, signal and lease commands, so Umamusume's anti-tamper helper no longer ends the app about 8 s in (the maintainer has since reached a Career story scene); a full JIT code cache is replaced and idle threads cost less memory; Subway Surfers 3.70.3 recorded playable (the maintainer's report, no capture). Partial: WebView renders; desktop text input reaches native editors; http(s) and Play Store links open in the host browser after a recent input | WebView pointer/focus/scroll, return/deep-link delivery, ads with test creatives, `media.player` and sustained video |
 | 2.0.0-beta.1 | Not started | Library cards, per-game settings, clear-data/uninstall | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
 
 Known blockers, by cause:
@@ -33,13 +33,14 @@ Known blockers, by cause:
 - **Architecture:** Bifrost runs AArch64 only, so an APK that ships only
   `armeabi-v7a` or `x86` libraries (Angry Birds Space) cannot start.
 - **Platform gaps still listed below:** no Settings screens, no host mDNS,
-  no Android Vulkan HAL, no toast animations.
+  no Android Vulkan HAL, no `media.player` service, no toast animations.
+- **Undiagnosed:** Firefox 159 reaches onboarding and a GeckoView surface, but pages do not load. Most of its sessions
+  ended on the Java Binder abort fixed on November 1; it has not been re-tested since.
 
 ## Next release priorities
 
-These are proposed scopes for the next pre-releases, not announced release dates.
-The runtime is 2.0.0-alpha.3. Neither scope below is complete in it; unmet items
-carry to the next pre-release. The
+These are proposed scopes, not announced release dates. The runtime is 2.0.0-alpha.3. The alpha.2 and alpha.3 scopes
+below shipped partly; what they still list carries to the next pre-release, ahead of beta.1. The
 [SpongeBob screenshots](Apps/spongebob.md#screenshots-2026-11-01) show cooking,
 the lobby, restaurant progress, Help Center and a level-14 pause menu; the
 [Azur Lane page](Apps/azur-lane.md#measurements-2026-11-01-200-alpha3) shows its home screen and the
@@ -47,10 +48,10 @@ the lobby, restaurant progress, Help Center and a level-14 pause menu; the
 Still images do not establish sustained performance
 or successful ads, sign-in and gameplay in every app.
 
-### 2.0.0-alpha.2: broader game support and less stutter
+### Carried from 2.0.0-alpha.2: broader game support and less stutter
 
 - Repair concrete startup and interaction blockers in selected games, starting
-  with Azur Lane's delayed login UI (its toast failure is fixed). Complete
+  with Azur Lane's delayed login UI (its toast failure is fixed; the maintainer has not said whether the delay remains). Complete
   connected common-service contracts rather than returning success from empty
   handlers.
 - Remove the first-ad-load wait: every Google Mobile Ads game blocks its main
@@ -62,14 +63,15 @@ or successful ads, sign-in and gameplay in every app.
 - Measure rendering, ART/GC, Binder/service work and input delays alongside JIT
   cost. Keep supported software and hardware media routes explicit.
 - Exercise multiple selected Android engines/apps, with audio, saved data,
-  resize, pause/resume and process exit; retain working Linux game behavior.
+  resize, pause/resume and process exit; retain working Linux game behavior. The maintainer reports working audio and
+  pause/resume in Azur Lane (November 1); the others are unrecorded.
 
 Acceptance: repeatable GPU-enabled runs report load time, CPU/compilation cost
 and median/p95/p99 frame times against the current baseline. Lower tail frame
 times must accompany correctness checks and sustained interaction; a window
 title's instantaneous FPS is not the acceptance measurement.
 
-### 2.0.0-alpha.3: WebView, media and possible ad support
+### Carried from 2.0.0-alpha.3: WebView, media and possible ad support
 
 - Finish attached WebView pointer/focus/scroll delivery. Desktop text and IME
   composition now reach native editors through `InputConnection`
@@ -249,6 +251,11 @@ after client exit. Aliased native-window dimensions now follow SurfaceView
 geometry; the user confirmed clean resizing. These probes do not establish
 video-ad playback or full lifecycle/recreation behavior.
 
+Implemented checkpoint (November 1): the real `media.extractor` daemon runs in the realm, so `MediaExtractor` and
+`AMediaExtractor` open files. Oddmar gets past its opening video and on to the next one, with Unity's `VideoPlayer` and the
+real codec stack, in a 75 s session and by the maintainer's report. `media.player` is still absent, so `MediaPlayer`
+video is not expected to play. Oddmar's gameplay, its story videos and audio sync during video are unchecked.
+
 - Extend EGL/OpenGL ES/Vulkan, ANativeWindow and buffer ownership so
   Android game surfaces present correctly through the host graphics path.
   Use the [AOSP graphics architecture](https://source.android.com/docs/core/graphics/architecture)
@@ -318,6 +325,9 @@ video-ad playback or full lifecycle/recreation behavior.
   500 MiB in Battle Cats), why the WebView service stays alive, and a
   controlled before/after run. The window title's VRAM figure for Battle Cats
   (about 205-257 MiB of 8573) has not been checked against the driver.
+  Since November 1 the window statistics count the whole session by PSS rather than one process's RSS, so earlier
+  title-bar figures read lower. On that measure Azur Lane held about 3.2 GiB and Umamusume Global about 4.4 GB;
+  long-session memory is unmeasured.
 
 Acceptance: rendered gameplay with working audio and input survives repeated
 surface recreation and lifecycle transitions without leaks or stale handles.
