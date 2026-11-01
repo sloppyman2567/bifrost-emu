@@ -23,6 +23,7 @@ import urllib.request
 import zipfile
 
 import android_package as package
+import android_paths
 
 ROOT = package.ROOT
 ARGS = None
@@ -1450,7 +1451,7 @@ class BrowserLinkTests(unittest.TestCase):
     def test_guest_maps_play_install_links_to_the_public_store_page(self):
         # Ad "Install" clicks arrive as https://play.google.com/d?id=<package>&inline=true&enifd=...,
         # a deep link only the Play Store app opens; the host browser gets a 404 for it.
-        javac = os.environ.get("JAVAC") or shutil.which("javac")
+        javac = android_paths.javac()
         java = shutil.which("java")
         if not javac or not java:
             self.skipTest("needs a JDK")
@@ -1930,6 +1931,24 @@ class AndroidPathsTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         os.environ.pop("BIFROST_ANDROID_STATE", None)
 
+    def test_javac_prefers_the_environment_then_the_newest_jdk_off_path(self):
+        jvm = Path(self.work.name) / "jvm"
+        for name in ("java-8-openjdk", "java-25-openjdk", "java-21-openjdk"):
+            tool = jvm / name / "bin/javac"
+            tool.parent.mkdir(parents=True)
+            tool.write_text("#!/bin/sh\n")
+            tool.chmod(0o755)
+        (jvm / "java-26-jre/bin").mkdir(parents=True)  # A runtime without javac is not a JDK.
+        environment = {"PATH": "", "JAVAC": "", "JAVA_HOME": ""}
+        with patch.object(self.paths, "JDK_ROOTS", (str(jvm),)), patch.dict(os.environ, environment):
+            self.assertEqual(self.paths.javac(), str(jvm / "java-25-openjdk/bin/javac"))
+            with patch.dict(os.environ, {"JAVA_HOME": str(jvm / "java-8-openjdk")}):
+                self.assertEqual(self.paths.javac(), str(jvm / "java-8-openjdk/bin/javac"))
+            with patch.dict(os.environ, {"JAVAC": "/opt/javac"}):
+                self.assertEqual(self.paths.javac(), "/opt/javac")
+        with patch.object(self.paths, "JDK_ROOTS", ()), patch.dict(os.environ, environment):
+            self.assertIsNone(self.paths.javac())
+
     def test_a_source_checkout_keeps_state_and_emulator_in_the_checkout(self):
         self.assertFalse(self.paths.installed())
         self.assertEqual(self.paths.state_root(), self.root / "android-state")
@@ -2277,7 +2296,7 @@ class PackageTests(unittest.TestCase):
             dex = cls.work / (name + "-dex")
             dex.mkdir()
             libraries = [play_services_basement(cls.work)] if managed == "ManagedPlayServices" else []
-            subprocess.run([os.environ.get("JAVAC", "javac"), "--release", "8", "-cp",
+            subprocess.run([android_paths.javac() or "javac", "--release", "8", "-cp",
                             os.pathsep.join(map(str, [cls.tools / "android.jar", *libraries])), "-d", str(classes),
                             str(ROOT / "Tests/Host" / (activity.rsplit(".", 1)[-1].split("$")[0] + ".java"))],
                            check=True, capture_output=True)

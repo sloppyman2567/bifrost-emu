@@ -28,7 +28,8 @@ and piped into a log it prints a line per ten percent. The rest of this section 
 checkout.
 
 Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
-`java` and `keytool`. The signing and manifest tools are checksum-pinned AOSP
+`java` and `keytool`. Building the managed launcher also needs `javac`, found through `JAVAC`, `PATH`,
+`JAVA_HOME`, then the newest JDK under `/usr/lib/jvm`, `/usr/lib64/jvm` or `/usr/java`. The signing and manifest tools are checksum-pinned AOSP
 downloads; no full Android SDK installation is required.
 
 ```bash

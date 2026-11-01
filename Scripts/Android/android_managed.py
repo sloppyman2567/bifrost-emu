@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "Tools/Android"))
 import android_framework
 import android_google
 import android_microg
+import android_paths
 from android_processes import ProcessHost
 
 PRIORITIES = "??VDIWEFS"
@@ -617,6 +618,9 @@ def file_hash(path):
 
 def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources=()):
     """Explicit build step; ordinary app launches never invoke a compiler."""
+    compiler = android_paths.javac()
+    if not compiler:
+        raise SystemExit("Building the managed launcher needs a JDK with javac; install one or set JAVAC")
     output.mkdir(parents=True, exist_ok=True)
     jar = ROOT / "Tools/android-tools/android.jar"
     sources = [LAUNCHER_DIR / name for name in LAUNCHER_SOURCES] + list(extra_sources)
@@ -624,7 +628,7 @@ def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources
         work = Path(temporary)
         classes = work / "classes"
         classes.mkdir()
-        subprocess.run([os.environ.get("JAVAC", "javac"), "--release", "8", "-cp", str(jar), "-d", str(classes),
+        subprocess.run([compiler, "--release", "8", "-cp", str(jar), "-d", str(classes),
                         *map(str, sources)], check=True)
         subprocess.run(["java", "-cp", str(ROOT / "Tools/android-tools/d8.jar"),
                         "com.android.tools.r8.D8", "--min-api", "26", "--lib", str(jar),

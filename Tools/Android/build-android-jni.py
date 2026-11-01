@@ -3,8 +3,8 @@
 import argparse
 import importlib.util
 from pathlib import Path
-import shutil
 import subprocess
+import sys
 import tempfile
 
 from android_art import install, ROOT
@@ -45,7 +45,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-root", type=Path, default=ROOT / "build/android-art/rootfs")
     parser.add_argument("--output", type=Path, default=ROOT / "build/android-jni")
-    parser.add_argument("--javac", default=shutil.which("javac"))
+    sys.path.insert(0, str(ROOT / "Scripts/Android"))
+    from android_paths import javac
+    parser.add_argument("--javac", default=javac())
     args = parser.parse_args()
     if not args.javac:
         parser.error("A JDK javac is required; pass --javac /path/to/javac")
