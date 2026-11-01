@@ -105,7 +105,7 @@ does not promise every ad network or Google Play Services support.
 - Guide dependency/runtime provisioning and signed APK installation from the
   library; show actionable missing-runtime or window-backend errors. Done: a card says why a run ended and the drawer what to
   try (November 1).
-- Run Linux games from the same library, with the rootfs profile and linker as per-game settings. Today Asgard runs Android apps
+- Run Linux games from the same library, with the rootfs profile and linker as per-app settings. Today Asgard runs Android apps
   only, and a Linux game started by hand without its setup can crash with no explanation.
 - Make the launcher select the intended graphics-capable executable and keep
   headless validation from silently replacing the desktop default.
@@ -113,11 +113,11 @@ does not promise every ad network or Google Play Services support.
   clear-data/uninstall and last-session drawer. Add clear update/reinstall and
   save export/import flows, with routine controls outside Developer.
 - Validate install → play → settings → stop/relaunch on a fresh setup. Broaden
-  the game matrix, including longer gameplay and multi-app realm/lifecycle
+  the app matrix, including longer sessions and multi-app realm/lifecycle
   checks on supported Linux display stacks.
 
-Acceptance: a fresh user can provision and launch a supported game without
-editing paths or environment variables. Supported games complete repeatable
+Acceptance: a fresh user can provision and launch a supported app without
+editing paths or environment variables. Supported apps complete repeatable
 30-minute interactive sessions with correct save, audio and input behavior;
 failed installs and app exits must leave the library and other apps usable.
 
@@ -562,7 +562,7 @@ Use cold/warm A/B measurements to verify that cache changes reduce stutters.
 - Verify relative mouse deltas, horizontal/vertical axes, pointer capture,
   sensitivity, focus transitions and fullscreen/windowed changes.
 - Add reliable gamepad discovery, hotplug, mappings, dead zones, triggers,
-  rumble and per-game profiles, with consistent event ordering and latency.
+  rumble and per-app profiles, with consistent event ordering and latency.
 - Bridge Android touch/multitouch, key codes, controller events and input
   queues; keep optional desktop-to-touch mappings configurable. The mouse wheel
   and trackpad pinch zoom, Shift+wheel pans and a middle-button drag moves two
