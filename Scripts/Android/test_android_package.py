@@ -648,6 +648,80 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertEqual((card.line.text(), card.line.property("tone")), ("Last run failed", "problem"))
         self.assertTrue(card.meta.text().startswith("1.7 · Installed"), card.meta.text())
 
+    def test_a_red_line_says_what_went_wrong_and_only_when_something_did(self):
+        explain = self.launcher.explain_ending
+        crash = [{"key": "signal"}]; ads = [{"key": "ads"}, {"key": "play"}]
+        self.assertEqual(explain({"state": "failed", "exit_code": 139}, crash)[0], "Crashed in native code")
+        self.assertEqual(explain({"state": "failed", "exit_code": 1}, [{"key": "java"}])[0], "Crashed in Java code")
+        self.assertEqual(explain({"state": "interrupted"})[0], "Ended unexpectedly")
+        self.assertEqual(explain({"state": "failed", "exit_code": 137})[0], "Ended from outside")
+        self.assertEqual(explain({"state": "failed", "exit_code": 1}, ads)[0], "Last run failed")
+        # A time limit is not a failure, nor is an app quitting by killing itself, unless it crashed first.
+        self.assertIsNone(explain({"state": "timed_out", "exit_code": 124}))
+        self.assertIsNone(explain({"state": "failed", "exit_code": 137}, ads, self_killed=True))
+        self.assertEqual(explain({"state": "failed", "exit_code": 137}, [{"key": "java"}], self_killed=True)[0], "Crashed in Java code")
+        own, other = "11-01 21:23:12.250 2365997    37 I Process : Sending signal. PID: 2365997 SIG: 9", \
+                     "11-01 21:23:12.250 2365997    37 I Process : Sending signal. PID: 42 SIG: 9"
+        self.assertTrue(self.launcher.SELF_KILL.search(own)); self.assertFalse(self.launcher.SELF_KILL.search(other))
+        # A log decides what the card says, and a click on a red line opens the drawer.
+        log = self.root / "session.log"; log.write_text("E AndroidRuntime: FATAL EXCEPTION: main\n")
+        session = {"state": "failed", "exit_code": 1, "session_id": "s", "started_at": 1792700000, "log": str(log)}
+        self.assertEqual(self.launcher.session_log(session), str(log))
+        failed = dict(self.app(7, "Broken"), session=session)
+        self.window.apps = [failed]; self.window.render()
+        card = self.window.cards[failed["package"]]
+        self.assertEqual(card.line.text(), "Crashed in Java code")
+        opened = []
+        self.window.open_drawer = opened.append
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        QTest.mouseClick(card.line, Qt.MouseButton.LeftButton)
+        self.assertEqual(opened, [failed["package"]])
+
+    def test_adaptive_icon_layers_compose_as_android_shows_them(self):
+        from PyQt6.QtGui import QColor, QImage
+        layer = QImage(108, 108, QImage.Format.Format_ARGB32); layer.fill(QColor(0, 0, 0, 0))
+        for x in range(18, 90):       # the inner 72 of 108: red, with a marker outside it that must not show
+            for y in range(18, 90): layer.setPixelColor(x, y, QColor("#ff0000"))
+        for x in range(0, 18): layer.setPixelColor(x, 54, QColor("#00ff00"))
+        path = self.root / "icon-foreground.png"; self.assertTrue(layer.save(str(path)))
+        window_card = dict(self.app(1, "Layered"), icon_layers={"background": "#ff0000ff", "foreground": str(path)})
+        self.window.apps = [window_card]; self.window.render()
+        image = self.window.cards[window_card["package"]].icon.pixmap().toImage()
+        side = image.width()
+        centre, edge = image.pixelColor(side // 2, side // 2), image.pixelColor(max(1, side // 40), side // 2)
+        self.assertEqual((centre.red(), centre.blue()), (255, 0))     # foreground over background
+        self.assertEqual(edge.green(), 0)                             # the outer ring of the layer is cropped
+        broken = dict(self.app(2, "Broken"), icon_layers={"background": "#ff0000ff", "foreground": str(self.root / "missing.png")})
+        self.window.apps = [broken]; self.window.render()             # falls back to the lettered tile, no crash
+        self.assertFalse(self.window.cards[broken["package"]].icon.pixmap().isNull())
+
+    def test_google_dialog_says_experimental_and_clips_no_text(self):
+        # "Sign in with Google…" lost its first letter, and the wrapped hint ran into the empty account list.
+        from PyQt6.QtWidgets import QDialog, QLabel, QPushButton
+        import unittest.mock
+        shown = []
+        original = QDialog.exec
+        def capture(dialog):
+            dialog.show(); self.settle(); shown.append(dialog)
+            for button in dialog.findChildren(QPushButton):
+                self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
+            words = []
+            for label in dialog.findChildren(QLabel):
+                if not label.isVisible() or not label.text(): continue
+                words.append(label.text())
+                self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()) if label.wordWrap()
+                                        else label.sizeHint().height(), label.text())
+            self.assertIn("Experimental", words)
+            self.assertFalse(any("game" in text.lower() for text in words), words)
+            self.assertFalse(dialog.accounts.isVisible())         # nothing signed in: no empty box
+            self.assertLessEqual(dialog.hint.geometry().bottom(), dialog.sign_in.geometry().top())
+            dialog.timer.stop(); dialog.close()
+            return 0
+        with unittest.mock.patch.object(QDialog, "exec", capture):
+            self.window.google_button.click(); self.settle(lambda: bool(shown))
+        self.assertTrue(shown)
+
     def test_keyboard_and_double_click_play_but_not_a_disabled_game(self):
         from PyQt6.QtCore import Qt
         from PyQt6.QtTest import QTest
@@ -869,6 +943,44 @@ class SessionResultTests(unittest.TestCase):
     def test_self_kill_without_host_close_fails(self):
         self.assertEqual(self.run_session("echo APP_HOST_CLOSED_LATER; kill -9 $$"), (137, "failed"))
         self.assertEqual(self.run_session("echo APP_HOST_CLOSED; exit 1"), (1, "failed"))
+
+
+class AdaptiveIconTests(unittest.TestCase):
+    """Layer lookup from aapt2's output, as a real APK set lays it out: a colour, a density split, an asset pack."""
+    TREE = ("N: android=http://schemas.android.com/apk/res/android\n  E: adaptive-icon (line=1)\n"
+            "      E: background (line=2)\n        A: http://schemas.android.com/apk/res/android:drawable(0x01010199)=@0x7f060098\n"
+            "      E: foreground (line=3)\n        A: http://schemas.android.com/apk/res/android:drawable(0x01010199)=@0x7f0800c0\n")
+    BADGING = "package: name='org.bifrost.cats' versionCode='1'\napplication: label='Cats' icon='res/icon.xml'\n"
+    BASE = "  type color id=06\n    resource 0x7f060098 color/white\n      () #ffffffff\n"
+    LOW = "    resource 0x7f0800c0 drawable/fg\n      (mdpi) (file) res/m/fg.png type=PNG\n"
+    HIGH = "    resource 0x7f0800c0 drawable/fg\n      (xxhdpi) (file) res/x/fg.png type=PNG\n"
+
+    def fake(self, tables):
+        def run(command):
+            if command[2] == "badging": return self.BADGING
+            if command[2] == "xmltree": return self.TREE
+            return tables[command[-1]]
+        return run
+
+    def layers(self, root, tables, assets=()):
+        for name in [*tables, *assets]:
+            with zipfile.ZipFile(name, "w") as archive:
+                archive.writestr("resources.arsc" if name in tables else "assets/pack", b"x")
+        import android_preflight as preflight
+        with patch.object(preflight, "run", self.fake(tables)):
+            return preflight.adaptive_icon_layers([*tables, *assets], "aapt2")
+
+    def test_layers_come_from_the_densest_split_and_asset_packs_are_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, low, high, pack = (str(Path(directory) / x) for x in ("base.apk", "low.apk", "high.apk", "pack.apk"))
+            found = self.layers(directory, {base: self.BASE, low: self.LOW, high: self.HIGH}, assets=[pack])
+            self.assertEqual(found, {"background": "#ffffffff", "foreground": (high, "res/x/fg.png")})
+
+    def test_a_vector_layer_means_no_adaptive_icon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = str(Path(directory) / "base.apk")
+            vector = self.BASE + "    resource 0x7f0800c0 drawable/fg\n      () (file) res/fg.xml type=XML\n"
+            self.assertIsNone(self.layers(directory, {base: vector}))
 
 
 class ApkInspectionTests(unittest.TestCase):

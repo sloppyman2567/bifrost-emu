@@ -10,6 +10,18 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### The library says what happened, and shows real icons (2026-11-01)
+
+- **"Last run failed" now means something failed:** a card says what went wrong ("Crashed in native code", "Stopped responding",
+  "Ended unexpectedly") and a click opens the drawer with what to try. A session's time limit and an app killing its own process
+  with no crash in the log are no longer shown as failures. In the maintainer's library that cleared two of four red lines; one
+  stays "Last run failed" because its log shows no known cause.
+- **Adaptive icons:** an app whose launcher icon has only adaptive layers (Geometry Dash Lite, The Battle Cats, YouTube) showed a
+  lettered tile. The library now composes the layers, looking through split APKs too, and existing installs get theirs once
+  without a reinstall. Vector layers still get the lettered tile.
+- **Google account dialog:** it is marked experimental and speaks of apps, not games. "Sign in with Google…" lost its first
+  letter and the wrapped hint ran into an empty account list; every label now fits, and the list only shows when an account does.
+
 ### Documentation (2026-11-01)
 
 - **Smaller guides:** dated checkpoints and per-game investigations moved, unchanged, out of `JIT.md` (3,247 to about

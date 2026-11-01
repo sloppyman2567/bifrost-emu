@@ -142,7 +142,7 @@ def activity_line(app, now=None):
     session = app["session"]; state = session.get("state", "stopped"); started = session.get("started_at")
     if state == "running" and started: return "Running for " + span(now - started), ""
     if state in ACTIVE: return STATES.get(state, state), ""
-    if state in FAILED: return "Last run failed", "problem"
+    if state in FAILED and (ending := session_ending(session)): return ending[0], "problem"
     if started: return "Played " + clock(started, now), ""
     return "Not played yet", ""
 
@@ -200,12 +200,15 @@ def describe_session(session, now=None):
     now = time.time() if now is None else now
     state = session.get("state", "stopped")
     outcome = STATES.get(state, state.replace("_", " ").capitalize())
-    code = session.get("exit_code")
-    if state == "failed" and code not in (None, 0, 1): outcome += f" (exit status {code})"
+    ending = session_ending(session) if state in FAILED else None
+    advice = ending[1] if ending else None
+    if ending: outcome = ending[0]
+    elif state == "failed": outcome = "The app closed itself"
+    elif state == "timed_out": advice = "A time limit set for this session ended it. That isn't a problem with the app."
     started, ended = session.get("started_at"), session.get("ended_at")
     when = clock(started, now) if started else None
     duration = span((ended or now) - started) if started and (ended or state in ACTIVE) else None
-    return {"outcome": outcome, "when": when, "duration": duration, "error": session.get("error")}
+    return {"outcome": outcome, "when": when, "duration": duration, "error": session.get("error"), "advice": advice}
 
 
 def drawer_stamp(session, log_info, developer=False, now=None):
@@ -222,7 +225,7 @@ def log_findings(lines):
         for key, title, pattern in SIGNATURES:
             match = pattern.search(line)
             if not match: continue
-            entry = found.setdefault(key, {"title": title, "count": 0, "example": None, "sources": []})
+            entry = found.setdefault(key, {"key": key, "title": title, "count": 0, "example": None, "sources": []})
             entry["count"] += 1
             if entry["example"] is None:
                 text = LOGCAT.sub("", line.strip())
@@ -238,6 +241,54 @@ def read_findings(path, limit=16 * 1024 * 1024):
         stream.seek(max(0, size - limit))
         if size > limit: stream.readline()
         return log_findings(stream.read().decode(errors="replace").splitlines())
+
+
+# Which findings can explain a run ending, in order, with what the card says and what to try. Ad and Play services
+# errors are not here: games usually keep running through them.
+CAUSES = (
+    ("crash", "Crashed in native code", "The app's native code hit a fault. Try again; if it keeps happening, the log shows where."),
+    ("signal", "Crashed in native code", "The app's native code hit a fault. Try again; if it keeps happening, the log shows where."),
+    ("java", "Crashed in Java code", "The app hit an unhandled error. Try again; if it keeps happening, the log shows where."),
+    ("anr", "Stopped responding", "The app stopped responding and was ended. Try again; slow first launches can do this."),
+)
+# Android apps often quit this way (Process.killProcess on themselves), and so does the crash handler, so causes come first.
+SELF_KILL = re.compile(r"\s(\d+)\s+\d+\s+I Process\s*: Sending signal\. PID: \1 SIG: 9")
+
+
+def explain_ending(session, findings=(), self_killed=False):
+    """Why a run ended, for a person: (card line, what to try), or None when nothing went wrong."""
+    state, code = session.get("state"), session.get("exit_code")
+    if state == "timed_out": return None
+    if state == "interrupted":
+        return "Ended unexpectedly", "Asgard lost track of this session, for example after a restart or if it was killed. Try again."
+    found = {item.get("key") for item in findings}
+    for key, line, advice in CAUSES:
+        if key in found: return line, advice
+    if session.get("error"): return "Couldn't start", "The app did not get as far as opening. Try again; the log shows why."
+    if self_killed: return None
+    if code == 137: return "Ended from outside", "Something outside the app ended it, such as low memory or another program. Try again."
+    return "Last run failed", "The log shows no known cause. Try again, or open the log for details."
+
+
+ENDINGS = {}  # (session, state, log size) -> explain_ending's result: a log is scanned once per ended run.
+
+
+def session_ending(session):
+    log = session_log(session)
+    try: size = os.stat(log).st_size if log else None
+    except OSError: size = None
+    key = (session.get("session_id"), session.get("state"), size)
+    if key not in ENDINGS:
+        findings, killed = [], False
+        if size is not None:
+            try:
+                findings = read_findings(log)
+                with open(log, "rb") as stream:
+                    stream.seek(max(0, size - 4096))
+                    killed = bool(SELF_KILL.search(stream.read().decode(errors="replace")))
+            except OSError: pass
+        ENDINGS[key] = explain_ending(session, findings, killed)
+    return ENDINGS[key]
 
 
 def settings_dialog(window, app, settings):
@@ -559,6 +610,29 @@ def build(state, application, settings=None):
     def restyle(widget):
         widget.style().unpolish(widget); widget.style().polish(widget)
 
+    class ClickableLabel(QLabel):
+        on_click = None
+        def mouseReleaseEvent(self, event):
+            if self.on_click and event.button() == Qt.MouseButton.LeftButton: self.on_click()
+            else: super().mouseReleaseEvent(event)
+
+    def adaptive_image(layers, side):
+        """Android's composition of an adaptive icon: both layers are 108 dp, of which the inner 72 dp show. Null if a layer
+        will not load, so the card falls back to its placeholder."""
+        image = QImage(side, side, QImage.Format.Format_ARGB32_Premultiplied); image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image); painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        target = QRectF(0, 0, side, side)
+        for name in ("background", "foreground"):
+            value = layers[name]
+            if value.startswith("#"):
+                painter.fillRect(target, QColor(value)); continue
+            layer = QImage(value)
+            if layer.isNull():
+                painter.end(); return QImage()
+            painter.drawImage(target, layer, QRectF(layer.width() / 6, layer.height() / 6, layer.width() * 2 / 3, layer.height() * 2 / 3))
+        painter.end()
+        return image
+
     def artwork(app, size, ratio, palette):
         """Rounded launcher tile at device pixels: the icon filling it (a padded icon is cropped to its
         pixels), or a tinted tile with the game's initial; a hairline keeps pale icons defined."""
@@ -567,9 +641,10 @@ def build(state, application, settings=None):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing); painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         path = QPainterPath(); path.addRoundedRect(QRectF(0, 0, size, size), size * .22, size * .22)
-        image = QImage(app["icon"]) if app.get("icon") else QImage()
+        layers = app.get("icon_layers")
+        image = adaptive_image(layers, round(size * ratio)) if layers else QImage(app["icon"]) if app.get("icon") else QImage()
         if not image.isNull():
-            box = opaque_bounds(image)
+            box = None if layers else opaque_bounds(image)
             if box and box[2] * box[3] < .97 * image.width() * image.height():
                 image = image.copy(*box)
             side = min(image.width(), image.height())
@@ -615,7 +690,8 @@ def build(state, application, settings=None):
             centered = Qt.AlignmentFlag.AlignHCenter
             self.title = scaled(QLabel(), 1.1, True); self.title.setAlignment(centered)
             self.meta = muted(QLabel()); self.meta.setAlignment(centered)
-            self.line = muted(QLabel()); self.line.setObjectName("line"); self.line.setAlignment(centered)
+            self.window_of_card = window
+            self.line = muted(ClickableLabel()); self.line.setObjectName("line"); self.line.setAlignment(centered)
             self.developer = muted(QLabel()); self.developer.setWordWrap(True); self.developer.setAlignment(centered)
             self.developer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             for widget in (self.title, self.meta, self.line, self.developer): layout.addWidget(widget)
@@ -650,7 +726,7 @@ def build(state, application, settings=None):
             rule = card_state(app, pending)
             ratio = self.devicePixelRatioF()
             self.meta_text = None
-            art = (app.get("icon"), app["label"], ratio, self.palette().cacheKey())
+            art = (app.get("icon"), str(app.get("icon_layers")), app["label"], ratio, self.palette().cacheKey())
             if art != self.art:
                 self.art = art; self.icon.setPixmap(artwork(app, icon_size, ratio, self.palette()))
             self.relabel()
@@ -661,6 +737,11 @@ def build(state, application, settings=None):
             self.meta_text = " · ".join(str(x) for x in (version, installed) if x) or " "
             text, tone = activity_line(app)
             self.line.setText(text); self.line.setProperty("tone", tone)
+            # The red line says what went wrong; a click opens the drawer with what to do about it.
+            self.line.on_click = (lambda: self.window_of_card.open_drawer(self.app["package"])) if tone else None
+            self.line.setToolTip("See what happened" if tone else "")
+            if tone: self.line.setCursor(Qt.CursorShape.PointingHandCursor)
+            else: self.line.unsetCursor()
             self.line.setForegroundRole(QPalette.ColorRole.WindowText if tone else QPalette.ColorRole.PlaceholderText)
             restyle(self.line)
             self.badge.setText(rule["badge"] or ""); self.badge.setVisible(bool(rule["badge"]))
@@ -705,13 +786,17 @@ def build(state, application, settings=None):
         def __init__(self, window):
             super().__init__(window)
             self.window_, self.signing_in = window, False
-            self.setWindowTitle("Google account"); self.setMinimumWidth(460)
-            layout = QVBoxLayout(self)
-            intro = muted(QLabel("Sign in once and every game on this device can use the account. Sign-in opens "
-                                 "microG's window showing Google's own page; your password goes to Google, "
-                                 "never to Asgard."))
-            intro.setWordWrap(True); layout.addWidget(intro)
-            self.accounts = QListWidget(); self.accounts.setMinimumHeight(110); layout.addWidget(self.accounts)
+            self.setWindowTitle("Google account")
+            layout = QVBoxLayout(self); layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(12)
+            heading = QHBoxLayout()
+            badge = QLabel("Experimental"); badge.setObjectName("badge"); heading.addWidget(badge); heading.addStretch()
+            layout.addLayout(heading)
+            self.intro = muted(QLabel("Sign in once and every app on this device can use the account. Sign-in opens "
+                                      "microG's window showing Google's own page; your password goes to Google, "
+                                      "never to Asgard. This is experimental: some apps and Google services may "
+                                      "not work with it."))
+            self.intro.setWordWrap(True); layout.addWidget(self.intro)
+            self.accounts = QListWidget(); self.accounts.setMinimumHeight(90); layout.addWidget(self.accounts)
             self.hint = muted(QLabel()); self.hint.setWordWrap(True); layout.addWidget(self.hint)
             row = QHBoxLayout()
             self.sign_in = QPushButton("Sign in with Google…")
@@ -727,6 +812,22 @@ def build(state, application, settings=None):
             self.accounts.itemSelectionChanged.connect(self.update_buttons)
             self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1500)
             self.refresh()
+
+        def showEvent(self, event):
+            super().showEvent(event)
+            self.fit()
+
+        def fit(self):
+            """Room for every button's whole label, and for the wrapped lines: a layout does not grow a dialog for those."""
+            margins = self.layout().contentsMargins()
+            buttons = self.findChildren(QPushButton)
+            for button in buttons: button.setMinimumWidth(button.sizeHint().width())
+            width = max(560, sum(b.sizeHint().width() for b in buttons) + 3 * self.layout().spacing() + 40 + margins.left() + margins.right())
+            self.setFixedWidth(width)
+            inner = width - margins.left() - margins.right()
+            for label in (self.intro, self.hint): label.setFixedHeight(label.heightForWidth(inner))
+            self.accounts.setVisible(bool(getattr(self, "found", [])))
+            self.layout().activate(); self.adjustSize()
 
         def update_buttons(self):
             self.remove.setEnabled(bool(self.accounts.selectedItems()) and not self.signing_in)
@@ -761,10 +862,11 @@ def build(state, application, settings=None):
             elif self.signing_in:
                 self.hint.setText("A microG window is open. Finish there; the account appears here when it closes.")
             elif not getattr(self, "found", []):
-                self.hint.setText("No Google account is signed in. Games that need Google Play services will ask for one.")
+                self.hint.setText("No Google account is signed in. Apps that need Google Play services will ask for one.")
             else:
-                self.hint.setText("Games pick up account changes the next time they start.")
+                self.hint.setText("Apps pick up account changes the next time they start.")
             self.update_buttons()
+            self.fit()
 
         def open_window(self, action):
             def started(code, output):
@@ -789,6 +891,7 @@ def build(state, application, settings=None):
             self.state = state
             self.jobs, self.pending, self.cards = set(), {}, {}
             self.refreshing, self.apps, self.columns = False, [], 0
+            self.icons_scanned = None
             self.selected, self.drawer_package, self.drawer_stamp, self.drawer_scanned = None, None, None, 0
             self.order, self.announce = [], None
             self.settings = settings or QSettings("Asgard", "Library")
@@ -820,7 +923,7 @@ def build(state, application, settings=None):
             self.install_button.clicked.connect(self.install)
             self.google_requester = None
             self.google_button = QPushButton(glyph("person", "text"), "Google account")
-            self.google_button.setObjectName("ghost"); self.google_button.setToolTip("Google account…")
+            self.google_button.setObjectName("ghost"); self.google_button.setToolTip("Google account (experimental)…")
             self.google_button.setIconSize(QSize(ICON, ICON)); self.google_button.clicked.connect(self.google_account)
             self.search.setMinimumWidth(140); self.search.setMaximumWidth(380)
             heading.addWidget(self.search); heading.addWidget(self.sort_button)
@@ -968,6 +1071,10 @@ def build(state, application, settings=None):
                     self.show_notice("Couldn't read the game library: " + str(error)[:300], error=True); return
                 self.google_request(listed)
                 self.render(); self.update_drawer()
+                # Apps installed before adaptive icons were read get theirs once, without holding up the window.
+                if self.icons_scanned != self.state and any(a.get("icon_unscanned") for a in self.apps):
+                    self.icons_scanned = self.state
+                    self.command(["refresh-icons"], lambda code, output: self.refresh())
                 app = self.app(self.announce)
                 if app:
                     self.announce = None; self.select(app["package"])
@@ -1231,6 +1338,7 @@ def build(state, application, settings=None):
                 parts.append("<br>Started " + html.escape(described["when"]) +
                              (" · " + html.escape(described["duration"]) if described["duration"] else ""))
             parts.append("</p>")
+            if described["advice"]: parts.append(f"<p>{html.escape(described['advice'])}</p>")
             if session.get("phase"):
                 prefix = "Current step" if session.get("state") in ACTIVE else "Last step"
                 parts.append(f"<p>{prefix}: {html.escape(session['phase'])}</p>")

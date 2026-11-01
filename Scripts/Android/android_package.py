@@ -334,6 +334,9 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                         candidate.replace(target)
                         files[relative] = checksum
             icon = copy_icon(next(p for r, p in packages if not r["split"]), base.get("icon"), staging)
+            base_path = next(p for r, p in packages if not r["split"])
+            adaptive = None if icon else copy_adaptive_icon(
+                [base_path, *(p for r, p in packages if r["split"])], str(aapt2), staging)
             app = state / name
             with app_lock(app):
                 metadata_path = app / "package.json"
@@ -440,6 +443,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                     "version_code": base["version_code"],
                     "version_name": base["version_name"],
                     "icon": icon.name if icon else None,
+                    "adaptive_icon": adaptive,
                     "source_sha256": source_sha256,
                     "installed_at": int(time.time()),
                     "signers": certificates,
@@ -461,7 +465,47 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
 ICON_TYPES = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"RIFF", ".webp"))
 
 
-def copy_icon(apk, member, staging):
+def copy_adaptive_icon(paths, aapt2, staging):
+    """Copy an adaptive icon's layers for the library to compose; metadata names a colour or a copied file per layer."""
+    try:
+        layers = preflight.adaptive_icon_layers(paths, aapt2)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not layers:
+        return None
+    result = {}
+    for name, layer in layers.items():
+        if isinstance(layer, str):
+            result[name] = layer
+            continue
+        copied = copy_icon(layer[0], layer[1], staging, "icon-" + name)
+        if copied is None:
+            return None
+        result[name] = copied.name
+    return result
+
+
+def refresh_icons(state, aapt2):
+    """Give apps installed before adaptive icons were read their layers. Scanned once: the result is saved either way."""
+    for app in sorted(state.iterdir()):
+        metadata_path = app / "package.json"
+        if not PACKAGE.fullmatch(app.name) or not metadata_path.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text())
+            if metadata.get("system") or metadata.get("icon") or "adaptive_icon" in metadata:
+                continue
+            with app_lock(app):
+                installed = sorted((app / "rootfs/data/app").glob(app.name + "-*/*.apk"), key=lambda p: (p.name != "base.apk", p.name))
+                metadata["adaptive_icon"] = copy_adaptive_icon(installed, aapt2, app) if installed else None
+                temporary = metadata_path.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+                temporary.replace(metadata_path)
+        except (OSError, ValueError, KeyError) as error:
+            print(f"{app.name}: {error}", file=sys.stderr)
+
+
+def copy_icon(apk, member, staging, stem="icon"):
     """Copy the launcher bitmap for library display; a missing or odd icon is not an error."""
     if not member:
         return None
@@ -477,7 +521,7 @@ def copy_icon(apk, member, staging):
                  and (suffix != ".webp" or data[8:12] == b"WEBP")), None)
     if kind is None:
         return None
-    output = staging / ("icon" + kind)
+    output = staging / (stem + kind)
     output.write_bytes(data)
     return output
 
@@ -673,11 +717,19 @@ def installed_apps(state):
             # Records from before label/icon capture still carry the base APK report.
             base = next((x for x in metadata.get("packages", []) if not x.get("split")), {})
             icon = metadata.get("icon")
+            adaptive = metadata.get("adaptive_icon")
+            layers = {name: value if re.fullmatch(r"#[0-9a-f]{8}", value) else str(app / value)
+                      for name, value in adaptive.items()
+                      if re.fullmatch(r"#[0-9a-f]{8}|icon-(?:background|foreground)\.(?:png|jpg|webp)", value)
+                      } if isinstance(adaptive, dict) else {}
             result.append({"package": app.name, "label": metadata.get("label") or base.get("label") or app.name,
                            "version": metadata["version_code"],
                            "version_name": metadata.get("version_name") or base.get("version_name"),
                            "icon": str(app / icon) if isinstance(icon, str) and re.fullmatch(r"icon\.(?:png|jpg|webp)", icon)
                                    and (app / icon).is_file() else None,
+                           "icon_layers": layers if len(layers) == 2 else None,
+                           # Installed before adaptive icons were read: `refresh-icons` has not looked at it yet.
+                           "icon_unscanned": not icon and "adaptive_icon" not in metadata and not metadata.get("system"),
                            "installed_at": metadata.get("installed_at"), "system": bool(metadata.get("system")),
                            "requester": metadata.get("requester"),
                            "launcher": metadata["launcher"]["kind"], "session": session})
@@ -925,6 +977,7 @@ def main():
         command.add_argument("package")
         command.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     commands.add_parser("launcher", help="open the desktop app library")
+    commands.add_parser("refresh-icons", help="read the adaptive icons of apps installed before they were supported")
     google = commands.add_parser("google", help="sign in to Google (microG) and manage the device's Google accounts")
     actions = google.add_subparsers(dest="action", required=True)
     for name, text in (("sign-in", "add a Google account in microG's sign-in window"),
@@ -949,6 +1002,9 @@ def main():
         if args.command == "launcher":
             from android_launcher import show
             return show(args.state_root.resolve())
+        if args.command == "refresh-icons":
+            refresh_icons(args.state_root, ROOT / "Tools/android-tools/aapt2")
+            return 0
         if args.command in ("list", "apps"):
             apps = installed_apps(args.state_root)
             if args.json: print(json.dumps(apps))

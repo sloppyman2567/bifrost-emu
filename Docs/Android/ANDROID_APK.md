@@ -271,8 +271,8 @@ the file's structure and page links.
 library using the same install and session supervisor as the CLI.
 
 Each card shows a rounded icon tile, the label, version and install date, and one line about
-the latest session ("Played Today 13:08", "Running for 25 min", or a red "Last run failed"),
-with Play/Stop, per-game settings and last-session buttons. Colors come from the desktop
+the latest session ("Played Today 13:08", "Running for 25 min", or in red what went wrong, such as "Crashed in native
+code"), with Play/Stop, per-game settings and last-session buttons. Colors come from the desktop
 palette and the icons are drawn by the launcher, so the look does not depend on an icon
 theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; a game
 without an icon gets a tile in one of ten fixed colors with its initial. Cards stretch
@@ -293,8 +293,16 @@ paths, interpreter launch and Java call tracing are grouped under Developer.
 Install records now retain the base APK's label/version and a bounded launcher
 bitmap; older records recover labels and versions from their saved base report.
 Icon selection prefers a dense daytime bitmap from the declared launcher
-resource. Adaptive/vector icons use that resource's bitmap fallback when present;
-otherwise the card uses a placeholder. This does not compose adaptive icons.
+resource, then that resource's bitmap fallback. An adaptive icon without one keeps its two layers (a colour, or the densest
+bitmap across the base APK and its splits; `adaptive_icon` in `package.json`) and the card composes them as Android does:
+each layer is 108 dp and the inner 72 dp show. A layer that is a vector leaves the placeholder. The library runs
+`asgard.py refresh-icons` once for apps installed before this, without a reinstall.
+
+A red line means a run really went wrong, and clicking it opens the drawer. `explain_ending` decides from the session and its
+log: a known crash signature names the crash, a session lost by the supervisor is "Ended unexpectedly", and an outside
+SIGKILL is "Ended from outside". A session's time limit and an app killing its own process with no crash in the log (Android
+apps often quit this way) are not failures, so the card just says when it was played. With no known cause it says "Last run
+failed". Ad and Play services errors never count as the cause.
 
 Per-game settings are described under [Per-app settings](#per-app-settings).
 The last-session drawer shows saved outcome/timing and
@@ -303,7 +311,7 @@ counts are a bounded log summary, not a diagnosis or gameplay result.
 
 ## Google account
 
-The library window's "Google account…" button opens the device's Google
+Experimental: some apps and Google services may not work with it. The library window's "Google account…" button opens the device's Google
 accounts: the signed-in list, "Sign in with Google…" (microG's own window with
 Google's embedded sign-in page; the password goes to Google, not to Asgard),
 "microG settings…" and "Remove". The same actions exist on the command line:

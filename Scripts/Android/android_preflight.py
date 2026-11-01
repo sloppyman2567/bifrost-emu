@@ -205,6 +205,71 @@ def launcher_icon(fields, path, aapt2):
     return resource_bitmap(run([aapt2, "dump", "resources", str(path)]), icon)
 
 
+def resource_entries(resources, identifier):
+    """(configuration, value) lines of one resource in `aapt2 dump resources` output."""
+    entries, inside = [], False
+    for line in resources.splitlines():
+        if re.match(r"\s*(?:resource 0x[0-9a-f]+ |type |package )", line):
+            inside = line.split()[:2] == ["resource", identifier]
+            continue
+        entry = re.match(r"\s*\(([^)]*)\) (.+)", line)
+        if inside and entry:
+            entries.append(entry.groups())
+    return entries
+
+
+def layer_density(configuration):
+    qualifiers = configuration.split("-")
+    return ("night" not in qualifiers, next((DENSITIES.get(x) or int(x[:-3]) for x in qualifiers
+                                             if x in DENSITIES or re.fullmatch(r"\d+dpi", x)), 0))
+
+
+def adaptive_icon_layers(paths, aapt2):
+    """Layers of an adaptive launcher icon, as {"background": ..., "foreground": ...}: an "#aarrggbb" colour or
+    (apk path, member) of the densest bitmap. A density split can hold a bitmap the base APK lacks, so paths lists the
+    base first and then every split. None when the icon is not adaptive or a layer is neither (a vector, say)."""
+    base = str(paths[0])
+    fields = badging_fields(run([aapt2, "dump", "badging", base]))
+    icon = fields.get("launchable-activity", {}).get("icon") or fields.get("application", {}).get("icon")
+    if not icon or not icon.endswith(".xml"):
+        return None
+    tree = run([aapt2, "dump", "xmltree", "--file", icon, base])
+    if "adaptive-icon" not in tree:
+        return None
+    wanted = {}
+    for layer in ("background", "foreground"):
+        match = re.search(rf"E: {layer} \(line=\d+\)\s+A: \S*drawable\(0x01010199\)=@(0x[0-9a-f]+)", tree)
+        if not match:
+            return None
+        wanted[layer] = match[1]
+    tables = {base: run([aapt2, "dump", "resources", base])}
+    def resolve(identifier, depth=0):
+        best = None
+        for path in map(str, paths):
+            if path not in tables:
+                # An asset pack has no resource table, so it holds no layer (and aapt2 would refuse it).
+                with zipfile.ZipFile(path) as archive:
+                    tables[path] = run([aapt2, "dump", "resources", path]) if "resources.arsc" in archive.namelist() else ""
+            for configuration, value in resource_entries(tables[path], identifier):
+                colour = re.fullmatch(r"#[0-9a-fA-F]{8}", value)
+                if colour and "night" not in configuration:
+                    return value.lower()
+                reference = re.fullmatch(r"@(0x[0-9a-f]+)", value)
+                if reference and depth < 4:
+                    return resolve(reference[1], depth + 1)
+                member = re.fullmatch(r"\(file\) (\S+) type=\S+", value)
+                if member and BITMAP.fullmatch(member[1]):
+                    rank = layer_density(configuration)
+                    if best is None or rank > best[0]:
+                        best = (rank, path, member[1])
+            # Nothing is denser than this: spare the remaining splits.
+            if best and best[0] >= (True, 640):
+                break
+        return (best[1], best[2]) if best else None
+    layers = {layer: resolve(identifier) for layer, identifier in wanted.items()}
+    return layers if all(layers.values()) else None
+
+
 def inspect_apk(name, path, aapt2, directory):
     fields = badging_fields(run([aapt2, "dump", "badging", str(path)]))
     manifest = xmltree_nodes(run([aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", str(path)]))

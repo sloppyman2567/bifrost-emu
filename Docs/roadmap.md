@@ -103,7 +103,11 @@ does not promise every ad network or Google Play Services support.
 ### 2.0.0-beta.1: easier setup and a dependable game library
 
 - Guide dependency/runtime provisioning and signed APK installation from the
-  library; show actionable missing-runtime or window-backend errors.
+  library; show actionable missing-runtime or window-backend errors. Done: a card says why a run ended and the drawer what to
+  try (November 1).
+- Run Linux games from the same library, so it picks the rootfs profile and linker. Today Asgard runs Android apps only, and a
+  Linux game started by hand without its setup crashes with no explanation. A rootfs chosen automatically, with an error naming
+  what to install, belongs here too.
 - Make the launcher select the intended graphics-capable executable and keep
   headless validation from silently replacing the desktop default.
 - Build on the current cards, icons, search, per-game Back-key/stats settings,

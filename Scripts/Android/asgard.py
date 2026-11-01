@@ -411,7 +411,7 @@ def main():
                              " (a running realm broker keeps the channels it started with)")
     parser.add_argument("command", choices=("realm", "run", "start", "list", "apps", "status",
                                            "stop", "resume", "logs", "install", "uninstall", "clear-data", "config", "compat",
-                                           "launcher", "probe", "google"))
+                                           "launcher", "refresh-icons", "probe", "google"))
     args, remainder = parser.parse_known_args()
     state = args.state_root.resolve()
     try:
