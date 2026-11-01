@@ -1,4 +1,4 @@
-"""Desktop game library using the same CLI and process supervisor as terminal launches."""
+"""Desktop app library using the same CLI and process supervisor as terminal launches."""
 import html
 import hashlib
 import json
@@ -97,7 +97,7 @@ def card_state(app, pending=None):
 
 
 def launch_request(app, interpreter=False, trace=False):
-    """CLI arguments for one Play click; the saved per-game settings are applied by the command."""
+    """CLI arguments for one Play click; the saved per-app settings are applied by the command."""
     args = ["start", app["package"]]
     if interpreter: args.append("--no-jit")
     # Call tracing follows ART methods, so NativeActivity apps launch without it.
@@ -151,7 +151,7 @@ TILE_COLORS = ("#d4574e", "#d9822b", "#b8962e", "#3f9e57", "#2f9d95", "#3a85c8",
 
 
 def tile_color(label):
-    """A stable color per game, for the tile of a game without an icon."""
+    """A stable color per app, for the tile of a app without an icon."""
     return TILE_COLORS[int(hashlib.sha256(label.encode()).hexdigest()[:4], 16) % len(TILE_COLORS)]
 
 
@@ -309,14 +309,14 @@ def settings_dialog(window, app, settings):
             self.settings = dict(settings)
             layout = QVBoxLayout(self); layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(12)
             dim = lambda label: (label.setForegroundRole(QPalette.ColorRole.PlaceholderText), label)[1]
-            intro = dim(QLabel("Saved for this game and shared with the command line. Changes apply the next time it starts."))
+            intro = dim(QLabel("Saved for this app and shared with the command line. Changes apply the next time it starts."))
             intro.setWordWrap(True); layout.addWidget(intro)
             tabs = QTabWidget(); layout.addWidget(tabs, 1)
             general = QWidget(); page = QVBoxLayout(general); page.setContentsMargins(14, 14, 14, 14); page.setSpacing(12)
             form = QFormLayout(); page.addLayout(form); form.setVerticalSpacing(10); form.setHorizontalSpacing(14)
             form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-            self.stats = QCheckBox("Show FPS, load and temperatures while the game runs")
+            self.stats = QCheckBox("Show FPS, load and temperatures while the app runs")
             self.stats.setChecked(settings.get("window_stats", False)); form.addRow("Window stats", self.stats)
             self.stats_mode = QComboBox()
             for name, text in STATS_MODES: self.stats_mode.addItem(text, name)
@@ -333,7 +333,7 @@ def settings_dialog(window, app, settings):
             form.addRow("Network", self.network)
             form.addRow("Runtime", dim(QLabel(f"Android API {API} · bundled runtime")))
             directory = window.state / app["package"]
-            folder = QPushButton("Open game folder")
+            folder = QPushButton("Open app folder")
             folder.setToolTip("The app environment: its files, data and logs")
             folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory.resolve()))))
             form.addRow("Files", folder)
@@ -341,10 +341,10 @@ def settings_dialog(window, app, settings):
             removal = QHBoxLayout(); removal.setSpacing(8)
             running = app["session"].get("state") in ACTIVE
             for text, command, tip, name in (
-                    ("Clear data…", "clear-data", "Delete this game's saves and settings; the game stays installed", ""),
-                    ("Uninstall…", "uninstall", "Remove this game with all of its data", "danger")):
+                    ("Clear data…", "clear-data", "Delete this app's saves and settings; the app stays installed", ""),
+                    ("Uninstall…", "uninstall", "Remove this app with all of its data", "danger")):
                 button = QPushButton(text); button.setObjectName(name)
-                button.setToolTip("Stop the game first" if running else tip); button.setEnabled(not running)
+                button.setToolTip("Stop the app first" if running else tip); button.setEnabled(not running)
                 button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
                 removal.addWidget(button)
             removal.addStretch(); page.addLayout(removal)
@@ -701,7 +701,7 @@ def build(state, application, settings=None):
             self.action.clicked.connect(lambda: window.act(self.app))
             self.gear = QToolButton(); self.gear.setObjectName("tool")
             self.gear.setIcon(glyph("tune", "muted")); self.gear.setIconSize(QSize(ICON, ICON))
-            self.gear.setToolTip("Game settings"); self.gear.clicked.connect(lambda: window.configure(self.app))
+            self.gear.setToolTip("App settings"); self.gear.clicked.connect(lambda: window.configure(self.app))
             self.history = QToolButton(); self.history.setObjectName("tool")
             self.history.setIcon(glyph("history", "muted")); self.history.setIconSize(QSize(ICON, ICON))
             self.history.setToolTip("Last session")
@@ -879,7 +879,7 @@ def build(state, application, settings=None):
             items = self.accounts.selectedItems()
             if not items: return
             name = items[0].text()
-            if not confirm(self, "Remove account", f"Sign {name} out of every game on this device?", "Remove"): return
+            if not confirm(self, "Remove account", f"Sign {name} out of every app on this device?", "Remove"): return
             def removed(code, output):
                 if code: self.hint.setText("Couldn't remove the account: " + short_error(output))
                 self.refresh()
@@ -902,10 +902,10 @@ def build(state, application, settings=None):
             outer.setContentsMargins(24, 20, 24, 16); outer.setSpacing(12)
             heading = QHBoxLayout(); heading.setSpacing(10)
             titles = QVBoxLayout(); titles.setSpacing(0)
-            titles.addWidget(scaled(QLabel("Game library"), 1.8, True))
+            titles.addWidget(scaled(QLabel("App library"), 1.8, True))
             self.summary = muted(QLabel()); titles.addWidget(self.summary)
             heading.addLayout(titles); heading.addStretch()
-            self.search = QLineEdit(); self.search.setObjectName("search"); self.search.setPlaceholderText("Search games")
+            self.search = QLineEdit(); self.search.setObjectName("search"); self.search.setPlaceholderText("Search apps")
             self.search.setClearButtonEnabled(True)
             self.search_action = self.search.addAction(glyph("search", "muted"), QLineEdit.ActionPosition.LeadingPosition)
             self.search.textChanged.connect(lambda: self.render(True))
@@ -915,7 +915,7 @@ def build(state, application, settings=None):
                 self.sort_group.addAction(action)
                 action.triggered.connect(lambda _, key=key: self.set_sort(key))
             self.sort_button = QPushButton(); self.sort_button.setObjectName("sort")
-            self.sort_button.setMenu(self.sort_menu); self.sort_button.setToolTip("Sort games")
+            self.sort_button.setMenu(self.sort_menu); self.sort_button.setToolTip("Sort apps")
             self.sort_mode = "name"
             self.set_sort(str(self.settings.value("sort", "name")), save=False)
             self.install_button = QPushButton(glyph("plus", "onaccent"), "Install APK…")
@@ -1068,7 +1068,7 @@ def build(state, application, settings=None):
                     self.apps = sorted((a for a in listed if not a.get("system")),
                                        key=lambda a: (a["label"].casefold(), a["package"]))
                 except (ValueError, KeyError) as error:
-                    self.show_notice("Couldn't read the game library: " + str(error)[:300], error=True); return
+                    self.show_notice("Couldn't read the app library: " + str(error)[:300], error=True); return
                 self.google_request(listed)
                 self.render(); self.update_drawer()
                 # Apps installed before adaptive icons were read get theirs once, without holding up the window.
@@ -1097,15 +1097,15 @@ def build(state, application, settings=None):
             order = [a["package"] for a in visible]
             if relayout or order != self.order: self.reflow(order)
             running = sum(a["session"].get("state") in ACTIVE for a in self.apps)
-            self.summary.setText(f"{len(self.apps)} game{'s' * (len(self.apps) != 1)}" + (f" · {running} running" if running else ""))
+            self.summary.setText(f"{len(self.apps)} app{'s' * (len(self.apps) != 1)}" + (f" · {running} running" if running else ""))
             if not self.apps:
-                self.empty_title.setText("No games yet")
+                self.empty_title.setText("No apps yet")
                 self.empty_hint.setText("Install an APK, APKM, APKS or XAPK file, or drop one anywhere in this window.")
                 self.empty_hint.setFixedHeight(self.empty_hint.heightForWidth(420))
                 self.empty_install.show(); self.pages.setCurrentIndex(1)
             elif not visible:
                 self.empty_title.setText("No matches")
-                self.empty_hint.setText(f"No installed game matches “{self.search.text()}”.")
+                self.empty_hint.setText(f"No installed app matches “{self.search.text()}”.")
                 self.empty_hint.setFixedHeight(self.empty_hint.heightForWidth(420))
                 self.empty_install.hide(); self.pages.setCurrentIndex(1)
             else:
@@ -1182,14 +1182,14 @@ def build(state, application, settings=None):
             primary = menu.addAction(rule["text"]); primary.setEnabled(rule["enabled"])
             primary.triggered.connect(lambda: self.act(app))
             menu.addSeparator()
-            menu.addAction("Game settings…").triggered.connect(lambda: self.configure(app))
+            menu.addAction("App settings…").triggered.connect(lambda: self.configure(app))
             session = menu.addAction("Last session"); session.triggered.connect(lambda: self.open_drawer(app["package"]))
             session.setEnabled(bool(app["session"].get("session_id") or app.get("error")))
             menu.addSeparator()
             running = app["session"].get("state") in ACTIVE
             for text, command in (("Clear data…", "clear-data"), ("Uninstall…", "uninstall")):
                 action = menu.addAction(text); action.setEnabled(not running)
-                action.setToolTip("Stop the game first" if running else "")
+                action.setToolTip("Stop the app first" if running else "")
                 action.triggered.connect(lambda _, command=command: self.remove_app(app, command))
             return menu
 
@@ -1246,7 +1246,7 @@ def build(state, application, settings=None):
             GoogleAccounts(self).exec()
 
         def google_request(self, listed):
-            """Say which game an open Google window belongs to, while its window is up."""
+            """Say which app an open Google window belongs to, while its window is up."""
             window = next((a for a in listed if a.get("system") and a["package"] == "com.google.android.gms"
                            and a["session"].get("state") in ACTIVE), None)
             requester = window.get("requester") if window else None
@@ -1282,7 +1282,7 @@ def build(state, application, settings=None):
             """Ask, then clear or uninstall; True once the command was started."""
             removing = command == "uninstall"
             question = (f"Uninstall {app['label']}? Its saves and settings are deleted too." if removing else
-                        f"Delete all saves and settings of {app['label']}? The game stays installed.")
+                        f"Delete all saves and settings of {app['label']}? The app stays installed.")
             if not confirm(self, "Uninstall" if removing else "Clear data", question + "\n\nThis cannot be undone.",
                            "Uninstall" if removing else "Clear data"): return False
             package = app["package"]
@@ -1358,13 +1358,13 @@ def build(state, application, settings=None):
                     parts.append("</ul>")
                     if all(item["title"] in ("Ad SDK errors", "Google Play services unavailable") for item in findings):
                         parts.append("<p><small>Ad and Play services errors are expected here: Google Play "
-                                     "services are not available, and games usually keep running.</small></p>")
+                                     "services are not available, and apps usually keep running.</small></p>")
                 else:
                     parts.append("<p>No known problem signatures in the log.</p>")
             elif session.get("session_id"):
                 parts.append("<p>This session has no log.</p>")
             else:
-                parts.append("<p>This game hasn't been played yet.</p>")
+                parts.append("<p>This app hasn't been played yet.</p>")
             if self.developer_mode() and session.get("session_id"):
                 parts.append(f"<p><small>Session {html.escape(session['session_id'])} · PID {session.get('pid') or '—'}"
                              f" · exit {session.get('exit_code') if session.get('exit_code') is not None else '—'}</small></p>")
@@ -1375,13 +1375,13 @@ def build(state, application, settings=None):
             if path: QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
         def choose(self):
-            path = QFileDialog.getExistingDirectory(self, "Choose game library folder", str(self.state))
+            path = QFileDialog.getExistingDirectory(self, "Choose app library folder", str(self.state))
             if path:
                 self.state = Path(path); self.path.setText(path); self.apps = []
                 self.close_drawer(); self.render(True); self.refresh()
 
         def install(self):
-            paths, _ = QFileDialog.getOpenFileNames(self, "Install Android games", str(Path.home()),
+            paths, _ = QFileDialog.getOpenFileNames(self, "Install Android apps", str(Path.home()),
                 "Android packages (*.apk *.apkm *.apks *.xapk);;All files (*)")
             self.install_files(paths)
 
@@ -1425,7 +1425,7 @@ def build(state, application, settings=None):
                 done = f"{batch['installed']} of {batch['total']} installed. " if batch["total"] > 1 else ""
                 self.show_notice(f"{done}Couldn't install {name}: {error}{more}", error=True)
             elif batch["total"] > 1:
-                self.show_notice(f"{batch['installed']} games installed.", timeout=8000)
+                self.show_notice(f"{batch['installed']} apps installed.", timeout=8000)
             # A lone install is announced by the first listing that contains the package.
             if batch["installed"] == 1: self.announce = batch["announce"]
             self.refresh()

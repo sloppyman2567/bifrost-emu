@@ -19,6 +19,7 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - **Adaptive icons:** an app whose launcher icon has only adaptive layers (Geometry Dash Lite, The Battle Cats, YouTube) showed a
   lettered tile. The library now composes the layers, looking through split APKs too, and existing installs get theirs once
   without a reinstall. Vector layers still get the lettered tile.
+- **An app library:** the window says "App library", "8 apps" and "App settings", since not everything in it is a game.
 - **Google account dialog:** it is marked experimental and speaks of apps, not games. "Sign in with Google…" lost its first
   letter and the wrapped hint ran into an empty account list; every label now fits, and the list only shows when an account does.
 

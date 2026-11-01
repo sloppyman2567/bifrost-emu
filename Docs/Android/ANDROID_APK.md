@@ -170,8 +170,8 @@ from the library.
   Symlinks inside the data are removed, never followed, and a symlinked parent
   directory aborts the command.
 
-The library window offers both as "Clear data…" and "Uninstall…" in a game's
-settings, disabled while the game runs.
+The library window offers both as "Clear data…" and "Uninstall…" in a app's
+settings, disabled while the app runs.
 
 ## Per-app settings
 
@@ -186,7 +186,7 @@ start of that app, from the CLI (`start`, `run`) and the library window alike.
 Changes take effect at the next start. A setting you never chose is not stored,
 so it keeps following the emulator's default.
 
-A game's settings in the launcher are its compatibility profile. General
+A app's settings in the launcher are its compatibility profile. General
 contains window stats, Back key, network mode, the current bundled Android API,
 a button to open the app environment folder, and "Clear data…" and "Uninstall…".
 Compatibility contains an
@@ -259,7 +259,7 @@ gameplay), `title` (reached its title, login or main menu on screen),
 error; nothing more is claimed) and `blocked` (it starts, then the app itself
 ends the session). An installed app with no entry is `untested`. Every entry
 carries its evidence, the date and, where known, the version, and many link to
-an app page under `Docs/Apps/`. The library's game settings show the same text.
+an app page under `Docs/Apps/`. The library's app settings show the same text.
 This is documentation of past observations, not a guarantee for other
 versions, devices or Google-account states; update an entry only from a new
 observation, and keep the claim no stronger than its evidence. A test checks
@@ -267,26 +267,26 @@ the file's structure and page links.
 
 ## Desktop library
 
-`python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 game
+`python3 Scripts/Android/asgard.py launcher` opens the optional PyQt6 app
 library using the same install and session supervisor as the CLI.
 
 Each card shows a rounded icon tile, the label, version and install date, and one line about
 the latest session ("Played Today 13:08", "Running for 25 min", or in red what went wrong, such as "Crashed in native
-code"), with Play/Stop, per-game settings and last-session buttons. Colors come from the desktop
+code"), with Play/Stop, per-app settings and last-session buttons. Colors come from the desktop
 palette and the icons are drawn by the launcher, so the look does not depend on an icon
-theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; a game
+theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; a app
 without an icon gets a tile in one of ten fixed colors with its initial. Cards stretch
 between 208 and 280 px to fill the row, and the column count follows the viewport width.
-A running or starting game carries a status chip and its Play button becomes a red Stop.
+A running or starting app carries a status chip and its Play button becomes a red Stop.
 
 Double-click, Enter or Space plays (or stops) the focused card, arrow keys move between
-cards, and the context menu or Menu key offers Play/Stop, game settings, last session,
-clear data and uninstall (the last two are disabled while the game runs). Search matches the
+cards, and the context menu or Menu key offers Play/Stop, app settings, last session,
+clear data and uninstall (the last two are disabled while the app runs). Search matches the
 label or package ID, and Sort offers Name or Recently played. Dropping `.apk`, `.apkm`,
 `.apks` or `.xapk` files anywhere on the window installs them one at a time (the Install
 button accepts several files too), and a failure in one does not stop the rest. The window
 size and sort order are remembered (Qt settings, `Asgard/Library`). The library refreshes every 1.5 s
-while the window is focused or a game is running, every 10 s otherwise, and not at all while
+while the window is focused or a app is running, every 10 s otherwise, and not at all while
 it is minimized; it refreshes at once when the window is activated. Package IDs, library
 paths, interpreter launch and Java call tracing are grouped under Developer.
 
@@ -304,7 +304,7 @@ SIGKILL is "Ended from outside". A session's time limit and an app killing its o
 apps often quit this way) are not failures, so the card just says when it was played. With no known cause it says "Last run
 failed". Ad and Play services errors never count as the cause.
 
-Per-game settings are described under [Per-app settings](#per-app-settings).
+Per-app settings are described under [Per-app settings](#per-app-settings).
 The last-session drawer shows saved outcome/timing and
 recognized error signatures from at most the final 16 MiB of its log; those
 counts are a bounded log summary, not a diagnosis or gameplay result.
@@ -321,10 +321,10 @@ Google's embedded sign-in page; the password goes to Google, not to Asgard),
 settings stay per app. A completed login needs real credentials and has not
 been observed here. See the
 [runtime guide](ANDROID_RUNTIME.md#google-accounts-and-sign-in-2026-10-20) for
-the account service and its limits. When a game itself starts a Google
+the account service and its limits. When a app itself starts a Google
 screen (a Google Sign-In button, `AccountManager.addAccount`), it opens in the
-same kind of separate window and returns to the game; the library window then
-says which game asked, and the dialog's hint names it.
+same kind of separate window and returns to the app; the library window then
+says which app asked, and the dialog's hint names it.
 
 ## Optional real Media NDK bundle
 

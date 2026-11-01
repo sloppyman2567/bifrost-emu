@@ -696,6 +696,17 @@ class LauncherLibraryTests(unittest.TestCase):
         self.window.apps = [broken]; self.window.render()             # falls back to the lettered tile, no crash
         self.assertFalse(self.window.cards[broken["package"]].icon.pixmap().isNull())
 
+    def test_the_library_speaks_of_apps_not_games(self):
+        from PyQt6.QtWidgets import QLabel, QLineEdit
+        self.fill(2)
+        texts = [label.text() for label in self.window.findChildren(QLabel)] + [self.window.search.placeholderText()]
+        self.assertIn("App library", texts); self.assertIn("Search apps", texts); self.assertIn("2 apps", texts)
+        # The fixture apps are labelled "Game 01": their own names are not the library's wording.
+        labels = {app["label"] for app in self.window.apps}
+        self.assertFalse([text for text in texts if "game" in text.lower() and not any(name in text for name in labels)])
+        self.window.apps = self.window.apps[:1]; self.window.render()
+        self.assertEqual(self.window.summary.text(), "1 app")
+
     def test_google_dialog_says_experimental_and_clips_no_text(self):
         # "Sign in with Google…" lost its first letter, and the wrapped hint ran into the empty account list.
         from PyQt6.QtWidgets import QDialog, QLabel, QPushButton
@@ -747,7 +758,7 @@ class LauncherLibraryTests(unittest.TestCase):
     def test_context_menu_follows_the_card_state(self):
         def items(app):
             return {a.text(): a.isEnabled() for a in self.window.build_menu(app).actions() if a.text()}
-        self.assertEqual(items(self.app(1)), {"Play": True, "Game settings…": True, "Last session": False,
+        self.assertEqual(items(self.app(1)), {"Play": True, "App settings…": True, "Last session": False,
                                               "Clear data…": True, "Uninstall…": True})
         running = items(self.app(1, state="running", session_id="s"))
         self.assertEqual((running["Stop"], running["Last session"], running["Clear data…"], running["Uninstall…"]),
