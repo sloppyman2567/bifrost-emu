@@ -9,7 +9,7 @@ runtime, improve sustained Linux game performance, and make input reliable
 across mouse, keyboard, touch and gamepads. Correctness remains the gate for
 every optimization. Existing Linux applications must keep working.
 
-## Progress at a glance (2026-10-27)
+## Progress at a glance (2026-11-01)
 
 Statuses are what the changelog and app pages record; none of them is a
 compatibility guarantee. "Done" means the contract is implemented and checked

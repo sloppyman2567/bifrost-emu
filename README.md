@@ -416,14 +416,14 @@ The current version is **2.0.0-alpha.3**, the third pre-release toward the
 
 | Topic | Document |
 |---|---|
-| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
+| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
 | JIT internals | [JIT guide](Docs/JIT.md) |
 | Source layout | [Architecture](Docs/ARCHITECTURE.md) |
 | Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
 | Host graphics, audio and input | [Host integration](Docs/HOST_INTEGRATION.md), [window stats](Docs/window-stats.md) |
 | Embedding | [C API and native bridge](Docs/EMBEDDING.md) |
 | Support and security | [Support matrix](Docs/SUPPORT.md), [security model](Docs/SECURITY.md) |
-| Tests and history | [Test guide](Docs/TESTS.md), [dated test history](Docs/archive/TESTS-history.md), [changelog](Docs/CHANGELOG.md) (releases before 2.0.0-alpha.2 are in `Docs/archive/`), [third-party notes](Docs/THIRD_PARTY.md); per-app investigation logs are in `Docs/archive/apps/` |
+| Tests and history | [Test guide](Docs/TESTS.md), [changelog](Docs/CHANGELOG.md) (releases before 2.0.0-alpha.3 are in `Docs/archive/`), and the dated [test](Docs/archive/TESTS-history.md), [JIT](Docs/archive/JIT-history.md) and [runtime](Docs/archive/ANDROID_RUNTIME-history.md) history, [third-party notes](Docs/THIRD_PARTY.md); per-app investigation logs are in `Docs/archive/apps/` |
 | Licensing | [License scope and texts](LICENSES/README.md) |
 | Configuration | [`bifrost.toml.sample`](bifrost.toml.sample) |
 

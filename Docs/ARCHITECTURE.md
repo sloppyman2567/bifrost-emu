@@ -135,7 +135,7 @@ decoder or syscall dispatch table can reasonably remain large.
 | `Tests/Unit/`, `Tests/Apps/`, `Tests/Asm/` | Guest fixtures, application probes and assembly tests |
 | `Tests/Host/` | Native host checks and Java framework probe sources |
 | `ThirdParty/` | Vendored headers, registries and dependencies |
-| `Docs/Android/`, `Docs/Apps/` | Android contracts and application status |
+| `Docs/Android/`, `Docs/Apps/`, `Docs/archive/` | Android contracts, application status, and dated history moved out of the guides and changelog |
 
 Downloaded toolchains and SDKs retain their own internal names, such as
 `Tools/aarch64-linux-musl-cross/` and the Android NDK's `include/android/`.
