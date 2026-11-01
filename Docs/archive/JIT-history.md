@@ -1,6 +1,6 @@
 # JIT history
 
-Dated optimization checkpoints and fixes moved out of [the JIT guide](../../JIT.md), unchanged and in their original order. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
+Dated optimization checkpoints and fixes moved out of [the JIT guide](../JIT.md), unchanged and in their original order. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
 ## Chain-skip exits no longer load RDI/RSI (2026-10-26)
 

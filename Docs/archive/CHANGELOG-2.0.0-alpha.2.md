@@ -1,6 +1,6 @@
 # Changelog archive: 2.0.0-alpha.2
 
-An older release moved out of [the changelog](../../CHANGELOG.md), unchanged.
+An older release moved out of [the changelog](../CHANGELOG.md), unchanged.
 
 ## [2.0.0-alpha.2] — Android compatibility and runtime fixes (2026-10-21)
 

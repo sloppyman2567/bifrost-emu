@@ -327,9 +327,9 @@ surface recreation and lifecycle transitions without leaks or stale handles.
 Target sustained improvement at 3440×1440 on a documented reference host.
 The maintainer reports (2026-11-01, not an instrumented measurement) mostly
 sustained 60 FPS in the Doom 3 demo, even in its heavy scenes. Older reports, from
-builds that predate many JIT changes and without saying whether they cover the demo,
-gave about 20–30 FPS in demanding scenes (October 28) and 1–5 FPS in the spider-robot
-encounter (October 5). Measure first: matched-scene frame times (median, p95/p99) in
+builds that predate many JIT changes and probably also the demo, gave about 20–30 FPS
+in demanding scenes (October 28) and 1–5 FPS in the spider-robot encounter (October 5).
+Measure first: matched-scene frame times (median, p95/p99) in
 the demo and, where available, the full game on a documented host, to confirm that
 report and find the remaining drops, then remove them where host resources permit.
 Cutscene FPS alone is not the acceptance criterion.
