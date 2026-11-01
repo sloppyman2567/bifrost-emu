@@ -20,7 +20,7 @@ as the linked section says, not that every app using it works.
 | 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout and descriptive file names; Asgard Android runtime on the pinned Android 15 framework; SpongeBob playable | Goals below |
 | 2.0.0-alpha.2 (2026-10-21) | Released; its goals were partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
 | 2.0.0-alpha.3 (2026-11-01) | Released; its WebView, media and ad scope is mostly open | Since alpha.2: `media.extractor` and POSIX timers, so video opens through Android's media stack; a fix for the Java Binder abort on native threads; session-wide window stats; lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package; `fcntl` owner, signal and lease commands, so Umamusume's anti-tamper helper no longer ends the app about 8 s in (the maintainer has since reached a Career story scene); a full JIT code cache is replaced and idle threads cost less memory; Subway Surfers 3.70.3 recorded playable (the maintainer's report, no capture). Partial: WebView renders; desktop text input reaches native editors; http(s) and Play Store links open in the host browser after a recent input | WebView pointer/focus/scroll, return/deep-link delivery, ads with test creatives, `media.player` and sustained video |
-| 2.0.0-beta.1 | Not started | Library cards, per-app settings, clear-data/uninstall | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
+| 2.0.0-beta.1 | Not started | Library cards, per-app Android settings, clear-data/uninstall | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
 
 Known blockers, by cause:
 
@@ -105,11 +105,11 @@ does not promise every ad network or Google Play Services support.
 - Guide dependency/runtime provisioning and signed APK installation from the
   library; show actionable missing-runtime or window-backend errors. Done: a card says why a run ended and the drawer what to
   try (November 1).
-- Run Linux games from the same library, with the rootfs profile and linker as per-app settings. Today Asgard runs Android apps
+- Run Linux games from the same library, choosing each one's rootfs profile and linker. Today Asgard runs Android apps
   only, and a Linux game started by hand without its setup can crash with no explanation.
 - Make the launcher select the intended graphics-capable executable and keep
   headless validation from silently replacing the desktop default.
-- Build on the current cards, icons, search, per-app Back-key/stats settings,
+- Build on the current cards, icons, search, per-app Android Back-key/stats settings,
   clear-data/uninstall and last-session drawer. Add clear update/reinstall and
   save export/import flows, with routine controls outside Developer.
 - Validate install → play → settings → stop/relaunch on a fresh setup. Broaden
@@ -562,7 +562,7 @@ Use cold/warm A/B measurements to verify that cache changes reduce stutters.
 - Verify relative mouse deltas, horizontal/vertical axes, pointer capture,
   sensitivity, focus transitions and fullscreen/windowed changes.
 - Add reliable gamepad discovery, hotplug, mappings, dead zones, triggers,
-  rumble and per-app profiles, with consistent event ordering and latency.
+  rumble and per-game profiles, with consistent event ordering and latency.
 - Bridge Android touch/multitouch, key codes, controller events and input
   queues; keep optional desktop-to-touch mappings configurable. The mouse wheel
   and trackpad pinch zoom, Shift+wheel pans and a middle-button drag moves two
