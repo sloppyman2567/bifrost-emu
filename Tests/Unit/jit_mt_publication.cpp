@@ -108,10 +108,16 @@ static bool check_signal_return(bool mt) {
         cpu.pc = resume; cpu.sp = top; cpu.regs[30] = stop;
         cpu.regs[19] = 41; cpu.pstate = 0xa0000000;
         if (!deliver_signal(*e, cpu, e->signals(), BIFROST_SIGUSR1)) return false;
-        const uint64_t next = j->run_block(cpu, *e);
+        // A block that reaches a syscall leaves it pending, and the next run_block runs it.
+        const auto dispatch = [&] {
+            uint64_t pc = j->run_block(cpu, *e);
+            while (cpu.jit_svc_pc) pc = j->run_block(cpu, *e);
+            return pc;
+        };
+        const uint64_t next = dispatch();
         const bool chained = repeat && FrostJIT::chain_skip_enabled() && !dbg().no_chain;
         if (next != (chained ? resume : TRAMPOLINE_ADDR)) return false;
-        if (!chained && j->run_block(cpu, *e) != resume) return false;
+        if (!chained && dispatch() != resume) return false;
         if (!cpu.sig_frames.empty() || cpu.sp != top || cpu.regs[19] != 41 ||
             cpu.regs[30] != stop || cpu.sigmask || (cpu.pstate & 0xf0000000) != 0xa0000000)
             return false;
@@ -348,6 +354,9 @@ int main() {
     if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
     if (!check_signal_return(false) || !check_signal_return(true) || !check_selfloops() ||
-        !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) return 1;
+        !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) {
+        std::fputs("jit_mt_publication: FAILED after the checks that passed above\n", stderr);
+        return 1;
+    }
     std::puts("jit_mt_publication: immutable bytes and epoch exits PASS");
 }

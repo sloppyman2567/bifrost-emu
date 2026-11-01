@@ -62,6 +62,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   Four test scripts no longer need ripgrep, clang builds again, and the launcher build finds a JDK that is not on `PATH`.
 - **CI:** repaired the steps that failed every run, and added clang, executable-mode and older-CPU checks. The workflow
   has not run yet. `test_exec_mt` and `jit_disk_cache` still fail with `BIFROST_NO_CHAIN_SKIP=1`, which is not the default.
+- **`test_jit_mt_publication`:** it exited 1 without a message, so its later checks had not run since syscalls began leaving
+  generated code on October 25. It assumed one `run_block` finishes a sigreturn; it now runs the pending syscall, and all
+  its checks pass. It names a failure now, too.
 
 ### Firefox starts (2026-11-01)
 
