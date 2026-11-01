@@ -155,6 +155,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   bitmaps`. Only base application windows used their ThreadedRenderer; dialogs and popup menus were drawn on a software
   canvas, which refuses the hardware bitmaps an image loader (Glide) hands out. Every window whose ViewRootImpl has a
   renderer now draws on the GPU, as on Android. See [the runtime guide](Android/ANDROID_RUNTIME.md).
+- That left their `FLAG_DIM_BEHIND` dim in the software dim layer, above every surface, so popups looked dimmed. A GPU
+  window now keeps its dim in a display-sized layer just below its own. The fixture asserts the dim's alpha, not the
+  stacking itself.
 
 ### Video frames convert on the host, off the main thread (2026-10-28)
 
