@@ -120,6 +120,9 @@ static void print_start_page() {
     print_status_line("Game libraries", games, "bifrost-emu --setup-rootfs --games");
     print_status_line("Android (Asgard)", !asgard.empty(), setup_asgard);
     printf("\n  Common options\n"
+           "    --setup-rootfs          install or update the libraries programs need\n"
+           "    --setup-rootfs --games  add the libraries games need\n"
+           "    --rootfs-list           list the installed libraries\n"
            "    --rootfs-profile NAME   use other libraries, e.g. games\n"
            "    --guest-ld              use the program's own ld.so (experimental)\n"
            "    --window-stats          show FPS and load in the window\n"

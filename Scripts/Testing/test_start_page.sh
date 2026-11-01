@@ -32,6 +32,7 @@ else
     refuse "no library command without Asgard" 'open the app library' "$page"
 fi
 refuse "the page leaves out internal options" '--asgard-broker' "$page"
+expect "the page shows how to set up libraries" '--setup-rootfs +install or update' "$page"
 
 mkdir -p "$WORK/xdg/bifrost/rootfs/lib" "$WORK/xdg/bifrost/rootfs.d/games/lib"
 touch "$WORK/xdg/bifrost/rootfs/lib/ld-musl-aarch64.so.1" "$WORK/xdg/bifrost/rootfs.d/games/lib/ld-musl-aarch64.so.1"
