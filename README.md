@@ -127,6 +127,21 @@ make                                   # build (SDL2/GL thunks auto-detected)
 ./bifrost-emu Tests/Apps/toybox seq 1 10   # arguments pass through
 ```
 
+On Fedora, install the build dependencies and use the source build. On an immutable Fedora such as Bazzite, do it inside a
+[Distrobox](https://distrobox.it) container, and run the emulator there too, since it links the container's libraries:
+
+```bash
+distrobox create --name bifrost --image registry.fedoraproject.org/fedora-toolbox:44 && distrobox enter bifrost   # Bazzite only
+sudo dnf install gcc-c++ make pkgconf-pkg-config git python3 curl xz diffutils SDL3-devel sdl2-compat-devel \
+     mesa-libGL-devel mesa-libEGL-devel libffi-devel wayland-devel libX11-devel \
+     libavcodec-free-devel libavutil-free-devel libswscale-free-devel
+make -j$(nproc) USE_SDL2=1 USE_THUNK_GL=1
+./bifrost-emu --setup-rootfs                  # once: the libraries Linux programs need
+./bifrost-emu --setup-rootfs --games          # for Linux games; --rootfs-default games then uses them by default
+```
+
+Checked in a Fedora 44 chroot on one machine, without Distrobox, a display or a GPU: see the [support matrix](Docs/SUPPORT.md).
+
 On Debian and Ubuntu (25.10 or newer for Android windows) the quickest install is the package:
 
 ```bash

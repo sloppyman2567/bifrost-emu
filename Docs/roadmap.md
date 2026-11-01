@@ -631,7 +631,10 @@ Open:
 - Find out how often the fork hang reached real apps (an SDK calling `Runtime.exec` from a busy game). It was only forced by a
   stress test.
 - Re-test the Ubuntu VM's Hungry Shark World black screen: the libGL and thread ctype fixes may bear on it, unconfirmed.
-- Fedora, Debian, Alpine and openSUSE stay untested.
+- Fedora is built and unit-tested in a chroot only: run a game on real Bazzite in Distrobox. Debian, Alpine and openSUSE stay untested.
+- A dynamic Linux game on the default rootfs can crash at address 0 instead of explaining itself. With no guest libopenal the host's is
+  thunked, but only 29 symbols: dhewm3 imports eight more (such as `alcGetProcAddress`, `alGetSourcei`), which resolve to null. The `games` profile
+  works. Pick an installed profile automatically, and stop naming what is missing rather than continuing with unresolved imports.
 
 ## Delivery gates
 
