@@ -110,6 +110,10 @@ int main(void) {
                                  .pApplicationInfo = &app };
     VkInstance instance = VK_NULL_HANDLE;
     VkResult r = vkCreateInstance(&ici, NULL, &instance);
+    if (r == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        printf("SKIP: host has no Vulkan driver\n");
+        return 77;
+    }
     CHECK(r == VK_SUCCESS && instance, "vkCreateInstance (no extensions)");
     if (r != VK_SUCCESS) return 1;
 

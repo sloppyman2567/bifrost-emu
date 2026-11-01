@@ -70,6 +70,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   interpreter, QEMU and natively on x86). `test_thread_exit_unmapped_tls` used libc `clone()`, which musl 1.2.5 refuses for
   these flags. `android_service_manager` compared Binder's answer with the host UID, so it only passed at listed UIDs such
   as 1000. The local workflow check missed them because it reused fixtures built with `musl.cc`'s toolchain, under UID 1000.
+- **A guest had two identities:** in a plain run `getuid` was the host account while `getresuid`, `AT_UID`,
+  `/proc/self/status` and `getgroups` said root, with every capability. They now all report the host account, and an
+  unprivileged guest has no capabilities. Binder is unchanged: its sender stays 0 outside the Android runtime.
+- **Threads the emulator creates skipped `__ctype_init`:** on glibc before 2.42 (Ubuntu 24.04 has 2.39) `isalpha` and
+  `toupper` returned 0 and `%.3f` printed `3.14` in SDL threads, audio callbacks and SDL filter workers. From 2.42 they ignored `setlocale`.
+- **Ubuntu builds could not find host GL by name:** its toolchain drops `-lGL`, so every guest `glMapBuffer` returned NULL.
+  libGL is now loaded at startup.
+- **`/dev/dsp` hung without a sound device:** nothing drained the stream, so a guest blocked for good once the ring filled.
+  Streams now drain at the device rate, as on a silent device.
+- **CI's full-suite job:** it installs `zstd` and Mesa's software Vulkan driver. `div_loop`, `div_loop2`, `div_simple`, `div_test`,
+  `loop_div` and `simple_div` were required but had no source in git; their sources are rebuilt from the old binaries (identical
+  output) and they now check that output. The runner no longer takes ALSA and `XDG_RUNTIME_DIR` messages for a test failure.
+  This job has not run on GitHub with these changes: it passes in a local Ubuntu 24.04 rootfs with no display, GPU or sound.
 
 ### Firefox starts (2026-11-01)
 

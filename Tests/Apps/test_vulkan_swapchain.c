@@ -75,6 +75,10 @@ int main(void) {
     };
     VkInstance instance = VK_NULL_HANDLE;
     VkResult r = vkCreateInstance(&ici, NULL, &instance);
+    if (r == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        printf("SKIP: host has no Vulkan driver\n");
+        return 77;
+    }
     if (r == VK_ERROR_EXTENSION_NOT_PRESENT) {
         printf("SKIP: host driver lacks VK_EXT_headless_surface\n");
         return 77;

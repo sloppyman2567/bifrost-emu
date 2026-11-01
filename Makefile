@@ -609,7 +609,7 @@ check-all: setup-tests generated-check $(TARGET)
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
-	@./Scripts/Testing/run_tests.sh --emu $(TARGET) --strict --allow-missing '^rw_(iperf3_version|coreutils_)'
+	@./Scripts/Testing/run_tests.sh --emu $(TARGET) --strict --allow-missing '^(rw_(iperf3_version|coreutils_)|xwayland_wire$$)'
 
 # Host-side C API test: test_capi.c links libbifrost.a and runs on the
 # HOST (it cannot be cross-compiled as a guest ELF). Builds and runs it.

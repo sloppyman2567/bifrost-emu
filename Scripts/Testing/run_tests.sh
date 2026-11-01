@@ -549,10 +549,10 @@ INTEGRATION_TESTS=(
     # Host validator checks guest compression and decompression in both engines.
     "zstd_compression|Scripts/Testing/run_zstd_regression.sh||120|ZSTD REGRESSION PASSED|HOST_JIT"
     "audio_test|Tests/Apps/audio_test.elf||10|audio_test: done"
-    "div_loop|Tests/Apps/div_loop.elf||5"
-    "div_loop2|Tests/Apps/div_loop2.elf||5"
-    "div_simple|Tests/Apps/div_simple.elf||5"
-    "div_test|Tests/Apps/div_test.elf||5"
+    "div_loop|Tests/Apps/div_loop.elf||5|sum=1428574"
+    "div_loop2|Tests/Apps/div_loop2.elf||5|sum=428571"
+    "div_simple|Tests/Apps/div_simple.elf||5|q=142857"
+    "div_test|Tests/Apps/div_test.elf||5|sum = 142928071"
     "dynlink_test|Tests/Apps/test_dynlink.elf||5|test_dynlink: ALL PASS"
     "fcvtzu_test|Tests/Apps/fcvtzu_test.elf||5|OK"
     "fcvtzu_test2|Tests/Apps/fcvtzu_test2.elf||5|passed"
@@ -783,7 +783,7 @@ INTEGRATION_TESTS=(
     # Must pass under both JIT and interpreter.
     "sig_interp_regression|Tests/Apps/test_sig_interp_regression.elf||10|ALL PASS"
     "jit_new_ops|Tests/Apps/jit_new_ops.elf||5|ALL TESTS PASSED"
-    "loop_div|Tests/Apps/loop_div.elf||5"
+    "loop_div|Tests/Apps/loop_div.elf||5|sum = 140"
     "md5_neon_test|Tests/Apps/md5_neon_test.elf||5"
     "md5_scalar_test|Tests/Apps/md5_scalar_test.elf||5|5d41402abc4b2a76b9719d911017c592"
     "rev_real|Tests/Apps/rev.elf||5"
@@ -1197,8 +1197,9 @@ run_test() {
         fi
     fi
 
-    # Check for explicit FAIL/ERROR in output (unless balanced by PASS/OK)
-    if [ "$status" = "PASS" ] && echo "$output" | grep -qiE "FAIL|ERROR|segfault|decode error"; then
+    # Check for explicit FAIL/ERROR in output (unless balanced by PASS/OK). A host without a sound
+    # card or a session says so through ALSA and libwayland; that is no failure of the test.
+    if [ "$status" = "PASS" ] && echo "$output" | grep -vE '^ALSA lib |^error: XDG_RUNTIME_DIR' | grep -qiE "FAIL|ERROR|segfault|decode error"; then
         if ! echo "$output" | grep -qiE "PASS|OK|ALL.*PASS"; then
             status="FAIL"
             reason="output contains FAIL/ERROR"

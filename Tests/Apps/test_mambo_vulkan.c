@@ -76,6 +76,13 @@ int main(void) {
         printf("SKIP: SDL window/surface fns unavailable\n"); return 77;
     }
     CHECK(SDL_Init(0x20u /*VIDEO*/) == 0, "SDL_Init(VIDEO)");
+    /* Without a display SDL falls back to drivers that have no Vulkan surfaces. */
+    const char* (*get_driver)(void) = (const char* (*)(void))dlsym_bf(sdl, "SDL_GetCurrentVideoDriver");
+    const char* driver = get_driver ? get_driver() : NULL;
+    if (driver && (!strcmp(driver, "offscreen") || !strcmp(driver, "dummy"))) {
+        printf("SKIP: SDL video driver %s has no Vulkan surfaces\n", driver);
+        return 77;
+    }
     void* win = SDL_CreateWindow("MAMBO! Matikanetannhauser",
                                  100, 100, 640, 480,
                                  0x00000002u /*SHOWN*/ | 0x00000004u /*RESIZABLE*/);
@@ -133,6 +140,10 @@ int main(void) {
     };
     VkInstance instance = VK_NULL_HANDLE;
     VkResult r = vkCreateInstance(&ici, NULL, &instance);
+    if (r == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        printf("SKIP: host has no Vulkan driver\n");
+        return 77;
+    }
     if (r == VK_ERROR_EXTENSION_NOT_PRESENT) {
         printf("SKIP: host driver lacks required surface extensions\n");
         return 77;

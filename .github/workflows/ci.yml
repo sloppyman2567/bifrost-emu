@@ -130,7 +130,7 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3 curl gcc-aarch64-linux-gnu libsdl2-dev libgl-dev libegl-dev libffi-dev
+          sudo apt-get install -y build-essential python3 curl gcc-aarch64-linux-gnu libsdl2-dev libgl-dev libegl-dev libffi-dev zstd mesa-vulkan-drivers
       - name: Provision checksum-pinned musl toolchain
         run: |
           python3 Scripts/Setup/test_musl_fetch.py

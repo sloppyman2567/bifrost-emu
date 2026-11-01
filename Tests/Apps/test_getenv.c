@@ -1,7 +1,7 @@
 // test_getenv.c — Verify environment variables passed via envp/auxv.
 //
 // What it verifies:
-//   1. Standard environment variables (PATH, HOME, SHELL, TERM) are present.
+//   1. PATH and HOME, which the emulator defaults when missing, are present.
 //   2. getenv() returns the same values as iterating envp[].
 //   3. setenv() can add new variables.
 //   4. unsetenv() removes variables.
@@ -39,8 +39,6 @@ int main(void) {
     // 1. Standard env vars are present.
     CHECK(getenv("PATH") != NULL, "PATH is set");
     CHECK(getenv("HOME") != NULL, "HOME is set");
-    CHECK(getenv("SHELL") != NULL, "SHELL is set");
-    CHECK(getenv("TERM") != NULL, "TERM is set");
     CHECK(envp_has("PATH"), "PATH visible in envp[]");
     CHECK(envp_has("HOME"), "HOME visible in envp[]");
 

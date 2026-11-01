@@ -173,7 +173,16 @@ run as UID 1000, hid all three of these:
   Check a recorded hash against more than QEMU, since QEMU reproduces the fixture's own mistake.
 - `clone()` in musl 1.2.5 refuses `CLONE_THREAD`, `CLONE_SETTLS` and `CLONE_CHILD_CLEARTID` with `EINVAL`, without a
   syscall. Use `svc` for a raw thread.
-- `getuid()` is the host account unless `--android-runtime` is on, while Binder's sender UID is always the emulator's
-  process identity (`/proc/self/status`). Do not compare one with the other.
+- `getuid()` is the host account unless `--android-runtime` is on, while Binder's sender UID is 0 without it. Do not
+  compare one with the other.
+- A check of something the host may lack exits 77, and only for that cause: a missing Vulkan driver, an SDL video driver
+  without Vulkan surfaces or a missing window backend skips; a failure on a host that has them still fails. Do not
+  require variables such as `SHELL` or `TERM`.
+
+CI's scheduled and manual `make check-all` runs on Ubuntu 24.04 (glibc 2.39, SDL 2.30, a toolchain linking `--as-needed`)
+with no display, GPU or sound, so it uses Mesa's software GL and Vulkan. Every fixture it needs is built from git, so a
+stray local `.elf` cannot stand in for a missing source. A run here proves little about it: test a clean clone with
+Bootlin's toolchain, as a UID other than 1000, on that system. `xwayland_wire` (needs X11 in the rootfs) and
+`rw_iperf3_version`/`rw_coreutils_*` are its optional fixtures.
 
 
