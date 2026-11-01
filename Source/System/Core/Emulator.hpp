@@ -892,7 +892,7 @@ private:
     void exec_fp_scalar(const DecodedInst& d, CPU& cpu);
     void execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
-                      uint64_t entry_pc, uint64_t arg, uint64_t tls);
+                      uint64_t entry_pc, uint64_t arg, uint64_t tls, uint64_t ptid_ptr);
     void join_threads();
     // Join + erase finished guest threads. Snapshots under threads_mu_,
     // joins OUTSIDE it (a finishing thread takes threads_mu_ on some exit

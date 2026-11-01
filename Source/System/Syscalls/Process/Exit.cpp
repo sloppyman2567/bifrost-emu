@@ -17,35 +17,10 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
     switch (num) {
         case 93: { // exit — exit current thread (not whole process)
             emu.debugger().exited(cpu, static_cast<int>(a0));
-            // On AArch64 Linux, exit(2) (syscall 93) exits only the
-            // calling thread. The kernel's do_exit() handles:
-            //   1. clear_child_tid zeroing + futex wake (CLONE_CHILD_CLEARTID)
-            //   2. thread->tid zeroing (so pthread_join sees tid==0)
-            //
-            // musl's pthread_join polls thread->tid (at TPIDR_EL0 - 0xa0)
-            // via futex WAIT. The kernel zeros this field on thread exit.
-            // Our cleanup in thread_entry zeros clear_child_tid but NOT
-            // thread->tid. We zero it here so pthread_join can proceed.
-            //
-            // thread->tid address = TPIDR_EL0 - 0xc8 + 0x28 = TPIDR_EL0 - 0xa0
-            // (musl's struct pthread: base = TPIDR_EL0 - 0xc8, tid at +0x28)
-            // Leave the glibc DTV attached here: NPTL may cache this TCB and
-            // reads its DTV before calling _dl_allocate_tls_init on reuse.
-            // That allocator releases emulator-owned dynamic TLS then.
-            if (cpu.tpidr_el0 != 0 && !cpu.exit_tid_slot_freed) {
-                uint64_t tid_addr = cpu.tpidr_el0 - 0xa0;
-                try {
-                    emu.mem().store<uint32_t>(tid_addr, 0);
-                    // Futex wake on the tid field so pthread_join unblocks.
-                    auto* slot = emu.get_futex(tid_addr);
-                    {
-                        std::lock_guard<std::mutex> lk(slot->mu);
-                        slot->cv.notify_all();
-                    }
-                } catch (...) {
-                    // tid_addr unmapped — nothing we can do
-                }
-            }
+            // exit(2) ends only the calling thread. As in the kernel's mm_release, thread_entry then clears
+            // clear_child_tid and wakes it, and that is the one word a joiner may wait on. Write nothing to the TLS
+            // block here: TPIDR_EL0 - 0xa0 is musl's detach_state, so clearing it woke pthread_join early, which
+            // freed this stack and TLS for a new thread to reuse while this one still had words to write to them.
             cpu.running = false;
             cpu.exit_code = static_cast<int>(a0);
             return 0;

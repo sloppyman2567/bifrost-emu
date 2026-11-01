@@ -8,10 +8,11 @@
   a trusted reference before adding compatibility behavior.
 - Preserve Linux fd/poll/epoll ownership and timeout semantics. A ready socket
   must not lose readiness when translating guest event structures or masks.
-- Thread `exit` writes the musl tid word (`TPIDR_EL0 - 0xa0`) and `clear_child_tid`
-  only while the guest still maps them: `munmap` marks a thread that freed its own
-  TLS block (`CPU::exit_tid_slot_freed`), since another thread may reuse the range
-  before the exit runs. `test_thread_exit_unmapped_tls` covers it.
+- `spawn_thread` writes `CLONE_PARENT_SETTID` and `CLONE_CHILD_SETTID` before the child can run, as the kernel does: a new
+  thread reads its own tid at once (musl's `__tl_lock` misreads tid 0), and the word may lie in memory a later thread reuses.
+- Thread `exit` writes only `clear_child_tid`, as the kernel's `mm_release` does, and that is the last guest write of the
+  thread: a joiner wakes on it, frees the stack and TLS, and another thread may reuse them at once. `munmap` drops
+  `clear_child_tid` when a thread frees its page. `test_thread_exit_unmapped_tls` covers both.
 - `exit_group` uses Emulator::group_exit, waking blocked CPUs and preserving
   the successful exit code through native JIT callers. kill/tkill/tgkill
   default-fatal signals use Emulator::signal_exit, never `group_exit(128+n)`

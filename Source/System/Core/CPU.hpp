@@ -163,11 +163,6 @@ public:
     // When this thread exits, the word at this address is zeroed and a
     // futex wake is performed on it. Required for pthread_join to work.
     uint64_t clear_child_tid = 0;
-    // Host-only: this thread unmapped the page holding its musl-layout tid
-    // word (TPIDR_EL0 - 0xa0), as Bionic's exit_with_stack_teardown does for
-    // a detached thread. The range is reusable at once, so exit must not
-    // write that word: it can zero another thread's freshly mapped stack.
-    bool exit_tid_slot_freed = false;
     // ── Per-thread rseq (restartable sequences) state ───────────────
     // a per-thread rseq area. We model a "proper" single-CPU, non-
     // preempting rseq: we accept the registration, record the area,
@@ -456,7 +451,6 @@ public:
         is_fork_process = src.is_fork_process;
         // decode_cache: NOT copied (per-thread, fresh in child)
         set_tid_address_ptr = 0;   // child starts with no clear_child_tid
-        exit_tid_slot_freed = false;
         robust_list_head = 0;
         robust_list_len = 0;
         // rseq: child starts UNregistered (Linux semantics — rseq is

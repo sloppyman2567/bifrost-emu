@@ -151,8 +151,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
     // directly at call sites if needed; the lambda wrappers here are
     // only for the members used by every case.)
     auto spawn_thread = [&](CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
-                            uint64_t entry_pc, uint64_t arg, uint64_t tls) {
-        return emu.spawn_thread(parent_cpu, flags, stack_top, entry_pc, arg, tls);
+                            uint64_t entry_pc, uint64_t arg, uint64_t tls, uint64_t ptid) {
+        return emu.spawn_thread(parent_cpu, flags, stack_top, entry_pc, arg, tls, ptid);
     };
     // A futex word in a shared file mapping is a host futex (see Memory::shared_futex_word).
     auto shared_futex_word = [&](uint64_t addr) -> volatile uint32_t* {
@@ -240,14 +240,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // cpu.pc directly, NOT cpu.pc + 4.
             uint64_t entry_pc = cpu.pc;  // already SVC+4 (set by SVC_IMM handler)
             uint64_t arg = 0;  // x0 will be set to 0 for child
-            int child_tid = spawn_thread(cpu, flags, stack, entry_pc, arg, tls);
+            int child_tid = spawn_thread(cpu, flags, stack, entry_pc, arg, tls, ptid_ptr);
             if (child_tid < 0) {
                 ret_err(ENOMEM);
                 return 0;
-            }
-            // CLONE_PARENT_SETTID: write child TID to *ptid
-            if ((flags & clone_flags::PARENT_SETTID) && ptid_ptr) {
-                mem_.store<uint32_t>(ptid_ptr, child_tid);
             }
             ret_host(child_tid);
             return 0;
@@ -335,11 +331,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // is preserved on return), so clobbering it here is safe.
             cpu.regs[4] = child_tid;
             uint64_t entry_pc = cpu.pc;  // already SVC+4
-            int tid = spawn_thread(cpu, flags, stack_top, entry_pc, 0, tls);
+            int tid = spawn_thread(cpu, flags, stack_top, entry_pc, 0, tls, parent_tid);
             if (tid < 0) { ret_err(ENOMEM); return 0; }
-            if ((flags & clone_flags::PARENT_SETTID) && parent_tid) {
-                mem_.store<uint32_t>(parent_tid, static_cast<uint32_t>(tid));
-            }
             ret_host(static_cast<uint64_t>(tid));
             return 0;
         }

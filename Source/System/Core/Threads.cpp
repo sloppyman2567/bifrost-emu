@@ -310,7 +310,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     gt->finished.store(true, std::memory_order_release);
 }
 int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
-                           uint64_t entry_pc, uint64_t arg, uint64_t tls) {
+                           uint64_t entry_pc, uint64_t arg, uint64_t tls, uint64_t ptid_ptr) {
     if ((dbg().process_trace || dbg().fault_trace) && !(flags & 0x00010000))
         fprintf(stderr, "[clone] tid=%d flags=0x%llx stack=0x%llx inherited-sp=0x%llx pc=0x%llx\n",
                 parent_cpu.tid, (unsigned long long)flags, (unsigned long long)stack_top,
@@ -403,6 +403,13 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     inherit_task_comm(parent_cpu.tid, child_tid);
     if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
         mem_.store<uint32_t>(ctid_ptr, child_tid);
+    }
+    // Before the child can run, as in the kernel's copy_process path: a thread reads its own tid at once (musl's
+    // __tl_lock takes a free lock "recursively" on tid 0), and once it has exited and been joined, the word may lie in
+    // memory another thread reuses. A bad pointer is ignored: the kernel does not check this put_user either.
+    constexpr uint64_t BIFROST_CLONE_PARENT_SETTID = 0x00100000;
+    if ((flags & BIFROST_CLONE_PARENT_SETTID) && ptid_ptr) {
+        try { mem_.store<uint32_t>(ptid_ptr, child_tid); } catch (...) {}
     }
     // ── Shared-JIT mode (default) ──
     // Spawned threads share the main thread's FrostJIT instance, saving
