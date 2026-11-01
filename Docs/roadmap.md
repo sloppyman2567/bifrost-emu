@@ -530,7 +530,9 @@ correctness coverage.
   cleanly); supertux2 does not start there (its `libcurl-gnutls` wants glibc
   2.43) and crashes under the built-in linker too. Direction: make `--guest-ld` the default, then
   deprecate the built-in linker. Other games, musl threads, `make verify` and cold-start measurements remain before
-  it can become the default. The native linker imitates ld.so internals (`link_map`,
+  it can become the default. Runs on November 1 with `--guest-ld --rootfs-profile games` found two blockers: Neverball stops at
+  startup because the profile lacks `libudev.so.1` (its `libopenhmd` needs it), and vkQuake crashes within a second (signal 11,
+  `fault_addr=0xa060 pc=0x52593c`, not yet traced). dhewm3 was alive after 2 minutes on both linkers, with no input sent. The native linker imitates ld.so internals (`link_map`,
   `_rtld_global_ro` hooks, main-executable initializer ownership) and breaks
   when glibc changes; a legacy-start program ran every constructor twice until
   October 20. Needs a replacement for the thunk `dlopen`/`dlsym` interception,
