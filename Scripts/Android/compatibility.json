@@ -23,8 +23,8 @@
       "name": "Azur Lane",
       "tested_version": "9.3.7",
       "status": "playable",
-      "checked": "2026-10-29",
-      "evidence": "The maintainer reports it is playable; no gameplay screenshots or session details are recorded. Earlier screenshots (2026-10-14) show the loading and title/login screens.",
+      "checked": "2026-11-01",
+      "evidence": "The maintainer reports it is playable online, with audio and pause/resume working, through a finished battle. A screenshot shows the home screen at 60 FPS (Docs/Apps/azur-lane.md).",
       "notes": [
         "UI delays at the login scene were reported on 2026-10-14 and have not been re-checked."
       ],
