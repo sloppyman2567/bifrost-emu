@@ -109,6 +109,7 @@ INSTALLABLE = (".apk", ".apkm", ".apks", ".xapk")
 SORTS = (("name", "Name"), ("played", "Recently played"))
 FAILED = ("failed", "timed_out", "interrupted")
 MIN_CARD, MAX_CARD, GAP = 208, 280, 18
+GUTTER = 10  # between the cards and the scrollbar
 
 
 def installable(paths):
@@ -183,7 +184,7 @@ def clock(stamp, now):
     moment, today = time.localtime(stamp), time.localtime(now)
     day = (time.strftime("Today", moment) if moment[:3] == today[:3] else
            "Yesterday" if time.localtime(now - 86400)[:3] == moment[:3] else
-           time.strftime("%b %d, %Y", moment))
+           time.strftime("%b %d" if moment.tm_year == today.tm_year else "%b %d, %Y", moment))
     return day + time.strftime(" %H:%M", moment)
 
 
@@ -242,7 +243,7 @@ def read_findings(path, limit=16 * 1024 * 1024):
 def settings_dialog(window, app, settings):
     """Edit one persistent app profile; changes are staged until Save."""
     from PyQt6.QtCore import Qt, QUrl
-    from PyQt6.QtGui import QDesktopServices
+    from PyQt6.QtGui import QDesktopServices, QIcon, QPalette
     from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                  QFormLayout, QHeaderView, QHBoxLayout, QLabel, QPushButton,
                                  QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -252,15 +253,18 @@ def settings_dialog(window, app, settings):
     class Settings(QDialog):
         def __init__(self):
             super().__init__(window)
-            self.setWindowTitle(app["label"] + " compatibility profile")
-            self.resize(680, 560)
+            self.setWindowTitle(app["label"] + " settings")
+            self.resize(620, 500)
             self.settings = dict(settings)
-            layout = QVBoxLayout(self)
-            intro = QLabel("Saved for this app and shared by the launcher and CLI. Changes apply at the next start.")
+            layout = QVBoxLayout(self); layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(12)
+            dim = lambda label: (label.setForegroundRole(QPalette.ColorRole.PlaceholderText), label)[1]
+            intro = dim(QLabel("Saved for this game and shared with the command line. Changes apply the next time it starts."))
             intro.setWordWrap(True); layout.addWidget(intro)
-            tabs = QTabWidget(); layout.addWidget(tabs)
-            general = QWidget(); form = QFormLayout(general)
-            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            tabs = QTabWidget(); layout.addWidget(tabs, 1)
+            general = QWidget(); page = QVBoxLayout(general); page.setContentsMargins(14, 14, 14, 14); page.setSpacing(12)
+            form = QFormLayout(); page.addLayout(form); form.setVerticalSpacing(10); form.setHorizontalSpacing(14)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
             self.stats = QCheckBox("Show FPS, load and temperatures while the game runs")
             self.stats.setChecked(settings.get("window_stats", False)); form.addRow("Window stats", self.stats)
             self.stats_mode = QComboBox()
@@ -276,15 +280,26 @@ def settings_dialog(window, app, settings):
             for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
             self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
             form.addRow("Network", self.network)
-            runtime = QLabel(f"Android API {API} · bundled runtime")
-            runtime.setWordWrap(True); form.addRow("Runtime", runtime)
+            form.addRow("Runtime", dim(QLabel(f"Android API {API} · bundled runtime")))
             directory = window.state / app["package"]
-            folder = QPushButton("Open app environment folder")
+            folder = QPushButton("Open game folder")
+            folder.setToolTip("The app environment: its files, data and logs")
             folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory.resolve()))))
-            form.addRow("Environment", folder)
+            form.addRow("Files", folder)
+            page.addStretch(1)
+            removal = QHBoxLayout(); removal.setSpacing(8)
+            running = app["session"].get("state") in ACTIVE
+            for text, command, tip, name in (
+                    ("Clear data…", "clear-data", "Delete this game's saves and settings; the game stays installed", ""),
+                    ("Uninstall…", "uninstall", "Remove this game with all of its data", "danger")):
+                button = QPushButton(text); button.setObjectName(name)
+                button.setToolTip("Stop the game first" if running else tip); button.setEnabled(not running)
+                button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
+                removal.addWidget(button)
+            removal.addStretch(); page.addLayout(removal)
             tabs.addTab(general, "General")
 
-            compatibility = QWidget(); compat = QVBoxLayout(compatibility)
+            compatibility = QWidget(); compat = QVBoxLayout(compatibility); compat.setContentsMargins(14, 14, 14, 14); compat.setSpacing(10)
             policy = QFormLayout(); self.emulator = QComboBox()
             for text, value in (("Runtime default", None), ("Off", "0"), ("On", "1")):
                 self.emulator.addItem(text, value)
@@ -294,7 +309,7 @@ def settings_dialog(window, app, settings):
             self.emulator.setCurrentIndex(max(0, self.emulator.findData(value)))
             policy.addRow("Android emulator flag", self.emulator); compat.addLayout(policy)
             self.emulator.setToolTip("Android property: ro.kernel.qemu")
-            note = QLabel("Choose whether this app sees Android's emulator flag. Runtime default uses the bundled image's value.")
+            note = dim(QLabel("Choose whether this app sees Android's emulator flag. Runtime default uses the bundled image's value."))
             note.setWordWrap(True); compat.addWidget(note)
             advanced = QLabel("Advanced device properties")
             compat.addWidget(advanced)
@@ -310,13 +325,13 @@ def settings_dialog(window, app, settings):
             add = QPushButton("Add property"); add.clicked.connect(lambda: self.add_property())
             remove = QPushButton("Remove selected"); remove.clicked.connect(self.remove_properties)
             actions.addWidget(add); actions.addWidget(remove); actions.addStretch(); compat.addLayout(actions)
-            hint = QLabel("Remove an override to use the runtime default. Values may be empty. "
-                          "Properties are preserved when the runtime is rebuilt; changing them may require rebuilding it.")
+            hint = dim(QLabel("Remove an override to use the runtime default. Values may be empty. "
+                              "Properties are preserved when the runtime is rebuilt; changing them may require rebuilding it."))
             hint.setWordWrap(True); compat.addWidget(hint)
             try:
                 import android_compat
                 data = android_compat.load(); value = android_compat.entry(data, app["package"])
-                text = value["status"] + (f" ({value['checked']})" if value.get("checked") else "") + ". " + value["evidence"]
+                text = value["status"].capitalize() + (f" ({value['checked']})" if value.get("checked") else "") + ". " + value["evidence"]
             except (OSError, ValueError, KeyError):
                 text = "Compatibility report unavailable"
             report = QLabel(text); report.setWordWrap(True)
@@ -328,20 +343,12 @@ def settings_dialog(window, app, settings):
                 add.setEnabled(False); remove.setEnabled(False)
                 note.setText("Device property overrides apply to managed Android apps. This app uses the native Activity runtime.")
 
-            removal = QHBoxLayout()
-            running = app["session"].get("state") in ACTIVE
-            for text, command, tip in (
-                    ("Clear data…", "clear-data", "Delete this game's saves and settings; the game stays installed"),
-                    ("Uninstall…", "uninstall", "Remove this game with all of its data")):
-                button = QPushButton(text)
-                button.setToolTip("Stop the game first" if running else tip); button.setEnabled(not running)
-                button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
-                removal.addWidget(button)
-            removal.addStretch(); layout.addLayout(removal)
             self.error = QLabel(); self.error.setWordWrap(True); self.error.hide(); layout.addWidget(self.error)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-            reset = buttons.addButton("Restore profile defaults", QDialogButtonBox.ButtonRole.ResetRole)
+            reset = buttons.addButton("Restore defaults", QDialogButtonBox.ButtonRole.ResetRole)
             reset.clicked.connect(self.reset_profile)
+            # Desktop themes put clip-art on standard buttons, chosen when the box is built, before any stylesheet.
+            for button in buttons.buttons(): button.setIcon(QIcon())
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.network.currentData())
@@ -422,6 +429,28 @@ def build(state, application, settings=None):
     def make_style(colors):
         accent, danger, good = colors["accent"], colors["danger"], colors["good"]
         return f"""
+        QDialogButtonBox {{ dialogbuttonbox-buttons-have-icons: 0; }}
+        QDialog QPushButton {{ background: transparent; border: 1px solid {tint(colors["text"], .28)}; border-radius: 9px;
+            min-height: 32px; padding: 0 14px; }}
+        QDialog QPushButton:hover {{ background: palette(button); }}
+        QDialog QPushButton:disabled {{ color: {colors["muted"].name()}; }}
+        QDialog QPushButton:default {{ background: palette(highlight); color: palette(highlighted-text); border: none;
+            font-weight: 600; }}
+        QDialog QPushButton:default:hover {{ background: {accent.lighter(112).name()}; }}
+        QDialog QPushButton#danger {{ color: {danger.name()}; border-color: {tint(danger, .45)}; }}
+        QDialog QPushButton#danger:hover {{ background: {danger.darker(130).name()}; color: white; }}
+        QDialog QPushButton#danger:disabled {{ color: {colors["muted"].name()}; border-color: {tint(colors["text"], .15)}; }}
+        QTabWidget::pane {{ border: none; border-top: 1px solid {tint(colors["text"], .18)}; top: -1px; }}
+        QTabWidget > QWidget > QWidget {{ background: transparent; }}
+        QTabBar::tab {{ background: transparent; color: {colors["muted"].name()}; padding: 7px 14px;
+            border-bottom: 2px solid transparent; }}
+        QTabBar::tab:hover {{ color: {colors["text"].name()}; }}
+        QTabBar::tab:selected {{ color: {colors["text"].name()}; border-bottom-color: palette(highlight); }}
+        QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+        QScrollBar::handle:vertical {{ background: palette(mid); border-radius: 4px; min-height: 36px; margin: 0 1px; }}
+        QScrollBar::handle:vertical:hover {{ background: {colors["muted"].name()}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
         QFrame#card {{ background: palette(base); border: 2px solid transparent; border-radius: 14px; }}
         QFrame#card:hover {{ border-color: palette(mid); }}
         QFrame#card:focus, QFrame#card[selected="true"] {{ border-color: palette(highlight); }}
@@ -443,12 +472,14 @@ def build(state, application, settings=None):
         QPushButton#primary:disabled {{ background: palette(button); color: {colors["muted"].name()}; }}
         QPushButton#ghost, QPushButton#sort {{ background: transparent; border: 1px solid palette(mid); border-radius: 9px;
             min-height: 32px; padding: 0 12px; }}
+        QPushButton#primary, QPushButton#ghost, QPushButton#sort, QLineEdit#search {{ max-height: 34px; }}
         QPushButton#ghost:hover, QPushButton#sort:hover {{ background: palette(button); }}
         QPushButton#sort {{ padding-right: 30px; }}
         QPushButton#sort::menu-indicator {{ subcontrol-position: right center; right: 11px; }}
         QToolButton#tool {{ border: none; border-radius: 8px; padding: 6px; }}
         QToolButton#tool:hover {{ background: palette(button); }}
-        QLineEdit#search {{ background: palette(base); border: 1px solid palette(mid); border-radius: 9px; padding: 6px 10px; }}
+        QLineEdit#search {{ background: palette(base); border: 1px solid palette(mid); border-radius: 9px; padding: 0 10px;
+            min-height: 32px; }}
         QLineEdit#search:focus {{ border-color: palette(highlight); }}
         QFrame#notice, QFrame#progress, QFrame#drawer, QFrame#developer {{
             background: palette(alternate-base); border: 1px solid palette(mid); border-radius: 10px; }}
@@ -557,6 +588,16 @@ def build(state, application, settings=None):
         painter.drawRoundedRect(QRectF(.5, .5, size - 1, size - 1), size * .22, size * .22)
         painter.end()
         return pixmap
+
+    def confirm(parent, title, text, action):
+        """Ask before something destructive, with the action on the button and no theme clip-art."""
+        box = QMessageBox(parent); box.setWindowTitle(title); box.setText(text); box.setIcon(QMessageBox.Icon.NoIcon)
+        accept = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel); box.setDefaultButton(cancel); box.setEscapeButton(cancel)
+        accept.setObjectName("danger"); restyle(accept)
+        for button in box.buttons(): button.setIcon(QIcon())
+        box.exec()
+        return box.clickedButton() is accept
 
     class Card(QFrame):
         def __init__(self, window, app):
@@ -736,8 +777,7 @@ def build(state, application, settings=None):
             items = self.accounts.selectedItems()
             if not items: return
             name = items[0].text()
-            if QMessageBox.question(self, "Remove account", f"Sign {name} out of every game on this device?"
-                                    ) != QMessageBox.StandardButton.Yes: return
+            if not confirm(self, "Remove account", f"Sign {name} out of every game on this device?", "Remove"): return
             def removed(code, output):
                 if code: self.hint.setText("Couldn't remove the account: " + short_error(output))
                 self.refresh()
@@ -807,7 +847,7 @@ def build(state, application, settings=None):
             self.pages = QStackedWidget()
             self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setFrameShape(QFrame.Shape.NoFrame)
             grid_body = QWidget(); self.grid = QGridLayout(grid_body)
-            self.grid.setContentsMargins(0, 0, 0, 0); self.grid.setSpacing(spacing)
+            self.grid.setContentsMargins(0, 0, GUTTER, 0); self.grid.setSpacing(spacing)
             self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             self.scroll.setWidget(grid_body); self.pages.addWidget(self.scroll)
             self.scroll.viewport().installEventFilter(self)
@@ -825,6 +865,8 @@ def build(state, application, settings=None):
             outer.addLayout(middle, 1)
             outer.addWidget(self.build_developer())
             self.setCentralWidget(body)
+            # Nothing is selected on launch, and clicking empty space leaves the search box.
+            body.setFocusPolicy(Qt.FocusPolicy.ClickFocus); body.setFocus()
             self.drop_hint = QLabel("<div style='font-size: 22pt; font-weight: 600'>Drop to install</div>"
                                     "<div style='margin-top: 6px'>APK, APKM, APKS or XAPK</div>", body)
             self.drop_hint.setObjectName("drop"); self.drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -964,7 +1006,7 @@ def build(state, application, settings=None):
 
         def reflow(self, order=None):
             if order is not None: self.order = order
-            columns, width = grid_metrics(self.scroll.viewport().width())
+            columns, width = grid_metrics(self.scroll.viewport().width() - GUTTER)
             self.columns, self.metrics = columns, (columns, width)
             for card in self.cards.values():
                 self.grid.removeWidget(card); card.hide()
@@ -979,7 +1021,7 @@ def build(state, application, settings=None):
             # The viewport gets its size after the window's own resize event, so only
             # its own Resize carries the width the grid must fill.
             if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
-                if grid_metrics(self.scroll.viewport().width()) != self.metrics: self.reflow()
+                if grid_metrics(self.scroll.viewport().width() - GUTTER) != self.metrics: self.reflow()
             return super().eventFilter(watched, event)
 
         def resizeEvent(self, event):
@@ -1134,9 +1176,8 @@ def build(state, application, settings=None):
             removing = command == "uninstall"
             question = (f"Uninstall {app['label']}? Its saves and settings are deleted too." if removing else
                         f"Delete all saves and settings of {app['label']}? The game stays installed.")
-            buttons, no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
-            if QMessageBox.question(self, "Uninstall" if removing else "Clear data", question + "\n\nThis cannot be undone.",
-                                    buttons, no) != QMessageBox.StandardButton.Yes: return False
+            if not confirm(self, "Uninstall" if removing else "Clear data", question + "\n\nThis cannot be undone.",
+                           "Uninstall" if removing else "Clear data"): return False
             package = app["package"]
             def removed(code, output):
                 if code:

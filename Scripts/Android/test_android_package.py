@@ -477,6 +477,18 @@ class LauncherProfileTests(unittest.TestCase):
         self.dialog = settings_dialog(self.window, self.app, settings)
         return self.dialog
 
+    def test_settings_dialog_has_no_theme_icons_and_clips_no_text(self):
+        # On a themed desktop Save and Cancel showed clip-art, and the wrapped Runtime line was cut in half.
+        from PyQt6.QtWidgets import QLabel, QPushButton
+        dialog = self.edit({})
+        dialog.show()
+        self.assertEqual([b.text() for b in dialog.findChildren(QPushButton) if not b.icon().isNull()], [])
+        for label in dialog.findChildren(QLabel):
+            if not label.isVisible() or not label.text(): continue
+            needed = label.heightForWidth(label.width()) if label.wordWrap() else label.sizeHint().height()
+            self.assertGreaterEqual(label.height(), needed, label.text())
+            if not label.wordWrap(): self.assertGreaterEqual(label.width(), label.sizeHint().width(), label.text())
+
     def test_profile_round_trip_uses_the_cli_format_and_cancel_does_not_save(self):
         from android_settings import save, load, properties
         saved = {"property.ro.kernel.qemu": "0", "property.debug.fixture": "", "network": "offline"}
@@ -591,12 +603,12 @@ class LauncherLibraryTests(unittest.TestCase):
     def test_cards_fill_the_viewport_on_first_show_and_follow_resizes(self):
         # The grid once used the viewport width from before the window's layout, so a window
         # opened wide showed two columns and left more than half of it empty.
-        from android_launcher import grid_metrics
+        from android_launcher import GUTTER, grid_metrics
         self.fill(12)
         for width in (1100, 1650, 800, 1300):
             self.window.resize(width, 700); self.settle()
             viewport = self.window.scroll.viewport().width()
-            columns, card = grid_metrics(viewport)
+            columns, card = grid_metrics(viewport - GUTTER)
             self.assertEqual(self.window.metrics, (columns, card), width)
             shown = [self.window.cards[p] for p in self.window.order]
             self.assertEqual({c.width() for c in shown}, {card})

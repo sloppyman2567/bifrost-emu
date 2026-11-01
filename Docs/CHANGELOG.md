@@ -10,6 +10,15 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Asgard launcher cleanup (2026-11-01)
+
+- **Game settings:** the Runtime line no longer clips, Save and Cancel lose the desktop theme's clip-art, and tabs and
+  buttons match the library. "Clear data…" and "Uninstall…" moved into the General tab, away from Save and Restore.
+- **Confirmations:** they name the action on the button ("Uninstall", "Remove") instead of Yes/No, with Cancel as the
+  default.
+- **Library:** a slim scrollbar with a gap from the cards, equal-height heading controls, nothing selected on launch and
+  no year on dates in the current year.
+
 ### Video through Android's media extractor (2026-11-01)
 
 - **`media.extractor`:** the image's real daemon now runs in the realm. Without it `AMediaExtractor` and `MediaExtractor`
