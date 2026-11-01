@@ -53,6 +53,13 @@ struct ExclusiveMonitor {
         return version_of(bucket(addr).word.load(std::memory_order_acquire));
     }
 
+    // A fork child's copy of a bucket stays locked for good if another thread was inside a store. Reads first,
+    // so a fork does not copy the whole table's pages. That thread's store either landed or did not, as on a real fork.
+    void unlock_all_in_fork_child() {
+        for (auto& b : buckets)
+            if (b.word.load(std::memory_order_relaxed) & 1) b.word.fetch_and(~uint64_t(1), std::memory_order_relaxed);
+    }
+
     // Holds one bucket for a store. Destruction unlocks, with a version bump if
     // commit() was called (an exception leaves the version alone).
     class Hold {

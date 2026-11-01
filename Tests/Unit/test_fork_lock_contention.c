@@ -5,8 +5,8 @@
 // of waiting writers and hands the lock to one that does not exist. Android SDKs that run a helper command
 // (Runtime.exec, popen, posix_spawn) from a busy game hit this: the child never ran and kept a copy of the game.
 //
-// Six kinds of threads keep the guest memory index, the thread lists, the descriptor table and the futex
-// queues busy while the main thread forks. Each child must exit (or exec a program that exits) with status 0
+// Seven threads keep the guest memory index, the thread lists, the descriptor table, the futex queues and
+// the exclusive monitor busy while the main thread forks. Each child must exit (or exec a program that exits) with status 0
 // within a few seconds. The first forks, while the JIT is still compiling, were the ones that hung.
 //
 // Build: make setup-tests
@@ -24,7 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { ROUNDS = 100, CHILD_SECONDS = 8, WORKERS = 6 };
+enum { ROUNDS = 100, CHILD_SECONDS = 8, WORKERS = 7 };
 static atomic_int stop;
 static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t turn_changed = PTHREAD_COND_INITIALIZER;
@@ -78,6 +78,21 @@ static void *futex_pingpong(void *arg) {  // futex queues: condition variable wa
     }
     return 0;
 }
+// One LL/SC increment. A store-exclusive holds the monitor's bucket, so a fork can copy it held.
+static long exclusive_word;
+static void exclusive_add(void) {
+    long value;
+    unsigned failed;
+    do {
+        __asm__ volatile("ldxr %0, [%2]\n add %0, %0, #1\n stxr %w1, %0, [%2]"
+                         : "=&r"(value), "=&r"(failed) : "r"(&exclusive_word) : "memory");
+    } while (failed);
+}
+static void *exclusive_worker(void *arg) {
+    (void)arg;
+    while (!atomic_load(&stop)) exclusive_add();
+    return 0;
+}
 static double now(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -93,12 +108,14 @@ int main(int argc, char **argv) {
     pthread_create(&workers[3], 0, descriptor_worker, 0);
     pthread_create(&workers[4], 0, futex_pingpong, (void *)0);
     pthread_create(&workers[5], 0, futex_pingpong, (void *)1);
+    pthread_create(&workers[6], 0, exclusive_worker, 0);
     int bad = 0;
     for (int exec_mode = 0; exec_mode < 2; ++exec_mode) {
         const char *kind = exec_mode ? "fork+exec" : "fork";
         for (int i = 0; i < ROUNDS && bad < 3; ++i) {
             pid_t pid = fork();
             if (pid == 0) {
+                exclusive_add();
                 if (exec_mode) {
                     char *args[] = {argv[0], "--child", 0};
                     execv(argv[0], args);

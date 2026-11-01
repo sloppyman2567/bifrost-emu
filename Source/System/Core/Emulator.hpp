@@ -114,6 +114,8 @@ public:
     std::vector<FrostJIT*> all() const;
     // Leaks every instance: the caller (a fork child, an exec) is still inside one's code.
     void abandon();
+    // fork_guest holds this across a host fork: abandon() in the child needs it, and invalidations take it constantly.
+    std::mutex& mutex_for_fork() { return mu_; }
 private:
     static constexpr size_t kMaxLive = 8;  // current + retired-unreleased is at most 2
     size_t live_snapshot(FrostJIT** out) const;

@@ -42,7 +42,7 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   complete every load before writing any architectural register (and write the base
   last), and a store pair must write none: a fault on the second half restarts the
   whole instruction. `jit_host_fault` checks this, including `ldp x13, x12, [x13]`.
-- The exclusive monitor is `System/Core/ExclusiveMonitor.hpp`; the interpreter, the
+- The exclusive monitor is `System/Core/ExclusiveMonitor.hpp` (a fork child resets its held bits); the interpreter, the
   `jit_ldxr/stxr/stlr` helpers and `CodeGen/Integer/Atomics.cpp` implement one
   protocol and must change together: version read before the value at LDXR; STXR/STLR
   hold the bucket across check and write and bump on a write. Never bump before the

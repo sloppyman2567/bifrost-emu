@@ -16,6 +16,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Signals.hpp"   // exit_robust_list helper
+#include "System/Core/ExclusiveMonitor.hpp"
 #include "System/Loader/DynamicLinker.hpp"  // allocate_thread_tls (SDL threads)
 #include "System/Loader/GuestLibcSymbol.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"  // needed for per-thread JIT + jit_.reset()
@@ -882,7 +883,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     // fork stays locked there for good (and what it guards may be half updated). Take every lock the child, or the
     // guest code it runs, uses at once, as pthread_atfork handlers do: the comm table, the private futex maps (the
     // child inherits guest words but none of the parent's host waiters, Linux fork(2)), the thread lists, the guest
-    // descriptor table and the guest memory index. Try them all and release on any failure, so no lock is waited
+    // descriptor table, the JIT list and the guest memory index. Try them all and release on any failure, so no lock is waited
     // for while another is held and threads that nest them in a different order cannot deadlock with the fork.
     std::unique_lock<std::mutex> comm_lock(comm_mu_, std::defer_lock);
     std::array<std::unique_lock<std::mutex>, FUTEX_SHARDS> futex_locks;
@@ -892,10 +893,11 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     std::unique_lock<std::mutex> sdl_threads_lock(sdl_threads_mu_, std::defer_lock);
     std::unique_lock<std::mutex> descriptors_lock(fds_.mutex_for_fork(), std::defer_lock);
     std::unique_lock<std::mutex> timers_lock(timers_.mutex_for_fork(), std::defer_lock);
+    std::unique_lock<std::mutex> jit_list_lock(jit_.mutex_for_fork(), std::defer_lock);
     std::unique_lock<std::shared_mutex> memory_lock(mem_.mutex_for_fork(), std::defer_lock);
     const auto release_all = [&] {
         for (auto* lock : {&memory_lock}) if (lock->owns_lock()) lock->unlock();
-        for (auto* lock : {&timers_lock, &descriptors_lock, &sdl_threads_lock, &threads_lock, &comm_lock})
+        for (auto* lock : {&jit_list_lock, &timers_lock, &descriptors_lock, &sdl_threads_lock, &threads_lock, &comm_lock})
             if (lock->owns_lock()) lock->unlock();
         for (auto& lock : futex_locks) if (lock.owns_lock()) lock.unlock();
     };
@@ -903,7 +905,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         bool held = comm_lock.try_lock();
         for (size_t i = 0; held && i < FUTEX_SHARDS; ++i) held = futex_locks[i].try_lock();
         held = held && threads_lock.try_lock() && sdl_threads_lock.try_lock() && descriptors_lock.try_lock() &&
-               timers_lock.try_lock() && memory_lock.try_lock();
+               timers_lock.try_lock() && jit_list_lock.try_lock() && memory_lock.try_lock();
         if (!held) release_all();
         return held;
     };
@@ -931,6 +933,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     if (child_pid == 0) {
         host_fork_child_ = true;
         fork_parent_pid_ = forking_pid;
+        g_exclusive_monitor.unlock_all_in_fork_child();
         for (auto& shard : futex_shards_) {
             // Do not destroy copied condition variables: their waiter
             // counts refer to vanished parent threads and destruction can
@@ -950,6 +953,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         }
     }
     if (descriptors_lock.owns_lock()) descriptors_lock.unlock();
+    if (jit_list_lock.owns_lock()) jit_list_lock.unlock();
     if (child_pid == 0) {
         (void)timers_lock.release();  // after_fork_child makes a fresh lock
         timers_.after_fork_child();
