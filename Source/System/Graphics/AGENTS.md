@@ -17,7 +17,9 @@
   go to `Include/Generated/GLExtensions.hpp`, and `ExtensionFilter.cpp` removes
   them from the guest's `glGetString`, `glGetStringi` and `GL_NUM_EXTENSIONS`.
   Desktop GL keeps the host list. Regenerate with `glcoverage.py`, then
-  `make opgen-thunk`; host symbols fall back from `dlsym` to `eglGetProcAddress`.
+  `make opgen-thunk`; host symbols fall back from `dlsym` to `eglGetProcAddress`. `dlsym(RTLD_DEFAULT)` finds GL only because
+  `register_known_symbols_` loads libGL `RTLD_GLOBAL`: nothing names GL at link time, so a toolchain that defaults to
+  `--as-needed` (Ubuntu's) drops `-lGL`, and raw lookups then miss (`glMapBuffer` returned NULL).
 - GL binding state is per context. `GraphicThunkImpl::tracker()` returns the
   calling thread's current EGL context's `GLStateTracker` (switched after a
   successful `eglMakeCurrent`), else the default tracker for SDL/GLFW GL.

@@ -364,6 +364,11 @@ void GraphicThunk::register_known_symbols_() {
         if (!h && dbg().thunk_trace)
             fprintf(stderr, "[thunk] glfw: dlopen failed: %s\n", dlerror());
     }
+    // Nothing here names a GL symbol at link time, so a toolchain that links --as-needed by default
+    // (Ubuntu's) drops -lGL. Without this, every dlsym(RTLD_DEFAULT) for GL misses and glMapBuffer returns NULL.
+    if (kHaveGL && !dlopen("libGL.so.1", RTLD_LAZY | RTLD_GLOBAL) && !dlopen("libGL.so", RTLD_LAZY | RTLD_GLOBAL) &&
+        dbg().thunk_trace)
+        fprintf(stderr, "[thunk] gl: dlopen failed: %s\n", dlerror());
     // SDL symbols MUST resolve through the specific library handle:
     // on sdl2-compat hosts libSDL3 is also in the global scope and
     // exports same-named symbols with SDL3 ABI (e.g.
