@@ -70,7 +70,7 @@ bool host_entries(const std::string& dir, bool want_files, std::vector<DirNode::
         const std::string name = e->d_name;
         if (!safe_sysfs_name(name)) continue;
         if (want_files ? e->d_type == DT_REG : (e->d_type == DT_DIR || e->d_type == DT_LNK))
-            out->push_back({name, want_files ? 0x1 /*DT_REG*/ : 0x4 /*DT_DIR*/});
+            out->push_back({name, static_cast<uint8_t>(want_files ? 0x1 /*DT_REG*/ : 0x4 /*DT_DIR*/)});
     }
     closedir(d);
     return true;
