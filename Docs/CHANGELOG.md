@@ -10,6 +10,24 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Other CPUs, compilers and distributions (2026-11-01)
+
+- **Older x86-64 CPUs:** `CLZ` without LZCNT (Intel before Haswell) and `FCVT{N,P,M,A}S` without SSE4.1 (Core 2 and older)
+  left a stale register, giving wrong values and crashes. `UMINP`/`UMAXP` on bytes and `SMINP`/`SMAXP` on halfwords hit
+  `SIGILL` without SSSE3. LZCNT is now detected on CPUs without CPUID leaf 7. Checked on emulated CPUs only
+  (`test_host_cpu_models.sh`), not real old hardware.
+- **Multithreaded JIT:** chain slots after a frame pop read the CPU through the caller's RBX (ordinary frames and Tier-2
+  only; the default Tier-1 layout was not affected). It crashed or hung depending on the compiler.
+- **Fresh clones:** 58 scripts and the `toybox` and `zstd` fixtures were not executable in git, so `./Scripts/...` failed.
+  Four test scripts no longer need ripgrep, clang builds again, and the launcher build finds a JDK that is not on `PATH`.
+- **CI:** repaired the steps that failed every run, and added clang, executable-mode and older-CPU checks. The workflow
+  has not run yet. `test_exec_mt` and `jit_disk_cache` still fail with `BIFROST_NO_CHAIN_SKIP=1`, which is not the default.
+
+### Firefox starts (2026-11-01)
+
+- Firefox 159 reaches onboarding and a GeckoView surface, through repeated-provider rules, three `ANativeWindow` exports,
+  and the `role` and `shortcut` services. Pages do not load yet: see `Scripts/Android/compatibility.json`.
+
 ### YUV video frames convert 14 times faster (2026-10-31)
 
 - A TextureView's video (YUV 4:2:0 gralloc buffers) was converted to RGBA by a scalar loop, on HWUI's render thread, at
