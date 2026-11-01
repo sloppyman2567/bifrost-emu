@@ -368,6 +368,10 @@ reconstruction at observable boundaries. Extend the existing compiler in
 measured stages. The detailed contracts are in
 [the JIT design plan](JIT.md#planned-codegen-retaining-guest-state-across-regions).
 
+Candidate, not started and not measured: the JIT detects AVX-512 but emits none. On such a host, `xmm16`-`xmm31` could hold more
+of the 32 guest vector registers than the 13 of `XMM3`-`XMM15` today, and `psraq` and variable shifts could replace fallbacks.
+Guest vectors are 128 bits, so a 512-bit datapath itself would add little.
+
 Implemented foundation (October 12): experimental Tier-2 collects up to
 eight blocks/256 instructions, retains compatible vector or scalar-FP cache
 layouts inside regions, and uses live-work timing to select candidates.
@@ -522,9 +526,9 @@ correctness coverage.
   emulator-created threads), dhewm3 ran 120 s with a `games` rootfs profile,
   and neverball survived 40 s in two of three runs (the third was closed
   cleanly); supertux2 does not start there (its `libcurl-gnutls` wants glibc
-  2.43) and crashes under the built-in linker too. Other games, musl threads,
-  `make verify` and cold-start measurements remain before it can become the
-  default. The native linker imitates ld.so internals (`link_map`,
+  2.43) and crashes under the built-in linker too. Direction: make `--guest-ld` the default, then
+  deprecate the built-in linker. Other games, musl threads, `make verify` and cold-start measurements remain before
+  it can become the default. The native linker imitates ld.so internals (`link_map`,
   `_rtld_global_ro` hooks, main-executable initializer ownership) and breaks
   when glibc changes; a legacy-start program ran every constructor twice until
   October 20. Needs a replacement for the thunk `dlopen`/`dlsym` interception,
@@ -605,6 +609,25 @@ Acceptance: real editor/WebView tests cover composition, scrolling, focus swaps,
 resize, browser failure, callback delivery and process exit. Finish by checking
 the requested Azur Lane interaction in the actual window and profiling its
 frame delays; separate input, service, renderer and JIT findings.
+
+## Hosts and CI
+
+Status on November 1, 2026:
+
+- CI's full-suite job passes on GitHub (Ubuntu 24.04, no display, GPU or sound; run 41347586904). So do the build, clang and
+  script-mode jobs. Those runs did not cover what they skip: GLES/EGL, Wayland, Android surface and SDL Vulkan surface tests.
+- The guest job's JIT tests pass on GitHub, but on commit `30b48623` its interpreter run failed `test_fork_lock_contention`.
+  The fork-hang and thread-exit fixes that followed pass locally and in an Ubuntu 24.04 rootfs; they have not run on GitHub.
+
+Open:
+
+- Run the strict suite and `make verify` on an AVX-512 host. The first will be a Zen 5 CPU with an RDNA 4 GPU on CachyOS. Neither
+  has been run. CachyOS may install packages built for that CPU, so host libraries could use AVX-512 themselves.
+- Check Android games on RDNA 4: GPU work so far has been on one RDNA 3 card.
+- Find out how often the fork hang reached real apps (an SDK calling `Runtime.exec` from a busy game). It was only forced by a
+  stress test.
+- Re-test the Ubuntu VM's Hungry Shark World black screen: the libGL and thread ctype fixes may bear on it, unconfirmed.
+- Fedora, Debian, Alpine and openSUSE stay untested.
 
 ## Delivery gates
 

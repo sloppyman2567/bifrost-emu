@@ -82,7 +82,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - **CI's full-suite job:** it installs `zstd` and Mesa's software Vulkan driver. `div_loop`, `div_loop2`, `div_simple`, `div_test`,
   `loop_div` and `simple_div` were required but had no source in git; their sources are rebuilt from the old binaries (identical
   output) and they now check that output. The runner no longer takes ALSA and `XDG_RUNTIME_DIR` messages for a test failure.
-  This job has not run on GitHub with these changes: it passes in a local Ubuntu 24.04 rootfs with no display, GPU or sound.
+  It passed on GitHub on November 1, on Ubuntu 24.04 with no display, GPU or sound.
+- **A fork child could hang for good:** `fork` copied two kinds of lock while other threads held them: the JIT list, which
+  every cache invalidation takes, and the exclusive monitor's buckets, held across a store-exclusive. The child then waited for
+  a thread that does not exist in it. The list now joins the locks held across `fork`, and the child clears any held bucket.
+  `test_fork_lock_contention` adds a worker that hammers LL/SC on a word the child touches: the old binary passed 0 of 4 runs
+  under the interpreter, the new one 52 of 52 with both engines. How often a real app hit this is not known.
+- **Thread create and join could crash or end a musl guest:** the parent wrote `CLONE_PARENT_SETTID` after starting the child,
+  and `exit` zeroed `TPIDR_EL0 - 0xa0`, which is musl's `detach_state` and not its tid as assumed. A new thread could see tid 0 and
+  misuse musl's thread-list lock, a joiner could free a thread's stack too early, and late writes then landed in memory a new
+  thread was reusing. Both now follow the kernel. Under load the guest crashed, hung or exited 0 with no output, where QEMU
+  passed. Bionic's `pthread_create` and `pthread_join` cannot reach either path (from its source; no game was run for this).
 
 ### Firefox starts (2026-11-01)
 
