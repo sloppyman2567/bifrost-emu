@@ -105,9 +105,8 @@ does not promise every ad network or Google Play Services support.
 - Guide dependency/runtime provisioning and signed APK installation from the
   library; show actionable missing-runtime or window-backend errors. Done: a card says why a run ended and the drawer what to
   try (November 1).
-- Run Linux games from the same library, so it picks the rootfs profile and linker. Today Asgard runs Android apps only, and a
-  Linux game started by hand without its setup crashes with no explanation. A rootfs chosen automatically, with an error naming
-  what to install, belongs here too.
+- Run Linux games from the same library, with the rootfs profile and linker as per-game settings. Today Asgard runs Android apps
+  only, and a Linux game started by hand without its setup can crash with no explanation.
 - Make the launcher select the intended graphics-capable executable and keep
   headless validation from silently replacing the desktop default.
 - Build on the current cards, icons, search, per-app Back-key/stats settings,
@@ -634,7 +633,8 @@ Open:
 - Fedora is built and unit-tested in a chroot only: run a game on real Bazzite in Distrobox. Debian, Alpine and openSUSE stay untested.
 - A dynamic Linux game on the default rootfs can crash at address 0 instead of explaining itself. With no guest libopenal the host's is
   thunked, but only 29 symbols: dhewm3 imports eight more (such as `alcGetProcAddress`, `alGetSourcei`), which resolve to null. The `games` profile
-  works. Pick an installed profile automatically, and stop naming what is missing rather than continuing with unresolved imports.
+  works, and users choose it with `--rootfs-default games`; the rootfs is not picked automatically. Stop naming what is missing rather than
+  continuing with unresolved imports.
 
 ## Delivery gates
 
