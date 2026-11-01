@@ -16,7 +16,7 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](Apps/vkquake.md).
 
-The fully provisioned suite was 375 runs under `run_tests.sh --strict` (2026-10-27) with the JIT and 360 with `--no-jit` (15 tests that exist only in the JIT run are not selected there), in these categories: unit
+The fully provisioned suite was 377 runs under `run_tests.sh --strict` (2026-11-01) with the JIT and 362 with `--no-jit` (15 tests that exist only in the JIT run are not selected there), in these categories: unit
 (focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
 `Tests/Asm/`), sandbox, per-thread JIT, interactive (scripted stdin), toybox, real-world static and dynamic programs,
 dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitted by `--quick`). The runner prints

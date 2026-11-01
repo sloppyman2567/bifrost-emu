@@ -317,8 +317,8 @@ make ci               # local correctness gate (generated files, APIs, both engi
 ./Scripts/Testing/run_tests.sh --strict --filter "sig|brk|pipe"   # by name
 ```
 
-On 2026-10-27, with every fixture provisioned, the strict suite passed
-**375/375** under the JIT and **360/360** under the interpreter (15 JIT-only
+On 2026-11-01, with every fixture provisioned, the strict suite passed
+**377/377** under the JIT and **362/362** under the interpreter (15 JIT-only
 tests are not run there), and `make verify` passed 100 differential fixtures plus
 ten threaded oracle runs. Missing fixtures fail strict mode; environment skips
 (exit 77) stay visible. Details, history and fixture licensing are in
