@@ -364,9 +364,9 @@ the Media NDK bundle alone does not create those codec services.
 The realm-owned software Gralloc5 allocator and guest mapper are also checked
 through AHardwareBuffer and AImageReader CPU pixels (see
 [allocation validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13)).
-`media.player` and `media.extractor` remain absent; unavailable service calls
-may block. Full stream reconfiguration, HDR, native EGL rendering into an aliased
-Surface and in-game video playback remain unverified. This is a bounded media
+`media.player` remains absent; unavailable service calls may block. `media.extractor`
+is the image's real daemon, and Oddmar's splash video opens through it. Full stream reconfiguration, HDR,
+native EGL rendering into an aliased Surface and sustained in-game video playback remain unverified. This is a bounded media
 implementation, not arbitrary codec/player/DRM compatibility.
 
 ## Package and runtime ownership

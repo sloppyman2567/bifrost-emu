@@ -9,7 +9,7 @@ the emulator's memory, signal, syscall, loader and host-service implementations.
 | Responsibility | Directory and entry points |
 |---|---|
 | CLI and configuration | `Source/Main.cpp`, `Source/System/Core/Config.cpp` |
-| Emulator startup and lifetime | `Source/System/Core/Emulator/`: `Lifecycle.cpp`, `ElfLoading.cpp`, `GuestStartup.cpp`, `Android.cpp`, `ThunkWiring.cpp` |
+| Emulator startup and lifetime | `Source/System/Core/Emulator/`: `Lifecycle.cpp`, `ElfLoading.cpp`, `GuestStartup.cpp`, `Android.cpp`, `ThunkWiring.cpp`, `GuestTimers.cpp` (POSIX timers) |
 | Decode and reference execution | `Source/Interpreter/Decoder/`, `Core/`, `FloatSIMD/` |
 | LL/SC exclusive monitor | `Source/System/Core/ExclusiveMonitor.hpp` (shared by the interpreter, the JIT helpers and `Source/FrostJIT/CodeGen/Integer/Atomics.cpp`) |
 | JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/`, `Tier2/` |
@@ -105,7 +105,7 @@ Code under `Guest/` is compiled for, or runs inside, the guest:
 
 - `Guest/Android/Include/`: freestanding Bionic and NativeActivity headers.
 - `Guest/Android/Adapters/`: Bionic adapter libraries (EGL, surface, AAudio,
-  OpenSL ES, assets, log, Activity window, managed looper) built by
+  OpenSL ES, assets, log, Activity window, managed looper, the preloaded Java Binder attach) built by
   `Tools/Android/build-android-adapters.py`.
 - `Guest/Android/Launchers/`: native and ART launch executables.
 - `Guest/Android/Managed/`: the managed launcher dex (`ManagedLauncher.java`,

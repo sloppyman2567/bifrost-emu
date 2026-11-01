@@ -33,7 +33,8 @@ SpongeBob: Krusty Cook-Off. Azur Lane and Umamusume Global are playable on the
 maintainer's report, with screenshots on their pages; The Battle Cats, Subway Surfers
 and Geometry Dash Lite on the report alone, with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
 browser screens, but pages do not load. Hungry Shark World, Hungry
-Shark Evolution and Uptodown start and run a bounded session. Roblox, TrickCal
+Shark Evolution and Uptodown start and run a bounded session. Oddmar gets past its opening video and on to the next one;
+gameplay is not confirmed. Roblox, TrickCal
 and Umamusume JP are blocked by the app itself (Umamusume JP at a device
 integrity check when it connects). These are single checks, not compatibility
 guarantees, and gameplay is confirmed only where the file says `playable`.

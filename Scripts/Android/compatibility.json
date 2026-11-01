@@ -119,7 +119,7 @@
       "checked": "2026-11-01",
       "evidence": "Sessions reach the main Activity, a GPU window, first-run onboarding and a GeckoView surface, with tab, GPU and crash-helper child processes. The maintainer reports pages do not load.",
       "notes": [
-        "Most sessions end when a native Gecko thread reaches an in-process Java Binder service without a JVM attachment (JavaBinder: env null); which service is not identified.",
+        "Most sessions end when a native Gecko thread reaches an in-process Java Binder service without a JVM attachment (JavaBinder: env null); which service is not identified. A general fix for that abort landed on 2026-11-01; Firefox has not been re-tested with it.",
         "The first codec query blocks Gecko's main thread for 5 s waiting for media.player, which is not published, delaying the tab process by about 9 s.",
         "Firefox sends its own telemetry and, when accepted in its dialog, crash reports to Mozilla."
       ]

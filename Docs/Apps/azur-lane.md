@@ -15,7 +15,9 @@ and a finished battle, with working audio and pause/resume.
   2,603 MiB, Google services 455 MiB and the broker and services 224 MiB. JIT code was 386 MiB of the game's share, and
   it used 562 MiB of VRAM. Memory across screens varied by about 4%; a long session has not been measured.
 
-## Screenshots (2026-10-14, 2.0.0-alpha.1)
+## Screenshots (2026-10-14)
+
+From Bifrost 2.0.0-alpha.1.
 
 Loading after the update check:
 

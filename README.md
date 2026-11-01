@@ -60,6 +60,7 @@ that every feature has an automated test or a recorded capture.
 | Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
 | Geometry Dash Lite 2.2.148 | Android, Cocos2d-x | User-reported playable (2026-10-29); ads only somewhat stable. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
+| Oddmar | Android, Unity/IL2CPP | Gets past its opening video and on to the next one (2026-11-01); gameplay is not confirmed. |
 | Hungry Shark Evolution, Hungry Shark World | Android | Run sessions to their windows; gameplay is not confirmed. Hungry Shark World's Play Games sign-in does not complete. |
 | Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
 | Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |

@@ -39,11 +39,12 @@ Known blockers, by cause:
 
 These are proposed scopes for the next pre-releases, not announced release dates.
 The runtime is 2.0.0-alpha.3. Neither scope below is complete in it; unmet items
-carry to the next pre-release. The October 14
-[SpongeBob screenshots](Apps/spongebob.md#screenshots-2026-10-14) show cooking,
-the lobby, Help Center and a level-14 pause menu; the
-[Azur Lane screenshots](Apps/azur-lane.md#screenshots-2026-10-14) show loading
-and the title/login screen. Still images do not establish sustained performance
+carry to the next pre-release. The
+[SpongeBob screenshots](Apps/spongebob.md#screenshots-2026-11-01) show cooking,
+the lobby, restaurant progress, Help Center and a level-14 pause menu; the
+[Azur Lane page](Apps/azur-lane.md#measurements-2026-11-01-200-alpha3) shows its home screen and the
+[Umamusume screenshots](Apps/umamusume.md#screenshots-2026-11-01) show its title, home and a Career story scene.
+Still images do not establish sustained performance
 or successful ads, sign-in and gameplay in every app.
 
 ### 2.0.0-alpha.2: broader game support and less stutter
@@ -130,8 +131,8 @@ backend combinations. [APK setup and boundaries](Android/ANDROID_APK.md) documen
 the exact scope. Implemented managed checkpoints now include the pinned Android
 15 ART/framework, APK Activity creation, resources, JNI, WindowManager-owned
 Activity windows and a shared Binder realm. SpongeBob has user-confirmed cooking
-levels and menus; Azur Lane, The Battle Cats, Umamusume Global, Subway Surfers
-and Geometry Dash Lite are user-reported playable without captures (see
+levels and menus; Azur Lane and Umamusume Global are user-reported playable with screenshots, and The Battle Cats,
+Subway Surfers and Geometry Dash Lite without captures (see
 `Scripts/Android/compatibility.json`). Those checkpoints do not establish
 arbitrary APK compatibility.
 
