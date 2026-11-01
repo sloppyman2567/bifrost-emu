@@ -361,6 +361,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     fp.rounding = static_cast<uint8_t>((is_away << 2) | rmode);
                     fp.sf = sf != 0;
                     fp.is_unsigned = is_unsigned;
+                    fp.rd = static_cast<uint8_t>(rd);
                     emit_fp_f2i(block, tmp, rn, fp, cur_pc);
                     if (!sf) {
                         uint16_t z = g_alloc.alloc();

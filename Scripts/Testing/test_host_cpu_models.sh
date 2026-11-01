@@ -16,7 +16,7 @@ set -u
 ulimit -c 0  # A CPU model that cannot run a host library would leave a core per attempt.
 
 EMU="${1:-${BIFROST_EMU:-./bifrost-emu}}"
-FIXTURES=(jit_cls jit_bfext jit_block_split jit_fp_scalar jit_selfloop_writeback)
+FIXTURES=(jit_cls jit_bfext jit_block_split jit_fp_scalar jit_selfloop_writeback jit_round_away)
 # name|what it lacks
 MODELS=(
     "SandyBridge|LZCNT, BMI, AVX2, FMA"

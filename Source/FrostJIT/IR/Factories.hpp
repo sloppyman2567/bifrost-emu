@@ -996,12 +996,13 @@ inline IRInst IRInst::make_fp_f2i(uint16_t dest, uint16_t src,
     inst.width = p.ftype;
     inst.cond = p.rounding;
     inst.flags_op = p.sf ? 1 : 0;
-    inst.imm = p.is_unsigned ? 1 : 0;
+    inst.imm = (p.is_unsigned ? 1 : 0) | (static_cast<int64_t>(p.rd) << 8);
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline FpF2IParams IRInst::fp_f2i_params() const {
-    return FpF2IParams{width, cond, (flags_op & 1) != 0, (imm & 1) != 0};
+    return FpF2IParams{width, cond, (flags_op & 1) != 0, (imm & 1) != 0,
+                       static_cast<uint8_t>((imm >> 8) & 31)};
 }
 // int->FP: width=ftype, flags_op=sf, imm=is_unsigned.
 inline IRInst IRInst::make_fp_i2f(uint16_t dest, uint16_t src,

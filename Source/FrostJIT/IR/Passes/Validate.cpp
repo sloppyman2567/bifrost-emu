@@ -936,7 +936,7 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
             case IROp::FP_F2I: {
                 // width=ftype 0/1, cond=rounding ((is_away<<2)|rmode —
                 // 0..3 standard rounding or 4 signed ties-away),
-                // flags_op=sf, imm=is_unsigned bit.
+                // flags_op=sf, imm=is_unsigned bit | rd << 8.
                 if (inst.width > 1) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_F2I "
@@ -944,14 +944,14 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         block.start_pc, i, inst.width, inst.arm_pc);
                     ok = false;
                 }
-                if (inst.cond > 4 || (inst.cond == 4 && inst.imm)) {
+                if (inst.cond > 4 || (inst.cond == 4 && (inst.imm & 1))) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_F2I "
                         "rounding=%u invalid (want 0..3 or signed ties-away=4, arm_pc=0x%lx)\n",
                         block.start_pc, i, inst.cond, inst.arm_pc);
                     ok = false;
                 }
-                if (inst.flags_op > 1 || inst.imm > 1) {
+                if (inst.flags_op > 1 || (inst.imm & ~0x1F01LL)) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: FP_F2I "
                         "sf/unsigned must be bits (arm_pc=0x%lx)\n",

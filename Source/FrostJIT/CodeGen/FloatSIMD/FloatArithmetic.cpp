@@ -331,8 +331,14 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // N/P/M rounding uses roundsd/roundss (SSE4.1): N rounds
                 // explicitly (nearest-even, MXCSR-independent) so the
                 // saturation pre-check below sees the rounded value.
+                // Without it the interpreter writes Xd, and dest (a scratch
+                // the translator stores to Xd next) has to take that value.
                 if (!has_sse41()) {
                     emit_call_interp(inst.arm_pc, false);
+                    kill_vreg(inst.dest);
+                    int d = alloc_reg();
+                    emit_load_arm(d, fp.rd);
+                    set_vreg_reg(inst.dest, d);
                     return true;
                 }
             }

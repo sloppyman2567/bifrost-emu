@@ -246,7 +246,8 @@ struct FpF2IParams {
     uint8_t ftype = 0;      // 0=S, 1=D (width)
     uint8_t rounding = 3;   // (is_away<<2)|rmode (cond)
     bool sf = false;        // 64-bit dest (flags_op)
-    bool is_unsigned = false;  // (imm)
+    bool is_unsigned = false;  // (imm bit 0)
+    uint8_t rd = 0;         // Xd, for the reload after an interpreter fallback (imm bits 8..12)
 };
 struct FpI2FParams {
     uint8_t ftype = 0;      // 0=S, 1=D (width)
