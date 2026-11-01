@@ -387,6 +387,13 @@ processes, under its own UIDs:
   One connection per provider carries this client's stable/unstable counts
   (`refContentProvider`, `removeContentProvider`, `unstableProviderDied`).
   A child process whose providers have clients stays running until the session exits.
+- A package's providers follow `ComponentResolver.addProvidersLocked`, applied where
+  `FrameworkParseCache` reads a package: the first declaration of an authority owns it, a
+  later one loses that name and, with none left, has a null authority and is not started.
+  A class declared again is ignored (`FrameworkPackages.registeredProviders`). Firefox's
+  merged manifest repeats `InitializationProvider`, keeping the initializers on the first.
+- `updateServiceGroup` checks the connection exists and records nothing: groups only order
+  isolated processes for a low-memory killer this runtime does not have.
 - A service child is bound like `handleBindApplication`: it installs its
   process's providers, publishes them to the session, then runs
   `Application.onCreate`. Publication sends only provider class names and
@@ -1315,7 +1322,9 @@ server classes, for one app, user 0 and the default device:
 | `account` | Android 15's `AccountManagerService` for one user over a shared JSON store; authenticators are bound and run as the system. See [Google accounts](#google-accounts-and-sign-in-2026-10-20). |
 | `media_session` | The sessions an app creates for itself (`FrameworkMediaSessions`, modelled on `MediaSessionRecord`, android-15.0.0_r1): `createSession` returns an `ISession` and its `ISessionController`; the session keeps the metadata, playback state (a playing position moves on with the clock), queue, queue title, extras, rating type, volume (local follows the system music stream, remote is the app's) and flags the app publishes, and tells the registered controller callbacks in order on one thread; a controller's transport commands, `sendCommand` and media buttons reach the app's `ISessionCallback`; `destroySession` tells the controllers and a later `registerCallback` is told at once. Limits: 100 sessions per uid (`SESSION_CREATION_LIMIT_PER_UID`, `Created too many sessions`), the global-priority flag is refused, a media button receiver that starts an activity is ignored. Not modelled: other packages' sessions, session listeners, media key routing (`dispatchMediaKeyEvent` still reaches nobody), local volume commands from a controller, the content-URI grant check on metadata art, `getSessions`. |
 | `location` | Only the passive provider, location setting on; location data needs a runtime location grant and has no source. |
-| `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). `notifyProviderInheritance` (what the framework calls when an app's process starts, as `AppWidgetServiceImpl` in android-15.0.0_r1): a null array or entry ends the call, each package must be the caller's own, and the provider lookup finds none, so nothing is recorded. |
+| `appwidget` | `FEATURE_APP_WIDGETS`, as on phones (`AppWidgetManager.getInstance` is null without the service). No home screen binds widgets: `getAppWidgetIds` checks that the provider is the caller's own package and returns none. Provider queries (`getInstalledProvidersForProfile`) are unsupported (`FrameworkAppWidgets`). `isRequestPinAppWidgetSupported` is false: no launcher confirms pin requests. `notifyProviderInheritance` (what the framework calls when an app's process starts, as `AppWidgetServiceImpl` in android-15.0.0_r1): a null array or entry ends the call, each package must be the caller's own, and the provider lookup finds none, so nothing is recorded. |
+| `role` | `RoleService` for a device that defines no roles (`FrameworkRoles`): no permission controller is provisioned to grant one, so `isRoleAvailable` and `isRoleHeld` are false, with its caller-package, cross-user and empty-name checks. `RoleManager` is null without the service. Other methods are unsupported. |
+| `shortcut` | `ShortcutService` with no launcher (`FrameworkShortcuts`): nothing is stored, so reads are empty and removals validate their arguments and find nothing; `isRequestPinItemSupported` is false. `ShortcutManager` is null without the service. Publishing a shortcut is unsupported. |
 | `notification` zen mode | `getZenMode` is 0 (Do Not Disturb off, `Settings.Global.ZEN_MODE_OFF`), so `NotificationManager.getCurrentInterruptionFilter` is `INTERRUPTION_FILTER_ALL`; it takes no package and needs no permission. Policy and rule changes stay unsupported. |
 | `activity` running services | `getServices` (`ActivityManager.getRunningServices`) reports the app's own created services, started or only bound, with pid, process, `FLAG_STARTED`, client count and activity times, up to `maxNum`: what an app without `GET_TASKS` sees (`ActiveServices.getRunningServiceInfoLocked`). `FLAG_FOREGROUND` and `foreground` follow `setServiceForeground` (see Foreground services). Only the main process is answered; a call from a child process is not routed. |
 | camera | No camera HAL or cameraserver: `config.disable_cameraservice=true` (a default the image can override), so libcamera2ndk and `CameraManager` skip `media.camera` and list no cameras instead of polling for it forever. No `android.hardware.camera*` feature is declared. |
@@ -1714,7 +1723,9 @@ function from AOSP's pinned `libandroid.map.txt` (android-15.0.0_r1) as a
 generated forwarder resolved through `re_android.so`. Azur Lane's CRIWARE
 `libcri_ware_unity.so` needed `AAsset_seek`. Window-handle functions
 (`ANativeWindow_*`, `ASurfaceControl_createFromWindow`) keep their thunked or
-wrapped behaviour; `ANativeWindow_toSurface` remains unexported.
+wrapped behaviour. `ANativeWindow_lock`, `unlockAndPost` and `toSurface` reach the image's library for a
+framework Surface; a host window handle has no CPU-visible buffers, so locking returns `-EINVAL` and
+`toSurface` returns NULL. Firefox's `libxul.so` imports all three.
 `ASurfaceControl_createFromWindow` had no wrapper at all, so YouTube's `libgoogle3.so` failed to load (Bionic
 binds imports at `dlopen`, whether or not the function is ever called). It is now a wrapper in
 `surface.c`: a Bifrost host window handle has no SurfaceFlinger layer behind it and returns NULL (creation

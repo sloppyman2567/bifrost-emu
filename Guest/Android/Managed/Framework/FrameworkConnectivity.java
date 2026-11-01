@@ -149,6 +149,8 @@ final class FrameworkConnectivity {
                 case "getLinkProperties": return defaultNetwork != null && defaultNetwork.equals(a[0])
                         ? hostLink() : null;
                 case "getAllNetworks": return defaultNetwork == null ? new Network[0] : new Network[] {defaultNetwork};
+                // ConnectivityService: the global proxy, else the link's. Neither exists here.
+                case "getProxyForNetwork": return null;
                 case "isActiveNetworkMetered":
                     // ConnectivityService: no active network is conservatively metered.
                     return hostCapabilities == null
@@ -172,6 +174,7 @@ final class FrameworkConnectivity {
         if (connectivity.getRestrictBackgroundStatus()
                 != ConnectivityManager.RESTRICT_BACKGROUND_STATUS_DISABLED)
             throw new AssertionError("host bridge unexpectedly restricts background networking");
+        if (connectivity.getDefaultProxy() != null) throw new AssertionError("unexpected default proxy");
         Network active = connectivity.getActiveNetwork();
         NetworkInfo info = connectivity.getActiveNetworkInfo();
         if (hostNetwork != (active != null) || hostNetwork != (info != null && info.isConnected()))

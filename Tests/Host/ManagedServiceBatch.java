@@ -1242,6 +1242,34 @@ public final class ManagedServiceBatch {
         check((Integer) invoke(ops, "checkOperation", camera, uid, NAME) == defaultMode(camera), "privileged call changed state");
     }
 
+    // ShortcutManager, which Firefox clears at startup: no launcher exists, so nothing is stored or pinnable.
+    private static void shortcuts(Context context) throws Exception {
+        android.content.pm.ShortcutManager manager = context.getSystemService(android.content.pm.ShortcutManager.class);
+        check(manager != null, "ShortcutManager is published");
+        manager.removeDynamicShortcuts(java.util.Collections.singletonList("absent"));
+        manager.removeAllDynamicShortcuts();
+        manager.reportShortcutUsed("absent");
+        check(manager.getDynamicShortcuts().isEmpty() && manager.getPinnedShortcuts().isEmpty(), "no shortcuts stored");
+        check(!manager.isRequestPinShortcutSupported(), "no launcher confirms pinned shortcuts");
+        check(manager.getMaxShortcutCountPerActivity() == 15, "default shortcut limit");
+        Object service = endpoint("shortcut", "android.content.pm.IShortcutService");
+        denied(() -> invoke(service, "removeAllDynamicShortcuts", "org.bifrost.absent", 0));
+        denied(() -> invoke(service, "removeAllDynamicShortcuts", NAME, 10));
+        checks++;
+    }
+
+    // RoleManager, which Firefox reads for its default-browser prompt: this device defines no roles.
+    private static void roles(Context context) throws Exception {
+        android.app.role.RoleManager manager = context.getSystemService(android.app.role.RoleManager.class);
+        check(manager != null, "RoleManager is published");
+        check(!manager.isRoleAvailable(android.app.role.RoleManager.ROLE_BROWSER), "no role is available");
+        check(!manager.isRoleHeld(android.app.role.RoleManager.ROLE_BROWSER), "no role is held");
+        Object service = endpoint("role", "android.app.role.IRoleManager");
+        denied(() -> invoke(service, "isRoleAvailableAsUser", "role", 10));
+        denied(() -> invoke(service, "isRoleHeldAsUser", "role", "org.bifrost.absent", 0));
+        checks++;
+    }
+
     // AppWidgetManager.getInstalledProvidersForProfile, which Roblox calls: the caller's own profile lists no providers.
     private static void appWidgets(Context context) throws Exception {
         Object widgets = endpoint("appwidget", "com.android.internal.appwidget.IAppWidgetService");
@@ -1249,6 +1277,7 @@ public final class ManagedServiceBatch {
         check(slice != null && ((java.util.List<?>) slice.getClass().getMethod("getList").invoke(slice)).isEmpty(), "provider list for the own profile");
         check(invoke(widgets, "getInstalledProvidersForProfile", 1, 10, NAME) == null, "provider list for a disabled profile");
         denied(() -> invoke(widgets, "getInstalledProvidersForProfile", 1, 0, "org.bifrost.absent"));
+        check(Boolean.FALSE.equals(invoke(widgets, "isRequestPinAppWidgetSupported")), "no launcher confirms pinned widgets");
         // notifyProviderInheritance: a null array or entry ends the call, the own package has no provider to
         // mark, and a foreign package is refused before any lookup.
         invoke(widgets, "notifyProviderInheritance", (Object) null);
@@ -1718,7 +1747,7 @@ public final class ManagedServiceBatch {
         mediaSessions(context);
         audioTracks();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
-        uiMode(context); permissions(context); appOps(context, packages); appWidgets(context);
+        uiMode(context); permissions(context); appOps(context, packages); appWidgets(context); roles(context); shortcuts(context);
         battery(context); vibratorAndKeyguard(context); usageAndNetworkStats(context); mediaLocaleLegacyAuth(context); batteryFromSupplies(context); clipboard(context, packages);
         alarmsAccountsLocation(context);
         settings(context, system, packages, pkg);

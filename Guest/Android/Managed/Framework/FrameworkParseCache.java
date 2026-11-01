@@ -39,12 +39,13 @@ final class FrameworkParseCache {
         if (cached != null) {
             try {
                 PackageInfo info = cached.readTypedObject(PackageInfo.CREATOR);
-                if (info != null && cached.dataAvail() == 0) return info;
+                if (info != null && cached.dataAvail() == 0)
+                    return FrameworkPackages.scanProviderAuthorities(info);
             } catch (RuntimeException unreadable) {
                 // Parsed again below.
             } finally { cached.recycle(); }
         }
-        PackageInfo parsed = manager.getPackageArchiveInfo(apk, flags);
+        PackageInfo parsed = FrameworkPackages.scanProviderAuthorities(manager.getPackageArchiveInfo(apk, flags));
         if (parsed != null) {
             Parcel parcel = Parcel.obtain();
             try { parcel.writeTypedObject(parsed, 0); write(archive, set, parcel); }

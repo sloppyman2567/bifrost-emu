@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -129,6 +130,23 @@ void *ASurfaceControl_createFromWindow(void *parent, const char *debug_name) {
     if (!parent || shim(parent)) return NULL;
     void *(*call)(void *, const char *) = bifrost_platform_symbol("ASurfaceControl_createFromWindow");
     return call ? call(parent, debug_name) : NULL;
+}
+// CPU drawing on a framework Surface is the image's BufferQueue path, the one Surface.lockCanvas takes. A host window
+// handle has no CPU-visible buffers: locking fails, as the NDK allows (a negative status), and no Surface wraps it.
+int ANativeWindow_lock(void *window, void *buffer, void *dirty) {
+    if (shim(window)) return -EINVAL;
+    int (*call)(void *, void *, void *) = bifrost_platform_symbol("ANativeWindow_lock");
+    return call(window, buffer, dirty);
+}
+int ANativeWindow_unlockAndPost(void *window) {
+    if (shim(window)) return -EINVAL;
+    int (*call)(void *) = bifrost_platform_symbol("ANativeWindow_unlockAndPost");
+    return call(window);
+}
+jobject ANativeWindow_toSurface(JNIEnv *env, void *window) {
+    if (!window || shim(window)) return NULL;
+    jobject (*call)(JNIEnv *, void *) = bifrost_platform_symbol("ANativeWindow_toSurface");
+    return call(env, window);
 }
 int ANativeWindow_setBuffersGeometry(void *window, int w, int h, int format) {
     extern int thunk_ANativeWindow_setBuffersGeometry(void *, int, int, int);

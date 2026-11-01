@@ -31,7 +31,8 @@ Per-app results are recorded in `Scripts/Android/compatibility.json` (shown by
 `asgard compat`), each with the version and date it was checked. A person played
 SpongeBob: Krusty Cook-Off; Azur Lane, The Battle Cats, Umamusume Global,
 Subway Surfers and Geometry Dash Lite are playable on the maintainer's report,
-with no capture. YouTube shows its home screen. Hungry Shark World, Hungry
+with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
+browser screens, but pages do not load. Hungry Shark World, Hungry
 Shark Evolution and Uptodown start and run a bounded session. Roblox, TrickCal
 and Umamusume JP are blocked by the app itself (Umamusume JP at a device
 integrity check when it connects). These are single checks, not compatibility

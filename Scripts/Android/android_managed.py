@@ -53,7 +53,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkPendingIntents.java", "Framework/FrameworkUsers.java",
                     "Framework/FrameworkDeviceIdle.java", "Framework/FrameworkMediaRouter.java",
                     "Framework/FrameworkTelephony.java", "Framework/FrameworkPackageChecksums.java",
-                    "Framework/FrameworkAppWidgets.java", "Framework/FrameworkCursors.java",
+                    "Framework/FrameworkAppWidgets.java", "Framework/FrameworkRoles.java", "Framework/FrameworkShortcuts.java", "Framework/FrameworkCursors.java",
                     "Framework/FrameworkUsageStats.java", "Framework/FrameworkNetworkStats.java", "Framework/FrameworkMediaMetrics.java",
                     "Framework/FrameworkLocales.java", "Framework/FrameworkLegacyPermissions.java", "Framework/FrameworkAuth.java", "Framework/FrameworkSharedLibraries.java")
 

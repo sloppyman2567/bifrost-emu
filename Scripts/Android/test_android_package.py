@@ -2180,6 +2180,11 @@ class PackageTests(unittest.TestCase):
             # Deliberately declare the lower-priority provider first.
             component += (f'<provider android:name="{activity}$InitProvider" '
                           'android:authorities="org.bifrost.fixture.init;org.bifrost.fixture.alias" android:exported="false"/>')
+            # Repeated authorities: Android keeps the first declaration only.
+            component += (f'<provider android:name="{activity}$InitProvider" '
+                          'android:authorities="org.bifrost.fixture.init" android:exported="false"/>')
+            component += (f'<provider android:name="{activity}$ShadowedProvider" '
+                          'android:authorities="org.bifrost.fixture.alias" android:exported="false"/>')
             component += (f'<provider android:name="{activity}$EarlyProvider" '
                           'android:authorities="org.bifrost.fixture.early" android:initOrder="100" android:exported="false"/>')
             component += (f'<provider android:name="{activity}$DisabledProvider" '

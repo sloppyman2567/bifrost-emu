@@ -516,6 +516,15 @@ final class FrameworkServiceRuntime {
         for (Connection connection : new ArrayList<>(binding.clients)) connected(connection, binder, false);
     }
 
+    // ActiveServices.updateServiceGroupLocked: groups order isolated processes
+    // for the low-memory killer, which does not exist here; nothing is recorded.
+    synchronized void updateGroup(Object client) {
+        if (remote != null) throw new UnsupportedOperationException("activity.updateServiceGroup");
+        IBinder binder = ((IInterface) client).asBinder();
+        if (!connections.containsKey(binder))
+            throw new IllegalArgumentException("Could not find connection for " + binder);
+    }
+
     synchronized boolean unbind(Object client) throws Exception {
         if (remote != null) return remote.unbindService(client);
         return unbind(client, null);

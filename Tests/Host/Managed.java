@@ -95,6 +95,9 @@ public final class Managed extends Activity {
     public static final class RemoteProvider extends InitProvider {
         @Override public boolean onCreate() { throw new AssertionError("Remote provider started in main process"); }
     }
+    public static final class ShadowedProvider extends InitProvider {
+        @Override public boolean onCreate() { throw new AssertionError("Provider with no authority left was started"); }
+    }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         if (!applicationStarted) throw new AssertionError("Activity preceded Application.onCreate");

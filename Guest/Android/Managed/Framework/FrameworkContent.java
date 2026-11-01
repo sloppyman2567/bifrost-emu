@@ -27,17 +27,16 @@ final class FrameworkContent {
                 .invoke(thread)).asBinder();
         List<ProviderInfo> providers = new ArrayList<>();
         String process = Application.getProcessName();
-        if (pkg.applicationInfo.enabled && pkg.providers != null) {
-            for (ProviderInfo info : pkg.providers) {
-                if (!info.enabled || !Objects.equals(process,
+        if (pkg.applicationInfo.enabled) {
+            for (ProviderInfo info : FrameworkPackages.registeredProviders(pkg)) {
+                // ComponentResolverBase.queryProviders skips a null authority:
+                // parsing requires one, so this declaration lost all its names.
+                if (info.authority == null || !info.enabled || !Objects.equals(process,
                         info.processName == null ? pkg.packageName : info.processName)) continue;
-                if (info.authority == null || info.authority.isEmpty())
+                if (info.authority.isEmpty())
                     throw new IllegalArgumentException("Provider has no authority: " + info.name);
                 providers.add(info);
-                for (String authority : info.authority.split(";")) {
-                    if (localProviders.putIfAbsent(authority, info) != null)
-                        throw new IllegalArgumentException("Duplicate provider authority: " + authority);
-                }
+                for (String authority : info.authority.split(";")) localProviders.put(authority, info);
             }
         }
         // ActivityManager normally orders this list before binding the app.

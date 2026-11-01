@@ -84,6 +84,36 @@ final class FrameworkPackages {
         return names;
     }
 
+    // ComponentResolver.addProvidersLocked: the first declaration of an
+    // authority in a package owns it. A later one loses that name and, with
+    // none left, has a null authority (Firefox repeats InitializationProvider).
+    static PackageInfo scanProviderAuthorities(PackageInfo pkg) {
+        if (pkg == null || pkg.providers == null) return pkg;
+        java.util.Set<String> owned = new java.util.HashSet<>();
+        for (ProviderInfo provider : pkg.providers) {
+            if (provider.authority == null) continue;
+            String kept = null;
+            for (String name : provider.authority.split(";")) {
+                if (owned.add(name)) kept = kept == null ? name : kept + ";" + name;
+                else android.util.Log.w("AsgardPackages", "Skipping provider name " + name
+                        + " (in package " + pkg.packageName + "): name already used");
+            }
+            provider.authority = kept;
+        }
+        return pkg;
+    }
+
+    // ProviderIntentResolver.addProvider: a class declared again is ignored,
+    // so it is neither started nor matched a second time.
+    static List<ProviderInfo> registeredProviders(PackageInfo pkg) {
+        List<ProviderInfo> providers = new ArrayList<>();
+        if (pkg.providers == null) return providers;
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (ProviderInfo provider : pkg.providers)
+            if (names.add(provider.name)) providers.add(provider);
+        return providers;
+    }
+
     void install(Context system, PackageInfo pkg) {
         installPermissions(system, pkg);
         applySharedLibraries(pkg);
@@ -780,7 +810,7 @@ final class FrameworkPackages {
             if (findPackage(pkg.packageName, flags, userId) == null || pkg.providers == null
                     || (intent.getPackage() != null && !intent.getPackage().equals(pkg.packageName))) continue;
             Map<ComponentName, List<IntentFilter>> filters = providerFilters(pkg);
-            for (ProviderInfo info : pkg.providers) {
+            for (ProviderInfo info : registeredProviders(pkg)) {
                 if (!componentMatches(info, flags, userId)) continue;
                 android.content.pm.ResolveInfo best = null;
                 for (IntentFilter filter : filters.getOrDefault(new ComponentName(pkg.packageName, info.name),

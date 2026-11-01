@@ -127,6 +127,8 @@ public final class ManagedLauncher {
     private static final FrameworkKeyguard keyguard = new FrameworkKeyguard(packages);
     private static final FrameworkClipboard clipboard = new FrameworkClipboard(packages, () -> windowOpen);
     private static final FrameworkAppWidgets appWidgets = new FrameworkAppWidgets(packages);
+    private static final FrameworkRoles roles = new FrameworkRoles(packages);
+    private static final FrameworkShortcuts shortcuts = new FrameworkShortcuts(packages);
     private static final FrameworkAlarms alarms = new FrameworkAlarms(packages);
     private static final FrameworkAccounts accounts = new FrameworkAccounts(packages);
     private static final FrameworkLocation location = new FrameworkLocation(packages);
@@ -673,6 +675,8 @@ public final class ManagedLauncher {
         users.install(services);
         deviceIdle.install(services);
         appWidgets.install(services);
+        roles.install(services);
+        shortcuts.install(services);
         // The runner provisions one writable emulated volume for user 0.
         // Android 15's VolumeInfo.buildStorageVolume uses the same path for
         // both app and internal access to an emulated volume.
@@ -994,6 +998,7 @@ public final class ManagedLauncher {
                 case "bindService": return serviceRuntime.bind(a, false);
                 case "bindServiceInstance": return serviceRuntime.bind(a, true);
                 case "unbindService": return serviceRuntime.unbind(a[0]);
+                case "updateServiceGroup": serviceRuntime.updateGroup(a[0]); return null;
                 case "peekService": return serviceRuntime.peek((Intent) a[0], (String) a[2]);
                 case "getServices": return serviceRuntime.running((Integer) a[0]);  // (maxNum, flags)
                 case "publishService": serviceRuntime.publish((IBinder) a[0], (Intent) a[1], (IBinder) a[2]); return null;

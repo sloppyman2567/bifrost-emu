@@ -10,7 +10,7 @@ import android.os.Process;
 import java.util.Objects;
 
 final class FrameworkAppWidgets implements FrameworkServices.Call {
-    private enum Contract { getAppWidgetIds, getInstalledProvidersForProfile, notifyProviderInheritance }
+    private enum Contract { getAppWidgetIds, getInstalledProvidersForProfile, isRequestPinAppWidgetSupported, notifyProviderInheritance }
 
     @Override public String[] methods() {
         Contract[] values = Contract.values();
@@ -52,6 +52,8 @@ final class FrameworkAppWidgets implements FrameworkServices.Call {
                 return Class.forName("android.content.pm.ParceledListSlice")
                         .getConstructor(java.util.List.class).newInstance(new java.util.ArrayList<Object>());
             }
+            // ShortcutRequestPinProcessor: pinning needs a default launcher that confirms requests; none exists here.
+            case isRequestPinAppWidgetSupported: return false;
             // AppWidgetServiceImpl.notifyProviderInheritance (android-15.0.0_r1): a null array or null
             // entry ends the call, each package must be the caller's own, then the provider lookup finds
             // none here (no provider is modelled), which ends the walk. Nothing is recorded.

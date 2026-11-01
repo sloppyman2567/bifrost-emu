@@ -102,6 +102,18 @@
       "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded.",
       "notes": ["Ads are only somewhat stable in the maintainer's report; which ads fail, and how, is not recorded."]
     },
+    "org.mozilla.firefox": {
+      "name": "Firefox",
+      "tested_version": "159.0",
+      "status": "title",
+      "checked": "2026-11-01",
+      "evidence": "Sessions reach the main Activity, a GPU window, first-run onboarding and a GeckoView surface, with tab, GPU and crash-helper child processes. The maintainer reports pages do not load.",
+      "notes": [
+        "Most sessions end when a native Gecko thread reaches an in-process Java Binder service without a JVM attachment (JavaBinder: env null); which service is not identified.",
+        "The first codec query blocks Gecko's main thread for 5 s waiting for media.player, which is not published, delaying the tab process by about 9 s.",
+        "Firefox sends its own telemetry and, when accepted in its dialog, crash reports to Mozilla."
+      ]
+    },
     "com.google.android.youtube": {
       "name": "YouTube",
       "tested_version": "21.42.247",
