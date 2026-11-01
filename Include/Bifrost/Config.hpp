@@ -150,4 +150,9 @@ struct Config {
 //   4. ~/.bifrost.toml
 //   5. /etc/bifrost.toml
 std::string find_config_file();
+// Saves `profile` as [paths] profile in the user's own config file (~/.bifrost.toml if that is the one in use, else the
+// XDG path), changing only that line; "" removes it. Returns the path written, or "" with err set.
+std::string save_default_rootfs_profile(const std::string& profile, std::string& err);
+// The same edit on a config file's text.
+std::string with_rootfs_profile(const std::string& text, const std::string& profile);
 } // namespace arm64emu

@@ -7,10 +7,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 namespace arm64emu {
 // ── Helpers ────────────────────────────────────────────────────────────
 static std::string trim(const std::string& s) {
@@ -419,4 +421,71 @@ std::string find_config_file() {
     }
     return "";
 }
+std::string with_rootfs_profile(const std::string& text, const std::string& profile) {
+    const std::string line = "profile = \"" + profile + "\"";
+    const auto trimmed = [](const std::string& value) {
+        const size_t first = value.find_first_not_of(" \t\r");
+        return first == std::string::npos ? std::string() : value.substr(first);
+    };
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    for (std::string item; std::getline(stream, item);) lines.push_back(item);
+    size_t section = lines.size();
+    for (size_t i = 0; i < lines.size(); ++i)
+        if (trimmed(lines[i]).rfind("[paths]", 0) == 0) { section = i; break; }
+    if (section == lines.size()) {
+        if (profile.empty()) return text;
+        if (!lines.empty() && !trimmed(lines.back()).empty()) lines.push_back("");
+        lines.push_back("[paths]");
+        lines.push_back(line);
+    } else {
+        size_t found = 0;
+        for (size_t i = section + 1; i < lines.size() && trimmed(lines[i]).rfind('[', 0) != 0; ++i) {
+            const std::string body = trimmed(lines[i]);
+            if (body.rfind("profile", 0) == 0 && trimmed(body.substr(7)).rfind('=', 0) == 0) { found = i; break; }
+        }
+        if (found && profile.empty()) lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(found));
+        else if (found) lines[found] = line;
+        else if (!profile.empty()) lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(section) + 1, line);
+    }
+    std::string out;
+    for (const auto& item : lines) out += item + "\n";
+    return out;
+}
+
+std::string save_default_rootfs_profile(const std::string& profile, std::string& err) {
+    namespace fs = std::filesystem;
+    const char* home = getenv("HOME");
+    const char* xdg = getenv("XDG_CONFIG_HOME");
+    const std::string dotfile = home && *home ? std::string(home) + "/.bifrost.toml" : "";
+    const std::string xdg_path = xdg && *xdg ? std::string(xdg) + "/bifrost/config.toml"
+                               : home && *home ? std::string(home) + "/.config/bifrost/config.toml" : "";
+    std::error_code ec;
+    // A user config in the XDG place is read before ~/.bifrost.toml, so the dotfile is only the one in use without it.
+    std::string path = !dotfile.empty() && fs::exists(dotfile, ec) && !fs::exists(xdg_path, ec) ? dotfile : xdg_path;
+    if (path.empty()) { err = "neither HOME nor XDG_CONFIG_HOME is set"; return {}; }
+    // A symlink (a managed dotfile) stays one: the rename below replaces its target.
+    if (fs::is_symlink(path, ec)) {
+        const fs::path target = fs::canonical(path, ec);
+        if (ec) { err = "cannot follow " + path + ": " + ec.message(); return {}; }
+        path = target.string();
+    }
+    std::string text;
+    {
+        std::ifstream in(path);
+        if (in) { std::stringstream buffer; buffer << in.rdbuf(); text = buffer.str(); }
+    }
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    if (ec) { err = "cannot create " + fs::path(path).parent_path().string() + ": " + ec.message(); return {}; }
+    const std::string temporary = path + ".tmp";
+    {
+        std::ofstream out(temporary, std::ios::trunc);
+        out << with_rootfs_profile(text, profile);
+        if (!out.flush()) { err = "cannot write " + temporary; fs::remove(temporary, ec); return {}; }
+    }
+    fs::rename(temporary, path, ec);
+    if (ec) { err = "cannot replace " + path + ": " + ec.message(); fs::remove(temporary, ec); return {}; }
+    return path;
+}
+
 } // namespace arm64emu

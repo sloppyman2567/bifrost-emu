@@ -29,7 +29,8 @@ a message listing these places.
 A named rootfs is installed beside the default one, in `rootfs.d/NAME` under the same data directories
 (`<data>/bifrost/rootfs.d/NAME`, `<executable dir>/rootfs.d/NAME`). Select it with `--rootfs-profile NAME`,
 `BIFROST_ROOTFS_PROFILE=NAME` or `[paths] profile = "NAME"`; `bifrost-emu --rootfs-list` shows the installed ones
-(`*` marks the one in use). A profile supplies libraries only and does not confine guest paths, like the default
+(`*` marks the one in use). `bifrost-emu --rootfs-default NAME` saves one in your config so you need no flag (`default` goes back),
+changing only that line and warning if another config file or the environment overrides it. A profile supplies libraries only and does not confine guest paths, like the default
 rootfs; `--rootfs` / `BIFROST_ROOT` still sets the sandboxed root and wins over a profile. A profile that is not
 installed is an error naming the places searched, not a fall back to another rootfs. Names are letters, digits,
 `.`, `_` and `-`, up to 64, not starting with `.`.

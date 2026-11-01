@@ -9,7 +9,8 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/bifrost-start-page.XXXXXX")
 trap 'rm -rf -- "$WORK"' EXIT
 mkdir -p "$WORK/inst" "$WORK/xdg/bifrost" "$WORK/home"
 cp "$EMU" "$WORK/inst/bifrost-emu"   # away from the checkout, so its rootfs and Asgard are not found by accident
-run() { env -u BIFROST_ROOT -u BIFROST_ROOTFS_PROFILE -u BIFROST_ASGARD -u XDG_CONFIG_HOME HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$WORK/inst/bifrost-emu" "$@" 2>&1; }
+cd "$WORK"
+run() { env -u BIFROST_ROOT -u BIFROST_ROOTFS_PROFILE -u BIFROST_ASGARD -u BIFROST_CONFIG -u XDG_CONFIG_HOME HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$WORK/inst/bifrost-emu" "$@" 2>&1; }
 
 fail=0
 expect() {  # name, pattern, text
@@ -47,6 +48,33 @@ install -m 0755 /dev/null "$WORK/xdg/bifrost/asgard/Tools/android-tools/aapt2"
 page=$(run)
 expect "Asgard found" 'Android \(Asgard\) +installed' "$page"
 expect "library command shown, clear of its description" 'asgard launcher +open the app library' "$page"
+
+# --rootfs-default edits the user's own config, and only its one line.
+conf="$WORK/home/.config/bifrost/config.toml"
+in_use() { run --rootfs-list | sed -n 's/^\* *\([^ ]*\).*/\1/p'; }
+expect "the normal rootfs is in use at first" '^default$' "$(in_use)"
+out=$(run --rootfs-default games); expect "saying where it saved" "games rootfs \(saved in $conf\)" "$out"
+expect "the games profile is in use" '^games$' "$(in_use)"
+expect "the page says which is in use" 'Linux libraries +installed, using games' "$(run)"
+printf '# mine\n[jit]\nthreshold = 7\n\n[paths]\n# about the rootfs\nprofile = "games"\n\n[log]\nquiet = true\n' > "$conf"
+run --rootfs-default default > /dev/null
+expect "default goes back" '^default$' "$(in_use)"
+kept=$(cat "$conf")
+expect "comments stay" '# about the rootfs' "$kept"; expect "other settings stay" 'threshold = 7' "$kept"; expect "other sections stay" 'quiet = true' "$kept"
+refuse "the line is gone" '^profile' "$kept"
+before=$(cat "$conf"); status=0; out=$(run --rootfs-default nothing-here) || status=$?
+expect "a missing profile is refused" 'not installed; nothing changed' "$out"
+[[ $status == 2 && "$before" == "$(cat "$conf")" ]] && echo "PASS it changes nothing" || { echo "FAIL a refused name changed the config or the status ($status)"; fail=1; }
+status=0; run --rootfs-default '../evil' > /dev/null || status=$?
+[[ $status == 2 ]] && echo "PASS a bad name is refused" || { echo "FAIL a bad name got status $status"; fail=1; }
+mkdir -p "$WORK/dotfiles"; mv "$conf" "$WORK/dotfiles/config.toml"; ln -s "$WORK/dotfiles/config.toml" "$conf"
+run --rootfs-default games > /dev/null
+[[ -L "$conf" ]] && grep -q 'profile = "games"' "$WORK/dotfiles/config.toml" && echo "PASS a symlinked config stays a symlink" || { echo "FAIL symlinked config"; fail=1; }
+run --rootfs-default default > /dev/null
+mkdir -p "$WORK/other"; printf '[paths]\n' > "$WORK/other/bifrost.toml"
+expect "a config that shadows it is named" 'bifrost.toml is read instead' "$(cd "$WORK/other" && run --rootfs-default games)"
+expect "the environment is named" 'BIFROST_ROOTFS_PROFILE=x overrides' "$(env BIFROST_ROOTFS_PROFILE=x HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$WORK/inst/bifrost-emu" --rootfs-default games 2>&1)"
+run --rootfs-default default > /dev/null
 
 help=$(run --help); all=$(run --help-all)
 expect "--help points to the full list" '--help-all' "$help"

@@ -38,6 +38,7 @@
 //   --rootfs-profile NAME  use the installed rootfs profile NAME (rootfs.d/NAME) for
 //                   libraries only; BIFROST_ROOT / --rootfs still wins. A profile that
 //                   is not installed is an error.
+//   --rootfs-default NAME  save NAME as the profile to use ("default" for the normal rootfs), then exit
 //   --rootfs-list   list the installed rootfs profiles (* marks the one in use), then exit
 //   --config PATH   load config from PATH (overrides the auto-search)
 //   --print-config  print the resolved config and exit
@@ -56,6 +57,7 @@
 #include "System/Loader/RootfsDiscovery.hpp"
 #include "System/Loader/RootfsSetup.hpp"
 #include <string>
+#include <filesystem>
 #include <vector>
 #include <cstdio>
 #include <cstring>
@@ -116,18 +118,55 @@ static void print_start_page() {
     if (!asgard.empty())
         printf("    %-38sopen the app library\n", from_checkout ? "Scripts/Android/asgard.py launcher" : "asgard launcher");
     printf("\n  Status\n");
-    print_status_line("Linux libraries", !arm64emu::library_root().empty(), "bifrost-emu --setup-rootfs");
+    const std::string in_use = arm64emu::requested_rootfs_profile();
+    if (!in_use.empty() && !arm64emu::library_root().empty()) printf("    %-22sinstalled, using %s\n", "Linux libraries", in_use.c_str());
+    else print_status_line("Linux libraries", !arm64emu::library_root().empty(), "bifrost-emu --setup-rootfs");
     print_status_line("Linux game libraries", games, "bifrost-emu --setup-rootfs --games");
     print_status_line("Android (Asgard)", !asgard.empty(), setup_asgard);
     printf("\n  Common options\n"
            "    --setup-rootfs          install or update the libraries Linux programs need\n"
            "    --setup-rootfs --games  add the libraries Linux games need\n"
            "    --rootfs-list           list the installed Linux libraries\n"
-           "    --rootfs-profile NAME   use other Linux libraries, e.g. games\n"
+           "    --rootfs-profile NAME   use other Linux libraries for this run, e.g. games\n"
+           "    --rootfs-default NAME   always use them\n"
            "    --guest-ld              use the program's own ld.so (experimental)\n"
            "    --window-stats          show FPS and load in the window\n"
            "    --no-jit                interpreter only, for debugging\n"
            "\n  bifrost-emu --help shows every option.\n\n");
+}
+// --rootfs-default NAME: remember which rootfs Linux programs use, without editing a config file by hand.
+static int set_default_rootfs(const std::string& name) {
+    const bool reset = name == "default";
+    if (!reset && !arm64emu::valid_rootfs_profile_name(name)) {
+        fprintf(stderr, "bifrost-emu: invalid rootfs profile name '%s'\n", name.c_str());
+        return 2;
+    }
+    if (!reset) {
+        bool installed = false;
+        for (const auto& profile : arm64emu::list_rootfs_profiles())
+            if (profile.name == name && !profile.path.empty()) installed = true;
+        if (!installed) {
+            fprintf(stderr, "bifrost-emu: rootfs profile '%s' is not installed; nothing changed. See --rootfs-list.\n", name.c_str());
+            if (name == "games") fprintf(stderr, "Install it with: bifrost-emu --setup-rootfs --games\n");
+            return 2;
+        }
+    }
+    std::string err;
+    const bool shadows_system = arm64emu::find_config_file() == "/etc/bifrost.toml";
+    const std::string path = arm64emu::save_default_rootfs_profile(reset ? "" : name, err);
+    if (path.empty()) { fprintf(stderr, "bifrost-emu: %s\n", err.c_str()); return 1; }
+    printf("Linux programs now use the %s rootfs (saved in %s).\n", name.c_str(), path.c_str());
+    if (shadows_system) printf("Note: this file is now read instead of /etc/bifrost.toml, so its settings no longer apply.\n");
+    // Only the first config file found is read, and the environment beats it.
+    const std::string active = arm64emu::find_config_file();
+    std::error_code ec;
+    if (!active.empty() && !std::filesystem::equivalent(active, path, ec))
+        printf("Note: %s is read instead of that file, so this has no effect while it exists.\n", active.c_str());
+    if (const char* env = getenv("BIFROST_ROOTFS_PROFILE"); env && *env)
+        printf("Note: BIFROST_ROOTFS_PROFILE=%s overrides this in the current environment.\n", env);
+    if (const char* env = getenv("BIFROST_ROOT"); env && *env)
+        printf("Note: BIFROST_ROOT=%s overrides this in the current environment.\n", env);
+    return 0;
 }
 static void print_help(bool all) {
     print_art();
@@ -140,6 +179,8 @@ static void print_help(bool all) {
            "                            --games adds the libraries Linux games need. Android apps\n"
            "                            use neither: Asgard brings its own\n"
            "    --rootfs-profile NAME   use the installed rootfs profile NAME for libraries\n"
+           "    --rootfs-default NAME   always use that profile, saved in your config, then exit\n"
+           "                            (\"default\" goes back to the normal rootfs)\n"
            "    --rootfs-list           list installed rootfs profiles and exit\n"
            "    --rootfs PATH           guest root for libraries and paths (BIFROST_ROOT)\n"
            "    --guest-ld              run dynamic programs under their own ld.so (experimental)\n"
@@ -319,6 +360,10 @@ int main(int argc, char** argv) {
     }
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
         return arm64emu::window_stats::ui_main(std::atoi(argv[2]));
+    if (argc >= 2 && std::string(argv[1]) == "--rootfs-default") {
+        if (argc != 3) { fprintf(stderr, "bifrost-emu: --rootfs-default requires one NAME (see --rootfs-list)\n"); return 2; }
+        return set_default_rootfs(argv[2]);
+    }
     // Not a guest run: hand the remaining arguments to the rootfs installer.
     if (argc >= 2 && std::string(argv[1]) == "--setup-rootfs")
         return arm64emu::run_rootfs_setup(std::vector<std::string>(argv + 2, argv + argc));
