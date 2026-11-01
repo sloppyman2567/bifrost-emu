@@ -19,6 +19,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - **Links:** those pointing at sections that left `TESTS.md` earlier now reach the test history.
 - **App pages:** a new [Umamusume page](Apps/umamusume.md), and current screenshots and readings for
   [Azur Lane](Apps/azur-lane.md) and [SpongeBob](Apps/spongebob.md). The account ID on one SpongeBob screen is covered.
+  The [Doom 3 page](Apps/doom3.md) records the maintainer's report of mostly sustained 60 FPS in the demo, even in heavy
+  scenes. It is not an instrumented measurement and does not cover the full game.
 
 ### Asgard launcher cleanup (2026-11-01)
 
